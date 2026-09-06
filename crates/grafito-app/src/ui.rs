@@ -27,6 +27,16 @@ pub(crate) struct CommandInputResponse {
 /// whose physical captures look much narrower than their egui width.
 pub(crate) const COMPACT_TOP_CHROME_MAX_WIDTH: f32 = BREAKPOINT_COMPACT;
 
+/// Ancho mínimo del rail para pintar sus etiquetas cortas. Debajo de este
+/// ancho el rail colapsa a iconos puros: pintar texto en una franja de 1-2px
+/// deja slivers (fragmentos en zigzag) en el borde del panel. Puro y
+/// testeable headless.
+pub(crate) const RAIL_LABEL_MIN_WIDTH: f32 = 40.0;
+
+pub(crate) fn rail_labels_visible(rect_width: f32) -> bool {
+    rect_width >= RAIL_LABEL_MIN_WIDTH
+}
+
 pub(crate) fn top_chrome_uses_overflow(viewport_width: f32) -> bool {
     viewport_width <= COMPACT_TOP_CHROME_MAX_WIDTH
 }
@@ -634,13 +644,18 @@ pub(crate) fn draw_top_bar(
                                         egui::vec2(ICON_MD, ICON_MD),
                                     );
                                     draw_icon(ui.painter(), icon_rect, *icon, ic_color);
-                                    ui.painter().text(
-                                        rect.center() + egui::vec2(0.0, 14.0),
-                                        Align2::CENTER_CENTER,
-                                        *label,
-                                        egui::FontId::proportional(TYPE_2XS),
-                                        ic_color,
-                                    );
+                                    // Iconos puros si el rail está colapsado: el texto
+                                    // de `painter` no respeta layout y, sin clip,
+                                    // pinta slivers de 1-2px en el borde.
+                                    if rail_labels_visible(rect.width()) {
+                                        ui.painter().with_clip_rect(rect).text(
+                                            rect.center() + egui::vec2(0.0, 14.0),
+                                            Align2::CENTER_CENTER,
+                                            *label,
+                                            egui::FontId::proportional(TYPE_2XS),
+                                            ic_color,
+                                        );
+                                    }
                                 }
 
                                 resp.widget_info(|| {
@@ -677,13 +692,19 @@ fn draw_geometry_utility_contents(
     let mut close_requested = false;
 
     ui.add_space(SPACE_SM);
+    // Wrap honesto en el dock: evita slivers clipados en docks angostos.
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Espacio de trabajo")
-                .color(theme.text_secondary)
-                .size(grafito_ui::tokens::TYPE_SM)
-                .strong(),
-        );
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Espacio de trabajo")
+                    .color(theme.text_secondary)
+                    .size(grafito_ui::tokens::TYPE_SM)
+                    .strong(),
+            )
+            .truncate(),
+        )
+        .on_hover_text("Espacio de trabajo");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             close_requested = action_icon_button(
                 ui,

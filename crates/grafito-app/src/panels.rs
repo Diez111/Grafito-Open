@@ -638,6 +638,29 @@ fn draw_right_drawer_header(ui: &mut egui::Ui, app: &mut GrafitoApp, title: &str
     });
 }
 
+/// Texto de la fila de etiqueta del Inspector. Nunca devuelve una letra
+/// suelta: la etiqueta cruda (p. ej. `S`, autolabel de `Surface3D` según
+/// `document.rs:1193-1202` — primera letra del nombre del tipo) se presenta
+/// con prefijo `Etiqueta: ` para que no parezca texto truncado.
+/// `None` si no hay etiqueta que mostrar. Puro y testeable headless.
+pub(crate) fn inspector_label_text(label: &str) -> Option<String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("Etiqueta: {trimmed}"))
+    }
+}
+
+/// Tooltip honesto de la card de identidad: texto completo sin truncar.
+pub(crate) fn inspector_identity_tooltip(object_name: &str, label: &str, visible: bool) -> String {
+    let state = if visible { "Visible" } else { "Oculto" };
+    match inspector_label_text(label) {
+        Some(labeled) => format!("{object_name} · {labeled} · {state}"),
+        None => format!("{object_name} · {state}"),
+    }
+}
+
 fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, visible: bool) {
     let theme = current_theme(ui.ctx());
     egui::Frame::none()
@@ -646,6 +669,8 @@ fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, vi
         .rounding(egui::Rounding::same(RADIUS_LG))
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.label(
                 egui::RichText::new("Identidad del objeto")
                     .color(theme.text_tertiary)
@@ -653,31 +678,44 @@ fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, vi
                     .strong(),
             );
             ui.add_space(SPACE_XS);
+            let tooltip = inspector_identity_tooltip(object_name, label, visible);
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(object_name)
-                        .color(theme.text_primary)
-                        .size(TYPE_BASE)
-                        .strong(),
-                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(if visible { "Visible" } else { "Oculto" })
-                            .color(if visible {
-                                theme.success
-                            } else {
-                                theme.text_tertiary
-                            })
-                            .size(TYPE_SM),
-                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(if visible { "Visible" } else { "Oculto" })
+                                .color(if visible {
+                                    theme.success
+                                } else {
+                                    theme.text_tertiary
+                                })
+                                .size(TYPE_SM),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(tooltip.as_str());
                 });
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(object_name)
+                            .color(theme.text_primary)
+                            .size(TYPE_BASE)
+                            .strong(),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tooltip.as_str());
             });
-            if !label.is_empty() {
-                ui.label(
-                    egui::RichText::new(label)
-                        .color(theme.text_secondary)
-                        .size(TYPE_SM),
-                );
+            if let Some(labeled) = inspector_label_text(label) {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(labeled)
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tooltip.as_str());
             }
         });
 }
@@ -2591,6 +2629,11 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                 .id_salt("right_properties_scroll")
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    // Wrap honesto: sin esto, las filas de texto del Inspector
+                    // (p. ej. `Tipo: Surface3D`) se clipan en el borde del
+                    // dock y dejan slivers de 1-2px. Las filas horizontales de
+                    // controles (DragValue/Slider) no se ven afectadas.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     let Some(id) = app.selected_object else {
                         draw_inspector_empty_state(ui);
                         return;

@@ -259,9 +259,28 @@ pub struct AssistantVisuals {
 
 /// Cache de bloques parseados de las respuestas del transcript, direccionado
 /// por contenido y acotado. Evita re-parsear los mismos turnos en cada frame.
+///
+/// R1 stream fluido: si el contenido nuevo extiende a uno ya cacheado (el
+/// caso del streaming, donde cada delta agrega texto al final), los bloques
+/// cerrados se congelan y sólo se re-parsea el sufijo desde el inicio del
+/// último bloque. Sin re-parse total no hay saltos de layout ni scroll que
+/// pelea. `parse_count`/`last_reused_blocks` lo hacen testeable headless.
 #[derive(Default, Clone)]
 pub struct AssistantBlocksCache {
-    entries: std::collections::VecDeque<(String, Vec<AssistantMessageBlock>)>,
+    entries: std::collections::VecDeque<CachedBlocks>,
+    /// Invocaciones al parser (cada `blocks` que no pega exacto suma una,
+    /// sea total o de sufijo: el ahorro se mide en `last_reused_blocks`).
+    parse_count: u64,
+    /// Bloques reutilizados sin re-parsear en la última llamada a `blocks`.
+    last_reused_blocks: usize,
+}
+
+/// Entrada del cache: contenido fuente, bloques y línea inicial de cada uno.
+#[derive(Clone)]
+struct CachedBlocks {
+    content: String,
+    blocks: Vec<AssistantMessageBlock>,
+    starts: Vec<usize>,
 }
 
 impl AssistantBlocksCache {
@@ -269,24 +288,111 @@ impl AssistantBlocksCache {
 
     /// Devuelve los bloques de `content`, reutilizando el cache si ya se parseó.
     fn blocks(&mut self, content: &str) -> Vec<AssistantMessageBlock> {
-        if let Some((_, blocks)) = self
+        if let Some(entry) = self
             .entries
             .iter()
-            .find(|(cached, _)| self.same_content(cached, content))
+            .find(|entry| self.same_content(&entry.content, content))
         {
-            return blocks.clone();
+            self.last_reused_blocks = entry.blocks.len();
+            return entry.blocks.clone();
         }
-        let blocks = parse_assistant_blocks(content);
-        self.entries
-            .push_front((content.to_owned(), blocks.clone()));
+        // Reúso de prefijo: el stream agrega al final, los bloques cerrados
+        // (todos menos el último, que puede seguir abierto) se congelan.
+        if let Some(prefix) = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.blocks.is_empty() && Self::is_prefix_extension(&entry.content, content)
+            })
+            .max_by_key(|entry| entry.content.len())
+        {
+            // Si el agregado empieza en línea nueva y el último bloque no es
+            // un párrafo (que podría fusionarse), también está cerrado: se
+            // congela todo y el sufijo son sólo las líneas nuevas. Si no
+            // (continuación de la misma línea o párrafo abierto), se congela
+            // todo menos el último y se re-parsea desde su inicio.
+            let extra = &content[prefix.content.len()..];
+            let last_closed = extra.starts_with('\n')
+                && !matches!(
+                    prefix.blocks.last(),
+                    Some(AssistantMessageBlock::Paragraph(_))
+                );
+            let frozen = if last_closed {
+                prefix.blocks.len()
+            } else {
+                prefix.blocks.len().saturating_sub(1)
+            };
+            let suffix_from = if last_closed {
+                prefix.content.lines().count()
+            } else {
+                prefix.starts.get(frozen).copied().unwrap_or(0)
+            };
+            let suffix_lines = content.lines().count();
+            let suffix_source = if suffix_from < suffix_lines {
+                content
+                    .lines()
+                    .skip(suffix_from)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            self.parse_count += 1;
+            let mut blocks = prefix.blocks[..frozen].to_vec();
+            let mut starts = prefix.starts[..frozen].to_vec();
+            for spanned in parse_assistant_blocks_spanned(&suffix_source) {
+                starts.push(suffix_from + spanned.start_line);
+                blocks.push(spanned.block);
+            }
+            self.last_reused_blocks = frozen;
+            let entry = CachedBlocks {
+                content: content.to_owned(),
+                blocks: blocks.clone(),
+                starts,
+            };
+            self.entries.push_front(entry);
+            while self.entries.len() > Self::MAX_ENTRIES {
+                self.entries.pop_back();
+            }
+            return blocks;
+        }
+        self.parse_count += 1;
+        self.last_reused_blocks = 0;
+        let spanned = parse_assistant_blocks_spanned(content);
+        let starts = spanned.iter().map(|entry| entry.start_line).collect();
+        let blocks: Vec<AssistantMessageBlock> =
+            spanned.into_iter().map(|entry| entry.block).collect();
+        self.entries.push_front(CachedBlocks {
+            content: content.to_owned(),
+            blocks: blocks.clone(),
+            starts,
+        });
         while self.entries.len() > Self::MAX_ENTRIES {
             self.entries.pop_back();
         }
         blocks
     }
 
+    /// Extensión monótona de stream: el nuevo contenido empieza con el viejo
+    /// y agrega algo (sin ediciones en el medio, que piden re-parse total).
+    fn is_prefix_extension(cached: &str, content: &str) -> bool {
+        content.len() > cached.len() && content.starts_with(cached)
+    }
+
     fn same_content(&self, cached: &str, content: &str) -> bool {
         cached == content
+    }
+
+    /// Invocaciones al parser hasta ahora (test headless de reúso).
+    #[cfg(test)]
+    fn parse_count(&self) -> u64 {
+        self.parse_count
+    }
+
+    /// Bloques congelados reutilizados en la última llamada (test headless).
+    #[cfg(test)]
+    fn last_reused_blocks(&self) -> usize {
+        self.last_reused_blocks
     }
 }
 
@@ -608,6 +714,12 @@ pub struct AssistantPanelState {
     /// Memoria de trabajo episódica (WorkingMemory sincronizada con perfil).
     /// F5 inline: permite al tutor socrático adaptar pistas sin tocar memoria a largo plazo.
     pub working_memory: grafito_profile::WorkingMemory,
+    /// El transcript estaba pegado abajo en el frame anterior (R1).
+    ///
+    /// El stick-to-bottom sólo sigue si el usuario ya estaba abajo: si
+    /// scrolleó arriba a leer, el stream no lo mueve. Se actualiza desde el
+    /// `ScrollAreaOutput` en cada frame; arranca clavado.
+    pub transcript_at_bottom: bool,
 }
 
 impl Default for AssistantPanelState {
@@ -677,6 +789,7 @@ impl Default for AssistantPanelState {
             long_memory: grafito_profile::LongTermMemory::default(),
             new_fact_draft: String::new(),
             working_memory: grafito_profile::WorkingMemory::default(),
+            transcript_at_bottom: true,
         }
     }
 }
@@ -1636,11 +1749,23 @@ fn should_draw_empty_state(state: &AssistantPanelState) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AssistantMessageBlock {
-    Heading { level: usize, text: String },
+    Heading {
+        level: usize,
+        text: String,
+    },
     Bullet(String),
-    Ordered { number: u32, text: String },
+    Ordered {
+        number: u32,
+        text: String,
+    },
+    /// Cita `> …`: se pela el marcador y el resto lleva inline-formatting
+    /// igual que un párrafo (R1: sin `>` ni `**` visibles).
+    Quote(String),
     Paragraph(String),
-    Code { language: String, text: String },
+    Code {
+        language: String,
+        text: String,
+    },
     Table(Vec<Vec<String>>),
     DisplayMath(String),
 }
@@ -1651,37 +1776,101 @@ fn transcript_button_row_min_height() -> f32 {
     crate::tokens::hit_target_size(28.0)
 }
 
+/// Ancho estable del transcript (R1): el texto nunca agranda el panel.
+///
+/// Todo texto del transcript envuelve al ancho disponible ya fijado
+/// (`auto_shrink` sin agrandar + `wrap` + columnas acotadas); este saneo cubre
+/// los anchos degenerados del primer layout (cero/negativo/NaN) con el mínimo
+/// del panel. Puro, sin pánico.
+fn stable_transcript_width(available_width: f32) -> f32 {
+    if available_width.is_finite() && available_width > 0.0 {
+        available_width
+    } else {
+        ASSISTANT_PANEL_MIN_WIDTH
+    }
+}
+
+/// Tolerancia para considerar que el transcript está abajo del todo (px).
+/// Base 4 × 2: menos que una línea, más que el jitter de layout.
+const TRANSCRIPT_BOTTOM_TOLERANCE: f32 = 8.0;
+
+/// Decide si el transcript está pegado abajo desde la geometría del scroll.
+///
+/// Puro (`offset + viewport >= contenido − tolerancia`): si el contenido entra
+/// sin scroll, también cuenta como abajo (no hay a dónde subir). Sin pánico:
+/// anchos degenerados caen a `true` (arranque clavado, sin salto inicial).
+fn transcript_is_at_bottom(offset_y: f32, viewport_h: f32, content_h: f32) -> bool {
+    if !offset_y.is_finite() || !viewport_h.is_finite() || !content_h.is_finite() {
+        return true;
+    }
+    offset_y + viewport_h >= content_h - TRANSCRIPT_BOTTOM_TOLERANCE
+}
+
+/// Decide si el scroll del transcript sigue al contenido nuevo (R1).
+///
+/// Stick-to-bottom SÓLO si el usuario ya estaba abajo: si scrolleó arriba a
+/// leer, el stream no lo mueve. Sin chip flotante de "↓ nuevo" por decisión
+/// explícita: un `Area` superpuesto rompería el hover (regla existente del
+/// panel) y el stick de egui ya re-engancha al volver abajo. Puro.
+fn transcript_stick_to_bottom(user_at_bottom: bool) -> bool {
+    user_at_bottom
+}
+
 /// Tamaño mínimo legible de la card de animación (bug tiny).
 /// Derivado de tokens existentes, sin literales nuevos fuera de escala base 4.
 fn assistant_media_min_side() -> f32 {
     HIT_TARGET_MIN * 5.0
 }
 
+/// Bloque con su línea inicial (0-based sobre `content.lines()`).
+///
+/// Cada inicio de bloque es un estado fresco del parser (el párrafo se vacía
+/// antes de cada push), así que re-parsear desde el `start_line` del último
+/// bloque reproduce la cola: es la base del reúso de prefijo en streaming.
+struct SpannedBlock {
+    block: AssistantMessageBlock,
+    start_line: usize,
+}
+
+/// Parsea el transcript a bloques (atajo testeable sobre la versión con spans).
+#[cfg(test)]
 fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
+    parse_assistant_blocks_spanned(content)
+        .into_iter()
+        .map(|entry| entry.block)
+        .collect()
+}
+
+fn parse_assistant_blocks_spanned(content: &str) -> Vec<SpannedBlock> {
     let lines = content.lines().collect::<Vec<_>>();
     let mut blocks = Vec::new();
     let mut paragraph = Vec::new();
+    let mut paragraph_start: Option<usize> = None;
     let mut index = 0;
 
     while index < lines.len() {
         let line = lines[index];
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
             index += 1;
             continue;
         }
+        let block_start = index;
 
         if let Some(language) = trimmed.strip_prefix("```") {
             if let Some(end) = lines[index + 1..]
                 .iter()
                 .position(|candidate| candidate.trim_start().starts_with("```"))
             {
-                flush_assistant_paragraph(&mut blocks, &mut paragraph);
+                flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
                 let end = index + end + 1;
-                blocks.push(AssistantMessageBlock::Code {
-                    language: language.trim().to_ascii_lowercase(),
-                    text: lines[index + 1..end].join("\n"),
+                blocks.push(SpannedBlock {
+                    block: AssistantMessageBlock::Code {
+                        language: language.trim().to_ascii_lowercase(),
+                        text: lines[index + 1..end].join("\n"),
+                    },
+                    start_line: block_start,
                 });
                 index = end + 1;
                 continue;
@@ -1703,8 +1892,11 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
                 let end = index + end + 1;
                 let math = lines[index + 1..end].join("\n");
                 if !math.trim().is_empty() {
-                    flush_assistant_paragraph(&mut blocks, &mut paragraph);
-                    blocks.push(AssistantMessageBlock::DisplayMath(math.trim().into()));
+                    flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+                    blocks.push(SpannedBlock {
+                        block: AssistantMessageBlock::DisplayMath(math.trim().into()),
+                        start_line: block_start,
+                    });
                     index = end + 1;
                     continue;
                 }
@@ -1722,15 +1914,18 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
                     .filter(|value| !value.trim().is_empty())
             })
         {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            blocks.push(AssistantMessageBlock::DisplayMath(math.trim().into()));
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::DisplayMath(math.trim().into()),
+                start_line: block_start,
+            });
             index += 1;
             continue;
         }
 
         // HTML tabla <table>...</table> — para el caso del usuario que escupió HTML
         if trimmed.to_ascii_lowercase().starts_with("<table") {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
             let mut end = index;
             while end < lines.len() && !lines[end].to_ascii_lowercase().contains("</table>") {
                 end += 1;
@@ -1741,10 +1936,16 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
             let html = lines[index..end.min(lines.len())].join("\n");
             if let Some(rows) = parse_html_table(&html) {
                 if !rows.is_empty() {
-                    blocks.push(AssistantMessageBlock::Table(rows));
+                    blocks.push(SpannedBlock {
+                        block: AssistantMessageBlock::Table(rows),
+                        start_line: block_start,
+                    });
                 }
             } else {
                 // Fallback: tratar como párrafo si no se pudo parsear
+                if paragraph_start.is_none() {
+                    paragraph_start = Some(block_start);
+                }
                 paragraph.push(html);
             }
             index = end;
@@ -1757,7 +1958,7 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
                 parse_markdown_table_row(lines[index + 1].trim()),
             ) {
                 if markdown_table_separator(&separator, header.len()) {
-                    flush_assistant_paragraph(&mut blocks, &mut paragraph);
+                    flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
                     let mut rows = vec![header];
                     index += 2;
                     while index < lines.len() {
@@ -1770,7 +1971,10 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
                         rows.push(row);
                         index += 1;
                     }
-                    blocks.push(AssistantMessageBlock::Table(rows));
+                    blocks.push(SpannedBlock {
+                        block: AssistantMessageBlock::Table(rows),
+                        start_line: block_start,
+                    });
                     continue;
                 }
             }
@@ -1782,11 +1986,28 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
             .count();
         if (1..=3).contains(&heading_level) && trimmed.as_bytes().get(heading_level) == Some(&b' ')
         {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            blocks.push(AssistantMessageBlock::Heading {
-                level: heading_level,
-                text: trimmed[heading_level + 1..].trim().into(),
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::Heading {
+                    level: heading_level,
+                    text: trimmed[heading_level + 1..].trim().into(),
+                },
+                start_line: block_start,
             });
+            index += 1;
+            continue;
+        }
+
+        // Cita `> …`: se pela el marcador y el resto lleva inline-formatting.
+        // Un `>` solo actúa como separador en blanco (nunca muestra `>` crudo).
+        if trimmed.starts_with('>') {
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            if let Some(quoted) = strip_quote_markers(trimmed) {
+                blocks.push(SpannedBlock {
+                    block: AssistantMessageBlock::Quote(quoted.into()),
+                    start_line: block_start,
+                });
+            }
             index += 1;
             continue;
         }
@@ -1796,24 +2017,73 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
             .or_else(|| trimmed.strip_prefix("* "))
             .or_else(|| trimmed.strip_prefix("+ "))
         {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            blocks.push(AssistantMessageBlock::Bullet(bullet.trim().into()));
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::Bullet(bullet.trim().into()),
+                start_line: block_start,
+            });
             index += 1;
             continue;
         }
 
-        if let Some((number, item)) = parse_ordered_list_item(trimmed) {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            blocks.push(AssistantMessageBlock::Ordered { number, text: item });
+        // Ordenado, tolerando énfasis envolvente (`**1. Título**` del modelo).
+        // Se intenta directo primero para conservar el formato interno del ítem.
+        if let Some((number, item)) = parse_ordered_list_item(trimmed)
+            .or_else(|| parse_ordered_list_item(strip_wrapping_emphasis(trimmed)))
+        {
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::Ordered { number, text: item },
+                start_line: block_start,
+            });
             index += 1;
             continue;
         }
 
+        if paragraph_start.is_none() {
+            paragraph_start = Some(block_start);
+        }
         paragraph.push(trimmed.to_owned());
         index += 1;
     }
-    flush_assistant_paragraph(&mut blocks, &mut paragraph);
+    flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
     blocks
+}
+
+/// Pela los marcadores de cita al inicio de línea (`>`, `>>`, `> >`).
+///
+/// Puro, sin pánico: sólo `strip_prefix`/`trim_start`. `None` si no queda
+/// texto (un `>` solo es separador, no contenido).
+fn strip_quote_markers(trimmed: &str) -> Option<&str> {
+    let mut rest = trimmed;
+    let mut found = false;
+    while let Some(after) = rest.strip_prefix('>') {
+        found = true;
+        rest = after.trim_start();
+    }
+    if found && !rest.is_empty() {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+/// Quita una capa de énfasis envolvente (`**x**`, `__x__`) si abre y cierra.
+///
+/// Para que `**1. Título**` se reconozca como ítem ordenado en vez de caer a
+/// párrafo con asteriscos visibles. Puro, sin pánico.
+fn strip_wrapping_emphasis(text: &str) -> &str {
+    for (open, close) in [("**", "**"), ("__", "__")] {
+        if let Some(inner) = text
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+        {
+            if !inner.is_empty() {
+                return inner;
+            }
+        }
+    }
+    text
 }
 
 /// Detecta cerca de código sin cerrar (``` sin su cierre posterior).
@@ -1892,35 +2162,51 @@ fn is_bare_display_math(text: &str) -> bool {
     false
 }
 
-fn flush_assistant_paragraph(blocks: &mut Vec<AssistantMessageBlock>, paragraph: &mut Vec<String>) {
-    if !paragraph.is_empty() {
-        let text = paragraph.join(" ");
-        if is_bare_display_math(&text) {
-            // Promover a DisplayMath para estructura y separación (fracciones apiladas, no inline plano)
-            // Extraer solo la parte matemática desde el primer \
-            let trimmed = text.trim();
-            let math_source = if let Some(start) = trimmed.find('\\') {
-                // Si hay texto previo no-matemático ("El resultado es \frac..."), mantener como párrafo
-                // pero si el texto previo es corto (<30 chars) y el resto es math largo, promover solo math
-                let before = trimmed[..start].trim();
-                let candidate = trimmed[start..].trim();
-                if before.is_empty() || (before.len() < 30 && candidate.len() > before.len()) {
-                    candidate.to_string()
-                } else {
-                    // No promover, dejar como párrafo (bare math será manejado inline)
-                    blocks.push(AssistantMessageBlock::Paragraph(text));
-                    paragraph.clear();
-                    return;
-                }
-            } else {
-                trimmed.to_string()
-            };
-            blocks.push(AssistantMessageBlock::DisplayMath(math_source));
-        } else {
-            blocks.push(AssistantMessageBlock::Paragraph(text));
-        }
-        paragraph.clear();
+fn flush_assistant_paragraph(
+    blocks: &mut Vec<SpannedBlock>,
+    paragraph: &mut Vec<String>,
+    paragraph_start: &mut Option<usize>,
+) {
+    if paragraph.is_empty() {
+        *paragraph_start = None;
+        return;
     }
+    let start_line = paragraph_start.take().unwrap_or(0);
+    let text = paragraph.join(" ");
+    if is_bare_display_math(&text) {
+        // Promover a DisplayMath para estructura y separación (fracciones apiladas, no inline plano)
+        // Extraer solo la parte matemática desde el primer \
+        let trimmed = text.trim();
+        let math_source = if let Some(start) = trimmed.find('\\') {
+            // Si hay texto previo no-matemático ("El resultado es \frac..."), mantener como párrafo
+            // pero si el texto previo es corto (<30 chars) y el resto es math largo, promover solo math
+            let before = trimmed[..start].trim();
+            let candidate = trimmed[start..].trim();
+            if before.is_empty() || (before.len() < 30 && candidate.len() > before.len()) {
+                candidate.to_string()
+            } else {
+                // No promover, dejar como párrafo (bare math será manejado inline)
+                blocks.push(SpannedBlock {
+                    block: AssistantMessageBlock::Paragraph(text),
+                    start_line,
+                });
+                paragraph.clear();
+                return;
+            }
+        } else {
+            trimmed.to_string()
+        };
+        blocks.push(SpannedBlock {
+            block: AssistantMessageBlock::DisplayMath(math_source),
+            start_line,
+        });
+    } else {
+        blocks.push(SpannedBlock {
+            block: AssistantMessageBlock::Paragraph(text),
+            start_line,
+        });
+    }
+    paragraph.clear();
 }
 
 /// Nombre humano en español para un identificador literal de control.
@@ -4138,10 +4424,14 @@ fn draw_panel_contents(
             );
         });
 
-    egui::ScrollArea::vertical()
+    // R1 stick-to-bottom condicional: sólo sigue abajo si el usuario ya
+    // estaba abajo (egui además desengancha solo al scrollear arriba y
+    // re-engancha al volver). Sin chip flotante por decisión explícita.
+    let stick = transcript_stick_to_bottom(state.transcript_at_bottom);
+    let scroll_output = egui::ScrollArea::vertical()
         .id_salt("grafito_assistant_conversation")
         .auto_shrink([false, true])
-        .stick_to_bottom(true)
+        .stick_to_bottom(stick)
         .show(ui, |ui| {
             if let Some(error) = state.error.clone() {
                 egui::Frame::none()
@@ -4278,6 +4568,11 @@ fn draw_panel_contents(
                 }
             }
         });
+    state.transcript_at_bottom = transcript_is_at_bottom(
+        scroll_output.state.offset.y,
+        scroll_output.inner_rect.height(),
+        scroll_output.content_size.y,
+    );
     action
 }
 
@@ -5504,6 +5799,19 @@ fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool
     if is_teaching_topic && has_math {
         return true;
     }
+    // R1: explicación con marcha (pasos/proceso a aplicar) + matemática
+    // habilita aunque sea corta y sin bloques ricos: es justo el caso de una
+    // explicación real ("En 4D Grafito hace una proyección por CPU…").
+    // Saludos vacíos ("hola") no mencionan ni marcha ni matemática.
+    if mentions_step_march(&lower)
+        && (has_math
+            || has_code
+            || mentions_math_text(&lower)
+            || blocks.len() >= 2
+            || content.chars().count() > 200)
+    {
+        return true;
+    }
     // Muy estricto para el resto: solo para explicaciones largas y estructuradas. Evita botón en respuestas puntuales 3D/4D
     let signals = has_heading as u8
         + has_math as u8
@@ -5511,6 +5819,99 @@ fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool
         + (blocks.len() >= 4) as u8
         + (long as u8);
     signals >= 3
+}
+
+/// Menciona una marcha a seguir (pasos, proceso, orden de aplicación).
+///
+/// Puro, minúsculas ya normalizadas por el llamador. Acotado a pie a
+/// expresiones de procedimiento para no habilitar en saludos o preguntas
+/// sueltas sin desarrollo.
+fn mentions_step_march(lower: &str) -> bool {
+    [
+        "paso a paso",
+        "paso ",
+        "pasos",
+        "proceso",
+        "procedimiento",
+        "primero",
+        "después",
+        "despues",
+        "luego",
+        "elegí",
+        "elegis",
+        "elegi ",
+        "aplicarla",
+        "aplicalo",
+        "aplicalas",
+        "seguí",
+        "seguis",
+        "seguí ",
+        "arrastrá",
+        "arrastra",
+        "activá",
+        "activa ",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+}
+
+/// Menciona matemática en prosa (sin necesidad de bloque rico).
+///
+/// Cubre dimensiones/siglas del dominio (`4d`, `cpu`, `proyección`) y
+/// vocabulario matemático más símbolos sueltos. Puro.
+fn mentions_math_text(lower: &str) -> bool {
+    const CUES: &[&str] = &[
+        "proyecci",
+        "4d",
+        "3d",
+        "2d",
+        "cpu",
+        "matriz",
+        "vector",
+        "funci",
+        "deriv",
+        "integr",
+        "taylor",
+        "pitág",
+        "pitag",
+        "límite",
+        "limite",
+        "gráf",
+        "graf",
+        "fórm",
+        "formul",
+        "cálc",
+        "calc",
+        "ecuaci",
+        "geometr",
+        "dimensi",
+        "matemá",
+        "matema",
+        "trigonom",
+        "seno",
+        "coseno",
+        "tangente",
+        "pendiente",
+        "raíz",
+        "raiz",
+        "fracci",
+        "polinom",
+        "cociente",
+        "teorema",
+        "demostra",
+        "ejercicio",
+        "resolv",
+        "esfera",
+        "cubo",
+        "cono",
+        "cilindro",
+    ];
+    if CUES.iter().any(|cue| lower.contains(cue)) {
+        return true;
+    }
+    ["√", "∫", "∑", "≈", "⇒", "→", "∞", "≠", "≤", "≥", "±"]
+        .iter()
+        .any(|symbol| lower.contains(symbol))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5818,12 +6219,30 @@ fn draw_assistant_response(
                     2 => TYPE_MD,
                     _ => TYPE_SM,
                 };
-                ui.label(
-                    egui::RichText::new(text)
-                        .color(theme.text_primary)
-                        .size(size)
-                        .strong(),
-                );
+                // R1: el inline aplica DENTRO del encabezado (`## **T**`
+                // no muestra asteriscos) con wrap fijo al ancho del panel.
+                draw_inline_text_sized(ui, &humanize_prose_text(text), size, theme.text_primary);
+            }
+            AssistantMessageBlock::Quote(text) => {
+                // R1: cita sin `>` ni `**` visibles; hairline lateral sage.
+                let quote = humanize_prose_text(text);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    ui.add_space(SPACE_XS);
+                    let inner = ui.vertical(|ui| {
+                        draw_inline_text(ui, &quote);
+                    });
+                    let rect = inner.response.rect;
+                    let bar = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x - SPACE_SM + 2.0, rect.min.y + 2.0),
+                        egui::pos2(
+                            rect.min.x - SPACE_SM + 4.0,
+                            (rect.max.y - 2.0).max(rect.min.y),
+                        ),
+                    );
+                    ui.painter()
+                        .rect_filled(bar, 1.0, theme.accent.gamma_multiply(0.45));
+                });
             }
             AssistantMessageBlock::Bullet(text) => {
                 ui.horizontal_top(|ui| {
@@ -6650,6 +7069,12 @@ fn draw_markdown_table(
     block_index: usize,
 ) {
     let theme = current_theme(ui.ctx());
+    // Ancho estable (R1): se captura ANTES del ScrollArea horizontal, adentro
+    // el ancho disponible es infinito y el Grid mediría para agrandar. Cada
+    // columna se acota a su parte del panel: el texto envuelve, el panel no.
+    let panel_w = stable_transcript_width(ui.available_width());
+    let columns = rows.first().map(Vec::len).unwrap_or(1).max(1);
+    let max_col = ((panel_w - SPACE_XS * 2.0) / columns as f32).max(44.0);
     egui::Frame::none()
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -6667,18 +7092,29 @@ fn draw_markdown_table(
                     )))
                     .striped(true)
                     .min_col_width(44.0)
+                    .max_col_width(max_col)
+                    .num_columns(columns)
                     .show(ui, |ui| {
                         for (row_index, row) in rows.iter().enumerate() {
                             for cell in row {
-                                let text = egui::RichText::new(cell)
-                                    .color(theme.text_primary)
-                                    .size(TYPE_SM);
+                                // R1: inline DENTRO de la celda (`**x**`, código
+                                // y matemática no filtran jerga) con wrap.
+                                let plain = humanize_prose_text(cell);
                                 if row_index == 0 {
-                                    ui.label(text.strong());
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(inline_plain_text(&plain))
+                                                .color(theme.text_primary)
+                                                .size(TYPE_SM)
+                                                .strong(),
+                                        )
+                                        .wrap(),
+                                    );
                                 } else {
-                                    ui.label(text);
+                                    draw_inline_text_sized(ui, &plain, TYPE_SM, theme.text_primary);
                                 }
                             }
+                            ui.end_row();
                         }
                     });
                 });
@@ -7298,71 +7734,96 @@ fn find_bare_math_fragment(text: &str) -> Option<(usize, usize, String)> {
     best_start.map(|s| (s, best_end, best_plain))
 }
 
-fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
-    let theme = current_theme(ui.ctx());
-    let normal = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color: theme.text_primary,
-        ..Default::default()
-    };
-    let bold = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color: theme.text_primary,
-        italics: false,
-        ..Default::default()
-    };
-    let code = egui::TextFormat {
-        font_id: egui::FontId::monospace(TYPE_SM),
-        color: theme.accent,
-        background: theme.accent_muted,
-        ..Default::default()
-    };
-    let math = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color: theme.accent_strong,
-        ..Default::default()
-    };
+/// Formatos ya resueltos para un `LayoutJob` inline.
+struct InlineFormats {
+    normal: egui::TextFormat,
+    bold: egui::TextFormat,
+    code: egui::TextFormat,
+    math: egui::TextFormat,
+}
+
+/// Quita marcadores inline a medio cerrar sin mostrar jerga (`**` sueltos).
+///
+/// Contrato malformado→legible (R1, stream parcial): `**`, `__`, backticks,
+/// `$$`, `\[`, `\(` sin cierre se pelan y queda el texto. Un `$` solo se
+/// conserva (puede ser moneda) y un `*` inicial huérfano (`*uno` del modelo)
+/// se pela sólo si no tiene pareja en el tramo.
+fn strip_unclosed_inline_markers(segment: &str) -> String {
+    let mut out = segment
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .replace("$$", "")
+        .replace(r"\[", "")
+        .replace(r"\(", "")
+        .replace(r"\]", "")
+        .replace(r"\)", "");
+    if out.starts_with('*') && out.chars().filter(|c| *c == '*').count() == 1 {
+        out = out[1..].to_string();
+    }
+    out
+}
+
+/// Construye el `LayoutJob` con inline-formatting sin tocar `Ui`.
+///
+/// Único punto de formato para párrafos, ítems, citas, encabezados y celdas:
+/// el inline aplica DENTRO de todo bloque de texto (R1). Puro salvo los
+/// formatos ya resueltos que recibe.
+fn inline_layout_job(text: &str, formats: &InlineFormats) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let mut remaining = text;
     while !remaining.is_empty() {
         let markers = [
-            ("**", "**", &bold),
-            ("`", "`", &code),
-            ("$$", "$$", &math),
-            (r"\[", r"\]", &math),
-            ("$", "$", &math),
-            (r"\(", r"\)", &math),
+            ("**", "**"),
+            ("__", "__"),
+            ("`", "`"),
+            ("$$", "$$"),
+            (r"\[", r"\]"),
+            ("$", "$"),
+            (r"\(", r"\)"),
         ];
         let next = markers
             .iter()
-            .filter_map(|(start, end, format)| {
+            .filter_map(|(start, end)| {
                 remaining
                     .find(start)
-                    .map(|position| (position, *start, *end, *format))
+                    .map(|position| (position, *start, *end))
             })
-            .min_by_key(|(position, _, _, _)| *position);
-        if let Some((position, start, end, format)) = next {
+            .min_by_key(|(position, _, _)| *position);
+        if let Some((position, start, end)) = next {
+            let format = if start == "**" || start == "__" {
+                &formats.bold
+            } else if start == "`" {
+                &formats.code
+            } else {
+                &formats.math
+            };
             if position > 0 {
                 // Antes del marker, verificar si hay bare math en el prefijo
                 let prefix = &remaining[..position];
                 if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(prefix) {
                     if b_s > 0 {
-                        job.append(&prefix[..b_s], 0.0, normal.clone());
+                        job.append(&prefix[..b_s], 0.0, formats.normal.clone());
                     }
-                    job.append(&b_plain, 0.0, math.clone());
+                    job.append(&b_plain, 0.0, formats.math.clone());
                     let after_bare = &prefix[b_e..];
                     if !after_bare.is_empty() {
-                        job.append(after_bare, 0.0, normal.clone());
+                        job.append(after_bare, 0.0, formats.normal.clone());
                     }
                     // No consumir el marker aún, re-evaluar desde el marker
                     remaining = &remaining[position..];
                     continue;
                 }
-                job.append(&remaining[..position], 0.0, normal.clone());
+                job.append(&remaining[..position], 0.0, formats.normal.clone());
             }
             let after_start = &remaining[position + start.len()..];
             let Some(end_position) = after_start.find(end) else {
-                job.append(&remaining[position..], 0.0, normal.clone());
+                // Sin cierre (típico stream parcial): texto plano sin jerga.
+                job.append(
+                    &strip_unclosed_inline_markers(&remaining[position..]),
+                    0.0,
+                    formats.normal.clone(),
+                );
                 break;
             };
             let source_end = position + start.len() + end_position + end.len();
@@ -7378,9 +7839,9 @@ fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
         // Sin markers $...$, buscar bare math
         if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(remaining) {
             if b_s > 0 {
-                job.append(&remaining[..b_s], 0.0, normal.clone());
+                job.append(&remaining[..b_s], 0.0, formats.normal.clone());
             }
-            job.append(&b_plain, 0.0, math.clone());
+            job.append(&b_plain, 0.0, formats.math.clone());
             // Si hay texto después del bare fragment, también como normal
             let after = &remaining[b_e..];
             if !after.trim().is_empty() {
@@ -7389,112 +7850,138 @@ fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
                 remaining = after;
                 // Si el after no contiene más bare math, append como normal y break
                 if find_bare_math_fragment(remaining).is_none() {
-                    job.append(remaining, 0.0, normal.clone());
+                    job.append(
+                        &strip_unclosed_inline_markers(remaining),
+                        0.0,
+                        formats.normal.clone(),
+                    );
                     break;
                 }
                 continue;
             }
             break;
         }
-        job.append(remaining, 0.0, normal.clone());
+        job.append(
+            &strip_unclosed_inline_markers(remaining),
+            0.0,
+            formats.normal.clone(),
+        );
         break;
     }
+    job
+}
+
+/// Texto plano legible de un tramo con inline-formatting (para tests y gates).
+///
+/// Pela `**`/`__`/backticks cerrados o sueltos y conserva el interior: lo que
+/// se afirma acá es lo que el render ya no muestra como jerga. Puro.
+fn inline_plain_text(text: &str) -> String {
+    let mut out = text.to_string();
+    for (open, close) in [("**", "**"), ("__", "__"), ("`", "`")] {
+        loop {
+            let Some(start) = out.find(open) else {
+                break;
+            };
+            let after = start + open.len();
+            if let Some(rel) = out[after..].find(close) {
+                let end = after + rel;
+                let inner = out[after..end].to_string();
+                out = format!("{}{}{}", &out[..start], inner, &out[end + close.len()..]);
+            } else {
+                break;
+            }
+        }
+    }
+    strip_unclosed_inline_markers(&out)
+}
+
+fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
+    let theme = current_theme(ui.ctx());
+    let formats = InlineFormats {
+        normal: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color: theme.text_primary,
+            ..Default::default()
+        },
+        bold: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color: theme.text_primary,
+            italics: false,
+            ..Default::default()
+        },
+        code: egui::TextFormat {
+            font_id: egui::FontId::monospace(TYPE_SM),
+            color: theme.accent,
+            background: theme.accent_muted,
+            ..Default::default()
+        },
+        math: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color: theme.accent_strong,
+            ..Default::default()
+        },
+    };
+    let job = inline_layout_job(text, &formats);
+    ui.add(egui::Label::new(job).wrap().selectable(true));
+}
+
+/// Inline con tamaño y color propios (encabezados y celdas de tabla).
+///
+/// Misma gramática que `draw_inline_text`: el formato aplica DENTRO de todo
+/// bloque (R1). El énfasis del encabezado lo da el tamaño (TYPE_LG/MD/SM),
+/// sin jerga de marcadores visible.
+fn draw_inline_text_sized(ui: &mut egui::Ui, text: &str, size: f32, color: egui::Color32) {
+    let theme = current_theme(ui.ctx());
+    let normal = egui::TextFormat {
+        font_id: egui::FontId::proportional(size),
+        color,
+        ..Default::default()
+    };
+    let formats = InlineFormats {
+        normal: normal.clone(),
+        bold: normal.clone(),
+        code: egui::TextFormat {
+            font_id: egui::FontId::monospace(size),
+            color: theme.accent,
+            background: theme.accent_muted,
+            ..Default::default()
+        },
+        math: egui::TextFormat {
+            font_id: egui::FontId::proportional(size),
+            color: theme.accent_strong,
+            ..Default::default()
+        },
+    };
+    let job = inline_layout_job(text, &formats);
     ui.add(egui::Label::new(job).wrap().selectable(true));
 }
 
 fn draw_inline_text_with_color(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     let theme = current_theme(ui.ctx());
-    let normal = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color,
-        ..Default::default()
+    let formats = InlineFormats {
+        normal: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color,
+            ..Default::default()
+        },
+        bold: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color,
+            ..Default::default()
+        },
+        code: egui::TextFormat {
+            font_id: egui::FontId::monospace(TYPE_SM),
+            color: theme.accent,
+            background: theme.accent_muted,
+            ..Default::default()
+        },
+        math: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color: theme.accent_strong,
+            ..Default::default()
+        },
     };
-    let bold = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color,
-        ..Default::default()
-    };
-    let code = egui::TextFormat {
-        font_id: egui::FontId::monospace(TYPE_SM),
-        color: theme.accent,
-        background: theme.accent_muted,
-        ..Default::default()
-    };
-    let math = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color: theme.accent_strong,
-        ..Default::default()
-    };
-    let mut job = egui::text::LayoutJob::default();
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        let markers = [
-            ("**", "**", &bold),
-            ("`", "`", &code),
-            ("$$", "$$", &math),
-            (r"\[", r"\]", &math),
-            ("$", "$", &math),
-            (r"\(", r"\)", &math),
-        ];
-        let next = markers
-            .iter()
-            .filter_map(|(start, end, format)| {
-                remaining
-                    .find(start)
-                    .map(|position| (position, *start, *end, *format))
-            })
-            .min_by_key(|(position, _, _, _)| *position);
-        if let Some((position, start, end, format)) = next {
-            if position > 0 {
-                let prefix = &remaining[..position];
-                if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(prefix) {
-                    if b_s > 0 {
-                        job.append(&prefix[..b_s], 0.0, normal.clone());
-                    }
-                    job.append(&b_plain, 0.0, math.clone());
-                    let after_bare = &prefix[b_e..];
-                    if !after_bare.is_empty() {
-                        job.append(after_bare, 0.0, normal.clone());
-                    }
-                    remaining = &remaining[position..];
-                    continue;
-                }
-                job.append(&remaining[..position], 0.0, normal.clone());
-            }
-            let after_start = &remaining[position + start.len()..];
-            let Some(end_position) = after_start.find(end) else {
-                job.append(&remaining[position..], 0.0, normal.clone());
-                break;
-            };
-            let source_end = position + start.len() + end_position + end.len();
-            let inline = if matches!(start, "$$" | "$" | r"\[" | r"\(") {
-                inline_math_text(&remaining[position..source_end])
-            } else {
-                after_start[..end_position].to_owned()
-            };
-            job.append(&inline, 0.0, format.clone());
-            remaining = &after_start[end_position + end.len()..];
-            continue;
-        }
-        if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(remaining) {
-            if b_s > 0 {
-                job.append(&remaining[..b_s], 0.0, normal.clone());
-            }
-            job.append(&b_plain, 0.0, math.clone());
-            let after = &remaining[b_e..];
-            if !after.trim().is_empty() {
-                remaining = after;
-                if find_bare_math_fragment(remaining).is_none() {
-                    job.append(remaining, 0.0, normal.clone());
-                    break;
-                }
-                continue;
-            }
-            break;
-        }
-        job.append(remaining, 0.0, normal.clone());
-        break;
-    }
+    let job = inline_layout_job(text, &formats);
     ui.add(egui::Label::new(job).wrap().selectable(true));
 }
 
@@ -9492,5 +9979,264 @@ mod tests {
         );
         assert!(assistant_media_min_side() >= HIT_TARGET_MIN);
         assert_eq!(assistant_media_min_side() % 4.0, 0.0);
+    }
+
+    // ── R1 rediseño del render del transcript ──
+
+    /// Extrae los textos legibles de un bloque (sólo tests).
+    fn block_texts(block: &AssistantMessageBlock) -> Vec<&str> {
+        match block {
+            AssistantMessageBlock::Heading { text, .. }
+            | AssistantMessageBlock::Bullet(text)
+            | AssistantMessageBlock::Ordered { text, .. }
+            | AssistantMessageBlock::Quote(text)
+            | AssistantMessageBlock::Paragraph(text)
+            | AssistantMessageBlock::DisplayMath(text) => vec![text],
+            AssistantMessageBlock::Code { language, text } => vec![language, text],
+            AssistantMessageBlock::Table(rows) => {
+                rows.iter().flatten().map(String::as_str).collect()
+            }
+        }
+    }
+
+    #[test]
+    fn r1_inline_markers_never_leak_in_lists_quotes_headings_tables() {
+        // Bug R1.1: `**1. T…` literal. El inline aplica DENTRO de ítems,
+        // bullets, citas, encabezados y celdas; lo a medio cerrar (stream
+        // parcial) degrada a texto plano sin `**`/backticks sueltos.
+        // El código cercado queda crudo a propósito: ahí `**` es contenido.
+        let cases = [
+            "**1. Título**",
+            "1. **Negrita al inicio**",
+            "1. `código al inicio`",
+            "1. **sin cerrar en ítem",
+            "- **Negrita en bullet**",
+            "- `código en bullet`",
+            "> **Cita con negrita**",
+            "> cita simple",
+            "## **Encabezado con negrita**",
+            "# Título `con código`",
+            "| col | col |\n| --- | --- |\n| **celda** | `code` |",
+            "**sin cerrar",
+            "*uno",
+            "__doble__",
+            "__sin cerrar",
+        ];
+        for src in cases {
+            let blocks = parse_assistant_blocks(src);
+            assert!(!blocks.is_empty(), "vacío para {src:?}");
+            for block in &blocks {
+                if matches!(block, AssistantMessageBlock::Code { .. }) {
+                    continue;
+                }
+                for text in block_texts(block) {
+                    let plain = inline_plain_text(&humanize_prose_text(text));
+                    assert!(!plain.contains("**"), "jerga `**` en {src:?} → {plain:?}");
+                    assert!(
+                        !plain.contains('`'),
+                        "jerga backtick en {src:?} → {plain:?}"
+                    );
+                    assert!(!plain.contains("__"), "jerga `__` en {src:?} → {plain:?}");
+                }
+                if let AssistantMessageBlock::Quote(text) = block {
+                    assert!(
+                        !text.trim_start().starts_with('>'),
+                        "`>` filtrado en {src:?}"
+                    );
+                }
+            }
+        }
+        // `>` solo actúa como separador en blanco: cero bloques, sin `>` crudo.
+        assert!(parse_assistant_blocks(">").is_empty());
+        // `**1. Título**` es ítem ordenado, no párrafo con asteriscos.
+        let wrapped = parse_assistant_blocks("**1. Título**");
+        assert!(
+            matches!(
+                &wrapped[..],
+                [AssistantMessageBlock::Ordered { number: 1, text }]
+                if text == "Título"
+            ),
+            "era {wrapped:?}"
+        );
+        // `> **x` pela la cita y conserva el interior para el inline.
+        let quote = parse_assistant_blocks("> **Cita**");
+        assert!(
+            matches!(
+                &quote[..],
+                [AssistantMessageBlock::Quote(text)] if text == "**Cita**"
+            ),
+            "era {quote:?}"
+        );
+        // Cerrados conservan el interior, sueltos se pelan sin jerga.
+        assert_eq!(inline_plain_text("**1. Título**"), "1. Título");
+        assert_eq!(inline_plain_text("1. **x**"), "1. x");
+        assert_eq!(inline_plain_text("**sin cerrar"), "sin cerrar");
+        assert_eq!(inline_plain_text("*uno"), "uno");
+        assert_eq!(inline_plain_text("__doble__"), "doble");
+        // `$` solo se conserva (puede ser moneda), no es marcador a pelar.
+        assert!(inline_plain_text("cuesta $5").contains('$'));
+    }
+
+    #[test]
+    fn r1_stepwise_enables_on_real_math_explanation_but_not_greetings() {
+        // Bug R1.2: "Explícame paso a paso" deshabilitado en explicación real.
+        let content = "Vamos con calma, paso a paso. En 4D Grafito hace una proyección por CPU a 3D/2D, vos elegís si aplicarla:";
+        let blocks = parse_assistant_blocks(content);
+        assert_eq!(
+            stepwise_disabled_reason(&blocks, content),
+            None,
+            "marcha + matemática debe habilitar"
+        );
+        // Negativo: saludos vacíos siguen disabled con motivo (nunca mudo).
+        let hola = parse_assistant_blocks("hola");
+        assert!(stepwise_disabled_reason(&hola, "hola").is_some());
+        let empty: Vec<AssistantMessageBlock> = Vec::new();
+        assert!(stepwise_disabled_reason(&empty, "").is_some());
+    }
+
+    #[test]
+    fn r1_streaming_cache_reuses_stable_prefix() {
+        // Bug R1.3a: cada delta re-paresaba todo. El prefijo cerrado se
+        // congela y sólo se parsea el sufijo desde el último bloque estable.
+        let mut cache = AssistantBlocksCache::default();
+        let first = "1. Arrastrá el punto\n2. Usá el deslizador";
+        let frozen = cache.blocks(first);
+        assert_eq!(frozen.len(), 2);
+        let extended = "1. Arrastrá el punto\n2. Usá el deslizador\n3. Activá la traza";
+        let calls = cache.parse_count();
+        let grown = cache.blocks(extended);
+        assert_eq!(grown.len(), 3, "era {grown:?}");
+        assert_eq!(grown[..2], frozen[..], "el prefijo se congela idéntico");
+        assert_eq!(cache.last_reused_blocks(), 2);
+        assert_eq!(cache.parse_count(), calls + 1, "un solo parse de sufijo");
+        // Mismo contenido pega exacto sin parsear de nuevo.
+        let calls = cache.parse_count();
+        let same = cache.blocks(extended);
+        assert_eq!(same, grown);
+        assert_eq!(cache.parse_count(), calls);
+        // Extensión en la misma línea también queda correcta.
+        let _ = cache.blocks("Hola");
+        let longer = cache.blocks("Hola mundo");
+        assert!(
+            matches!(
+                &longer[..],
+                [AssistantMessageBlock::Paragraph(text)] if text.contains("mundo")
+            ),
+            "era {longer:?}"
+        );
+        // Edición en el medio (no prefijo) re-parsea total pero correcto.
+        let edited = cache.blocks("1. Arrastrá el punto\n2. Otro paso\n3. Activá la traza");
+        assert_eq!(edited.len(), 3);
+    }
+
+    #[test]
+    fn r1_scroll_pins_only_when_user_was_at_bottom() {
+        // Bug R1.3b: stick-to-bottom sólo si ya estaba abajo.
+        assert!(transcript_is_at_bottom(90.0, 10.0, 100.0));
+        assert!(transcript_is_at_bottom(0.0, 600.0, 100.0));
+        assert!(!transcript_is_at_bottom(0.0, 100.0, 500.0));
+        assert!(!transcript_is_at_bottom(10.0, 100.0, 500.0));
+        assert!(transcript_is_at_bottom(f32::NAN, 100.0, 500.0));
+        assert!(transcript_stick_to_bottom(true));
+        assert!(!transcript_stick_to_bottom(false));
+    }
+
+    #[test]
+    fn r1_transcript_width_is_stable_and_sanitized() {
+        // Bug R1.3c: el texto nunca cambia el ancho del panel.
+        assert_eq!(stable_transcript_width(400.0), 400.0);
+        assert_eq!(stable_transcript_width(300.0), 300.0);
+        assert_eq!(stable_transcript_width(0.0), ASSISTANT_PANEL_MIN_WIDTH);
+        assert_eq!(stable_transcript_width(-5.0), ASSISTANT_PANEL_MIN_WIDTH);
+        assert_eq!(stable_transcript_width(f32::NAN), ASSISTANT_PANEL_MIN_WIDTH);
+        assert_eq!(
+            stable_transcript_width(f32::INFINITY),
+            ASSISTANT_PANEL_MIN_WIDTH
+        );
+    }
+
+    #[test]
+    fn r1_adversarial_transcript_renders_within_panel_width() {
+        // Bug R1.3c headless con egui: encabezado/cita/ítems/tabla con
+        // marcadores + cerca sin cerrar no ensanchan el panel (wrap fijo).
+        // El token irrompible sólo exige no-pánico: egui envuelve por palabra.
+        const ADVERSARIAL: &str = "## **Título con negrita**\n\n> **Cita con negrita**\n\n1. **Ítem ordenado con negrita**\n2. `código en ítem` con texto normal\n\n| col | col |\n| --- | --- |\n| **celda** | `code` |\n\n```grafito\nFunction[sin(x)]\n```\n\n**sin cerrar en stream parcial";
+        for width in [300.0, 520.0] {
+            let context = egui::Context::default();
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let available = ui.available_width();
+                        let verified: Vec<VerifiedAssistantProposal> = Vec::new();
+                        let applied: Vec<VerifiedAssistantProposal> = Vec::new();
+                        let indices: Vec<usize> = Vec::new();
+                        let proposal_state = AssistantProposalRenderState {
+                            verified_proposals: &verified,
+                            applied_proposals: &applied,
+                            preflight_candidate_count: 0,
+                            proposal_code_block_indices: &indices,
+                            proposal_results_available: false,
+                            correction_available: false,
+                        };
+                        let mut cache = AssistantBlocksCache::default();
+                        let _ = draw_assistant_response(
+                            ui,
+                            ADVERSARIAL,
+                            proposal_state,
+                            None,
+                            0,
+                            &mut cache,
+                        );
+                        let used = ui.min_rect().width();
+                        assert!(
+                            used <= available + 1.0,
+                            "ancho {used} > disponible {available} en panel {width}"
+                        );
+                    });
+                },
+            );
+        }
+        // Token irrompible: no-pánico (el panel lo contiene el padre).
+        let context = egui::Context::default();
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let verified: Vec<VerifiedAssistantProposal> = Vec::new();
+                    let applied: Vec<VerifiedAssistantProposal> = Vec::new();
+                    let indices: Vec<usize> = Vec::new();
+                    let proposal_state = AssistantProposalRenderState {
+                        verified_proposals: &verified,
+                        applied_proposals: &applied,
+                        preflight_candidate_count: 0,
+                        proposal_code_block_indices: &indices,
+                        proposal_results_available: false,
+                        correction_available: false,
+                    };
+                    let mut cache = AssistantBlocksCache::default();
+                    let _ = draw_assistant_response(
+                        ui,
+                        "supercalifragilisticoespialidoso".repeat(8).as_str(),
+                        proposal_state,
+                        None,
+                        0,
+                        &mut cache,
+                    );
+                });
+            },
+        );
     }
 }

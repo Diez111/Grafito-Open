@@ -2962,6 +2962,75 @@ fn geometry_3d_polytope_inspectors_expose_labeled_scrollable_controls() {
 }
 
 #[test]
+fn inspector_label_never_renders_a_bare_letter() {
+    // Vacía → sin fila (nada que mostrar, jamás 1 letra).
+    assert_eq!(crate::panels::inspector_label_text(""), None);
+    assert_eq!(crate::panels::inspector_label_text("   "), None);
+    // Autolabel de 1 letra (`S` de Surface3D, `document.rs:1193-1202`)
+    // → con prefijo, jamás suelta.
+    assert_eq!(
+        crate::panels::inspector_label_text("S").as_deref(),
+        Some("Etiqueta: S")
+    );
+    // Texto largo → completo, sin recorte silencioso.
+    let long = "Superficie paramétrica de revolución con malla fina";
+    let rendered = crate::panels::inspector_label_text(long).expect("label text");
+    assert!(rendered.contains(long), "elide honesto: texto completo");
+    assert!(rendered.chars().count() > 1);
+    // Trim honesto, sin duplicar prefijo.
+    assert_eq!(
+        crate::panels::inspector_label_text("  S  ").as_deref(),
+        Some("Etiqueta: S")
+    );
+}
+
+#[test]
+fn inspector_identity_tooltip_carries_full_text() {
+    let tip = crate::panels::inspector_identity_tooltip("Surface3D", "S", true);
+    assert!(tip.contains("Surface3D"), "nombre completo en tooltip");
+    assert!(tip.contains("Etiqueta: S"), "etiqueta con contexto");
+    assert!(tip.contains("Visible"));
+    let hidden = crate::panels::inspector_identity_tooltip("Esfera 3D", "", false);
+    assert!(hidden.contains("Oculto"));
+    assert!(!hidden.contains("Etiqueta:"));
+}
+
+#[test]
+fn collapsed_rail_shows_icons_only_without_text_slivers() {
+    // Rail sano (60px) → icono + etiqueta.
+    assert!(crate::ui::rail_labels_visible(60.0));
+    assert!(crate::ui::rail_labels_visible(
+        crate::ui::RAIL_LABEL_MIN_WIDTH
+    ));
+    // Franja colapsada (1-2px, el artefacto del screenshot) → iconos puros.
+    assert!(!crate::ui::rail_labels_visible(2.0));
+    assert!(!crate::ui::rail_labels_visible(1.0));
+    assert!(!crate::ui::rail_labels_visible(0.0));
+    assert!(!crate::ui::rail_labels_visible(
+        crate::ui::RAIL_LABEL_MIN_WIDTH - 0.1
+    ));
+    // Anchos mínimos sanos (tokens como única fuente).
+    const { assert!(grafito_ui::tokens::RAIL_WIDTH >= crate::ui::RAIL_LABEL_MIN_WIDTH) };
+    const { assert!(grafito_ui::tokens::DRAWER_RIGHT_MIN >= 200.0) };
+    const { assert!(grafito_ui::tokens::PANEL_LEFT_MIN >= 100.0) };
+}
+
+#[test]
+fn identity_card_and_rail_clip_text_honestly() {
+    let panels = include_str!("panels.rs");
+    assert!(panels.contains("inspector_label_text"));
+    assert!(panels.contains("Etiqueta: "));
+    assert!(panels.contains("inspector_identity_tooltip"));
+    assert!(panels.contains(".truncate()"));
+    assert!(panels.contains("TextWrapMode::Wrap"));
+    assert!(panels.contains(".on_hover_text("));
+    let ui = include_str!("ui.rs");
+    assert!(ui.contains("with_clip_rect"));
+    assert!(ui.contains("rail_labels_visible"));
+    assert!(ui.contains("RAIL_LABEL_MIN_WIDTH"));
+}
+
+#[test]
 fn workspace_utility_dock_reserves_one_right_column_for_3d_properties() {
     use crate::{Perspective, RightPanelContent, ShellWidthClass};
 
