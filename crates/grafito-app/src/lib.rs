@@ -25,6 +25,9 @@ pub(crate) mod commands;
 pub mod controllers;
 pub(crate) mod export;
 pub(crate) mod input;
+#[allow(dead_code)]
+// D3: pipeline testeado headless; D1-bis cablea el TextEdit en panels.rs (prohibido en D3).
+pub(crate) mod inspector_edit;
 pub(crate) mod keyboard;
 pub(crate) mod lifecycle;
 pub(crate) mod manim_orchestrator;

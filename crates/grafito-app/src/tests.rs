@@ -2945,7 +2945,9 @@ fn geometry_3d_polytope_inspectors_expose_labeled_scrollable_controls() {
     assert!(inspector.contains("draw_inspector_identity"));
     assert!(source.contains("fn draw_inspector_empty_state"));
     assert!(source.contains("Inspector listo"));
-    assert!(source.contains("Identidad del objeto"));
+    assert!(source.contains("inspector_equation_text"));
+    assert!(source.contains("inspector_type_caption"));
+    assert!(source.contains("Ecuación no disponible para este tipo"));
     assert!(inspector.contains("Proyección"));
     assert!(inspector.contains("Geometría"));
     assert!(inspector.contains("Apariencia"));
@@ -2986,13 +2988,93 @@ fn inspector_label_never_renders_a_bare_letter() {
 
 #[test]
 fn inspector_identity_tooltip_carries_full_text() {
-    let tip = crate::panels::inspector_identity_tooltip("Surface3D", "S", true);
-    assert!(tip.contains("Surface3D"), "nombre completo en tooltip");
+    // El titular es la ecuación en grande (o el caption si no hay).
+    let tip = crate::panels::inspector_identity_tooltip("z = x^2+y^2", "S", true);
+    assert!(tip.contains("z = x^2+y^2"), "ecuación completa en tooltip");
     assert!(tip.contains("Etiqueta: S"), "etiqueta con contexto");
     assert!(tip.contains("Visible"));
-    let hidden = crate::panels::inspector_identity_tooltip("Esfera 3D", "", false);
+    let hidden = crate::panels::inspector_identity_tooltip("curva paramétrica 3D", "", false);
+    assert!(hidden.contains("curva paramétrica 3D"));
     assert!(hidden.contains("Oculto"));
     assert!(!hidden.contains("Etiqueta:"));
+}
+
+#[test]
+fn inspector_equation_text_shows_formula_not_type_name() {
+    use grafito_core::{GeoObject, ParametricCurve3DObj, Surface3DObj};
+    // Superficie explícita → fórmula en grande.
+    let surface = GeoObject::Surface3D(Surface3DObj::new("x^2+y^2", (-2.0, 2.0), (-2.0, 2.0)));
+    assert_eq!(
+        crate::panels::inspector_equation_text(&surface).as_deref(),
+        Some("z = x^2+y^2")
+    );
+    // Superficie paramétrica → tupla.
+    let param = GeoObject::Surface3D(Surface3DObj::new_parametric(
+        "cos(u)",
+        "sin(u)",
+        "v",
+        (0.0, std::f64::consts::TAU),
+        (-1.0, 1.0),
+    ));
+    assert_eq!(
+        crate::panels::inspector_equation_text(&param).as_deref(),
+        Some("(cos(u), sin(u), v)")
+    );
+    // Curva paramétrica 3D → tupla.
+    let curve =
+        GeoObject::ParametricCurve3D(ParametricCurve3DObj::new("t", "t^2", "t^3", 0.0, 1.0));
+    assert_eq!(
+        crate::panels::inspector_equation_text(&curve).as_deref(),
+        Some("(t, t^2, t^3)")
+    );
+    // Vacía → None (placeholder honesto, jamás el nombre en grande).
+    let empty = GeoObject::Surface3D(Surface3DObj::new("", (-1.0, 1.0), (-1.0, 1.0)));
+    assert_eq!(crate::panels::inspector_equation_text(&empty), None);
+}
+
+#[test]
+fn inspector_equation_text_is_none_without_formula() {
+    use grafito_core::{Cube3DObj, GeoObject, Point3DObj, Sphere3DObj};
+    use grafito_geometry::Point3D;
+    let origin = Point3D::new(0.0, 0.0, 0.0);
+    for obj in [
+        GeoObject::Cube3D(Cube3DObj::new(origin, 1.0)),
+        GeoObject::Sphere3D(Sphere3DObj::new(origin, 1.0)),
+        GeoObject::Point3D(Point3DObj::new(origin)),
+    ] {
+        assert_eq!(
+            crate::panels::inspector_equation_text(&obj),
+            None,
+            "sin fórmula → placeholder honesto"
+        );
+        assert!(
+            !crate::panels::inspector_type_caption(&obj).is_empty(),
+            "siempre hay caption terciario"
+        );
+    }
+}
+
+#[test]
+fn inspector_type_caption_is_spanish_tertiary() {
+    use grafito_core::{GeoObject, ParametricCurve3DObj, Surface3DObj};
+    let surface = GeoObject::Surface3D(Surface3DObj::new("x", (-1.0, 1.0), (-1.0, 1.0)));
+    assert_eq!(
+        crate::panels::inspector_type_caption(&surface),
+        "superficie 3D"
+    );
+    let curve = GeoObject::ParametricCurve3D(ParametricCurve3DObj::new("t", "0", "0", 0.0, 1.0));
+    assert_eq!(
+        crate::panels::inspector_type_caption(&curve),
+        "curva paramétrica 3D"
+    );
+    // El caption nunca es el nombre muerto en grande: es minúscula terciaria.
+    for caption in [
+        crate::panels::inspector_type_caption(&surface),
+        crate::panels::inspector_type_caption(&curve),
+    ] {
+        assert_ne!(caption, "Surface3D");
+        assert_ne!(caption, "ParametricCurve3D");
+    }
 }
 
 #[test]
@@ -3028,6 +3110,101 @@ fn identity_card_and_rail_clip_text_honestly() {
     assert!(ui.contains("with_clip_rect"));
     assert!(ui.contains("rail_labels_visible"));
     assert!(ui.contains("RAIL_LABEL_MIN_WIDTH"));
+}
+
+#[test]
+fn workspace_tabs_are_centered_pills_with_real_contrast() {
+    let ui = include_str!("ui.rs");
+    // Segmentado de ancho completo (centrado por construcción), pill activo.
+    assert!(ui.contains("Button::new"), "tabs como botones");
+    assert!(
+        ui.contains(".selected(inspector_selected)"),
+        "pill inspector seleccionable"
+    );
+    assert!(
+        ui.contains(".selected(assistant_selected)"),
+        "pill asistente seleccionable"
+    );
+    assert!(ui.contains("RADIUS_PILL"), "pill del activo");
+    assert!(
+        ui.contains("keyboard_enter_bg"),
+        "fill activo de alto contraste"
+    );
+    assert!(
+        ui.contains("keyboard_enter_text"),
+        "texto activo de alto contraste"
+    );
+    // TYPE_SM como única medida de los tabs + SPACE_SM debajo del grupo.
+    let dock_fn = ui
+        .split("fn draw_geometry_utility_contents")
+        .nth(1)
+        .expect("dock fn");
+    let dock_fn = dock_fn
+        .split("fn draw_geometry_utility_dock")
+        .next()
+        .expect("fin del dock fn");
+    assert!(dock_fn.contains("TYPE_SM"), "tabs en TYPE_SM");
+    assert!(
+        !dock_fn.contains("selectable_label"),
+        "sin tabs pegados a la izquierda"
+    );
+}
+
+#[test]
+fn workspace_dock_kills_glyph_strip_causes() {
+    let ui = include_str!("ui.rs");
+    let dock_fn = ui
+        .split("fn draw_geometry_utility_dock")
+        .nth(1)
+        .expect("dock fn");
+    let dock_fn = dock_fn.split("\nfn ").next().expect("fin del dock fn");
+    // 1. Fondo opaco: el canvas 3D no se transparenta por el borde.
+    assert!(dock_fn.contains(".fill(theme.panel_bg)"), "drawer opaco");
+    assert!(!dock_fn.contains("TRANSPARENT"), "sin fondo transparente");
+    // 2. Anchos por token con mínimo real (nunca franja 0-40px).
+    assert!(dock_fn.contains("DRAWER_RIGHT_DEFAULT"), "ancho por token");
+    assert!(dock_fn.contains("DRAWER_RIGHT_MIN"), "mínimo por token");
+    assert!(dock_fn.contains("DRAWER_RIGHT_MAX"), "máximo por token");
+    const {
+        assert!(grafito_ui::tokens::DRAWER_RIGHT_MIN >= 200.0);
+        assert!(grafito_ui::tokens::DRAWER_RIGHT_MIN >= crate::ui::RAIL_LABEL_MIN_WIDTH);
+    }
+    // 3. Cero texto pintado a mano en el path del dock: todo Label/widget
+    // (con truncate + wrap + tooltip), nada de `painter().text` sin clip.
+    for marker in [
+        "fn draw_geometry_utility_contents",
+        "fn draw_geometry_utility_dock",
+        "fn draw_compact_geometry_utility_dock",
+    ] {
+        let body = ui.split(marker).nth(1).expect(marker);
+        let body = body.split("\nfn ").next().unwrap_or(body);
+        assert!(
+            !body.contains("painter().text"),
+            "{marker} sin texto a mano"
+        );
+    }
+    let panels = include_str!("panels.rs");
+    for marker in [
+        "fn draw_inspector_identity",
+        "fn draw_right_properties_contents",
+        "fn draw_inspector_section",
+        "fn draw_inspector_empty_state",
+    ] {
+        let body = panels.split(marker).nth(1).expect(marker);
+        let body = body.split("\nfn ").next().unwrap_or(body);
+        assert!(
+            !body.contains("painter().text"),
+            "{marker} sin texto a mano"
+        );
+    }
+    // El único texto a mano que queda en panels.rs (histograma) va clipeado.
+    assert!(
+        panels.contains("with_clip_rect(hist_rect)"),
+        "histograma clipeado"
+    );
+    // La card vieja con nombre muerto no vuelve.
+    assert!(!panels.contains("Propiedades dedicadas en panel de Álgebra."));
+    assert!(!panels.contains("Identidad del objeto"));
 }
 
 #[test]

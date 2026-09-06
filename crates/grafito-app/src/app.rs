@@ -5928,8 +5928,12 @@ impl eframe::App for GrafitoApp {
                         {
                             #[cfg(feature = "profile")]
                             puffin::profile_scope_if!(canvas_resize_preview, "resize_cpu_grid_3d");
+                            // Clip como en 2D: el grid pinta texto (ejes/ticks) que
+                            // sin clip deja slivers en paneles vecinos.
+                            let mut grid_painter = ui.painter().clone();
+                            grid_painter.set_clip_rect(canvas_rect);
                             self.draw_3d_grid(
-                                ui.painter(),
+                                &grid_painter,
                                 canvas_rect,
                                 w,
                                 h,
@@ -5978,8 +5982,10 @@ impl eframe::App for GrafitoApp {
                         {
                             #[cfg(feature = "profile")]
                             puffin::profile_scope_if!(canvas_resize_preview, "resize_cpu_grid_3d");
+                            let mut grid_painter = ui.painter().clone();
+                            grid_painter.set_clip_rect(canvas_rect);
                             self.draw_3d_grid(
-                                ui.painter(),
+                                &grid_painter,
                                 canvas_rect,
                                 w,
                                 h,

@@ -11,9 +11,10 @@ use grafito_ui::animation::interpolate_color;
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
-    BREAKPOINT_COMPACT, ICON_MD, RADIUS_LG, RADIUS_MD, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM,
-    SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS,
-    TYPE_SM, TYPE_XS,
+    BREAKPOINT_COMPACT, DRAWER_RIGHT_DEFAULT, DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, ICON_MD,
+    RADIUS_LG, RADIUS_MD, RADIUS_PILL, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
+    SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS, TYPE_SM,
+    TYPE_XS,
 };
 use grafito_ui::Tool;
 use std::collections::VecDeque;
@@ -716,10 +717,42 @@ fn draw_geometry_utility_contents(
         });
     });
     ui.add_space(SPACE_XS);
+    // Tabs centrados: control segmentado de ancho completo (dos mitades
+    // iguales = grupo centrado por construcción, con jerarquía). El activo
+    // es un pill con contraste real (mismo par fill/texto que los pills de
+    // acción); tamaño TYPE_SM; SPACE_SM debajo antes del contenido.
+    let tab_width = ((ui.available_width() - SPACE_SM) / 2.0).max(0.0);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
         let inspector_selected = app.workspace_dock_tab == WorkspaceDockTab::Inspector;
+        let inspector_fill = if inspector_selected {
+            theme.keyboard_enter_bg
+        } else {
+            Color32::TRANSPARENT
+        };
+        let inspector_text = if inspector_selected {
+            theme.keyboard_enter_text
+        } else {
+            theme.text_secondary
+        };
         if ui
-            .selectable_label(inspector_selected, "Inspector")
+            .add_sized(
+                egui::vec2(tab_width, 32.0),
+                egui::Button::new(
+                    egui::RichText::new("Inspector")
+                        .size(TYPE_SM)
+                        .strong()
+                        .color(inspector_text),
+                )
+                .selected(inspector_selected)
+                .fill(inspector_fill)
+                .stroke(if inspector_selected {
+                    egui::Stroke::NONE
+                } else {
+                    egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))
+                })
+                .rounding(RADIUS_PILL),
+            )
             .on_hover_text("Propiedades del objeto seleccionado")
             .clicked()
         {
@@ -731,17 +764,43 @@ fn draw_geometry_utility_contents(
             "Asistente"
         };
         let assistant_selected = app.workspace_dock_tab == WorkspaceDockTab::Assistant;
+        let assistant_fill = if assistant_selected {
+            theme.keyboard_enter_bg
+        } else {
+            Color32::TRANSPARENT
+        };
+        let assistant_text = if assistant_selected {
+            theme.keyboard_enter_text
+        } else {
+            theme.text_secondary
+        };
         if ui
-            .selectable_label(assistant_selected, assistant_label)
+            .add_sized(
+                egui::vec2(tab_width, 32.0),
+                egui::Button::new(
+                    egui::RichText::new(assistant_label)
+                        .size(TYPE_SM)
+                        .strong()
+                        .color(assistant_text),
+                )
+                .selected(assistant_selected)
+                .fill(assistant_fill)
+                .stroke(if assistant_selected {
+                    egui::Stroke::NONE
+                } else {
+                    egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))
+                })
+                .rounding(RADIUS_PILL),
+            )
             .on_hover_text("Asistente matemático")
             .clicked()
         {
             app.open_assistant_workspace();
         }
     });
-    ui.add_space(SPACE_XS);
+    ui.add_space(SPACE_SM);
     ui.separator();
-    ui.add_space(SPACE_XS);
+    ui.add_space(SPACE_SM);
 
     match app.workspace_dock_tab {
         WorkspaceDockTab::Inspector => crate::panels::draw_right_properties_contents(app, ui),
@@ -757,12 +816,14 @@ fn draw_geometry_utility_contents(
 pub(crate) fn draw_geometry_utility_dock(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     egui::SidePanel::right("geometry_utility_dock")
-        .default_width(344.0)
-        .min_width(292.0)
-        .max_width(440.0)
+        .default_width(DRAWER_RIGHT_DEFAULT)
+        .min_width(DRAWER_RIGHT_MIN)
+        .max_width(DRAWER_RIGHT_MAX)
         .resizable(true)
         .show_separator_line(false)
         .frame(
+            // Fondo opaco: sin esto el canvas 3D se transparenta por el
+            // borde y deja la tira de glifos en zigzag.
             egui::Frame::none()
                 .fill(theme.panel_bg)
                 .stroke(egui::Stroke::NONE),

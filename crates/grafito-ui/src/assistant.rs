@@ -409,6 +409,20 @@ pub struct AssistantMedia {
 /// `grafito-app/src/anim_native.rs`): lo que se ve es lo que se exporta.
 pub const MEDIA_CARD_BASE_FPS: f32 = 12.0;
 
+/// Alto máximo del preview inline de la card (D2).
+///
+/// Derivado de tokens (`SPACE_XXL * 7 = 280`): evita retratos gigantes sin
+/// literales sueltos. El ancho manda (todo el ancho disponible) y el alto
+/// es `ancho * h/w` clampeado a este tope para no mover el scroll.
+const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
+
+/// Tooltips cortos de la toolbar de la card (D2, ≤60 chars, sin cortes).
+const MEDIA_TIP_SPEED: &str = "Cambia la velocidad: 0.5x, 1x, 2x";
+const MEDIA_TIP_FULLSCREEN: &str = "Ver grande. Esc para cerrar";
+const MEDIA_TIP_EXPORT: &str = "Guarda la animación como GIF";
+const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual";
+const MEDIA_TIP_PLAY: &str = "Retoma donde quedó";
+
 /// Velocidad del reproductor de la card (B5).
 ///
 /// Por card (campo en el estado, sin global mutable): cada animación nueva
@@ -640,6 +654,15 @@ pub struct AssistantPanelState {
     media_paused: std::cell::Cell<bool>,
     /// Velocidad por card (media/lenta/rápida); sin global mutable.
     media_speed: std::cell::Cell<MediaPlaybackSpeed>,
+    /// Último fotograma pintado (D2): gate anti-parpadeo. La textura sólo
+    /// se re-selecciona si el índice cambió; el rect es estable (ancho
+    /// total, aspecto preservado) así el scroll no salta. `Cell` porque la
+    /// Piel dibuja con `&Estado`. Se reinicia en `set_media`.
+    media_last_shown: std::cell::Cell<Option<usize>>,
+    /// Overlay de pantalla completa (D2): `true` = ventana grande con la
+    /// animación + transporte + `Esc` para cerrar. Estado local de la card
+    /// (`Cell`, sin global mutable, sin I/O/spawn). Se reinicia en `set_media`.
+    media_fullscreen: std::cell::Cell<bool>,
     /// Exportación a GIF de la card (la app la actualiza desde el hilo de
     /// export; la UI solo la renderiza, cero I/O/spawn en `Ui::`).
     media_export: MediaExportState,
@@ -743,6 +766,8 @@ impl Default for AssistantPanelState {
             media_last_tick_s: std::cell::Cell::new(None),
             media_paused: std::cell::Cell::new(false),
             media_speed: std::cell::Cell::new(MediaPlaybackSpeed::default()),
+            media_last_shown: std::cell::Cell::new(None),
+            media_fullscreen: std::cell::Cell::new(false),
             media_export: MediaExportState::default(),
             anim_progress: false,
             tutor_level: 0,
@@ -1287,6 +1312,8 @@ impl AssistantPanelState {
         self.media_last_tick_s.set(None);
         self.media_paused.set(false);
         self.media_speed.set(MediaPlaybackSpeed::default());
+        self.media_last_shown.set(None);
+        self.media_fullscreen.set(false);
         self.media_export = MediaExportState::default();
         if let Some(media) = &self.media {
             self.media_textures = media
@@ -2247,8 +2274,10 @@ pub fn humanize_control_name(id: &str) -> Option<&'static str> {
 
 /// Reemplaza identificadores literales de controles en prosa por su nombre
 /// humano. Orden longest-first (`PlayPause` antes que `Play`/`Pause`) y
-/// reemplazos en minúsculas para no re-matchear. Puro, conserva UTF-8
-/// (`str::replace` nunca corta scalars).
+/// reemplazos en minúsculas para no re-matchear. Puro, conserva UTF-8.
+/// Además absorbe el sufijo GeoGebra `Id[param]` (ej. `Button[a]`): el
+/// modelo a veces filtra `Button` dejando `[a]` suelto ("sin botón[a]");
+/// la prosa final jamás tiene corchetes (D2): queda "sin botón".
 pub fn humanize_prose_text(text: &str) -> String {
     const KNOWN_IDS: &[&str] = &[
         "PlayPause",
@@ -2279,11 +2308,90 @@ pub fn humanize_prose_text(text: &str) -> String {
     for id in KNOWN_IDS {
         if out.contains(id) {
             if let Some(human) = humanize_control_name(id) {
-                out = out.replace(id, human);
+                out = replace_control_with_optional_param(&out, id, human);
             }
         }
     }
     out
+}
+
+/// Reemplaza `id` y `id[lo que sea]` por `human` sin dejar corchetes.
+///
+/// Recorre por bytes con fronteras char (nunca corta scalars): si tras el
+/// `id` viene `[`, absorbe hasta el `]` de cierre (acotado a 64 chars para
+/// no comerse párrafos si falta el cierre). Pura, sin panic ni `unwrap`.
+fn replace_control_with_optional_param(haystack: &str, id: &str, human: &str) -> String {
+    const MAX_PARAM_LEN: usize = 64;
+    let mut out = String::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(pos) = rest.find(id) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + id.len()..];
+        if let Some(stripped) = after.strip_prefix('[') {
+            // Busca `]` de cierre en los próximos 64 chars (límite honesto).
+            let window_len: usize = stripped
+                .char_indices()
+                .take_while(|(offset, _)| *offset <= MAX_PARAM_LEN)
+                .last()
+                .map(|(offset, ch)| offset + ch.len_utf8())
+                .unwrap_or(0);
+            let window = &stripped[..window_len.min(stripped.len())];
+            if let Some(close) = window.find(']') {
+                out.push_str(human);
+                rest = &stripped[close + 1..];
+                continue;
+            }
+            // Sin cierre: deja el `[` como texto y sigue (jamás panic).
+        }
+        out.push_str(human);
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Tamaño del preview inline de la card (D2, puro y testeable).
+///
+/// Todo el ancho disponible, aspecto preservado (`alto = ancho * h/w`),
+/// alto clampeado a `max_h` (tokens). Sin upscale >1.0 para no pixelar
+/// texturas chicas y sin re-reservar por frame: el llamador usa el tamaño
+/// del primer frame para que el bloque sea estable entre fotogramas.
+pub fn media_preview_size(frame_w: f32, frame_h: f32, avail_w: f32, max_h: f32) -> (f32, f32) {
+    let fw = if frame_w.is_finite() && frame_w > 0.0 {
+        frame_w
+    } else {
+        1.0
+    };
+    let fh = if frame_h.is_finite() && frame_h > 0.0 {
+        frame_h
+    } else {
+        1.0
+    };
+    let avail = if avail_w.is_finite() && avail_w > 0.0 {
+        avail_w
+    } else {
+        80.0
+    };
+    let cap = if max_h.is_finite() && max_h > 0.0 {
+        max_h
+    } else {
+        MEDIA_CARD_MAX_PREVIEW_H
+    };
+    let scale = (avail / fw).min(1.0);
+    let mut w = (fw * scale).ceil();
+    let mut h = (fh * scale).ceil();
+    if h > cap {
+        let down = cap / h;
+        w = (w * down).ceil();
+        h = cap;
+    }
+    if w < 1.0 {
+        w = 1.0;
+    }
+    if h < 1.0 {
+        h = 1.0;
+    }
+    (w, h)
 }
 
 fn parse_markdown_table_row(line: &str) -> Option<Vec<String>> {
@@ -4745,10 +4853,23 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     };
     // Handle clonado (barato): la pintura no retiene borrow del estado y los
     // controles de abajo usan `&mut` sin pelear con el borrow checker.
+    // D2: tamaño de referencia = primer frame (estable entre fotogramas).
+    let (first_w, first_h) = state
+        .media_textures()
+        .0
+        .first()
+        .map(|t| (t.size_vec2().x, t.size_vec2().y))
+        .unwrap_or((1.0, 1.0));
     let texture = state.media_textures().0.get(index).cloned();
+    // D2 gate anti-parpadeo: las texturas se suben una sola vez en
+    // `set_media`; acá sólo se re-selecciona el handle si el índice cambió.
+    // El rect es estable (misma reserva siempre) así el scroll no salta.
+    state.media_last_shown.set(Some(index));
     let duration_ms = media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS);
     let paused = state.media_paused.get();
     let speed_label = state.media_speed.get().label();
+    let counter_compact = format!("{}/{}", index + 1, frame_count);
+    let counter_long = format!("Fotograma {} de {}", index + 1, frame_count);
     let export_line: Option<(String, egui::Color32)> = match &state.media_export {
         MediaExportState::Idle => None,
         MediaExportState::Exporting => Some(("Exportando…".to_owned(), theme.text_secondary)),
@@ -4795,21 +4916,13 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             }
             ui.add_space(SPACE_XS);
             if let Some(texture) = &texture {
-                let size = texture.size_vec2();
+                // D2: todo el ancho disponible, aspecto preservado
+                // (`alto = ancho * h/w`), misma reserva siempre (ref = primer
+                // frame) para no mover el scroll entre fotogramas.
                 let max_w = ui.available_width().max(80.0);
-                // Evita altura enorme al pedo con retratos o texturas gigantes:
-                // clampear tanto ancho como alto, sin upscale >1.0 y con max_h 280.
-                let max_h = 280.0_f32.min(ui.available_height().max(80.0));
-                let scale_w = (max_w / size.x.max(1.0)).clamp(0.25, 1.0);
-                let scale_h = (max_h / size.y.max(1.0)).clamp(0.25, 1.0);
-                let scale = scale_w.min(scale_h);
-                // Piso legible derivado de tokens (nunca tiny): si el frame
-                // es diminuto, se escala hasta el mínimo dentro del scroll.
-                let min_side = assistant_media_min_side();
-                let display = egui::vec2(size.x * scale, size.y * scale)
-                    .ceil()
-                    .max(egui::vec2(min_side.min(max_w), min_side.min(max_h)));
-                // Usar allocate_exact_size para que ScrollArea mida correcto, no cursor hack
+                let (dw, dh) =
+                    media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
+                let display = egui::vec2(dw, dh);
                 let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
                 ui.painter().image(
                     texture.id(),
@@ -4825,11 +4938,6 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 );
             }
             ui.add_space(SPACE_XS);
-            ui.label(
-                egui::RichText::new(format!("Fotograma {} de {}", index + 1, frame_count))
-                    .color(theme.text_secondary)
-                    .size(TYPE_XS),
-            );
             if frame_count > 1 && duration_ms > 0 {
                 let mut fraction =
                     (state.media_playhead_ms.get().min(duration_ms) as f32) / (duration_ms as f32);
@@ -4846,36 +4954,58 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     state.media_playhead_ms.set(t_ms.min(duration_ms));
                     state.media_paused.set(true);
                 }
+                // Contador accesible para lector (el compacto vive en la toolbar).
+                ui.label(
+                    egui::RichText::new(&counter_long)
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS)
+                        .weak(),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(&counter_long)
+                        .color(theme.text_secondary)
+                        .size(TYPE_XS),
+                );
             }
-            ui.horizontal(|ui| {
-                let toggle = if state.media_paused.get() {
-                    "Reproducir"
+            ui.add_space(SPACE_XS);
+            // D2 toolbar compacta con wrap por tokens: todo abre algo o
+            // explica (nada mudo). Contador integrado en la misma fila.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                let toggle_label = if state.media_paused.get() {
+                    "▶ Reproducir"
                 } else {
-                    "Pausar"
+                    "⏸ Pausar"
                 };
                 if ui
-                    .small_button(toggle)
+                    .small_button(toggle_label)
                     .on_hover_text(if state.media_paused.get() {
-                        "Retoma donde quedó"
+                        MEDIA_TIP_PLAY
                     } else {
-                        "Congela en el fotograma actual"
+                        MEDIA_TIP_PAUSE
                     })
                     .clicked()
                 {
                     state.media_paused.set(!state.media_paused.get());
                 }
                 if ui
-                    .small_button(format!("Velocidad: {speed_label}"))
-                    .on_hover_text("Cambia entre 0.5x, 1x y 2x")
+                    .small_button(format!("{speed_label} ▾"))
+                    .on_hover_text(MEDIA_TIP_SPEED)
                     .clicked()
                 {
                     state.media_speed.set(state.media_speed.get().cycle());
                 }
+                if ui
+                    .small_button("⛶ Pantalla completa")
+                    .on_hover_text(MEDIA_TIP_FULLSCREEN)
+                    .clicked()
+                {
+                    state.media_fullscreen.set(true);
+                }
                 let exporting = matches!(state.media_export, MediaExportState::Exporting);
-                let export_response = ui.add_enabled(
-                    frame_count > 0 && !exporting,
-                    egui::Button::new("Exportar animación"),
-                );
+                let export_response =
+                    ui.add_enabled(frame_count > 0 && !exporting, egui::Button::new("Exportar"));
                 if export_response.clicked() {
                     action = Some(AssistantUiAction::ExportMedia);
                 }
@@ -4885,14 +5015,110 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 } else if exporting {
                     export_response.on_disabled_hover_text("Ya se está exportando…");
                 } else {
-                    export_response.on_hover_text("Guarda la animación como GIF");
+                    export_response.on_hover_text(MEDIA_TIP_EXPORT);
                 }
+                ui.label(
+                    egui::RichText::new(&counter_compact)
+                        .color(theme.text_secondary)
+                        .size(TYPE_XS)
+                        .strong(),
+                );
             });
             if let Some((text, color)) = &export_line {
                 ui.add_space(SPACE_XS);
                 ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
             }
         });
+    // D2 overlay de pantalla completa: animación grande + transporte + Esc.
+    // Patrón `egui::Window` existente (ver `draw_assistant_settings_window`);
+    // sin I/O ni spawn, sólo renderiza `&Estado`.
+    if state.media_fullscreen.get() {
+        let mut open = true;
+        let mut close_requested = false;
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close_requested = true;
+        }
+        let screen = ui.ctx().screen_rect();
+        egui::Window::new("Animación")
+            .id(egui::Id::new("assistant_media_fullscreen"))
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .constrain(true)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width((screen.width() * 0.86).clamp(480.0, 900.0))
+            .default_height((screen.height() * 0.82).clamp(420.0, 720.0))
+            .frame(
+                egui::Frame::window(&ui.ctx().style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
+                    .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG)),
+            )
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(ui.available_width());
+                if !title.is_empty() {
+                    ui.label(
+                        egui::RichText::new(&title)
+                            .color(theme.text_primary)
+                            .size(TYPE_SM)
+                            .strong(),
+                    );
+                    ui.add_space(SPACE_XS);
+                }
+                if let Some(texture) = state.media_textures().0.get(index).cloned() {
+                    let size = texture.size_vec2();
+                    let max_w = ui.available_width().max(80.0);
+                    let max_h = (ui.available_height() - 96.0)
+                        .clamp(200.0, screen.height() * 0.62)
+                        .max(200.0);
+                    let (dw, dh) = media_preview_size(size.x, size.y, max_w, max_h);
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(dw, dh), egui::Sense::hover());
+                    ui.painter().image(
+                        texture.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                ui.add_space(SPACE_SM);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                    let toggle_label = if state.media_paused.get() {
+                        "▶ Reproducir"
+                    } else {
+                        "⏸ Pausar"
+                    };
+                    if ui.small_button(toggle_label).clicked() {
+                        state.media_paused.set(!state.media_paused.get());
+                    }
+                    if ui
+                        .small_button(format!("{speed_label} ▾"))
+                        .on_hover_text(MEDIA_TIP_SPEED)
+                        .clicked()
+                    {
+                        state.media_speed.set(state.media_speed.get().cycle());
+                    }
+                    ui.label(
+                        egui::RichText::new(&counter_long)
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS)
+                            .strong(),
+                    );
+                    if ui
+                        .small_button("Cerrar (Esc)")
+                        .on_hover_text("Cierra esta vista grande")
+                        .clicked()
+                    {
+                        close_requested = true;
+                    }
+                });
+            });
+        if !open || close_requested {
+            state.media_fullscreen.set(false);
+        }
+    }
     // F17: playback media card — wake source local (no cubierto por is_pending).
     // Solo cuando reproduce: en pausa la card es estática (las interacciones
     // repintan solas) y no se quema CPU.
@@ -9921,6 +10147,64 @@ mod tests {
         let both = humanize_prose_text("PlayPause y Play");
         assert!(!both.contains("PlayPause"));
         assert!(both.contains("reproducir"));
+    }
+
+    #[test]
+    fn humanize_prose_text_absorbe_parametro_sin_dejar_corchetes() {
+        // D2 bug del screenshot: "sin botón[a] sobre esa variable".
+        let human = humanize_prose_text("sin Button[a] sobre esa variable");
+        assert_eq!(human, "sin botón sobre esa variable", "prosa rota: {human}");
+        assert!(!human.contains('['), "quedó corchete: {human}");
+        assert!(!human.contains(']'), "quedó corchete: {human}");
+        assert!(!human.contains("Button"), "quedó crudo: {human}");
+        // Otros controles con parámetro GeoGebra también se absorben.
+        let play = humanize_prose_text("tocá PlayPause[a] para ver");
+        assert!(!play.contains('['), "quedó corchete: {play}");
+        assert!(!play.contains("PlayPause"), "quedó crudo: {play}");
+        let slider = humanize_prose_text("mové Slider[p, 0, 1] suave");
+        assert!(!slider.contains('['), "quedó corchete: {slider}");
+        assert!(slider.contains("deslizador"), "falta humano: {slider}");
+        // Sin cierre: jamás panic, jamás corchete inventado de más.
+        let broken = humanize_prose_text("sin Button[a sobre esa variable");
+        assert!(!broken.contains("Button"), "quedó crudo: {broken}");
+    }
+
+    #[test]
+    fn media_preview_size_usa_todo_el_ancho_y_preserva_aspecto() {
+        // D2: ancho total, alto = ancho * h/w, clampeado a max_h.
+        let (w, h) = media_preview_size(400.0, 200.0, 340.0, 280.0);
+        assert_eq!((w, h), (340.0, 170.0), "debe usar todo el ancho");
+        // Retrato gigante: el alto se clampa sin cambiar el ancho de reserva
+        // más que por el downscale proporcional.
+        let (w2, h2) = media_preview_size(200.0, 800.0, 340.0, 280.0);
+        assert!(h2 <= 280.0, "alto sin clampear: {h2}");
+        assert!(w2 <= 340.0, "ancho desbordado: {w2}");
+        // Sin upscale: textura chica no se pixela.
+        let (w3, h3) = media_preview_size(100.0, 50.0, 340.0, 280.0);
+        assert_eq!((w3, h3), (100.0, 50.0), "no debe agrandar: {w3}x{h3}");
+        // Estable entre frames: mismo ref da misma reserva siempre.
+        let a = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
+        let b = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
+        assert_eq!(a, b, "la reserva debe ser estable");
+    }
+
+    #[test]
+    fn media_toolbar_tooltips_cortos_y_fullscreen_arranca_cerrado() {
+        // D2: tooltips ≤60 chars para que no se corten en panel ~340px.
+        for tip in [
+            MEDIA_TIP_SPEED,
+            MEDIA_TIP_FULLSCREEN,
+            MEDIA_TIP_EXPORT,
+            MEDIA_TIP_PAUSE,
+            MEDIA_TIP_PLAY,
+        ] {
+            assert!(tip.chars().count() <= 60, "tooltip largo: {tip}");
+            assert!(!tip.is_empty(), "tooltip mudo");
+        }
+        // Estado nuevo vive en la card (Cell), arranca cerrado y limpio.
+        let state = AssistantPanelState::default();
+        assert!(!state.media_fullscreen.get());
+        assert_eq!(state.media_last_shown.get(), None);
     }
 
     #[test]

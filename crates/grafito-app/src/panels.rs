@@ -638,6 +638,132 @@ fn draw_right_drawer_header(ui: &mut egui::Ui, app: &mut GrafitoApp, title: &str
     });
 }
 
+/// Ecuación/fórmula display-only del objeto para el Inspector (frente D1).
+/// Pura y testeable headless. D3 alimenta el campo de EDICIÓN; este getter
+/// solo expone lo que el objeto YA trae para mostrarlo en grande.
+/// `None` → placeholder honesto, jamás el nombre del tipo en grande.
+pub(crate) fn inspector_equation_text(obj: &GeoObject) -> Option<String> {
+    fn non_empty(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+    match obj {
+        GeoObject::Function(f) => non_empty(&f.expr).map(|expr| format!("y = {expr}")),
+        GeoObject::ImplicitCurve(c) => {
+            let lhs = c.expr_lhs.trim();
+            let rhs = c.expr_rhs.trim();
+            let op = match c.operator {
+                grafito_core::RelationOperator::Eq => "=",
+                grafito_core::RelationOperator::Less => "<",
+                grafito_core::RelationOperator::Greater => ">",
+                grafito_core::RelationOperator::LessEq => "≤",
+                grafito_core::RelationOperator::GreaterEq => "≥",
+            };
+            match (lhs.is_empty(), rhs.is_empty()) {
+                (true, true) => None,
+                (true, false) => Some(rhs.to_string()),
+                (false, true) => Some(lhs.to_string()),
+                (false, false) => Some(format!("{lhs} {op} {rhs}")),
+            }
+        }
+        GeoObject::ParametricCurve2D(c) => {
+            let (x, y) = (c.expr_x.trim(), c.expr_y.trim());
+            if x.is_empty() && y.is_empty() {
+                None
+            } else {
+                Some(format!("({x}, {y})"))
+            }
+        }
+        GeoObject::ParametricCurve3D(c) => {
+            let (x, y, z) = (c.expr_x.trim(), c.expr_y.trim(), c.expr_z.trim());
+            if x.is_empty() && y.is_empty() && z.is_empty() {
+                None
+            } else {
+                Some(format!("({x}, {y}, {z})"))
+            }
+        }
+        GeoObject::PolarCurve(c) => non_empty(&c.expr_r).map(|expr| format!("r = {expr}")),
+        GeoObject::Surface3D(s) => {
+            if s.is_parametric {
+                let (x, y, z) = (s.expr_x.trim(), s.expr_y.trim(), s.expr_z.trim());
+                if x.is_empty() && y.is_empty() && z.is_empty() {
+                    None
+                } else {
+                    Some(format!("({x}, {y}, {z})"))
+                }
+            } else if s.is_complex {
+                non_empty(&s.expr).map(|expr| format!("|{expr}|"))
+            } else {
+                non_empty(&s.expr).map(|expr| format!("z = {expr}"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Caption terciario del tipo de objeto, en español rioplatense.
+/// El nombre muerto (`Surface3D`, …) nunca va en grande: solo acá,
+/// en `TYPE_XS`. Puro y testeable headless.
+pub(crate) fn inspector_type_caption(obj: &GeoObject) -> &'static str {
+    match obj {
+        GeoObject::Point(_) => "punto",
+        GeoObject::Line(_) => "recta",
+        GeoObject::Circle(_) => "círculo",
+        GeoObject::Polygon(_) => "polígono",
+        GeoObject::Pencil(p) if p.is_dynamic_locus() => "lugar geométrico",
+        GeoObject::Pencil(_) => "trazo",
+        GeoObject::Function(_) => "función",
+        GeoObject::Text(_) => "texto",
+        GeoObject::Ellipse(_) => "elipse",
+        GeoObject::Parabola(_) => "parábola",
+        GeoObject::Hyperbola(_) => "hipérbola",
+        GeoObject::Arc(_) => "arco",
+        GeoObject::Sector(_) => "sector",
+        GeoObject::BezierCurve(_) => "curva Bézier",
+        GeoObject::Spline(_) => "spline",
+        GeoObject::Point3D(_) => "punto 3D",
+        GeoObject::Segment3D(_) => "segmento 3D",
+        GeoObject::Plane3D(_) => "plano 3D",
+        GeoObject::Line3D(_) => "recta 3D",
+        GeoObject::Sphere3D(_) => "esfera 3D",
+        GeoObject::Cube3D(_) => "cubo 3D",
+        GeoObject::Tetrahedron3D(_) => "tetraedro 3D",
+        GeoObject::Pyramid3D(_) => "pirámide 3D",
+        GeoObject::Cone3D(_) => "cono 3D",
+        GeoObject::Cylinder3D(_) => "cilindro 3D",
+        GeoObject::Torus3D(_) => "toro 3D",
+        GeoObject::MoebiusStrip(_) => "cinta de Möbius",
+        GeoObject::Surface3D(s) if s.is_complex => "superficie compleja 3D",
+        GeoObject::Surface3D(_) => "superficie 3D",
+        GeoObject::Prism3D(_) => "prisma 3D",
+        GeoObject::Quadric3D(_) => "cuádrica 3D",
+        GeoObject::ParametricCurve2D(_) => "curva paramétrica 2D",
+        GeoObject::ParametricCurve3D(_) => "curva paramétrica 3D",
+        GeoObject::PolarCurve(_) => "curva polar",
+        GeoObject::ImplicitCurve(_) => "curva implícita",
+        GeoObject::VectorField2D(_) => "campo vectorial 2D",
+        GeoObject::ComplexGrid(_) => "grilla compleja",
+        GeoObject::ComplexMapping(_) => "mapeo complejo",
+        GeoObject::ComplexIntegral(_) => "integral compleja",
+        GeoObject::Attractor3D(_) => "atractor 3D",
+        GeoObject::Fractal2D(_) => "fractal 2D",
+        GeoObject::RegularPolychoron4D(_) => "polícoro regular 4D",
+        GeoObject::RegularPolytopeND(_) => "politopo regular N-D",
+        GeoObject::HyperSurface4D(_) => "hiperficie 4D",
+        GeoObject::VectorField3D(_) => "campo vectorial 3D",
+        GeoObject::Histogram(_) => "histograma",
+        GeoObject::ScatterPlot(_) => "dispersión",
+        GeoObject::BoxPlot(_) => "diagrama de caja",
+        GeoObject::RegressionLine(_) => "recta de regresión",
+        GeoObject::DataTable(_) => "tabla de datos",
+        GeoObject::PhasePortrait(_) => "retrato de fase",
+        GeoObject::Transformed(_) => "objeto transformado",
+        // `GeoObject` es non-exhaustive: variantes futuras caen al nombre
+        // honesto en inglés hasta tener caption en español.
+        &_ => obj.name(),
+    }
+}
+
 /// Texto de la fila de etiqueta del Inspector. Nunca devuelve una letra
 /// suelta: la etiqueta cruda (p. ej. `S`, autolabel de `Surface3D` según
 /// `document.rs:1193-1202` — primera letra del nombre del tipo) se presenta
@@ -653,16 +779,24 @@ pub(crate) fn inspector_label_text(label: &str) -> Option<String> {
 }
 
 /// Tooltip honesto de la card de identidad: texto completo sin truncar.
-pub(crate) fn inspector_identity_tooltip(object_name: &str, label: &str, visible: bool) -> String {
+/// `headline` es la ecuación en grande (o el caption si no hay ecuación).
+pub(crate) fn inspector_identity_tooltip(headline: &str, label: &str, visible: bool) -> String {
     let state = if visible { "Visible" } else { "Oculto" };
     match inspector_label_text(label) {
-        Some(labeled) => format!("{object_name} · {labeled} · {state}"),
-        None => format!("{object_name} · {state}"),
+        Some(labeled) => format!("{headline} · {labeled} · {state}"),
+        None => format!("{headline} · {state}"),
     }
 }
 
-fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, visible: bool) {
+fn draw_inspector_identity(ui: &mut egui::Ui, obj: &GeoObject) {
     let theme = current_theme(ui.ctx());
+    let visible = obj.is_visible();
+    let label = obj.label().to_string();
+    let caption = inspector_type_caption(obj);
+    // Titular: ecuación en grande; sin ecuación, placeholder honesto.
+    // El nombre del tipo vive solo como caption terciario.
+    let headline = inspector_equation_text(obj).unwrap_or_else(|| caption.to_string());
+    let equation_shown = inspector_equation_text(obj).is_some();
     egui::Frame::none()
         .fill(theme.input_bg)
         .stroke(egui::Stroke::NONE)
@@ -671,15 +805,18 @@ fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, vi
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-            ui.label(
-                egui::RichText::new("Identidad del objeto")
-                    .color(theme.text_tertiary)
-                    .size(TYPE_SM)
-                    .strong(),
-            );
-            ui.add_space(SPACE_XS);
-            let tooltip = inspector_identity_tooltip(object_name, label, visible);
+            // Título + badge en la misma fila: el badge va a la derecha
+            // del título, nunca flotando.
             ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Ecuación")
+                            .color(theme.text_tertiary)
+                            .size(TYPE_SM)
+                            .strong(),
+                    )
+                    .truncate(),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add(
                         egui::Label::new(
@@ -693,20 +830,35 @@ fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, vi
                         )
                         .truncate(),
                     )
-                    .on_hover_text(tooltip.as_str());
+                    .on_hover_text(inspector_identity_tooltip(&headline, &label, visible));
                 });
+            });
+            ui.add_space(SPACE_XS);
+            let tooltip = inspector_identity_tooltip(&headline, &label, visible);
+            if equation_shown {
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(object_name)
+                        egui::RichText::new(&headline)
                             .color(theme.text_primary)
-                            .size(TYPE_BASE)
-                            .strong(),
+                            .size(TYPE_MD)
+                            .monospace(),
                     )
                     .truncate(),
                 )
                 .on_hover_text(tooltip.as_str());
-            });
-            if let Some(labeled) = inspector_label_text(label) {
+            } else {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Ecuación no disponible para este tipo")
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tooltip.as_str());
+            }
+            ui.add_space(SPACE_XS);
+            if let Some(labeled) = inspector_label_text(&label) {
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(labeled)
@@ -717,6 +869,15 @@ fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, vi
                 )
                 .on_hover_text(tooltip.as_str());
             }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(caption)
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS),
+                )
+                .truncate(),
+            )
+            .on_hover_text(tooltip.as_str());
         });
 }
 
@@ -2267,7 +2428,10 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             egui::Sense::hover(),
                         );
                         if ui.is_rect_visible(hist_rect) {
-                            let painter = ui.painter();
+                            // Clip explícito: los conteos y min/max se pintan
+                            // a mano y sin esto dejan slivers en docks
+                            // angostos (misma clase que la tira del drawer).
+                            let painter = ui.painter().with_clip_rect(hist_rect);
                             let plot = hist_rect.shrink2(egui::vec2(2.0, 2.0));
                             // Plot area interna
                             let plot_top = plot.min.y;
@@ -2630,9 +2794,10 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     // Wrap honesto: sin esto, las filas de texto del Inspector
-                    // (p. ej. `Tipo: Surface3D`) se clipan en el borde del
-                    // dock y dejan slivers de 1-2px. Las filas horizontales de
-                    // controles (DragValue/Slider) no se ven afectadas.
+                    // (p. ej. la ecuación en `TYPE_MD`) se clipan en el borde
+                    // del dock y dejan slivers de 1-2px. Las filas
+                    // horizontales de controles (DragValue/Slider) no se ven
+                    // afectadas.
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     let Some(id) = app.selected_object else {
                         draw_inspector_empty_state(ui);
@@ -2642,10 +2807,102 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                         ui.label(egui::RichText::new("Objeto inexistente.").color(txt_dim));
                         return;
                     };
-                    let object_name = edited_object.name().to_string();
-                    let object_label = edited_object.label().to_string();
-                    let object_visible = edited_object.is_visible();
-                    draw_inspector_identity(ui, &object_name, &object_label, object_visible);
+                    draw_inspector_identity(ui, &edited_object);
+                    ui.add_space(SPACE_XS);
+                    // D1-bis: editor de ecuación (pipeline D3). El display vive
+                    // en `draw_inspector_identity`; acá el campo editable con
+                    // validación en vivo y commit atómico + undo. El borrador
+                    // vive en memoria temporal egui (sobrevive frames, no se
+                    // persiste) claveado por objeto.
+                    {
+                        use crate::inspector_edit as ieq;
+                        if let Some(live_now) = app.document.get_object(id).cloned() {
+                            if ieq::is_editable(&live_now) {
+                                let eq_key = egui::Id::new(("inspector_equation", id));
+                                let mut eq_state: ieq::InspectorEditState = ui
+                                    .ctx()
+                                    .memory(|mem| mem.data.get_temp(eq_key))
+                                    .unwrap_or_else(|| {
+                                        ieq::begin_edit(&live_now).unwrap_or(
+                                            ieq::InspectorEditState {
+                                                draft: String::new(),
+                                                error: None,
+                                                editing: false,
+                                            },
+                                        )
+                                    });
+                                // Sin edición en curso, re-sincroniza con la
+                                // canónica (cambios desde Álgebra u otros).
+                                if !eq_state.editing {
+                                    if let Some(fresh) = ieq::begin_edit(&live_now) {
+                                        eq_state = fresh;
+                                    }
+                                }
+                                ui.label(
+                                    egui::RichText::new("Ecuación (editable)")
+                                        .color(txt_dim)
+                                        .size(TYPE_XS),
+                                );
+                                let mut draft = eq_state.draft.clone();
+                                let eq_resp = ui.add(
+                                    egui::TextEdit::singleline(&mut draft)
+                                        .hint_text(ieq::hint_for(&live_now))
+                                        .desired_width(f32::INFINITY),
+                                );
+                                if eq_resp.changed() {
+                                    ieq::update_draft(&mut eq_state, &draft);
+                                    ieq::revalidate_state(&mut eq_state, &live_now);
+                                }
+                                if let Some(err) = eq_state.error.clone() {
+                                    ui.label(
+                                        egui::RichText::new(err)
+                                            .color(current_theme(ui.ctx()).danger)
+                                            .size(TYPE_XS),
+                                    );
+                                }
+                                let canonical_now = live_now
+                                    .canonical_equation_text()
+                                    .unwrap_or_default();
+                                let can_apply = eq_state.error.is_none()
+                                    && eq_state.draft != canonical_now;
+                                let apply_clicked = ui
+                                    .add_enabled(
+                                        can_apply,
+                                        egui::Button::new("Aplicar ecuación"),
+                                    )
+                                    .clicked();
+                                let enter_pressed = eq_resp.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if apply_clicked || enter_pressed {
+                                    match ieq::commit_draft_with_previous(
+                                        &mut app.document,
+                                        id,
+                                        &eq_state.draft,
+                                    ) {
+                                        Ok(Some(before)) => {
+                                            snapshot.capture_successful_replacement(before);
+                                            if let Some(updated) =
+                                                app.document.get_object(id).cloned()
+                                            {
+                                                ieq::cancel_edit(&mut eq_state, &updated);
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(message) => {
+                                            eq_state.error = Some(message.clone());
+                                            app.notify(
+                                                message,
+                                                grafito_ui::toast::ToastKind::Error,
+                                            );
+                                        }
+                                    }
+                                }
+                                ui.ctx().memory_mut(|mem| {
+                                    mem.data.insert_temp(eq_key, eq_state);
+                                });
+                            }
+                        }
+                    }
                     ui.add_space(SPACE_MD);
                     let mut changed = false;
 
@@ -3086,13 +3343,24 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                             });
                     });
                 }
-                other => {
-                    ui.label(format!("Tipo: {}", other.name()));
+                _ => {
+                    // Display-only: la ecuación ya va en grande en la card de
+                    // identidad. Sin nombre muerto ni texto que no sirve.
+                    // D3 agrega el campo de edición; este dock no edita.
+                    ui.add_space(SPACE_XS);
+                    ui.separator();
+                    ui.add_space(SPACE_SM);
                     ui.label(
-                        egui::RichText::new("Propiedades dedicadas en panel de Álgebra.")
+                        egui::RichText::new("Sin controles dedicados en este dock.")
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                    );
+                    ui.label(
+                        egui::RichText::new("Editá este objeto desde el panel de Álgebra.")
                             .color(txt_dim)
                             .size(TYPE_XS),
                     );
+                    ui.add_space(SPACE_MD);
                 }
                     }
                     match apply_object_panel_edit_with_previous(&mut app.document, id, changed, move |object| {
