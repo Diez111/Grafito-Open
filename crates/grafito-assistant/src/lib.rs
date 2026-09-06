@@ -2347,11 +2347,15 @@ pub struct SocraticGuardContext {
 pub fn stream_progress_sender(delta_tx: SyncSender<String>) -> impl FnMut(&str) + Send {
     let mut last_sent = 0_usize;
     move |accumulated: &str| {
-        if accumulated.len() > last_sent
-            && delta_tx
-                .try_send(accumulated[last_sent..].to_owned())
-                .is_ok()
-        {
+        // `last_sent` es índice por bytes: se usa vía `get` para no paniquear
+        // si un llamante futuro pasa un acumulado no-monotónico o si el corte
+        // cae a mitad de un scalar multibyte (el acumulado real sólo crece
+        // por `push_str`, así que en el path SSE siempre es boundary válido;
+        // este `get` es defensa en profundidad, sin `unwrap`).
+        let Some(suffix) = accumulated.get(last_sent..) else {
+            return;
+        };
+        if !suffix.is_empty() && delta_tx.try_send(suffix.to_owned()).is_ok() {
             last_sent = accumulated.len();
         }
     }
@@ -4537,6 +4541,91 @@ mod tests {
         assert!(!error.contains("Configuraci"), "{error}");
     }
 
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_over_cap_with_multibyte_markdown_partial_no_done() {
+        // Repro del reporte AS2: stream que supera el tope con deltas previos
+        // (parcial con markdown a medio cerrar + multibyte UTF-8 que parte
+        // los chunks de 4 KiB, `data: [DONE]` ausente). No debe paniquear:
+        // devuelve el parcial con `truncated:true` y el texto sigue siendo
+        // UTF-8 válido. El `fragment:true` del stub parte el cuerpo a la
+        // mitad (los reads de 4 KiB del lector cortan el resto); el
+        // reensamblado por `\n` nunca parte un scalar (0x0A < 0x80) y la
+        // cola se decodifica con `from_utf8_lossy`.
+        let chunk_text =
+            "## Enfoque\n**negrita sin cerrar áéíóú → ñ «» ✓ · × 🦀\n```grafito\nFunction[x^2]\n";
+        let event = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":{}}}\n",
+            serde_json::to_string(chunk_text).unwrap()
+        );
+        let mut body = Vec::new();
+        while body.len() <= RESPONSES_MAX_BODY_BYTES + 16 * 1024 {
+            body.extend_from_slice(event.as_bytes());
+        }
+        // Sin `data: [DONE]`: EOF abrupto tras deltas válidos.
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", true)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let mut snapshots = Vec::new();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(15),
+            1_000_000,
+            Some(&mut |accumulated: &str| {
+                snapshots.push(accumulated.len());
+            }),
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert!(completion.truncated);
+        assert!(!completion.text.is_empty());
+        assert!(completion.text.contains("## Enfoque"));
+        assert!(completion.text.contains("🦀"));
+        // Cotas OOM: `pending` + `text` nunca superan tope + un chunk 4 KiB.
+        assert!(completion.text.len() <= RESPONSES_MAX_BODY_BYTES + 4 * 1024);
+        assert!(!snapshots.is_empty());
+        // El parcial pasa por `completion_from_text` sin panic (budget amplio).
+        let via_completion =
+            completion_from_text(&completion.text, 1_000_000, completion.truncated).unwrap();
+        assert_eq!(via_completion.text, completion.text);
+        assert!(via_completion.truncated);
+        // Con budget chico falla honesto (output budget), no panic.
+        assert!(completion_from_text(&completion.text, 64, true).is_err());
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_huge_line_without_newline_stays_bounded() {
+        // Línea de 300 KiB sin `\n`: `pending.extend` queda acotado por el
+        // tope (el chequeo es por `total_bytes` ANTES de extender de más y
+        // `take(maximum)` limita el reader). Con un delta previo válido se
+        // rescata el parcial truncado; sin eventos, Err honesto. Sin panic.
+        let first = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"previo áé\"}\n";
+        let mut body = first.as_bytes().to_vec();
+        body.extend_from_slice(&vec![b'x'; 300 * 1024]);
+        // Sin newline final ni [DONE]: EOF abrupto.
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(15),
+            1_000_000,
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert!(completion.truncated);
+        assert!(completion.text.contains("previo"));
+        assert!(completion.text.len() <= RESPONSES_MAX_BODY_BYTES + 4 * 1024);
+    }
+
     #[test]
     fn stream_progress_sender_forwards_only_unsent_suffixes_without_blocking() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1);
@@ -4551,6 +4640,86 @@ mod tests {
         // Sin crecimiento no hay envío.
         send("Hola mundo!");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stream_progress_sender_never_panics_on_multibyte_or_shrinking_input() {
+        // Defensa en profundidad para el único slicing por bytes del path SSE
+        // (`accumulated[last_sent..]`): ni multibyte ni acumulados
+        // no-monotónicos (reemplazo/achique) pueden paniquear el worker.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(8);
+        let mut send = stream_progress_sender(tx);
+        send("áéí → ñ «» ✓");
+        assert_eq!(rx.try_recv().unwrap(), "áéí → ñ «» ✓");
+        // Crecimiento multibyte: el sufijo debe cortarse en boundary válido.
+        send("áéí → ñ «» ✓ 🦀");
+        assert_eq!(rx.try_recv().unwrap(), " 🦀");
+        // Achique / reemplazo no-monotónico: no hay envío y NO hay panic.
+        send("á");
+        assert!(rx.try_recv().is_err());
+        // Corte que caería a mitad de scalar si se indexara sin `get`:
+        // "aé" = [61, C3, A9]; un `last_sent=2` sería mid-scalar.
+        let (tx2, rx2) = std::sync::mpsc::sync_channel::<String>(8);
+        let mut send2 = stream_progress_sender(tx2);
+        send2("ab");
+        assert_eq!(rx2.try_recv().unwrap(), "ab");
+        // Reemplazo no-extensión con `len > last_sent` pero boundary inválido.
+        send2("aé");
+        assert!(rx2.try_recv().is_err());
+        // El acumulado válido posterior sigue funcionando.
+        send2("ab🦀");
+        assert_eq!(rx2.try_recv().unwrap(), "🦀");
+    }
+
+    #[test]
+    fn completion_from_text_is_char_safe_on_multibyte_over_budget() {
+        // `completion_from_text` cuenta por chars (no bytes): un parcial
+        // multibyte que supera el budget falla honesto, nunca paniquea.
+        let big = "áéí→".repeat(2_000);
+        let over = completion_from_text(&big, 64, true);
+        assert!(
+            matches!(over, Err(ref error) if error.contains("output budget")),
+            "{over:?}"
+        );
+        // Markdown a medio cerrar + multibyte dentro del budget pasa intacto.
+        let partial = "## Enfoque\n**negrita sin cerrar áé →\n```grafito\nFunction[x^2]\n";
+        let ok = completion_from_text(partial, 10_000, true).unwrap();
+        assert_eq!(ok.text, partial);
+        assert!(ok.truncated);
+        // Vacío o con controles (salvo \n\r\t) se rechaza sin panic.
+        assert!(completion_from_text("   ", 64, false).is_err());
+        assert!(completion_from_text("hola\x07mundo", 64, false).is_err());
+    }
+
+    #[test]
+    fn non_streaming_parse_of_streamed_partial_is_char_safe() {
+        // El mismo parcial que entrega el stream debe parsear sin panic por
+        // el path no-streaming (`responses_completion_text` + `completion_from_text`).
+        let partial = "## Enfoque **sin cerrar áéí → ñ «» ✓ 🦀\n```grafito\nFunction[x^2]";
+        let body = json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": partial}]
+            }]
+        });
+        let (text, truncated) = responses_completion_text(&body).unwrap();
+        assert_eq!(text, partial);
+        assert!(!truncated);
+        let completion = completion_from_text(&text, 10_000, true).unwrap();
+        assert_eq!(completion.text, partial);
+        assert!(completion.truncated);
+        // `incomplete` del no-streaming también marca truncado sin panic.
+        let incomplete = json!({
+            "status": "incomplete",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": partial}]
+            }]
+        });
+        let (text2, truncated2) = responses_completion_text(&incomplete).unwrap();
+        assert_eq!(text2, partial);
+        assert!(truncated2);
     }
 
     #[cfg(feature = "assistant-net")]

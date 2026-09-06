@@ -378,9 +378,10 @@ impl AssistantRuntime {
     /// - `remote`/`proposal`/`agent`/`model` tienen token: se marcan cancelados
     ///   pero el slot se conserva hasta que `take_finished_*`/`poll_assistant_agent`
     ///   drene el worker (sin huérfanos; ver test `cancelled_remote_job_...`).
-    /// - `anim` no tiene token: se dropea el receiver. El worker es acotado
-    ///   (render nativo o `job_timeout` 15s del motor) y su `send` falla tras el
-    ///   drop, así que el hilo termina solo sin dejar trabajo huérfano.
+    /// - `anim` tiene token (AS4, como `agent`): se señala y se dropea el slot.
+    ///   El worker es acotado (render nativo <2 s con chequeo entre frames o
+    ///   `job_timeout` 15 s del motor con closure `cancel`) y su `send` falla
+    ///   tras el drop, así que el hilo termina solo sin dejar trabajo huérfano.
     ///
     /// Retorna `true` si había algún job en vuelo.
     fn cancel_all_assistant_jobs(&mut self) -> bool {
@@ -401,11 +402,27 @@ impl AssistantRuntime {
             job.cancellation.cancel();
             cancelled = true;
         }
-        if self.anim_job.is_some() {
-            self.anim_job = None;
+        if self.cancel_anim_job() {
             cancelled = true;
         }
         cancelled
+    }
+
+    /// Cancela solo el job de animación (AS4): señala el token y dropea el slot.
+    ///
+    /// Headless y sin I/O: el hilo en vuelo observa el token entre frames
+    /// (closure de progreso) y descarta el resultado rancio en vez de
+    /// publicarlo. Retorna `true` si había job en vuelo.
+    pub(crate) fn cancel_anim_job(&mut self) -> bool {
+        if let Some(job) = self.anim_job.as_ref() {
+            job.cancellation.cancel();
+        }
+        if self.anim_job.is_some() {
+            self.anim_job = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -585,7 +602,14 @@ enum AgentChannelMsg {
 }
 
 /// Job que genera y carga una animación del motor externo.
+///
+/// AS4: con `cancellation` como `AssistantAgentJob` (cancel real: descartar
+/// señala el token, no solo dropea el receiver). El hilo la chequea entre
+/// frames en el closure de progreso (el render nativo no acepta token) y
+/// antes/después del transporte; el motor externo la recibe como closure
+/// `cancel` en `run_job` (aborto <200 ms).
 struct AssistantAnimJob {
+    cancellation: CancellationToken,
     receiver: std::sync::mpsc::Receiver<Result<grafito_ui::assistant::AssistantMedia, String>>,
 }
 
@@ -762,25 +786,48 @@ impl GrafitoApp {
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
             match job.receiver.try_recv() {
                 Ok(Ok(media)) => {
+                    let was_cancelled = job.cancellation.is_cancelled();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
-                    self.assistant.set_media(Some(media.clone()), ctx);
-                    self.notify("Animación lista.", ToastKind::Success);
+                    if was_cancelled {
+                        // Cancel real (AS4): el worker observó el token y el
+                        // resultado es rancio — se descarta sin publicar.
+                        self.notify("Generación cancelada.", ToastKind::Info);
+                    } else {
+                        self.install_anim_preview_frames(&media);
+                        self.assistant.set_media(Some(media), ctx);
+                        self.notify("Animación lista.", ToastKind::Success);
+                    }
                     ctx.request_repaint();
                 }
                 Ok(Err(error)) => {
+                    let was_cancelled =
+                        job.cancellation.is_cancelled() || error.to_lowercase().contains("cancel");
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
-                    self.assistant.set_media(None, ctx);
-                    let message = format!("No se pudo generar la animación: {error}");
-                    self.notify(&message, ToastKind::Error);
-                    self.show_assistant_error(message);
+                    if was_cancelled {
+                        self.notify("Generación cancelada.", ToastKind::Info);
+                    } else {
+                        self.assistant.set_media(None, ctx);
+                        let message = format!("No se pudo generar la animación: {error}");
+                        self.notify(&message, ToastKind::Error);
+                        self.show_assistant_error(message);
+                        // Refleja el fallo en el panel (Fallo visible, sin progreso inventado).
+                        self.anim_preview.progress = 0.0;
+                        self.anim_preview.status = format!("Error: {error}");
+                    }
                     ctx.request_repaint();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let was_cancelled = job.cancellation.is_cancelled();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
+                    if !was_cancelled {
+                        self.anim_preview.progress = 0.0;
+                        self.anim_preview.status =
+                            "Error: la generación terminó inesperadamente.".to_string();
+                    }
                     ctx.request_repaint();
                 }
             }
@@ -967,9 +1014,9 @@ impl GrafitoApp {
                 };
                 let anim_concept = problem_clone.clone();
                 // Cancela animación previa si existe — evita crash al pedir otra cosa tras animación
-                // y evita "tomo una ya hecha" (stale derivative)
-                if self.assistant_runtime.anim_job.is_some() {
-                    self.assistant_runtime.anim_job = None;
+                // y evita "tomo una ya hecha" (stale derivative). Cancel real:
+                // señala el token, el hilo descarta.
+                if self.assistant_runtime.cancel_anim_job() {
                     self.assistant.anim_progress = false;
                 }
                 // Heurística de memoria: si el usuario pide recordar o expresa preferencia, guardarlo
@@ -2012,10 +2059,63 @@ impl GrafitoApp {
         self.run_assistant_animation_with(ctx, "derivative-slope", "derivada como pendiente");
     }
 
-    fn run_assistant_animation_with(&mut self, ctx: &egui::Context, template: &str, concept: &str) {
-        // Si hay una animación en curso, cancelarla para regenerar la nueva (evita "tomo una ya hecha")
-        if self.assistant_runtime.anim_job.is_some() {
-            self.assistant_runtime.anim_job = None;
+    /// Refleja los frames recibidos en el panel de vista previa (AS4, UI thread).
+    ///
+    /// Puro UI-state, sin I/O ni spawn: intenta la entrada paramétrica con
+    /// guardas honestas (`set_parametric_frames`: OOM, conteo y tamaño) a
+    /// partir de la plantilla/concepto vigentes del panel; si no aplica
+    /// (clásico o deriva distinta), instala directo el set clásico acotado
+    /// (48 frames). Nunca inventa progreso ni deja el estado a medias.
+    fn install_anim_preview_frames(&mut self, media: &grafito_ui::assistant::AssistantMedia) {
+        let template = self.anim_preview.template.clone();
+        let concept = self.anim_preview.concept.clone();
+        if let Some(anim) = crate::anim_native::parametric_for_template(&template, &concept) {
+            // Pre-chequeo barato (conteo + tamaño) para no clonar 33-59 MiB
+            // cuando el set es clásico; `set_parametric_frames` revalida OOM.
+            let w = anim.viewport.width as usize;
+            let h = anim.viewport.height as usize;
+            let encaja = media.frames.len() == anim.frame_count()
+                && media
+                    .frames
+                    .first()
+                    .is_some_and(|frame| frame.size == [w, h]);
+            if encaja
+                && crate::anim_ui::set_parametric_frames(
+                    &mut self.anim_preview,
+                    &anim,
+                    media.frames.clone(),
+                )
+                .is_ok()
+            {
+                return;
+            }
+        }
+        self.anim_preview.frames = media.frames.clone();
+        self.anim_preview.frame_idx = 0;
+        self.anim_preview.playing = false;
+        self.anim_preview.progress = 1.0;
+        self.anim_preview.media_path = None;
+        self.anim_preview.mark_params_applied();
+        if self.anim_preview.status.is_empty()
+            || self
+                .anim_preview
+                .status
+                .starts_with("Generación solicitada")
+            || self.anim_preview.status.starts_with("Regenerando")
+        {
+            self.anim_preview.status = "Vista previa lista.".to_string();
+        }
+    }
+
+    pub(crate) fn run_assistant_animation_with(
+        &mut self,
+        ctx: &egui::Context,
+        template: &str,
+        concept: &str,
+    ) {
+        // Si hay una animación en curso, cancelarla para regenerar la nueva (evita "tomo una ya hecha").
+        // Cancel real (AS4): señala el token antes de dropear, el hilo descarta.
+        if self.assistant_runtime.cancel_anim_job() {
             self.assistant.anim_progress = false;
         }
         // No destruir texturas durante el draw (evita wgpu panic 'Texture has been destroyed').
@@ -2051,7 +2151,7 @@ impl GrafitoApp {
                 .map(|duration| duration.as_nanos())
                 .unwrap_or(0)
         ));
-        let _ = std::fs::create_dir_all(&work_dir);
+        // Sin I/O en UI: el workdir lo crea el hilo (`create_dir_all` abajo).
         let canvas = (720, 540);
         let resolution =
             grafito_anim::protocol::Resolution::try_new(canvas.0, canvas.1).unwrap_or_default();
@@ -2066,30 +2166,87 @@ impl GrafitoApp {
             spec: None,
         };
         let request = anim_params.into_request();
+        let cancellation = CancellationToken::default();
+        let worker_cancellation = cancellation.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let repaint = ctx.clone();
         let template_owned = template.to_string();
         let concept_owned = concept.clone();
         std::thread::spawn(move || {
-            // Generador nativo correcto: usa el dispatcher que elige por concepto y template
-            let native = || {
-                let frames = crate::anim_native::render_anim_for_concept(
-                    &template_owned,
-                    &concept_owned,
-                    480,
-                    360,
-                );
-                let title = match template_owned.as_str() {
-                    "integral-area" => "Integral — área bajo la curva (nativa)".to_string(),
-                    "derivative-slope" => "Derivada como pendiente (nativa)".to_string(),
-                    "pitagoras" | "pythagoras" => "Teorema de Pitágoras (nativa)".to_string(),
-                    "taylor-series" => "Serie de Taylor (nativa)".to_string(),
-                    "conformal-map" => "Mapeo conforme (nativa)".to_string(),
-                    "universal" => format!("{} (nativa)", concept_owned),
-                    _ => format!("{} (nativa)", concept_owned),
+            // I/O solo en el hilo (nunca en UI): el workdir se crea aquí.
+            let _ = std::fs::create_dir_all(&work_dir);
+            if worker_cancellation.is_cancelled() {
+                let _ = sender.send(Err(
+                    "La generación se canceló antes de completarse.".to_string()
+                ));
+                repaint.request_repaint();
+                return;
+            }
+            // Nativo cancelable (AS4): paramétrico si hay `ParametricAnim`, si
+            // no el clásico. El render no acepta token: el closure de progreso
+            // lo chequea entre frames y el hilo descarta el resultado rancio.
+            let render_native_cancellable =
+                || -> Result<grafito_ui::assistant::AssistantMedia, String> {
+                    if let Some(anim) =
+                        crate::anim_native::parametric_for_template(&template_owned, &concept_owned)
+                    {
+                        let mut saw_cancel = false;
+                        let rendered = crate::anim_native::render_parametric_frames_with_progress(
+                            &anim,
+                            &mut |_, _| {
+                                if worker_cancellation.is_cancelled() {
+                                    saw_cancel = true;
+                                }
+                            },
+                        );
+                        if worker_cancellation.is_cancelled() || saw_cancel {
+                            return Err(
+                                "La generación se canceló antes de completarse.".to_string()
+                            );
+                        }
+                        match rendered {
+                            Ok(frames) => {
+                                let title = format!("{} (paramétrica)", concept_owned);
+                                Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+                            }
+                            Err(error) => Err(error.to_string()),
+                        }
+                    } else {
+                        let mut saw_cancel = false;
+                        let frames = crate::anim_native::render_anim_with_progress(
+                            &template_owned,
+                            &concept_owned,
+                            480,
+                            360,
+                            &std::collections::BTreeMap::new(),
+                            &mut |_, _| {
+                                if worker_cancellation.is_cancelled() {
+                                    saw_cancel = true;
+                                }
+                            },
+                        );
+                        if worker_cancellation.is_cancelled() || saw_cancel {
+                            return Err(
+                                "La generación se canceló antes de completarse.".to_string()
+                            );
+                        }
+                        if frames.is_empty() {
+                            return Err("el motor nativo no produjo fotogramas".to_string());
+                        }
+                        let title = match template_owned.as_str() {
+                            "integral-area" => "Integral — área bajo la curva (nativa)".to_string(),
+                            "derivative-slope" => "Derivada como pendiente (nativa)".to_string(),
+                            "pitagoras" | "pythagoras" => {
+                                "Teorema de Pitágoras (nativa)".to_string()
+                            }
+                            "taylor-series" => "Serie de Taylor (nativa)".to_string(),
+                            "conformal-map" => "Mapeo conforme (nativa)".to_string(),
+                            "universal" => format!("{} (nativa)", concept_owned),
+                            _ => format!("{} (nativa)", concept_owned),
+                        };
+                        Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+                    }
                 };
-                grafito_ui::assistant::AssistantMedia { title, frames }
-            };
             let result = match engine {
                 Some(engine_section) => {
                     let config = grafito_anim::EngineConfig {
@@ -2101,34 +2258,65 @@ impl GrafitoApp {
                         job_timeout: std::time::Duration::from_secs(15),
                         ..Default::default()
                     };
-                    match grafito_anim::run_job(&config, &request, None, |_| {}) {
+                    // Cancel real en el motor externo: `run_job` aborta <200 ms.
+                    let cancel_flag = &worker_cancellation;
+                    match grafito_anim::run_job(
+                        &config,
+                        &request,
+                        Some(&|| cancel_flag.is_cancelled()),
+                        |_| {},
+                    ) {
                         Ok(result) => match load_gif_frames(&result.media_path) {
                             Ok(frames) if !frames.is_empty() => {
-                                let title = match template_owned.as_str() {
-                                    "integral-area" => "Integral — área bajo la curva".to_string(),
-                                    "derivative-slope" => "Derivada como pendiente".to_string(),
-                                    "pitagoras" | "pythagoras" => {
-                                        "Teorema de Pitágoras".to_string()
-                                    }
-                                    "taylor-series" => "Serie de Taylor".to_string(),
-                                    "conformal-map" => "Mapeo conforme".to_string(),
-                                    _ => concept_owned.clone(),
-                                };
-                                Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+                                if worker_cancellation.is_cancelled() {
+                                    Err("La generación se canceló antes de completarse."
+                                        .to_string())
+                                } else {
+                                    let title = match template_owned.as_str() {
+                                        "integral-area" => {
+                                            "Integral — área bajo la curva".to_string()
+                                        }
+                                        "derivative-slope" => "Derivada como pendiente".to_string(),
+                                        "pitagoras" | "pythagoras" => {
+                                            "Teorema de Pitágoras".to_string()
+                                        }
+                                        "taylor-series" => "Serie de Taylor".to_string(),
+                                        "conformal-map" => "Mapeo conforme".to_string(),
+                                        _ => concept_owned.clone(),
+                                    };
+                                    Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+                                }
                             }
-                            _ => Ok(native()),
+                            _ => render_native_cancellable(),
                         },
-                        Err(_) => Ok(native()),
+                        Err(error) => {
+                            if worker_cancellation.is_cancelled()
+                                || error.to_lowercase().contains("cancel")
+                            {
+                                Err(error)
+                            } else {
+                                render_native_cancellable()
+                            }
+                        }
                     }
                 }
-                None => Ok(native()),
+                None => render_native_cancellable(),
+            };
+            // Descarte final: si se canceló en el último instante, no se publica rancio.
+            let result = if worker_cancellation.is_cancelled() {
+                Err("La generación se canceló antes de completarse.".to_string())
+            } else {
+                result
             };
             let _ = sender.send(result);
             let _ = std::fs::remove_dir_all(&work_dir);
             repaint.request_repaint();
         });
         self.assistant.anim_progress = true;
-        self.assistant_runtime.anim_job = Some(AssistantAnimJob { receiver });
+        self.assistant_runtime.anim_job = Some(AssistantAnimJob {
+            cancellation,
+            receiver,
+        });
         self.notify("Generando animación…", ToastKind::Info);
     }
 
@@ -2619,7 +2807,8 @@ impl GrafitoApp {
         // Cancela remote+proposal+agent+model+anim (todos, sin else-if: aunque el
         // slot remoto sólo permite un job de consulta a la vez, model/anim son
         // independientes y deben cancelarse también). Los workers con token se
-        // drenan en poll (take_finished_*); anim se dropea (worker acotado).
+        // drenan en poll (take_finished_*); anim señala su token y dropea el
+        // slot (worker acotado con chequeo entre frames).
         let had_anim = self.assistant_runtime.anim_job.is_some();
         if self.assistant_runtime.cancel_all_assistant_jobs() {
             if had_anim {
@@ -3249,10 +3438,12 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
         "La respuesta superó el tope de 256 KiB: pedila por partes (ej: «dame 3 ejemplos»)."
             .to_string()
     } else {
-        let truncated = if error.len() > 120 {
-            format!("{}…", &error[..120])
+        // Corte por chars, nunca por bytes (el mensaje puede traer multibyte).
+        let truncated: String = error.chars().take(120).collect();
+        let truncated = if error.chars().count() > 120 {
+            format!("{truncated}…")
         } else {
-            error.to_string()
+            truncated
         };
         format!("Error: {truncated} — Revisá Configuración → Modelo (actual: {current_model})")
     }
@@ -5127,14 +5318,19 @@ mod tests {
         });
         let (_anim_tx, anim_rx) =
             sync_channel::<Result<grafito_ui::assistant::AssistantMedia, String>>(1);
-        runtime.anim_job = Some(AssistantAnimJob { receiver: anim_rx });
+        let anim_cancel = CancellationToken::default();
+        runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: anim_cancel.clone(),
+            receiver: anim_rx,
+        });
 
         assert!(runtime.cancel_all_assistant_jobs());
         assert!(remote_cancel.is_cancelled());
         assert!(proposal_cancel.is_cancelled());
         assert!(agent_cancel.is_cancelled());
         assert!(model_cancel.is_cancelled());
-        // Anim no tiene token: se dropea el slot de inmediato.
+        // Anim AS4: señala el token como el resto y dropea el slot de inmediato.
+        assert!(anim_cancel.is_cancelled());
         assert!(runtime.anim_job.is_none());
         // Los jobs con token conservan el slot hasta el drain (sin huérfanos).
         assert!(!runtime.remote_request_slot_is_free());
@@ -5168,6 +5364,52 @@ mod tests {
         assert!(runtime.remote_request_slot_is_free());
         // Sin jobs, cancelar es no-op.
         assert!(!runtime.cancel_all_assistant_jobs());
+    }
+
+    #[test]
+    fn anim_cancel_signals_token_instead_of_only_dropping_receiver() {
+        // AS4 cancel real: descartar señala el token (el hilo lo chequea entre
+        // frames en el closure de progreso). Headless, sin ventana ni render.
+        let mut runtime = AssistantRuntime::default();
+        assert!(!runtime.cancel_anim_job(), "sin job es no-op");
+        let anim_cancel = CancellationToken::default();
+        let (_anim_tx, anim_rx) =
+            sync_channel::<Result<grafito_ui::assistant::AssistantMedia, String>>(1);
+        runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: anim_cancel.clone(),
+            receiver: anim_rx,
+        });
+        assert!(!anim_cancel.is_cancelled());
+        assert!(runtime.cancel_anim_job());
+        assert!(
+            anim_cancel.is_cancelled(),
+            "descartar debe señalar el token"
+        );
+        assert!(runtime.anim_job.is_none());
+        assert!(!runtime.cancel_anim_job(), "doble cancel es no-op");
+    }
+
+    #[test]
+    fn anim_progress_closure_observes_token_between_frames() {
+        // El render nativo no acepta token: el hilo lo chequea en el closure
+        // de progreso. Este test pineado verifica el contrato sin render
+        // pesado: el closure ve el token entre frames.
+        let cancel = CancellationToken::default();
+        let worker = cancel.clone();
+        let mut saw: Vec<(usize, usize)> = Vec::new();
+        let mut on_frame = |done: usize, total: usize| {
+            saw.push((done, total));
+            assert!(
+                !worker.is_cancelled(),
+                "sin cancel el closure no debe ver token"
+            );
+        };
+        for frame in 1..=3 {
+            on_frame(frame, 3);
+        }
+        assert_eq!(saw, vec![(1, 3), (2, 3), (3, 3)]);
+        cancel.cancel();
+        assert!(worker.is_cancelled(), "cancel debe verse entre frames");
     }
 
     #[test]

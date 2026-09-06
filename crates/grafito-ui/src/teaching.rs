@@ -180,11 +180,30 @@ pub fn draw_teaching_session(ui: &mut egui::Ui, session: &mut TeachingSession) -
     action
 }
 
+/// Motivo por el que "Explícame paso a paso" queda deshabilitado, si aplica.
+///
+/// Puro: `None` = habilitado. Sin tema no hay sesión que abrir, así que el
+/// botón deshabilitado lo dice en vez de quedar mudo.
+pub fn explain_stepwise_disabled_reason(topic: &str) -> Option<&'static str> {
+    if topic.trim().is_empty() {
+        return Some("Elegí un tema primero: sin tema no hay pasos que explicar");
+    }
+    None
+}
+
 /// Botón explícito "Explícame paso a paso" para insertar en el transcript.
 /// Debe ser Scandinavian: hairline, RADIUS_MD, sin color saturado.
 /// Anima scale 0.97 al presionar (feedback háptico sutil).
-pub fn draw_explain_stepwise_button(ui: &mut egui::Ui, topic: &str) -> bool {
+/// Siempre explica su estado: deshabilitado + motivo si `enabled` es falso,
+/// nunca mudo.
+pub fn draw_explain_stepwise_button_enabled(ui: &mut egui::Ui, topic: &str, enabled: bool) -> bool {
     let theme = current_theme(ui.ctx());
+    let blank_reason = explain_stepwise_disabled_reason(topic);
+    let reason = if enabled {
+        blank_reason
+    } else {
+        Some(blank_reason.unwrap_or("No disponible para este contenido todavía"))
+    };
     let is_pressed = ui.input(|i| i.pointer.any_down());
     let scale = if is_pressed { 0.97 } else { 1.0 };
     // Aplicar escala visual sutil mediante padding reducido
@@ -200,9 +219,27 @@ pub fn draw_explain_stepwise_button(ui: &mut egui::Ui, topic: &str) -> bool {
         // feedback visual: oscurecer levemente al presionar
         btn = btn.fill(theme.accent.gamma_multiply(0.12));
     }
-    let resp = ui.add(btn);
-    resp.on_hover_text("Abre la enseñanza interactiva con burbujas, gráfica y pizarra")
-        .clicked()
+    let resp = ui.add_enabled(reason.is_none(), btn);
+    let hovered =
+        resp.on_hover_text("Abre la enseñanza interactiva con burbujas, gráfica y pizarra");
+    if let Some(why) = reason {
+        ui.label(
+            egui::RichText::new(why)
+                .color(theme.text_tertiary)
+                .size(TYPE_XS)
+                .weak(),
+        );
+        hovered.on_disabled_hover_text(why).clicked()
+    } else {
+        hovered.clicked()
+    }
+}
+
+/// Botón explícito "Explícame paso a paso" para insertar en el transcript.
+/// Debe ser Scandinavian: hairline, RADIUS_MD, sin color saturado.
+/// Anima scale 0.97 al presionar (feedback háptico sutil).
+pub fn draw_explain_stepwise_button(ui: &mut egui::Ui, topic: &str) -> bool {
+    draw_explain_stepwise_button_enabled(ui, topic, true)
 }
 
 #[cfg(test)]
@@ -212,5 +249,13 @@ mod tests {
     fn teaching_session_progress() {
         let s = TeachingSession::for_topic("derivada");
         assert!(s.progress() > 0.0 && s.progress() <= 1.0);
+    }
+
+    #[test]
+    fn stepwise_button_explains_why_it_is_disabled() {
+        // Bug 4: deshabilitado sin explicación → motivo; con tema → None.
+        assert!(explain_stepwise_disabled_reason("").is_some());
+        assert!(explain_stepwise_disabled_reason("   ").is_some());
+        assert_eq!(explain_stepwise_disabled_reason("derivada"), None);
     }
 }

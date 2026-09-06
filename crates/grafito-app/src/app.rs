@@ -66,7 +66,14 @@ pub(crate) struct PendingImportJob {
 pub(crate) struct PendingTextWriteJob {
     pub receiver: Receiver<Result<PathBuf, String>>,
 }
-
+/// Export GIF del panel de animación en background (AS4, `spawn_gif_export`).
+///
+/// Piel pura: el `JoinHandle` hace E/S en su hilo; el `update` lo pulsa con
+/// `is_finished()` (no bloquea) y al terminar publica `media_path`/`status`
+/// en `anim_preview`. `dest` es el archivo elegido (temporal honesto).
+pub(crate) struct AnimExportJob {
+    pub handle: std::thread::JoinHandle<Result<PathBuf, crate::anim_native::GifExportError>>,
+}
 /// Presupuestos espejo de `grafito-ggb` (sin añadir dependencia para no tocar
 /// `Cargo.toml`): `MAX_GGB_BYTES` 64MiB, `MAX_GGB_XML_BYTES` 10MiB,
 /// `MAX_ELEMS` 5000, `MAX_ZIP_ENTRIES` 4096. Ver
@@ -473,6 +480,12 @@ pub(crate) fn spawn_text_write(
 const TRIG_GRAPH_LABEL: &str = "TrigGraph";
 const TRIG_VALUE_LABEL: &str = "TrigValue";
 const VIEW_SETTLE_DURATION: Duration = Duration::from_millis(150);
+/// Presupuesto del splash (AS3 cold-start): overlay total 1500 ms con
+/// fade-out desde los 1000 ms. Solo cosmético: los gates reales de arranque
+/// viven en `startup_splash_phase` (GPU → escena → plugins) y el documento
+/// CLI llega por `maybe_start_startup_open` en background.
+const SPLASH_TOTAL_MS: u128 = 1500;
+const SPLASH_FADE_START_MS: u128 = 1000;
 const MULTIDIMENSIONAL_MOTION_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 pub(crate) const DEFAULT_3D_ORBIT_RADIANS_PER_SECOND: f32 = 0.3;
 pub(crate) const DEFAULT_4D_ROTATION_RADIANS_PER_SECOND: f64 = 0.55;
@@ -1557,6 +1570,12 @@ pub struct GrafitoApp {
     /// `None` = idle; `Some(receiver)` = polling con `try_recv` en `update`.
     pub(crate) pending_save_job: Option<PendingSaveJob>,
     pub(crate) pending_open_job: Option<PendingOpenJob>,
+    /// Archivo pasado por CLI (`grafito doc.json`) pendiente de abrir en
+    /// background (AS3 cold-start): `new()` ya no hace I/O de documentos en el
+    /// hilo UI — guarda la ruta aquí y el primer `update` la abre con
+    /// `spawn_document_open` (`maybe_start_startup_open` + `poll_background_jobs`).
+    /// `None` = sin pendiente (arranque normal con documento vacío).
+    startup_pending_doc: Option<PathBuf>,
     pub(crate) pending_export_job: Option<PendingExportJob>,
     /// Job de importación `.ggb` en background (F1-1): lectura + parse fuera del
     /// UI thread, resultado aplicado con undo único vía `process_input`.
@@ -1602,6 +1621,13 @@ pub struct GrafitoApp {
     pub assistant: grafito_ui::assistant::AssistantPanelState,
     /// Trabajos remotos y claves de sesión que nunca se serializan.
     pub(crate) assistant_runtime: crate::assistant::AssistantRuntime,
+    /// Vista previa de animaciones (AS4, `anim_ui::AnimPreviewState` puro).
+    /// La dibuja `draw_anim_preview_panel` (ventana compañera del asistente);
+    /// la generación corre en `assistant.rs` con token cancelable y el export
+    /// en `anim_export_job`. UI solo lee `&Estado`.
+    pub anim_preview: crate::anim_ui::AnimPreviewState,
+    /// Export GIF en curso del panel (hilo `spawn_gif_export`, sin bloquear).
+    pub(crate) anim_export_job: Option<AnimExportJob>,
     /// El drawer derecho contextual puede cerrarse sin perder su estado.
     pub right_drawer_open: bool,
     /// Pestaña visible del dock único de Geometry 3D.
@@ -1884,6 +1910,23 @@ impl GrafitoApp {
         (TOTAL, "Listo")
     }
 
+    /// Fase visible del splash con el pendiente de arranque (AS3).
+    ///
+    /// Pura y testeable: si hay un documento CLI abriéndose en background
+    /// (`startup_pending_doc` o `pending_open_job` sin `current_path` aún),
+    /// el stage es honesto ("Abriendo documento…") con el `done` real de los
+    /// gates; si no, delega en `startup_splash_phase` sin cambios.
+    fn splash_stage(&self) -> (u32, &'static str) {
+        let (done, stage) = self.startup_splash_phase();
+        let opening_startup_doc = self.startup_pending_doc.is_some()
+            || (self.pending_open_job.is_some()
+                && self.document_lifecycle.current_path().is_none());
+        if opening_startup_doc {
+            return (done, "Abriendo documento…");
+        }
+        (done, stage)
+    }
+
     /// Mantiene la proyección ligada al rectángulo real del canvas sin
     /// invalidar el índice espacial ni preparar GPU cuando el tamaño no cambió.
     fn sync_canvas_screen_size(&mut self, canvas_size: egui::Vec2) -> bool {
@@ -2081,28 +2124,23 @@ impl GrafitoApp {
         };
         let gpu_available = gpu_renderer.is_some();
         // ── A8 arranque: si se pasó un archivo por CLI (`grafito doc.json`),
-        // cargarlo como documento inicial para que el chequeo de recovery
-        // (`maybe_start_recovery_check` en `update`) tenga un `main` conocido.
+        // se abre en background en el primer `update` (`maybe_start_startup_open`)
+        // para no bloquear el primer paint (AS3 cold-start: antes era I/O
+        // sincrónica de hasta 10 MB aquí, en el hilo UI, antes del splash).
         // I/O en constructor (no en `Ui::`); el sidecar se chequea en background.
-        let mut document = initial_document();
-        let mut document_lifecycle = DocumentLifecycle::new(&document);
+        let document = initial_document();
+        let document_lifecycle = DocumentLifecycle::new(&document);
         let mut startup_recent: Option<String> = None;
+        let mut startup_pending_doc: Option<PathBuf> = None;
         if let Some(startup_path) = Self::startup_file_arg() {
             if startup_path.is_file() {
-                match load_document_candidate(&startup_path) {
-                    Ok(loaded) => {
-                        document = loaded;
-                        document_lifecycle
-                            .establish_opened_document(startup_path.clone(), &document);
-                        startup_recent = Some(startup_path.to_string_lossy().into_owned());
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "startup file {} no se pudo abrir: {err}",
-                            startup_path.display()
-                        );
-                    }
-                }
+                startup_recent = Some(startup_path.to_string_lossy().into_owned());
+                startup_pending_doc = Some(startup_path);
+            } else {
+                log::warn!(
+                    "startup file {} no existe o no es archivo regular",
+                    startup_path.display()
+                );
             }
         }
 
@@ -2201,6 +2239,7 @@ impl GrafitoApp {
             show_onboarding: !config.onboarding_completed,
             pending_save_job: None,
             pending_open_job: None,
+            startup_pending_doc,
             pending_export_job: None,
             pending_ggb_import_job: None,
             pending_import_job: None,
@@ -2241,6 +2280,8 @@ impl GrafitoApp {
             command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
             assistant,
             assistant_runtime: crate::assistant::AssistantRuntime::default(),
+            anim_preview: crate::anim_ui::AnimPreviewState::default(),
+            anim_export_job: None,
             right_drawer_open: true,
             workspace_dock_tab: crate::WorkspaceDockTab::Inspector,
             compact_geometry_utility_open: false,
@@ -2421,6 +2462,28 @@ impl GrafitoApp {
             receiver: rx,
             main_path,
         })
+    }
+
+    /// Arranca la apertura del archivo CLI en background (AS3 cold-start).
+    /// Piel pura: sin I/O, solo spawnea `spawn_document_open` una vez; el
+    /// resultado (éxito o error honesto) llega por `poll_background_jobs`,
+    /// que ya publica el toast "Documento abierto desde…". Si el usuario ya
+    /// abrió algo (hay `current_path` o un job en curso), el pendiente se
+    /// descarta sin ruido.
+    pub(crate) fn maybe_start_startup_open(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.startup_pending_doc.take() else {
+            return;
+        };
+        if self.pending_open_job.is_some() || self.document_lifecycle.current_path().is_some() {
+            return;
+        }
+        self.pending_open_job = Some(PendingOpenJob {
+            receiver: spawn_document_open(path, ctx),
+        });
+        self.notify(
+            "Abriendo documento inicial…",
+            grafito_ui::toast::ToastKind::Info,
+        );
     }
 
     /// Arranca el chequeo una vez por ruta (al arranque y al abrir archivos).
@@ -4178,6 +4241,176 @@ impl GrafitoApp {
         }
     }
 
+    /// Llamador del panel de animaciones (AS4, ventana compañera del asistente).
+    ///
+    /// Piel pura: dibuja `anim_ui::draw_anim_panel` desde `&Estado` en una
+    /// ventana pequeña colapsable (320 px, sin ventana grande nueva) solo
+    /// cuando el asistente está visible; los eventos con efecto se derivan a
+    /// `handle_anim_panel_events` (hilos) y el export se pulsa sin bloquear.
+    /// Sin E/S ni render pesado aquí: solo `ctx` para texturas/repaints.
+    pub(crate) fn draw_anim_preview_panel(&mut self, ctx: &egui::Context) {
+        if !self.assistant_visible {
+            return;
+        }
+        let mut eventos: Vec<crate::anim_ui::AnimPanelEvent> = Vec::new();
+        {
+            let preview = &mut self.anim_preview;
+            egui::Window::new("Animación didáctica")
+                .id(egui::Id::new("anim_preview_window"))
+                .collapsible(true)
+                .resizable(false)
+                .default_width(320.0)
+                .max_width(360.0)
+                .show(ctx, |ui| {
+                    ui.set_max_width(320.0);
+                    eventos.extend(crate::anim_ui::draw_anim_panel(ui, preview));
+                });
+        }
+        if !eventos.is_empty() {
+            self.handle_anim_panel_events(ctx, eventos);
+        }
+        self.poll_anim_export_job(ctx);
+    }
+
+    /// Maneja los eventos del panel (AS4, sin E/S en UI thread).
+    ///
+    /// - `Generate`/`Regenerate { template, concept }` → sincroniza
+    ///   plantilla/concepto del panel y spawnea el hilo cancelable en
+    ///   `assistant.rs` (paramétrico si hay `ParametricAnim`, si no clásico),
+    ///   que entrega `AssistantMedia` por channel.
+    /// - `FrameSelected` → preview (el reductor ya fijó `frame_idx`): solo repaint.
+    /// - `Cancel { was_generating: true }` → señala el token (cancel real);
+    ///   con `false` solo se detuvo la reproducción (ya aplicada).
+    /// - `Export { media_path }` → con frames codifica a GIF en el hilo
+    ///   `spawn_gif_export`; con solo archivo notifica su ruta.
+    ///
+    /// El resto (play/pausa, vaciar, plantilla, validación) ya quedó aplicado
+    /// por el reductor: solo repaint. Headless-testeable salvo el spawn.
+    pub(crate) fn handle_anim_panel_events(
+        &mut self,
+        ctx: &egui::Context,
+        eventos: Vec<crate::anim_ui::AnimPanelEvent>,
+    ) {
+        use crate::anim_ui::AnimPanelEvent as Ev;
+        for evento in eventos {
+            match evento {
+                Ev::GenerateRequested { template, concept }
+                | Ev::RegenerateRequested { template, concept } => {
+                    self.anim_preview.template = template.clone();
+                    self.anim_preview.concept = concept.clone();
+                    self.run_assistant_animation_with(ctx, &template, &concept);
+                    ctx.request_repaint();
+                }
+                Ev::FrameSelected(_) => {
+                    ctx.request_repaint();
+                }
+                Ev::CancelRequested { was_generating } => {
+                    if was_generating && self.assistant_runtime.cancel_anim_job() {
+                        self.assistant.anim_progress = false;
+                        self.notify("Generación cancelada.", grafito_ui::toast::ToastKind::Info);
+                    }
+                    ctx.request_repaint();
+                }
+                Ev::ExportRequested { media_path } => {
+                    self.start_anim_gif_export(ctx, &media_path);
+                    ctx.request_repaint();
+                }
+                Ev::PlaybackStarted
+                | Ev::PlaybackPaused
+                | Ev::Cleared
+                | Ev::TemplateSelected(_)
+                | Ev::ValidationFailed(_) => {
+                    ctx.request_repaint();
+                }
+            }
+        }
+    }
+
+    /// Arranca el export GIF del set visible (AS4, hilo `spawn_gif_export`).
+    ///
+    /// Sin E/S en UI: clona los frames acotados (48) y spawnea la codificación;
+    /// el `JoinHandle` se pulsa en `poll_anim_export_job`. Con `media_path`
+    /// existente y sin frames solo notifica la ruta (nada que codificar).
+    /// Destino temporal honesto (sin diálogo: el picking de archivo es P2).
+    fn start_anim_gif_export(&mut self, ctx: &egui::Context, media_path: &str) {
+        if self.anim_preview.frames.is_empty() {
+            if !media_path.is_empty() {
+                self.notify(
+                    format!("Archivo listo en {media_path}."),
+                    grafito_ui::toast::ToastKind::Info,
+                );
+            }
+            let _ = ctx;
+            return;
+        }
+        if self.anim_export_job.is_some() {
+            self.notify(
+                "Ya hay una exportación en curso.",
+                grafito_ui::toast::ToastKind::Info,
+            );
+            return;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dest = std::env::temp_dir().join(format!("grafito_anim_{stamp}.gif"));
+        let frames = self.anim_preview.frames.clone();
+        let handle = crate::anim_native::spawn_gif_export(
+            frames,
+            dest,
+            crate::anim_native::GIF_EXPORT_DELAY_CS,
+        );
+        self.anim_export_job = Some(AnimExportJob { handle });
+        self.notify(
+            "Exportando GIF en segundo plano…",
+            grafito_ui::toast::ToastKind::Info,
+        );
+    }
+
+    /// Pulsa el export GIF sin bloquear (AS4): `is_finished()` + `join`
+    /// inmediato; publica `media_path`/`status` o el error honesto en español.
+    fn poll_anim_export_job(&mut self, ctx: &egui::Context) {
+        let finished = self
+            .anim_export_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished());
+        if !finished {
+            return;
+        }
+        let Some(job) = self.anim_export_job.take() else {
+            return;
+        };
+        match job.handle.join() {
+            Ok(Ok(path)) => {
+                let ruta = path.to_string_lossy().into_owned();
+                self.anim_preview.media_path = Some(ruta.clone());
+                self.anim_preview.status = format!("GIF exportado en {ruta}.");
+                self.notify(
+                    format!("GIF exportado en {ruta}."),
+                    grafito_ui::toast::ToastKind::Success,
+                );
+            }
+            Ok(Err(error)) => {
+                let detalle = error.to_string();
+                self.anim_preview.status = format!("Error al exportar: {detalle}");
+                self.notify(
+                    format!("No se pudo exportar el GIF: {detalle}"),
+                    grafito_ui::toast::ToastKind::Error,
+                );
+            }
+            Err(_) => {
+                self.anim_preview.status =
+                    "Error al exportar: el hilo terminó inesperadamente.".to_string();
+                self.notify(
+                    "No se pudo exportar el GIF: el hilo terminó inesperadamente.",
+                    grafito_ui::toast::ToastKind::Error,
+                );
+            }
+        }
+        ctx.request_repaint();
+    }
+
     pub(crate) const AULA_TAB_INDEX: usize = 3;
     #[allow(dead_code)]
     pub(crate) const AULA_TAB_LABEL: &'static str = "Aula";
@@ -5166,6 +5399,9 @@ impl eframe::App for GrafitoApp {
         }
 
         self.handle_native_close_request(ctx);
+        // AS3 cold-start: el archivo CLI se abre en background en el primer
+        // frame (nunca I/O de documentos en `new()`), con splash honesto.
+        self.maybe_start_startup_open(ctx);
         self.poll_background_jobs(ctx);
         // Aula: sincronizar opt-in (Piel pura, sin I/O) — campo classroom
         self.classroom.set_opt_in(self.advanced_red_opt_in);
@@ -5607,6 +5843,9 @@ impl eframe::App for GrafitoApp {
                 // Configuración unificada: una sola ventana (Configuración)
                 self.show_mascot_config = false;
             }
+            // AS4: ventana compañera del asistente con el panel de animaciones
+            // (llamador de `draw_anim_panel` + manejo de sus eventos en hilos).
+            self.draw_anim_preview_panel(ctx);
 
             use crate::RightPanelContent;
             if shell.show_right_drawer && !geometry_utility_dock_available {
@@ -5990,8 +6229,6 @@ impl eframe::App for GrafitoApp {
         // con el logo, nombre y versión. Se desvanece con un fade-out.
         if let Some(start) = self.splash_start {
             let elapsed = start.elapsed();
-            let total_ms = 1500_u128;
-            let fade_out_start_ms = 1000_u128;
             let elapsed_ms = elapsed.as_millis();
             // F10-D cold start instrumentado: first_frame real una sola vez.
             if !self.startup_first_frame_logged {
@@ -6002,13 +6239,13 @@ impl eframe::App for GrafitoApp {
                     self.document.object_count(),
                 );
             }
-            if elapsed_ms < total_ms {
+            if elapsed_ms < SPLASH_TOTAL_MS {
                 let _theme = grafito_ui::theme::current_theme(ctx);
-                let alpha = if elapsed_ms < fade_out_start_ms {
+                let alpha = if elapsed_ms < SPLASH_FADE_START_MS {
                     1.0
                 } else {
-                    let t = (elapsed_ms - fade_out_start_ms) as f32
-                        / (total_ms - fade_out_start_ms) as f32;
+                    let t = (elapsed_ms - SPLASH_FADE_START_MS) as f32
+                        / (SPLASH_TOTAL_MS - SPLASH_FADE_START_MS) as f32;
                     1.0 - t
                 };
                 egui::Area::new(egui::Id::new("splash_overlay"))
@@ -6080,9 +6317,10 @@ impl eframe::App for GrafitoApp {
                                     .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
                             );
                             // G-E splash progreso real por fases (S): gates reales
-                            // vía `startup_splash_phase` (GPU → escena → plugins),
+                            // vía `splash_stage` (GPU → escena → plugins, más
+                            // "Abriendo documento…" si el CLI sigue en background),
                             // barra done/3 honesta, sin % falso de tiempo.
-                            let (done, stage) = self.startup_splash_phase();
+                            let (done, stage) = self.splash_stage();
                             let phase = if self.document.object_count() > 0 {
                                 format!(
                                     "{stage} · {} de 3 · Documento · {} objetos · {}ms",
@@ -7390,6 +7628,28 @@ pub fn run_app() -> Result<(), eframe::Error> {
 mod splash_tests {
     use super::*;
 
+    // ── AS3 cold-start: splash honesto + arranque sin I/O en `new()` ──
+    #[test]
+    fn splash_budget_pins_overlay_timing() {
+        // Overlay 1500 ms con fade desde 1000 ms (orden pinneado por los
+        // valores: 1000 < 1500; sin assert relacional: clippy lo ve const).
+        assert_eq!(SPLASH_TOTAL_MS, 1500);
+        assert_eq!(SPLASH_FADE_START_MS, 1000);
+    }
+
+    #[test]
+    fn splash_stage_reports_startup_doc_honestly() {
+        let mut app = dummy_grafito_app();
+        // Sin GPU (dummy) y sin pendiente: gate 0 honesto, sin override.
+        let (done, stage) = app.splash_stage();
+        assert_eq!((done, stage), app.startup_splash_phase());
+        // Con documento CLI pendiente: mismo `done`, stage honesto.
+        app.startup_pending_doc = Some(PathBuf::from("/tmp/inicio.json"));
+        let (done_pending, stage_pending) = app.splash_stage();
+        assert_eq!(done_pending, done);
+        assert_eq!(stage_pending, "Abriendo documento…");
+    }
+
     #[test]
     fn splash_texture_handle_is_retained_and_reused() {
         let ctx = egui::Context::default();
@@ -7613,6 +7873,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         show_onboarding: false,
         pending_save_job: None,
         pending_open_job: None,
+        startup_pending_doc: None,
         pending_export_job: None,
         pending_ggb_import_job: None,
         pending_import_job: None,
@@ -7651,6 +7912,8 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
         assistant: grafito_ui::assistant::AssistantPanelState::default(),
         assistant_runtime: crate::assistant::AssistantRuntime::default(),
+        anim_preview: crate::anim_ui::AnimPreviewState::default(),
+        anim_export_job: None,
         right_drawer_open: true,
         workspace_dock_tab: crate::WorkspaceDockTab::Inspector,
         compact_geometry_utility_open: false,
@@ -7687,5 +7950,102 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         advanced_red_opt_in: false,
         locale: AppLocale::Es,
         classroom: crate::classroom::ClassroomPanel::new(),
+    }
+}
+
+// ── AS4: tests headless del manejador del panel (eventos→acciones) ─────────
+// Sin ventana real (no hay display): `egui::Context::default()` solo para
+// `request_repaint()`; el reductor ya dejó el estado aplicado y aquí se
+// verifica que el manejador no spawnea de más y publica lo esperado. El caso
+// `Generate`→hilo pesado (48 frames) no se ejecuta aquí: lo cubre el contrato
+// del closure entre frames en `assistant.rs`.
+#[cfg(test)]
+mod anim_preview_panel_tests {
+    use super::dummy_grafito_app;
+    use crate::anim_ui::{apply_anim_panel_action, AnimPanelAction, AnimPanelEvent};
+
+    fn ctx_ciego() -> egui::Context {
+        egui::Context::default()
+    }
+
+    #[test]
+    fn frame_selected_solo_repinta_preview() {
+        let mut app = dummy_grafito_app();
+        app.anim_preview.frames = vec![egui::ColorImage::new([2, 2], egui::Color32::BLACK); 5];
+        // Reductor: clampea, pausa y emite (evento→acción ya aplicado).
+        let evs = apply_anim_panel_action(&mut app.anim_preview, AnimPanelAction::SelectFrame(3));
+        assert_eq!(evs, vec![AnimPanelEvent::FrameSelected(3)]);
+        assert_eq!(app.anim_preview.frame_idx, 3);
+        // Manejador: solo repaint, sin spawnear generación ni export.
+        // (`cancel_anim_job()==false` prueba que no hay job sin tocar
+        // el campo privado de `assistant.rs`.)
+        app.handle_anim_panel_events(&ctx_ciego(), evs);
+        assert_eq!(app.anim_preview.frame_idx, 3);
+        assert!(!app.assistant_runtime.cancel_anim_job());
+        assert!(app.anim_export_job.is_none());
+    }
+
+    #[test]
+    fn cancel_sin_job_es_noop() {
+        let mut app = dummy_grafito_app();
+        assert!(!app.assistant_runtime.cancel_anim_job());
+        app.handle_anim_panel_events(
+            &ctx_ciego(),
+            vec![AnimPanelEvent::CancelRequested {
+                was_generating: true,
+            }],
+        );
+        assert!(!app.assistant_runtime.cancel_anim_job());
+        // Solo reproducción (was_generating=false) tampoco toca jobs.
+        app.handle_anim_panel_events(
+            &ctx_ciego(),
+            vec![AnimPanelEvent::CancelRequested {
+                was_generating: false,
+            }],
+        );
+        assert!(!app.assistant_runtime.cancel_anim_job());
+    }
+
+    #[test]
+    fn export_sin_nada_no_spawnea() {
+        let mut app = dummy_grafito_app();
+        assert!(app.anim_preview.frames.is_empty());
+        app.handle_anim_panel_events(
+            &ctx_ciego(),
+            vec![AnimPanelEvent::ExportRequested {
+                media_path: String::new(),
+            }],
+        );
+        assert!(
+            app.anim_export_job.is_none(),
+            "sin frames no debe spawnear E/S"
+        );
+    }
+
+    #[test]
+    fn export_desde_frames_spawnea_y_publica_gif() {
+        let mut app = dummy_grafito_app();
+        app.anim_preview.frames = vec![
+            egui::ColorImage::new([2, 2], egui::Color32::BLACK),
+            egui::ColorImage::new([2, 2], egui::Color32::WHITE),
+        ];
+        app.handle_anim_panel_events(
+            &ctx_ciego(),
+            vec![AnimPanelEvent::ExportRequested {
+                media_path: String::new(),
+            }],
+        );
+        let Some(job) = app.anim_export_job.take() else {
+            panic!("con frames debe spawnear el hilo de export");
+        };
+        // Join bloqueante solo en test (frames 2×2, ms). Limpia el temporal.
+        match job.handle.join() {
+            Ok(Ok(path)) => {
+                assert!(path.exists(), "el GIF debe existir en {}", path.display());
+                let _ = std::fs::remove_file(&path);
+            }
+            Ok(Err(error)) => panic!("export tiny no debe fallar: {error}"),
+            Err(_) => panic!("el hilo de export no debe caer"),
+        }
     }
 }

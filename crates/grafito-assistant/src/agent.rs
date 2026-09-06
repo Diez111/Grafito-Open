@@ -667,8 +667,19 @@ fn canvas_from_call(call: &ToolCall) -> (u32, u32) {
     }
 }
 
-/// generate_animation(template, concept, params) — valida AnimRequest sin ejecutar motor.
+/// generate_animation(template, concept, params, pedido) — valida sin ejecutar motor.
+///
+/// Dos vías (puras, sin Python):
+/// - `pedido` (nuevo, AS4): texto libre en lenguaje natural que se infiere a
+///   `ParametricAnim` 100% Rust (barrido, traza, transición, lugar, tangente
+///   o área móvil). Si falta algo, el error dice qué falta con un ejemplo;
+///   jamás se inventa matemática. Tiene precedencia sobre template/concept.
+/// - template/concept/params (histórica): valida `AnimRequest` por concepto.
 fn generate_animation_tool(call: &ToolCall) -> ToolResult {
+    // AS4: vía pedido en lenguaje natural → ParametricAnim (sin Python).
+    if let Some(pedido) = string_arg(call, "pedido") {
+        return propose_parametric_tool(&call.id, &pedido);
+    }
     let template_raw = string_arg(call, "template").unwrap_or_default();
     let concept_raw = string_arg(call, "concept").unwrap_or_default();
     let mut params_map = std::collections::BTreeMap::new();
@@ -723,6 +734,36 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
         "note": "solicitud validada; el motor de animación se ejecuta en la capa UI tras aprobación explícita"
     });
     ToolResult::text(&call.id, true, payload.to_string())
+}
+
+/// Propone una animación paramétrica desde un pedido en lenguaje natural.
+///
+/// Puro y honesto: delega en `infer_parametric_anim` (reglas sin inventos) y
+/// devuelve el plan como JSON con la pista humanizada para el chat (nombres
+/// del mapa de controles en español — deslizador, reproducir, pausar —,
+/// nunca identificadores literales). El render lo hace la UI en Rust nativo
+/// tras aprobación explícita; aquí no hay E/S ni motor.
+fn propose_parametric_tool(call_id: &str, pedido: &str) -> ToolResult {
+    match grafito_anim::parametric::infer_parametric_anim(pedido) {
+        Err(error) => ToolResult::text(call_id, false, error.to_string()),
+        Ok(anim) => {
+            let hint = grafito_anim::parametric::parametric_hint(&anim);
+            let payload = json!({
+                "kind": anim.kind.as_str(),
+                "kind_label": anim.kind.en_espanol(),
+                "expr_a": anim.expr_a,
+                "expr_b": anim.expr_b,
+                "param": anim.param.as_str(),
+                "range": [anim.p0, anim.p1],
+                "frames": anim.frame_count(),
+                "viewport": [anim.viewport.width, anim.viewport.height],
+                "hint": hint,
+                "protocol_version": grafito_anim::protocol::ANIM_PROTOCOL_VERSION,
+                "note": "plan paramétrico validado en Rust nativo; la vista previa se genera en la UI tras aprobación explícita"
+            });
+            ToolResult::text(call_id, true, payload.to_string())
+        }
+    }
 }
 
 // ── Schemas pedagógicos (para exponer al LLM vía tool_catalog) ─────────────
@@ -808,23 +849,30 @@ pub fn suggest_next_tool_schema() -> ToolSchema {
     )
 }
 
-/// Schema de `generate_animation(template, concept, params)`.
+/// Schema de `generate_animation(template, concept, params, pedido)`.
 ///
 /// `canvas`/`width`/`height` son opcionales; si vienen del LLM se usan con validación
 /// 64..=4096, con fallback a 640x480.
+///
+/// `pedido` (nuevo, AS4): texto libre que se infiere a plan paramétrico 100%
+/// Rust sin Python (ej. «barrido de f(x)=x^2+p·x con p en [-2,2]»). Tiene
+/// precedencia sobre template/concept; si falta algo, el error dice qué
+/// falta. El tamaño va dentro del pedido («en 320x240»); canvas/width/height
+/// se ignoran en la vía pedido.
 pub fn generate_animation_tool_schema() -> ToolSchema {
     ToolSchema::new(
         "generate_animation",
-        "Valida y propone una solicitud de animación didáctica (template, concept, params) sin ejecutar el motor; usa protocolo AnimRequest.",
+        "Valida y propone una solicitud de animación didáctica (template, concept, params) sin ejecutar el motor; usa protocolo AnimRequest. Con 'pedido' en lenguaje natural propone un plan paramétrico 100% Rust (barrido, traza, transición, lugar, tangente o área móvil) sin Python.",
         json!({
             "type": "object",
             "properties": {
                 "template": {"type": "string", "description": "Plantilla opcional: derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, auto"},
                 "concept": {"type": "string", "description": "Concepto en lenguaje natural, ej. derivada como pendiente"},
                 "params": {"type": "object", "description": "Mapa opcional de parámetros numéricos finitos", "additionalProperties": {"type": "number"}},
-                "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
-                "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640)"},
-                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480)"}
+                "pedido": {"type": "string", "description": "Pedido libre para plan paramétrico, ej. barrido de f(x)=x^2+p·x con p en [-2,2] (tiene precedencia; el tamaño puede ir dentro, ej. en 320x240)"},
+                "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096 (solo vía template/concept)", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+                "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640; solo vía template/concept)"},
+                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480; solo vía template/concept)"}
             },
             "required": []
         }),
@@ -1071,6 +1119,24 @@ const MAX_RESPONSES_ARGS_CHARS: usize = 2_048;
 
 /// Resumen de args para `AgentEvent::ToolStarted` (paridad con el loop_engine).
 const MAX_RESPONSES_ARGS_SUMMARY_CHARS: usize = 160;
+
+/// Tope acumulado de caracteres del `input` Responses entre turnos.
+///
+/// Paridad con `AgentBudget::default().max_total_chars = 48_000` que el loop
+/// Chat (`grafito-agent::loop_engine`) ya enforcea por iteración: el loop
+/// Responses acumulaba `function_call` + `function_call_output` sin cota
+/// (solo `max_tool_turns`), así que una tool verborrágica podía inflar el
+/// payload turno a turno. Fail-closed con el mismo mensaje que el loop Chat.
+const MAX_RESPONSES_INPUT_CHARS: usize = 48_000;
+
+/// Suma el tamaño serializado del `input` Responses (paridad con
+/// `message_chars` de `loop_engine`: `Value::to_string().len()`).
+fn responses_input_chars(input: &[Value]) -> usize {
+    input
+        .iter()
+        .map(|item| item.to_string().len())
+        .fold(0_usize, |acc, len| acc.saturating_add(len))
+}
 
 /// ¿Este modelo viaja por Responses API en vez de Chat Completions?
 ///
@@ -1465,6 +1531,8 @@ fn run_responses_agent_loop<D: ToolDispatcher>(
     }
     let started = Instant::now();
     let max_turns = budget.max_tool_turns.max(1);
+    let mut accumulated_chars =
+        responses_input_chars(&input).saturating_add(instructions_owned.len());
     for turn in 0..=max_turns {
         if cancellation.is_cancelled() {
             return Err("assistant agent request was cancelled".into());
@@ -1472,6 +1540,9 @@ fn run_responses_agent_loop<D: ToolDispatcher>(
         let remaining = budget.total_span.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             return Err("assistant agent loop exceeded its total span".into());
+        }
+        if accumulated_chars > MAX_RESPONSES_INPUT_CHARS {
+            return Err("assistant agent loop exceeded its total char budget".into());
         }
         let per_turn_timeout = budget.per_turn_timeout.min(remaining);
         let payload = build_responses_agent_payload(
@@ -1511,12 +1582,14 @@ fn run_responses_agent_loop<D: ToolDispatcher>(
                 for call in &calls {
                     let arguments =
                         serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string());
-                    input.push(json!({
+                    let item = json!({
                         "type": "function_call",
                         "call_id": call.id,
                         "name": call.name,
                         "arguments": arguments,
-                    }));
+                    });
+                    accumulated_chars = accumulated_chars.saturating_add(item.to_string().len());
+                    input.push(item);
                 }
                 for call in &calls {
                     on_event(AgentEvent::ToolStarted {
@@ -1531,11 +1604,13 @@ fn run_responses_agent_loop<D: ToolDispatcher>(
                         name: call.name.clone(),
                         ok: result.ok,
                     });
-                    input.push(json!({
+                    let item = json!({
                         "type": "function_call_output",
                         "call_id": result.call_id,
                         "output": result.content,
-                    }));
+                    });
+                    accumulated_chars = accumulated_chars.saturating_add(item.to_string().len());
+                    input.push(item);
                 }
             }
         }
@@ -2269,6 +2344,39 @@ mod tests {
     }
 
     #[test]
+    fn responses_input_budget_matches_chat_loop() {
+        // Paridad con `AgentBudget::default().max_total_chars` (loop_engine).
+        assert_eq!(
+            MAX_RESPONSES_INPUT_CHARS,
+            AgentBudget::default().max_total_chars
+        );
+        assert_eq!(MAX_RESPONSES_INPUT_CHARS, 48_000);
+    }
+
+    #[test]
+    fn responses_input_chars_sums_serialized_len() {
+        let input = vec![
+            json!({"role": "user", "content": "hola"}),
+            json!({"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"}),
+        ];
+        let expected: usize = input.iter().map(|item| item.to_string().len()).sum();
+        assert_eq!(responses_input_chars(&input), expected);
+        assert_eq!(responses_input_chars(&[]), 0);
+        // Un turno típico (2 calls + 2 outputs de 2048 chars) cabe holgado.
+        let big_output = "x".repeat(2_048);
+        let turn = vec![
+            json!({"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"}),
+            json!({"type": "function_call_output", "call_id": "c1", "output": big_output}),
+        ];
+        assert!(responses_input_chars(&turn) < MAX_RESPONSES_INPUT_CHARS);
+        // 24 outputs de 2048 chars (peor caso ×6 del budget de 4 turnos) exceden.
+        let flood: Vec<Value> = (0..24)
+            .map(|i| json!({"type": "function_call_output", "call_id": i, "output": big_output}))
+            .collect();
+        assert!(responses_input_chars(&flood) > MAX_RESPONSES_INPUT_CHARS);
+    }
+
+    #[test]
     fn agent_completion_parses_text_and_tool_calls() {
         let text_body = json!({
             "choices": [{
@@ -2522,6 +2630,100 @@ mod tests {
         };
         let result = dispatch_safe_tool(&call);
         assert!(!result.ok);
+    }
+
+    // ── AS4: vía pedido en lenguaje natural → plan paramétrico ──────────
+    #[test]
+    fn generate_animation_pedido_barrido_ok() {
+        let call = ToolCall {
+            id: "as4-1".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "barrido de f(x)=x^2+p*x con p en [-2,2]"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["kind"], "sweep");
+        assert_eq!(value["expr_a"], "x^2+p*x");
+        assert_eq!(value["param"], "p");
+        assert_eq!(value["frames"], 24);
+        // Pista humanizada, sin identificadores literales de control.
+        let hint = value["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("deslizador"));
+        assert!(hint.contains("reproducir"));
+        assert!(hint.contains("pausar"));
+        for id in [
+            "PlayPause",
+            "Slider",
+            "Button",
+            "Tangent",
+            "Select",
+            "Parallel",
+            "Midpoint",
+            "Distance",
+            "Angle",
+            "Area",
+            "Function",
+            "Polygon",
+            "Circle",
+            "Line",
+            "Point",
+            "Vector",
+            "Segment",
+            "Ray",
+            "Eraser",
+            "Pencil",
+        ] {
+            assert!(
+                !result.content.contains(id),
+                "el payload no debe traer {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_animation_pedido_tangente_ok() {
+        let call = ToolCall {
+            id: "as4-2".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "animá la recta tangente móvil de f(x)=x^2 con p en [-1,1]"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["kind"], "tangent");
+        assert_eq!(value["kind_label"], "recta tangente móvil");
+    }
+
+    #[test]
+    fn generate_animation_pedido_tres_errores_honestos() {
+        // 1. Sin tipo: hay expresión pero no dice qué animar.
+        let sin_tipo = ToolCall {
+            id: "as4-e1".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "dibujame f(x)=x^2"}),
+        };
+        let r1 = dispatch_safe_tool(&sin_tipo);
+        assert!(!r1.ok);
+        assert!(r1.content.contains("qué tipo"), "r1: {}", r1.content);
+        // 2. Sin expresión.
+        let sin_expr = ToolCall {
+            id: "as4-e2".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "barrido con p en [-2,2]"}),
+        };
+        let r2 = dispatch_safe_tool(&sin_expr);
+        assert!(!r2.ok);
+        assert!(r2.content.contains("expresión"), "r2: {}", r2.content);
+        // 3. Sin rango.
+        let sin_rango = ToolCall {
+            id: "as4-e3".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "barrido de f(x)=x^2+p*x"}),
+        };
+        let r3 = dispatch_safe_tool(&sin_rango);
+        assert!(!r3.ok);
+        assert!(r3.content.contains("rango"), "r3: {}", r3.content);
     }
 
     #[test]

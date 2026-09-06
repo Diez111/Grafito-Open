@@ -360,6 +360,32 @@ pub(crate) const NATIVE_MAX_DIM: u32 = 4096;
 pub(crate) const NATIVE_FALLBACK_W: usize = 640;
 pub(crate) const NATIVE_FALLBACK_H: usize = 480;
 
+// ── AS3 presupuestos de memoria por generación (diseño, con test) ─────────
+// Un set nativo son `NATIVE_ANIM_FRAME_COUNT` frames RGBA en RAM:
+// `w*h*4*48`. A 640×480 = 58_982_400 B (≈56 MiB) transitorios durante el
+// render en el hilo de generación (nunca en UI thread). Por eso NO hay caché
+// de sets completos: la capa de caché es la ventana paginada de texturas en
+// `anim_ui.rs` (8 thumbs ≈ 9.8 MiB GPU a 640×480). Retener 1 set = 56 MiB
+// permanentes sin uso probado → se regenera bajo demanda.
+// `NATIVE_FRAME_BYTES_ESTIMADO_640x480` pinnea el número para el usuario
+// ("cuando inicio la app como que carga algo" no es esto: el render nativo
+// solo corre al pedir una animación, en hilo aparte).
+
+/// Bytes por píxel RGBA (espejo de `egui::ColorImage`: 4 B/px).
+pub const NATIVE_BYTES_PER_PIXEL: usize = 4;
+/// Memoria estimada del set canónico 640×480×48 RGBA: 58_982_400 B (≈56 MiB).
+pub const NATIVE_FRAME_BYTES_ESTIMADO_640X480: usize =
+    640 * 480 * NATIVE_BYTES_PER_PIXEL * NATIVE_ANIM_FRAME_COUNT;
+
+/// Estima los bytes RGBA de un set (`w*h*4*count`). `None` si desborda
+/// (`checked_mul`, sin pánicos). Puro, sin I/O ni allocs.
+#[must_use]
+pub fn estimate_frames_bytes(w: usize, h: usize, count: usize) -> Option<usize> {
+    w.checked_mul(h)
+        .and_then(|v| v.checked_mul(NATIVE_BYTES_PER_PIXEL))
+        .and_then(|v| v.checked_mul(count))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeSizeError {
     BelowMinimum {
@@ -2257,6 +2283,293 @@ pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<e
     }
 }
 
+// ── AS4: render paramétrico genérico 100% Rust (sin Python/manim) ───────
+// `ParametricAnim` (crate `grafito-anim`, modelo + inferencia + evaluador)
+// se rasteriza aquí con la misma paleta y mundo [-3,3]² que los templates
+// dedicados. Los templates viejos NO se tocan: `parametric_for_template`
+// declara cuáles tienen equivalente canónico (tangente/área/traza/barrido)
+// y cuáles conservan su renderer dedicado (`pitagoras`, euler, fourier…).
+use grafito_anim::parametric::{
+    FrameCount, ParamName, ParametricAnim, ParametricKind, PARAMETRIC_MAX_BYTES,
+};
+use grafito_anim::Resolution;
+
+/// Error tipado del render paramétrico (mensajes en español, sin pánicos).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParametricRenderError {
+    /// La animación no valida (expresión, rango, frames o viewport).
+    InvalidAnim(String),
+    /// El set estimado excede `PARAMETRIC_MAX_BYTES` o desborda.
+    Oom { got: Option<usize>, max: usize },
+    /// La reserva del frame falló (OOM real del SO).
+    AllocFailed { bytes: usize },
+}
+
+impl std::fmt::Display for ParametricRenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidAnim(detail) => write!(f, "animación inválida: {detail}"),
+            Self::Oom { got, max } => match got {
+                Some(got) => write!(
+                    f,
+                    "el set estimado ({got} bytes) excede el tope de {max} bytes: bajá la resolución o los fotogramas"
+                ),
+                None => write!(
+                    f,
+                    "el set estimado desborda el contador: bajá la resolución o los fotogramas (tope {max} bytes)"
+                ),
+            },
+            Self::AllocFailed { bytes } => {
+                write!(f, "sin memoria para reservar el frame ({bytes} bytes)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParametricRenderError {}
+
+/// Presupuesto del set antes de reservar (honesto, sin OOM).
+fn check_parametric_budget(
+    anim: &ParametricAnim,
+) -> Result<(usize, usize, usize), ParametricRenderError> {
+    // OOM primero (solo lee campos, no valida): el rechazo por memoria debe
+    // ser `Oom` aunque el resto también falle.
+    let (w, h) = (anim.viewport.width as usize, anim.viewport.height as usize);
+    let n = anim.frame_count();
+    match estimate_frames_bytes(w, h, n) {
+        Some(got) if got <= PARAMETRIC_MAX_BYTES => {}
+        other => {
+            return Err(ParametricRenderError::Oom {
+                got: other,
+                max: PARAMETRIC_MAX_BYTES,
+            });
+        }
+    }
+    anim.validate()
+        .map_err(|e| ParametricRenderError::InvalidAnim(e.to_string()))?;
+    Ok((w, h, n))
+}
+
+/// Ejes + título común del mundo paramétrico [-3,3]².
+fn draw_parametric_base(buf: &mut [u8], w: usize, h: usize, t: f64, title: &str) {
+    fill_background(buf, w, h, title, t * 0.08);
+    draw_subtle_grid(buf, w, h, t);
+    draw_line(
+        buf,
+        w,
+        h,
+        to_pixel(w, h, -3.0, 0.0),
+        to_pixel(w, h, 3.0, 0.0),
+        AXIS_COLOR,
+    );
+    draw_line(
+        buf,
+        w,
+        h,
+        to_pixel(w, h, 0.0, -3.0),
+        to_pixel(w, h, 0.0, 3.0),
+        AXIS_COLOR,
+    );
+    let short: String = title.chars().take(24).collect();
+    draw_text_block(buf, w, h, w / 12, h / 12, &short, TEXT_COLOR, 1);
+}
+
+/// Muestrea `y = anim(frame i, x)` en 121 puntos de [-3,3]; huecos donde no hay dominio.
+fn sample_curve(anim: &ParametricAnim, frame: usize) -> Vec<Option<(f64, f64)>> {
+    (0..=120)
+        .map(|k| {
+            let x = -3.0 + 6.0 * (k as f64 / 120.0);
+            anim.eval_frame(frame, x).map(|y| (x, y))
+        })
+        .collect()
+}
+
+/// Dibuja la polilínea cortando en huecos (sin unir ramas ni dominios rotos).
+fn draw_curve_gaps(buf: &mut [u8], w: usize, h: usize, pts: &[Option<(f64, f64)>], color: [u8; 4]) {
+    let px: Vec<Option<(usize, usize)>> = pts
+        .iter()
+        .map(|opt| opt.map(|(x, y)| to_pixel(w, h, x, y)))
+        .collect();
+    for pair in px.windows(2) {
+        if let (Some(a), Some(b)) = (pair[0], pair[1]) {
+            draw_line(buf, w, h, a, b, color);
+        }
+    }
+}
+
+/// Pendiente numérica central (clamp a ±10 para dibujar; `None` sin dominio).
+fn numeric_slope(anim: &ParametricAnim, frame: usize, x: f64) -> Option<f64> {
+    let h_step = 1e-3;
+    let a = anim.eval_frame(frame, x - h_step)?;
+    let b = anim.eval_frame(frame, x + h_step)?;
+    let s = (b - a) / (2.0 * h_step);
+    if s.is_finite() {
+        Some(s.clamp(-10.0, 10.0))
+    } else {
+        None
+    }
+}
+
+/// Renderiza una `ParametricAnim` a fotogramas RGBA (puro en memoria).
+///
+/// OOM acotado: valida presupuesto con `estimate_frames_bytes` y reserva con
+/// `try_reserve` (`AllocFailed` honesto en vez de abortar). Determinista:
+/// mismo `anim` → mismos píxeles.
+pub fn render_parametric_frames(
+    anim: &ParametricAnim,
+) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
+    render_parametric_frames_with_progress(anim, &mut |_, _| {})
+}
+
+/// Idem + progreso REAL por frame (`on_frame(done 1..=n, total n)`).
+pub fn render_parametric_frames_with_progress(
+    anim: &ParametricAnim,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
+    let (w, h, n) = check_parametric_budget(anim)?;
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(n)
+        .map_err(|_| ParametricRenderError::Oom {
+            got: anim.estimate_bytes(),
+            max: PARAMETRIC_MAX_BYTES,
+        })?;
+    for frame in 0..n {
+        let s = anim.frame_fraction(frame);
+        let p = anim.frame_param(frame);
+        let mut buf = alloc_frame_buffer(w, h).map_err(|_| {
+            let got = estimate_frames_bytes(w, h, 1);
+            ParametricRenderError::AllocFailed {
+                bytes: got.unwrap_or(w.saturating_mul(h).saturating_mul(4)),
+            }
+        })?;
+        draw_parametric_base(&mut buf, w, h, s, &anim.expr_a);
+        match anim.kind {
+            ParametricKind::Sweep | ParametricKind::Morph => {
+                let pts = sample_curve(anim, frame);
+                draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
+            }
+            ParametricKind::Trace => {
+                // La curva se dibuja hasta `s`: solo el prefijo x ≤ -3+6s.
+                let x_max = -3.0 + 6.0 * s;
+                let pts: Vec<Option<(f64, f64)>> = (0..=120)
+                    .map(|k| {
+                        let x = -3.0 + 6.0 * (k as f64 / 120.0);
+                        if x <= x_max {
+                            anim.eval_frame(frame, x).map(|y| (x, y))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
+                if let Some(y) = anim.eval_frame(frame, x_max) {
+                    let (px, py) = to_pixel(w, h, x_max, y);
+                    draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                }
+            }
+            ParametricKind::Locus => {
+                // Traza de (q, f(q)) para q de p0 a p + punto móvil en p.
+                let pts: Vec<Option<(f64, f64)>> = (0..=120)
+                    .map(|k| {
+                        let q = anim.p0 + (p - anim.p0) * (k as f64 / 120.0);
+                        anim.eval_frame(frame, q).map(|y| (q, y))
+                    })
+                    .collect();
+                draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
+                let xc = p.clamp(-3.0, 3.0);
+                if let Some(y) = anim.eval_frame(frame, xc) {
+                    let (px, py) = to_pixel(w, h, xc, y);
+                    draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                }
+            }
+            ParametricKind::Tangent => {
+                let pts = sample_curve(anim, frame);
+                draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
+                let xc = p.clamp(-3.0, 3.0);
+                if let (Some(y0), Some(slope)) =
+                    (anim.eval_frame(frame, xc), numeric_slope(anim, frame, xc))
+                {
+                    let xa = (xc - 1.2).max(-3.0);
+                    let xb = (xc + 1.2).min(3.0);
+                    let a = to_pixel(w, h, xa, y0 + slope * (xa - xc));
+                    let b = to_pixel(w, h, xb, y0 + slope * (xb - xc));
+                    draw_line(&mut buf, w, h, a, b, TANGENT_BLUE);
+                    let (px, py) = to_pixel(w, h, xc, y0);
+                    draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                }
+            }
+            ParametricKind::Area => {
+                // Área entre p0 (fijo) y p (móvil) bajo la curva.
+                let mut a = anim.p0.clamp(-3.0, 3.0);
+                let mut b = p.clamp(-3.0, 3.0);
+                if a > b {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                for px_col in 0..w {
+                    let x = -3.0 + 6.0 * (px_col as f64 / w as f64);
+                    if x < a || x > b {
+                        continue;
+                    }
+                    if let Some(y) = anim.eval_frame(frame, x) {
+                        let top = to_pixel(w, h, x, y);
+                        let base = to_pixel(w, h, x, 0.0);
+                        draw_line(&mut buf, w, h, base, top, FILL_SOFT_BLUE);
+                    }
+                }
+                let pts = sample_curve(anim, frame);
+                draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
+                let (px, py) = to_pixel(w, h, b, anim.eval_frame(frame, b).unwrap_or(0.0));
+                draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+            }
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), n);
+    }
+    Ok(frames)
+}
+
+/// Equivalente paramétrico canónico de un template viejo, si lo tiene.
+///
+/// `derivative-slope` → tangente móvil sobre `x^2`; `integral-area` → área
+/// móvil sobre `x^2`; `taylor-series` → traza de `sin(x)`;
+/// `conformal-map` → barrido de `sin(x+p)`. El resto (`pitagoras`, euler,
+/// fourier, logistic, gradient, mobius, universal) conserva su renderer
+/// dedicado → `None` honesto (no se finge equivalencia).
+pub fn parametric_for_template(template: &str, concept: &str) -> Option<ParametricAnim> {
+    let t = template.trim().to_lowercase();
+    let viewport = Resolution::try_new(640, 480).unwrap_or_default();
+    let mk = |kind: ParametricKind, expr: &str, param: &str, p0: f64, p1: f64| {
+        ParametricAnim::try_new(
+            kind,
+            expr.to_string(),
+            None,
+            ParamName::try_new(param).ok()?,
+            p0,
+            p1,
+            FrameCount::try_new(NATIVE_ANIM_FRAME_COUNT).ok()?,
+            viewport,
+        )
+        .ok()
+    };
+    match t.as_str() {
+        "derivative-slope" | "ecuacion-anim" => mk(ParametricKind::Tangent, "x^2", "p", -1.5, 1.5),
+        "integral-area" | "fraccion-visual" | "prob-anim" => {
+            mk(ParametricKind::Area, "x^2", "p", 0.0, 2.0)
+        }
+        "taylor-series" | "serie-anim" | "trig-anim" => {
+            mk(ParametricKind::Trace, "sin(x)", "t", 0.0, 1.0)
+        }
+        "conformal-map" | "vector-anim" | "conica-anim" => {
+            mk(ParametricKind::Sweep, "sin(x+p)", "p", 0.0, 6.0)
+        }
+        _ => {
+            let _ = concept;
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2313,6 +2626,32 @@ mod tests {
             "{label} tomó {ms}ms en {w}x{h}, debe ser <1800ms (<2s debug)"
         );
         frames
+    }
+
+    // ── AS3: presupuesto de memoria del set (diseño, con test) ──────────
+    #[test]
+    fn frame_set_memory_budget_is_documented_and_checked() {
+        assert_eq!(NATIVE_ANIM_FRAME_COUNT, 48);
+        assert_eq!(NATIVE_BYTES_PER_PIXEL, 4);
+        // Set canónico 640×480×48 RGBA = 58_982_400 B (≈56 MiB).
+        assert_eq!(
+            estimate_frames_bytes(640, 480, NATIVE_ANIM_FRAME_COUNT),
+            Some(58_982_400)
+        );
+        assert_eq!(
+            NATIVE_FRAME_BYTES_ESTIMADO_640X480,
+            640 * 480 * NATIVE_BYTES_PER_PIXEL * NATIVE_ANIM_FRAME_COUNT
+        );
+        // Tamaño chico de thumbs (160×120×8): ~614 KiB, cabe en GPU integrada.
+        assert_eq!(estimate_frames_bytes(160, 120, 8), Some(160 * 120 * 4 * 8));
+        // Overflow saturante: None en vez de panic/wrap.
+        assert_eq!(estimate_frames_bytes(usize::MAX, usize::MAX, 48), None);
+        assert_eq!(
+            estimate_frames_bytes(4096, 4096, 48),
+            Some(4096 * 4096 * 4 * 48)
+        );
+        // Cero dimensiones = cero bytes (sin pánicos).
+        assert_eq!(estimate_frames_bytes(0, 480, 48), Some(0));
     }
 
     #[test]
@@ -2972,5 +3311,155 @@ mod tests {
         assert!((1..=30).contains(&GIF_EXPORT_SPEED));
         // 48 nativos ≤ tope 64, pineado en tiempo de compilación:
         const { assert!(NATIVE_ANIM_FRAME_COUNT <= GIF_EXPORT_MAX_FRAMES) };
+    }
+}
+
+// ── AS4: tests del render paramétrico (barrido/traza/morph/locus) ────────
+#[cfg(test)]
+mod parametric_render_tests {
+    use super::*;
+    use grafito_anim::protocol::Resolution;
+
+    fn anim(
+        kind: ParametricKind,
+        expr_a: &str,
+        expr_b: Option<&str>,
+        param: &str,
+        p0: f64,
+        p1: f64,
+        n: usize,
+    ) -> ParametricAnim {
+        ParametricAnim::try_new(
+            kind,
+            expr_a.to_string(),
+            expr_b.map(str::to_string),
+            ParamName::try_new(param).unwrap(),
+            p0,
+            p1,
+            FrameCount::try_new(n).unwrap(),
+            Resolution::try_new(96, 72).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn assert_parametric_valid(frames: &[egui::ColorImage], n: usize, label: &str) {
+        assert_eq!(frames.len(), n, "{label}: len");
+        for (i, f) in frames.iter().enumerate() {
+            assert_eq!(f.size, [96, 72], "{label} frame {i}: size");
+            assert_eq!(f.pixels.len(), 96 * 72, "{label} frame {i}: pixels");
+        }
+        assert_ne!(
+            frames[0].pixels,
+            frames[n - 1].pixels,
+            "{label}: primero != último"
+        );
+        let first_px = frames[0].pixels[0];
+        assert!(
+            frames[0].pixels.iter().any(|p| *p != first_px),
+            "{label}: frame no sólido"
+        );
+        for p in frames[0].pixels.iter().step_by(97) {
+            assert_eq!(p.a(), 255, "{label}: alpha 255");
+        }
+    }
+
+    #[test]
+    fn barrido_traza_morph_locus_acotados_y_distintos() {
+        let casos = [
+            (
+                anim(ParametricKind::Sweep, "x^2+p*x", None, "p", -2.0, 2.0, 12),
+                "barrido",
+            ),
+            (
+                anim(ParametricKind::Trace, "sin(x)", None, "t", 0.0, 1.0, 12),
+                "traza",
+            ),
+            (
+                anim(ParametricKind::Morph, "x^2", Some("x^3"), "p", 0.0, 1.0, 12),
+                "morph",
+            ),
+            (
+                anim(ParametricKind::Locus, "x^2", None, "p", -2.0, 2.0, 12),
+                "locus",
+            ),
+        ];
+        for (a, label) in casos {
+            let frames = render_parametric_frames(&a).unwrap();
+            assert_parametric_valid(&frames, 12, label);
+        }
+    }
+
+    #[test]
+    fn tangente_y_area_moviles_acotados_y_distintos() {
+        // Sucesores genéricos de derivative-slope / integral-area.
+        let tg = anim(ParametricKind::Tangent, "x^2", None, "p", -1.5, 1.5, 12);
+        let area = anim(ParametricKind::Area, "x^2", None, "p", 0.0, 2.0, 12);
+        assert_parametric_valid(&render_parametric_frames(&tg).unwrap(), 12, "tangente");
+        assert_parametric_valid(&render_parametric_frames(&area).unwrap(), 12, "área");
+    }
+
+    #[test]
+    fn progreso_real_por_frame_y_determinismo() {
+        let a = anim(ParametricKind::Sweep, "x^2+p*x", None, "p", -2.0, 2.0, 8);
+        let mut vistos = Vec::new();
+        let frames = render_parametric_frames_with_progress(&a, &mut |done, total| {
+            vistos.push((done, total));
+        })
+        .unwrap();
+        assert_eq!(vistos.len(), 8);
+        for (i, (done, total)) in vistos.iter().enumerate() {
+            assert_eq!((*done, *total), (i + 1, 8));
+        }
+        // Determinista: mismo anim → mismos píxeles.
+        let again = render_parametric_frames(&a).unwrap();
+        assert_eq!(frames.len(), again.len());
+        for (f, g) in frames.iter().zip(again.iter()) {
+            assert_eq!(f.pixels, g.pixels);
+        }
+    }
+
+    #[test]
+    fn oom_rechaza_honesto_sin_reservar() {
+        let huge = ParametricAnim::try_new(
+            ParametricKind::Sweep,
+            "x+p".to_string(),
+            None,
+            ParamName::try_new("p").unwrap(),
+            -2.0,
+            2.0,
+            FrameCount::try_new(48).unwrap(),
+            Resolution::try_new(4096, 4096).unwrap(),
+        );
+        // try_new ya rechaza por presupuesto…
+        assert!(huge.is_err());
+        // …y el render también si el presupuesto se excede por otra vía.
+        let mut a = anim(ParametricKind::Sweep, "x+p", None, "p", -2.0, 2.0, 12);
+        a.viewport = Resolution::try_new(4096, 4096).unwrap();
+        // 4096×4096×4×12 > 64 MiB → Oom honesto.
+        assert!(matches!(
+            render_parametric_frames(&a),
+            Err(ParametricRenderError::Oom { .. })
+        ));
+    }
+
+    #[test]
+    fn templates_viejos_mapean_a_casos_y_resto_none() {
+        let tg = parametric_for_template("derivative-slope", "derivada").unwrap();
+        assert_eq!(tg.kind, ParametricKind::Tangent);
+        let area = parametric_for_template("integral-area", "integral").unwrap();
+        assert_eq!(area.kind, ParametricKind::Area);
+        let tr = parametric_for_template("taylor-series", "serie").unwrap();
+        assert_eq!(tr.kind, ParametricKind::Trace);
+        // Sin equivalente honesto → None (conservan renderer dedicado).
+        for t in ["pitagoras", "euler", "fourier", "universal", "no-existe"] {
+            assert!(
+                parametric_for_template(t, "x").is_none(),
+                "{t} debe conservar su renderer"
+            );
+        }
+        // El equivalente canónico renderiza de verdad.
+        let frames = render_parametric_frames(&tg).unwrap();
+        assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_ne!(frames[0].pixels, frames[NATIVE_ANIM_FRAME_COUNT - 1].pixels);
     }
 }
