@@ -376,10 +376,11 @@ impl ComplexComputePipeline {
                 map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         });
-        // TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando
-        // el hilo de prepare (acotado a 1 intento por frame via
-        // MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs). Mitigación:
-        // poll acotado con timeout en vez de Wait infinito.
+        // TODO P1 (B6-Next): migrar al patrón `dispatch_*` + slot background
+        // (ver `function_compute`/`implicit_compute` + `GpuComputeSlot` en
+        // canvas.rs). Sin waiter thread: en wgpu 22 `Device` no es `Clone`;
+        // la espera se distribuye en frames (poll no-bloqueante por frame).
+        // Mitigación actual: poll acotado con timeout en vez de Wait infinito.
         log::trace!("Complex compute sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);
         crate::gpu_timing::read_and_log(&self.timing, device, "Complex Compute");

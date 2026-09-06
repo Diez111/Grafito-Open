@@ -45,6 +45,7 @@ pub mod depth_3d;
 pub mod domain_coloring_compute;
 pub mod fill_compute;
 pub mod function_compute;
+pub mod gpu_readback;
 pub mod gpu_timing;
 pub mod implicit_compute;
 pub mod parametric_compute;
@@ -66,7 +67,10 @@ const TRANSFORMED_CACHE_CAP: usize = 64;
 /// one attempt per frame via `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` in
 /// canvas.rs, so a bounded poll here only guards against a hung GPU freezing
 /// the prepare thread indefinitely.
-const SYNC_GPU_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+///
+/// Origen único en [`gpu_readback::GPU_READBACK_TIMEOUT`]: el path asíncrono
+/// (`PendingGpuReadback`) comparte el mismo presupuesto 250 ms.
+const SYNC_GPU_READBACK_TIMEOUT: std::time::Duration = gpu_readback::GPU_READBACK_TIMEOUT;
 
 /// Bounded synchronous readback: wraps `map_async` + `poll` in
 /// `pollster::block_on` with a timeout. Uses `wgpu::Maintain::Poll` (non
@@ -74,9 +78,11 @@ const SYNC_GPU_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// block the prepare thread forever. Returns `true` if the buffer was mapped
 /// before the deadline.
 ///
-/// TODO P1: mover a `spawn_blocking` — el readback síncrono sigue bloqueando
-/// el hilo de prepare (acotado a 1 intento por frame via
-/// `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` en canvas.rs).
+/// Path síncrono legacy: solo para callers sin slot background (tests,
+/// `evaluate_*` directos). El prepare 2D usa `PendingGpuReadback` (ver
+/// `gpu_readback.rs` + `dispatch_*` en `function_compute`/`implicit_compute`)
+/// para no bloquear el hilo UI; el resto de pipelines migrará al mismo
+/// patrón (TODO P1 + `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` en canvas.rs).
 pub(crate) fn sync_readback_with_timeout(
     device: &wgpu::Device,
     map_ok: &std::sync::atomic::AtomicBool,

@@ -2564,6 +2564,9 @@ pub enum AssistantUiAction {
     OpenMascotConfig,
     /// Explícame paso a paso — inicia enseñanza interactiva con burbujas, gráfica y pizarra.
     ExplainStepwise(String),
+    /// B7 — Pedir un ejercicio del tema (botón «Andamiar» / CTA de vacío).
+    /// La app lo genera en background y muestra la tarjeta con corrección.
+    RequestExercise { topic: String },
     /// Aplicar comando raw grafito directamente (fallback cuando no hay preflight)
     ApplyRawCommand(String),
     /// Guardar cambios de avatar y nombre de perfil (unificado).
@@ -4588,7 +4591,10 @@ fn draw_panel_contents(
                 ui.add_space(SPACE_SM);
             }
             if should_draw_empty_state(state) {
-                draw_assistant_empty_state(ui, state, visuals);
+                retain_first_assistant_action(
+                    &mut action,
+                    draw_assistant_empty_state(ui, state, visuals),
+                );
             } else {
                 let reveal_clip = {
                     let last_content = state
@@ -5486,11 +5492,19 @@ fn draw_assistant_empty_state(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
     _visuals: AssistantVisuals,
-) {
+) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let assistant_name = state.avatar.assistant_name_or_default();
     let time = ui.input(|i| i.time);
     let hover_pos = ui.input(|i| i.pointer.hover_pos());
+    // B7 — CTA de vacío: si ya hay borrador se usa como tema, si no el
+    // tema por defecto (siempre resuelve a un ejercicio real).
+    let tema_cta = if state.problem.trim().is_empty() {
+        ANDAMIAR_DEFAULT_TOPIC.to_string()
+    } else {
+        state.problem.trim().chars().take(60).collect()
+    };
+    let mut action = None;
     // Minimalista — avatar protagonista, texto escaso, centrado
     let avail = ui.available_height();
     // Centrar verticalmente el bloque completo
@@ -5540,7 +5554,17 @@ fn draw_assistant_empty_state(
                 .size(crate::tokens::TYPE_SM)
                 .weak(),
         );
+        ui.add_space(crate::tokens::SPACE_SM);
+        // B7 — entrada al ciclo de ejercicio sin conversación previa.
+        if ui
+            .button("Andamiar: practicá con un ejercicio")
+            .on_hover_text("Genero un ejercicio y lo corregimos juntos")
+            .clicked()
+        {
+            action = Some(AssistantUiAction::RequestExercise { topic: tema_cta });
+        }
     });
+    action
 }
 
 fn draw_assistant_header(
@@ -5992,6 +6016,21 @@ fn stepwise_disabled_reason(
     Some("Se habilita en explicaciones con matemática, tabla, código o desarrollo largo")
 }
 
+/// B7 — Tema por defecto de «Andamiar» cuando el turno viene vacío.
+/// Existe en el currículum (`am1-der`), así que siempre resuelve a un
+/// ejercicio real en vez de caer en error.
+pub const ANDAMIAR_DEFAULT_TOPIC: &str = "derivada";
+
+/// B7 — Tema para «Andamiar» desde un turno: primera línea acotada a 60
+/// (mismo recorte que el botón paso a paso). Puro, testeable.
+pub fn andamiar_topic_for_content(content: &str) -> String {
+    let primera = content.lines().next().unwrap_or("").trim();
+    if primera.is_empty() {
+        return ANDAMIAR_DEFAULT_TOPIC.to_string();
+    }
+    primera.chars().take(60).collect()
+}
+
 /// Decide si una respuesta merece el botón "Explícame paso a paso".
 /// Solo para contenido complejo: headings, math, tablas o cuerpo largo.
 fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool {
@@ -6277,6 +6316,30 @@ fn draw_conversation_turn(
                     .take(60)
                     .collect::<String>();
                 action = Some(AssistantUiAction::ExplainStepwise(topic));
+            }
+            // B7 — Andamiar: siempre habilitado, nunca mudo. Genera un
+            // ejercicio del tema en background y muestra la tarjeta con
+            // corrección + próximo paso.
+            ui.add_space(SPACE_XS);
+            let andamiar_btn = || {
+                egui::Button::new(
+                    egui::RichText::new("Andamiar")
+                        .color(theme.accent)
+                        .size(TYPE_XS)
+                        .strong(),
+                )
+                .rounding(crate::tokens::RADIUS_MD)
+                .fill(theme.accent.gamma_multiply(0.08))
+                .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)))
+            };
+            if ui
+                .add_sized(egui::vec2(ui.available_width(), 28.0), andamiar_btn())
+                .on_hover_text("Genero un ejercicio del tema y lo corregimos juntos")
+                .clicked()
+            {
+                action = Some(AssistantUiAction::RequestExercise {
+                    topic: andamiar_topic_for_content(&turn.content),
+                });
             }
         });
     ui.add_space(crate::tokens::SPACE_MD);
@@ -8355,6 +8418,24 @@ mod tests {
     }
 
     #[test]
+    fn b7_andamiar_topic_primera_linea_acotada_con_fallback() {
+        assert_eq!(
+            andamiar_topic_for_content("La derivada de x^2\nmás texto largo"),
+            "La derivada de x^2"
+        );
+        assert_eq!(andamiar_topic_for_content(""), ANDAMIAR_DEFAULT_TOPIC);
+        assert_eq!(
+            andamiar_topic_for_content("   \n  "),
+            ANDAMIAR_DEFAULT_TOPIC
+        );
+        let largo = "a".repeat(200);
+        assert_eq!(andamiar_topic_for_content(&largo).chars().count(), 60);
+        // El fallback siempre resuelve a un LO real del currículum.
+        let los = grafito_pedagogy::Curriculum::find_for_concept(ANDAMIAR_DEFAULT_TOPIC);
+        assert!(los.iter().any(|lo| lo.id == "am1-der"));
+    }
+
+    #[test]
     fn state_allows_submission_while_a_saved_key_is_resolved_on_demand() {
         let state = AssistantPanelState {
             problem: "2 + 2".into(),
@@ -8425,7 +8506,7 @@ mod tests {
 
         let empty = context.run(input(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                draw_assistant_empty_state(ui, &mut state, visuals);
+                let _ = draw_assistant_empty_state(ui, &mut state, visuals);
             });
         });
         // Minimalista: empty state sin avatar, no requiere textura.

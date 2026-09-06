@@ -7,7 +7,10 @@
 use crate::manim_orchestrator::{ManimOrchestrator, OrchestratorState};
 use crate::whiteboard_ui::WhiteboardSession;
 use egui::{Color32, Stroke};
-use grafito_pedagogy::{Exercise, TeachingSession, TeachingTopic};
+use grafito_pedagogy::{
+    Curriculum, Exercise, ExerciseGenerator, LearningObjective, PedagogicalLevel, TeachingSession,
+    TeachingTopic,
+};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_whiteboard::WhiteboardDoc;
 use std::time::{Duration, Instant};
@@ -33,6 +36,8 @@ pub struct TeachingUiState {
     pub anim_frames: Option<Vec<egui::ColorImage>>,
     /// Texturas cacheadas de `anim_frames` (creadas lazily con `ctx.load_texture`).
     pub anim_textures: Vec<egui::TextureHandle>,
+    /// Panel de ejercicio B7 (pedir→generar→responder→próximo). Vacío por defecto.
+    pub ejercicio: PanelEjercicio,
     cached_hash: u64,
     cached_len: usize,
 }
@@ -48,6 +53,7 @@ impl Default for TeachingUiState {
             opened_at: None,
             anim_frames: None,
             anim_textures: Vec::new(),
+            ejercicio: PanelEjercicio::default(),
             cached_hash: 0,
             cached_len: 0,
         }
@@ -832,14 +838,11 @@ pub fn elementos_para_topico(topico: &TeachingTopic) -> Vec<grafito_whiteboard::
 // ── Tarjeta de ejercicio inline (pura + dibujo acotado) ──
 
 /// Tope de caracteres del enunciado para que la tarjeta no desborde.
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 pub const MAX_ENUNCIADO_CHARS: usize = 280;
 /// Tope por opción múltiple.
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 pub const MAX_OPCION_CHARS: usize = 120;
 
 /// Recorta por borde de carácter (nunca parte UTF-8). Puro, sin I/O.
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 pub fn acotar_texto(texto: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -851,7 +854,6 @@ pub fn acotar_texto(texto: &str, max: usize) -> String {
     format!("{recortado}…")
 }
 
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 fn numero_simple(texto: &str) -> Option<f64> {
     let t = texto.trim().replace(',', ".");
     if t.is_empty() {
@@ -868,7 +870,6 @@ fn numero_simple(texto: &str) -> Option<f64> {
     t.parse::<f64>().ok()
 }
 
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 fn formatear_numero(valor: f64) -> String {
     if (valor - valor.round()).abs() < 1e-9 && valor.abs() < 1e9 {
         format!("{}", valor.round() as i64)
@@ -878,7 +879,6 @@ fn formatear_numero(valor: f64) -> String {
 }
 
 /// Opciones múltiples deterministas (4, con la solución incluida). Puro, sin I/O.
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 pub fn opciones_para_ejercicio(ejercicio: &Exercise) -> Vec<String> {
     let solucion = ejercicio.solution.trim().to_string();
     let mut candidatas: Vec<String> = Vec::with_capacity(4);
@@ -927,7 +927,6 @@ pub fn opciones_para_ejercicio(ejercicio: &Exercise) -> Vec<String> {
 }
 
 /// Índice de la solución dentro de `opciones`. Puro, sin I/O.
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 pub fn indice_respuesta_correcta(ejercicio: &Exercise, opciones: &[String]) -> Option<usize> {
     let sol = ejercicio.solution.trim();
     opciones.iter().position(|o| o.trim() == sol)
@@ -935,7 +934,6 @@ pub fn indice_respuesta_correcta(ejercicio: &Exercise, opciones: &[String]) -> O
 
 /// Estado local de la tarjeta inline (vive en la Piel, no persiste).
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 pub struct EstadoTarjetaEjercicio {
     pub respuesta: String,
     pub opcion_elegida: Option<usize>,
@@ -946,7 +944,6 @@ pub struct EstadoTarjetaEjercicio {
 ///
 /// Layout acotado (ancho del panel, `wrap` + recorte). Sin I/O ni spawn:
 /// sólo evalúa con `FeedbackEngine` (CPU en memoria). Textos en rioplatense.
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
 pub fn draw_tarjeta_ejercicio(
     ui: &mut egui::Ui,
     ejercicio: &Exercise,
@@ -1058,6 +1055,287 @@ pub fn draw_tarjeta_ejercicio(
                     });
             }
         });
+}
+
+// ── Panel de ejercicio con estados (B7: cablea la tarjeta) ──
+
+/// Tope del tema pedido (mensajes y resolución de LO acotados).
+pub const MAX_TEMA_CHARS: usize = 60;
+
+/// Estado del panel de ejercicio: vacío / generando / lista / error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EstadoPanelEjercicio {
+    #[default]
+    Vacio,
+    Generando,
+    Lista,
+    Error,
+}
+
+/// Panel de ejercicio: dueña del ciclo pedir→generar→responder→próximo.
+///
+/// Vive en `TeachingUiState` (sin tocar `app.rs`): el hilo de generación
+/// escribe por `mpsc` y `sondear` lo cosecha sin bloquear. La corrección
+/// (`Responder`) sigue inline en `draw_tarjeta_ejercicio` (CPU en memoria,
+/// precedente aceptado); la app asienta el resultado en el perfil aparte.
+#[derive(Default)]
+pub struct PanelEjercicio {
+    pub estado: EstadoPanelEjercicio,
+    pub tema: String,
+    pub ejercicio: Option<Exercise>,
+    pub opciones: Vec<String>,
+    pub tarjeta: EstadoTarjetaEjercicio,
+    /// Próximo paso BKT (`recommend_next`) o texto honesto si no hay ramas.
+    pub proximo: Option<String>,
+    pub error: Option<String>,
+    /// Semilla: crece en cada pedido para que «Otro ejercicio» varíe.
+    pub semilla: u64,
+    /// Respuesta ya asentada en el perfil (evita doble conteo BKT).
+    pub registrada: Option<String>,
+    receptor: Option<std::sync::mpsc::Receiver<Result<Exercise, String>>>,
+}
+
+/// Quita tildes para el reintento fuzzy (`función`→`funcion`). Puro.
+fn sin_tildes(texto: &str) -> String {
+    texto
+        .chars()
+        .map(|c| match c {
+            'á' | 'Á' => 'a',
+            'é' | 'É' => 'e',
+            'í' | 'Í' => 'i',
+            'ó' | 'Ó' => 'o',
+            'ú' | 'Ú' | 'ü' | 'Ü' => 'u',
+            'ñ' | 'Ñ' => 'n',
+            otro => otro,
+        })
+        .collect()
+}
+
+/// Resuelve texto libre → `LearningObjective` (exacto por id, si no fuzzy
+/// por concepto con reintento sin tildes). Puro, sin I/O. Mismo criterio
+/// que `generate_exercise` del dispatcher, sin round-trip JSON.
+pub fn resolver_lo(tema: &str) -> Result<LearningObjective, String> {
+    let recortado: String = tema.trim().chars().take(MAX_TEMA_CHARS).collect();
+    if recortado.is_empty() {
+        return Err("Decime un tema primero, che (ej. «derivada»).".to_string());
+    }
+    if let Some(lo) = Curriculum::get(recortado.trim()) {
+        return Ok(lo);
+    }
+    let mut candidatos = Curriculum::find_for_concept(&recortado);
+    if candidatos.is_empty() {
+        candidatos = Curriculum::find_for_concept(&sin_tildes(&recortado));
+    }
+    candidatos.into_iter().next().ok_or_else(|| {
+        format!("No encontré ejercicios de «{recortado}», probá con otro tema, che.")
+    })
+}
+
+/// Arma un ejercicio validado para el tema (núcleo sync del job). Puro.
+pub fn armar_ejercicio(
+    tema: &str,
+    nivel: PedagogicalLevel,
+    semilla: u64,
+) -> Result<Exercise, String> {
+    let lo = resolver_lo(tema)?;
+    let ejercicio = ExerciseGenerator.generate_with_seed(&lo, nivel, semilla);
+    ejercicio
+        .validate()
+        .map_err(|motivo| format!("El ejercicio salió fallado ({motivo}), probá de nuevo, che."))?;
+    Ok(ejercicio)
+}
+
+impl PanelEjercicio {
+    /// Pide un ejercicio: pasa a `Generando` y lo arma en background.
+    /// La UI sólo cosecha con `sondear`; cero spawn en el dibujado.
+    pub fn pedir(&mut self, tema: &str, nivel: PedagogicalLevel) {
+        let recortado: String = tema.trim().chars().take(MAX_TEMA_CHARS).collect();
+        if recortado.is_empty() {
+            self.estado = EstadoPanelEjercicio::Error;
+            self.error = Some("Decime un tema primero, che (ej. «derivada»).".to_string());
+            self.receptor = None;
+            return;
+        }
+        let semilla = self.semilla.wrapping_add(1);
+        let para_hilo = recortado.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("grafito-ejercicio".to_string())
+            .spawn(move || {
+                let _ = tx.send(armar_ejercicio(&para_hilo, nivel, semilla));
+            }) {
+            Ok(_) => {
+                self.semilla = semilla;
+                self.tema = recortado;
+                self.receptor = Some(rx);
+                self.estado = EstadoPanelEjercicio::Generando;
+                self.error = None;
+                self.proximo = None;
+                self.registrada = None;
+            }
+            Err(_) => {
+                self.receptor = None;
+                self.estado = EstadoPanelEjercicio::Error;
+                self.error =
+                    Some("No pude arrancar la generación, probá de nuevo, che.".to_string());
+            }
+        }
+    }
+
+    /// Cosecha el job sin bloquear (agota la cola: vale el último pedido).
+    /// Retorna `true` si hubo cambio (el dibujado repinta).
+    pub fn sondear(&mut self) -> bool {
+        if self.receptor.is_none() {
+            return false;
+        }
+        let mut cambio = false;
+        loop {
+            let recibido = match self.receptor.as_ref() {
+                None => break,
+                Some(rx) => rx.try_recv(),
+            };
+            match recibido {
+                Ok(Ok(ejercicio)) => {
+                    cambio = true;
+                    self.opciones = opciones_para_ejercicio(&ejercicio);
+                    // Invariante de la tarjeta: la solución está entre las opciones.
+                    debug_assert!(indice_respuesta_correcta(&ejercicio, &self.opciones).is_some());
+                    self.ejercicio = Some(ejercicio);
+                    self.tarjeta = EstadoTarjetaEjercicio::default();
+                    self.estado = EstadoPanelEjercicio::Lista;
+                    self.error = None;
+                }
+                Ok(Err(mensaje)) => {
+                    cambio = true;
+                    self.estado = EstadoPanelEjercicio::Error;
+                    self.error = Some(mensaje);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if self.estado == EstadoPanelEjercicio::Generando {
+                        self.estado = EstadoPanelEjercicio::Error;
+                        self.error =
+                            Some("Se cortó la generación, probá de nuevo, che.".to_string());
+                        cambio = true;
+                    }
+                    self.receptor = None;
+                    break;
+                }
+            }
+        }
+        if cambio && !matches!(self.estado, EstadoPanelEjercicio::Generando) {
+            self.receptor = None;
+        }
+        cambio
+    }
+
+    /// Cierra el panel (suelta el job en curso: su `send` falla en silencio).
+    pub fn cerrar(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Intención del panel (la app ejecuta; el dibujado no genera ni persiste).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccionEjercicio {
+    Otro,
+    Cerrar,
+}
+
+/// Dibuja el panel según estado. `Vacio` no dibuja nada (los entry points
+/// son el botón «Andamiar» en cada respuesta y el CTA del estado vacío).
+/// Todos los botones hacen algo: sin botones mudos.
+pub fn draw_panel_ejercicio(
+    ui: &mut egui::Ui,
+    panel: &mut PanelEjercicio,
+) -> Option<AccionEjercicio> {
+    if panel.sondear() {
+        ui.ctx().request_repaint();
+    }
+    let tema = grafito_ui::theme::current_theme(ui.ctx());
+    match panel.estado {
+        EstadoPanelEjercicio::Vacio => None,
+        EstadoPanelEjercicio::Generando => {
+            // El job es instantáneo (CPU pura): este frame cosecha al siguiente.
+            ui.ctx().request_repaint();
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new("Armando tu ejercicio…")
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .color(tema.text_secondary),
+                );
+            });
+            None
+        }
+        EstadoPanelEjercicio::Error => {
+            let mensaje = panel
+                .error
+                .clone()
+                .unwrap_or_else(|| "Algo falló, probá de nuevo, che.".to_string());
+            egui::Frame::none()
+                .fill(tema.panel_bg)
+                .stroke(Stroke::new(1.0, tema.separator.gamma_multiply(0.10)))
+                .rounding(grafito_ui::tokens::RADIUS_MD)
+                .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new(acotar_texto(&mensaje, MAX_ENUNCIADO_CHARS))
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(tema.text_primary),
+                    );
+                });
+            ui.horizontal(|ui| {
+                let mut accion = None;
+                if ui.button("Reintentar").clicked() {
+                    accion = Some(AccionEjercicio::Otro);
+                }
+                if ui.button("Cerrar").clicked() {
+                    accion = Some(AccionEjercicio::Cerrar);
+                }
+                accion
+            })
+            .inner
+        }
+        EstadoPanelEjercicio::Lista => {
+            let Some(ejercicio) = panel.ejercicio.as_ref() else {
+                panel.estado = EstadoPanelEjercicio::Error;
+                panel.error = Some("Se perdió el ejercicio, pedí otro, che.".to_string());
+                return None;
+            };
+            ui.label(
+                egui::RichText::new(format!("Ejercicio · {}", panel.tema))
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(tema.text_secondary),
+            );
+            draw_tarjeta_ejercicio(ui, ejercicio, &panel.opciones, &mut panel.tarjeta);
+            if let Some(proximo) = panel.proximo.as_ref() {
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+                ui.label(
+                    egui::RichText::new(acotar_texto(proximo, MAX_ENUNCIADO_CHARS))
+                        .size(grafito_ui::tokens::TYPE_XS)
+                        .color(tema.text_secondary),
+                );
+            }
+            ui.add_space(grafito_ui::tokens::SPACE_XS);
+            ui.horizontal(|ui| {
+                let mut accion = None;
+                if ui
+                    .button("Otro ejercicio")
+                    .on_hover_text("Genero uno nuevo del mismo tema")
+                    .clicked()
+                {
+                    accion = Some(AccionEjercicio::Otro);
+                }
+                if ui.button("Cerrar").clicked() {
+                    accion = Some(AccionEjercicio::Cerrar);
+                }
+                accion
+            })
+            .inner
+        }
+    }
 }
 
 // ── Burbuja morph avatar→burbuja (pura + clamp a viewport) ──
@@ -1976,6 +2254,82 @@ mod tests {
         assert_eq!(ops.len(), 4);
         assert!(ops.iter().any(|o| o.trim() == "7"));
         assert!(indice_respuesta_correcta(&ejercicio, &ops).is_some());
+    }
+
+    // ── B7: panel de ejercicio con estados ──
+
+    #[test]
+    fn b7_resolver_lo_exactoy_fuzzy() {
+        let por_id = resolver_lo("am1-der").expect("am1-der existe");
+        assert_eq!(por_id.id, "am1-der");
+        let fuzzy = resolver_lo("derivada").expect("derivada resuelve");
+        assert_eq!(fuzzy.id, "am1-der");
+        // Con tilde también (reintento sin tildes).
+        let tilde = resolver_lo("función").expect("función resuelve");
+        assert!(!tilde.id.is_empty());
+    }
+
+    #[test]
+    fn b7_resolver_lo_vacio_y_desconocido_dan_error_honesto() {
+        assert!(resolver_lo("").is_err());
+        assert!(resolver_lo("   ").is_err());
+        let err = resolver_lo("origami de papel xyz").expect_err("sin LO");
+        assert!(err.contains("origami de papel xyz"));
+    }
+
+    #[test]
+    fn b7_armar_ejercicio_valido_y_acotado() {
+        let ejercicio =
+            armar_ejercicio("derivada", grafito_pedagogy::PedagogicalLevel::Secondary, 7)
+                .expect("ejercicio válido");
+        assert!(ejercicio.validate().is_ok());
+        assert!(!ejercicio.prompt.trim().is_empty());
+        assert!(!ejercicio.solution.trim().is_empty());
+        let ops = opciones_para_ejercicio(&ejercicio);
+        assert_eq!(ops.len(), 4);
+        assert!(indice_respuesta_correcta(&ejercicio, &ops).is_some());
+    }
+
+    #[test]
+    fn b7_pedir_genera_en_background_y_lista() {
+        let mut panel = PanelEjercicio::default();
+        assert_eq!(panel.estado, EstadoPanelEjercicio::Vacio);
+        panel.pedir("derivada", grafito_pedagogy::PedagogicalLevel::Secondary);
+        assert_eq!(panel.estado, EstadoPanelEjercicio::Generando);
+        // El job es CPU pura: converge en pocos ms (cota 2s anti-flake).
+        let mut lista = false;
+        for _ in 0..400 {
+            if panel.sondear() && panel.estado == EstadoPanelEjercicio::Lista {
+                lista = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(lista, "el job debió listar, estado={:?}", panel.estado);
+        assert_eq!(panel.opciones.len(), 4);
+        assert!(panel.ejercicio.is_some());
+    }
+
+    #[test]
+    fn b7_pedir_tema_vacio_da_error_y_cerrar_resetea() {
+        let mut panel = PanelEjercicio::default();
+        panel.pedir("   ", grafito_pedagogy::PedagogicalLevel::Secondary);
+        assert_eq!(panel.estado, EstadoPanelEjercicio::Error);
+        assert!(panel.error.is_some());
+        panel.cerrar();
+        assert_eq!(panel.estado, EstadoPanelEjercicio::Vacio);
+        assert!(panel.error.is_none());
+        assert!(panel.ejercicio.is_none());
+    }
+
+    #[test]
+    fn b7_otro_ejercicio_cambia_semilla() {
+        let mut panel = PanelEjercicio::default();
+        panel.pedir("derivada", grafito_pedagogy::PedagogicalLevel::Secondary);
+        let primera = panel.semilla;
+        panel.pedir("derivada", grafito_pedagogy::PedagogicalLevel::Secondary);
+        assert_ne!(panel.semilla, primera);
+        panel.cerrar();
     }
 
     trait VacioOlibre {

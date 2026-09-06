@@ -4392,6 +4392,19 @@ mod registry_tests {
     }
 
     #[test]
+    fn registry_counts_match_documented_architecture() {
+        // Blindaje docs↔código (architecture.md §8/§13). Si agregás un
+        // comando, actualizá ESTE test + architecture.md juntos.
+        assert_eq!(all().len(), 250, "COMMANDS registrados (docs §8)");
+        assert_eq!(
+            palette_commands().count(),
+            206,
+            "comandos visibles en paleta (docs §8: 206 + 14 UI = 220)"
+        );
+        assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
+    }
+
+    #[test]
     fn registry_resolve_is_case_insensitive_and_trims() {
         for spec in all() {
             let upper = spec.canonical.to_ascii_uppercase();

@@ -2092,6 +2092,8 @@ impl GrafitoApp {
                 cache_2d: None,
                 cache_3d: None,
                 scene_readiness: scene_readiness.clone(),
+                // Frente B6: slot background de compute 2D (cap 1, inicia libre).
+                gpu_compute_slot: crate::canvas::GpuComputeSlot::default(),
             };
             render_state
                 .renderer

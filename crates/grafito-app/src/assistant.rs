@@ -60,6 +60,24 @@ enum AssistantRemoteRoute {
     FusionFallback,
 }
 
+/// B7 — ¿El texto pide ejercitar? (botón «Andamiar» o pedido en el chat).
+/// Puro y testeable. No pisa preguntas («qué es una derivada» → false:
+/// sólo dispara con verbo de ejercitación explícito).
+pub(crate) fn wants_exercise_request(texto: &str) -> bool {
+    let lower = texto.to_lowercase();
+    [
+        "ejercicio",
+        "ejercitar",
+        "practic",
+        "andamia",
+        "poneme a prueba",
+        "tomame",
+        "practiquemos",
+    ]
+    .iter()
+    .any(|pista| lower.contains(pista))
+}
+
 enum LocalAssistantDisposition {
     Solved {
         answer: String,
@@ -1067,6 +1085,20 @@ impl GrafitoApp {
         if let Some(action) = action {
             self.handle_assistant_action(ctx, action);
         }
+        self.asentar_respuesta_ejercicio();
+        if let Some(pedido) =
+            crate::teaching_ui::draw_panel_ejercicio(ui, &mut self.teaching_ui.ejercicio)
+        {
+            match pedido {
+                crate::teaching_ui::AccionEjercicio::Otro => {
+                    let tema = self.teaching_ui.ejercicio.tema.clone();
+                    self.iniciar_ejercicio(ctx, &tema);
+                }
+                crate::teaching_ui::AccionEjercicio::Cerrar => {
+                    self.teaching_ui.ejercicio.cerrar();
+                }
+            }
+        }
         self.cancel_stale_model_request();
     }
 
@@ -1148,6 +1180,15 @@ impl GrafitoApp {
                         // I/O en background thread para no bloquear UI (60fps)
                         spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
                     }
+                }
+                // B7 — Pedido de ejercicio en texto: genera la tarjeta en vez de
+                // una respuesta de chat. La animación tiene prioridad si el
+                // texto también la pide.
+                if !wants_animation && wants_exercise_request(&problem_clone) {
+                    self.iniciar_ejercicio(ctx, &problem_clone);
+                    self.assistant.problem.clear();
+                    ctx.request_repaint();
+                    return;
                 }
                 self.start_local_assistant_request(ctx);
                 if wants_animation {
@@ -1605,6 +1646,9 @@ impl GrafitoApp {
                 // teaching_ui.start ya inicia el orchestrator con el template del primer paso
                 self.teaching_ui.start(&topic);
                 self.notify(format!("Enseñanza iniciada: {topic}"), ToastKind::Info);
+            }
+            AssistantUiAction::RequestExercise { topic } => {
+                self.iniciar_ejercicio(ctx, &topic);
             }
         }
     }
@@ -2255,6 +2299,88 @@ impl GrafitoApp {
     }
 
     /// Genera una animación didáctica con el motor externo y la reproduce en el chat.
+    /// B7 — Arranca el ciclo de ejercicio: tema crudo → concepto → job en
+    /// background → tarjeta visible bajo el chat. Sin I/O en la UI.
+    fn iniciar_ejercicio(&mut self, ctx: &egui::Context, tema_crudo: &str) {
+        let tema = extract_concept(tema_crudo).unwrap_or_else(|| {
+            let recorte: String = tema_crudo
+                .trim()
+                .chars()
+                .take(crate::teaching_ui::MAX_TEMA_CHARS)
+                .collect();
+            if recorte.is_empty() {
+                grafito_ui::assistant::ANDAMIAR_DEFAULT_TOPIC.to_string()
+            } else {
+                recorte
+            }
+        });
+        let nivel = PedagogicalLevel::from_level_value(self.profile.level);
+        self.teaching_ui.ejercicio.pedir(&tema, nivel);
+        self.notify(
+            format!("Armo un ejercicio de {tema}, che."),
+            ToastKind::Info,
+        );
+        ctx.request_repaint();
+    }
+
+    /// B7 — Asienta la respuesta ya corregida en el perfil (BKT barato, en
+    /// memoria) y calcula el próximo paso. Corre tras dibujar la tarjeta;
+    /// registra una sola vez por respuesta (guardia `registrada`).
+    fn asentar_respuesta_ejercicio(&mut self) {
+        let (lo_id, tema, respuesta, fb) = match (
+            self.teaching_ui.ejercicio.ejercicio.as_ref(),
+            self.teaching_ui.ejercicio.tarjeta.devolucion.as_ref(),
+        ) {
+            (Some(ejercicio), Some(fb)) => (
+                ejercicio.lo_id.clone(),
+                self.teaching_ui.ejercicio.tema.clone(),
+                self.teaching_ui
+                    .ejercicio
+                    .tarjeta
+                    .respuesta
+                    .trim()
+                    .to_string(),
+                fb.clone(),
+            ),
+            _ => return,
+        };
+        if self.teaching_ui.ejercicio.registrada.as_deref() == Some(respuesta.as_str()) {
+            return;
+        }
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        self.profile
+            .record_outcome(&lo_id, &tema, epoch, fb.correct);
+        let pista = if fb.correct {
+            String::new()
+        } else {
+            format!("{:?}", fb.misconception)
+        };
+        self.profile.working_memory.record_attempt(&pista);
+        self.profile.working_memory.set_topic(&tema);
+        self.profile.working_memory.set_session_epoch(epoch);
+        self.assistant.working_memory = self.profile.working_memory.clone();
+        // I/O en background thread para no bloquear UI (60fps)
+        spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
+        // BKT en memoria (barato): próxima rama o texto honesto si no hay.
+        let proximo = self
+            .profile
+            .recommend_next()
+            .first()
+            .map(|rama| rama.name.clone());
+        let texto = match proximo {
+            Some(nombre) => format!("Próximo tema sugerido: {nombre}, che."),
+            None => {
+                "Seguí practicando este tema y pedí otro ejercicio cuando quieras, che.".to_string()
+            }
+        };
+        let panel = &mut self.teaching_ui.ejercicio;
+        panel.proximo = Some(texto);
+        panel.registrada = Some(respuesta);
+    }
+
     /// Genera y envía un mini-examen (3 preguntas) de la rama recomendada.
     fn run_mini_exam(&mut self, ctx: &egui::Context) {
         let branch = self
@@ -5116,10 +5242,10 @@ mod tests {
         remote_error_message, should_fallback_agent_spark_to_deepseek,
         should_fallback_remote_spark_to_deepseek, socratic_guard_context,
         stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
-        AgentChannelMsg, AssistantAgentJob, AssistantAnimJob, AssistantCommandInvocation,
-        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
-        AssistantRemoteRoute, AssistantRuntime, GifExportJob, LocalAssistantDisposition,
-        RemoteProposalVerification,
+        wants_exercise_request, AgentChannelMsg, AssistantAgentJob, AssistantAnimJob,
+        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
+        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
+        GifExportJob, LocalAssistantDisposition, RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
@@ -6162,6 +6288,20 @@ mod tests {
         panel.conversation.push(ConversationTurn::user("hola"));
         pop_provisional_stream_turn(&mut panel);
         assert_eq!(panel.conversation.len(), 1);
+    }
+
+    #[test]
+    fn b7_wants_exercise_request_solo_con_verbo_explicito() {
+        // Dispara con verbo de ejercitación explícito…
+        assert!(wants_exercise_request("haceme un ejercicio de derivadas"));
+        assert!(wants_exercise_request("practicamos integrales, che"));
+        assert!(wants_exercise_request("andamiame con límites"));
+        assert!(wants_exercise_request("poneme a prueba con fracciones"));
+        // …y no pisa preguntas ni graficación normal.
+        assert!(!wants_exercise_request("qué es una derivada"));
+        assert!(!wants_exercise_request("graficá x^2"));
+        assert!(!wants_exercise_request("hola"));
+        assert!(!wants_exercise_request(""));
     }
 
     #[test]

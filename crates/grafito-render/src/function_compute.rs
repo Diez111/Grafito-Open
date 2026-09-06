@@ -9,12 +9,14 @@
 //! If an expression uses operations that are not supported by the bytecode
 //! machine, compilation fails and the caller falls back to the CPU evaluator.
 
+use crate::gpu_readback::{PendingGpuReadback, ReadbackPoll};
 use crate::implicit_compute::{
     compile_expr, f32_bounds_have_precision, BytecodeProgram, CompileError,
 };
 use grafito_core::function_sampling;
-use grafito_core::object::{FunctionObj, FunctionSamples};
+use grafito_core::object::{FunctionCacheKey, FunctionObj, FunctionSamples};
 use std::collections::HashMap;
+use std::sync::{atomic::AtomicBool, Arc};
 
 const OP_PUSH_VAR_MASK: u32 = 0xFF;
 const OP_PUSH_VAR_VALUE: u32 = 2;
@@ -61,6 +63,31 @@ struct FunctionParamsUniform {
     x_max: f32,
     n: u32,
     code_len: u32,
+}
+
+/// Submit compilado y validado, listo para `submit_buffers` (origen único
+/// sync/async).
+struct FunctionSubmit {
+    params: FunctionParamsUniform,
+    code: Vec<u32>,
+    constants: Vec<f32>,
+}
+
+/// Dispatch en vuelo: el submit ya está en la GPU y la espera corre en el
+/// waiter background. Se resuelve con `resolve_eval` en un frame posterior.
+/// El buffer readback pertenece al pipeline (persistente), así que el `wait`
+/// puede cruzar frames sin mover memoria GPU entre threads.
+#[derive(Debug)]
+pub struct PendingFunctionEval {
+    grid_size: usize,
+    wait: PendingGpuReadback,
+}
+
+impl PendingFunctionEval {
+    /// Poll non-blocking delegado al waiter (para el slot de `canvas.rs`).
+    pub fn poll(&mut self) -> ReadbackPoll {
+        self.wait.poll()
+    }
 }
 
 impl FunctionComputePipeline {
@@ -193,18 +220,15 @@ impl FunctionComputePipeline {
         }
     }
 
-    /// Evaluate the function `y = f(x)` on the GPU for an arbitrary expression
-    /// string and return a vector of y values. Returns `None` if the expression
-    /// cannot be compiled to GPU bytecode (caller should fall back to CPU).
-    pub fn evaluate_expr(
+    /// Compila y valida un submit sin tocar la GPU: origen único para el path
+    /// síncrono (`evaluate_expr`) y el asíncrono (`dispatch_expr`).
+    fn plan_submit(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         expr: &str,
         domain: (f64, f64),
         grid_size: usize,
         variables: &HashMap<String, f64>,
-    ) -> Option<Vec<f64>> {
+    ) -> Option<FunctionSubmit> {
         if grid_size > self.max_grid {
             return None;
         }
@@ -219,19 +243,38 @@ impl FunctionComputePipeline {
         if !f32_bounds_have_precision(&[x_min, x_max], min_step) {
             return None;
         }
-        let params = FunctionParamsUniform {
-            x_min: x_min as f32,
-            x_max: x_max as f32,
-            n: (grid_size + 1) as u32,
-            code_len: prog.code.len() as u32,
-        };
+        Some(FunctionSubmit {
+            params: FunctionParamsUniform {
+                x_min: x_min as f32,
+                x_max: x_max as f32,
+                n: (grid_size + 1) as u32,
+                code_len: prog.code.len() as u32,
+            },
+            code: prog.code,
+            constants: prog.constants,
+        })
+    }
 
-        queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
-        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&prog.code));
+    /// Escribe uniformes, hace submit del dispatch y arma el `map_async`.
+    /// Barato y non-blocking: no espera a la GPU. Retorna el flag que el
+    /// waiter background (o el poll síncrono legacy) observará.
+    fn submit_buffers(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        submit: &FunctionSubmit,
+        grid_size: usize,
+    ) -> Arc<AtomicBool> {
+        queue.write_buffer(
+            &self.params_buffer,
+            0,
+            bytemuck::cast_slice(&[submit.params]),
+        );
+        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
         queue.write_buffer(
             &self.constants_buffer,
             0,
-            bytemuck::cast_slice(&prog.constants),
+            bytemuck::cast_slice(&submit.constants),
         );
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -294,10 +337,94 @@ impl FunctionComputePipeline {
                 log::error!("Function compute readback failed: {:?}", result.err());
             }
         });
-        // TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando
-        // el hilo de prepare (acotado a 1 intento por frame via
-        // MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs). Mitigación:
-        // poll acotado con timeout en vez de Wait infinito.
+        map_ok
+    }
+
+    /// Copia inmediata del readback ya mapeado (sin espera GPU). El llamante
+    /// debe garantizar que el buffer está mapeado (`ReadbackPoll::Mapped`);
+    /// si el rango no es válido se hace `unmap` y se retorna `None`.
+    fn copy_mapped_values(&self, grid_size: usize) -> Option<Vec<f64>> {
+        let slice = self.values_readback.slice(..);
+        let data = slice.get_mapped_range();
+        let values_f32: &[f32] = bytemuck::cast_slice(&data);
+        let ys: Vec<f64> = values_f32
+            .get(..=grid_size)?
+            .iter()
+            .map(|&v| if v.is_finite() { v as f64 } else { f64::NAN })
+            .collect();
+        drop(data);
+        self.values_readback.unmap();
+        Some(ys)
+    }
+
+    /// Libera el buffer readback sin bloquear. Idempotente: si el `map_async`
+    /// falló o sigue pendiente, es no-op seguro; se llama en todo camino de
+    /// descarte (job obsoleto, timeout, objeto borrado) para no dejar el
+    /// pipeline inutilizado.
+    pub fn abort_eval(&self) {
+        self.values_readback.unmap();
+    }
+
+    /// Dispatch sin espera (frente B6): hace submit + `map_async` y retorna
+    /// inmediatamente con un [`PendingFunctionEval`]. El hilo del frame nunca
+    /// bloquea; el resolve llega en un frame posterior vía [`Self::resolve_eval`].
+    /// Retorna `None` en los mismos casos que [`Self::evaluate_expr`].
+    pub fn dispatch_expr(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        expr: &str,
+        domain: (f64, f64),
+        grid_size: usize,
+        variables: &HashMap<String, f64>,
+    ) -> Option<PendingFunctionEval> {
+        let submit = self.plan_submit(expr, domain, grid_size, variables)?;
+        let map_ok = self.submit_buffers(device, queue, &submit, grid_size);
+        log::trace!("Function compute async dispatch (wait distributed over frames)");
+        Some(PendingFunctionEval {
+            grid_size,
+            wait: PendingGpuReadback::submit(&map_ok),
+        })
+    }
+
+    /// Resolve non-blocking de un dispatch previo. Solo copia si el poll ya
+    /// reportó `Mapped`; en cualquier otro caso hace `unmap` y retorna `None`
+    /// (el llamante usa el fallback CPU honesto). Nunca espera: el llamante
+    /// debe haber hecho el `device.poll(Maintain::Poll)` no-bloqueante del
+    /// frame antes de llamar.
+    pub fn resolve_eval(&self, pending: PendingFunctionEval) -> Option<Vec<f64>> {
+        // Nota profiling: el path síncrono lee `gpu_timing::read_and_log` tras
+        // el wait; aquí se omite a propósito porque su poll de 50 ms
+        // reintroduciría bloqueo en el hilo UI. El `resolve` del encoder ya
+        // quedó encolado en el submit y no afecta al resultado.
+        let PendingFunctionEval {
+            grid_size,
+            mut wait,
+        } = pending;
+        if wait.poll() != ReadbackPoll::Mapped {
+            self.abort_eval();
+            return None;
+        }
+        self.copy_mapped_values(grid_size)
+    }
+
+    /// Evaluate the function `y = f(x)` on the GPU for an arbitrary expression
+    /// string and return a vector of y values. Returns `None` if the expression
+    /// cannot be compiled to GPU bytecode (caller should fall back to CPU).
+    ///
+    /// Path síncrono legacy (bloquea hasta 250 ms): solo para callers sin slot
+    /// background. El prepare 2D usa `dispatch_expr` + `resolve_eval`.
+    pub fn evaluate_expr(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        expr: &str,
+        domain: (f64, f64),
+        grid_size: usize,
+        variables: &HashMap<String, f64>,
+    ) -> Option<Vec<f64>> {
+        let submit = self.plan_submit(expr, domain, grid_size, variables)?;
+        let map_ok = self.submit_buffers(device, queue, &submit, grid_size);
         log::trace!("Function compute sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);
         crate::gpu_timing::read_and_log(&self.timing, device, "Function Compute");
@@ -308,16 +435,7 @@ impl FunctionComputePipeline {
             self.values_readback.unmap();
             return None;
         }
-        let data = slice.get_mapped_range();
-        let values_f32: &[f32] = bytemuck::cast_slice(&data);
-        let ys: Vec<f64> = values_f32[..=grid_size]
-            .iter()
-            .map(|&v| if v.is_finite() { v as f64 } else { f64::NAN })
-            .collect();
-        drop(data);
-        self.values_readback.unmap();
-
-        Some(ys)
+        self.copy_mapped_values(grid_size)
     }
 
     /// Evaluate a `FunctionObj` on the GPU by delegating to [`Self::evaluate_expr`].
@@ -360,10 +478,162 @@ pub fn evaluate_function_batch_gpu(
         .ok_or_else(|| "GPU function evaluation failed (unsupported expression?)".to_string())
 }
 
+/// Job de cache en vuelo: conserva la `key` del dispatch para re-chequear
+/// vigencia en el resolve (si la expresión/variables cambiaron entre frames,
+/// el resultado se descarta en vez de escribir basura en el cache).
+#[derive(Debug)]
+pub struct PendingFunctionJob {
+    key: FunctionCacheKey,
+    padded_domain: (f64, f64),
+    grid_size: usize,
+    eval: PendingFunctionEval,
+}
+
+impl PendingFunctionJob {
+    /// Poll non-blocking del waiter subyacente (para el slot de `canvas.rs`).
+    pub fn poll(&mut self) -> ReadbackPoll {
+        self.eval.poll()
+    }
+}
+
+/// Resultado de [`dispatch_function_on_gpu`]: `Cached` no tocó la GPU,
+/// `Dispatched` ocupa el slot background (cap 1), `Unsupported` pide CPU.
+#[derive(Debug)]
+pub enum FunctionDispatchOutcome {
+    Cached,
+    Dispatched(PendingFunctionJob),
+    Unsupported,
+}
+
+/// Dispatch sin espera a nivel cache (frente B6): replica los chequeos de
+/// [`maybe_compute_function_on_gpu`] y retorna el job en vuelo en vez de
+/// bloquear. El llamante guarda el job en el slot (cap 1) y lo resuelve con
+/// [`resolve_function_job`] cuando el poll reporte `Mapped`.
+pub fn dispatch_function_on_gpu(
+    compute: &FunctionComputePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    fun: &FunctionObj,
+    domain: (f64, f64),
+    grid_size: usize,
+    variables: &HashMap<String, f64>,
+) -> FunctionDispatchOutcome {
+    if fun.is_integral {
+        // Integral functions need adaptive quadrature; GPU only evaluates the integrand.
+        return FunctionDispatchOutcome::Unsupported;
+    }
+    let padded_domain = function_sampling::padded_snapped_domain(domain, 2.0, 64);
+    let key = function_sampling::cache_key(fun, padded_domain, grid_size, variables);
+
+    {
+        let cached_key = fun.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(&key) {
+            return FunctionDispatchOutcome::Cached;
+        }
+    }
+
+    match compute.dispatch_expr(
+        device,
+        queue,
+        &fun.expr,
+        padded_domain,
+        grid_size,
+        variables,
+    ) {
+        Some(eval) => FunctionDispatchOutcome::Dispatched(PendingFunctionJob {
+            key,
+            padded_domain,
+            grid_size,
+            eval,
+        }),
+        None => FunctionDispatchOutcome::Unsupported,
+    }
+}
+
+/// Resolve non-blocking de un job de cache. Re-chequea la key contra el
+/// estado actual del objeto: si cambió (edición entre dispatch y resolve),
+/// hace `unmap` y retorna `false` sin escribir. Nunca espera.
+/// Retorna `true` si el cache quedó poblado con la key vigente.
+pub fn resolve_function_job(
+    compute: &FunctionComputePipeline,
+    fun: &FunctionObj,
+    variables: &HashMap<String, f64>,
+    job: PendingFunctionJob,
+) -> bool {
+    let PendingFunctionJob {
+        key,
+        padded_domain,
+        grid_size,
+        eval,
+    } = job;
+    // Vigencia: la key incluye expr, dominio con padding/snapping y variables
+    // referenciadas; si el documento cambió, el resultado es de otra escena.
+    let fresh = function_sampling::cache_key(fun, padded_domain, grid_size, variables);
+    if fresh != key {
+        log::debug!("Function GPU job obsoleto (key cambió); descartando sin escribir");
+        compute.abort_eval();
+        return false;
+    }
+    // Otro frame pudo poblar el mismo cache mientras la GPU trabajaba.
+    {
+        let cached_key = fun.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(&key) {
+            compute.abort_eval();
+            return true;
+        }
+    }
+    let Some(ys) = compute.resolve_eval(eval) else {
+        return false;
+    };
+    populate_function_cache(fun, &key, padded_domain, grid_size, ys);
+    true
+}
+
+/// Escribe samples + key en el cache del objeto (origen único sync/async).
+fn populate_function_cache(
+    fun: &FunctionObj,
+    key: &FunctionCacheKey,
+    padded_domain: (f64, f64),
+    grid_size: usize,
+    ys: Vec<f64>,
+) {
+    let (x_min, x_max) = padded_domain;
+    let dx = (x_max - x_min) / grid_size as f64;
+    let samples: FunctionSamples = ys
+        .into_iter()
+        .enumerate()
+        .map(|(i, y)| {
+            let x = x_min + i as f64 * dx;
+            // GPU results are already f32; retain every finite sample and let the
+            // geometry builder apply its view-aware screen-space bounds.
+            let y_opt = y.is_finite().then_some(y);
+            (x, y_opt)
+        })
+        .collect();
+
+    *fun.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *fun.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key.clone());
+}
+
 /// Try to populate the function cache using the GPU compute pipeline.
 /// Returns `true` if the cache was populated (either already cached or freshly
 /// computed on the GPU). Returns `false` if the GPU path is unavailable or the
 /// expression is not supported by the bytecode machine.
+///
+/// Path síncrono legacy (bloquea hasta 250 ms). El prepare 2D usa
+/// `dispatch_function_on_gpu` + `resolve_function_job`.
 pub fn maybe_compute_function_on_gpu(
     compute: &FunctionComputePipeline,
     device: &wgpu::Device,
@@ -394,27 +664,6 @@ pub fn maybe_compute_function_on_gpu(
         return false;
     };
 
-    let (x_min, x_max) = padded_domain;
-    let dx = (x_max - x_min) / grid_size as f64;
-    let samples: FunctionSamples = ys
-        .into_iter()
-        .enumerate()
-        .map(|(i, y)| {
-            let x = x_min + i as f64 * dx;
-            // GPU results are already f32; retain every finite sample and let the
-            // geometry builder apply its view-aware screen-space bounds.
-            let y_opt = y.is_finite().then_some(y);
-            (x, y_opt)
-        })
-        .collect();
-
-    *fun.cached_samples.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = samples;
-    *fun.cached_key.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = Some(key);
+    populate_function_cache(fun, &key, padded_domain, grid_size, ys);
     true
 }
