@@ -193,6 +193,25 @@ impl ToolDispatcher for PedagogyDispatcher {
     }
 }
 
+/// `ask_user` real vía evento pendiente (S2): nunca ejecuta en silencio.
+///
+/// Pura y no bloqueante: devuelve `ok=false` + JSON `needs_user:true` con
+/// `question` + `options` que la UI muestra como botones en el turno. La
+/// respuesta del usuario vuelve al loop como `function_call_output`/mensaje
+/// vía `grafito_agent::tools::{ask_user_answer_function_output,
+/// ask_user_answer_tool_message}`. Reutiliza el saneado del dispatcher base
+/// (`grafito-agent`), sin duplicar topes ni mutar `Document`.
+fn ask_user_tool(call: &ToolCall) -> ToolResult {
+    match grafito_agent::tools::parse_ask_user_request(call) {
+        Ok(request) => ToolResult::text(
+            &call.id,
+            false,
+            grafito_agent::tools::format_ask_user_pending(&request),
+        ),
+        Err(error) => ToolResult::text(&call.id, false, error.to_string()),
+    }
+}
+
 fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
     if let Some(rejected) = reject_oversized_string_args(call) {
         return rejected;
@@ -200,11 +219,7 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
     match call.name.as_str() {
         "evaluate_expr" => evaluate_expr_tool(call),
         "grafito_docs" => grafito_docs_tool(call),
-        "ask_user" => ToolResult::text(
-            &call.id,
-            false,
-            "ask_user requires an explicit user answer in the Grafito chat; repeated it as a clarifying question instead".to_string(),
-        ),
+        "ask_user" => ask_user_tool(call),
         // Pedagogy tools (F3.2) — puras, sin Document, sin I/O
         "scaffold" => scaffold_tool(call),
         "generate_exercise" => generate_exercise_tool(call),
@@ -917,10 +932,13 @@ pub fn all_safe_tool_schemas() -> Vec<ToolSchema> {
         ),
         ToolSchema::new(
             "ask_user",
-            "Hace una única pregunta corta de aclaración matemática al usuario cuando falta un valor obligatorio.",
+            "Hace una única pregunta corta de aclaración matemática al usuario cuando falta un valor obligatorio. La UI la muestra como botones; nunca se ejecuta en silencio.",
             json!({
                 "type": "object",
-                "properties": {"question": {"type": "string"}},
+                "properties": {
+                    "question": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "string"}}
+                },
                 "required": ["question"]
             }),
         )
@@ -2316,6 +2334,198 @@ pub fn vibecoder_explain(compiler_message: &str, context: &str) -> VibecoderErro
     })
 }
 
+// ── S3: fix sintáctico seguro para fence/propuesta inválida ──────────────────
+//
+// Solo reescritura sintáctica (corchetes, coma trailing, mayúscula inicial).
+// Jamás cambio semántico silencioso: el candidato solo se acepta si
+// `parse_assistant_command` lo reconoce Y difiere del crudo únicamente por
+// esos retoques. Puro, acotado (≤1024 bytes como el reconocedor) y sin `unwrap`.
+
+/// Tope del crudo evaluado (paridad con `MAX_ASSISTANT_COMMAND_BYTES` del reconocedor).
+pub const MAX_VIBE_FIX_BYTES: usize = 1_024;
+
+/// ¿El fix solo toca sintaxis (sin cambiar números, nombres ni operadores)?
+///
+/// Compara crudo vs fix tras `trim`: permite únicamente agregar `]`/`)`
+/// faltantes al final, quitar una coma trailing antes de `]` y capitalizar la
+/// inicial del nombre (`function` → `Function`). Cualquier otra diferencia
+/// (incluido cambiar el interior) es semántica y se rechaza.
+fn is_safe_syntactic_fix(raw: &str, fixed: &str) -> bool {
+    let raw = raw.trim();
+    let fixed = fixed.trim();
+    if raw.is_empty() || fixed.is_empty() || raw == fixed {
+        return false;
+    }
+    // Normaliza capitalización inicial para comparar el resto.
+    let mut raw_chars: Vec<char> = raw.chars().collect();
+    let mut fixed_chars: Vec<char> = fixed.chars().collect();
+    // Permite capitalizar la primera letra del nombre (antes de `[`).
+    if let (Some(raw_open), Some(fixed_open)) = (raw.find('['), fixed.find('[')) {
+        let (raw_name, fixed_name) = (&raw[..raw_open], &fixed[..fixed_open]);
+        if raw_name.len() == fixed_name.len()
+            && raw_name
+                .chars()
+                .zip(fixed_name.chars())
+                .enumerate()
+                .all(|(idx, (a, b))| {
+                    if idx == 0 {
+                        a.eq_ignore_ascii_case(&b)
+                    } else {
+                        a == b
+                    }
+                })
+        {
+            raw_chars = raw[raw_open..].chars().collect();
+            fixed_chars = fixed[fixed_open..].chars().collect();
+        } else if raw_name != fixed_name {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    let raw_body: String = raw_chars.into_iter().collect();
+    let fixed_body: String = fixed_chars.into_iter().collect();
+    // 0. Solo cambió la mayúscula inicial (`function[x]` → `Function[x]`):
+    //    cuerpos idénticos tras normalizar el nombre.
+    if raw_body == fixed_body {
+        return true;
+    }
+    // Casos permitidos sobre el cuerpo `[…]`:
+    // 1. Agregar `]` (o `)]`) faltante al final.
+    if fixed_body.starts_with(&raw_body) {
+        let suffix = &fixed_body[raw_body.len()..];
+        return matches!(suffix, "]" | ")]" | "))]" | "]]");
+    }
+    // 2. Quitar coma trailing antes de `]` (`[x,]` → `[x]`).
+    if raw_body.ends_with(",]") && fixed_body == raw_body[..raw_body.len() - 2].to_owned() + "]" {
+        return true;
+    }
+    // 3. Combinación: coma trailing + `]` faltante (`[x,` → `[x]`).
+    if raw_body.ends_with(',') && fixed_body == raw_body[..raw_body.len() - 1].to_owned() + "]" {
+        return true;
+    }
+    false
+}
+
+/// Candidatos sintácticos en orden (primero el que valide gana).
+fn vibecoder_fix_candidates(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim().to_owned();
+    if trimmed.is_empty() || trimmed.len() > MAX_VIBE_FIX_BYTES {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // 1. Recorta texto trailing tras el `]` balanceado (el LLM suele agregar
+    //    "explicación" tras el comando): mismo recorte que `ApplyRawCommand`.
+    if let Some(open) = trimmed.find('[') {
+        let mut depth = 0i32;
+        let mut close_idx: Option<usize> = None;
+        for (idx, ch) in trimmed[open..].char_indices() {
+            if ch == '[' {
+                depth += 1;
+            } else if ch == ']' {
+                depth -= 1;
+                if depth == 0 {
+                    close_idx = Some(open + idx);
+                    break;
+                }
+            }
+        }
+        if let Some(close) = close_idx {
+            if trimmed.len() > close + 1 && !trimmed[close + 1..].trim().is_empty() {
+                out.push(trimmed[..=close].trim().to_owned());
+            }
+        }
+    }
+    // 2. Agrega `]` faltante.
+    if trimmed.contains('[') && !trimmed.ends_with(']') {
+        out.push(format!("{trimmed}]"));
+    }
+    // 3. Quita coma trailing (`[x,]` → `[x]`, `[x,` → `[x]`).
+    if trimmed.ends_with(",]") {
+        out.push(trimmed[..trimmed.len() - 2].to_owned() + "]");
+    } else if trimmed.ends_with(',') {
+        out.push(trimmed[..trimmed.len() - 1].to_owned() + "]");
+    }
+    // 4. Capitaliza la inicial (`function[x]` → `Function[x]`).
+    if let Some(open) = trimmed.find('[') {
+        let (name, rest) = trimmed.split_at(open);
+        let name = name.trim();
+        if let Some(first) = name.chars().next() {
+            if first.is_ascii_lowercase() {
+                let mut fixed_name = first.to_ascii_uppercase().to_string();
+                fixed_name.push_str(&name[first.len_utf8()..]);
+                out.push(format!("{fixed_name}{rest}"));
+                // Capitalizada + `]` faltante.
+                if (rest.contains('[') || trimmed.contains('[')) && !rest.trim_end().ends_with(']')
+                {
+                    out.push(format!("{fixed_name}{rest}]"));
+                }
+            }
+        }
+    }
+    // 5. Combinación coma + capitalización (se genera vía 3+4 en validación).
+    out
+}
+
+/// Sugiere un fix sintáctico seguro para una entrada rota típica.
+///
+/// Devuelve el texto canónico (`canonical_text`) si algún candidato valida con
+/// `parse_assistant_command` Y es solo retoque sintáctico; `None` en cualquier
+/// otro caso (incluido comando semánticamente distinto como `Script[Save[]]`,
+/// que jamás se reescribe en silencio). Pura, sin `unwrap`.
+#[must_use]
+pub fn vibecoder_suggest_fix(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_VIBE_FIX_BYTES {
+        return None;
+    }
+    // Si ya valida, no hay nada que arreglar (no se propone a sí misma).
+    if grafito_command::assistant_proposals::parse_assistant_command(trimmed).is_some() {
+        return None;
+    }
+    for candidate in vibecoder_fix_candidates(trimmed) {
+        if candidate.len() > MAX_VIBE_FIX_BYTES {
+            continue;
+        }
+        let Some(invocation) =
+            grafito_command::assistant_proposals::parse_assistant_command(&candidate)
+        else {
+            continue;
+        };
+        let canonical = invocation.canonical_text();
+        // El canónico debe validar y ser retoque sintáctico del crudo.
+        if grafito_command::assistant_proposals::parse_assistant_command(&canonical).is_none() {
+            continue;
+        }
+        if is_safe_syntactic_fix(trimmed, &candidate) || is_safe_syntactic_fix(trimmed, &canonical)
+        {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
+/// Explicación + fix para un fence/propuesta inválida (S3).
+///
+/// Combina `vibecoder_explain` (negocio en rioplatense, 2-3 botones) con
+/// `vibecoder_suggest_fix` (solo sintaxis). El fix es `Some` únicamente cuando
+/// es seguro en 1 click; el caller lo ofrece vía bloque fenced (que ya tiene
+/// botón Aplicar) o vía `InsertCommand`, jamás auto-aplicado en silencio.
+#[must_use]
+pub fn explain_invalid_proposal(raw: &str, context: &str) -> (VibecoderError, Option<String>) {
+    let clipped: String = raw.trim().chars().take(200).collect();
+    let compiler_hint = if clipped.is_empty() {
+        "syntax error: propuesta vacía".to_owned()
+    } else if raw.trim().len() > MAX_VIBE_FIX_BYTES {
+        "syntax error: propuesta excede el tope".to_owned()
+    } else {
+        format!("syntax error: propuesta inválida ({clipped})")
+    };
+    let explained = vibecoder_explain(&compiler_hint, context);
+    let fix = vibecoder_suggest_fix(raw);
+    (explained, fix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2446,6 +2656,41 @@ mod tests {
         let result = dispatch_safe_tool(&call);
         assert!(!result.ok);
         assert!(result.content.contains("explicit user answer"));
+    }
+
+    #[test]
+    fn ask_user_pending_round_trip_via_evento_sin_bloquear() {
+        // Dispatcher → pendiente estructurado → parse → function_call_output.
+        // Puro y no bloqueante (sin threads, sin Document, sin I/O).
+        let call = ToolCall {
+            id: "call-q".into(),
+            name: "ask_user".into(),
+            arguments: json!({"question": "¿qué valor le doy a x?", "options": ["0", "1"]}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(!result.ok, "ask_user nunca ejecuta en silencio");
+        let pending = grafito_agent::tools::parse_ask_user_pending(&result.content)
+            .expect("pendiente estructurado parseable");
+        assert_eq!(pending.question(), "¿qué valor le doy a x?");
+        assert_eq!(pending.options(), &["0".to_owned(), "1".to_owned()]);
+        let output = grafito_agent::tools::ask_user_answer_function_output(&result.call_id, "1")
+            .expect("respuesta no vacía");
+        assert_eq!(output["type"], "function_call_output");
+        assert_eq!(output["call_id"], result.call_id);
+        assert_eq!(output["output"], "1");
+    }
+
+    #[test]
+    fn ask_user_rechaza_pregunta_vacia_y_respuesta_vacia() {
+        let call = ToolCall {
+            id: "call-e".into(),
+            name: "ask_user".into(),
+            arguments: json!({}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(!result.ok);
+        assert!(grafito_agent::tools::parse_ask_user_pending(&result.content).is_none());
+        assert!(grafito_agent::tools::ask_user_answer_function_output("c1", "   ").is_none());
     }
 
     // ── Tests pedagógicos F3.2 ──────────────────────────────────────────────
@@ -3395,5 +3640,39 @@ mod tests {
         let dos = vec![ok_a, ok_b];
         assert!(VibecoderError::try_new(VibecoderKind::Unknown, "T", "E", dos).is_ok());
         assert!(VibecoderError::try_new(VibecoderKind::Unknown, "", "E", vec![]).is_err());
+    }
+
+    #[test]
+    fn entrada_rota_tipica_da_explicacion_mas_fix_sintactico() {
+        // S3: fence inválido típico → vibecoder_explain (Syntax, rioplatense,
+        // 2 botones) + fix canónico en 1 click (solo sintaxis).
+        let (explained, fix) = explain_invalid_proposal("Function[x", "derivada");
+        assert_eq!(explained.kind, VibecoderKind::Syntax);
+        assert!(explained.explanation.contains("derivada"));
+        assert_eq!(fix.as_deref(), Some("Function[x]"));
+        // Minúscula + corchete faltante también es solo sintaxis.
+        // (`function[x]` ya valida solo y no necesita fix.)
+        assert!(vibecoder_suggest_fix("function[x]").is_none());
+        let (_, fix) = explain_invalid_proposal("function[x", "");
+        assert_eq!(fix.as_deref(), Some("Function[x]"));
+        // Coma trailing también es sintaxis pura.
+        let (_, fix) = explain_invalid_proposal("Function[x,]", "");
+        assert_eq!(fix.as_deref(), Some("Function[x]"));
+    }
+
+    #[test]
+    fn fix_jamas_cambia_semantica_en_silencio() {
+        // Comando válido → no se propone a sí mismo.
+        assert!(vibecoder_suggest_fix("Function[x]").is_none());
+        // Comando prohibido/semántico → explicación sí, fix jamás.
+        let (explained, fix) = explain_invalid_proposal("Script[Save[]]", "");
+        assert!(!explained.title.trim().is_empty());
+        assert!(fix.is_none(), "Script jamás se reescribe: {fix:?}");
+        // Vacío / gigante → sin fix, sin pánico.
+        assert!(vibecoder_suggest_fix("").is_none());
+        assert!(vibecoder_suggest_fix(&"x".repeat(5_000)).is_none());
+        let (explained, fix) = explain_invalid_proposal("", "integral");
+        assert!(explained.explanation.contains("integral"));
+        assert!(fix.is_none());
     }
 }

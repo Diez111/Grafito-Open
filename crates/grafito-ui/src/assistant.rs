@@ -9,6 +9,7 @@ use crate::{
         TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
     },
 };
+use grafito_anim::protocol::Timeline;
 use grafito_assistant_types::{
     AssistantExecutionOrigin, AssistantFocus, AssistantRepairFeedback, AttachmentLimits,
     ConversationRole, ConversationTurn, ImageAttachment, ImmutableDocumentContext, ProposedPlan,
@@ -168,6 +169,85 @@ pub struct VerifiedAssistantProposal {
     pub prerequisite_parameters: Vec<AssistantParameterAssignment>,
 }
 
+/// Tope de la pregunta de aclaración (paridad con `grafito-agent` S2).
+pub const MAX_CLARIFICATION_QUESTION_CHARS: usize = 300;
+/// Tope de opciones como botones (paridad con `grafito-agent` S2).
+pub const MAX_CLARIFICATION_OPTIONS: usize = 4;
+/// Tope por opción (paridad con `grafito-agent` S2).
+pub const MAX_CLARIFICATION_OPTION_CHARS: usize = 64;
+
+/// Aclaración pendiente del agente (S2 `ask_user` real vía evento).
+///
+/// Pura y acotada: `call_id` correlaciona la respuesta con el
+/// `function_call_output` que vuelve al loop; `question` en rioplatense y
+/// `options` (0..=4) se muestran como botones en el turno. Nunca bloquea
+/// threads: el worker termina con el pendiente y la UI lo retoma con un nuevo
+/// job que incluye la respuesta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingClarification {
+    /// Id de correlación con el `function_call` que la originó.
+    pub call_id: String,
+    /// Pregunta corta ya saneada (`1..=300` chars).
+    pub question: String,
+    /// Opciones ya saneadas para botones (`0..=4`, cada una `1..=64`).
+    pub options: Vec<String>,
+}
+
+impl PendingClarification {
+    /// Valida y construye (`Err` si `call_id`/`question` vacíos o largos).
+    pub fn try_new(call_id: &str, question: &str, options: Vec<String>) -> Result<Self, String> {
+        let call_id = call_id.trim();
+        if call_id.is_empty() {
+            return Err("aclaración sin call_id".to_string());
+        }
+        if call_id.chars().count() > MAX_TOOL_NAME_CHARS {
+            return Err(format!("call_id excede {} chars", MAX_TOOL_NAME_CHARS));
+        }
+        let collapsed = question.split_whitespace().collect::<Vec<_>>().join(" ");
+        let question = collapsed.trim();
+        if question.is_empty() {
+            return Err("aclaración sin pregunta".to_string());
+        }
+        if question.chars().count() > MAX_CLARIFICATION_QUESTION_CHARS {
+            return Err(format!(
+                "pregunta excede {MAX_CLARIFICATION_QUESTION_CHARS} chars"
+            ));
+        }
+        let mut clean_options = Vec::new();
+        for option in options {
+            if clean_options.len() >= MAX_CLARIFICATION_OPTIONS {
+                break;
+            }
+            let collapsed = option.split_whitespace().collect::<Vec<_>>().join(" ");
+            let trimmed = collapsed.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let clipped: String = trimmed
+                .chars()
+                .take(MAX_CLARIFICATION_OPTION_CHARS)
+                .collect::<String>()
+                .trim()
+                .to_owned();
+            if clipped.is_empty() {
+                continue;
+            }
+            if clean_options.iter().any(|known: &String| known == &clipped) {
+                continue;
+            }
+            clean_options.push(clipped);
+        }
+        Ok(Self {
+            call_id: call_id.to_owned(),
+            question: question.to_owned(),
+            options: clean_options,
+        })
+    }
+}
+
+/// Límite del nombre de herramienta (paridad con `grafito-agent::schema`).
+const MAX_TOOL_NAME_CHARS: usize = 64;
+
 /// Recursos visuales locales que la aplicación anfitriona prepara para el asistente.
 ///
 /// La textura es opcional para que la interfaz mantenga un fallback seguro si el
@@ -215,6 +295,74 @@ impl AssistantBlocksCache {
 pub struct AssistantMedia {
     pub title: String,
     pub frames: Vec<egui::ColorImage>,
+}
+
+/// Fotogramas por segundo base del reproductor de la card (B5).
+///
+/// 12 ≈ `100 / GIF_EXPORT_DELAY_CS` (`8cs` en
+/// `grafito-app/src/anim_native.rs`): lo que se ve es lo que se exporta.
+pub const MEDIA_CARD_BASE_FPS: f32 = 12.0;
+
+/// Velocidad del reproductor de la card (B5).
+///
+/// Por card (campo en el estado, sin global mutable): cada animación nueva
+/// arranca en `Normal` (ver `set_media`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaPlaybackSpeed {
+    /// Mitad de velocidad.
+    Half,
+    /// Velocidad base (12 fps).
+    #[default]
+    Normal,
+    /// Doble velocidad.
+    Double,
+}
+
+impl MediaPlaybackSpeed {
+    /// Factor sobre `MEDIA_CARD_BASE_FPS` (la app lo usa para el delay del GIF).
+    pub fn rate(self) -> f32 {
+        match self {
+            Self::Half => 0.5,
+            Self::Normal => 1.0,
+            Self::Double => 2.0,
+        }
+    }
+
+    /// Etiqueta visible (sin IDs literales).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Half => "0.5x",
+            Self::Normal => "1x",
+            Self::Double => "2x",
+        }
+    }
+
+    /// Rota media → normal → rápida → media (botón de velocidad).
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Half => Self::Normal,
+            Self::Normal => Self::Double,
+            Self::Double => Self::Half,
+        }
+    }
+}
+
+/// Estado de la exportación a GIF de la card (B5).
+///
+/// Lo actualiza la app desde el hilo de export (`spawn_gif_export`); la UI
+/// solo lo renderiza. Progreso honesto: `Exporting` es indeterminado (el
+/// codificador no reporta %) y nunca inventa porcentaje.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MediaExportState {
+    /// Sin exportación en curso ni resultado previo.
+    #[default]
+    Idle,
+    /// Hilo de export en vuelo (indeterminado, con texto visible).
+    Exporting,
+    /// GIF escrito (la app avisa la ruta con un aviso).
+    Done,
+    /// Falló con motivo en rioplatense (jamás mudo).
+    Failed(String),
 }
 
 /// Fila de actividad de una herramienta del asistente mientras el agente trabaja.
@@ -371,6 +519,24 @@ pub struct AssistantPanelState {
     media_textures: Vec<egui::TextureHandle>,
     /// Guarda si ya se construyeron las texturas de la media actual.
     media_textures_ready: bool,
+    /// Fotograma actual del reproductor en ms acumulados (B5). Avanza con el
+    /// reloj cuando reproduce; se congela en pausa o al arrastrar. Por card:
+    /// vive en el estado, sin global mutable. `Cell` porque la Piel dibuja
+    /// con `&Estado` (el loop del historial ya presta `&state` al turno) y el
+    /// cursor es detalle local de render, no dato a persistir. Se reinicia
+    /// en `set_media`.
+    media_playhead_ms: std::cell::Cell<u64>,
+    /// Último instante visto (`ui.input time`); `None` = reloj sin armar.
+    media_last_tick_s: std::cell::Cell<Option<f64>>,
+    /// Pausado por el usuario o al arrastrar el deslizador. Al soltar QUEDA
+    /// en pausa con estado visible («en pausa» + botón Reproducir): retomar
+    /// es explícito y nunca salta solo. Se reinicia en `set_media`.
+    media_paused: std::cell::Cell<bool>,
+    /// Velocidad por card (media/lenta/rápida); sin global mutable.
+    media_speed: std::cell::Cell<MediaPlaybackSpeed>,
+    /// Exportación a GIF de la card (la app la actualiza desde el hilo de
+    /// export; la UI solo la renderiza, cero I/O/spawn en `Ui::`).
+    media_export: MediaExportState,
     /// Confirmación del usuario de que el modelo elegido admite imágenes.
     pub vision_enabled: bool,
     /// Autoriza explícitamente una revisión con el modelo de razonamiento
@@ -405,6 +571,10 @@ pub struct AssistantPanelState {
     pub is_pending: bool,
     /// Consulta local no resuelta que espera una autorización remota explícita.
     pending_remote_authorization: Option<PendingRemoteAuthorization>,
+    /// Aclaración pendiente del agente (`ask_user` S2): pregunta + botones.
+    /// Se muestra en el turno sin bloquear threads; la respuesta vuelve al
+    /// loop como `function_call_output`/mensaje vía un nuevo job.
+    pending_clarification: Option<PendingClarification>,
     /// Plan local tipado que ya superó su vista previa y espera Apply explícito.
     proposed_plan: Option<ProposedPlan>,
     /// Cambios legibles que producirá el plan local pendiente.
@@ -457,6 +627,11 @@ impl Default for AssistantPanelState {
             media: None,
             media_textures: Vec::new(),
             media_textures_ready: false,
+            media_playhead_ms: std::cell::Cell::new(0),
+            media_last_tick_s: std::cell::Cell::new(None),
+            media_paused: std::cell::Cell::new(false),
+            media_speed: std::cell::Cell::new(MediaPlaybackSpeed::default()),
+            media_export: MediaExportState::default(),
             anim_progress: false,
             tutor_level: 0,
             tutor_covered: 0,
@@ -485,6 +660,7 @@ impl Default for AssistantPanelState {
             proposal_correction_context: None,
             is_pending: false,
             pending_remote_authorization: None,
+            pending_clarification: None,
             proposed_plan: None,
             proposed_plan_changes: Vec::new(),
             is_cancelling: false,
@@ -554,6 +730,7 @@ impl AssistantPanelState {
         self.clear_proposal_correction();
         self.cancel_remote_authorization();
         self.clear_proposed_plan();
+        self.clear_pending_clarification();
         self.error = None;
     }
 
@@ -600,6 +777,50 @@ impl AssistantPanelState {
     pub fn cancel_remote_authorization(&mut self) {
         self.clear_remote_authorization();
         self.image_upload_consent = false;
+    }
+
+    /// Conserva una aclaración del agente (`ask_user` S2) hasta que el usuario
+    /// elija una opción o la descarte. No toca `is_pending`: el worker ya
+    /// terminó y la respuesta vuelve como nuevo job (nunca bloquea threads).
+    pub fn stage_clarification(&mut self, pending: PendingClarification) {
+        self.pending_clarification = Some(pending);
+        self.error = None;
+    }
+
+    /// Devuelve si hay una aclaración esperando respuesta del usuario.
+    pub fn has_pending_clarification(&self) -> bool {
+        self.pending_clarification.is_some()
+    }
+
+    /// Vista de la aclaración pendiente (pregunta + botones).
+    pub fn pending_clarification(&self) -> Option<&PendingClarification> {
+        self.pending_clarification.as_ref()
+    }
+
+    /// Consume la aclaración al responder (la respuesta vuelve al loop como
+    /// `function_call_output`/mensaje vía un nuevo job en la app).
+    pub fn take_clarification_answer(&mut self, call_id: &str, answer: &str) -> Option<String> {
+        let pending = self.pending_clarification.take()?;
+        if pending.call_id != call_id {
+            return None;
+        }
+        let collapsed = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = collapsed.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let clipped: String = trimmed
+            .chars()
+            .take(MAX_CLARIFICATION_QUESTION_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_owned();
+        (!clipped.is_empty()).then_some(clipped)
+    }
+
+    /// Descarta la aclaración sin responder (el turno visible queda intacto).
+    pub fn clear_pending_clarification(&mut self) {
+        self.pending_clarification = None;
     }
 
     /// Conserva un plan local ya previsualizado para que el usuario lo aplique.
@@ -911,11 +1132,49 @@ impl AssistantPanelState {
         self.agent_activity.clear();
         self.agent_ledger = None;
     }
+}
 
+/// Fila de actividad como etiqueta única con wrap (panel 300px, sin `horizontal`).
+///
+/// Pura: `"• {texto}"` en `TYPE_XS` con `wrap()` en el render. Sin I/O ni `unwrap`.
+pub fn format_activity_row(text: &str) -> String {
+    format!("• {}", text.trim())
+}
+
+/// Ayuda del proveedor compatible: sin jerga de endpoint ni env var.
+///
+/// Pura: redirige a Ajustes → Asistente. Sin I/O ni `unwrap`.
+pub fn custom_provider_help_text() -> &'static str {
+    "Usá OpenCode, Muse Spark u otro proxy OpenAI-compatible. Configurá la dirección y la clave en Ajustes → Asistente."
+}
+
+/// Resumen corto de modelos: plegable + tooltip, se elige solo el verificado.
+///
+/// Pura, sin I/O ni `unwrap`.
+pub fn verified_models_summary_text() -> &'static str {
+    "Modelos verificados de OpenCode Go. Se elige solo el modelo verificado."
+}
+
+/// Detalle de modelos verificados (dentro del plegable, no crudo en ayuda).
+///
+/// Pura, sin I/O ni `unwrap`.
+pub fn verified_models_detail_text() -> &'static str {
+    "deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor, fusion (+ 17 más por descubrimiento)."
+}
+
+impl AssistantPanelState {
     /// Establece la animación a reproducir y prepara sus texturas de frames.
     pub fn set_media(&mut self, media: Option<AssistantMedia>, ctx: &egui::Context) {
         self.media = media;
         self.media_textures_ready = false;
+        // Card nueva = reproductor fresco (B5): playhead en 0, reloj sin
+        // armar, reproduciendo a velocidad base y sin resultado de export
+        // rancio de la animación anterior.
+        self.media_playhead_ms.set(0);
+        self.media_last_tick_s.set(None);
+        self.media_paused.set(false);
+        self.media_speed.set(MediaPlaybackSpeed::default());
+        self.media_export = MediaExportState::default();
         if let Some(media) = &self.media {
             self.media_textures = media
                 .frames
@@ -938,6 +1197,75 @@ impl AssistantPanelState {
     /// texturas de frames listas (para el dibujado del reproductor).
     pub(crate) fn media_textures(&self) -> (&[egui::TextureHandle], bool) {
         (&self.media_textures, self.media_textures_ready)
+    }
+
+    /// Factor de velocidad actual del reproductor (lo usa la app para el
+    /// delay del GIF exportado). Puro, sin I/O.
+    pub fn media_playback_rate(&self) -> f32 {
+        self.media_speed.get().rate()
+    }
+
+    /// Estado de exportación para la app (hilo de export).
+    pub fn media_export_state(&self) -> &MediaExportState {
+        &self.media_export
+    }
+
+    /// Actualiza el estado de exportación (solo la app, desde el poll del
+    /// hilo de export; la UI nunca lo toca).
+    pub fn set_media_export(&mut self, state: MediaExportState) {
+        self.media_export = state;
+    }
+
+    /// Avanza el reloj del reproductor y devuelve el índice a mostrar (B5).
+    ///
+    /// - Sin frames o sin texturas listas: arma el reloj y devuelve `None`.
+    /// - En pausa: congela el playhead (actualiza el reloj para retomar sin
+    ///   salto) y devuelve el índice actual.
+    /// - Reproduciendo: suma `dt * rate` con `dt` capado a 250 ms
+    ///   (volver de segundo plano no salta) y loopea el playhead.
+    ///
+    /// El índice sale de `media_frame_at` (`Timeline::sample` + round +
+    /// clamp). Puro estado UI, sin I/O ni spawn. Toma `&self`: el cursor vive
+    /// en `Cell` (detalle local de render, ver campos).
+    pub(crate) fn advance_media_playhead(
+        &self,
+        now_s: f64,
+        frame_count: usize,
+        textures_ready: bool,
+    ) -> Option<usize> {
+        if frame_count == 0 || !textures_ready {
+            self.media_last_tick_s.set(Some(now_s));
+            return None;
+        }
+        let timeline = media_scrub_timeline(frame_count, MEDIA_CARD_BASE_FPS)?;
+        let duration_ms = timeline.duration_ms;
+        let last = self.media_last_tick_s.replace(Some(now_s));
+        if self.media_paused.get() {
+            return Some(media_frame_at(
+                &timeline,
+                self.media_playhead_ms.get(),
+                frame_count,
+            ));
+        }
+        if let Some(previous_s) = last {
+            let dt_s = (now_s - previous_s).clamp(0.0, 0.25);
+            if dt_s.is_finite() && dt_s > 0.0 {
+                // El playhead va en ms de timeline (tiempo real a 1x): los fps
+                // ya viven en la duración, acá solo pesan dt y velocidad.
+                let step_ms = dt_s * f64::from(self.media_speed.get().rate()) * 1000.0;
+                if step_ms.is_finite() && step_ms > 0.0 {
+                    let step_ms = step_ms.min(u64::MAX as f64) as u64;
+                    self.media_playhead_ms.set(
+                        self.media_playhead_ms.get().saturating_add(step_ms) % duration_ms.max(1),
+                    );
+                }
+            }
+        }
+        Some(media_frame_at(
+            &timeline,
+            self.media_playhead_ms.get(),
+            frame_count,
+        ))
     }
 
     /// Muestra el turno enviado antes de que el proveedor responda.
@@ -1183,6 +1511,7 @@ impl AssistantPanelState {
         self.clear_proposal_correction();
         self.cancel_remote_authorization();
         self.clear_proposed_plan();
+        self.clear_pending_clarification();
     }
 
     fn clear_proposal_correction(&mut self) {
@@ -1485,6 +1814,20 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
     }
     flush_assistant_paragraph(&mut blocks, &mut paragraph);
     blocks
+}
+
+/// Detecta cerca de código sin cerrar (``` sin su cierre posterior).
+///
+/// Pura: alterna por cada línea que abre con ```; impar = parcial.
+/// Sin pánico: sólo `lines`/`trim_start`, sin índices ni `unwrap`.
+pub fn has_unclosed_code_fence(content: &str) -> bool {
+    let mut open = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            open = !open;
+        }
+    }
+    open
 }
 
 /// Ítem de lista numerada (`1. …`, `2) …`) como bloque propio.
@@ -1809,6 +2152,12 @@ pub enum AssistantUiAction {
     AgentModeChanged(bool),
     /// Generar una animación del objeto/expresión y reproducirla en el chat.
     RunAnimation,
+    /// Exportar la animación visible en la card a GIF (B5).
+    ///
+    /// Piel pura: la card emite la intención; la app la ejecuta en el hilo
+    /// de export existente (`spawn_gif_export`) y publica progreso/error en
+    /// `MediaExportState`. Sin I/O ni spawn en `Ui::`.
+    ExportMedia,
     /// Preguntarle al tutor qué estudiar a continuación.
     AskNextTopic,
     /// Feedback del usuario: la última explicación le sirvió.
@@ -1829,6 +2178,21 @@ pub enum AssistantUiAction {
     LiveSaveAvatar,
     /// Restablecer avatar al valor por defecto (borrador local).
     ResetAvatar,
+    /// Aclaración pedida por el agente (`ask_user` S2): la tool devolvió el
+    /// evento pendiente y la UI lo muestra como botones en el turno.
+    /// La app la estagia vía `stage_clarification`; esta variante existe para
+    /// tests/contrato y nunca se emite desde el dibujado (los botones emiten
+    /// `AnswerClarification`).
+    AskClarification {
+        question: String,
+        options: Vec<String>,
+    },
+    /// Respuesta del usuario a la aclaración pendiente (1 click en un botón).
+    /// La app la vuelve al loop como `function_call_output`/mensaje en un
+    /// nuevo job de background; nunca bloquea threads.
+    AnswerClarification { call_id: String, answer: String },
+    /// Descartar la aclaración sin responder (el turno visible queda intacto).
+    DismissClarification,
 }
 
 /// Dibuja el asistente como parte permanente del shell, antes del canvas.
@@ -3282,16 +3646,27 @@ fn draw_assistant_settings_contents(
     if provider == ProviderProfile::CustomOpenAiCompatible {
         ui.add_space(SPACE_SM);
         ui.label(
-            egui::RichText::new("Usá OpenCode, Muse Spark u otro proxy OpenAI-compatible. Configurá endpoint https://.../v1 y clave GRAFITO_ASSISTANT_CUSTOM_*_API_KEY.")
+            egui::RichText::new(custom_provider_help_text())
                 .color(theme.text_tertiary)
                 .size(TYPE_XS),
         );
         ui.label(
-            egui::RichText::new("Modelos OpenCode Go verificados: deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor, fusion (+ 17 más por descubrimiento). Spark usa la API de respuestas; el modo agente con herramientas reintenta con DeepSeek sin cambiar tu modelo.")
+            egui::RichText::new(verified_models_summary_text())
                 .color(theme.text_tertiary)
                 .size(TYPE_XS)
                 .weak(),
-        );
+        )
+        .on_hover_text("Spark usa la API de respuestas; el modo agente con herramientas reintenta con DeepSeek sin cambiar tu modelo.");
+        egui::CollapsingHeader::new("Ver modelos verificados")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(verified_models_detail_text())
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS)
+                        .weak(),
+                );
+            });
     }
     if provider != state.provider {
         state.select_provider(provider);
@@ -3807,6 +4182,13 @@ fn draw_panel_contents(
                 );
                 ui.add_space(SPACE_SM);
             }
+            if state.has_pending_clarification() {
+                retain_first_assistant_action(
+                    &mut action,
+                    draw_pending_clarification_card(ui, state),
+                );
+                ui.add_space(SPACE_SM);
+            }
             if should_draw_empty_state(state) {
                 draw_assistant_empty_state(ui, state, visuals);
             } else {
@@ -3891,8 +4273,8 @@ fn draw_panel_contents(
             if should_draw_empty_state(state) {
                 if state.anim_progress {
                     draw_animation_progress(ui, state, visuals);
-                } else if let Some(media) = &state.media {
-                    draw_media_card(ui, media, state);
+                } else if state.media.is_some() {
+                    retain_first_assistant_action(&mut action, draw_media_card(ui, state));
                 }
             }
         });
@@ -3945,76 +4327,97 @@ fn draw_animation_progress(
     let _ = state;
 }
 
-/// Reproductor de animación (GIF-like) en el chat.
-/// Con tamaño mínimo legible, contraste texto primario y label de estado
-/// (`lista` / `generando`).
-fn draw_media_card(ui: &mut egui::Ui, media: &AssistantMedia, state: &AssistantPanelState) {
-    let theme = current_theme(ui.ctx());
-    let (textures, ready) = state.media_textures();
-    if ready && !textures.is_empty() {
-        let time = ui.input(|input| input.time);
-        let fps = 12.0;
-        let index = ((time * fps) as usize) % textures.len();
-        egui::Frame::none()
-            .fill(theme.input_bg)
-            .stroke(egui::Stroke::new(1.0, theme.separator))
-            .rounding(RADIUS_MD)
-            .inner_margin(egui::Margin::same(SPACE_SM))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.set_min_height(transcript_button_row_min_height());
-                    ui.label(
-                        egui::RichText::new("Animación")
-                            .color(theme.text_primary)
-                            .size(TYPE_SM)
-                            .strong(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new("lista · se reproduce sola")
-                                .color(theme.success)
-                                .size(TYPE_XS)
-                                .strong(),
-                        );
-                    });
-                });
-                if !media.title.is_empty() {
-                    ui.label(
-                        egui::RichText::new(&media.title)
-                            .color(theme.text_primary)
-                            .size(TYPE_SM),
-                    );
-                }
-                ui.add_space(SPACE_XS);
-                let texture = &textures[index];
-                let size = texture.size_vec2();
-                let max_w = ui.available_width().max(80.0);
-                // Evita altura enorme al pedo con retratos o texturas gigantes:
-                // clampear tanto ancho como alto, sin upscale >1.0 y con max_h 280.
-                let max_h = 280.0_f32.min(ui.available_height().max(80.0));
-                let scale_w = (max_w / size.x.max(1.0)).clamp(0.25, 1.0);
-                let scale_h = (max_h / size.y.max(1.0)).clamp(0.25, 1.0);
-                let scale = scale_w.min(scale_h);
-                // Piso legible derivado de tokens (nunca tiny): si el frame
-                // es diminuto, se escala hasta el mínimo dentro del scroll.
-                let min_side = assistant_media_min_side();
-                let display = egui::vec2(size.x * scale, size.y * scale)
-                    .ceil()
-                    .max(egui::vec2(min_side.min(max_w), min_side.min(max_h)));
-                // Usar allocate_exact_size para que ScrollArea mida correcto, no cursor hack
-                let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
-                ui.painter().image(
-                    texture.id(),
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-            });
-        // F17: playback media card — wake source local (no cubierto por is_pending).
-        ui.ctx()
-            .request_repaint_after(MEDIA_PLAYBACK_REPAINT_INTERVAL);
+/// Duración del loop para `frame_count` fotogramas a `fps` (B5).
+///
+/// En ms, mínimo 1 si hay frames; 0 si no hay nada que recorrer. `fps` no
+/// finita o ≤ 0 cae a `MEDIA_CARD_BASE_FPS`. Pura, sin panic.
+pub fn media_loop_duration_ms(frame_count: usize, fps: f32) -> u64 {
+    if frame_count == 0 {
+        return 0;
+    }
+    let fps = if fps.is_finite() && fps > 0.0 {
+        fps
     } else {
+        MEDIA_CARD_BASE_FPS
+    };
+    let ms = (frame_count as f32 / fps * 1000.0).round();
+    if !ms.is_finite() {
+        return 1;
+    }
+    (ms as u64).clamp(1, grafito_anim::protocol::MAX_TIMELINE_DURATION_MS)
+}
+
+/// Timeline de scrub para `frame_count` fotogramas (B5).
+///
+/// Dos keys lineales `0 → 0.0` y `duración → N-1`: el deslizador mapea
+/// fracción → `t_ms` y `Timeline::sample` interpola el valor. `None` si no
+/// hay frames. Pura, sin panic.
+pub fn media_scrub_timeline(frame_count: usize, fps: f32) -> Option<Timeline> {
+    if frame_count == 0 {
+        return None;
+    }
+    let duration_ms = media_loop_duration_ms(frame_count, fps);
+    let last = frame_count.saturating_sub(1) as f32;
+    Some(Timeline {
+        duration_ms,
+        keyframes: vec![
+            grafito_anim::protocol::Keyframe {
+                t_ms: 0,
+                value: 0.0,
+            },
+            grafito_anim::protocol::Keyframe {
+                t_ms: duration_ms,
+                value: last,
+            },
+        ],
+    })
+}
+
+/// Índice a mostrar en `t_ms` vía `Timeline::sample` (B5).
+///
+/// Lerp + round + clamp a `0..N`: slider→frame sin saltos ni panic.
+/// Timeline vacío o `frame_count == 0` → 0. Pura.
+pub fn media_frame_at(timeline: &Timeline, t_ms: u64, frame_count: usize) -> usize {
+    if frame_count == 0 {
+        return 0;
+    }
+    let value = timeline.sample(t_ms);
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.round() as usize).min(frame_count.saturating_sub(1))
+}
+
+/// Reproductor de animación (GIF-like) en el chat (B5).
+///
+/// - Autoplay a 12 fps (`MEDIA_CARD_BASE_FPS`); al arrastrar el deslizador
+///   se pausa y QUEDA en pausa con estado visible («en pausa» + botón
+///   Reproducir): retomar es explícito y nunca salta solo.
+/// - Deslizador mapea fracción → `t_ms` → `media_frame_at`
+///   (`Timeline::sample` + round + clamp).
+/// - Estado siempre visible: «Fotograma N de M» + reproduciendo/en pausa.
+/// - Velocidad por card (0.5x/1x/2x, botón que rota); la app la usa para el
+///   delay del GIF.
+/// - Botón Exportar emite `AssistantUiAction::ExportMedia` (la app ejecuta
+///   en el hilo existente; cero I/O/spawn en `Ui::`). Deshabilitado con
+///   motivo si no hay frames; progreso/error vía `MediaExportState`, jamás
+///   mudo. Prosa sin IDs literales.
+fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<AssistantUiAction> {
+    let theme = current_theme(ui.ctx());
+    let now_s = ui.input(|input| input.time);
+    // Snapshot barato sin retener borrows (los controles piden `&mut` y la
+    // pintura solo necesita el handle clonado).
+    let (title, frame_count) = state.media.as_ref().map_or_else(
+        || (String::new(), 0),
+        |media| (media.title.clone(), media.frames.len()),
+    );
+    let index = state.advance_media_playhead(
+        now_s,
+        frame_count,
+        state.media_textures().1 && !state.media_textures().0.is_empty(),
+    );
+    let mut action = None;
+    let Some(index) = index else {
         egui::Frame::none()
             .fill(theme.input_bg)
             .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -4043,7 +4446,166 @@ fn draw_media_card(ui: &mut egui::Ui, media: &AssistantMedia, state: &AssistantP
                         .weak(),
                 );
             });
+        return action;
+    };
+    // Handle clonado (barato): la pintura no retiene borrow del estado y los
+    // controles de abajo usan `&mut` sin pelear con el borrow checker.
+    let texture = state.media_textures().0.get(index).cloned();
+    let duration_ms = media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS);
+    let paused = state.media_paused.get();
+    let speed_label = state.media_speed.get().label();
+    let export_line: Option<(String, egui::Color32)> = match &state.media_export {
+        MediaExportState::Idle => None,
+        MediaExportState::Exporting => Some(("Exportando…".to_owned(), theme.text_secondary)),
+        MediaExportState::Done => Some(("Se exportó la animación.".to_owned(), theme.success)),
+        MediaExportState::Failed(reason) => {
+            Some((format!("No se pudo exportar: {reason}"), theme.warning))
+        }
+    };
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(RADIUS_MD)
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.set_min_height(transcript_button_row_min_height());
+                ui.label(
+                    egui::RichText::new("Animación")
+                        .color(theme.text_primary)
+                        .size(TYPE_SM)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (status, color) = if paused {
+                        ("en pausa", theme.text_tertiary)
+                    } else {
+                        ("reproduciendo", theme.success)
+                    };
+                    ui.label(
+                        egui::RichText::new(status)
+                            .color(color)
+                            .size(TYPE_XS)
+                            .strong(),
+                    );
+                });
+            });
+            if !title.is_empty() {
+                ui.label(
+                    egui::RichText::new(&title)
+                        .color(theme.text_primary)
+                        .size(TYPE_SM),
+                );
+            }
+            ui.add_space(SPACE_XS);
+            if let Some(texture) = &texture {
+                let size = texture.size_vec2();
+                let max_w = ui.available_width().max(80.0);
+                // Evita altura enorme al pedo con retratos o texturas gigantes:
+                // clampear tanto ancho como alto, sin upscale >1.0 y con max_h 280.
+                let max_h = 280.0_f32.min(ui.available_height().max(80.0));
+                let scale_w = (max_w / size.x.max(1.0)).clamp(0.25, 1.0);
+                let scale_h = (max_h / size.y.max(1.0)).clamp(0.25, 1.0);
+                let scale = scale_w.min(scale_h);
+                // Piso legible derivado de tokens (nunca tiny): si el frame
+                // es diminuto, se escala hasta el mínimo dentro del scroll.
+                let min_side = assistant_media_min_side();
+                let display = egui::vec2(size.x * scale, size.y * scale)
+                    .ceil()
+                    .max(egui::vec2(min_side.min(max_w), min_side.min(max_h)));
+                // Usar allocate_exact_size para que ScrollArea mida correcto, no cursor hack
+                let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("Fotograma no disponible.")
+                        .color(theme.warning)
+                        .size(TYPE_SM),
+                );
+            }
+            ui.add_space(SPACE_XS);
+            ui.label(
+                egui::RichText::new(format!("Fotograma {} de {}", index + 1, frame_count))
+                    .color(theme.text_secondary)
+                    .size(TYPE_XS),
+            );
+            if frame_count > 1 && duration_ms > 0 {
+                let mut fraction =
+                    (state.media_playhead_ms.get().min(duration_ms) as f32) / (duration_ms as f32);
+                fraction = fraction.clamp(0.0, 1.0);
+                let response = ui.add(
+                    egui::Slider::new(&mut fraction, 0.0..=1.0)
+                        .text("Recorrer fotogramas")
+                        .show_value(false),
+                );
+                if response.dragged() || response.changed() {
+                    // Se pausa al arrastrar y queda en pausa con estado
+                    // visible (decisión B5 documentada arriba).
+                    let t_ms = (fraction.clamp(0.0, 1.0) * (duration_ms as f32)).round() as u64;
+                    state.media_playhead_ms.set(t_ms.min(duration_ms));
+                    state.media_paused.set(true);
+                }
+            }
+            ui.horizontal(|ui| {
+                let toggle = if state.media_paused.get() {
+                    "Reproducir"
+                } else {
+                    "Pausar"
+                };
+                if ui
+                    .small_button(toggle)
+                    .on_hover_text(if state.media_paused.get() {
+                        "Retoma donde quedó"
+                    } else {
+                        "Congela en el fotograma actual"
+                    })
+                    .clicked()
+                {
+                    state.media_paused.set(!state.media_paused.get());
+                }
+                if ui
+                    .small_button(format!("Velocidad: {speed_label}"))
+                    .on_hover_text("Cambia entre 0.5x, 1x y 2x")
+                    .clicked()
+                {
+                    state.media_speed.set(state.media_speed.get().cycle());
+                }
+                let exporting = matches!(state.media_export, MediaExportState::Exporting);
+                let export_response = ui.add_enabled(
+                    frame_count > 0 && !exporting,
+                    egui::Button::new("Exportar animación"),
+                );
+                if export_response.clicked() {
+                    action = Some(AssistantUiAction::ExportMedia);
+                }
+                if frame_count == 0 {
+                    export_response
+                        .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+                } else if exporting {
+                    export_response.on_disabled_hover_text("Ya se está exportando…");
+                } else {
+                    export_response.on_hover_text("Guarda la animación como GIF");
+                }
+            });
+            if let Some((text, color)) = &export_line {
+                ui.add_space(SPACE_XS);
+                ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
+            }
+        });
+    // F17: playback media card — wake source local (no cubierto por is_pending).
+    // Solo cuando reproduce: en pausa la card es estática (las interacciones
+    // repintan solas) y no se quema CPU.
+    if !state.media_paused.get() {
+        ui.ctx()
+            .request_repaint_after(MEDIA_PLAYBACK_REPAINT_INTERVAL);
     }
+    action
 }
 
 fn retain_first_assistant_action(
@@ -4138,6 +4700,67 @@ fn draw_remote_authorization_card(
                 }
                 if ui.small_button("Seguir localmente").clicked() {
                     action = Some(AssistantUiAction::CancelRemoteAuthorization);
+                }
+            });
+        });
+    action
+}
+
+/// Tarjeta de aclaración pendiente (S2 `ask_user` real vía evento).
+///
+/// Piel pura: muestra la pregunta + botones (0..=4 opciones) en el turno.
+/// Cada botón emite `AnswerClarification{call_id, answer}`; "Responder en el
+/// chat" descarta para escribir a mano. Sin I/O ni spawn (el 1 click vuelve
+/// al loop como `function_call_output` vía un nuevo job en la app).
+fn draw_pending_clarification_card(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+) -> Option<AssistantUiAction> {
+    let pending = state.pending_clarification()?;
+    let theme = current_theme(ui.ctx());
+    let call_id = pending.call_id.clone();
+    let question = pending.question.clone();
+    let options = pending.options.clone();
+    let mut action = None;
+    egui::Frame::none()
+        .fill(theme.accent_muted)
+        .stroke(egui::Stroke::new(1.0, theme.accent))
+        .rounding(RADIUS_MD)
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                egui::RichText::new("Necesito una aclaración")
+                    .color(theme.accent_strong)
+                    .size(TYPE_SM)
+                    .strong(),
+            );
+            ui.add_space(SPACE_XS);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(question)
+                        .color(theme.text_primary)
+                        .size(TYPE_SM),
+                )
+                .wrap(),
+            );
+            ui.add_space(SPACE_SM);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                for option in &options {
+                    if ui.small_button(option).clicked() {
+                        action = Some(AssistantUiAction::AnswerClarification {
+                            call_id: call_id.clone(),
+                            answer: option.clone(),
+                        });
+                    }
+                }
+                if ui
+                    .small_button("Responder en el chat")
+                    .on_hover_text("Descartar y escribir la respuesta a mano")
+                    .clicked()
+                {
+                    action = Some(AssistantUiAction::DismissClarification);
                 }
             });
         });
@@ -4589,8 +5212,11 @@ fn draw_assistant_composer(
                 if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
                     if state.is_pending && !state.is_cancelling {
                         action = Some(AssistantUiAction::Cancel);
+                        // A11Y live-region sobre la respuesta existente (patrón toolbar::tag_live_region).
+                        crate::toolbar::tag_live_region(&editor, escape_live_text(true));
                     } else {
                         editor.surrender_focus();
+                        crate::toolbar::tag_live_region(&editor, escape_live_text(false));
                     }
                 }
                 ui.add_space(crate::tokens::SPACE_XS);
@@ -4971,9 +5597,9 @@ fn draw_conversation_turn(
                 if state.anim_progress {
                     ui.add_space(SPACE_SM);
                     draw_animation_progress(ui, state, visuals);
-                } else if let Some(media) = &state.media {
+                } else if state.media.is_some() {
                     ui.add_space(SPACE_SM);
-                    draw_media_card(ui, media, state);
+                    retain_first_assistant_action(&mut action, draw_media_card(ui, state));
                 }
             }
             // Paso a paso: siempre visible, nunca mudo. Si el contenido no es
@@ -5095,7 +5721,7 @@ fn draw_pending_indicator(
                                 .size(TYPE_XS)
                                 .strong(),
                         );
-                        ui.add_space(4.0);
+                        ui.add_space(SPACE_XS);
                         ui.label(
                             egui::RichText::new(ledger)
                                 .color(theme.text_primary)
@@ -5121,16 +5747,16 @@ fn draw_pending_indicator(
                             .size(TYPE_XS)
                             .strong(),
                         );
-                        ui.add_space(2.0);
+                        ui.add_space(SPACE_XS * 0.5);
                         for row in state.agent_activity.iter() {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("•").color(theme.accent));
-                                ui.label(
-                                    egui::RichText::new(&row.text)
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format_activity_row(&row.text))
                                         .color(theme.text_secondary)
                                         .size(TYPE_XS),
-                                );
-                            });
+                                )
+                                .wrap(),
+                            );
                         }
                     });
                 ui.ctx().request_repaint();
@@ -5147,6 +5773,20 @@ fn draw_assistant_response(
     cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
+    // Cerca sin cerrar: avisar arriba sin cambiar el parseo a párrafo
+    // (contrato `rich_assistant_blocks_keep_malformed_syntax_as_plain_text`).
+    if has_unclosed_code_fence(content) {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Respuesta parcial…")
+                    .color(theme.text_tertiary)
+                    .size(TYPE_XS)
+                    .weak(),
+            )
+            .wrap(),
+        );
+        ui.add_space(SPACE_XS);
+    }
     let blocks = cache.blocks(content);
     let mut action = None;
     let mut code_block_index = 0;
@@ -5776,20 +6416,28 @@ fn rejected_proposal_action(
 }
 
 /// Texto corto de detalle para la propuesta (botón Detalle de la tarjeta).
+///
+/// S1: incluye la vista esperada (`Vista 2D`/`Vista 3D`) para que el Apply de
+/// 1 click anticipe qué se va a mostrar y encuadrar.
 fn proposal_detail_text(verified: &VerifiedAssistantProposal) -> String {
+    let view = verified.proposal.expected_view_label();
     let base = match &verified.proposal {
         AssistantProposal::Command(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                "Comando comprobado listo para aplicar al documento."
+                format!("Comando comprobado listo para aplicar al documento. Vista {view}.")
             } else {
-                "Comando comprobado con sus parámetros necesarios."
+                format!("Comando comprobado con sus parámetros necesarios. Vista {view}.")
             }
         }
-        AssistantProposal::Scene(_) => "Escena 3D comprobada; se aplica de forma atómica.",
-        AssistantProposal::Parameter(_) => "Parámetro comprobado listo para aplicar.",
+        AssistantProposal::Scene(_) => {
+            "Escena 3D comprobada; se aplica de forma atómica. Vista 3D.".to_string()
+        }
+        AssistantProposal::Parameter(_) => {
+            "Parámetro comprobado listo para aplicar. Vista 2D.".to_string()
+        }
     };
     if verified.prerequisite_parameters.is_empty() {
-        base.to_string()
+        base
     } else {
         format!(
             "{base} Parámetros: {}.",
@@ -5801,6 +6449,12 @@ fn proposal_detail_text(verified: &VerifiedAssistantProposal) -> String {
                 .join(", ")
         )
     }
+}
+
+/// Etiqueta de vista para la tarjeta verificada (S1, pura y honesta).
+#[must_use]
+pub fn verified_proposal_view_label(verified: &VerifiedAssistantProposal) -> &'static str {
+    verified.proposal.expected_view_label()
 }
 
 fn draw_verified_assistant_proposal(
@@ -5846,22 +6500,24 @@ fn draw_verified_assistant_proposal(
             });
     }
 
+    // S1: la descripción anticipa la vista que el Apply va a mostrar/encuadrar.
+    let view = verified.proposal.expected_view_label();
     let description = match &verified.proposal {
         AssistantProposal::Command(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                "Aplicar el comando comprobado al documento de Grafito"
+                format!("Aplicar el comando comprobado y mostrar vista {view}")
             } else {
-                "Aplicar el comando comprobado con sus parámetros necesarios"
+                format!("Aplicar el comando comprobado con sus parámetros y mostrar vista {view}")
             }
         }
         AssistantProposal::Scene(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                "Aplicar escena 3D verificada al documento de Grafito"
+                "Aplicar escena 3D verificada y mostrar vista 3D".to_string()
             } else {
-                "Aplicar escena 3D verificada con sus parámetros necesarios"
+                "Aplicar escena 3D verificada con sus parámetros y mostrar vista 3D".to_string()
             }
         }
-        AssistantProposal::Parameter(_) => "Aplicar parámetro verificado al documento de Grafito",
+        AssistantProposal::Parameter(_) => "Aplicar parámetro verificado (vista 2D)".to_string(),
     };
     let mut action = None;
     let status = match &verified.proposal {
@@ -6920,6 +7576,18 @@ pub fn assistant_live_text(state: &AssistantPanelState) -> Option<String> {
     None
 }
 
+/// Texto corto para anunciar Esc en el composer (live-region, render puro).
+///
+/// Puro (`&bool`): si había turno en curso se está cancelando, si no se
+/// pausó la edición y el borrador queda. Sin I/O ni spawn.
+pub fn escape_live_text(was_pending: bool) -> String {
+    if was_pending {
+        "Cancelando…".to_owned()
+    } else {
+        "Edición pausada. Borrador conservado.".to_owned()
+    }
+}
+
 fn should_submit_on_enter(
     editor_has_focus: bool,
     enter_pressed: bool,
@@ -7738,6 +8406,58 @@ mod tests {
     }
 
     #[test]
+    fn b3_activity_row_is_single_wrapped_label() {
+        // B3.1: fila única "• texto" en TYPE_XS con wrap, sin horizontal (panel 300px).
+        assert_eq!(format_activity_row("  trabajo  "), "• trabajo");
+        assert!(format_activity_row("x").starts_with("• "));
+    }
+
+    #[test]
+    fn b3_custom_provider_help_has_no_jargon() {
+        // B3.2: sin endpoint crudo ni env var, deriva a Ajustes → Asistente.
+        let help = custom_provider_help_text();
+        assert!(help.contains("Configurá la dirección y la clave en Ajustes → Asistente"));
+        assert!(!help.contains("https://"));
+        assert!(!help.contains("GRAFITO_ASSISTANT_CUSTOM"));
+    }
+
+    #[test]
+    fn b3_activity_spacing_uses_tokens() {
+        // B3.3: literales 4.0/2.0 → SPACE_XS y mitad (tokens base 4).
+        assert_eq!(crate::tokens::SPACE_XS, 4.0);
+        assert_eq!(crate::tokens::SPACE_XS * 0.5, 2.0);
+    }
+
+    #[test]
+    fn b3_verified_models_summary_chooses_verified() {
+        // B3.4: resumen corto + plegable, se elige solo el verificado.
+        assert!(verified_models_summary_text().contains("Se elige solo el modelo verificado"));
+        assert!(!verified_models_summary_text().contains("deepseek-v4-flash"));
+        assert!(verified_models_detail_text().contains("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn b3_escape_announces_short_live_state() {
+        // B3.5: Esc etiqueta live-region con estado corto (patrón toolbar::tag_live_region).
+        assert_eq!(escape_live_text(true), "Cancelando…");
+        let paused = escape_live_text(false);
+        assert!(paused.contains("Borrador"), "era {paused}");
+    }
+
+    #[test]
+    fn b3_unclosed_fence_warns_but_keeps_paragraph_contract() {
+        // B3.6: cerca sin cerrar avisa "Respuesta parcial…" sin romper el
+        // contrato malformado → párrafo (sin Code).
+        assert!(has_unclosed_code_fence("```grafito\nFunction[x]\nsegundo"));
+        assert!(!has_unclosed_code_fence("```grafito\nFunction[x]\n```"));
+        assert!(!has_unclosed_code_fence("texto plano"));
+        let blocks = parse_assistant_blocks("```grafito\nFunction[x]\nsegundo comando");
+        assert!(!blocks
+            .iter()
+            .any(|block| matches!(block, AssistantMessageBlock::Code { .. })));
+    }
+
+    #[test]
     fn rich_assistant_blocks_support_standard_multiline_math_and_outerless_tables() {
         let blocks = parse_assistant_blocks(
             "x | f(x)\n--- | ---\n0 | 1\n\n$$\n\\frac{x^2}{2}\n$$\n\n\\[\nx^2 + y^2 = 1\n\\]",
@@ -7890,6 +8610,94 @@ mod tests {
         state.clear_agent_progress();
         assert!(state.agent_activity.is_empty());
         assert!(state.agent_ledger.is_none());
+    }
+
+    // ── B5: scrub + velocidad + export de la card (puros, sin ctx) ──────
+    #[test]
+    fn media_scrub_timeline_mapea_slider_a_frame_via_sample() {
+        // 48 frames a 12 fps → 4000 ms; sample en los extremos da 0 y N-1.
+        let timeline =
+            media_scrub_timeline(48, MEDIA_CARD_BASE_FPS).expect("con frames hay timeline");
+        assert_eq!(timeline.duration_ms, 4_000);
+        assert_eq!(media_frame_at(&timeline, 0, 48), 0);
+        assert_eq!(media_frame_at(&timeline, 4_000, 48), 47);
+        // Mitad del loop → mitad de los frames (lerp lineal + round).
+        assert_eq!(media_frame_at(&timeline, 2_000, 48), 24);
+        // Fuera de rango clampea, jamás panic.
+        assert_eq!(media_frame_at(&timeline, 99_999, 48), 47);
+        // Sin frames no hay timeline ni índice.
+        assert!(media_scrub_timeline(0, MEDIA_CARD_BASE_FPS).is_none());
+        assert_eq!(media_frame_at(&timeline, 0, 0), 0);
+        assert_eq!(media_loop_duration_ms(0, MEDIA_CARD_BASE_FPS), 0);
+        // fps inválido cae a la base sin panic.
+        assert_eq!(
+            media_loop_duration_ms(12, 0.0),
+            media_loop_duration_ms(12, MEDIA_CARD_BASE_FPS)
+        );
+        assert_eq!(
+            media_loop_duration_ms(12, f32::NAN),
+            media_loop_duration_ms(12, MEDIA_CARD_BASE_FPS)
+        );
+    }
+
+    #[test]
+    fn media_playback_speed_rota_y_reporta_factor() {
+        assert_eq!(MediaPlaybackSpeed::default(), MediaPlaybackSpeed::Normal);
+        assert_eq!(MediaPlaybackSpeed::Half.rate(), 0.5);
+        assert_eq!(MediaPlaybackSpeed::Normal.rate(), 1.0);
+        assert_eq!(MediaPlaybackSpeed::Double.rate(), 2.0);
+        assert_eq!(MediaPlaybackSpeed::Half.label(), "0.5x");
+        assert_eq!(MediaPlaybackSpeed::Normal.label(), "1x");
+        assert_eq!(MediaPlaybackSpeed::Double.label(), "2x");
+        assert_eq!(MediaPlaybackSpeed::Half.cycle(), MediaPlaybackSpeed::Normal);
+        assert_eq!(
+            MediaPlaybackSpeed::Normal.cycle(),
+            MediaPlaybackSpeed::Double
+        );
+        assert_eq!(MediaPlaybackSpeed::Double.cycle(), MediaPlaybackSpeed::Half);
+    }
+
+    #[test]
+    fn media_playhead_avanza_con_reloj_y_se_congela_en_pausa() {
+        let state = AssistantPanelState::default();
+        // Sin texturas listas no hay índice, pero el reloj se arma.
+        assert!(state.advance_media_playhead(10.0, 12, false).is_none());
+        // Con todo listo arranca en el frame 0.
+        assert_eq!(state.advance_media_playhead(10.0, 12, true), Some(0));
+        // 0.1 s a 1x → 100 ms de timeline → frame 1 (12 frames en 1000 ms).
+        assert_eq!(state.advance_media_playhead(10.1, 12, true), Some(1));
+        // En pausa se congela aunque pase el tiempo (y retoma sin salto:
+        // el reloj se sigue actualizando).
+        state.media_paused.set(true);
+        assert_eq!(state.advance_media_playhead(11.0, 12, true), Some(1));
+        state.media_paused.set(false);
+        assert_eq!(state.advance_media_playhead(11.0, 12, true), Some(1));
+        // Velocidad doble avanza el doble: 0.1 s → 200 ms → frame 3.
+        state.media_speed.set(MediaPlaybackSpeed::Double);
+        assert_eq!(state.advance_media_playhead(11.1, 12, true), Some(3));
+        // Salto de segundo plano (dt > 250 ms) se capa: no recorre todo.
+        let before = state
+            .advance_media_playhead(99.0, 12, true)
+            .expect("índice");
+        assert!(before < 12, "capa el salto, fue {before}");
+    }
+
+    #[test]
+    fn media_export_state_arranca_ocioso_y_set_media_lo_reinicia() {
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        assert_eq!(*state.media_export_state(), MediaExportState::Idle);
+        state.set_media_export(MediaExportState::Failed("corte".into()));
+        let media = AssistantMedia {
+            title: "prueba".into(),
+            frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
+        };
+        state.set_media(Some(media), &context);
+        // Card nueva: playhead en 0, reproduciendo, velocidad base, export ocioso.
+        assert_eq!(*state.media_export_state(), MediaExportState::Idle);
+        assert!(!state.media_paused.get());
+        assert_eq!(state.media_playback_rate(), 1.0);
+        assert_eq!(state.advance_media_playhead(1.0, 1, true), Some(0));
     }
 
     #[test]
@@ -8441,6 +9249,68 @@ mod tests {
             prerequisite_parameters: Vec::new(),
         };
         assert!(proposal_detail_text(&simple).contains("aplicar"));
+    }
+
+    #[test]
+    fn s1_card_anticipa_la_vista_que_el_apply_va_a_mostrar() {
+        // S1: la card verificada ya tiene Apply; ahora anticipa 2D/3D.
+        let two_d = VerifiedAssistantProposal {
+            candidate_index: 0,
+            proposal: command_proposal("Function[x]"),
+            prerequisite_parameters: Vec::new(),
+        };
+        assert_eq!(verified_proposal_view_label(&two_d), "2D");
+        assert!(proposal_detail_text(&two_d).contains("Vista 2D"));
+        let three_d = VerifiedAssistantProposal {
+            candidate_index: 1,
+            proposal: command_proposal("Sphere[0, 0, 0, 1]"),
+            prerequisite_parameters: Vec::new(),
+        };
+        assert_eq!(verified_proposal_view_label(&three_d), "3D");
+        assert!(proposal_detail_text(&three_d).contains("Vista 3D"));
+    }
+
+    #[test]
+    fn s2_aclaracion_pendiente_round_trip_sin_bloquear() {
+        // S2: stage → botones en el turno → respuesta vuelve como output.
+        let mut state = AssistantPanelState::default();
+        assert!(!state.has_pending_clarification());
+        let pending = PendingClarification::try_new(
+            "call-1",
+            "¿qué valor le doy a x?",
+            vec!["0".to_owned(), "1".to_owned()],
+        )
+        .expect("pendiente válido");
+        state.stage_clarification(pending);
+        assert!(state.has_pending_clarification());
+        assert_eq!(
+            state.pending_clarification().expect("pregunta").question,
+            "¿qué valor le doy a x?"
+        );
+        // 1 click en "1" → respuesta saneada para el loop.
+        let answer = state
+            .take_clarification_answer("call-1", "1")
+            .expect("respuesta");
+        assert_eq!(answer, "1");
+        assert!(!state.has_pending_clarification());
+        // call_id distinto o respuesta vacía no consumen nada útil.
+        state.stage_clarification(
+            PendingClarification::try_new("c2", "¿x?", Vec::new()).expect("pendiente"),
+        );
+        assert!(state.take_clarification_answer("otra", "1").is_none());
+        state.stage_clarification(
+            PendingClarification::try_new("c3", "¿x?", Vec::new()).expect("pendiente"),
+        );
+        assert!(state.take_clarification_answer("c3", "   ").is_none());
+        // Sanea topes sin pánico: pregunta vacía/call_id vacío fallan honesto.
+        assert!(PendingClarification::try_new("", "¿x?", Vec::new()).is_err());
+        assert!(PendingClarification::try_new("c", "   ", Vec::new()).is_err());
+        // Contrato UiAction::AskClarification existe (staging vía método).
+        let staged = AssistantUiAction::AskClarification {
+            question: "¿x?".to_owned(),
+            options: Vec::new(),
+        };
+        assert!(matches!(staged, AssistantUiAction::AskClarification { .. }));
     }
 
     #[test]

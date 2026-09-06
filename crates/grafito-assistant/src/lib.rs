@@ -4248,13 +4248,23 @@ mod tests {
             hint: Some("Mirá el área bajo la curva".into()),
             explanation: "Integral es área".into(),
         };
-        // attempts 0 -> telling debe bloquear
+        // attempts 0 -> telling debe bloquear (interno: diagnóstico con jerga solo para logs/detección).
         let telling = "La solución es x = 4";
         assert!(contains_telling_markers(telling));
         assert!(check_telling_guard(&fsm, telling).is_err());
         let repair = enforce_telling_guard(&fsm, telling, &scaffold).unwrap_err();
         assert!(repair.contains("GUARD TELLING"), "{repair}");
         assert!(repair.contains("¿Qué representa integral"), "{repair}");
+        // Transcript: voz de Mili SIN jerga (lo único que va al chat vía complete_request).
+        let student = fsm.repair_student_message(&scaffold);
+        assert!(!student.contains("GUARD"), "{student}");
+        assert!(
+            !student.contains("REPARACIÓN") && !student.contains("REPARACION"),
+            "{student}"
+        );
+        assert!(!student.contains("attempts"), "{student}");
+        assert!(!student.contains("can_reveal"), "{student}");
+        assert!(student.contains("Antes de mostrarte"), "{student}");
         // con attempts>=2 pasa
         let mut fsm2 = SocraticFsm::new("integral");
         fsm2.record_attempt(None);
@@ -4280,6 +4290,11 @@ mod tests {
         };
         let guarded = guard_remote_completion(&fsm, completion.clone(), &scaffold);
         assert!(guarded.is_err(), "debe bloquear telling con attempts=0");
+        // El Err interno conserva jerga solo para detección/logs; el transcript usa voz humana.
+        let student = fsm.repair_student_message(&scaffold);
+        assert!(!student.contains("GUARD"), "{student}");
+        assert!(!student.contains("attempts"), "{student}");
+        assert!(student.contains("Antes de mostrarte"), "{student}");
         let mut fsm2 = SocraticFsm::new("derivada");
         fsm2.record_attempt(None);
         fsm2.record_attempt(None);
@@ -4768,13 +4783,18 @@ mod tests {
             hint: Some("Recordá f'(x)=lim".into()),
             explanation: "formal".into(),
         };
-        // attempts=0: el guard bloquea el telling del stream.
+        // attempts=0: el guard bloquea el telling del stream (interno con jerga solo para logs).
         let fresh = SocraticFsm::new("derivada");
         let blocked = guard_remote_completion(&fresh, completion.clone(), &scaffold);
         assert!(
             matches!(blocked, Err(ref error) if error.starts_with("GUARD TELLING")),
             "{blocked:?}"
         );
+        // Transcript: la voz de Mili (lo único publicable) no lleva jerga.
+        let student = fresh.repair_student_message(&scaffold);
+        assert!(!student.contains("GUARD"), "{student}");
+        assert!(!student.contains("attempts"), "{student}");
+        assert!(student.contains("Antes de mostrarte"), "{student}");
         // attempts>=2: el mismo completado pasa.
         let mut seasoned = SocraticFsm::new("derivada");
         seasoned.record_attempt(None);
@@ -4796,7 +4816,7 @@ mod tests {
             .with_endpoint(format!("http://{address}/v1"))
             .unwrap();
 
-        // Path no-streaming (chat): sin deltas, pero el guard bloquea igual.
+        // Path no-streaming (chat): sin deltas, pero el guard bloquea igual (interno, jerga solo logs).
         let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
         let blocked = request_remote_streaming_with_api_key_on_worker(
             settings.clone(),
@@ -4811,6 +4831,16 @@ mod tests {
         assert!(
             matches!(blocked, Err(ref error) if error.starts_with("GUARD TELLING")),
             "{blocked:?}"
+        );
+        // Contrato de transcript: el poll convierte el diagnóstico a voz de Mili sin jerga
+        // (ver `repair_student_message` en grafito-pedagogy y el poll en grafito-app);
+        // el worker conserva el prefijo solo para detección.
+        assert!(
+            !telling_guard_context()
+                .fsm
+                .repair_student_message(&telling_guard_context().scaffold)
+                .contains("GUARD TELLING"),
+            "la voz de estudiante no debe llevar jerga interna"
         );
         assert!(
             delta_rx.try_recv().is_err(),

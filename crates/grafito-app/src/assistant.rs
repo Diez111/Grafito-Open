@@ -20,6 +20,7 @@ use grafito_command::assistant_proposals::{
     AssistantCommandInvocation, AssistantParameterAssignment, AssistantProposal,
     AssistantProposalRejection, AssistantProposalRejectionKind,
 };
+use grafito_pedagogy::scaffold::{extract_concept, is_exploratory_request};
 use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm, Turn};
 use grafito_ui::assistant::{
     AssistantCorrectionContext, AssistantPanelState, AssistantUiAction, VerifiedAssistantProposal,
@@ -111,6 +112,9 @@ pub(crate) struct AssistantRuntime {
     image_job: Option<AssistantImageJob>,
     agent_job: Option<AssistantAgentJob>,
     anim_job: Option<AssistantAnimJob>,
+    /// Export a GIF de la card en vuelo (B5): `JoinHandle` de
+    /// `spawn_gif_export` que `poll_gif_export_job` drena sin bloquear.
+    gif_export_job: Option<GifExportJob>,
     session_api_key: Option<SessionApiKey>,
 }
 
@@ -444,22 +448,58 @@ fn pop_provisional_stream_turn(panel: &mut AssistantPanelState) {
 
 /// ¿El error remoto es una reparación socrática forzada por el guard?
 ///
-/// El worker retorna el `repair_prompt` tal cual cuando
-/// `guard_remote_completion` detecta telling con `attempts<2`; el poll debe
-/// mostrar esa re-pregunta en vez de la solución (y nunca el fallback de
-/// modelo ni el cartel de error).
+/// El worker retorna el diagnóstico interno tal cual cuando
+/// `guard_remote_completion` detecta telling con `attempts<2`. El diagnóstico
+/// conserva la jerga `GUARD TELLING` SOLO para detección y logs; el poll JAMÁS
+/// lo publica: lo convierte a voz de Mili vía `repair_student_message`
+/// (sin `GUARD`/`attempts`/`estado`/`Re-preguntá`). Publicarlo crudo vía
+/// `complete_request` fue el bug P0.
 fn is_socratic_repair_error(error: &str) -> bool {
     error.starts_with("GUARD TELLING")
 }
 
+/// Cuenta respuestas a pregunta heurística previa (no turnos totales).
+///
+/// Un turno de usuario cuenta solo si el turno asistente inmediato anterior
+/// contiene `?` (re-pregunta heurística). El turno actual (último, ya empujado
+/// por `begin_request`) se excluye: aún no es respuesta, es la pregunta en
+/// curso. Primer turno sin pregunta previa ⇒ 0 y no punitivo (el guard de
+/// sesión se bypassea en `session_socratic_guard`; ver `can_reveal_answer`).
+/// Puro y determinista, sin `unwrap`, saturante a `u8`.
+fn count_heuristic_answers(conversation: &[ConversationTurn]) -> u8 {
+    let minus_current = conversation.len().saturating_sub(1);
+    let mut count: usize = 0;
+    let mut idx = 0;
+    while idx < minus_current {
+        let is_user = conversation
+            .get(idx)
+            .map(|turn| turn.role == ConversationRole::User)
+            .unwrap_or(false);
+        if is_user {
+            let prev_is_question = idx
+                .checked_sub(1)
+                .and_then(|prev| conversation.get(prev))
+                .map(|prev| prev.role == ConversationRole::Assistant && prev.content.contains('?'))
+                .unwrap_or(false);
+            if prev_is_question {
+                count = count.saturating_add(1);
+            }
+        }
+        idx += 1;
+    }
+    count.min(255) as u8
+}
+
 /// Construye el guard socrático de sesión para un lanzamiento remoto.
 ///
-/// - `attempts`: turnos de usuario previos en la conversación (la pregunta
-///   actual ya está empujada por `begin_request`, así que se resta 1). Cada
-///   mensaje del estudiante es un intento; las reparaciones del tutor no
-///   inflan el contador. Saturante a `u8`.
-/// - `topic`: concepto de `WorkingMemory` (`last_concept`/`current_topic`) o,
-///   sin tema, la pregunta actual truncada a 120 chars.
+/// - `attempts`: respuestas a pregunta heurística previa (ver
+///   `count_heuristic_answers`), no turnos totales. El turno actual se excluye.
+///   Primer turno sin pregunta previa ⇒ 0 y no punitivo.
+/// - `topic`: concepto sanitizado vía `extract_concept` (quita saludos/verbos
+///   como `hola`/`haceme`/`dame`, exige min 3 letras y allowlist). Sin tema
+///   reconocido → `String::new()` para que el scaffold caiga al fallback fijo
+///   `¿qué querés graficar primero: recta, parábola…?` en vez de interpolar el
+///   texto crudo (`¿Te imaginás hola...?` era el bug P0).
 /// - `level`: `PedagogicalLevel::from_level_value` del nivel del perfil.
 /// - `history`: últimos 4 turnos como `Turn` pedagógicos (contenido capado a
 ///   200 chars; el engine vuelve a acotar al segmentar).
@@ -470,18 +510,15 @@ fn socratic_guard_context(
     question: &str,
     conversation: &[ConversationTurn],
 ) -> SocraticGuardContext {
-    let prior_user_turns = conversation
-        .iter()
-        .filter(|turn| turn.role == ConversationRole::User)
-        .count();
-    let mut fsm = SocraticFsm::new(
-        working_topic
-            .map(str::trim)
-            .filter(|topic| !topic.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| question.chars().take(120).collect()),
-    );
-    fsm.attempts = prior_user_turns.saturating_sub(1).min(255) as u8;
+    // Sanitiza: memoria primero, luego pregunta actual; sin tema → "" (fallback).
+    let sanitized_topic: String = working_topic
+        .map(str::trim)
+        .filter(|topic| !topic.is_empty())
+        .and_then(extract_concept)
+        .or_else(|| extract_concept(question))
+        .unwrap_or_default();
+    let mut fsm = SocraticFsm::new(sanitized_topic);
+    fsm.attempts = count_heuristic_answers(conversation);
     let history: Vec<Turn> = conversation
         .iter()
         .rev()
@@ -601,6 +638,39 @@ enum AgentChannelMsg {
     Done(Result<grafito_agent::loop_engine::AgentOutcome, String>),
 }
 
+/// Parsea el `args_summary` de un `ToolStarted{ask_user}` a pendiente UI (S2).
+///
+/// Puro y no bloqueante: `args_summary` es `arguments.to_string()` truncado a
+/// 160 chars; para preguntas cortas típicas alcanza. Si viene truncado con
+/// `…` se recorta y se intenta igual; si no parsea, `None` honesto (sin
+/// inventar pregunta ni opciones). El `call_id` real no viaja en el evento,
+/// así que se deriva estable de la pregunta (longitud) sin inventar UUID.
+fn parse_agent_ask_user_pending(
+    args_summary: &str,
+) -> Option<grafito_ui::assistant::PendingClarification> {
+    let cleaned = args_summary.trim().trim_end_matches('…').trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(cleaned).ok()?;
+    let question = value.get("question").and_then(serde_json::Value::as_str)?;
+    if question.trim().is_empty() {
+        return None;
+    }
+    let options = value
+        .get("options")
+        .and_then(|options| options.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let call_id = format!("ask_user-{}", question.len());
+    grafito_ui::assistant::PendingClarification::try_new(&call_id, question, options).ok()
+}
+
 /// Job que genera y carga una animación del motor externo.
 ///
 /// AS4: con `cancellation` como `AssistantAgentJob` (cancel real: descartar
@@ -613,12 +683,28 @@ struct AssistantAnimJob {
     receiver: std::sync::mpsc::Receiver<Result<grafito_ui::assistant::AssistantMedia, String>>,
 }
 
+/// Export a GIF de la card en vuelo (B5).
+///
+/// Guarda el `JoinHandle` de `spawn_gif_export` (hilo existente, reusable y
+/// probado) para drenarlo sin bloquear en `poll_gif_export_job`.
+/// `frame_count` es solo para el mensaje de éxito (cuántos fotogramas
+/// viajaron al GIF).
+struct GifExportJob {
+    handle: std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::GifExportError>>,
+    frame_count: usize,
+}
+
 /// Job del modo agente (loop con herramientas).
 struct AssistantAgentJob {
     provider: ProviderProfile,
     model: String,
     cancellation: grafito_agent::loop_engine::Cancellation,
     receiver: Receiver<AgentChannelMsg>,
+    /// Canal lateral S2 (`ask_user` real vía evento): el forwarder de
+    /// background reenvía el pendiente como `PendingClarification` sin
+    /// bloquear (try_send acotado). La UI lo drena en `sync_assistant_for_frame`
+    /// (hilo UI, try_recv) y lo muestra como botones; nunca toca la zona guard.
+    clarification_receiver: Receiver<grafito_ui::assistant::PendingClarification>,
 }
 
 struct FinishedRemoteJob {
@@ -834,10 +920,14 @@ impl GrafitoApp {
                 }
             }
         }
+        // B5: drena el export a GIF de la card (sin bloquear; solo join si terminó).
+        self.poll_gif_export_job(ctx);
         if !self.plugins_loaded {
             self.plugins_loaded = true;
             self.load_assistant_plugins();
         }
+        // S2: drena aclaraciones del canal lateral sin bloquear (try_recv).
+        self.drain_pending_clarifications();
         self.assistant.focus = grafito_command::assistant_context::selected_function_focus(
             &self.document,
             self.selected_object,
@@ -1233,6 +1323,24 @@ impl GrafitoApp {
             AssistantUiAction::RetryProposalCorrection => {
                 self.request_assistant_proposal_correction(ctx);
             }
+            // S2 `ask_user` real vía evento: la tool devolvió el pendiente, la
+            // UI lo mostró como botones y la respuesta vuelve al loop como
+            // `function_call_output`/mensaje en un nuevo job (nunca bloquea).
+            AssistantUiAction::AskClarification { .. } => {
+                // Staging vía `stage_clarification` (el worker ya terminó);
+                // esta variante solo existe para contrato/tests, sin I/O.
+            }
+            AssistantUiAction::AnswerClarification { call_id, answer } => {
+                self.answer_pending_clarification(ctx, &call_id, &answer);
+            }
+            AssistantUiAction::DismissClarification => {
+                self.assistant.clear_pending_clarification();
+                self.notify(
+                    "Aclaración descartada. Escribí la respuesta en el chat si querés.",
+                    ToastKind::Info,
+                );
+                ctx.request_repaint();
+            }
             AssistantUiAction::ClearConversation => {
                 self.assistant.clear_conversation();
             }
@@ -1257,6 +1365,7 @@ impl GrafitoApp {
                 self.save_app_config();
             }
             AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
+            AssistantUiAction::ExportMedia => self.export_assistant_media(ctx),
             AssistantUiAction::AskNextTopic => {
                 let memory = self.profile.memory();
                 self.assistant.problem = format!(
@@ -1466,7 +1575,24 @@ impl GrafitoApp {
                 let outcome = self.execute_command_and_record(&command_text, self.ui_time);
                 match &outcome {
                     grafito_command::commands::CommandOutcome::Error(msg) => {
-                        self.show_assistant_error(msg.clone());
+                        // S3: ante fence/propuesta inválida, responde con
+                        // `vibecoder_explain` (negocio en rioplatense) + fix
+                        // propuesto en 1 click cuando sea seguro (solo
+                        // reescritura sintáctica, jamás cambio semántico
+                        // silencioso). El fix queda en la entrada para que el
+                        // usuario lo revise y lo aplique explícitamente.
+                        let (explained, fix) =
+                            grafito_assistant::agent::explain_invalid_proposal(&command_text, "");
+                        if let Some(fix) = fix {
+                            self.input_text = fix.clone();
+                            self.command_input_focus_requested = true;
+                            self.show_assistant_error(format!(
+                                "{} Te propongo un fix sintáctico en la entrada: {} Revisalo y aplicá.",
+                                explained.explanation, fix
+                            ));
+                        } else {
+                            self.show_assistant_error(format!("{} ({msg})", explained.explanation));
+                        }
                     }
                     _ => {
                         self.ensure_algebra_panel_visible();
@@ -1518,6 +1644,11 @@ impl GrafitoApp {
         prerequisite_parameters: &[AssistantParameterAssignment],
     ) -> bool {
         let before = self.object_labels_snapshot();
+        let before_ids = self
+            .document
+            .objects_iter()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::HashSet<_>>();
         let command_text = command.canonical_text();
         match preflight_assistant_graph_command_with_prerequisites(
             &self.document,
@@ -1543,6 +1674,14 @@ impl GrafitoApp {
                     self.set_perspective(perspective);
                 }
                 if committed {
+                    // S1 auto-graficar 1-click: el objeto queda seleccionado y
+                    // visible. 2D encuadra con `zoom_to_fit` (el preflight ya
+                    // garantizó geometría visible); 3D queda visible con la
+                    // cámara actual (el preflight lo verificó) + selección.
+                    self.select_new_assistant_objects(&before_ids);
+                    if view == grafito_command::assistant_context::AssistantGraphView::TwoD {
+                        self.zoom_to_fit();
+                    }
                     self.ensure_algebra_panel_visible();
                 }
                 committed
@@ -1560,6 +1699,11 @@ impl GrafitoApp {
         prerequisite_parameters: &[AssistantParameterAssignment],
     ) -> bool {
         let before = self.object_labels_snapshot();
+        let before_ids = self
+            .document
+            .objects_iter()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::HashSet<_>>();
         match preflight_assistant_scene_with_prerequisites(
             &self.document,
             prerequisite_parameters,
@@ -1567,6 +1711,7 @@ impl GrafitoApp {
             self.camera,
         ) {
             Ok(preflight) => {
+                let view = preflight.view;
                 let before_document = self.document.clone();
                 self.document = preflight.staged;
                 crate::app::save_command_snapshot_if_mutated(
@@ -1583,10 +1728,14 @@ impl GrafitoApp {
                     "Escena 3D verificada",
                 );
                 self.record_step_from_diff("Escena 3D verificada", &before, true);
-                if let Some(perspective) =
-                    assistant_graph_perspective(preflight.view, self.current_view)
-                {
+                if let Some(perspective) = assistant_graph_perspective(view, self.current_view) {
                     self.set_perspective(perspective);
+                }
+                // S1: selección + encuadre (3D ya viene con cámara fitted del
+                // preflight; 2D homogénea encuadra con zoom_to_fit).
+                self.select_new_assistant_objects(&before_ids);
+                if view == grafito_command::assistant_context::AssistantGraphView::TwoD {
+                    self.zoom_to_fit();
                 }
                 self.ensure_algebra_panel_visible();
                 self.notify(
@@ -1598,6 +1747,106 @@ impl GrafitoApp {
             Err(error) => {
                 self.show_assistant_error(error);
                 false
+            }
+        }
+    }
+
+    /// Selecciona los objetos nuevos tras un Apply (S1 auto-graficar 1-click).
+    ///
+    /// Puro en intención (solo `selected_object`, sin Document ni I/O): difiere
+    /// `before_ids` del documento actual y fija el máximo (determinista por
+    /// `Ord`) como seleccionado para que quede visible en Álgebra y canvas.
+    /// Sin nuevos → conserva la selección previa (default honesto, no inventa).
+    fn select_new_assistant_objects(
+        &mut self,
+        before_ids: &std::collections::HashSet<grafito_core::ObjectId>,
+    ) {
+        let mut newest: Option<grafito_core::ObjectId> = None;
+        for (id, _) in self.document.objects_iter() {
+            if before_ids.contains(id) {
+                continue;
+            }
+            newest = Some(match newest {
+                None => *id,
+                Some(current) => current.max(*id),
+            });
+        }
+        if let Some(id) = newest {
+            self.selected_object = Some(id);
+        }
+    }
+
+    /// Retoma una aclaración pendiente (S2) con la respuesta del usuario.
+    ///
+    /// No bloquea threads: consume el pendiente y lanza un nuevo job local con
+    /// la respuesta como `function_call_output`/mensaje para que el loop la
+    /// retome. Si el `call_id` no coincide o la respuesta está vacía, se
+    /// descarta sin I/O y con aviso honesto en rioplatense.
+    fn answer_pending_clarification(&mut self, ctx: &egui::Context, call_id: &str, answer: &str) {
+        let pending = self.assistant.pending_clarification().cloned();
+        let Some(pending) = pending else {
+            self.notify("No hay aclaración pendiente.", ToastKind::Info);
+            return;
+        };
+        if pending.call_id != call_id {
+            self.assistant.clear_pending_clarification();
+            self.notify(
+                "La aclaración quedó obsoleta; volvé a preguntar si la necesitás.",
+                ToastKind::Info,
+            );
+            ctx.request_repaint();
+            return;
+        }
+        let Some(sanitized) = self
+            .assistant
+            .take_clarification_answer(call_id, answer)
+            .filter(|text| !text.trim().is_empty())
+        else {
+            self.notify(
+                "Escribí una respuesta no vacía para continuar.",
+                ToastKind::Info,
+            );
+            return;
+        };
+        // La respuesta vuelve al loop como mensaje + `function_call_output`
+        // (Responses) para trazabilidad; el nuevo job local la retoma sin
+        // bloquear la UI (I/O solo en background, como el resto de jobs).
+        let output = serde_json::json!({
+            "type": "function_call_output",
+            "call_id": pending.call_id,
+            "output": sanitized,
+        });
+        self.assistant.problem = format!(
+            "Aclaración ({}): {}\nRespuesta: {}",
+            pending.question, output, sanitized
+        );
+        self.notify(
+            "Aclaración respondida. Retomo la consulta…",
+            ToastKind::Info,
+        );
+        self.start_local_assistant_request(ctx);
+        ctx.request_repaint();
+    }
+
+    /// Drena aclaraciones `ask_user` del canal lateral (S2, sin bloquear).
+    ///
+    /// Hilo UI, `try_recv` acotado (máx 4 por frame): si hay pendiente nuevo y
+    /// no hay otro visible, lo estagia para mostrar botones en el turno. Nunca
+    /// bloquea threads ni toca la zona guard (el forwarder ya parseó en
+    /// background).
+    fn drain_pending_clarifications(&mut self) {
+        let Some(job) = self.assistant_runtime.agent_job.as_ref() else {
+            return;
+        };
+        for _ in 0..4 {
+            match job.clarification_receiver.try_recv() {
+                Ok(pending) => {
+                    if !self.assistant.has_pending_clarification() {
+                        self.assistant.stage_clarification(pending);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             }
         }
     }
@@ -1947,6 +2196,8 @@ impl GrafitoApp {
                 cancellation.clone(),
             );
         let (sender, receiver) = std::sync::mpsc::sync_channel(128);
+        // S2: canal lateral de aclaraciones (cap 4, try_send sin bloquear).
+        let (clarification_sender, clarification_receiver) = std::sync::mpsc::sync_channel(4);
         let repaint = ctx.clone();
         let cancellation_forwarder = cancellation.clone();
         std::thread::spawn(move || {
@@ -1958,6 +2209,18 @@ impl GrafitoApp {
                 }
                 match event_receiver.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(event) => {
+                        // S2 `ask_user` real vía evento: reenvía el pendiente al
+                        // canal lateral sin bloquear (try_send) para que la UI
+                        // lo muestre como botones. Nunca bloquea threads.
+                        if let grafito_agent::AgentEvent::ToolStarted { name, args_summary } =
+                            &event
+                        {
+                            if name == "ask_user" {
+                                if let Some(pending) = parse_agent_ask_user_pending(args_summary) {
+                                    let _ = clarification_sender.try_send(pending);
+                                }
+                            }
+                        }
                         if sender.send(AgentChannelMsg::Event(event)).is_err() {
                             break;
                         }
@@ -1987,6 +2250,7 @@ impl GrafitoApp {
             model,
             cancellation,
             receiver,
+            clarification_receiver,
         });
     }
 
@@ -2103,6 +2367,126 @@ impl GrafitoApp {
 
     fn run_assistant_animation(&mut self, ctx: &egui::Context) {
         self.run_assistant_animation_with(ctx, "derivative-slope", "derivada como pendiente");
+    }
+
+    /// Exporta la animación visible en la card a GIF (B5, botón Exportar).
+    ///
+    /// Cablea al `spawn_gif_export` existente (hilo aparte, probado): la UI
+    /// solo emitió `ExportMedia`, acá corre el trabajo fuera del draw.
+    /// Jamás mudo:
+    /// - export en curso → aviso y no se duplica;
+    /// - sin animación o sin fotogramas → `Failed` en la card + aviso;
+    /// - preflight (`check_gif_export_budget`: 64 frames / 8 Mpx / dims) →
+    ///   motivo en la card + aviso;
+    /// - el destino es temporal (`temp_dir`, nombre único por instante) y se
+    ///   avisa la ruta al terminar; el delay sale de la velocidad de la card
+    ///   (`gif_delay_for_rate` sobre `GIF_EXPORT_DELAY_CS`).
+    fn export_assistant_media(&mut self, ctx: &egui::Context) {
+        use grafito_ui::assistant::MediaExportState;
+        if self.assistant_runtime.gif_export_job.is_some() {
+            self.notify("Ya se está exportando la animación.", ToastKind::Info);
+            return;
+        }
+        let frames = self
+            .assistant
+            .media
+            .as_ref()
+            .map_or_else(Vec::new, |media| media.frames.clone());
+        if frames.is_empty() {
+            self.assistant.set_media_export(MediaExportState::Failed(
+                "todavía no hay fotogramas para exportar".into(),
+            ));
+            self.notify("No hay animación para exportar.", ToastKind::Error);
+            ctx.request_repaint();
+            return;
+        }
+        if let Err(budget) = crate::anim_native::check_gif_export_budget(&frames) {
+            let reason = budget.to_string();
+            self.assistant
+                .set_media_export(MediaExportState::Failed(reason.clone()));
+            self.notify(format!("No se pudo exportar: {reason}"), ToastKind::Error);
+            ctx.request_repaint();
+            return;
+        }
+        let frame_count = frames.len();
+        let delay_cs = crate::anim_native::gif_delay_for_rate(
+            crate::anim_native::GIF_EXPORT_DELAY_CS,
+            self.assistant.media_playback_rate(),
+        );
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0);
+        let path =
+            std::env::temp_dir().join(format!("grafito_animacion_{stamp}_{frame_count}.gif"));
+        let handle = crate::anim_native::spawn_gif_export(frames, path, delay_cs);
+        self.assistant_runtime.gif_export_job = Some(GifExportJob {
+            handle,
+            frame_count,
+        });
+        self.assistant.set_media_export(MediaExportState::Exporting);
+        ctx.request_repaint();
+    }
+
+    /// Drena el export a GIF sin bloquear (B5).
+    ///
+    /// Solo hace `join` si el hilo terminó (`is_finished`); publica el
+    /// resultado en la card + aviso: éxito con ruta (verificando cota 5 MB
+    /// post-escritura: si excede, se borra y es error honesto), o motivo del
+    /// fallo. Se llama cada frame desde `sync_assistant_for_frame`.
+    fn poll_gif_export_job(&mut self, ctx: &egui::Context) {
+        use grafito_ui::assistant::MediaExportState;
+        let finished = self
+            .assistant_runtime
+            .gif_export_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished());
+        if !finished {
+            return;
+        }
+        let Some(job) = self.assistant_runtime.gif_export_job.take() else {
+            return;
+        };
+        match job.handle.join() {
+            Ok(Ok(path)) => {
+                let too_big = std::fs::metadata(&path)
+                    .map(|metadata| metadata.len() > crate::anim_native::GIF_EXPORT_MAX_FILE_BYTES)
+                    .unwrap_or(false);
+                if too_big {
+                    let _ = std::fs::remove_file(&path);
+                    let reason = "el GIF supera 5 MB";
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(reason.into()));
+                    self.notify(format!("No se pudo exportar: {reason}."), ToastKind::Error);
+                } else {
+                    self.assistant.set_media_export(MediaExportState::Done);
+                    self.notify(
+                        format!(
+                            "Se exportaron {} fotogramas a {}.",
+                            job.frame_count,
+                            path.display()
+                        ),
+                        ToastKind::Success,
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                let reason = error.to_string();
+                self.assistant
+                    .set_media_export(MediaExportState::Failed(reason.clone()));
+                self.notify(
+                    format!("No se pudo exportar la animación: {reason}."),
+                    ToastKind::Error,
+                );
+            }
+            Err(_) => {
+                self.assistant.set_media_export(MediaExportState::Failed(
+                    "la exportación terminó inesperadamente".into(),
+                ));
+                self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
+            }
+        }
+        ctx.request_repaint();
     }
 
     pub(crate) fn run_assistant_animation_with(
@@ -2530,15 +2914,37 @@ impl GrafitoApp {
     /// Guard socrático de la sesión actual para un lanzamiento remoto.
     ///
     /// Fuente: nivel del perfil + tema de `WorkingMemory` + conversación.
-    /// Siempre `Some` en consultas remotas (el worker lo aplica en el path
-    /// streaming y en el no-streaming); el modo agente lo ignora porque ya
-    /// orquesta sus propias tools socráticas.
+    /// Bypass exploratorio (demo, no evaluación) → `None` (guard desactivado):
+    /// - pedido demostrativo (`ejemplos`/`probá`/`capacidades`/`graficá` vía
+    ///   `is_exploratory_request`), o
+    /// - sin `last_concept`/`current_topic` (primer turno sin tema previo), o
+    /// - sin pregunta heurística previa en la conversación (`?` asistente).
+    ///   Primer turno sin pregunta previa ⇒ no punitivo (ver `can_reveal_answer`
+    ///   y `count_heuristic_answers`).
+    ///
+    /// El modo agente lo ignora porque ya orquesta sus propias tools socráticas.
     fn session_socratic_guard(&self, question: &str) -> Option<SocraticGuardContext> {
+        // Es demo, no evaluación: se salta el telling.
+        if is_exploratory_request(question) {
+            return None;
+        }
         let topic = self.profile.working_memory.last_concept.as_deref().or(self
             .profile
             .working_memory
             .current_topic
             .as_deref());
+        // Sin concepto previo → demo, no evaluación.
+        let topic_trimmed = topic.map(str::trim).filter(|topic| !topic.is_empty())?;
+        let _ = topic_trimmed;
+        // Sin pregunta heurística previa → primer turno no punitivo.
+        let has_prior_question = self
+            .assistant
+            .conversation
+            .iter()
+            .any(|turn| turn.role == ConversationRole::Assistant && turn.content.contains('?'));
+        if !has_prior_question {
+            return None;
+        }
         Some(socratic_guard_context(
             self.profile.level,
             topic,
@@ -3024,14 +3430,33 @@ impl GrafitoApp {
                         Err(error) => {
                             // Reparación socrática: el guard detectó telling
                             // con attempts<2 en el worker (streaming o no).
-                            // Se fuerza la re-pregunta como respuesta en vez
-                            // de mostrar la solución; no hay fallback de
-                            // modelo ni cartel de error para este caso.
+                            // El `error` es diagnóstico interno con jerga
+                            // (`GUARD TELLING...`, solo para detección y logs):
+                            // JAMÁS se publica crudo vía `complete_request`
+                            // (ese fue el bug P0). Se convierte a voz de Mili
+                            // vía `repair_student_message` (sin `GUARD`/
+                            // `attempts`/`estado`/`Re-preguntá`). No hay
+                            // fallback de modelo ni cartel de error aquí.
                             if is_socratic_repair_error(&error) {
                                 if correction_attempt > 0 {
                                     self.assistant.restore_proposal_correction();
                                 }
-                                self.assistant.complete_request(error);
+                                // Jerga solo en logs/eventos internos.
+                                eprintln!(
+                                    "grafito: socratic repair interno (no al transcript): {error}"
+                                );
+                                // Convierte a voz de Mili; si no hay guard
+                                // (no debería pasar si hubo repair), fallback
+                                // humano sin jerga ni eco crudo.
+                                let student = self
+                                    .session_socratic_guard(&question)
+                                    .map(|guard| {
+                                        guard.fsm.repair_student_message(&guard.scaffold)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        "Antes de mostrarte la solución, ¿qué forma te imaginás? Contame qué probaste y lo vemos juntos.".to_owned()
+                                    });
+                                self.assistant.complete_request(student);
                                 self.notify(
                                     "El tutor repregunta antes de mostrar la solución directa.",
                                     ToastKind::Info,
@@ -4693,7 +5118,7 @@ mod tests {
         stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
         AgentChannelMsg, AssistantAgentJob, AssistantAnimJob, AssistantCommandInvocation,
         AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
-        AssistantRemoteRoute, AssistantRuntime, LocalAssistantDisposition,
+        AssistantRemoteRoute, AssistantRuntime, GifExportJob, LocalAssistantDisposition,
         RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
@@ -4705,6 +5130,8 @@ mod tests {
     use grafito_command::commands::CommandOutcome;
     use grafito_core::{Document, GeoObject};
     use grafito_geometry::ViewTransform;
+    use grafito_pedagogy::scaffold::{extract_concept, is_exploratory_request};
+    use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm};
     use grafito_ui::assistant::{
         AssistantPanelState, AssistantProposal, VerifiedAssistantProposal,
     };
@@ -5303,11 +5730,13 @@ mod tests {
         });
         let agent_cancel = grafito_agent::loop_engine::Cancellation::default();
         let (agent_tx, agent_rx) = sync_channel::<AgentChannelMsg>(128);
+        let (_, clarification_rx) = sync_channel::<grafito_ui::assistant::PendingClarification>(4);
         runtime.agent_job = Some(AssistantAgentJob {
             provider: ProviderProfile::OpenCodeGo,
             model: "muse-spark-1.3-contributor".into(),
             cancellation: agent_cancel.clone(),
             receiver: agent_rx,
+            clarification_receiver: clarification_rx,
         });
         let model_cancel = CancellationToken::default();
         let (model_tx, model_rx) = sync_channel::<Result<Vec<String>, String>>(1);
@@ -5501,6 +5930,101 @@ mod tests {
     }
 
     #[test]
+    fn export_sin_media_falla_honesto_sin_hilo() {
+        // Sin animación: nada se spawnea, la card muestra el motivo y hay aviso.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        app.export_assistant_media(&ctx);
+        assert!(app.assistant_runtime.gif_export_job.is_none());
+        assert!(
+            matches!(
+                app.assistant.media_export_state(),
+                grafito_ui::assistant::MediaExportState::Failed(_)
+            ),
+            "sin frames el error es honesto, jamás mudo"
+        );
+    }
+
+    #[test]
+    fn export_no_duplica_job_en_vuelo() {
+        // Slot ocupado: avisa y no pisa el hilo existente.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        app.assistant_runtime.gif_export_job = Some(GifExportJob {
+            handle: std::thread::spawn(|| Ok(std::path::PathBuf::from("ocupado"))),
+            frame_count: 1,
+        });
+        app.export_assistant_media(&ctx);
+        assert!(
+            app.assistant_runtime.gif_export_job.is_some(),
+            "no pisa el job en vuelo"
+        );
+        // Limpia sin colgar (el hilo ya terminó).
+        let job = app
+            .assistant_runtime
+            .gif_export_job
+            .take()
+            .expect("job en vuelo");
+        let _ = job.handle.join();
+    }
+
+    #[test]
+    fn export_con_frames_corre_en_hilo_y_publica_exito_con_ruta() {
+        // Cableado real: `spawn_gif_export` escribe un GIF válido y el poll
+        // publica `Done` (ruta avisada por el aviso). Limpia su temporal.
+        // El prefijo `grafito_animacion_` solo lo crea este export.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        let frames = vec![egui::ColorImage::new([8, 8], egui::Color32::RED); 3];
+        app.assistant.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "prueba".into(),
+                frames,
+            }),
+            &ctx,
+        );
+        app.export_assistant_media(&ctx);
+        assert!(app.assistant_runtime.gif_export_job.is_some());
+        assert_eq!(
+            *app.assistant.media_export_state(),
+            grafito_ui::assistant::MediaExportState::Exporting
+        );
+        for _ in 0..200 {
+            app.poll_gif_export_job(&ctx);
+            if app.assistant_runtime.gif_export_job.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.assistant_runtime.gif_export_job.is_none(),
+            "el hilo debe terminar"
+        );
+        assert_eq!(
+            *app.assistant.media_export_state(),
+            grafito_ui::assistant::MediaExportState::Done
+        );
+        // El GIF existe y es real; se borra para no ensuciar el temporal.
+        let mut cleaned = 0;
+        let entries = std::fs::read_dir(std::env::temp_dir()).expect("temporal legible");
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let is_ours = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("grafito_animacion_"));
+            if !is_ours {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("GIF exportado legible");
+            assert_eq!(&bytes[0..6], b"GIF89a", "GIF real con cabecera");
+            std::fs::remove_file(&path).expect("limpia su temporal");
+            cleaned += 1;
+        }
+        assert_eq!(cleaned, 1, "un solo GIF de este export");
+    }
+
+    #[test]
     fn cancel_a_mitad_senala_token_y_descarta_media_rancia() {
         // Cancel a mitad → token señalado y sin media rancia en el turno.
         let mut runtime = AssistantRuntime::default();
@@ -5641,40 +6165,69 @@ mod tests {
     }
 
     #[test]
-    fn socratic_guard_context_seeds_attempts_from_prior_user_turns() {
-        // Fresca: sólo la pregunta actual → attempts=0 (telling bloqueado).
+    fn socratic_guard_context_seeds_attempts_from_heuristic_answers() {
+        // Fresca: sólo la pregunta actual → attempts=0, tema sanitizado a canónico.
+        // `derivá x^2` extrae `derivada` (verbo→sustantivo), jamás el crudo.
         let fresh = vec![ConversationTurn::user("derivá x^2")];
         let guard = socratic_guard_context(8, None, "derivá x^2", &fresh);
         assert_eq!(guard.fsm.attempts, 0);
-        assert_eq!(guard.fsm.topic, "derivá x^2");
-        assert!(guard.scaffold.question.contains("derivá x^2"));
+        assert_eq!(guard.fsm.topic, "derivada");
+        assert!(guard.scaffold.question.contains("derivada"));
+        assert!(!guard.scaffold.question.contains("derivá x^2"));
 
-        // Un intercambio + seguimiento → attempts=1 (sigue bloqueado).
+        // Sin tema reconocido → tópico vacío + scaffold fallback (nunca crudo).
+        let raw = "hola haceme ejemplos para probar las capacidades de graficacion";
+        let demo = vec![ConversationTurn::user(raw)];
+        let guard = socratic_guard_context(8, None, raw, &demo);
+        assert_eq!(guard.fsm.attempts, 0);
+        assert_eq!(guard.fsm.topic, "");
+        assert_eq!(
+            guard.scaffold.question,
+            grafito_pedagogy::scaffold::NO_CONCEPT_FALLBACK_QUESTION
+        );
+        assert!(!guard.scaffold.question.contains("hola"));
+
+        // Un intercambio SIN `?` previa → attempts=0 (no es respuesta heurística).
         let one_exchange = vec![
             ConversationTurn::user("primera"),
             ConversationTurn::assistant("re-pregunta"),
             ConversationTurn::user("segunda"),
         ];
         let guard = socratic_guard_context(8, Some("derivada"), "segunda", &one_exchange);
+        assert_eq!(guard.fsm.attempts, 0);
+        assert_eq!(guard.fsm.topic, "derivada");
+
+        // Una respuesta a `?` previa → attempts=1 (sigue bloqueado, <2).
+        let one_answer = vec![
+            ConversationTurn::user("quiero ver derivada"),
+            ConversationTurn::assistant("¿qué forma te imaginás?"),
+            ConversationTurn::user("mi intento"),
+            ConversationTurn::assistant("¿y ahora qué ves?"),
+            ConversationTurn::user("segunda"),
+        ];
+        let guard = socratic_guard_context(8, Some("derivada"), "segunda", &one_answer);
         assert_eq!(guard.fsm.attempts, 1);
         assert_eq!(guard.fsm.topic, "derivada");
 
-        // Dos intercambios + seguimiento → attempts=2 (reveal permitido).
-        let two_exchanges = vec![
-            ConversationTurn::user("una"),
-            ConversationTurn::assistant("pista"),
-            ConversationTurn::user("dos"),
-            ConversationTurn::assistant("otra pista"),
+        // Dos respuestas a `?` → attempts=2 (reveal permitido).
+        let two_answers = vec![
+            ConversationTurn::user("init"),
+            ConversationTurn::assistant("¿primera pregunta?"),
+            ConversationTurn::user("ans1"),
+            ConversationTurn::assistant("¿segunda pregunta?"),
+            ConversationTurn::user("ans2"),
+            ConversationTurn::assistant("¿tercera pregunta?"),
             ConversationTurn::user("tres"),
         ];
-        let guard = socratic_guard_context(8, Some("  "), "tres", &two_exchanges);
+        let guard = socratic_guard_context(8, Some("  "), "tres", &two_answers);
         assert_eq!(guard.fsm.attempts, 2);
-        // Tema en blanco cae a la pregunta actual.
-        assert_eq!(guard.fsm.topic, "tres");
+        // Tema en blanco + pregunta sin tema → tópico vacío (fallback, no crudo).
+        assert_eq!(guard.fsm.topic, "");
     }
 
     #[test]
     fn socratic_repair_error_is_detected_by_prefix() {
+        // Diagnóstico interno (solo logs/detección) conserva el prefijo.
         assert!(is_socratic_repair_error(
             "GUARD TELLING — REPARACIÓN SOCRÁTICA OBLIGATORIA (attempts=0 <2, ...)"
         ));
@@ -5684,6 +6237,51 @@ mod tests {
         assert!(!is_socratic_repair_error(
             "remote assistant request was cancelled"
         ));
+        // La voz de estudiante (lo que SÍ va al transcript) jamás lleva el prefijo.
+        let fsm = SocraticFsm::new("derivada");
+        let scaffold =
+            ScaffoldEngine.scaffold("derivada", PedagogicalLevel::from_level_value(8), &[]);
+        let student = fsm.repair_student_message(&scaffold);
+        assert!(!is_socratic_repair_error(&student));
+        assert!(!student.contains("GUARD"), "{student}");
+    }
+
+    #[test]
+    fn socratic_repair_turn_has_no_jargon_or_raw_echo_red_first() {
+        // Regresión P0 red-first con el input real que mostró la directiva interna.
+        // Falla si el turno contiene jerga o eco degenerado del saludo.
+        let raw = "hola haceme ejemplos para probar las capacidades de graficacion";
+        // 1. Es exploratorio y sin tema: el extractor y el scaffold no interpolan crudo.
+        assert!(is_exploratory_request(raw));
+        assert_eq!(extract_concept(raw), None);
+        let scaffold = ScaffoldEngine.scaffold(raw, PedagogicalLevel::from_level_value(8), &[]);
+        assert_eq!(
+            scaffold.question,
+            grafito_pedagogy::scaffold::NO_CONCEPT_FALLBACK_QUESTION
+        );
+        // 2. El guard sanitiza: tópico vacío (fallback), attempts=0 no punitivo.
+        let conversation = vec![ConversationTurn::user(raw)];
+        let guard = socratic_guard_context(8, None, raw, &conversation);
+        assert_eq!(guard.fsm.attempts, 0);
+        assert_eq!(guard.fsm.topic, "");
+        // 3. La voz de Mili (lo único que va al transcript) no tiene jerga ni eco.
+        let fsm = SocraticFsm::new(guard.fsm.topic.clone());
+        let turno = fsm.repair_student_message(&guard.scaffold);
+        for forbidden in [
+            "GUARD",
+            "REPARACIÓN",
+            "REPARACION",
+            "attempts",
+            "can_reveal",
+            "Re-pregunt",
+            "¿Te imaginás hola",
+        ] {
+            assert!(
+                !turno.contains(forbidden),
+                "el turno contiene '{forbidden}': '{turno}'"
+            );
+        }
+        assert!(turno.contains("Antes de mostrarte"), "{turno}");
     }
 
     #[test]
@@ -6336,6 +6934,89 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn s1_apply_muestra_la_vista_esperada_segun_el_objeto() {
+        // S1 auto-graficar 1-click: apply → vista esperada (2D o 3D según el
+        // objeto; si no se puede determinar, default 2D honesto).
+        use grafito_command::assistant_proposals::{
+            parse_assistant_command, parse_assistant_parameter, AssistantProposal,
+        };
+        let two_d =
+            AssistantProposal::Command(parse_assistant_command("Function[x]").expect("2D válido"));
+        assert_eq!(
+            two_d.expected_view(),
+            grafito_command::assistant_context::AssistantGraphView::TwoD
+        );
+        // Desde 3D, un 2D pide cambio a Geometry2D (el Apply lo abre).
+        assert_eq!(
+            assistant_graph_perspective(two_d.expected_view(), crate::ViewMode::D3),
+            Some(crate::Perspective::Geometry2D)
+        );
+        // Desde 2D, un 2D no pide cambio (ya visible).
+        assert_eq!(
+            assistant_graph_perspective(two_d.expected_view(), crate::ViewMode::D2),
+            None
+        );
+        let three_d = AssistantProposal::Command(
+            parse_assistant_command("Sphere[0, 0, 0, 1]").expect("3D válido"),
+        );
+        assert_eq!(
+            three_d.expected_view(),
+            grafito_command::assistant_context::AssistantGraphView::ThreeD
+        );
+        assert_eq!(
+            assistant_graph_perspective(three_d.expected_view(), crate::ViewMode::D2),
+            Some(crate::Perspective::Geometry3D)
+        );
+        // Parámetro sin objeto → default 2D honesto (no inventa 3D).
+        let param =
+            AssistantProposal::Parameter(parse_assistant_parameter("a = 2.5").expect("parámetro"));
+        assert_eq!(
+            param.expected_view(),
+            grafito_command::assistant_context::AssistantGraphView::TwoD
+        );
+    }
+
+    #[test]
+    fn s2_clarificacion_round_trip_sin_bloquear() {
+        // S2 `ask_user` real vía evento: parse del `args_summary` → pendiente
+        // → respuesta saneada para el loop como `function_call_output`.
+        // Puro y no bloqueante (sin threads, sin Document, sin I/O).
+        let pending = super::parse_agent_ask_user_pending(
+            r#"{"question":"¿qué valor le doy a x?","options":["0","1"]}"#,
+        )
+        .expect("pendiente parseable");
+        assert_eq!(pending.question, "¿qué valor le doy a x?");
+        assert_eq!(pending.options, vec!["0".to_owned(), "1".to_owned()]);
+        // Truncado con `…` igual intenta (honesto, sin inventar).
+        assert!(super::parse_agent_ask_user_pending("hola").is_none());
+        assert!(super::parse_agent_ask_user_pending("").is_none());
+        assert!(super::parse_agent_ask_user_pending(r#"{"question":""}"#).is_none());
+        // La respuesta vuelve al loop como `function_call_output` (Responses)
+        // vía `answer_pending_clarification` (nuevo job, nunca bloquea).
+        let output = grafito_agent::tools::ask_user_answer_function_output(&pending.call_id, "1")
+            .expect("respuesta no vacía");
+        assert_eq!(output["type"], "function_call_output");
+        assert_eq!(output["call_id"], pending.call_id);
+        assert_eq!(output["output"], "1");
+    }
+
+    #[test]
+    fn s3_entrada_rota_da_explicacion_mas_fix() {
+        // S3: fence inválida típica → `vibecoder_explain` + fix sintáctico.
+        let (explained, fix) =
+            grafito_assistant::agent::explain_invalid_proposal("Function[x", "derivada");
+        assert_eq!(
+            explained.kind,
+            grafito_assistant::agent::VibecoderKind::Syntax
+        );
+        assert!(explained.explanation.contains("derivada"));
+        assert_eq!(fix.as_deref(), Some("Function[x]"));
+        // Semántico jamás se reescribe en silencio.
+        let (_, fix) = grafito_assistant::agent::explain_invalid_proposal("Script[Save[]]", "");
+        assert!(fix.is_none());
     }
 
     #[test]

@@ -2197,6 +2197,7 @@ name = "grafito-ui"
 version = "1.0.0"
 dependencies = [
  "egui",
+ "grafito-anim",
  "grafito-assistant-types",
  "grafito-command",
  "grafito-core",

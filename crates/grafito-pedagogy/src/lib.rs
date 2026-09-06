@@ -27,8 +27,9 @@ pub use exercise::{Exercise, ExerciseDifficulty, ExerciseGenerator, ExerciseKind
 pub use feedback::{Feedback, FeedbackEngine, Misconception, Verdict};
 pub use level::PedagogicalLevel;
 pub use level::{UTNProgram, UdlProfile, UdlRepresentation};
-pub use scaffold::{Scaffold, ScaffoldEngine, Turn};
-pub use socratic::{GuardError, SocraticFsm, SocraticState};
+pub use scaffold::NO_CONCEPT_FALLBACK_QUESTION;
+pub use scaffold::{extract_concept, is_exploratory_request, Scaffold, ScaffoldEngine, Turn};
+pub use socratic::{GuardError, SocraticFsm, SocraticRepair, SocraticState};
 pub use teaching::{TeachingSession, TeachingStep, TeachingTopic};
 
 /// Error tipado del motor pedagógico (siempre en español o código tipado).

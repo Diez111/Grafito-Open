@@ -7765,7 +7765,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
 
 // La animación vive dentro del turno del chat (transcript con `AssistantMedia`,
 // ver `assistant.rs::run_assistant_animation_with` + `sync_assistant_for_frame`):
-// sin ventana compañera ni export separado. El reproductor del transcript
+// sin ventana compañera. El reproductor del transcript
 // (`grafito-ui/src/assistant.rs::set_media`, `draw_media_card`) es el único
-// destino; no hay botón de export en el transcript, así que el hilo GIF
-// también se elimina (cero `dead_code`, sin `#[allow(dead_code)]` nuevo).
+// destino, con scrub, velocidad y botón Exportar GIF (`GifExportJob`,
+// `export_assistant_media`, `poll_gif_export_job`).

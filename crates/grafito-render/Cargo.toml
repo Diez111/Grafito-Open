@@ -34,6 +34,10 @@ harness = false
 name = "render_scenarios"
 harness = false
 
+[[bench]]
+name = "ast_cache_acceptance"
+harness = false
+
 [lints]
 workspace = true
 

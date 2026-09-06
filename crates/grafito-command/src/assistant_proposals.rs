@@ -103,6 +103,46 @@ impl AssistantProposal {
             Self::Parameter(assignment) => assignment.canonical_text(),
         }
     }
+
+    /// Vista que debe mostrarse al aplicar (S1 auto-graficar 1-click).
+    ///
+    /// Pura y total: `Command` usa su capacidad verificada, `Scene` usa la
+    /// vista del primer componente si todos comparten vista, y `Parameter`
+    /// (sin objeto gráfico) cae a `TwoD` honesto (no cambia a 3D). Si no se
+    /// puede determinar, default `TwoD` honesto.
+    #[must_use]
+    pub fn expected_view(&self) -> crate::assistant_context::AssistantGraphView {
+        use crate::assistant_context::{assistant_graph_capability, AssistantGraphView};
+        match self {
+            Self::Command(command) => assistant_graph_capability(command.canonical_name())
+                .map(|capability| capability.view)
+                .unwrap_or(AssistantGraphView::TwoD),
+            Self::Scene(commands) => {
+                let mut view = None;
+                for command in commands {
+                    let current = assistant_graph_capability(command.canonical_name())
+                        .map(|capability| capability.view);
+                    match (view, current) {
+                        (None, Some(current)) => view = Some(current),
+                        (Some(expected), Some(current)) if expected == current => {}
+                        _ => return AssistantGraphView::TwoD,
+                    }
+                }
+                view.unwrap_or(AssistantGraphView::TwoD)
+            }
+            Self::Parameter(_) => AssistantGraphView::TwoD,
+        }
+    }
+
+    /// Etiqueta corta de la vista (`2D`/`3D`) para la tarjeta (rioplatense, sin jerga).
+    #[must_use]
+    pub fn expected_view_label(&self) -> &'static str {
+        use crate::assistant_context::AssistantGraphView;
+        match self.expected_view() {
+            AssistantGraphView::TwoD => "2D",
+            AssistantGraphView::ThreeD => "3D",
+        }
+    }
 }
 
 /// Propuesta reconocida y su ubicación estable entre los bloques de código.
@@ -580,5 +620,32 @@ mod tests {
         assert!(parse_assistant_parameter("a = NaN").is_none());
         assert!(parse_assistant_parameter("a = sin(1)").is_none());
         assert!(parse_assistant_parameter("a = 1; Save[]").is_none());
+    }
+
+    #[test]
+    fn expected_view_apunta_a_la_vista_correcta_con_default_2d_honesto() {
+        use crate::assistant_context::AssistantGraphView;
+        // S1: apply → vista esperada (2D o 3D según el objeto).
+        let two_d = parse_assistant_command("Function[x]").expect("2D válido");
+        assert_eq!(
+            AssistantProposal::Command(two_d).expected_view(),
+            AssistantGraphView::TwoD
+        );
+        assert_eq!(
+            AssistantProposal::Command(parse_assistant_command("Function[x]").expect("2D válido"))
+                .expected_view_label(),
+            "2D"
+        );
+        let three_d = parse_assistant_command("Sphere[0, 0, 0, 1]").expect("3D válido");
+        assert_eq!(
+            AssistantProposal::Command(three_d).expected_view(),
+            AssistantGraphView::ThreeD
+        );
+        // Parámetro sin objeto → default 2D honesto (no inventa 3D).
+        let param = parse_assistant_parameter("a = 2.5").expect("parámetro");
+        assert_eq!(
+            AssistantProposal::Parameter(param).expected_view(),
+            AssistantGraphView::TwoD
+        );
     }
 }

@@ -61,6 +61,14 @@ pub fn is_known_native_template(template: &str) -> bool {
 
 /// Retardo por frame en centésimas de segundo (8 ≈ 12 fps, igual que `PLAYBACK_FPS` en `anim_ui.rs`).
 pub const GIF_EXPORT_DELAY_CS: u16 = 8;
+/// FPS base del reproductor/export (B5): `100 / GIF_EXPORT_DELAY_CS` (pineado en test).
+pub const GIF_BASE_FPS: f32 = 12.0;
+/// Píxeles totales máximos por GIF exportado (B5, paridad con el loader
+/// `load_gif_frames` en `assistant.rs`: 8 M).
+pub const GIF_EXPORT_MAX_TOTAL_PIXELS: usize = 8_000_000;
+/// Bytes máximos del GIF escrito (B5, paridad con el loader: 5 MB). Se
+/// verifica tras el join (el tamaño final solo se conoce al codificar).
+pub const GIF_EXPORT_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// Velocidad del cuantizador NeuQuant 1..=30 (10 = compromiso; ver docs de `gif`).
 pub const GIF_EXPORT_SPEED: i32 = 10;
 /// Tope de frames por GIF (igual que `MAX_GIF_FRAMES` del loader).
@@ -89,6 +97,10 @@ pub enum GifExportError {
         width: usize,
         height: usize,
     },
+    /// Píxeles totales sobre el presupuesto (paridad con el loader: 8 M).
+    TooManyPixels {
+        got: usize,
+    },
     Encode(String),
     Io(String),
 }
@@ -114,6 +126,12 @@ impl std::fmt::Display for GifExportError {
                 f,
                 "dimensión {width}x{height} fuera de 1..={GIF_EXPORT_MAX_DIM}"
             ),
+            Self::TooManyPixels { got } => {
+                write!(
+                    f,
+                    "demasiados píxeles totales: {got} > {GIF_EXPORT_MAX_TOTAL_PIXELS}"
+                )
+            }
             Self::Encode(detail) => write!(f, "falló codificar el GIF: {detail}"),
             Self::Io(detail) => write!(f, "falló escribir el GIF: {detail}"),
         }
@@ -240,6 +258,58 @@ pub fn spawn_gif_export(
     delay_cs: u16,
 ) -> std::thread::JoinHandle<Result<PathBuf, GifExportError>> {
     std::thread::spawn(move || export_frames_to_gif_file(&frames, &path, delay_cs))
+}
+
+/// Retardo por frame para una velocidad de la card (B5).
+///
+/// `base_delay_cs / rate` en centésimas (8/1 → 8 ≈ 12 fps; 8/0.5 → 16;
+/// 8/2 → 4), mínimo 1. Tasa no finita o ≤ 0 → base (honesto, sin panic).
+/// Puro, sin E/S.
+pub fn gif_delay_for_rate(base_delay_cs: u16, rate: f32) -> u16 {
+    if !rate.is_finite() || rate <= 0.0 || base_delay_cs == 0 {
+        return base_delay_cs.max(1);
+    }
+    let delay = f32::from(base_delay_cs) / rate;
+    if !delay.is_finite() {
+        return base_delay_cs;
+    }
+    (delay.round() as u16).clamp(1, 100)
+}
+
+/// Preflight puro antes de spawnear la exportación (B5).
+///
+/// Verifica vacío, tope 64 frames, dimensiones 1..=4096 y píxeles totales
+/// ≤ 8 M (paridad con el loader; `checked_*` + saturación, sin panic ni
+/// overflow). No estima bytes: el tamaño final (cota 5 MB) lo verifica la app
+/// tras el join, porque solo se conoce al codificar. Puro, sin E/S.
+pub fn check_gif_export_budget(frames: &[egui::ColorImage]) -> Result<(), GifExportError> {
+    if frames.is_empty() {
+        return Err(GifExportError::EmptyFrames);
+    }
+    if frames.len() > GIF_EXPORT_MAX_FRAMES {
+        return Err(GifExportError::TooManyFrames { got: frames.len() });
+    }
+    let mut total_pixels: usize = 0;
+    for frame in frames {
+        let (w, h) = (frame.size[0], frame.size[1]);
+        if w == 0 || h == 0 || w > GIF_EXPORT_MAX_DIM || h > GIF_EXPORT_MAX_DIM {
+            return Err(GifExportError::DimensionOutOfRange {
+                width: w,
+                height: h,
+            });
+        }
+        let pixel_count = w
+            .checked_mul(h)
+            .ok_or(GifExportError::DimensionOutOfRange {
+                width: w,
+                height: h,
+            })?;
+        total_pixels = total_pixels.saturating_add(pixel_count);
+        if total_pixels > GIF_EXPORT_MAX_TOTAL_PIXELS {
+            return Err(GifExportError::TooManyPixels { got: total_pixels });
+        }
+    }
+    Ok(())
 }
 
 // ── Dispatch honesto nativo (sync mecánico, ANIM-REVIVE) ───────────────────
@@ -3299,6 +3369,60 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..6], b"GIF89a");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gif_delay_for_rate_escala_desde_la_base() {
+        assert_eq!(gif_delay_for_rate(GIF_EXPORT_DELAY_CS, 1.0), 8);
+        assert_eq!(gif_delay_for_rate(GIF_EXPORT_DELAY_CS, 0.5), 16);
+        assert_eq!(gif_delay_for_rate(GIF_EXPORT_DELAY_CS, 2.0), 4);
+        // Tasas inválidas caen a la base, sin panic.
+        assert_eq!(gif_delay_for_rate(GIF_EXPORT_DELAY_CS, 0.0), 8);
+        assert_eq!(gif_delay_for_rate(GIF_EXPORT_DELAY_CS, -1.0), 8);
+        assert_eq!(gif_delay_for_rate(GIF_EXPORT_DELAY_CS, f32::NAN), 8);
+        // FPS base pineado con el delay.
+        assert_eq!(GIF_BASE_FPS, 12.0);
+        assert_eq!(100 / u32::from(GIF_EXPORT_DELAY_CS), 12);
+    }
+
+    #[test]
+    fn gif_export_budget_preflight_cotas_honestas() {
+        assert_eq!(
+            check_gif_export_budget(&[]),
+            Err(GifExportError::EmptyFrames)
+        );
+        assert!(check_gif_export_budget(&synthetic_frames(3)).is_ok());
+        let many = synthetic_frames(GIF_EXPORT_MAX_FRAMES + 1);
+        assert_eq!(
+            check_gif_export_budget(&many),
+            Err(GifExportError::TooManyFrames {
+                got: GIF_EXPORT_MAX_FRAMES + 1
+            })
+        );
+        // Dimensión fuera de rango.
+        let big = vec![egui::ColorImage::new(
+            [GIF_EXPORT_MAX_DIM + 1, 8],
+            egui::Color32::BLACK,
+        )];
+        assert!(matches!(
+            check_gif_export_budget(&big),
+            Err(GifExportError::DimensionOutOfRange { .. })
+        ));
+        // Píxeles totales sobre 8 M con dimensiones válidas (9 × 1024² > 8 M).
+        let heavy: Vec<egui::ColorImage> = (0..9)
+            .map(|_| egui::ColorImage::new([1024, 1024], egui::Color32::BLACK))
+            .collect();
+        assert!(matches!(
+            check_gif_export_budget(&heavy),
+            Err(GifExportError::TooManyPixels { .. })
+        ));
+        // Mensaje en español, sin inglés crudo.
+        let msg = format!("{}", GifExportError::TooManyPixels { got: 9_000_000 });
+        assert!(msg.contains("píxeles"));
+        assert!(!msg.to_lowercase().contains("failed"));
+        // Cotas pineadas (paridad con el loader de `assistant.rs`).
+        assert_eq!(GIF_EXPORT_MAX_TOTAL_PIXELS, 8_000_000);
+        assert_eq!(GIF_EXPORT_MAX_FILE_BYTES, 5 * 1024 * 1024);
     }
 
     #[test]
