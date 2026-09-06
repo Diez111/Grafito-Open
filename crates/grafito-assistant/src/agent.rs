@@ -969,6 +969,28 @@ fn build_agent_payload(
     }))
 }
 
+/// Error HTTP del transporte agente con freno de cuota.
+///
+/// Ante 429 registra la pausa global (con `Retry-After` si vino) para que
+/// los reintentos automáticos del loop Chat (`complete_with_retries` en
+/// `grafito-agent/loop_engine.rs`: 2 reintentos con 400/800ms, fuera de este
+/// archivo) fallen honesto sin red en vez de martillar la cuota. El formato
+/// conserva el prefijo `assistant agent returned HTTP {status}` + sufijo de
+/// espera sólo con header legible (sin header queda byte-idéntico al
+/// anterior, y los tests de detección siguen pasando).
+#[cfg(feature = "assistant-net")]
+fn agent_http_status_error(response: reqwest::blocking::Response) -> String {
+    let status = response.status().as_u16();
+    if status == 429 {
+        let retry_after = crate::retry_after_secs_from_headers(response.headers());
+        crate::record_rate_limited(retry_after);
+        if let Some(secs) = retry_after {
+            return format!("assistant agent returned HTTP 429 (reintentá en {secs}s)");
+        }
+    }
+    format!("assistant agent returned HTTP {status}")
+}
+
 /// Envía una petición agéntica y devuelve texto final o llamadas de herramienta.
 ///
 /// Sin `assistant-net`: stub honesto que siempre retorna `Err(NoNetwork)`.
@@ -1005,6 +1027,11 @@ fn request_agent_completion(
         return Err("assistant agent requires an OpenAI-compatible chat endpoint (Muse Spark usa Responses API: el modo agente con herramientas aún no está soportado, usá el chat simple o deepseek)".into());
     }
     let payload = build_agent_payload(settings, messages, tools, max_output_tokens)?;
+    // Freno 429 compartido: en pausa se falla honesto sin red (cubre también
+    // los reintentos automáticos de `complete_with_retries` del loop Chat).
+    if crate::check_rate_limit_cooldown().is_err() {
+        return Err(crate::rate_limit_paused_error());
+    }
     let client = crate::shared_http_client()?;
     let mut call = client
         .post(crate::chat_completion_endpoint(settings)?)
@@ -1023,10 +1050,7 @@ fn request_agent_completion(
         return Err("assistant agent request was cancelled".into());
     }
     if !response.status().is_success() {
-        return Err(format!(
-            "assistant agent returned HTTP {}",
-            response.status().as_u16()
-        ));
+        return Err(agent_http_status_error(response));
     }
     let response_bytes = crate::read_bounded_response_body(response, MAX_AGENT_RESPONSE_BYTES)?;
     let body: Value = serde_json::from_slice(&response_bytes)
@@ -1146,6 +1170,21 @@ const MAX_RESPONSES_ARGS_SUMMARY_CHARS: usize = 160;
 /// (solo `max_tool_turns`), así que una tool verborrágica podía inflar el
 /// payload turno a turno. Fail-closed con el mismo mensaje que el loop Chat.
 const MAX_RESPONSES_INPUT_CHARS: usize = 48_000;
+
+/// Peor caso de red por turno del modo agente (documentado y testeado).
+///
+/// - Responses (`run_responses_agent_loop`, acá): un POST por turno y ningún
+///   reintento interno → `max_tool_turns + 1 = 5` con el budget default.
+///   Ante 429 el loop corta en el primer POST (propaga `Err`): quema 1.
+/// - Chat (`run_agent` en `grafito-agent/loop_engine.rs`): cada turno pasa
+///   por `complete_with_retries` (`max_retries = 2`) → `(4+1) × (1+2) = 15`
+///   POST en el peor caso SIN pausa previa. Con la pausa global de `crate::`
+///   el primer 429 la arma y los reintentos/turnos siguientes fallan honesto
+///   sin red (1 POST de descubrimiento por turno como máximo, 0 si ya había
+///   pausa). Los valores se verifican contra `AgentBudget::default` en tests
+///   (sólo lectura: los budgets no se tocan).
+pub const MAX_AGENT_RESPONSES_HTTP_REQUESTS_PER_TURN: usize = 5;
+pub const MAX_AGENT_CHAT_HTTP_REQUESTS_PER_TURN: usize = 15;
 
 /// Suma el tamaño serializado del `input` Responses (paridad con
 /// `message_chars` de `loop_engine`: `Value::to_string().len()`).
@@ -1431,6 +1470,9 @@ fn post_responses_output(
         .post(crate::responses_endpoint(settings)?)
         .json(payload)
         .timeout(timeout);
+    if crate::check_rate_limit_cooldown().is_err() {
+        return Err(crate::rate_limit_paused_error());
+    }
     if let Some(key) = api_key {
         call = call.bearer_auth(crate::sanitize_api_key(key)?);
     }
@@ -1444,10 +1486,7 @@ fn post_responses_output(
         return Err("assistant agent request was cancelled".into());
     }
     if !response.status().is_success() {
-        return Err(format!(
-            "assistant agent returned HTTP {}",
-            response.status().as_u16()
-        ));
+        return Err(agent_http_status_error(response));
     }
     let response_bytes = crate::read_bounded_response_body(response, MAX_RESPONSES_BODY_BYTES)?;
     serde_json::from_slice(&response_bytes)
@@ -2564,6 +2603,142 @@ mod tests {
     }
 
     #[test]
+    fn agent_worst_case_request_counts_match_default_budgets() {
+        // El peor caso documentado sigue a `AgentBudget::default` (sólo
+        // lectura, los budgets no se tocan): Responses 1 POST/turno, Chat
+        // 1 + reintentos por turno. Si el budget sube, este test avisa que
+        // la amplificación también sube.
+        let budget = AgentBudget::default();
+        assert_eq!(budget.max_tool_turns, 4);
+        assert_eq!(budget.max_retries, 2);
+        assert_eq!(
+            MAX_AGENT_RESPONSES_HTTP_REQUESTS_PER_TURN,
+            budget.max_tool_turns.saturating_add(1)
+        );
+        assert_eq!(MAX_AGENT_RESPONSES_HTTP_REQUESTS_PER_TURN, 5);
+        assert_eq!(
+            MAX_AGENT_CHAT_HTTP_REQUESTS_PER_TURN,
+            budget
+                .max_tool_turns
+                .saturating_add(1)
+                .saturating_mul(budget.max_retries as usize + 1)
+        );
+        assert_eq!(MAX_AGENT_CHAT_HTTP_REQUESTS_PER_TURN, 15);
+        // Coherencia con el transporte simple (crate raíz).
+        assert_eq!(crate::MAX_SIMPLE_CHAT_HTTP_REQUESTS_PER_TURN, 2);
+        assert_eq!(crate::MAX_FUSION_HTTP_REQUESTS_PER_TURN, 2);
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn agent_transport_stays_quiet_while_rate_limited() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        crate::clear_rate_limit_for_tests();
+        // Stub que cuenta conexiones: si el freno falla, el POST llega y el
+        // contador lo delata. Ventana de 400ms y cierre limpio.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds");
+        let port = listener.local_addr().expect("stub addr").port();
+        let _ = listener.set_nonblocking(true);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let server = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_millis(400) {
+                match listener.accept() {
+                    Ok(_) => {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+        crate::record_rate_limited(Some(60));
+        let settings = crate::ProviderSettings::for_profile(
+            crate::ProviderProfile::OllamaLocal,
+            "deepseek-v4-flash",
+        )
+        .with_endpoint(format!("http://127.0.0.1:{port}/v1"))
+        .expect("stub endpoint is valid");
+        let error = request_agent_completion(
+            &settings,
+            Some("test-key"),
+            &[],
+            &[],
+            64,
+            Duration::from_secs(1),
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        // Se limpia ANTES de esperar al stub: la pausa de 60s no debe
+        // contaminar a los stubs 200/429 que corren en paralelo.
+        crate::clear_rate_limit_for_tests();
+        server.join().expect("stub joins");
+        assert!(
+            error.starts_with(crate::RATE_LIMIT_PAUSED_MARKER),
+            "falla honesto con marcador, sin tocar la red: {error}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "cero conexiones en pausa");
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn agent_post_records_cooldown_on_429_with_retry_after() {
+        use std::io::{Read, Write};
+        crate::clear_rate_limit_for_tests();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds");
+        let port = listener.local_addr().expect("stub addr").port();
+        // Accept con deadline (no bloqueante): si una pausa ajena (otro test
+        // en paralelo) hiciera fallar el POST antes de conectar, el join
+        // igual termina y el test falla rápido en vez de colgarse.
+        let server = std::thread::spawn(move || {
+            let _ = listener.set_nonblocking(true);
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(10) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buffer = [0; 4096];
+                        let _ = stream.read(&mut buffer);
+                        let body = "busy";
+                        write!(
+                            stream,
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nRetry-After: 3\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .expect("stub writes");
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+        let settings = crate::ProviderSettings::for_profile(
+            crate::ProviderProfile::OllamaLocal,
+            "muse-spark-test",
+        )
+        .with_endpoint(format!("http://127.0.0.1:{port}/v1"))
+        .expect("stub endpoint is valid");
+        let error = post_responses_output(
+            &settings,
+            Some("test-key"),
+            &serde_json::json!({"model": "muse-spark-test"}),
+            Duration::from_secs(5),
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        server.join().expect("stub joins");
+        assert!(error.contains("429"), "{error}");
+        assert!(error.contains("reintentá en 3s"), "{error}");
+        let remaining = crate::rate_limit_cooldown_remaining_secs().expect("pausa armada");
+        assert!(
+            (1..=3).contains(&remaining),
+            "respeta Retry-After: {remaining}"
+        );
+        crate::clear_rate_limit_for_tests();
+    }
+
+    #[test]
     fn responses_input_chars_sums_serialized_len() {
         let input = vec![
             json!({"role": "user", "content": "hola"}),
@@ -3201,6 +3376,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_runs_function_call_output_then_final_text() {
+        crate::clear_rate_limit_for_tests();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (port, stub) = spawn_responses_stub(
             vec![
@@ -3271,6 +3447,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_cancels_mid_loop_after_first_dispatch() {
+        crate::clear_rate_limit_for_tests();
         struct CancellingDispatcher {
             cancellation: Cancellation,
         }
@@ -3324,6 +3501,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_reports_per_turn_timeout() {
+        crate::clear_rate_limit_for_tests();
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds loopback");
         let port = listener.local_addr().expect("stub has addr").port();

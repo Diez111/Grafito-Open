@@ -90,6 +90,79 @@ const MAX_ERROR_BODY_CHARS: usize = 500;
 /// sólo se informa "reintentá en Ns" y la UI decide cuándo reintentar.
 const RETRY_AFTER_MIN_SECS: u64 = 1;
 const RETRY_AFTER_MAX_SECS: u64 = 120;
+/// Freno cliente ante 429 (cuota por minuto del proveedor).
+///
+/// El mensaje al usuario ("esperá ~1 minuto...") era correcto pero el fondo
+/// amplificaba: cada turno podía disparar varios POST (streaming+fallback,
+/// cascada draft+audit, loop agente con reintentos) y los reintentos
+/// inmediatos quemaban la cuota. Este freno comparte una pausa global entre
+/// hilos: ante un 429 se guarda `not_before = ahora + cooldown` y todo
+/// request posterior falla honesto y rápido sin tocar la red hasta que venza.
+/// - Con `Retry-After` legible: ese valor, con piso 1s y techo
+///   `RATE_LIMIT_MAX_COOLDOWN_SECS`.
+/// - Sin header: `RATE_LIMIT_DEFAULT_COOLDOWN_SECS` (60s, paridad con el
+///   mensaje "esperá ~1 minuto").
+///
+/// Nunca se duerme un worker: el reintento real lo hace el usuario de forma
+/// explícita cuando la pausa vence (jamás reintento inmediato en loop: los
+/// reintentos automáticos caen en la pausa y fallan sin red).
+pub const RATE_LIMIT_DEFAULT_COOLDOWN_SECS: u64 = 60;
+/// Techo de la pausa global ante 429 (5 min): evita bloquear la sesión si el
+/// proveedor pide una espera absurda. El clamp de *reporte* (`Retry-After`
+/// 1..120s en el texto del error) sigue intacto; esto sólo acota la pausa.
+pub const RATE_LIMIT_MAX_COOLDOWN_SECS: u64 = 300;
+/// TTL del cache de la lista de modelos (5 min): el botón "actualizar
+/// modelos" nunca está en el hot path del turno y dos pedidos seguidos no
+/// duplican el GET (`single-flight` vía cache compartido).
+pub const MODELS_CACHE_TTL_SECS: u64 = 300;
+/// Peor caso de red por turno de chat simple: streaming SSE (1 POST) + UN
+/// único fallback no-streaming si el servidor nunca habla SSE (= 2).
+/// Nunca hay reintento automático ante 429 en este path.
+pub const MAX_SIMPLE_CHAT_HTTP_REQUESTS_PER_TURN: usize = 2;
+/// Peor caso de red por turno Fusion: draft (Anthropic) + audit (OpenAI) = 2.
+/// Si el draft falla no hay audit (falla honesto, sin request extra).
+pub const MAX_FUSION_HTTP_REQUESTS_PER_TURN: usize = 2;
+/// Marcador interno de pausa por cuota (sólo logs/detección, jamás UI cruda):
+/// los workers devuelven `{MARKER}:{segundos}` y la app lo convierte a
+/// criollo con `rate_limit_paused_message`. Sin URL, sin claves, sin jerga.
+pub const RATE_LIMIT_PAUSED_MARKER: &str = "rate_limit_cooldown_paused";
+
+/// Segundos de pausa global ante un 429: `Retry-After` con piso 1s y techo
+/// 5 min; sin header, 60s (paridad con "esperá ~1 minuto"). Puro, testeable.
+fn rate_limit_cooldown_secs(retry_after_secs: Option<u64>) -> u64 {
+    match retry_after_secs {
+        Some(secs) => secs.clamp(1, RATE_LIMIT_MAX_COOLDOWN_SECS),
+        None => RATE_LIMIT_DEFAULT_COOLDOWN_SECS,
+    }
+}
+
+/// Mensaje criollo de pausa por cuota, con cuenta regresiva y sin jerga
+/// (nada de `429`/`quota`/`retry-after` crudos: eso queda en logs).
+/// Puro y determinista: la app lo usa en disparadores y en el mapeo de
+/// errores de workers.
+pub fn rate_limit_paused_message(remaining_secs: u64) -> String {
+    let remaining = remaining_secs.max(1);
+    format!(
+        "El proveedor pausó la cuota por un rato, che: probá de nuevo en {remaining}s. No hace falta cambiar el modelo ni la clave."
+    )
+}
+
+/// Si `error` es un marcador de pausa (`{MARKER}:{N}`), devuelve el mensaje
+/// criollo con su cuenta regresiva. Puro: la app lo usa en
+/// `remote_error_message` para no mostrar jerga interna. Un marcador roto
+/// cae al default honesto (60s), nunca pánico.
+pub fn rate_limit_paused_message_from_error(error: &str) -> Option<String> {
+    let rest = error.strip_prefix(RATE_LIMIT_PAUSED_MARKER)?;
+    let digits = rest.strip_prefix(':')?.trim();
+    let remaining: u64 = digits.parse().unwrap_or(RATE_LIMIT_DEFAULT_COOLDOWN_SECS);
+    Some(rate_limit_paused_message(remaining))
+}
+
+/// ¿Sigue fresca una entrada del cache de modelos? Puro sobre la edad: al
+/// cumplir el TTL se considera vencida y el próximo pedido refetchea.
+fn models_cache_is_fresh(age: Duration) -> bool {
+    age.as_secs() < MODELS_CACHE_TTL_SECS
+}
 /// Timeouts remotos: simple 60s (`RequestBudget::default`), agente 30s por
 /// turno (`AgentBudget::default` en grafito-agent/loop_engine.rs:43). Piso
 /// 100ms = mínimo válido de `RequestBudget::validate`; techo 120s = cap
@@ -1072,7 +1145,7 @@ fn parse_retry_after_secs(value: &str) -> Option<u64> {
 }
 
 #[cfg(feature = "assistant-net")]
-fn retry_after_secs_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+pub(crate) fn retry_after_secs_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
@@ -1081,7 +1154,9 @@ fn retry_after_secs_from_headers(headers: &reqwest::header::HeaderMap) -> Option
 
 /// Error HTTP con cuerpo truncado y, sólo en 429 con `Retry-After` legible,
 /// sufijo ` (reintentá en {N}s)`. No incluye URL, headers ni claves.
-fn http_status_error(status: u16, body: &str, retry_after_secs: Option<u64>) -> String {
+/// `pub(crate)` porque el transporte agente (`agent.rs`) reutiliza el mismo
+/// formato en sus dos POST (Chat y Responses) sin tocar el wire.
+pub(crate) fn http_status_error(status: u16, body: &str, retry_after_secs: Option<u64>) -> String {
     let snippet = truncate_error_body(body);
     if status == 429 {
         if let Some(secs) = retry_after_secs {
@@ -1340,6 +1415,11 @@ pub fn request_responses_completion_streaming(
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
+    // Freno 429: si la cuota está en pausa se falla honesto sin tocar la red
+    // (la cancelación ya se chequeó arriba y tiene prioridad).
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
     let started = Instant::now();
     let mut streaming_payload = base_payload.clone();
     streaming_payload["stream"] = json!(true);
@@ -1360,13 +1440,17 @@ pub fn request_responses_completion_streaming(
     }
     if !response.status().is_success() {
         // Idéntico al path no-streaming: 429 con Retry-After, cuerpo acotado
-        // sin secretos.
+        // sin secretos. Además arma la pausa global para que el fallback
+        // no-streaming (abajo) y los reintentos del usuario no martillen.
         let status = response.status().as_u16();
         let retry_after = if status == 429 {
             retry_after_secs_from_headers(response.headers())
         } else {
             None
         };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
         let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
         return Err(http_status_error(status, &body, retry_after));
     }
@@ -2467,6 +2551,14 @@ pub fn request_remote_models_with_api_key_on_worker(
         if cancellation.is_cancelled() {
             return Err("remote model request was cancelled".into());
         }
+        // Freno 429 compartido + single-flight por TTL: en pausa se falla
+        // honesto sin red; con cache fresco se devuelve sin el GET.
+        if check_rate_limit_cooldown().is_err() {
+            return Err(rate_limit_paused_error());
+        }
+        if let Some(models) = cached_model_list() {
+            return Ok(models);
+        }
         let endpoint = models_endpoint(&settings)?;
         let client = shared_http_client()?;
         let mut call = client.get(endpoint).timeout(Duration::from_secs(15));
@@ -2485,12 +2577,16 @@ pub fn request_remote_models_with_api_key_on_worker(
         }
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            // 429 informa "reintentá en Ns" sin dormir el worker (cancelable).
+            // 429 informa "reintentá en Ns" sin dormir el worker (cancelable)
+            // y arma la pausa global (también frena chat/agente/modelos).
             let retry_after = if status == 429 {
                 retry_after_secs_from_headers(response.headers())
             } else {
                 None
             };
+            if status == 429 {
+                record_rate_limited(retry_after);
+            }
             if let Some(secs) = retry_after {
                 return Err(format!(
                     "remote model request returned HTTP 429 (reintentá en {secs}s)"
@@ -2518,6 +2614,8 @@ pub fn request_remote_models_with_api_key_on_worker(
         if models.is_empty() || models.len() > MAX_DISCOVERED_MODELS {
             return Err("remote model list is outside the allowed size".into());
         }
+        // Single-flight: el próximo pedido dentro del TTL sale del cache.
+        store_model_list(models.clone());
         Ok(models)
     })
 }
@@ -2767,6 +2865,9 @@ fn request_responses_completion(
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
     let response = call
         .send()
         .map_err(|error| transport_error("remote assistant", &error, Some(timeout)))?;
@@ -2776,12 +2877,16 @@ fn request_responses_completion(
     if !response.status().is_success() {
         let status = response.status().as_u16();
         // Retry-After sólo en 429; no se duerme el worker cancelable, sólo se
-        // anota "reintentá en Ns" (clamp 1..120s, entero o fecha HTTP).
+        // anota "reintentá en Ns" (clamp 1..120s, entero o fecha HTTP) y se
+        // arma la pausa global.
         let retry_after = if status == 429 {
             retry_after_secs_from_headers(response.headers())
         } else {
             None
         };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
         let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
         return Err(http_status_error(status, &body, retry_after));
     }
@@ -2875,6 +2980,9 @@ fn request_anthropic_completion(
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
     let response = call
         .send()
         .map_err(|error| transport_error("remote assistant", &error, Some(timeout)))?;
@@ -2888,6 +2996,9 @@ fn request_anthropic_completion(
         } else {
             None
         };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
         let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
         return Err(http_status_error(status, &body, retry_after));
     }
@@ -2950,6 +3061,9 @@ fn send_openai_request(
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
     let response = call
         .send()
         .map_err(|error| transport_error("remote assistant", &error, timeout))?;
@@ -2963,6 +3077,9 @@ fn send_openai_request(
         } else {
             None
         };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
         let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
         return Err(http_status_error(status, &body, retry_after));
     }
@@ -3060,6 +3177,146 @@ fn response_schema_error(expectation: &str) -> String {
 fn response_content_error(reason: &str) -> String {
     format!("remote assistant response content is not displayable: {reason}")
 }
+
+/// Pausa global compartida ante 429 (`static` + `Mutex`: el transporte es
+/// por-request en hilos workers, así que el freno vive acá y no en el
+/// cliente). `None` = sin pausa. El `Mutex` se toma con `.ok()`: si está
+/// envenenado se ignora la pausa (fail-open a un request, nunca pánico).
+#[cfg(feature = "assistant-net")]
+static RATE_LIMIT_NOT_BEFORE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// Resta de la pausa con tiempo inyectado (para tests sin red ni sleeps):
+/// `Some(segundos)` si `not_before` sigue en el futuro, `None` si venció.
+#[cfg(feature = "assistant-net")]
+pub(crate) fn cooldown_remaining_secs(not_before: Instant, now: Instant) -> Option<u64> {
+    if not_before > now {
+        Some(not_before.duration_since(now).as_secs().max(1))
+    } else {
+        None
+    }
+}
+
+/// Guarda la pausa global ante un 429 (con/sin `Retry-After`). Sin red,
+/// sin sleep, sin pánico. La llama todo path que ve un 429 (los 7 `.send()`
+/// del crate, vía sus wrappers).
+#[cfg(feature = "assistant-net")]
+pub(crate) fn record_rate_limited(retry_after_secs: Option<u64>) {
+    let wait = rate_limit_cooldown_secs(retry_after_secs);
+    let not_before = Instant::now().checked_add(Duration::from_secs(wait));
+    if let Ok(mut guard) = RATE_LIMIT_NOT_BEFORE.lock() {
+        // `checked_add` casi nunca falla (≤300s); si fallara se conserva la
+        // pausa previa en vez de romper el invariante.
+        if let Some(deadline) = not_before {
+            *guard = Some(deadline);
+        }
+    }
+}
+
+/// ¿La cuota sigue en pausa? `Ok(())` = vía libre; `Err(segundos)` = el
+/// llamante falla honesto sin tocar la red.
+#[cfg(feature = "assistant-net")]
+pub(crate) fn check_rate_limit_cooldown() -> Result<(), u64> {
+    let not_before = RATE_LIMIT_NOT_BEFORE.lock().ok().and_then(|guard| *guard);
+    match not_before {
+        Some(deadline) => match cooldown_remaining_secs(deadline, Instant::now()) {
+            Some(left) => Err(left),
+            None => Ok(()),
+        },
+        None => Ok(()),
+    }
+}
+
+/// Vía libre o segundos restantes de la pausa global (para los disparadores
+/// de la app, que fallan honesto ANTES de spawnear workers).
+#[cfg(feature = "assistant-net")]
+pub fn rate_limit_cooldown_remaining_secs() -> Option<u64> {
+    check_rate_limit_cooldown().err()
+}
+
+/// Sin red no hay cuota que pausar: siempre vía libre.
+#[cfg(not(feature = "assistant-net"))]
+pub fn rate_limit_cooldown_remaining_secs() -> Option<u64> {
+    None
+}
+
+/// Error honesto de worker ante pausa: marcador interno (la app lo pasa a
+/// criollo; en logs queda el contador, sin secretos).
+#[cfg(feature = "assistant-net")]
+pub(crate) fn rate_limit_paused_error() -> String {
+    let remaining =
+        rate_limit_cooldown_remaining_secs().unwrap_or(RATE_LIMIT_DEFAULT_COOLDOWN_SECS);
+    format!("{RATE_LIMIT_PAUSED_MARKER}:{remaining}")
+}
+
+/// Limpia la pausa global (sólo tests: los stubs 429 la setean de verdad y
+/// no deben contaminar a los stubs 200 que corren en paralelo, incluidos los
+/// tests de integración en `tests/` que comparten el `static` del proceso).
+#[cfg(feature = "assistant-net")]
+#[doc(hidden)]
+pub fn clear_rate_limit_for_tests() {
+    if let Ok(mut guard) = RATE_LIMIT_NOT_BEFORE.lock() {
+        *guard = None;
+    }
+}
+
+/// Sin red no hay pausa que limpiar.
+#[cfg(not(feature = "assistant-net"))]
+#[doc(hidden)]
+pub fn clear_rate_limit_for_tests() {}
+
+/// Cache compartido de la lista de modelos (single-flight por TTL): dos
+/// pedidos seguidos no duplican el GET; el turno de chat nunca lo toca
+/// (no está en su hot path).
+#[cfg(feature = "assistant-net")]
+static MODELS_CACHE: std::sync::Mutex<Option<CachedModelList>> = std::sync::Mutex::new(None);
+
+/// Entrada del cache: modelos + instante de fetch (TTL `MODELS_CACHE_TTL_SECS`).
+#[cfg(feature = "assistant-net")]
+#[derive(Debug, Clone)]
+struct CachedModelList {
+    fetched_at: Instant,
+    models: Vec<String>,
+}
+
+/// Modelos cacheados si siguen frescos; `None` si hay que fetchear.
+/// Sin pánico: ante `Mutex` envenenado o reloj roto se refetchea.
+#[cfg(feature = "assistant-net")]
+pub(crate) fn cached_model_list() -> Option<Vec<String>> {
+    let guard = MODELS_CACHE.lock().ok()?;
+    let cached = guard.as_ref()?;
+    let age = Instant::now().checked_duration_since(cached.fetched_at)?;
+    if models_cache_is_fresh(age) {
+        Some(cached.models.clone())
+    } else {
+        None
+    }
+}
+
+/// Guarda la lista recién fetcheada. Sin pánico ante `Mutex` envenenado.
+#[cfg(feature = "assistant-net")]
+pub(crate) fn store_model_list(models: Vec<String>) {
+    if let Ok(mut guard) = MODELS_CACHE.lock() {
+        *guard = Some(CachedModelList {
+            fetched_at: Instant::now(),
+            models,
+        });
+    }
+}
+
+/// Limpia el cache de modelos (sólo tests, para aislar stubs; ver
+/// `clear_rate_limit_for_tests`).
+#[cfg(feature = "assistant-net")]
+#[doc(hidden)]
+pub fn clear_models_cache_for_tests() {
+    if let Ok(mut guard) = MODELS_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// Sin red no hay cache que limpiar.
+#[cfg(not(feature = "assistant-net"))]
+#[doc(hidden)]
+pub fn clear_models_cache_for_tests() {}
 
 /// Cliente bloqueante compartido por todos los proveedores.
 ///
@@ -3785,6 +4042,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn minimax_wire_uses_anthropic_headers_and_response_shape() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/messages",
@@ -3826,6 +4084,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_wire_uses_bearer_and_response_shape() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -3875,6 +4134,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn fusion_returns_only_the_deepseek_audited_answer() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -3940,6 +4200,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn fusion_discards_the_draft_when_deepseek_audit_fails() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -4020,6 +4281,204 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_cooldown_maps_retry_after_with_cap_and_default() {
+        // Con header: tal cual, con piso 1s y techo 5 min.
+        assert_eq!(rate_limit_cooldown_secs(Some(7)), 7);
+        assert_eq!(rate_limit_cooldown_secs(Some(0)), 1);
+        assert_eq!(
+            rate_limit_cooldown_secs(Some(3_600)),
+            RATE_LIMIT_MAX_COOLDOWN_SECS
+        );
+        // Sin header: 60s (paridad con "esperá ~1 minuto").
+        assert_eq!(
+            rate_limit_cooldown_secs(None),
+            RATE_LIMIT_DEFAULT_COOLDOWN_SECS
+        );
+    }
+
+    #[test]
+    fn rate_limit_paused_message_counts_down_without_jargon() {
+        let message = rate_limit_paused_message(42);
+        assert!(message.contains("42"), "cuenta regresiva: {message}");
+        assert!(!message.contains("429"), "sin código crudo: {message}");
+        let lowered = message.to_lowercase();
+        assert!(!lowered.contains("quota"), "sin jerga inglesa: {message}");
+        assert!(
+            !message.contains("retry-after") && !message.contains("Retry-After"),
+            "sin header crudo: {message}"
+        );
+        assert!(
+            message.contains("modelo") && message.contains("clave"),
+            "tranquiliza sin mandar a reconfigurar: {message}"
+        );
+        // Piso honesto: nunca "0s".
+        assert!(rate_limit_paused_message(0).contains('1'));
+    }
+
+    #[test]
+    fn rate_limit_marker_round_trips_to_paused_message() {
+        let message =
+            rate_limit_paused_message_from_error(&format!("{RATE_LIMIT_PAUSED_MARKER}:9"))
+                .expect("marker válido mapea");
+        assert!(message.contains('9'), "conserva la cuenta: {message}");
+        assert!(!message.contains("429"), "sale en criollo: {message}");
+        assert!(
+            rate_limit_paused_message_from_error("remote assistant returned HTTP 500: x").is_none(),
+            "sólo el marcador mapea"
+        );
+        // Marcador roto: cae al default honesto, sin pánico.
+        let fallback =
+            rate_limit_paused_message_from_error(&format!("{RATE_LIMIT_PAUSED_MARKER}:???"))
+                .expect("marker roto no paniquea");
+        assert!(
+            fallback.contains(&RATE_LIMIT_DEFAULT_COOLDOWN_SECS.to_string()),
+            "default honesto: {fallback}"
+        );
+    }
+
+    #[test]
+    fn models_cache_freshness_follows_ttl() {
+        assert!(models_cache_is_fresh(Duration::from_secs(10)));
+        assert!(!models_cache_is_fresh(Duration::from_secs(
+            MODELS_CACHE_TTL_SECS
+        )));
+        assert!(!models_cache_is_fresh(Duration::from_secs(
+            MODELS_CACHE_TTL_SECS.saturating_add(1)
+        )));
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn rate_limit_cooldown_blocks_without_touching_network() {
+        // Sin red ni sleeps: la pausa se arma y se consulta en memoria.
+        clear_rate_limit_for_tests();
+        assert!(check_rate_limit_cooldown().is_ok());
+        record_rate_limited(Some(60));
+        assert!(check_rate_limit_cooldown().is_err(), "en pausa bloquea");
+        let remaining = rate_limit_cooldown_remaining_secs().expect("pausa armada");
+        assert!(
+            (1..=60).contains(&remaining),
+            "cuenta regresiva acotada: {remaining}"
+        );
+        assert!(rate_limit_cooldown_remaining_secs().is_some());
+        clear_rate_limit_for_tests();
+        assert!(check_rate_limit_cooldown().is_ok());
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn rate_limit_cooldown_honors_retry_after_and_expires() {
+        clear_rate_limit_for_tests();
+        // Con Retry-After: la pausa respeta el header (acotado al venir).
+        record_rate_limited(Some(7));
+        let remaining = rate_limit_cooldown_remaining_secs().expect("pausa armada");
+        assert!(
+            (1..=7).contains(&remaining),
+            "respeta Retry-After: {remaining}"
+        );
+        clear_rate_limit_for_tests();
+        assert!(
+            rate_limit_cooldown_remaining_secs().is_none(),
+            "limpiar vence la pausa"
+        );
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn models_cache_single_flight_avoids_duplicate_fetch() {
+        // El segundo lookup sale del cache: ningún GET extra (single-flight
+        // por TTL). Sin red en este test: sólo el registro compartido.
+        clear_models_cache_for_tests();
+        clear_rate_limit_for_tests();
+        assert!(cached_model_list().is_none());
+        store_model_list(vec!["deepseek-v4-flash".to_string()]);
+        assert_eq!(
+            cached_model_list(),
+            Some(vec!["deepseek-v4-flash".to_string()]),
+            "segundo pedido sin refetch"
+        );
+        clear_models_cache_for_tests();
+        assert!(cached_model_list().is_none());
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn models_second_lookup_reuses_cache_without_second_get() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        // Stub que cuenta GETs: el segundo pedido debe salir del cache (1 GET
+        // total). Si un bug refetchea, el contador lo delata sin colgar: el
+        // servidor acepta hasta 2 y cierra con ventana de 500ms.
+        clear_models_cache_for_tests();
+        clear_rate_limit_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let server = thread::spawn(move || {
+            let _ = listener.set_nonblocking(true);
+            let start = Instant::now();
+            let mut first_at: Option<Instant> = None;
+            while start.elapsed() < Duration::from_secs(10) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        if first_at.is_none() {
+                            first_at = Some(Instant::now());
+                        }
+                        let mut buffer = [0; 4096];
+                        let _ = stream.read(&mut buffer);
+                        let body = r#"{"data":[{"id":"deepseek-v4-flash"}]}"#;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                    }
+                    Err(_) => {
+                        // Tras el primer GET se da una ventana de 500ms por
+                        // si un bug dispara el segundo; después se cierra.
+                        if first_at.is_some_and(|at| at.elapsed() >= Duration::from_millis(500)) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                if counter.load(Ordering::SeqCst) >= 2 {
+                    break;
+                }
+            }
+        });
+        let settings =
+            ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "deepseek-v4-flash")
+                .with_endpoint(format!("http://{address}/v1"))
+                .unwrap();
+        let fetch = || {
+            request_remote_models_with_api_key_on_worker(
+                settings.clone(),
+                Some("test-key".to_string()),
+                CancellationToken::default(),
+            )
+            .join()
+            .unwrap()
+            .unwrap()
+        };
+        let first = fetch();
+        let second = fetch();
+        server.join().unwrap();
+        assert_eq!(first, vec!["deepseek-v4-flash".to_string()]);
+        assert_eq!(second, first);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "el segundo pedido sale del cache, sin segundo GET"
+        );
+        clear_models_cache_for_tests();
+        clear_rate_limit_for_tests();
+    }
+
+    #[test]
     fn http_status_error_truncates_body_and_announces_retry_without_secrets() {
         let long = "x".repeat(2_000);
         let error = http_status_error(500, &long, None);
@@ -4090,6 +4549,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_reports_429_with_retry_after_without_sleeping() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -4118,6 +4578,9 @@ mod tests {
             64,
         )
         .unwrap_err();
+        // Se limpia antes de los asserts: la pausa de ~7s no debe contaminar
+        // a los stubs 200 que corren en paralelo (el string ya está en mano).
+        clear_rate_limit_for_tests();
         server.join().unwrap();
         assert!(error.contains("429"), "{error}");
         assert!(error.contains("reintentá en 7s"), "{error}");
@@ -4127,6 +4590,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_truncates_long_500_body_without_secrets() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -4172,6 +4636,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_marks_incomplete_as_truncated_with_partial_text() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -4392,6 +4857,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_responses_reassembles_fragmented_deltas_with_progress() {
+        clear_rate_limit_for_tests();
         let body = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" mundo\"}\n\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
             .to_vec();
         let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", true)]);
@@ -4429,6 +4895,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_falls_back_to_non_streaming_when_server_never_speaks_sse() {
+        clear_rate_limit_for_tests();
         let json_body =
             br#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"listo"}]}]}"#
                 .to_vec();
@@ -4471,6 +4938,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_over_cap_with_prior_deltas_returns_truncated_partial() {
+        clear_rate_limit_for_tests();
         // Bug del screenshot: el stream cortaba con Err duro aunque ya había
         // deltas válidos en pantalla. Ahora devuelve el parcial con
         // `truncated:true` (la UI lo avisa y ofrece continuar).
@@ -4503,6 +4971,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_over_cap_without_events_keeps_honest_error() {
+        clear_rate_limit_for_tests();
         // Sin ningún evento válido no hay parcial que rescatar: se mantiene
         // el Err, pero honesto (nombra el tope, no manda a Configuración).
         let mut body = Vec::new();
@@ -4531,6 +5000,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn non_streaming_body_over_cap_fails_honest_without_config_pointer() {
+        clear_rate_limit_for_tests();
         // El path no-streaming comparte el tope de 256 KiB: cuerpo mayor →
         // Err honesto con el mismo texto (límite OOM, no error de modelo).
         let big_text = "y".repeat(RESPONSES_MAX_BODY_BYTES + 1024);
@@ -4559,6 +5029,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_over_cap_with_multibyte_markdown_partial_no_done() {
+        clear_rate_limit_for_tests();
         // Repro del reporte AS2: stream que supera el tope con deltas previos
         // (parcial con markdown a medio cerrar + multibyte UTF-8 que parte
         // los chunks de 4 KiB, `data: [DONE]` ausente). No debe paniquear:
@@ -4614,6 +5085,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_huge_line_without_newline_stays_bounded() {
+        clear_rate_limit_for_tests();
         // Línea de 300 KiB sin `\n`: `pending.extend` queda acotado por el
         // tope (el chequeo es por `total_bytes` ANTES de extender de más y
         // `take(maximum)` limita el reader). Con un delta previo válido se
@@ -4740,6 +5212,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_completion_flows_into_telling_guard() {
+        clear_rate_limit_for_tests();
         // El worker aplica `guard_remote_completion` sobre el resultado del
         // transporte streaming; acá se verifica la misma composición
         // (transporte SSE stub → guard) que ejecuta el brazo Responses del
@@ -4806,6 +5279,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn guarded_chat_worker_blocks_telling_on_the_non_streaming_path() {
+        clear_rate_limit_for_tests();
         let chat_body = br#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"La respuesta es x = 2"}}]}"#
             .to_vec();
         let (address, server) = serve_stub_replies(vec![

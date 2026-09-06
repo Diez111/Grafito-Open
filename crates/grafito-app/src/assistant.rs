@@ -2,9 +2,10 @@
 
 use crate::{assistant_credentials, GrafitoApp};
 use grafito_assistant::{
-    harness, request_remote_models_with_api_key_on_worker,
-    request_remote_streaming_with_api_key_on_worker, validate_attachment, CancellationToken,
-    ProviderSettings, RemoteCompletion, SocraticGuardContext,
+    harness, rate_limit_cooldown_remaining_secs, rate_limit_paused_message,
+    request_remote_models_with_api_key_on_worker, request_remote_streaming_with_api_key_on_worker,
+    validate_attachment, CancellationToken, ProviderSettings, RemoteCompletion,
+    SocraticGuardContext, RATE_LIMIT_DEFAULT_COOLDOWN_SECS,
 };
 use grafito_assistant_types::{
     AssistantFocus, AssistantRepairFailure, AssistantRepairFailureKind, AssistantRepairFeedback,
@@ -1659,6 +1660,19 @@ impl GrafitoApp {
         self.notify(error, ToastKind::Error);
     }
 
+    /// Freno 429 lado UI: si la cuota del proveedor sigue en pausa, muestra
+    /// el mensaje criollo con cuenta regresiva y no spawnea ningún worker
+    /// (cero red). Retorna `true` si frenó (el llamante debe volver). Sólo
+    /// disparadores lo usan (chat/agente/corrección/modelos).
+    fn fail_fast_if_rate_limited(&mut self) -> bool {
+        if let Some(remaining) = rate_limit_cooldown_remaining_secs() {
+            self.show_assistant_error(rate_limit_paused_message(remaining));
+            true
+        } else {
+            false
+        }
+    }
+
     fn reject_assistant_command(&mut self) {
         self.show_assistant_error(
             "La sugerencia remota está incompleta o no es una acción de Grafito permitida.",
@@ -3090,6 +3104,12 @@ impl GrafitoApp {
         question: String,
         model_override: Option<&str>,
     ) {
+        // Freno 429: en pausa se avisa con cuenta regresiva sin tocar la red.
+        // Cubre chat simple, modo agente y el fallback sólo-sesión (que
+        // también pasa por acá): ningún reintento automático quema cuota.
+        if self.fail_fast_if_rate_limited() {
+            return;
+        }
         if !self.assistant_runtime.remote_request_slot_is_free() {
             return;
         }
@@ -3229,6 +3249,11 @@ impl GrafitoApp {
     }
 
     fn request_assistant_proposal_correction(&mut self, ctx: &egui::Context) {
+        // Freno 429 primero: la sesión de corrección queda intacta para
+        // reintentarla cuando venza la pausa (se toma abajo, no acá).
+        if self.fail_fast_if_rate_limited() {
+            return;
+        }
         if self.assistant.is_pending || !self.assistant_runtime.remote_request_slot_is_free() {
             return;
         }
@@ -3286,6 +3311,11 @@ impl GrafitoApp {
     }
 
     fn start_model_request(&mut self, ctx: &egui::Context) {
+        // La lista de modelos también respeta la pausa (es un GET al mismo
+        // proveedor). Con cache fresco el worker ni sale a la red.
+        if self.fail_fast_if_rate_limited() {
+            return;
+        }
         if !self.assistant_runtime.request_model_refresh() {
             return;
         }
@@ -3912,7 +3942,8 @@ fn is_agent_spark_responses_unsupported_error(error: &str) -> bool {
 }
 
 /// Fallback agente sólo-sesión: Spark + Responses API no soportado → deepseek.
-/// Nunca dispara en `Ok` (sólo se llama en la rama `Err`).
+/// Nunca dispara en `Ok` (sólo se llama en la rama `Err`) y nunca ante 429:
+/// la cuota en pausa no se quema probando con otro modelo.
 fn should_fallback_agent_spark_to_deepseek(
     error: &str,
     provider: ProviderProfile,
@@ -3921,10 +3952,12 @@ fn should_fallback_agent_spark_to_deepseek(
     is_agent_spark_responses_unsupported_error(error)
         && provider == ProviderProfile::OpenCodeGo
         && model.contains("muse-spark")
+        && !error.contains("429")
 }
 
 /// Fallback chat (no agente) sólo-sesión: Spark 500/timeout → deepseek.
 /// La preferencia guardada queda intacta; el próximo pedido reintenta spark.
+/// Nunca ante 429: cambiar de modelo no devuelve cuota y duplicaría el gasto.
 fn should_fallback_remote_spark_to_deepseek(
     error: &str,
     provider: ProviderProfile,
@@ -3936,6 +3969,7 @@ fn should_fallback_remote_spark_to_deepseek(
         && current_model.contains("muse-spark")
         && provider == ProviderProfile::OpenCodeGo
         && correction_attempt == 0
+        && !error.contains("429")
 }
 
 /// Sanea errores de adjuntos de crates externos (inglés crudo) a español.
@@ -3948,6 +3982,21 @@ fn attachment_error_message(error: &str) -> String {
     }
 }
 
+/// Mensaje criollo ante un 429 del transporte: cuenta regresiva si el error
+/// trae el sufijo del transporte ("(reintentá en Ns)", clamp 1..120s), minuto
+/// por defecto si no. Sin "429" crudo: eso queda en logs. Puro.
+fn rate_limit_429_user_message(error: &str) -> String {
+    if let Some(start) = error.find("(reintentá en ") {
+        let tail = &error[start + "(reintentá en ".len()..];
+        if let Some(end) = tail.find('s') {
+            if let Ok(secs) = tail[..end].trim().parse::<u64>() {
+                return rate_limit_paused_message(secs);
+            }
+        }
+    }
+    rate_limit_paused_message(RATE_LIMIT_DEFAULT_COOLDOWN_SECS)
+}
+
 fn remote_error_message(error: &str, current_model: &str) -> String {
     eprintln!(
         "grafito: remote_error raw={} model={}",
@@ -3955,6 +4004,10 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     );
     if error.contains("llavero") || error.contains("API key") {
         "No se pudo preparar la consulta remota. Revisá la configuración avanzada.".into()
+    } else if let Some(paused) = grafito_assistant::rate_limit_paused_message_from_error(error) {
+        // Pausa global: el worker ya contó los segundos, se muestra en
+        // criollo con cuenta regresiva (sin 429 crudo).
+        paused
     } else if error.contains("could not be built") {
         "No se pudo armar la consulta: la API key o el endpoint tienen caracteres inválidos. Reingresá la clave en Configuración avanzada (sin espacios ni saltos de línea).".into()
     } else if error.contains("Responses API") {
@@ -3966,8 +4019,9 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     } else if error.contains("429") || error.contains("rate limit") || error.contains("RateLimit") {
         // 429 = cuota por minuto del proveedor, no es tu modelo ni tu clave.
         // Va antes de la rama 404/"model" porque el cuerpo del 429 puede
-        // nombrar al modelo ("Model X rate limited").
-        "Límite de uso del proveedor (429, cuota por minuto). Esperá ~1 minuto y reintentá; no cambies tu modelo ni tu clave.".into()
+        // nombrar al modelo ("Model X rate limited"). Sin código crudo: con
+        // cuenta regresiva si el transporte la trajo, minuto si no.
+        rate_limit_429_user_message(error)
     } else if error.contains("404") || error.contains("model") {
         format!(
             "El modelo '{}' no está disponible: {error}. Revisá Configuración → Modelo.",
@@ -5664,20 +5718,66 @@ mod tests {
     #[test]
     fn error_429_reports_quota_not_model_or_key() {
         // 429 = cuota por minuto, no modelo ni clave: el mensaje no debe
-        // mandar a reconfigurar nada.
+        // mandar a reconfigurar nada ni mostrar el código crudo.
         let quota = remote_error_message(
             "assistant agent returned HTTP 429: Model muse-spark-1.3-contributor rate limited",
             "muse-spark-1.3-contributor",
         );
-        assert!(quota.contains("429"), "menciona el código: {quota}");
+        assert!(!quota.contains("429"), "sin código crudo: {quota}");
         assert!(
-            quota.contains("Esperá"),
+            quota.contains("minuto") || quota.contains('s'),
             "pide esperar, no reconfigurar: {quota}"
         );
         assert!(
             !quota.contains("Revisá Configuración → Modelo"),
             "no culpa al modelo: {quota}"
         );
+    }
+
+    #[test]
+    fn error_429_with_retry_after_counts_down() {
+        // Con sufijo del transporte se muestra la cuenta regresiva exacta.
+        let quota = remote_error_message(
+            "remote assistant returned HTTP 429: busy (reintentá en 7s)",
+            "muse-spark-1.3-contributor",
+        );
+        assert!(quota.contains('7'), "cuenta regresiva: {quota}");
+        assert!(!quota.contains("429"), "sin código crudo: {quota}");
+    }
+
+    #[test]
+    fn error_rate_limit_marker_maps_to_paused_message() {
+        // El marcador interno de la pausa global sale en criollo.
+        let paused = remote_error_message(
+            &format!("{}:25", grafito_assistant::RATE_LIMIT_PAUSED_MARKER),
+            "deepseek-v4-flash",
+        );
+        assert!(paused.contains("25"), "cuenta regresiva: {paused}");
+        assert!(!paused.contains("429"), "sin código crudo: {paused}");
+    }
+
+    #[test]
+    fn fallbacks_never_fire_on_429_quota_errors() {
+        // Ante 429 no se quema cuota probando con otro modelo: el usuario
+        // espera y reintenta el suyo cuando vence la pausa.
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            "remote assistant returned HTTP 429: busy (reintentá en 7s)",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
+        assert!(!should_fallback_agent_spark_to_deepseek(
+            "assistant agent returned HTTP 429 (reintentá en 3s)",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+        ));
+        // ...pero el fallback normal ante 500/timeout sigue intacto.
+        assert!(should_fallback_remote_spark_to_deepseek(
+            "remote assistant timed out after 30s",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
     }
 
     #[test]

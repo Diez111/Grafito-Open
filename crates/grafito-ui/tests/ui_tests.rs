@@ -161,12 +161,19 @@ fn command_palette_projects_registered_metadata_and_keeps_actions_explicit() {
 fn stable_palette_does_not_expose_unavailable_placeholder_features() {
     let commands = all_commands();
 
-    for unavailable in ["Button", "Image"] {
+    // G-D: Button es comando real (brazo + ida/vuelta en grafito-command);
+    // solo Image sigue fuera por ser placeholder sin motor.
+    {
+        let unavailable = "Image";
         assert!(
             commands.iter().all(|command| command.name != unavailable),
             "{unavailable} must stay out of the stable command palette"
         );
     }
+    assert!(
+        commands.iter().any(|command| command.name == "Button"),
+        "Button is a real command since G-D and needs a palette entry"
+    );
     assert!(
         commands
             .iter()
