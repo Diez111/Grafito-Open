@@ -1213,12 +1213,96 @@ pub(crate) fn render_integral_frames(width: u32, height: u32) -> Vec<egui::Color
 /// Integral con params vivos: `a` cota inferior en [-3, 3] (def 0.0), `b`
 /// cota superior en [-3, 3] (def 2.0); si `a > b` se ordenan. El área barrida
 /// es `a..(a + (b-a)*t)`. Mapa vacío = histórico exacto (`0..2t`).
+///
+/// Contrato N1 (frente integral): cada uno de los 48 frames muestra ejes +
+/// curva canónica `f(x)=x^2` FIJA (idéntica en todos los frames) + área
+/// sombreada acumulada de `a` a `b(N)` MONÓTONA no-decreciente + cota móvil
+/// vertical en `b(N)` + etiqueta ASCII del valor acumulado (`[a,b] S=v`,
+/// trapecios con el evaluador existente). Cero puntos decorativos sueltos:
+/// la cota es una línea, jamás un círculo.
 pub fn render_integral_frames_with_params(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
     render_integral_frames_with_params_impl(width, height, params, &mut |_, _| {})
+}
+
+/// Anim canónica de integral (N1): la vía clásica evalúa con EL MISMO
+/// evaluador que la vía paramétrica (`parametric_for_template`), así ambas
+/// dibujan la misma matemática. `None` solo si el mapeo canónico faltara;
+/// el render usa `x*x` finito como respaldo honesto.
+pub(crate) fn integral_canonical_anim() -> Option<ParametricAnim> {
+    parametric_for_template("integral-area", "integral")
+}
+
+/// Evalúa la canónica en el frame dado; sin canónica, `x*x` finito.
+fn integral_eval(anim: Option<&ParametricAnim>, frame: usize, x: f64) -> Option<f64> {
+    match anim {
+        Some(a) => a.eval_frame(frame, x),
+        None => {
+            let v = x * x;
+            if v.is_finite() {
+                Some(v)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Extremo derecho del área en el frame (`a..x_end` crece con el frame).
+/// Puro, sin I/O, sin pánicos.
+pub(crate) fn integral_frame_end(a: f64, b: f64, frame: usize) -> f64 {
+    let total = NATIVE_ANIM_FRAME_COUNT;
+    let t = if total <= 1 {
+        0.0
+    } else {
+        frame.min(total - 1) as f64 / (total - 1) as f64
+    };
+    a + (b - a) * t
+}
+
+/// `S` acumulada por trapecios (paso 1/20, ≤122 tramos acotados) sobre
+/// `[a, x_end]` con el evaluador existente; salta tramos no finitos.
+/// `Some(0.0)` si `x_end <= a`; `None` si ningún tramo valida (la etiqueta
+/// muestra `S=?` honesto en vez de inventar).
+pub(crate) fn integral_acumulada(
+    anim: Option<&ParametricAnim>,
+    frame: usize,
+    a: f64,
+    x_end: f64,
+) -> Option<f64> {
+    // Entradas finitas por construcción (cotas clampeadas + frame acotado):
+    // `<=` es total acá; NaN no llega (y el `as usize` saturaría a 0 igual).
+    if x_end <= a {
+        return Some(0.0);
+    }
+    let pasos = ((x_end - a) / 0.05).ceil() as usize;
+    let mut s = 0.0;
+    let mut valida = false;
+    for i in 0..pasos.min(4096) {
+        let x0 = a + i as f64 * 0.05;
+        let x1 = (a + (i + 1) as f64 * 0.05).min(x_end);
+        if x1 <= x0 {
+            continue;
+        }
+        if let (Some(fa), Some(fb)) = (
+            integral_eval(anim, frame, x0),
+            integral_eval(anim, frame, x1),
+        ) {
+            let tramo = (fa + fb) * 0.5 * (x1 - x0);
+            if tramo.is_finite() {
+                s += tramo;
+                valida = true;
+            }
+        }
+    }
+    if valida && s.is_finite() {
+        Some(s)
+    } else {
+        None
+    }
 }
 
 fn render_integral_frames_with_params_impl(
@@ -1231,10 +1315,14 @@ fn render_integral_frames_with_params_impl(
     let hi = scene_param_clamped(params, SCENE_PARAM_B, 2.0, -3.0, 3.0);
     let (a, b) = if lo <= hi { (lo, hi) } else { (hi, lo) };
     let ((w, h), _) = resolve_native_size(width, height);
-    let curve: Vec<(f64, f64)> = (-60..=60)
+    // N1: la curva es FIJA (evaluada en el frame 0); solo el área acumulada
+    // y la cota móvil dependen del frame. Huecos sin unir (honesto).
+    let canon = integral_canonical_anim();
+    let anim_ref = canon.as_ref();
+    let curva: Vec<Option<(f64, f64)>> = (-60..=60)
         .map(|i| {
             let x = i as f64 / 20.0;
-            (x, x * x * 0.15)
+            integral_eval(anim_ref, 0, x).map(|y| (x, y))
         })
         .collect();
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
@@ -1262,31 +1350,47 @@ fn render_integral_frames_with_params_impl(
             to_pixel(w, h, 0.0, 3.0),
             axis,
         );
-        for pair in curve.windows(2) {
-            let (ax, ay) = to_pixel(w, h, pair[0].0, pair[0].1);
-            let (bx, by) = to_pixel(w, h, pair[1].0, pair[1].1);
-            draw_line(&mut buf, w, h, (ax, ay), (bx, by), CURVE_MAIN);
+        let x_end = integral_frame_end(a, b, frame).clamp(-3.0, 3.0);
+        // Área acumulada `a..x_end`: una pasada por columna de pantalla
+        // (densa como la vía paramétrica: cada píxel se blendea una sola
+        // vez, sin multi-blend de columnas vecinas, y el conjunto sombreado
+        // crece monótono con el frame).
+        for px_col in 0..w {
+            let x = -3.0 + 6.0 * (px_col as f64 / w as f64);
+            if x < a || x > x_end {
+                continue;
+            }
+            if let Some(y) = integral_eval(anim_ref, frame, x) {
+                let top = to_pixel(w, h, x, y);
+                let bottom = to_pixel(w, h, x, 0.0);
+                draw_line(&mut buf, w, h, bottom, top, FILL_SOFT_BLUE);
+            }
         }
-        let x_max = (a + (b - a) * t).clamp(-3.0, 3.0);
-        let steps = (((x_max - a) * 20.0) as i32).max(0);
-        for i in 0..steps {
-            let x = a + i as f64 / 20.0;
-            let y = x * x * 0.15;
-            let top = to_pixel(w, h, x, y);
-            let bottom = to_pixel(w, h, x, 0.0);
-            draw_line(&mut buf, w, h, top, bottom, FILL_SOFT_BLUE);
-        }
-        let xm = x_max;
-        let ym = xm * xm * 0.15;
-        let p = to_pixel(w, h, xm, ym);
-        draw_filled_circle(&mut buf, w, h, p.0, p.1, 3, DOT_BLUE);
+        // Cota móvil vertical en `x_end`: línea (DOT_BLUE), jamás un punto.
+        let y_end = integral_eval(anim_ref, frame, x_end).map_or(0.0, |v| v);
+        draw_line(
+            &mut buf,
+            w,
+            h,
+            to_pixel(w, h, x_end, 0.0),
+            to_pixel(w, h, x_end, y_end),
+            DOT_BLUE,
+        );
+        // Curva fija por encima (idéntica en los 48 frames).
+        draw_curve_gaps(&mut buf, w, h, &curva, CURVE_MAIN);
+        // Etiquetas ASCII honestas: título fijo + valor acumulado del frame.
+        draw_text_block(&mut buf, w, h, w / 14, h / 12, "y=x^2", TEXT_COLOR, 1);
+        let etiqueta = match integral_acumulada(anim_ref, frame, a, x_end) {
+            Some(s) => format!("[{a:.2},{x_end:.2}] S={s:.2}"),
+            None => format!("[{a:.2},{x_end:.2}] S=?"),
+        };
         draw_text_block(
             &mut buf,
             w,
             h,
             w / 14,
-            h / 12,
-            "area  integral",
+            h.saturating_sub(14),
+            &etiqueta,
             TEXT_COLOR,
             1,
         );
@@ -2570,7 +2674,9 @@ pub fn render_parametric_frames_with_progress(
                 }
             }
             ParametricKind::Area => {
-                // Área entre p0 (fijo) y p (móvil) bajo la curva.
+                // N1: área entre p0 (fijo) y p (móvil) bajo la curva + cota
+                // vertical en b + S acumulada con el mismo evaluador.
+                // Cero puntos sueltos: la cota es línea (DOT_BLUE), no círculo.
                 let mut a = anim.p0.clamp(-3.0, 3.0);
                 let mut b = p.clamp(-3.0, 3.0);
                 if a > b {
@@ -2587,10 +2693,31 @@ pub fn render_parametric_frames_with_progress(
                         draw_line(&mut buf, w, h, base, top, FILL_SOFT_BLUE);
                     }
                 }
+                let y_b = anim.eval_frame(frame, b).map_or(0.0, |v| v);
+                draw_line(
+                    &mut buf,
+                    w,
+                    h,
+                    to_pixel(w, h, b, 0.0),
+                    to_pixel(w, h, b, y_b),
+                    DOT_BLUE,
+                );
                 let pts = sample_curve(anim, frame);
                 draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
-                let (px, py) = to_pixel(w, h, b, anim.eval_frame(frame, b).unwrap_or(0.0));
-                draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                let etiqueta = match integral_acumulada(Some(anim), frame, a, b) {
+                    Some(s) => format!("S={s:.2}"),
+                    None => "S=?".to_string(),
+                };
+                draw_text_block(
+                    &mut buf,
+                    w,
+                    h,
+                    w / 14,
+                    h.saturating_sub(14),
+                    &etiqueta,
+                    TEXT_COLOR,
+                    1,
+                );
             }
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
@@ -2638,6 +2765,50 @@ pub fn parametric_for_template(template: &str, concept: &str) -> Option<Parametr
             None
         }
     }
+}
+
+// ── N1: predicados pixel-lógicos compartidos (integral honesta) ──────────
+// Sombra = relleno blendido (trayectoria recta fondo→[91,155,255]) + cota
+// móvil sólida [66,133,244]. El grid con parallax se mueve BAJO el relleno:
+// una intersección del grid (gris ~195) bajo el relleno da [163,182,214]
+// (sigue siendo área azul, solo más brillante). Por eso el tope es r<175
+// y no r<150: cubre la trayectoria entera incluido intersección-relleno.
+// Fuera quedan: grises (b==r), texto blanco (b−r≈10), recorte del texto
+// (b−r≈7) y curva amarilla (r≥218 incluso sobre grid).
+
+/// Cuenta píxeles sombreados (relleno del área + cota móvil).
+#[cfg(test)]
+fn cuenta_pixeles_sombra(frame: &egui::ColorImage) -> usize {
+    frame
+        .pixels
+        .iter()
+        .filter(|c| {
+            let (r, _g, b) = (c.r(), c.g(), c.b());
+            b > 65 && b.saturating_sub(r) > 30 && r < 175
+        })
+        .count()
+}
+
+/// Máscara de la curva amarilla (r y g altos, b bajo): texto blanco
+/// (b=245), cota azul (r=66) y relleno (r<150) quedan fuera.
+#[cfg(test)]
+fn mascara_curva(frame: &egui::ColorImage) -> Vec<bool> {
+    frame
+        .pixels
+        .iter()
+        .map(|c| c.r() > 150 && c.g() > 130 && c.b() < 150)
+        .collect()
+}
+
+/// Puntos verdes sueltos estilo MINT (g dominante): la BASURA reportada.
+/// El umbral bajo (g>90) también caza el MINT tenue blendido; el relleno
+/// (g−r≈20), la cota (g<b) y los grises quedan fuera.
+#[cfg(test)]
+fn tiene_verde_suelto(frame: &egui::ColorImage) -> bool {
+    frame.pixels.iter().any(|c| {
+        let (r, g, b) = (c.r(), c.g(), c.b());
+        g > 90 && g.saturating_sub(r) > 40 && g.saturating_sub(b) > 25
+    })
 }
 
 #[cfg(test)]
@@ -2740,6 +2911,76 @@ mod tests {
         assert_frames_valid(&a, 64, 64, "integral-area");
         let b = render_integral_frames(64, 64);
         assert_eq!(a[0].pixels, b[0].pixels);
+    }
+    // ── N1: integral honesta (curva fija + sombra monótona + sin verde) ──
+    #[test]
+    fn integral_sombra_monotona_curva_fija_sin_verde() {
+        // Varios tamaños (thumbs, card, enseñanza): el contrato no depende
+        // de la resolución porque el grid bajo el relleno también cuenta.
+        for (w, h) in [(64, 64), (96, 72), (160, 120), (320, 180)] {
+            let frames = render_integral_frames(w, h);
+            assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT, "{w}x{h}: 48 frames");
+            // El área (píxeles sombreados) es no-decreciente con N.
+            let sombras: Vec<usize> = frames.iter().map(super::cuenta_pixeles_sombra).collect();
+            for par in sombras.windows(2) {
+                assert!(
+                    par[1] >= par[0],
+                    "{w}x{h}: sombra no-decreciente con N: {sombras:?}"
+                );
+            }
+            assert!(
+                sombras[0] < sombras[NATIVE_ANIM_FRAME_COUNT - 1],
+                "{w}x{h}: el área final debe sombrear más: {sombras:?}"
+            );
+            // La curva es la MISMA en los frames 0/24/47.
+            let c0 = super::mascara_curva(&frames[0]);
+            assert!(c0.iter().any(|v| *v), "{w}x{h}: la curva debe pintarse");
+            assert_eq!(
+                c0,
+                super::mascara_curva(&frames[24]),
+                "{w}x{h}: curva 0 == 24"
+            );
+            assert_eq!(
+                c0,
+                super::mascara_curva(&frames[47]),
+                "{w}x{h}: curva 0 == 47"
+            );
+            // Cero puntos decorativos sueltos en los 48 frames.
+            for (i, f) in frames.iter().enumerate() {
+                assert!(
+                    !super::tiene_verde_suelto(f),
+                    "{w}x{h} frame {i}: sin verde"
+                );
+            }
+        }
+    }
+    #[test]
+    fn integral_acumulada_vale_ocho_tercios_en_02() {
+        // S de x^2 en [0,2] = 8/3 ≈ 2.67 (trapecios, tolerancia de malla).
+        let canon = super::integral_canonical_anim().expect("canónica integral-area");
+        assert_eq!(canon.expr_a, "x^2");
+        let s = super::integral_acumulada(Some(&canon), 0, 0.0, 2.0).expect("S finita");
+        assert!((s - 8.0 / 3.0).abs() < 0.05, "S={s}");
+        assert_eq!(
+            super::integral_acumulada(Some(&canon), 0, 0.0, 0.0),
+            Some(0.0)
+        );
+        assert_eq!(
+            super::integral_acumulada(Some(&canon), 0, 2.0, 2.0),
+            Some(0.0)
+        );
+        // El extremo crece monótono en los 48 frames.
+        let mut previo = f64::NEG_INFINITY;
+        for f in 0..NATIVE_ANIM_FRAME_COUNT {
+            let xe = super::integral_frame_end(0.0, 2.0, f);
+            assert!(xe >= previo, "x_end monótono en frame {f}");
+            previo = xe;
+        }
+        assert_eq!(super::integral_frame_end(0.0, 2.0, 0), 0.0);
+        assert_eq!(
+            super::integral_frame_end(0.0, 2.0, NATIVE_ANIM_FRAME_COUNT - 1),
+            2.0
+        );
     }
     #[test]
     fn taylor_frames_bounded() {
@@ -3585,5 +3826,50 @@ mod parametric_render_tests {
         let frames = render_parametric_frames(&tg).unwrap();
         assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
         assert_ne!(frames[0].pixels, frames[NATIVE_ANIM_FRAME_COUNT - 1].pixels);
+    }
+
+    // ── N1: la canónica integral→Area rinde 48 con el mismo contrato ────
+    #[test]
+    fn area_canonica_mapea_template_y_rinde_48_monotonos() {
+        use grafito_anim::parametric::{
+            INTEGRAL_CANONICAL_EXPR, INTEGRAL_CANONICAL_P0, INTEGRAL_CANONICAL_P1,
+        };
+        // `parametric_for_template` mapea integral→Area con la función
+        // defaulteada (la que dibuja la card).
+        let area = parametric_for_template("integral-area", "integral").expect("mapea a Area");
+        assert_eq!(area.kind, ParametricKind::Area);
+        assert_eq!(area.expr_a, INTEGRAL_CANONICAL_EXPR);
+        assert_eq!(area.param.as_str(), "p");
+        assert_eq!(
+            (area.p0, area.p1),
+            (INTEGRAL_CANONICAL_P0, INTEGRAL_CANONICAL_P1)
+        );
+        assert_eq!(area.frame_count(), NATIVE_ANIM_FRAME_COUNT);
+        let frames = render_parametric_frames(&area).expect("render Area");
+        assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+        // Mismo contrato pixel-lógico que la vía clásica.
+        let sombras: Vec<usize> = frames.iter().map(super::cuenta_pixeles_sombra).collect();
+        for par in sombras.windows(2) {
+            assert!(
+                par[1] >= par[0],
+                "sombra paramétrica no-decreciente: {sombras:?}"
+            );
+        }
+        assert!(
+            sombras[0] < sombras[NATIVE_ANIM_FRAME_COUNT - 1],
+            "el área final debe sombrear más: {sombras:?}"
+        );
+        let c0 = super::mascara_curva(&frames[0]);
+        assert!(c0.iter().any(|v| *v), "la curva debe pintarse");
+        assert_eq!(c0, super::mascara_curva(&frames[24]), "curva 0 == 24");
+        assert_eq!(c0, super::mascara_curva(&frames[47]), "curva 0 == 47");
+        for (i, f) in frames.iter().enumerate() {
+            assert!(!super::tiene_verde_suelto(f), "frame {i} sin verde");
+        }
+        // Consistencia card↔pantalla completa: el fullscreen reusa el mismo
+        // `AssistantMedia` (mismos 48 frames, sin re-render); acá se pinnea
+        // que la vía clásica produce el mismo largo con la misma canónica.
+        let clasicos = render_integral_frames(96, 72);
+        assert_eq!(clasicos.len(), NATIVE_ANIM_FRAME_COUNT);
     }
 }

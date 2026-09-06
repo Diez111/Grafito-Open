@@ -739,7 +739,7 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
     if let Err(error) = request.validate() {
         return ToolResult::text(&call.id, false, format!("AnimRequest inválido: {error}"));
     }
-    let payload = json!({
+    let mut payload = json!({
         "template": template,
         "concept": normalized_concept,
         "params": params_map,
@@ -748,6 +748,22 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
         "protocol_version": grafito_anim::protocol::ANIM_PROTOCOL_VERSION,
         "note": "solicitud validada; el motor de animación se ejecuta en la capa UI tras aprobación explícita"
     });
+    // N1: la vía template/concept de integral no trae función: declara la
+    // canónica que va a renderizar (f(x)=x^2 en [0,2]) para que la prosa no
+    // pregunte lo que la vista ya muestra.
+    if payload
+        .get("template")
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| t == "integral-area")
+    {
+        payload["canonical"] = json!(true);
+        payload["canonical_expr"] = json!(grafito_anim::parametric::INTEGRAL_CANONICAL_EXPR);
+        payload["canonical_range"] = json!([
+            grafito_anim::parametric::INTEGRAL_CANONICAL_P0,
+            grafito_anim::parametric::INTEGRAL_CANONICAL_P1
+        ]);
+        payload["canonical_prose"] = json!(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+    }
     ToolResult::text(&call.id, true, payload.to_string())
 }
 
@@ -758,7 +774,14 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
 /// del mapa de controles en español — deslizador, reproducir, pausar —,
 /// nunca identificadores literales). El render lo hace la UI en Rust nativo
 /// tras aprobación explícita; aquí no hay E/S ni motor.
+///
+/// N1: si el pedido menciona integral/área va por `infer_area_anim`
+/// (canónica declarada sin función, explícita con función válida, `Err`
+/// honesto con función inválida).
 fn propose_parametric_tool(call_id: &str, pedido: &str) -> ToolResult {
+    if grafito_anim::parametric::pedido_menciona_area(pedido) {
+        return propose_area_tool(call_id, pedido);
+    }
     match grafito_anim::parametric::infer_parametric_anim(pedido) {
         Err(error) => ToolResult::text(call_id, false, error.to_string()),
         Ok(anim) => {
@@ -772,6 +795,40 @@ fn propose_parametric_tool(call_id: &str, pedido: &str) -> ToolResult {
                 "range": [anim.p0, anim.p1],
                 "frames": anim.frame_count(),
                 "viewport": [anim.viewport.width, anim.viewport.height],
+                "hint": hint,
+                "protocol_version": grafito_anim::protocol::ANIM_PROTOCOL_VERSION,
+                "note": "plan paramétrico validado en Rust nativo; la vista previa se genera en la UI tras aprobación explícita"
+            });
+            ToolResult::text(call_id, true, payload.to_string())
+        }
+    }
+}
+
+/// Propuesta de integral/área (N1): canónica declarada, explícita o `Err`.
+///
+/// La rama canónica agrega `"canonical": true` y la prosa que la declara
+/// (`INTEGRAL_CANONICAL_PROSA`): la UI renderiza `x^2` en `[0,2]` Y lo dice;
+/// jamás pregunta y muestra a la vez. Puro, sin E/S ni motor.
+fn propose_area_tool(call_id: &str, pedido: &str) -> ToolResult {
+    match grafito_anim::parametric::infer_area_anim(pedido) {
+        Err(error) => ToolResult::text(call_id, false, error.to_string()),
+        Ok(resuelto) => {
+            let anim = resuelto.anim();
+            let mut hint = grafito_anim::parametric::parametric_hint(anim);
+            if resuelto.es_canonica() {
+                hint.push(' ');
+                hint.push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+            }
+            let payload = json!({
+                "kind": anim.kind.as_str(),
+                "kind_label": anim.kind.en_espanol(),
+                "expr_a": anim.expr_a,
+                "expr_b": anim.expr_b,
+                "param": anim.param.as_str(),
+                "range": [anim.p0, anim.p1],
+                "frames": anim.frame_count(),
+                "viewport": [anim.viewport.width, anim.viewport.height],
+                "canonical": resuelto.es_canonica(),
                 "hint": hint,
                 "protocol_version": grafito_anim::protocol::ANIM_PROTOCOL_VERSION,
                 "note": "plan paramétrico validado en Rust nativo; la vista previa se genera en la UI tras aprobación explícita"
@@ -3144,6 +3201,92 @@ mod tests {
         let r3 = dispatch_safe_tool(&sin_rango);
         assert!(!r3.ok);
         assert!(r3.content.contains("rango"), "r3: {}", r3.content);
+    }
+
+    // ── N1: pedido de integral — canónica / explícita / inválida ────────
+    #[test]
+    fn generate_animation_pedido_integral_sin_funcion_usa_canonica() {
+        let call = ToolCall {
+            id: "n1-a".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "haceme una animacion de una integral (nativa)"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["kind"], "area");
+        assert_eq!(value["expr_a"], "x^2");
+        assert_eq!(value["param"], "p");
+        assert_eq!(value["canonical"], true);
+        // La pista declara la canónica en rioplatense, con nombres humanos.
+        let hint = value["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("pedime otra"), "{hint}");
+        assert!(hint.contains("x²"), "{hint}");
+        assert!(hint.contains("deslizador"), "{hint}");
+    }
+
+    #[test]
+    fn generate_animation_pedido_integral_con_funcion_es_explicita() {
+        let call = ToolCall {
+            id: "n1-b".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "animacion de la integral de f(x)=x^3 de 0 a 2"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["kind"], "area");
+        assert_eq!(value["expr_a"], "x^3");
+        assert_eq!(value["canonical"], false);
+        let hint = value["hint"].as_str().unwrap_or_default();
+        assert!(!hint.contains("pedime otra"), "{hint}");
+    }
+
+    #[test]
+    fn generate_animation_pedido_integral_invalida_falla_sin_plan() {
+        let call = ToolCall {
+            id: "n1-c".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "animacion de la integral de f(x)=foo(x) con p en [0,1]"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(
+            !result.ok,
+            "función inválida no propone plan: {}",
+            result.content
+        );
+        assert!(result.content.contains("foo(x)"), "{}", result.content);
+        assert!(
+            result.content.contains("x^2"),
+            "da ejemplo: {}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn generate_animation_template_integral_declara_canonica() {
+        // Vía template/concept sin pedido: también declara la canónica que
+        // va a renderizar, para que la prosa no pregunte por la función.
+        let call = ToolCall {
+            id: "n1-d".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"template": "integral-area", "concept": "integral"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["template"], "integral-area");
+        assert_eq!(value["canonical"], true);
+        assert_eq!(value["canonical_expr"], "x^2");
+        assert!(value["canonical_range"].is_array(), "{}", result.content);
+        assert!(
+            value["canonical_prose"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("pedime otra"),
+            "{}",
+            result.content
+        );
     }
 
     #[test]

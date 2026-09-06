@@ -79,6 +79,59 @@ pub(crate) fn wants_exercise_request(texto: &str) -> bool {
     .any(|pista| lower.contains(pista))
 }
 
+/// Estado del pedido de integral/área frente a la función (N1, puro).
+///
+/// Coherente con `infer_area_anim` (inferencia) y el agente: sin función se
+/// renderiza la canónica y la prosa la declara; con función inválida hay
+/// error honesto sin frames ni hilo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IntegralPedido {
+    /// No es `integral-area` o no menciona área (flujo existente intacto;
+    /// probabilidad/fracciones usan ese renderer como soporte).
+    NoAplica,
+    /// Sin función: renderiza la canónica y la prosa la declara.
+    Canonica,
+    /// Con función válida del usuario: flujo existente intacto.
+    Explicita,
+    /// Con función inválida: error honesto sin frames ni hilo.
+    FuncionInvalida(String),
+}
+
+/// Clasifica un pedido de animación integral (puro, sin I/O).
+///
+/// Solo actúa cuando la plantilla resuelta es `integral-area` Y el texto
+/// menciona integral/área. El resto → `NoAplica` (nada cambia).
+pub(crate) fn clasifica_pedido_integral(pedido: &str, template: &str) -> IntegralPedido {
+    if template.trim().to_lowercase() != "integral-area"
+        || !grafito_anim::parametric::pedido_menciona_area(pedido)
+    {
+        return IntegralPedido::NoAplica;
+    }
+    match grafito_anim::parametric::infer_area_anim(pedido) {
+        Ok(resuelto) if resuelto.es_canonica() => IntegralPedido::Canonica,
+        Ok(_) => IntegralPedido::Explicita,
+        Err(error) => IntegralPedido::FuncionInvalida(error.to_string()),
+    }
+}
+
+/// Agrega la declaración de la canónica al último turno del asistente.
+///
+/// Idempotente por contenido ("pedime otra" ya presente → no duplica).
+/// Puro sobre el transcript (sin I/O ni spawn): el hilo de render no se
+/// toca acá.
+fn append_canonical_integral_prose(conversation: &mut [ConversationTurn]) {
+    let Some(turno) = conversation.last_mut() else {
+        return;
+    };
+    if turno.role != ConversationRole::Assistant || turno.content.contains("pedime otra") {
+        return;
+    }
+    turno.content.push_str("\n\n");
+    turno
+        .content
+        .push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+}
+
 enum LocalAssistantDisposition {
     Solved {
         answer: String,
@@ -1154,6 +1207,24 @@ impl GrafitoApp {
                         ctx.request_repaint();
                         return;
                     }
+                    // N1: integral con función inválida → freno honesto ANTES
+                    // del hilo: turno guía sin media ni frames (misma forma
+                    // que el ambiguo).
+                    let plantilla_previa =
+                        crate::anim_native::detect_template_for_concept(&problem_clone);
+                    if let IntegralPedido::FuncionInvalida(detalle) =
+                        clasifica_pedido_integral(&problem_clone, plantilla_previa)
+                    {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let honesto = grafito_ui::assistant::humanize_prose_text(&detalle);
+                        self.assistant.complete_local_request(honesto.clone());
+                        self.assistant.set_media(None, ctx);
+                        self.notify(honesto, ToastKind::Info);
+                        ctx.request_repaint();
+                        return;
+                    }
                 }
                 // Heurística de memoria: si el usuario pide recordar o expresa preferencia, guardarlo
                 if lower.contains("recuerda que")
@@ -1214,6 +1285,15 @@ impl GrafitoApp {
                         }
                     }
                     self.run_assistant_animation_with(ctx, &plantilla, &concepto);
+                    // N1: integral sin función → la canónica se renderiza Y se
+                    // declara en la prosa del turno; jamás preguntar y mostrar
+                    // a la vez.
+                    if matches!(
+                        clasifica_pedido_integral(&problem_clone, &plantilla),
+                        IntegralPedido::Canonica
+                    ) {
+                        append_canonical_integral_prose(&mut self.assistant.conversation);
+                    }
                 }
             }
             AssistantUiAction::AuthorizeRemote => {
@@ -1342,20 +1422,44 @@ impl GrafitoApp {
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
                             .unwrap_or("");
-                        // El agente propuso `generate_animation` (vía
-                        // `GenerateAnimation` verificado): el hilo genera e
-                        // incrusta como `AssistantMedia` DEL TURNO.
-                        if let Some(turno) = self.assistant.conversation.last_mut() {
-                            if turno.role == ConversationRole::Assistant
-                                && !turno.content.contains("deslizador")
-                            {
-                                turno.content.push_str("\n\n");
-                                turno
-                                    .content
-                                    .push_str(crate::anim_ui::animation_reference_sentence());
+                        // N1: misma política que Submit (inferencia + agente).
+                        match clasifica_pedido_integral(concept, template) {
+                            IntegralPedido::FuncionInvalida(detalle) => {
+                                // Compromiso verificado pero función inválida:
+                                // prosa honesta sin hilo de render (sin frames).
+                                if let Some(turno) = self.assistant.conversation.last_mut() {
+                                    if turno.role == ConversationRole::Assistant {
+                                        turno.content.push_str("\n\n");
+                                        turno.content.push_str(
+                                            &grafito_ui::assistant::humanize_prose_text(&detalle),
+                                        );
+                                    }
+                                }
+                                self.notify(detalle, ToastKind::Info);
+                            }
+                            pedido_integral => {
+                                // El agente propuso `generate_animation` (vía
+                                // `GenerateAnimation` verificado): el hilo genera e
+                                // incrusta como `AssistantMedia` DEL TURNO.
+                                if let Some(turno) = self.assistant.conversation.last_mut() {
+                                    if turno.role == ConversationRole::Assistant
+                                        && !turno.content.contains("deslizador")
+                                    {
+                                        turno.content.push_str("\n\n");
+                                        turno.content.push_str(
+                                            crate::anim_ui::animation_reference_sentence(),
+                                        );
+                                    }
+                                }
+                                self.run_assistant_animation_with(ctx, template, concept);
+                                // N1: canónica renderizada Y declarada.
+                                if matches!(pedido_integral, IntegralPedido::Canonica) {
+                                    append_canonical_integral_prose(
+                                        &mut self.assistant.conversation,
+                                    );
+                                }
                             }
                         }
-                        self.run_assistant_animation_with(ctx, template, concept);
                     } else {
                         self.run_assistant_animation(ctx);
                     }
@@ -5285,8 +5389,9 @@ fn read_bounded_attachment(reader: impl Read, max_bytes: usize) -> Result<Vec<u8
 mod tests {
     use super::{
         accepts_model_result, accepts_remote_context, accepts_remote_result,
-        apply_local_assistant_plan, assistant_graph_perspective, attachment_error_message,
-        can_offer_assistant_proposal_correction, classify_local_assistant_response,
+        append_canonical_integral_prose, apply_local_assistant_plan, assistant_graph_perspective,
+        attachment_error_message, can_offer_assistant_proposal_correction,
+        clasifica_pedido_integral, classify_local_assistant_response,
         commit_assistant_graph_preflight, inspect_remote_action_proposals,
         inspect_remote_proposals, inspect_remote_proposals_cancellable,
         is_agent_spark_responses_unsupported_error, is_socratic_repair_error,
@@ -5299,7 +5404,7 @@ mod tests {
         wants_exercise_request, AgentChannelMsg, AssistantAgentJob, AssistantAnimJob,
         AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
         AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
-        GifExportJob, LocalAssistantDisposition, RemoteProposalVerification,
+        GifExportJob, IntegralPedido, LocalAssistantDisposition, RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
@@ -6153,6 +6258,79 @@ mod tests {
         // Sin gatillo no es animación (no debe disparar hilo).
         assert!(!crate::anim_ui::wants_animation_request("derivá x^2"));
         assert!(crate::anim_ui::animation_concept_from_request("derivá x^2").is_err());
+    }
+
+    #[test]
+    fn integral_tres_ramas_canonica_explicita_invalida() {
+        // 1. Sin función → canónica (se renderiza Y se declara).
+        assert_eq!(
+            clasifica_pedido_integral(
+                "haceme una animacion de una integral (nativa)",
+                "integral-area"
+            ),
+            IntegralPedido::Canonica
+        );
+        // 2. Con función válida → explícita (flujo intacto).
+        assert_eq!(
+            clasifica_pedido_integral(
+                "animacion de la integral de f(x)=x^3 de 0 a 2 con animación",
+                "integral-area"
+            ),
+            IntegralPedido::Explicita
+        );
+        // 3. Con función inválida → error honesto (sin frames ni hilo).
+        match clasifica_pedido_integral(
+            "animacion de la integral de f(x)=foo(x) con p en [0,1] con animación",
+            "integral-area",
+        ) {
+            IntegralPedido::FuncionInvalida(detalle) => {
+                assert!(detalle.contains("foo(x)"), "{detalle}");
+                assert!(detalle.contains("x^2"), "da ejemplo: {detalle}");
+            }
+            otro => panic!("esperaba FuncionInvalida, fue {otro:?}"),
+        }
+        // Fuera de integral-area o sin mención: no aplica (nada cambia).
+        assert_eq!(
+            clasifica_pedido_integral("explica la derivada con animación", "derivative-slope"),
+            IntegralPedido::NoAplica
+        );
+        assert_eq!(
+            clasifica_pedido_integral("explica la derivada con animación", "integral-area"),
+            IntegralPedido::NoAplica
+        );
+        // Probabilidad usa el renderer integral como soporte: no se frena.
+        assert_eq!(
+            clasifica_pedido_integral("explica la probabilidad con animación", "integral-area"),
+            IntegralPedido::NoAplica
+        );
+    }
+
+    #[test]
+    fn integral_canonica_prosa_declara_y_no_duplica() {
+        // La prosa declara la canónica en rioplatense.
+        let mut conversacion = vec![ConversationTurn::assistant("La animación está lista.")];
+        append_canonical_integral_prose(&mut conversacion);
+        let texto = &conversacion.last().expect("turno").content;
+        assert!(texto.contains("x²"), "{texto}");
+        assert!(texto.contains("pedime otra"), "{texto}");
+        // Idempotente: segunda pasada no duplica.
+        append_canonical_integral_prose(&mut conversacion);
+        assert_eq!(
+            conversacion
+                .last()
+                .expect("turno")
+                .content
+                .matches("pedime otra")
+                .count(),
+            1
+        );
+        // Turno de usuario o vacío: no toca nada.
+        let mut usuario = vec![ConversationTurn::user("hola")];
+        append_canonical_integral_prose(&mut usuario);
+        assert_eq!(usuario.last().expect("turno").content, "hola");
+        let mut vacia: Vec<ConversationTurn> = Vec::new();
+        append_canonical_integral_prose(&mut vacia);
+        assert!(vacia.is_empty());
     }
 
     #[test]

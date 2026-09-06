@@ -886,6 +886,9 @@ fn cut_expr_rhs(rhs: &str) -> String {
         " en (",
         " entre ",
         " donde ",
+        // `[` jamás es matemática válida (el evaluador no tiene corchetes):
+        // un rango suelto ("f(x)=x^2 [0,2]") termina la expresión.
+        " [",
         ";",
         "\n",
     ];
@@ -894,6 +897,22 @@ fn cut_expr_rhs(rhs: &str) -> String {
     for cut in cuts {
         if let Some(p) = low.find(cut) {
             best = Some(best.map_or(p, |b: usize| b.min(p)));
+        }
+    }
+    // N1: rangos en prosa tras la expresión ("x^3 de 0 a 2", "x^2 hasta 2").
+    // Solo cortan si lo que sigue es un número (mirada numérica): así
+    // "x^2 + a*x con a en [0,2]" conserva el parámetro `a` con espacios,
+    // porque tras " a " viene "x", no un número.
+    for key in [" de ", " hasta ", " a "] {
+        let mut from = 0;
+        while let Some(rel) = low.get(from..).and_then(|tail| tail.find(key)) {
+            let pos = from + rel;
+            let after = s.get(pos + key.len()..).unwrap_or("");
+            if number_prefix(after).is_some() {
+                best = Some(best.map_or(pos, |b: usize| b.min(pos)));
+                break;
+            }
+            from = pos + key.len();
         }
     }
     let mut out = match best {
@@ -1345,6 +1364,169 @@ pub fn parametric_hint(anim: &ParametricAnim) -> String {
     )
 }
 
+// ── N1: canónica de integral sin función + inferencia de área ────────────
+// Política coherente en inferencia + Submit + agente: si el pedido menciona
+// integral/área pero no trae función, se renderiza el canónico
+// `f(x)=x^2 en [0,2]` Y la prosa lo declara (`INTEGRAL_CANONICAL_PROSA`);
+// jamás preguntar Y mostrar a la vez. Si trae función con `x` pero no
+// evaluable en ningún punto del rango, `Err` honesto sin frames.
+
+/// Expresión canónica cuando el pedido no trae función.
+pub const INTEGRAL_CANONICAL_EXPR: &str = "x^2";
+/// Rango canónico `[0, 2]` cuando el pedido no trae rango.
+pub const INTEGRAL_CANONICAL_P0: f64 = 0.0;
+/// Rango canónico `[0, 2]` cuando el pedido no trae rango.
+pub const INTEGRAL_CANONICAL_P1: f64 = 2.0;
+/// Parámetro canónico de la animación de área.
+pub const INTEGRAL_CANONICAL_PARAM: &str = "p";
+/// Prosa rioplatense que declara la canónica (Submit + agente la usan tal
+/// cual; el renderer dibuja etiquetas ASCII por separado).
+pub const INTEGRAL_CANONICAL_PROSA: &str =
+    "te muestro con f(x)=x² en [0,2]; pedime otra y la cambio";
+
+/// ¿El pedido menciona integral o área? A propósito más amplio que
+/// `detect_kind` (que exige "móvil" para el área): un "haceme una animación
+/// de una integral" sin más ya pide la canónica, no un error.
+pub fn pedido_menciona_area(pedido: &str) -> bool {
+    let lower = pedido.to_lowercase();
+    lower.contains("integral") || lower.contains("área") || lower.contains("area")
+}
+
+/// Pedido de integral/área ya resuelto: canónico o explícito.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AreaPedido {
+    /// Sin función (o con prosa sin `x` no evaluable): canónico `x^2 [0,2]`.
+    Canonica(ParametricAnim),
+    /// Con función válida del usuario (constantes incluidas).
+    Explicita(ParametricAnim),
+}
+
+impl AreaPedido {
+    /// La animación a renderizar en ambas ramas.
+    pub fn anim(&self) -> &ParametricAnim {
+        match self {
+            Self::Canonica(a) | Self::Explicita(a) => a,
+        }
+    }
+
+    /// `true` solo en la rama canónica (la prosa debe declararlo).
+    pub fn es_canonica(&self) -> bool {
+        matches!(self, Self::Canonica(_))
+    }
+}
+
+/// ¿La expresión se evalúa en al menos un punto del rango? 9 muestras;
+/// basta una finita (el render corta los huecos sin unir ramas).
+fn area_expr_evaluable(expr: &str, param: &str, p0: f64, p1: f64) -> bool {
+    let mut validas = 0;
+    for k in 0..9 {
+        let t = k as f64 / 8.0;
+        let pv = p0 + (p1 - p0) * t;
+        // Muestreo en x sobre el mundo [-3, 3] del render.
+        let x = -3.0 + 6.0 * t;
+        if eval_expr(expr, x, param, pv).is_some() {
+            validas += 1;
+        }
+    }
+    validas > 0
+}
+
+fn area_anim(
+    expr: String,
+    param_raw: &str,
+    p0: f64,
+    p1: f64,
+    pedido_lower: &str,
+) -> ParametricResult<ParametricAnim> {
+    let param_nombre: String = if param_raw.trim().is_empty() {
+        guess_param_name(&expr, None).to_string()
+    } else {
+        param_raw.to_string()
+    };
+    let param = ParamName::try_new(&param_nombre)?;
+    let n = extract_frames(pedido_lower)?.unwrap_or(PARAMETRIC_MAX_FRAMES);
+    let frames = FrameCount::try_new(n)?;
+    let viewport = extract_viewport(pedido_lower).unwrap_or_default();
+    ParametricAnim::try_new(
+        ParametricKind::Area,
+        expr,
+        None,
+        param,
+        p0,
+        p1,
+        frames,
+        viewport,
+    )
+}
+
+/// Infiere un pedido de integral/área a `AreaPedido`.
+///
+/// - Sin expresión tras `=` → `Canonica` (`x^2` en `[0,2]`, o el rango
+///   pedido si lo trae).
+/// - Con expresión evaluable (constantes incluidas) → `Explicita`.
+/// - Con prosa sin `x` no evaluable ("F=m*a") → se ignora la prosa y va
+///   `Canonica` (no era una función).
+/// - Con `x` no evaluable en ningún punto ("foo(x)") → `Err` honesto
+///   (`NoSoportado` con ejemplo), sin frames.
+/// - Sin mención a integral/área → `FaltaTipo` (no es un pedido de área).
+pub fn infer_area_anim(pedido: &str) -> ParametricResult<AreaPedido> {
+    let text = pedido.trim();
+    if text.is_empty() {
+        return Err(ParametricError::PedidoVacio);
+    }
+    if text.chars().count() > 2000 {
+        return Err(ParametricError::ExpresionMuyLarga {
+            got: text.chars().count(),
+            max: 2000,
+        });
+    }
+    if !pedido_menciona_area(pedido) {
+        return Err(ParametricError::FaltaTipo);
+    }
+    let lower = text.to_lowercase();
+    let (param_raw, p0, p1) = extract_range(text).map_or_else(
+        || (String::new(), INTEGRAL_CANONICAL_P0, INTEGRAL_CANONICAL_P1),
+        |(nombre, a, b)| (nombre, a, b),
+    );
+    let Some(expr) = extract_single_expr(text) else {
+        let anim = area_anim(
+            INTEGRAL_CANONICAL_EXPR.to_string(),
+            &param_raw,
+            p0,
+            p1,
+            &lower,
+        )?;
+        return Ok(AreaPedido::Canonica(anim));
+    };
+    // Nombre del parámetro efectivo para validar la expresión.
+    let param_efectivo: String = if param_raw.trim().is_empty() {
+        guess_param_name(&expr, None).to_string()
+    } else {
+        param_raw.clone()
+    };
+    if area_expr_evaluable(&expr, &param_efectivo, p0, p1) {
+        let anim = area_anim(expr, &param_raw, p0, p1, &lower)?;
+        return Ok(AreaPedido::Explicita(anim));
+    }
+    // No evaluable: con `x` es función inválida (Err); sin `x` es prosa
+    // ("F=m*a") y se ignora yendo a la canónica.
+    if expr.contains('x') || expr.contains('X') {
+        return Err(ParametricError::NoSoportado {
+            detalle: format!(
+                "la función {expr:?} no se puede evaluar en [{p0},{p1}]: revisá la expresión, por ejemplo f(x)=x^2"
+            ),
+        });
+    }
+    let anim = area_anim(
+        INTEGRAL_CANONICAL_EXPR.to_string(),
+        &param_raw,
+        p0,
+        p1,
+        &lower,
+    )?;
+    Ok(AreaPedido::Canonica(anim))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1504,5 +1686,82 @@ mod tests {
         )
         .unwrap();
         assert!(ok.estimate_bytes() == Some(640 * 480 * 4 * 24));
+    }
+
+    // ── N1: canónica de integral sin función (3 ramas) ───────────────────
+    #[test]
+    fn area_sin_funcion_usa_canonica_x2_en_02() {
+        for pedido in [
+            "haceme una animacion de una integral (nativa)",
+            "explica la integral con animación",
+            "animá el área bajo la curva con animación",
+        ] {
+            let res = infer_area_anim(pedido).unwrap();
+            assert!(res.es_canonica(), "{pedido:?} debe ser canónica");
+            let anim = res.anim();
+            assert_eq!(anim.kind, ParametricKind::Area);
+            assert_eq!(anim.expr_a, INTEGRAL_CANONICAL_EXPR);
+            assert_eq!(anim.param.as_str(), INTEGRAL_CANONICAL_PARAM);
+            assert_eq!((anim.p0, anim.p1), (0.0, 2.0));
+            assert_eq!(anim.frame_count(), PARAMETRIC_MAX_FRAMES);
+        }
+        // La prosa declara la canónica en rioplatense.
+        assert!(INTEGRAL_CANONICAL_PROSA.contains("x²"));
+        assert!(INTEGRAL_CANONICAL_PROSA.contains("pedime otra"));
+    }
+
+    #[test]
+    fn area_con_funcion_valida_es_explicita() {
+        let res =
+            infer_area_anim("haceme una animacion de la integral de f(x)=x^3 de 0 a 2").unwrap();
+        assert!(!res.es_canonica());
+        let anim = res.anim();
+        assert_eq!(anim.expr_a, "x^3");
+        assert_eq!((anim.p0, anim.p1), (0.0, 2.0));
+        // Rango con corchetes también vale.
+        let res2 = infer_area_anim("área móvil bajo la curva y=sin(x) con p en [0,2]").unwrap();
+        assert!(!res2.es_canonica());
+        assert_eq!(res2.anim().expr_a, "sin(x)");
+        // Prosa con `=` pero sin `x` ni evaluable se ignora → canónica.
+        let res3 = infer_area_anim("animacion de la integral con F=m*a").unwrap();
+        assert!(res3.es_canonica(), "la prosa sin x no es función");
+    }
+
+    #[test]
+    fn area_con_funcion_invalida_falla_honesto_sin_frames() {
+        let err =
+            infer_area_anim("animacion de la integral de f(x)=foo(x) con p en [0,1]").unwrap_err();
+        match err {
+            ParametricError::NoSoportado { detalle } => {
+                assert!(detalle.contains("foo(x)"), "{detalle}");
+                assert!(detalle.contains("x^2"), "da ejemplo: {detalle}");
+            }
+            otro => panic!("esperaba NoSoportado, fue {otro:?}"),
+        }
+        // Sin mención a integral/área no es pedido de área.
+        assert_eq!(
+            infer_area_anim("barrido de f(x)=x^2 con p en [0,1]").unwrap_err(),
+            ParametricError::FaltaTipo
+        );
+        assert!(infer_area_anim("   ").is_err());
+    }
+
+    #[test]
+    fn recorte_de_rango_en_prosa_no_come_parametros() {
+        // " de 0 a 2" tras la expresión se recorta…
+        assert_eq!(
+            extract_single_expr("integral de f(x)=x^3 de 0 a 2").as_deref(),
+            Some("x^3")
+        );
+        // …pero un parámetro con espacios sobrevive (" a " sin número no corta).
+        assert_eq!(
+            extract_single_expr("barrido de f(x)=x^2 + a*x con a en [0,2]").as_deref(),
+            Some("x^2 + a*x")
+        );
+        // Rango suelto con corchetes también se recorta.
+        assert_eq!(
+            extract_single_expr("integral de f(x)=x^2 [0,2]").as_deref(),
+            Some("x^2")
+        );
     }
 }

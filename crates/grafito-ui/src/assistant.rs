@@ -5,8 +5,8 @@ use crate::{
     icons::{action_icon_button, Icon},
     theme::current_theme,
     tokens::{
-        HIT_TARGET_MIN, RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_2XS, TYPE_BASE,
-        TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
+        HIT_TARGET_MIN, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXL,
+        TYPE_2XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
     },
 };
 use grafito_anim::protocol::Timeline;
@@ -2312,7 +2312,78 @@ pub fn humanize_prose_text(text: &str) -> String {
             }
         }
     }
+    // N2: el modelo generaliza la sintaxis `Id[param]` del system prompt a la
+    // palabra ya humana (`botón[a]` en vez de `Button[a]`): el pase D2 no la
+    // ve porque busca `Button` exacto. Este barre la variante humana en
+    // cualquier caja, con/sin tilde, y absorbe `[param]`.
+    out = replace_human_button_params(&out);
     out
+}
+
+/// N2: reemplaza `botón`/`boton`/`button` en cualquier caja seguidos de un
+/// opcional `[param]` por `botón`, sin dejar corchetes.
+///
+/// Cubre lo que el pase D2 (`Button` exacto) no ve: el modelo escribe la
+/// palabra ya humana con sufijo GeoGebra (`botón[a]`, `BOTÓN[A]`, `boton[a]`).
+/// Frontera honesta: si tras la raíz viene letra (`botones`) no toca nada.
+/// Puro, UTF-8 seguro (chars, jamás índices byte), sin `unwrap`.
+fn replace_human_button_params(text: &str) -> String {
+    const MAX_PARAM_LEN: usize = 64;
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(stem) = match_button_stem(&chars[i..]) {
+            let mut j = i + stem;
+            if chars.get(j) == Some(&'[') {
+                let mut k = j + 1;
+                let mut seen = 0;
+                while k < chars.len() && chars[k] != ']' && seen <= MAX_PARAM_LEN {
+                    k += 1;
+                    seen += 1;
+                }
+                if k < chars.len() && chars[k] == ']' {
+                    j = k + 1;
+                }
+            }
+            out.push_str("botón");
+            i = j;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Raíz `boton`/`botón`/`button` case-insensitive (ASCII + Ó/ó) al inicio del
+/// slice. Devuelve chars consumidos o `None`. Exige frontera no-letra detrás
+/// para no romper `botones`. Pura, sin `unwrap`.
+fn match_button_stem(chunk: &[char]) -> Option<usize> {
+    let lower_at =
+        |pos: usize| -> Option<char> { chunk.get(pos).and_then(|c| c.to_lowercase().next()) };
+    let is_boton = lower_at(0) == Some('b')
+        && lower_at(1) == Some('o')
+        && lower_at(2) == Some('t')
+        && matches!(
+            (lower_at(3), lower_at(4)),
+            (Some('o'), Some('n')) | (Some('ó'), Some('n'))
+        );
+    let is_button = lower_at(0) == Some('b')
+        && lower_at(1) == Some('u')
+        && lower_at(2) == Some('t')
+        && lower_at(3) == Some('t')
+        && lower_at(4) == Some('o')
+        && lower_at(5) == Some('n');
+    let stem = if is_boton {
+        5
+    } else if is_button {
+        6
+    } else {
+        return None;
+    };
+    let boundary_ok = chunk.get(stem).is_none_or(|c| !c.is_alphabetic());
+    boundary_ok.then_some(stem)
 }
 
 /// Reemplaza `id` y `id[lo que sea]` por `human` sin dejar corchetes.
@@ -4797,6 +4868,89 @@ pub fn media_frame_at(timeline: &Timeline, t_ms: u64, frame_count: usize) -> usi
     (value.round() as usize).min(frame_count.saturating_sub(1))
 }
 
+/// Textos del contador de la card (N2): compacto `42/48` para la toolbar +
+/// largo `Fotograma 42 de 48` para hover/accesibilidad del deslizador.
+///
+/// UN solo contador visible: el largo jamás se dibuja como etiqueta suelta
+/// (era el duplicado del screenshot). Puro, sin `unwrap`.
+pub fn media_counter_text(index: usize, frame_count: usize) -> (String, String) {
+    if frame_count == 0 {
+        return ("0/0".to_owned(), "Sin fotogramas".to_owned());
+    }
+    let shown = index.saturating_add(1).min(frame_count);
+    let shown = shown.max(1);
+    (
+        format!("{shown}/{frame_count}"),
+        format!("Fotograma {shown} de {frame_count}"),
+    )
+}
+
+/// N2 (nota N1): la etiqueta del contador se suprime con gracia bajo ~160px
+/// de ancho disponible: el deslizador sigue (posición vía hover) pero no se
+/// dibuja texto que se truncaría. Piso legible `TYPE_XS` en el render. Pura.
+pub fn media_show_counter_label(avail_w: f32) -> bool {
+    avail_w.is_finite() && avail_w >= 160.0
+}
+
+/// Tamaño del preview en el overlay (N2): llena `min(ancho, alto-disponible)`
+/// respetando aspecto. A diferencia de la card inline SÍ permite upscale:
+/// "ver grande" lo pide y el usuario lo abrió a propósito. Puro, sin `unwrap`.
+pub fn media_overlay_preview_size(
+    frame_w: f32,
+    frame_h: f32,
+    avail_w: f32,
+    avail_h: f32,
+) -> (f32, f32) {
+    let fw = if frame_w.is_finite() && frame_w > 0.0 {
+        frame_w
+    } else {
+        1.0
+    };
+    let fh = if frame_h.is_finite() && frame_h > 0.0 {
+        frame_h
+    } else {
+        1.0
+    };
+    let aw = if avail_w.is_finite() && avail_w > 0.0 {
+        avail_w
+    } else {
+        80.0
+    };
+    let ah = if avail_h.is_finite() && avail_h > 0.0 {
+        avail_h
+    } else {
+        200.0
+    };
+    let scale = (aw / fw).min(ah / fh);
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let w = (fw * scale).ceil().max(1.0);
+    let h = (fh * scale).ceil().max(1.0);
+    (w, h)
+}
+
+/// Tamaño de la ventana overlay de la animación (N2, puro y testeable).
+///
+/// Centrada, hasta 86%×82% de pantalla, clampeada a `480..900 × 420..720`:
+/// el preview ocupa el resto (ver `media_preview_size`) y la toolbar una
+/// sola fila abajo. Sin columnas vacías. Pura, sin `unwrap`.
+pub fn media_overlay_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
+    let w = if screen_w.is_finite() && screen_w > 0.0 {
+        screen_w * 0.86
+    } else {
+        480.0
+    };
+    let h = if screen_h.is_finite() && screen_h > 0.0 {
+        screen_h * 0.82
+    } else {
+        420.0
+    };
+    (w.clamp(480.0, 900.0), h.clamp(420.0, 720.0))
+}
+
 /// Reproductor de animación (GIF-like) en el chat (B5).
 ///
 /// - Autoplay a 12 fps (`MEDIA_CARD_BASE_FPS`); al arrastrar el deslizador
@@ -4874,8 +5028,9 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     let duration_ms = media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS);
     let paused = state.media_paused.get();
     let speed_label = state.media_speed.get().label();
-    let counter_compact = format!("{}/{}", index + 1, frame_count);
-    let counter_long = format!("Fotograma {} de {}", index + 1, frame_count);
+    // N2: UN solo contador (el compacto vive en la toolbar); el largo solo
+    // va al hover del deslizador, jamás como etiqueta suelta duplicada.
+    let (counter_compact, counter_long) = media_counter_text(index, frame_count);
     let export_line: Option<(String, egui::Color32)> = match &state.media_export {
         MediaExportState::Idle => None,
         MediaExportState::Exporting => Some(("Exportando…".to_owned(), theme.text_secondary)),
@@ -4944,15 +5099,19 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 );
             }
             ui.add_space(SPACE_XS);
+            // N2: UNA sola barra (el deslizador) + UN solo contador (el de la
+            // toolbar). El texto largo vive solo en el hover: nada duplicado.
             if frame_count > 1 && duration_ms > 0 {
                 let mut fraction =
                     (state.media_playhead_ms.get().min(duration_ms) as f32) / (duration_ms as f32);
                 fraction = fraction.clamp(0.0, 1.0);
-                let response = ui.add(
-                    egui::Slider::new(&mut fraction, 0.0..=1.0)
-                        .text("Recorrer fotogramas")
-                        .show_value(false),
-                );
+                let response = ui
+                    .add(
+                        egui::Slider::new(&mut fraction, 0.0..=1.0)
+                            .text("Recorrer fotogramas")
+                            .show_value(false),
+                    )
+                    .on_hover_text(&counter_long);
                 if response.dragged() || response.changed() {
                     // Se pausa al arrastrar y queda en pausa con estado
                     // visible (decisión B5 documentada arriba).
@@ -4960,19 +5119,6 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     state.media_playhead_ms.set(t_ms.min(duration_ms));
                     state.media_paused.set(true);
                 }
-                // Contador accesible para lector (el compacto vive en la toolbar).
-                ui.label(
-                    egui::RichText::new(&counter_long)
-                        .color(theme.text_tertiary)
-                        .size(TYPE_XS)
-                        .weak(),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new(&counter_long)
-                        .color(theme.text_secondary)
-                        .size(TYPE_XS),
-                );
             }
             ui.add_space(SPACE_XS);
             // D2 toolbar compacta con wrap por tokens: todo abre algo o
@@ -5009,9 +5155,15 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 {
                     state.media_fullscreen.set(true);
                 }
+                // N2: mismo tamaño que el resto (`.small()`): el `Button`
+                // grande empujaba este último control fuera del panel ~340px
+                // y quedaba cortado en el borde. Con wrap por tokens jamás
+                // queda medio afuera: baja de fila antes de cortarse.
                 let exporting = matches!(state.media_export, MediaExportState::Exporting);
-                let export_response =
-                    ui.add_enabled(frame_count > 0 && !exporting, egui::Button::new("Exportar"));
+                let export_response = ui.add_enabled(
+                    frame_count > 0 && !exporting,
+                    egui::Button::new("Exportar").small(),
+                );
                 if export_response.clicked() {
                     action = Some(AssistantUiAction::ExportMedia);
                 }
@@ -5023,19 +5175,26 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 } else {
                     export_response.on_hover_text(MEDIA_TIP_EXPORT);
                 }
-                ui.label(
-                    egui::RichText::new(&counter_compact)
-                        .color(theme.text_secondary)
-                        .size(TYPE_XS)
-                        .strong(),
-                );
+                // N2: contador único integrado; bajo ~160px se suprime con
+                // gracia (nota N1) en vez de truncarse.
+                if media_show_counter_label(ui.available_width()) {
+                    ui.label(
+                        egui::RichText::new(&counter_compact)
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS)
+                            .strong(),
+                    );
+                }
             });
             if let Some((text, color)) = &export_line {
                 ui.add_space(SPACE_XS);
                 ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
             }
         });
-    // D2 overlay de pantalla completa: animación grande + transporte + Esc.
+    // N2 overlay rediseñado: preview CENTRADO que ocupa el espacio (respeta
+    // aspecto con `media_overlay_preview_size`: `min(ancho, alto-disponible)`)
+    // + UNA toolbar abajo con [Play/Pausa][deslizador+contador][1x][Exportar]
+    // [Cerrar(Esc)]. Sin columnas vacías, sin contadores duplicados.
     // Patrón `egui::Window` existente (ver `draw_assistant_settings_window`);
     // sin I/O ni spawn, sólo renderiza `&Estado`.
     if state.media_fullscreen.get() {
@@ -5045,6 +5204,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             close_requested = true;
         }
         let screen = ui.ctx().screen_rect();
+        let (win_w, win_h) = media_overlay_window_size(screen.width(), screen.height());
         egui::Window::new("Animación")
             .id(egui::Id::new("assistant_media_fullscreen"))
             .open(&mut open)
@@ -5052,8 +5212,8 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             .collapsible(false)
             .constrain(true)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .default_width((screen.width() * 0.86).clamp(480.0, 900.0))
-            .default_height((screen.height() * 0.82).clamp(420.0, 720.0))
+            .default_width(win_w)
+            .default_height(win_h)
             .frame(
                 egui::Frame::window(&ui.ctx().style())
                     .fill(theme.panel_bg)
@@ -5064,31 +5224,46 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             .show(ui.ctx(), |ui| {
                 ui.set_min_width(ui.available_width());
                 if !title.is_empty() {
-                    ui.label(
-                        egui::RichText::new(&title)
-                            .color(theme.text_primary)
-                            .size(TYPE_SM)
-                            .strong(),
-                    );
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new(&title)
+                                .color(theme.text_primary)
+                                .size(TYPE_SM)
+                                .strong(),
+                        );
+                    });
                     ui.add_space(SPACE_XS);
                 }
                 if let Some(texture) = state.media_textures().0.get(index).cloned() {
                     let size = texture.size_vec2();
-                    let max_w = ui.available_width().max(80.0);
-                    let max_h = (ui.available_height() - 96.0)
-                        .clamp(200.0, screen.height() * 0.62)
+                    // Reserva honesta para título + toolbar (todo tokens): lo
+                    // que queda es para el preview, centrado.
+                    let reserve = SPACE_XXL * 3.0 + SPACE_LG + SPACE_SM;
+                    let max_h = (ui.available_height() - reserve)
+                        .clamp(200.0, screen.height())
                         .max(200.0);
-                    let (dw, dh) = media_preview_size(size.x, size.y, max_w, max_h);
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(dw, dh), egui::Sense::hover());
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
+                    let max_w = ui.available_width().max(80.0);
+                    let (dw, dh) = media_overlay_preview_size(size.x, size.y, max_w, max_h);
+                    ui.vertical_centered(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(dw, dh), egui::Sense::hover());
+                        ui.painter().image(
+                            texture.id(),
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    });
+                } else {
+                    ui.label(
+                        egui::RichText::new("Fotograma no disponible.")
+                            .color(theme.warning)
+                            .size(TYPE_SM),
                     );
                 }
                 ui.add_space(SPACE_SM);
+                // UNA sola toolbar (wrap por tokens: baja de fila, jamás se
+                // corta a la mitad): deslizador + contador juntos.
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
                     let toggle_label = if state.media_paused.get() {
@@ -5096,8 +5271,44 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     } else {
                         "⏸ Pausar"
                     };
-                    if ui.small_button(toggle_label).clicked() {
+                    if ui
+                        .small_button(toggle_label)
+                        .on_hover_text(if state.media_paused.get() {
+                            MEDIA_TIP_PLAY
+                        } else {
+                            MEDIA_TIP_PAUSE
+                        })
+                        .clicked()
+                    {
                         state.media_paused.set(!state.media_paused.get());
+                    }
+                    if frame_count > 1 && duration_ms > 0 {
+                        let mut fraction = (state.media_playhead_ms.get().min(duration_ms) as f32)
+                            / (duration_ms as f32);
+                        fraction = fraction.clamp(0.0, 1.0);
+                        let slider_w = ui.available_width().max(80.0);
+                        let response = ui
+                            .add_sized(
+                                egui::vec2(slider_w, ui.spacing().interact_size.y),
+                                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
+                            )
+                            .on_hover_text(&counter_long);
+                        if response.dragged() || response.changed() {
+                            let t_ms =
+                                (fraction.clamp(0.0, 1.0) * (duration_ms as f32)).round() as u64;
+                            state.media_playhead_ms.set(t_ms.min(duration_ms));
+                            state.media_paused.set(true);
+                        }
+                    }
+                    // Contador único junto al deslizador; bajo ~160px se
+                    // suprime con gracia (nota N1) en vez de truncarse.
+                    if media_show_counter_label(ui.available_width()) {
+                        ui.label(
+                            egui::RichText::new(&counter_compact)
+                                .color(theme.text_secondary)
+                                .size(TYPE_XS)
+                                .strong(),
+                        );
                     }
                     if ui
                         .small_button(format!("{speed_label} ▾"))
@@ -5106,12 +5317,22 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     {
                         state.media_speed.set(state.media_speed.get().cycle());
                     }
-                    ui.label(
-                        egui::RichText::new(&counter_long)
-                            .color(theme.text_secondary)
-                            .size(TYPE_XS)
-                            .strong(),
+                    let exporting = matches!(state.media_export, MediaExportState::Exporting);
+                    let export_response = ui.add_enabled(
+                        frame_count > 0 && !exporting,
+                        egui::Button::new("Exportar").small(),
                     );
+                    if export_response.clicked() {
+                        action = Some(AssistantUiAction::ExportMedia);
+                    }
+                    if frame_count == 0 {
+                        export_response
+                            .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+                    } else if exporting {
+                        export_response.on_disabled_hover_text("Ya se está exportando…");
+                    } else {
+                        export_response.on_hover_text(MEDIA_TIP_EXPORT);
+                    }
                     if ui
                         .small_button("Cerrar (Esc)")
                         .on_hover_text("Cierra esta vista grande")
@@ -10251,6 +10472,39 @@ mod tests {
     }
 
     #[test]
+    fn humanize_boton_humano_con_parametro_en_cualquier_caja() {
+        // N2: el instalado D2 cubría `Button[a]` pero el modelo escribe la
+        // palabra ya humana (`botón[a]`): seguía visible en la prosa.
+        for raw in [
+            "sin botón[a] sobre esa variable",
+            "sin Button[a] sobre esa variable",
+            "sin boton[a] sobre esa variable",
+            "sin BOTÓN[A] sobre esa variable",
+            "sin button[A] sobre esa variable",
+            "sin Boton[a] sobre esa variable",
+        ] {
+            let human = humanize_prose_text(raw);
+            assert_eq!(
+                human, "sin botón sobre esa variable",
+                "prosa rota: {raw} → {human}"
+            );
+            assert!(!human.contains('['), "quedó corchete: {human}");
+            assert!(!human.contains(']'), "quedó corchete: {human}");
+        }
+        // Sin parámetro también se normaliza la caja a `botón`.
+        assert_eq!(
+            humanize_prose_text("tocá Button para ver"),
+            "tocá botón para ver"
+        );
+        // Frontera honesta: el plural `botones` no se toca.
+        let plural = humanize_prose_text("hay 2 o 3 botones para elegir");
+        assert!(plural.contains("botones"), "rompió el plural: {plural}");
+        // Sin cierre: jamás panic.
+        let broken = humanize_prose_text("sin botón[a sobre esa variable");
+        assert!(broken.contains("botón"), "perdió la palabra: {broken}");
+    }
+
+    #[test]
     fn media_preview_size_usa_todo_el_ancho_y_preserva_aspecto() {
         // D2: ancho total, alto = ancho * h/w, clampeado a max_h.
         let (w, h) = media_preview_size(400.0, 200.0, 340.0, 280.0);
@@ -10267,6 +10521,61 @@ mod tests {
         let a = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
         let b = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
         assert_eq!(a, b, "la reserva debe ser estable");
+    }
+
+    #[test]
+    fn media_counter_un_solo_texto_compacto_y_largo() {
+        // N2: UN solo contador visible (compacto en toolbar); el largo solo
+        // va al hover del deslizador.
+        let (compact, long) = media_counter_text(41, 48);
+        assert_eq!(compact, "42/48");
+        assert_eq!(long, "Fotograma 42 de 48");
+        let (first_c, first_l) = media_counter_text(0, 1);
+        assert_eq!(
+            (first_c.as_str(), first_l.as_str()),
+            ("1/1", "Fotograma 1 de 1")
+        );
+        // Vacío: jamás panic, jamás "1 de 0".
+        let (empty_c, _) = media_counter_text(0, 0);
+        assert_eq!(empty_c, "0/0");
+    }
+
+    #[test]
+    fn media_toolbar_cabe_en_panel_300_y_520_y_calla_bajo_160() {
+        // N2 bug 2: panel 300..520 (ASSISTANT_PANEL_MIN/MAX_WIDTH) muestra el
+        // contador; bug 5 (nota N1): bajo ~160px se suprime con gracia en vez
+        // de truncarse. Con wrap por tokens ningún control queda medio afuera.
+        assert!(media_show_counter_label(300.0));
+        assert!(media_show_counter_label(520.0));
+        assert!(media_show_counter_label(340.0));
+        assert!(!media_show_counter_label(159.9));
+        assert!(!media_show_counter_label(80.0));
+        assert!(!media_show_counter_label(f32::NAN));
+        assert!(!media_show_counter_label(f32::INFINITY));
+    }
+
+    #[test]
+    fn media_overlay_ocupa_el_espacio_centrado() {
+        // N2 bug 3: overlay centrado 86%×82% clampeado; preview llena
+        // min(ancho, alto) respetando aspecto.
+        let (w, h) = media_overlay_window_size(800.0, 600.0);
+        assert!((w - 800.0 * 0.86).abs() < 0.01, "ancho: {w}");
+        assert!((h - 600.0 * 0.82).abs() < 0.01, "alto: {h}");
+        // Pantalla chica: pisos 480×420; gigante: techos 900×720.
+        assert_eq!(media_overlay_window_size(400.0, 300.0), (480.0, 420.0));
+        assert_eq!(media_overlay_window_size(4000.0, 3000.0), (900.0, 720.0));
+        assert_eq!(
+            media_overlay_window_size(f32::NAN, f32::NAN),
+            (480.0, 420.0)
+        );
+        // Preview overlay: ocupa min(ancho, alto), respeta aspecto.
+        let (pw, ph) = media_overlay_preview_size(400.0, 200.0, 800.0, 500.0);
+        assert_eq!((pw, ph), (800.0, 400.0), "debe llenar el ancho: {pw}x{ph}");
+        let (qw, qh) = media_overlay_preview_size(200.0, 800.0, 800.0, 500.0);
+        assert_eq!((qw, qh), (125.0, 500.0), "retrato manda el alto: {qw}x{qh}");
+        // Cuadrado chico en overlay grande: upscale permitido (ver grande).
+        let (sw, sh) = media_overlay_preview_size(64.0, 64.0, 800.0, 500.0);
+        assert_eq!((sw, sh), (500.0, 500.0), "overlay agranda: {sw}x{sh}");
     }
 
     #[test]
