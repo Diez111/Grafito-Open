@@ -1979,6 +1979,7 @@ dependencies = [
 name = "grafito-anim"
 version = "1.0.0"
 dependencies = [
+ "criterion",
  "grafito-geometry",
  "log",
  "serde",
@@ -2037,6 +2038,7 @@ name = "grafito-assistant"
 version = "1.0.0"
 dependencies = [
  "base64",
+ "criterion",
  "grafito-agent",
  "grafito-anim",
  "grafito-assistant-types",

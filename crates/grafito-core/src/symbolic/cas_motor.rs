@@ -1,11 +1,12 @@
-//! Puerta CAS G-A del cerebro (frente G-A).
+//! Puerta CAS G-A del cerebro (frente G-A) + F3c (2º orden, sistemas, Laplace).
 //!
 //! Expone el motor de `grafito-geometry` (`cas`, `integral`, `ode`) con
 //! errores [`ExchangeError`] honestos: entradas malformadas van a
 //! `InvalidData`; subconjuntos fuera de S/M o presupuestos agotados van a
 //! `NotImplemented` con la derivación (`Eliminate`, cuadratura, diseño L).
 //! Cero `unwrap` en producción; presupuestos heredados del motor
-//! (2000 bytes, Taylor 64, Laurent orden 16, S-polinomios 128).
+//! (2000 bytes, Taylor 64, Laurent orden 16, S-polinomios 128,
+//! parciales grado ≤ 4, RHS 2º orden grado ≤ 8, Laplace n ≤ 20).
 
 use super::exchange::ExchangeError;
 use grafito_geometry::cas as geo_cas;
@@ -64,23 +65,22 @@ fn map_risch(feature: &'static str, err: geo_integral::RischError) -> ExchangeEr
     }
 }
 
-fn map_ode(err: geo_ode::OdeSymbolicError) -> ExchangeError {
-    const FEATURE: &str = "SolveODE";
+fn map_ode(feature: &'static str, err: geo_ode::OdeSymbolicError) -> ExchangeError {
     match err {
         geo_ode::OdeSymbolicError::InputTooLong { provided, maximum } => invalid(
-            FEATURE,
+            feature,
             format!("EDO de {provided} bytes excede el máximo {maximum}"),
         ),
         geo_ode::OdeSymbolicError::InvalidVariable { variable } => invalid(
-            FEATURE,
+            feature,
             format!("variable '{variable}' no es un identificador válido"),
         ),
         geo_ode::OdeSymbolicError::Parse { reason } => {
-            invalid(FEATURE, format!("no se pudo parsear: {reason}"))
+            invalid(feature, format!("no se pudo parsear: {reason}"))
         }
-        geo_ode::OdeSymbolicError::NotSupported { hint } => pending(FEATURE, hint),
+        geo_ode::OdeSymbolicError::NotSupported { hint } => pending(feature, hint),
         geo_ode::OdeSymbolicError::IntegrationFailed { expr } => pending(
-            FEATURE,
+            feature,
             format!("sin primitiva para '{expr}'; usa cuadratura numérica o reduce el sistema"),
         ),
     }
@@ -138,7 +138,7 @@ pub fn cas_definite_risch(expr: &str, var: &str, a: f64, b: f64) -> Result<Strin
 pub fn cas_solve_ode_linear(p: &str, q: &str, x: &str) -> Result<String, ExchangeError> {
     geo_ode::solve_linear_first_order(p, q, x)
         .map(|sol| format!("SolveODE[y' + ({p})*y = {q}] → {sol}"))
-        .map_err(map_ode)
+        .map_err(|err| map_ode("SolveODE", err))
 }
 
 /// `SolveODE` separable `y' = g(x)·h(y)`.
@@ -150,14 +150,58 @@ pub fn cas_solve_ode_separable(
 ) -> Result<String, ExchangeError> {
     geo_ode::solve_separable(g, h, x, y)
         .map(|sol| format!("SolveODE[y' = ({g})*({h})] → {sol}"))
-        .map_err(map_ode)
+        .map_err(|err| map_ode("SolveODE", err))
 }
 
 /// `SolveODE` general de 1er orden (lineal o separable; resto `Err`).
 pub fn cas_solve_ode(rhs: &str, x: &str, y: &str) -> Result<String, ExchangeError> {
     geo_ode::solve_ode_first_order(rhs, x, y)
         .map(|sol| format!("SolveODE[y' = {rhs}] → {sol}"))
-        .map_err(map_ode)
+        .map_err(|err| map_ode("SolveODE", err))
+}
+
+// ---------------------------------------------------------------------------
+// Frente F3c: EDO 2º orden, sistemas 2×2, Laplace (puerta honesta G-A).
+// ---------------------------------------------------------------------------
+
+/// `SolveODE` de 2º orden `a·y''+b·y'+c·y = rhs` (constantes, `a ≠ 0`).
+pub fn cas_solve_ode_second_order(
+    a: &str,
+    b: &str,
+    c: &str,
+    rhs: &str,
+    x: &str,
+) -> Result<String, ExchangeError> {
+    geo_ode::solve_ode_second_order_const(a, b, c, rhs, x)
+        .map(|sol| format!("SolveODE[({a})*y''+({b})*y'+({c})*y = {rhs}] → {sol}"))
+        .map_err(|err| map_ode("SolveODE", err))
+}
+
+/// Sistema lineal 2×2 constante por autovalores.
+pub fn cas_solve_ode_system_2x2(
+    a11: &str,
+    a12: &str,
+    a21: &str,
+    a22: &str,
+    t: &str,
+) -> Result<String, ExchangeError> {
+    geo_ode::solve_ode_system_2x2(a11, a12, a21, a22, t)
+        .map(|sol| format!("ODESystem[[{a11},{a12}],[{a21},{a22}]] → {sol}"))
+        .map_err(|err| map_ode("ODESystem", err))
+}
+
+/// `Laplace[f(t)]` directa del subset F3c.
+pub fn cas_laplace_direct(expr: &str, t: &str, s: &str) -> Result<String, ExchangeError> {
+    geo_ode::laplace_direct(expr, t, s)
+        .map(|out| format!("Laplace[{expr}]({t}→{s}) = {out}"))
+        .map_err(|err| map_ode("Laplace", err))
+}
+
+/// `Laplace⁻¹[F(s)]` de racionales propios grado ≤ 2.
+pub fn cas_laplace_inverse(expr: &str, s: &str, t: &str) -> Result<String, ExchangeError> {
+    geo_ode::laplace_inverse(expr, s, t)
+        .map(|out| format!("Laplace⁻¹[{expr}]({s}→{t}) = {out}"))
+        .map_err(|err| map_ode("Laplace", err))
 }
 
 /// `Residue[expr, var = at]` (polos simples + orden N ≤ 16).
@@ -292,6 +336,54 @@ mod tests {
         assert!(
             matches!(err, ExchangeError::InvalidData { .. }),
             "got {err}"
+        );
+    }
+
+    // --- Frente F3c: puerta de 2º orden, sistemas y Laplace ---
+
+    #[test]
+    fn gate_solve_ode_second_order() {
+        let out = cas_solve_ode_second_order("1", "-3", "2", "exp(x)", "x").expect("puerta EDO2");
+        assert!(out.contains('C'), "got {out}");
+        assert!(out.replace(' ', "").contains("exp(1*x)"), "got {out}");
+        let err = cas_solve_ode_second_order("0", "1", "1", "x", "x").expect_err("a=0");
+        assert!(
+            matches!(err, ExchangeError::NotImplemented { .. }),
+            "got {err}"
+        );
+        let euler = cas_solve_ode_second_order("x^2", "x", "1", "0", "x").expect_err("Euler");
+        let msg = format!("{euler}");
+        assert!(msg.contains("constante"), "got {msg}");
+    }
+
+    #[test]
+    fn gate_solve_ode_system_2x2() {
+        let out = cas_solve_ode_system_2x2("0", "1", "-2", "-3", "t").expect("puerta sistema");
+        assert!(out.contains("exp(-1*t)"), "got {out}");
+        let err = cas_solve_ode_system_2x2("t", "1", "0", "1", "t").expect_err("variable");
+        assert!(
+            matches!(err, ExchangeError::NotImplemented { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn gate_laplace_direct_and_inverse() {
+        let direct = cas_laplace_direct("sin(t)", "t", "s").expect("puerta Laplace");
+        assert!(direct.contains("s^2+1"), "got {direct}");
+        let inverse = cas_laplace_inverse("1/(s+1)", "s", "t").expect("puerta inversa");
+        assert!(inverse.contains("exp(-1*t)"), "got {inverse}");
+        let err = cas_laplace_inverse("1/(s^3+1)", "s", "t").expect_err("grado 3");
+        assert!(
+            matches!(err, ExchangeError::NotImplemented { .. }),
+            "got {err}"
+        );
+        // `laplace_pdf` es la densidad estadística, no la transformada:
+        // la puerta Laplace vive aquí, no en `statistics`.
+        let stats = grafito_geometry::statistics::laplace_pdf(0.0, 0.0, 1.0);
+        assert!(
+            (stats - 0.5).abs() < 1e-12,
+            "densidad Laplace(0,0,1)=0.5, got {stats}"
         );
     }
 }

@@ -75,13 +75,13 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 153;
+pub const MSG_COUNT: usize = 165;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
-/// `toolbar.group` (17) + `toolbar.tool` (76) + `palette` (17) +
-/// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) = 153.
+/// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (17) +
+/// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) = 165.
 pub static MESSAGES: &[Msg] = &[
-    // ── toolbar.group (17) — ES idéntico a `ToolGroupId::label` ──
+    // ── toolbar.group (18) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
     Msg { key: "toolbar.group.point", es: "Puntos", en: "Points" },
     Msg { key: "toolbar.group.line", es: "Rectas", en: "Lines" },
@@ -98,8 +98,9 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.group.threed", es: "3D", en: "3D" },
     Msg { key: "toolbar.group.fourd", es: "4D proyectado", en: "Projected 4D" },
     Msg { key: "toolbar.group.advanced", es: "Avanzado", en: "Advanced" },
+    Msg { key: "toolbar.group.transform", es: "Transformar", en: "Transform" },
     Msg { key: "toolbar.group.dynamics", es: "Dinámica", en: "Dynamics" },
-    // ── toolbar.tool (70) — ES idéntico a `ToolEntry` en toolbar.rs ──
+    // ── toolbar.tool (87) — ES idéntico a `ToolEntry` en toolbar.rs ──
     Msg { key: "toolbar.tool.select", es: "Seleccionar", en: "Select" },
     Msg { key: "toolbar.tool.point", es: "Punto", en: "Point" },
     Msg { key: "toolbar.tool.midpoint", es: "M Punto medio", en: "Midpoint" },
@@ -176,6 +177,18 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.tool.button", es: "Botón", en: "Button" },
     Msg { key: "toolbar.tool.image", es: "Imagen", en: "Image" },
     Msg { key: "toolbar.tool.trig_animation", es: "Animación trigonométrica", en: "Trigonometric animation" },
+    // ── toolbar.tool F3a (11): ES idéntico a la etiqueta estática de `GROUP_*` ──
+    Msg { key: "toolbar.tool.translate", es: "Traslada", en: "Translate" },
+    Msg { key: "toolbar.tool.rotate", es: "Rota", en: "Rotate" },
+    Msg { key: "toolbar.tool.dilate", es: "Homotecia", en: "Dilate" },
+    Msg { key: "toolbar.tool.reflect", es: "Refleja", en: "Reflect" },
+    Msg { key: "toolbar.tool.compass", es: "Compás", en: "Compass" },
+    Msg { key: "toolbar.tool.semicircle", es: "Semicírculo", en: "Semicircle" },
+    Msg { key: "toolbar.tool.spline", es: "Spline", en: "Spline" },
+    Msg { key: "toolbar.tool.prism3d", es: "Prisma", en: "Prism" },
+    Msg { key: "toolbar.tool.tetrahedron3d", es: "Tetraedro", en: "Tetrahedron" },
+    Msg { key: "toolbar.tool.checkbox", es: "Casilla", en: "Checkbox" },
+    Msg { key: "toolbar.tool.inputbox", es: "Caja de entrada", en: "Input box" },
     // ── palette (17): 14 acciones UI + título + vacío + pie ──
     // ES idéntico a `UI_ACTIONS` en command_palette.rs; EN = clave estable de despacho.
     Msg { key: "palette.action.point", es: "Herramienta Punto", en: "Point Tool" },
@@ -200,7 +213,7 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "onboarding.subtitle", es: "Grafito — pizarra geométrica interactiva", en: "Grafito — interactive geometry board" },
     Msg { key: "onboarding.bullet_primary", es: "• Construye con 5 herramientas esenciales — Mover, Punto, Recta, Círculo, Polígono", en: "• Build with 5 essential tools — Move, Point, Line, Circle, Polygon" },
     Msg { key: "onboarding.bullet_secondary", es: "• Secundaria añade 3 más — Lápiz, Medida, Análisis (8 total)", en: "• Secondary adds 3 more — Pencil, Measure, Analysis (8 total)" },
-    Msg { key: "onboarding.bullet_university", es: "• Universidad desbloquea 17 grupos — Cónicas, 3D, CAS, Estadística, Complejos, Dinámica…", en: "• University unlocks 17 groups — Conics, 3D, CAS, Statistics, Complex, Dynamics…" },
+    Msg { key: "onboarding.bullet_university", es: "• Universidad desbloquea 18 grupos — Cónicas, 3D, CAS, Estadística, Complejos, Dinámica…", en: "• University unlocks 18 groups — Conics, 3D, CAS, Statistics, Complex, Dynamics…" },
     Msg { key: "onboarding.btn_example", es: "Probar ejemplo", en: "Try an example" },
     Msg { key: "onboarding.btn_empty", es: "Empezar vacío", en: "Start empty" },
     Msg { key: "onboarding.btn_dismiss", es: "No mostrar", en: "Don't show again" },
@@ -282,13 +295,14 @@ pub fn group_label(slug: &str, locale: Locale) -> &'static str {
         "threed" => t("toolbar.group.threed", locale),
         "fourd" => t("toolbar.group.fourd", locale),
         "advanced" => t("toolbar.group.advanced", locale),
+        "transform" => t("toolbar.group.transform", locale),
         "dynamics" => t("toolbar.group.dynamics", locale),
         _ => "",
     }
 }
 
-/// Slugs válidos para [`group_label`] (17, en orden de la toolbar).
-pub const GROUP_SLUGS: &[&str; 17] = &[
+/// Slugs válidos para [`group_label`] (18, en orden de la toolbar).
+pub const GROUP_SLUGS: &[&str; 18] = &[
     "move",
     "point",
     "line",
@@ -298,6 +312,7 @@ pub const GROUP_SLUGS: &[&str; 17] = &[
     "eraser",
     "conic",
     "curve",
+    "transform",
     "measure",
     "analysis",
     "constraint",
@@ -388,6 +403,17 @@ pub fn tool_label(slug: &str, locale: Locale) -> &'static str {
         "image" => t("toolbar.tool.image", locale),
         "attractor3d" => t("toolbar.tool.attractor3d", locale),
         "trig_animation" => t("toolbar.tool.trig_animation", locale),
+        "translate" => t("toolbar.tool.translate", locale),
+        "rotate" => t("toolbar.tool.rotate", locale),
+        "dilate" => t("toolbar.tool.dilate", locale),
+        "reflect" => t("toolbar.tool.reflect", locale),
+        "compass" => t("toolbar.tool.compass", locale),
+        "semicircle" => t("toolbar.tool.semicircle", locale),
+        "spline" => t("toolbar.tool.spline", locale),
+        "prism3d" => t("toolbar.tool.prism3d", locale),
+        "tetrahedron3d" => t("toolbar.tool.tetrahedron3d", locale),
+        "checkbox" => t("toolbar.tool.checkbox", locale),
+        "inputbox" => t("toolbar.tool.inputbox", locale),
         _ => "",
     }
 }
@@ -528,6 +554,141 @@ pub fn toast_msg(suffix: &'static str, locale: Locale) -> &'static str {
     }
 }
 
+// ── Portugués: overlay parcial F3d (sin variante `Locale`) ──
+//
+// Por qué overlay y no `Locale::Pt`: los `match` sobre `Locale` en
+// `toolbar.rs` (`toolbar_live_text`) y `grafito-app/src/utils.rs` (`AppLocale`)
+// son exhaustivos y esos archivos están fuera del alcance de F3d
+// (PROHIBIDO: pertenecen a F3a/b/c). Añadir una variante rompería su
+// compilación. El tercer idioma completo llega con la migración a `fluent`
+// (ver docs del módulo); mientras tanto el PT vive como tabla parcial
+// `clave → texto` con fallback al EN en el call-site. El lint `unwrap_used`
+// sigue prohibido en prod: el fallback se escribe con `match` o `if let`.
+//
+// Cobertura F3d: 78 claves principales (18 grupos + 17 paleta + 11 onboarding
+// + 10 cheat + 10 toast + 12 app/misc). Las 87 `toolbar.tool` quedan en
+// fallback ES/EN a propósito: se miden en el test `pt_reports_tool_fallback`.
+
+/// Una entrada del overlay portugués: clave del catálogo + texto PT.
+#[derive(Debug, Clone, Copy)]
+pub struct PtMsg {
+    /// Clave estable de [`MESSAGES`] (nunca se renombra).
+    pub key: &'static str,
+    /// Português (BR neutro). Sin vacíos; placeholders `{path}`/`{err}`/`{topic}`
+    /// idénticos al ES/EN cuando la clave los lleva.
+    pub pt: &'static str,
+}
+
+/// Claves principales de UI con traducción PT (78). Ordenado por dominio como
+/// [`MESSAGES`]: grupos (18) + paleta (17) + onboarding (11) + cheat (10) +
+/// toast (10) + app/misc (12).
+pub static PT_MESSAGES: &[PtMsg] = &[
+    // ── grupos (18) ──
+    PtMsg { key: "toolbar.group.move", pt: "Selecionar" },
+    PtMsg { key: "toolbar.group.point", pt: "Pontos" },
+    PtMsg { key: "toolbar.group.line", pt: "Retas" },
+    PtMsg { key: "toolbar.group.circle", pt: "Círculos" },
+    PtMsg { key: "toolbar.group.polygon", pt: "Polígonos" },
+    PtMsg { key: "toolbar.group.pencil", pt: "Traço" },
+    PtMsg { key: "toolbar.group.eraser", pt: "Apagar" },
+    PtMsg { key: "toolbar.group.conic", pt: "Cônicas" },
+    PtMsg { key: "toolbar.group.curve", pt: "Curvas" },
+    PtMsg { key: "toolbar.group.transform", pt: "Transformar" },
+    PtMsg { key: "toolbar.group.measure", pt: "Medição" },
+    PtMsg { key: "toolbar.group.analysis", pt: "Análise" },
+    PtMsg { key: "toolbar.group.constraint", pt: "Restrições" },
+    PtMsg { key: "toolbar.group.boolean", pt: "Booleanas" },
+    PtMsg { key: "toolbar.group.threed", pt: "3D" },
+    PtMsg { key: "toolbar.group.fourd", pt: "4D projetado" },
+    PtMsg { key: "toolbar.group.advanced", pt: "Avançado" },
+    PtMsg { key: "toolbar.group.dynamics", pt: "Dinâmica" },
+    // ── paleta (17) ──
+    PtMsg { key: "palette.action.point", pt: "Ferramenta Ponto" },
+    PtMsg { key: "palette.action.line", pt: "Ferramenta Reta" },
+    PtMsg { key: "palette.action.circle", pt: "Ferramenta Circunferência" },
+    PtMsg { key: "palette.action.polygon", pt: "Ferramenta Polígono" },
+    PtMsg { key: "palette.action.function", pt: "Ferramenta Função" },
+    PtMsg { key: "palette.action.pencil", pt: "Lápis" },
+    PtMsg { key: "palette.action.eraser", pt: "Borracha" },
+    PtMsg { key: "palette.action.save", pt: "Salvar" },
+    PtMsg { key: "palette.action.export_svg", pt: "Exportar SVG" },
+    PtMsg { key: "palette.action.export_png", pt: "Exportar PNG" },
+    PtMsg { key: "palette.action.export_tikz", pt: "Exportar TikZ" },
+    PtMsg { key: "palette.action.zoom_fit", pt: "Enquadrar tudo" },
+    PtMsg { key: "palette.action.toggle_grid", pt: "Alternar grade" },
+    PtMsg { key: "palette.action.toggle_dark", pt: "Alternar modo escuro" },
+    PtMsg { key: "palette.title", pt: "Paleta de Comandos" },
+    PtMsg { key: "palette.empty", pt: "Nenhum comando encontrado" },
+    PtMsg { key: "palette.footer_nav", pt: "↑↓ navegar · Enter abrir · Esc fechar" },
+    // ── onboarding (11) ──
+    PtMsg { key: "onboarding.title", pt: "Bem-vindo ao Grafito" },
+    PtMsg { key: "onboarding.subtitle", pt: "Grafito — lousa geométrica interativa" },
+    PtMsg { key: "onboarding.bullet_primary", pt: "• Construa com 5 ferramentas essenciais — Mover, Ponto, Reta, Círculo, Polígono" },
+    PtMsg { key: "onboarding.bullet_secondary", pt: "• Secundário adiciona mais 3 — Lápis, Medida, Análise (8 no total)" },
+    PtMsg { key: "onboarding.bullet_university", pt: "• Universidade desbloqueia 17 grupos — Cônicas, 3D, CAS, Estatística, Complexos, Dinâmica…" },
+    PtMsg { key: "onboarding.btn_example", pt: "Testar exemplo" },
+    PtMsg { key: "onboarding.btn_empty", pt: "Começar vazio" },
+    PtMsg { key: "onboarding.btn_dismiss", pt: "Não mostrar" },
+    PtMsg { key: "onboarding.toast_example", pt: "Exemplo carregado — explore o Grafito!" },
+    PtMsg { key: "onboarding.about_title", pt: "Sobre o Grafito" },
+    PtMsg { key: "onboarding.hint", pt: "Você pode reabrir esta janela em Ajuda → Boas-vindas" },
+    // ── cheat (10) ──
+    PtMsg { key: "cheat.title", pt: "Atalhos de teclado" },
+    PtMsg { key: "cheat.save", pt: "Salvar: Ctrl+S" },
+    PtMsg { key: "cheat.undo_redo", pt: "Desfazer / Refazer: Ctrl+Z / Ctrl+Y" },
+    PtMsg { key: "cheat.tools_2d", pt: "Ferramentas 2D: F1–F6" },
+    PtMsg { key: "cheat.tools_3d", pt: "3D: F8 Esfera · F9 Cubo" },
+    PtMsg { key: "cheat.pencil_eraser", pt: "Lápis / Borracha: Ctrl+P / Ctrl+E" },
+    PtMsg { key: "cheat.palette_theme", pt: "Paleta / Tema: Ctrl+K / Ctrl+T" },
+    PtMsg { key: "cheat.analyze_snap", pt: "Analisar / Ajuste: Ctrl+A / G" },
+    PtMsg { key: "cheat.views", pt: "Perspectivas: Ctrl+Shift+1…0" },
+    PtMsg { key: "cheat.close", pt: "Cancelar / Fechar: Esc" },
+    // ── toast (10) ──
+    PtMsg { key: "toast.command_done", pt: "Comando concluído" },
+    PtMsg { key: "toast.command_applied", pt: "Comando aplicado no Grafito." },
+    PtMsg { key: "toast.saved", pt: "Documento salvo em {path}" },
+    PtMsg { key: "toast.opened", pt: "Documento aberto de {path}" },
+    PtMsg { key: "toast.exported", pt: "Exportado para {path}" },
+    PtMsg { key: "toast.save_cancelled", pt: "Salvamento cancelado" },
+    PtMsg { key: "toast.save_error", pt: "Erro ao salvar: {err}" },
+    PtMsg { key: "toast.load_error", pt: "Erro ao carregar: {err}" },
+    PtMsg { key: "toast.export_error", pt: "Erro ao exportar: {err}" },
+    PtMsg { key: "toast.anim_ready", pt: "Animação pronta." },
+    // ── app / misc (12) ──
+    PtMsg { key: "app.menu_file", pt: "Arquivo" },
+    PtMsg { key: "app.menu_edit", pt: "Editar" },
+    PtMsg { key: "app.menu_view", pt: "Ver" },
+    PtMsg { key: "app.menu_help", pt: "Ajuda" },
+    PtMsg { key: "assistant.composer_hint", pt: "Escreva uma mensagem…" },
+    PtMsg { key: "assistant.limit_hint", pt: "Caracteres usados do limite de entrada · Enter envia, Shift+Enter pula linha" },
+    PtMsg { key: "assistant.copied", pt: "Mensagem copiada." },
+    PtMsg { key: "assistant.generating", pt: "Gerando animação…" },
+    PtMsg { key: "assistant.teaching_started", pt: "Aula iniciada: {topic}" },
+    PtMsg { key: "panel.cas_empty", pt: "Sem resultado — execute um comando CAS" },
+    PtMsg { key: "common.cancel", pt: "Cancelar" },
+    PtMsg { key: "common.retry", pt: "Tentar de novo" },
+];
+
+/// Texto PT de `key`, o `None` si la clave sigue en fallback ES/EN
+/// (las 87 `toolbar.tool` hoy: ver test `pt_reports_tool_fallback`).
+/// Lookup lineal como [`t`]: el overlay es chico (<100 claves).
+pub fn pt(key: &'static str) -> Option<&'static str> {
+    let mut i = 0;
+    while i < PT_MESSAGES.len() {
+        if PT_MESSAGES[i].key == key {
+            return Some(PT_MESSAGES[i].pt);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Cobertura del overlay PT: `(cubiertas, total del catálogo)`.
+/// El numerador lo fija el test `pt_covers_main_ui_keys` en 78.
+pub fn pt_coverage() -> (usize, usize) {
+    (PT_MESSAGES.len(), MESSAGES.len())
+}
+
 // ── Números (display + parse tolerante) ──
 
 /// Formatea un número sólo para mostrar (nunca para persistir ni calcular).
@@ -587,8 +748,8 @@ pub fn parse_number_tolerant(text: &str) -> Option<f64> {
 mod tests {
     use super::{
         cheat_sheet_msg, format_number, group_label, onboarding_msg, palette_action,
-        palette_footer, parse_number_tolerant, toast_msg, tool_label, Locale, CHEAT_KEYS,
-        GROUP_SLUGS, MESSAGES, MSG_COUNT, ONBOARDING_KEYS, TOAST_KEYS,
+        palette_footer, parse_number_tolerant, pt, pt_coverage, toast_msg, tool_label, Locale,
+        CHEAT_KEYS, GROUP_SLUGS, MESSAGES, MSG_COUNT, ONBOARDING_KEYS, PT_MESSAGES, TOAST_KEYS,
     };
 
     #[test]
@@ -598,7 +759,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 153);
+        assert_eq!(MSG_COUNT, 165);
     }
 
     #[test]
@@ -665,18 +826,30 @@ mod tests {
     }
 
     #[test]
-    fn group_labels_cover_17_groups() {
-        assert_eq!(GROUP_SLUGS.len(), 17);
+    fn group_labels_cover_18_groups() {
+        assert_eq!(GROUP_SLUGS.len(), 18);
         for slug in GROUP_SLUGS {
             assert!(!group_label(slug, Locale::Es).is_empty(), "slug {slug}");
             assert!(!group_label(slug, Locale::En).is_empty(), "slug {slug}");
         }
         assert_eq!(group_label("move", Locale::Es), "Seleccionar");
+        assert_eq!(group_label("transform", Locale::Es), "Transformar");
+        assert_eq!(group_label("transform", Locale::En), "Transform");
         assert_eq!(group_label("dynamics", Locale::En), "Dynamics");
         assert_eq!(group_label("nope", Locale::Es), "");
         // Herramientas y acciones también resuelven en ambas lenguas.
         assert_eq!(tool_label("sphere3d", Locale::Es), "Esfera");
         assert_eq!(tool_label("sphere3d", Locale::En), "Sphere");
+        // F3d: los 11 slugs F3a ya resuelven en ambas lenguas.
+        assert_eq!(tool_label("translate", Locale::Es), "Traslada");
+        assert_eq!(tool_label("reflect", Locale::En), "Reflect");
+        assert_eq!(tool_label("compass", Locale::Es), "Compás");
+        assert_eq!(tool_label("semicircle", Locale::En), "Semicircle");
+        assert_eq!(tool_label("spline", Locale::Es), "Spline");
+        assert_eq!(tool_label("prism3d", Locale::En), "Prism");
+        assert_eq!(tool_label("tetrahedron3d", Locale::Es), "Tetraedro");
+        assert_eq!(tool_label("checkbox", Locale::En), "Checkbox");
+        assert_eq!(tool_label("inputbox", Locale::Es), "Caja de entrada");
         assert_eq!(tool_label("nope", Locale::En), "");
         assert_eq!(palette_action("save", Locale::Es), "Guardar");
         assert_eq!(palette_action("save", Locale::En), "Save");
@@ -746,5 +919,147 @@ mod tests {
         assert_eq!(onboarding_msg("btn_example", Locale::Es), "Probar ejemplo");
         assert_eq!(cheat_sheet_msg("save", Locale::En), "Save: Ctrl+S");
         assert_eq!(toast_msg("anim_ready", Locale::Es), "Animación lista.");
+    }
+
+    #[test]
+    fn pt_covers_main_ui_keys() {
+        // F3d: overlay parcial PT — 78 claves principales, sin duplicados ni vacíos,
+        // cada una existente en el catálogo ES/EN.
+        assert_eq!(PT_MESSAGES.len(), 78);
+        assert_eq!(pt_coverage(), (78, 165));
+        let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
+        keys.sort_unstable();
+        let mut i = 1;
+        while i < keys.len() {
+            assert_ne!(keys[i - 1], keys[i], "clave PT duplicada: {}", keys[i]);
+            i += 1;
+        }
+        for entry in PT_MESSAGES {
+            assert!(!entry.key.is_empty(), "clave PT vacía");
+            assert!(!entry.pt.is_empty(), "PT vacío en {}", entry.key);
+            assert!(
+                MESSAGES.iter().any(|m| m.key == entry.key),
+                "clave PT fuera del catálogo: {}",
+                entry.key
+            );
+        }
+        // Los 18 grupos resuelven por clave completa.
+        for slug in GROUP_SLUGS {
+            let mut full = String::from("toolbar.group.");
+            full.push_str(slug);
+            let mut found = false;
+            for entry in PT_MESSAGES {
+                if entry.key == full {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "grupo sin PT: {slug}");
+        }
+        // Paleta completa: 14 acciones + título + vacío + pie.
+        for key in [
+            "palette.action.point",
+            "palette.action.line",
+            "palette.action.circle",
+            "palette.action.polygon",
+            "palette.action.function",
+            "palette.action.pencil",
+            "palette.action.eraser",
+            "palette.action.save",
+            "palette.action.export_svg",
+            "palette.action.export_png",
+            "palette.action.export_tikz",
+            "palette.action.zoom_fit",
+            "palette.action.toggle_grid",
+            "palette.action.toggle_dark",
+            "palette.title",
+            "palette.empty",
+            "palette.footer_nav",
+        ] {
+            assert!(pt(key).is_some(), "paleta sin PT: {key}");
+        }
+        // Onboarding / cheat / toast / misc completos.
+        for suffix in ONBOARDING_KEYS {
+            let mut full = String::from("onboarding.");
+            full.push_str(suffix);
+            let mut found = false;
+            for entry in PT_MESSAGES {
+                if entry.key == full {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "onboarding sin PT: {suffix}");
+        }
+        for suffix in CHEAT_KEYS {
+            let mut full = String::from("cheat.");
+            full.push_str(suffix);
+            let mut found = false;
+            for entry in PT_MESSAGES {
+                if entry.key == full {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "cheat sin PT: {suffix}");
+        }
+        for suffix in TOAST_KEYS {
+            let mut full = String::from("toast.");
+            full.push_str(suffix);
+            let mut found = false;
+            for entry in PT_MESSAGES {
+                if entry.key == full {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "toast sin PT: {suffix}");
+        }
+        assert_eq!(pt("toolbar.group.transform"), Some("Transformar"));
+        assert_eq!(pt("palette.title"), Some("Paleta de Comandos"));
+        assert_eq!(pt("does.not.exist"), None);
+    }
+
+    #[test]
+    fn pt_placeholders_preserved() {
+        // Los placeholders del call-site viajan intactos al PT.
+        for (key, marker) in [
+            ("toast.saved", "{path}"),
+            ("toast.opened", "{path}"),
+            ("toast.exported", "{path}"),
+            ("toast.save_error", "{err}"),
+            ("toast.load_error", "{err}"),
+            ("toast.export_error", "{err}"),
+            ("assistant.teaching_started", "{topic}"),
+        ] {
+            let text = pt(key).expect("clave principal con PT");
+            assert!(
+                text.contains(marker),
+                "{key} PT debe contener {marker}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn pt_reports_tool_fallback() {
+        // Medición honesta del recorte F3d: las 87 `toolbar.tool` quedan en
+        // fallback ES/EN. `pt()` devuelve `None` y el call-site usa EN.
+        let mut tool_total = 0;
+        let mut tool_covered = 0;
+        for m in MESSAGES {
+            if m.key.starts_with("toolbar.tool.") {
+                tool_total += 1;
+                if pt(m.key).is_some() {
+                    tool_covered += 1;
+                }
+            }
+        }
+        assert_eq!(tool_total, 87);
+        assert_eq!(
+            tool_covered, 0,
+            "tools en PT: el recorte F3d es 0 a propósito"
+        );
+        assert_eq!(pt("toolbar.tool.translate"), None);
+        assert_eq!(tool_label("translate", Locale::En), "Translate");
     }
 }

@@ -4567,7 +4567,7 @@ fn document_lifecycle_non_utf8_document_paths_are_not_lossy() {
 
 #[test]
 fn document_lifecycle_file_shortcuts_share_the_file_command_policy() {
-    use crate::app::{file_shortcut, FileCommand};
+    use crate::lifecycle::{file_shortcut, FileCommand};
     use egui::Key;
 
     assert_eq!(file_shortcut(Key::N, true, false), Some(FileCommand::New));

@@ -1210,7 +1210,7 @@ fn sanitize_template(template: &str, concept: &str) -> String {
         "derivative-slope" | "integral-area" | "taylor-series" | "conformal-map" | "pitagoras"
         | "euler" | "fourier" => t,
         "pythagoras" => "pitagoras".to_string(),
-        "" | "universal" | "auto" => template_for_concept(concept).to_string(),
+        // F4: "", "universal", "auto" y desconocidos caen por concepto (rama única, sin duplicar).
         _ => template_for_concept(concept).to_string(),
     }
 }
@@ -3170,5 +3170,50 @@ mod tests {
         ] {
             assert!(curriculum_get(id).is_some(), "LO real {id}");
         }
+    }
+
+    #[test]
+    fn f4_sanitize_ramas_unificadas_y_tabla_pineada() {
+        // F4: "", "universal", "auto" y desconocidos delegan por concepto (rama única).
+        for tpl in ["", "universal", "auto", "unknown-xyz", "  "] {
+            assert_eq!(
+                sanitize_template(tpl, "derivada pendiente"),
+                template_for_concept("derivada pendiente").to_string(),
+                "tpl={tpl:?}"
+            );
+        }
+        // Canónicas pasan literales.
+        for known in [
+            "derivative-slope",
+            "integral-area",
+            "taylor-series",
+            "conformal-map",
+            "pitagoras",
+            "euler",
+            "fourier",
+        ] {
+            assert_eq!(sanitize_template(known, "cualquiera"), known);
+        }
+        assert_eq!(sanitize_template("pythagoras", "x"), "pitagoras");
+        // Tabla local pineada (paridad pre/post F4): 10 familias.
+        for (concept, expected) in [
+            ("teorema de pitágoras", "pitagoras"),
+            ("integral área bajo curva", "integral-area"),
+            ("serie de taylor", "taylor-series"),
+            ("mapeo conforme complejo", "conformal-map"),
+            ("derivada pendiente tangente", "derivative-slope"),
+            ("vector en el plano", "conformal-map"),
+            ("euler exponencial exp(x)", "euler"),
+            ("serie de fourier", "fourier"),
+            ("probabilidad binomial", "integral-area"),
+            ("sin(x) coseno", "taylor-series"),
+        ] {
+            assert_eq!(template_for_concept(concept), expected, "{concept}");
+        }
+        // NOTA F4: la canónica `grafito-anim::protocol::template_for_concept`
+        // diverge a propósito (fallback `universal` honesto + `logistic-bifurcation`,
+        // `gradient-field`, `mobius-transform` + fix `contiene_palabra` para "tarea").
+        // El re-export real requiere dep `grafito-anim` en `grafito-agent/Cargo.toml`
+        // (hoy hoja sin esa dep, ver tools.rs:3-9) + cambio de conducta → BLOQUEADO.
     }
 }

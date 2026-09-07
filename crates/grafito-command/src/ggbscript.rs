@@ -1037,6 +1037,151 @@ pub fn parse_tool_json(json: &str) -> Result<CustomToolDef, String> {
     })
 }
 
+// ── Flujo mínimo UI-adjunta F3d: historial → `.ggt` → listado ──
+//
+// La piel (P2) persiste el JSON en archivo `.ggt`; el núcleo sigue puro sobre
+// strings (sin `std::fs` en el cerebro). Este bloque es la única superficie
+// UI-adjunta: empaquetar el historial de comandos como herramienta, guardarla
+// en un store en memoria y listarla para que toolbar/paleta (P2) la muestren.
+// Cero comandos fantasma: todo pasa por [`define_tool_json`] /
+// [`parse_tool_json`] (registry `DefineTool`/`LoadTool` existente); el store
+// no despacha nada, solo describe (`describe` usa el formato de `LoadTool`).
+
+/// Herramientas personalizadas máximas en un [`CustomToolStore`].
+/// Con el JSON acotado a [`MAX_GGT_BYTES`] (64 KiB), el store pesa ≤4 MiB.
+pub const MAX_CUSTOM_TOOLS: usize = 64;
+
+/// Empaqueta el historial de comandos como JSON `.ggt` versionado.
+///
+/// Filtra entradas vacías, une con `"; "` y valida con [`define_tool_json`]
+/// (nombre, cotas, allowlist). Historial vacío → error honesto, nada que guardar.
+pub fn define_tool_from_history(name: &str, history: &[String]) -> Result<String, String> {
+    let mut script = String::new();
+    for entry in history {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !script.is_empty() {
+            script.push_str("; ");
+        }
+        script.push_str(trimmed);
+    }
+    if script.is_empty() {
+        return Err("DefineTool: el historial no contiene pasos".into());
+    }
+    define_tool_json(name, &script)
+}
+
+/// Store en memoria de custom tools (sesión): lo que la toolbar/paleta listan.
+///
+/// Puro sobre datos validados: `define`/`load_json` reusan [`define_tool_json`]
+/// y [`parse_tool_json`]. Sin despacho, sin I/O, sin `unwrap`.
+#[derive(Debug, Clone, Default)]
+pub struct CustomToolStore {
+    tools: Vec<CustomToolDef>,
+}
+
+impl CustomToolStore {
+    /// Store vacío.
+    pub fn new() -> Self {
+        Self { tools: Vec::new() }
+    }
+
+    /// Cantidad de herramientas guardadas.
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    /// `true` si no hay herramientas guardadas.
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+
+    /// Todas las herramientas en orden de carga (para listar en UI).
+    pub fn list(&self) -> &[CustomToolDef] {
+        &self.tools
+    }
+
+    /// Busca una herramienta por nombre exacto.
+    pub fn get(&self, name: &str) -> Option<&CustomToolDef> {
+        let wanted = name.trim();
+        self.tools.iter().find(|tool| tool.name == wanted)
+    }
+
+    /// Define desde una secuencia, guarda (reemplaza si el nombre existe) y
+    /// devuelve el JSON `.ggt` listo para persistir en archivo (P2).
+    /// Store lleno (y nombre nuevo) → error honesto, nada guardado.
+    pub fn define(&mut self, name: &str, script: &str) -> Result<String, String> {
+        let json = define_tool_json(name, script)?;
+        let def = parse_tool_json(&json)?;
+        self.upsert(def)?;
+        Ok(json)
+    }
+
+    /// Define desde el historial de comandos (ver [`define_tool_from_history`]).
+    pub fn define_from_history(
+        &mut self,
+        name: &str,
+        history: &[String],
+    ) -> Result<String, String> {
+        let json = define_tool_from_history(name, history)?;
+        let def = parse_tool_json(&json)?;
+        self.upsert(def)?;
+        Ok(json)
+    }
+
+    /// Carga un JSON `.ggt` (p. ej. leído de archivo por la piel) tras revalidar.
+    pub fn load_json(&mut self, json: &str) -> Result<String, String> {
+        let def = parse_tool_json(json)?;
+        let name = def.name.clone();
+        self.upsert(def)?;
+        Ok(name)
+    }
+
+    /// Línea mostrable de una herramienta (mismo formato que `LoadTool`).
+    /// La toolbar/paleta (P2) la renderiza sin despachar nada nuevo.
+    pub fn describe(&self, name: &str) -> Option<String> {
+        self.get(name).map(|tool| {
+            format!(
+                "'{}' válida con {} paso(s): {}",
+                tool.name,
+                tool.steps.len(),
+                tool.steps.join(" | ")
+            )
+        })
+    }
+
+    /// Una línea por herramienta, en orden de carga (para toolbar/paleta).
+    pub fn palette_entries(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .map(|tool| {
+                format!(
+                    "'{}' válida con {} paso(s): {}",
+                    tool.name,
+                    tool.steps.len(),
+                    tool.steps.join(" | ")
+                )
+            })
+            .collect()
+    }
+
+    fn upsert(&mut self, def: CustomToolDef) -> Result<(), String> {
+        if let Some(slot) = self.tools.iter_mut().find(|tool| tool.name == def.name) {
+            *slot = def;
+            return Ok(());
+        }
+        if self.tools.len() >= MAX_CUSTOM_TOOLS {
+            return Err(format!(
+                "el store admite hasta {MAX_CUSTOM_TOOLS} herramientas"
+            ));
+        }
+        self.tools.push(def);
+        Ok(())
+    }
+}
+
 fn run_define_tool(args: &[String], input_text: &mut String) -> CommandOutcome {
     if args.len() != 2 {
         return CommandOutcome::Error("DefineTool: usa DefineTool[nombre, pasos]".into());
@@ -1460,6 +1605,106 @@ mod tests {
                     CommandOutcome::Error(_)
                 ),
                 "{bad} debe fallar"
+            );
+        }
+    }
+
+    #[test]
+    fn define_from_history_round_trip() {
+        // F3d: el historial se empaqueta como `.ggt` y vuelve a validar.
+        let history = vec![
+            "Show[A]".to_string(),
+            "  ".to_string(),
+            "Hide[A]".to_string(),
+        ];
+        let json = define_tool_from_history("MiMacro", &history).expect("define");
+        assert!(json.contains("\"grafito_tool\":1"));
+        let tool = parse_tool_json(&json).expect("parse");
+        assert_eq!(tool.name, "MiMacro");
+        assert_eq!(tool.steps.len(), 2);
+
+        // Historial vacío o solo blancos → error honesto.
+        assert!(define_tool_from_history("Vacia", &[]).is_err());
+        assert!(define_tool_from_history("Blancos", &["   ".to_string()]).is_err());
+        // Paso fuera del subset → error honesto (misma allowlist).
+        assert!(define_tool_from_history("Mala", &["EraseAll[]".to_string()]).is_err());
+        // Nombre inválido → error honesto.
+        assert!(define_tool_from_history("9mal", &history).is_err());
+    }
+
+    #[test]
+    fn custom_tool_store_defines_lists_and_replaces() {
+        // F3d: guardar + cargar + listar usable (toolbar/paleta P2).
+        let mut store = CustomToolStore::new();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+
+        let json = store.define("Macro", "Show[A]; Hide[A]").expect("define");
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get("Macro").expect("get").steps.len(), 2);
+        // `describe` usa el formato de `LoadTool`: la UI lo muestra sin despachar.
+        assert_eq!(
+            store.describe("Macro").expect("describe"),
+            "'Macro' válida con 2 paso(s): Show[A] | Hide[A]"
+        );
+        assert_eq!(store.palette_entries().len(), 1);
+
+        // Redefinir el mismo nombre reemplaza, no duplica.
+        store.define("Macro", "Show[A]").expect("redefine");
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get("Macro").expect("get").steps.len(), 1);
+
+        // `load_json` revalida: el JSON de `define` entra, el maligno no.
+        assert_eq!(store.load_json(&json).expect("load"), "Macro");
+        assert_eq!(store.len(), 1);
+        let evil = "{\"grafito_tool\":1,\"name\":\"Evil\",\"steps\":[\"EraseAll[]\"]}";
+        assert!(store.load_json(evil).is_err());
+        assert!(store.get("Evil").is_none());
+        assert!(store.describe("Fantasma").is_none());
+
+        // Historial → store en una llamada.
+        let history = vec!["ZoomIn[]".to_string()];
+        store
+            .define_from_history("Acerca", &history)
+            .expect("from history");
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.palette_entries().len(), 2);
+        assert_eq!(store.list().len(), 2);
+    }
+
+    #[test]
+    fn custom_tool_store_is_bounded() {
+        // Presupuesto: hasta MAX_CUSTOM_TOOLS; lleno → error honesto.
+        let mut store = CustomToolStore::new();
+        for i in 0..MAX_CUSTOM_TOOLS {
+            let name = format!("Tool{i:03}");
+            store.define(&name, "Show[A]").expect("define");
+        }
+        assert_eq!(store.len(), MAX_CUSTOM_TOOLS);
+        assert!(store.define("DeMas", "Show[A]").is_err());
+        // Reemplazar un nombre existente con el store lleno sí vale.
+        store.define("Tool000", "Hide[A]").expect("replace");
+        assert_eq!(store.len(), MAX_CUSTOM_TOOLS);
+        assert_eq!(store.get("Tool000").expect("get").steps.len(), 1);
+    }
+
+    #[test]
+    fn custom_tool_steps_use_only_registered_commands() {
+        // Cero fantasma: cada paso del store resuelve en el registry y está
+        // en la allowlist del subset GGBScript.
+        let mut store = CustomToolStore::new();
+        store
+            .define("Todo", "Show[A]; Hide[A]; ZoomIn[]; PlayPause[]")
+            .expect("define");
+        let tool = store.get("Todo").expect("get");
+        for step in &tool.steps {
+            let parsed = parse_cas_command(step).expect("paso parseable");
+            let canonical = command_registry::canonicalize(&parsed.command).expect("registrado");
+            assert!(
+                GGBSCRIPT_ALLOWLIST
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(canonical)),
+                "{step} fuera del subset"
             );
         }
     }

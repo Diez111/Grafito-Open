@@ -401,9 +401,16 @@ jobs:
         run: cargo llvm-cov --workspace --all-targets --all-features --locked --lcov --output-path lcov.info
       - name: Enforce 75% line coverage gate
         run: cargo llvm-cov --workspace --all-targets --all-features --locked --fail-under-lines 75 --summary-only
-      - name: Fallback coverage gate via test if llvm-cov fails
-        if: failure()
-        run: cargo test --workspace --locked -- --nocapture
+      # F5 honesto: SIN fallback `cargo test` en failure().
+      # Por lectura, no por ideologia: el job `test` ya corre la suite completa en
+      # matriz 1.92+stable; un fallback aqui duplicaba ~45min y confundia (en GitHub
+      # Actions el job queda FAILED aunque el paso failure() pase, asi que no
+      # "maquillaba" el gate, solo gastaba minutos). Diagnostico de infra vs test
+      # real se hace mirando que paso fallo (Generate vs Enforce), no re-corriendo.
+      # GPU pin: este job NO instala drivers Vulkan a proposito; los tests
+      # gpu_compute hacen SKIP honesto sin adapter (ver gpu_context_or_skip) y el
+      # gate 75% esta calibrado para esa ruta. Las regresiones GPU requeridas viven
+      # en el job dedicado `gpu-compute` (Vulkan + GRAFITO_REQUIRE_GPU_TESTS=1).
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -414,7 +421,16 @@ jobs:
           retention-days: 14
 
   bench-regression:
-    name: bench regression (>10% gate)
+    # F5 honesto: INFORMATIVO explicito, SIN gate bloqueante >10%.
+    # Por lectura: cada run guarda un baseline fresco (`--save-baseline main`) sin
+    # descargar el artefacto de `main` ni comparar con tolerancia real; el nombre
+    # anterior ("bench regression (>10% gate)") mentia porque ningun paso fallaba
+    # ante regresion (`|| true`, solo `ls`). Comparar >10% de verdad exigiria
+    # baseline estable + comparador (criterion --baseline + critcmp) y seria flaky
+    # entre runners; hasta tenerlo, este job compila, corre harness --test,
+    # imprime numeros base y sube el artefacto. Criterio de aceptacion F5: los
+    # benches SSE-truncado + frames nativos existen, corren y publican su base.
+    name: bench baselines (informativo, sin gate)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -436,16 +452,17 @@ jobs:
         run: cargo bench --workspace --benches --locked --no-run
       - name: Run benches with --test harness
         run: cargo bench --workspace --benches --locked -- --test
-      - name: Save baseline 'main' and check regression >10%
+      - name: Save baseline 'main' (informativo, no compara ni falla por regresion)
         shell: bash
         run: |
           set -euo pipefail
-          echo "Saving baseline 'main' for regression detection"
+          echo "Baseline informativo 'main': guarda numeros base, NO evalua >10% (sin gate hasta baseline estable)."
           cargo bench --workspace --benches --locked -- --save-baseline main --test || true
           if [ -d target/criterion ]; then
             echo "criterion baselines present under target/criterion/"
             ls -R target/criterion | head -n 100 || true
           fi
+          echo "F5: ver numeros base en el log de cada bench (SSE-truncado + frames nativos); artefacto subido 7 dias."
       - name: Upload bench baselines
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -456,6 +473,11 @@ jobs:
           retention-days: 7
 
   mutation:
+    # F5: queda SEMANAL/manual a proposito (NO en PR).
+    # Por lectura: `cargo mutants --workspace --timeout 60 --in-place` tarda ~60min,
+    # muta el arbol en su lugar y es flaky para gate de PR; su valor es senal
+    # semanal de calidad, no bloqueo por cambio. Se ejecuta en `schedule` lunes 03:00
+    # y manual via `workflow_dispatch`.
     name: mutation testing (weekly/manual)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

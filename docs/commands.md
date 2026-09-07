@@ -15,7 +15,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Animate[]`: Anima un parametro local; sin argumentos crea una fase ciclica. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `Animate[variable]`, `Animate[variable, minimo, maximo, velocidad]`. Alias: `animar`.
 ## Animaciones
 
-- `GenerateAnimation[template, concepto]`: Genera una animación didáctica (placeholder o Manim) para el concepto dado. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `GenerateAnimation[template]`, `GenerateAnimation[]`.
+- `GenerateAnimation[template, concepto]`: Genera una animación didáctica (vista previa nativa o Manim) para el concepto dado. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `GenerateAnimation[template]`, `GenerateAnimation[]`.
 ## Complejos
 
 - `DomainColoring[expr, xmin, xmax, ymin, ymax, resolution]`: Visualiza fase y módulo de una función compleja en el plano 2D; límites opcionales y una resolución que debe ser un entero literal entre 16 y 300 (200 por defecto). Mutacion: crea objetos. Riesgo: medio. Alias: `domain_coloring`, `dcolor`.

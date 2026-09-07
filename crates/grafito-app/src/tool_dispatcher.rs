@@ -210,6 +210,17 @@ pub fn dispatch_tool(
         Tool::Tangent => handle_tangent(state, document, world),
         Tool::Perpendicular => handle_perpendicular(state, document, world),
         Tool::Parallel => handle_parallel(state, document, world),
+        Tool::Reflect => handle_reflect(state, document, world),
+        Tool::Rotate => handle_rotate(state, document, world),
+        Tool::Translate => handle_translate(state, document, world),
+        Tool::Dilate => handle_dilate(state, document, world),
+        Tool::Compass => handle_compass(state, document, world),
+        Tool::Semicircle => handle_semicircle(state, document, world),
+        Tool::Spline => handle_spline(state, document, world),
+        Tool::Prism3D => handle_prism(state, document, world),
+        Tool::Tetrahedron3D => handle_tetrahedron(state, document, world),
+        Tool::Checkbox => handle_action_box(state, document, "Checkbox", "Casilla", "casilla"),
+        Tool::InputBox => handle_action_box(state, document, "InputBox", "Entrada", "entrada"),
         Tool::Arc => handle_arc(state, document, world),
         Tool::Sector => handle_sector(state, document, world),
         Tool::Locus => handle_locus(state, document, world),
@@ -1204,6 +1215,432 @@ fn handle_regular_polygon(state: &mut ToolState, document: &Document, world: Poi
     }
 }
 
+/// Guía sin mutar: la herramienta sigue activa esperando el próximo clic.
+fn tool_hint(message: &str) -> ToolResult {
+    ToolResult {
+        objects: vec![],
+        message: Some(message.to_string()),
+        reset_tool: false,
+    }
+}
+
+/// Error honesto con limpieza: avisa, guarda el outcome y deja la herramienta
+/// activa para reintentar desde cero (sin `pending`/`driver` colgados).
+fn tool_honest_reset(state: &mut ToolState, message: &str) -> ToolResult {
+    state.driver = None;
+    state.pending.clear();
+    state.last_outcome = Some(CommandOutcome::Error(message.to_string()));
+    ToolResult {
+        objects: vec![],
+        message: Some(message.to_string()),
+        reset_tool: false,
+    }
+}
+
+/// Ejecuta un comando CAS desde una herramienta y limpia el flujo.
+/// El mensaje prioriza el del motor (éxito o error honesto); `success` es el
+/// fallback cuando el motor devuelve `Ok` pelado.
+fn finish_with_command(
+    state: &mut ToolState,
+    document: &mut Document,
+    cmd: String,
+    success: String,
+    reset_tool: bool,
+) -> ToolResult {
+    let mut input = cmd;
+    let outcome = grafito_command::commands::process_input(document, &mut input);
+    let message = match &outcome {
+        CommandOutcome::Ok => success,
+        CommandOutcome::Message(text) => text.clone(),
+        CommandOutcome::Error(error) => error.clone(),
+    };
+    state.driver = None;
+    state.pending.clear();
+    state.last_outcome = Some(outcome);
+    ToolResult {
+        objects: vec![],
+        message: Some(message),
+        reset_tool,
+    }
+}
+
+/// Etiqueta no vacía del punto existente bajo el clic, si lo hay.
+fn point_label_at(document: &mut Document, world: Point2) -> Option<String> {
+    let tolerance = 10.0 / document.view().scale;
+    let id = document.pick_object(world, tolerance)?;
+    match document.get_object(id) {
+        Some(GeoObject::Point(point)) if !point.label.trim().is_empty() => {
+            Some(point.label.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Argumento punto para comandos: etiqueta si el clic cae sobre un punto
+/// existente (preserva construcción paramétrica), literal `(x, y)` si no.
+fn point_arg(document: &mut Document, world: Point2) -> String {
+    point_label_at(document, world).unwrap_or_else(|| format!("({:.2},{:.2})", world.x, world.y))
+}
+
+/// Etiqueta no vacía del objeto bajo el clic si es de un tipo admitido.
+fn labeled_source_at(
+    document: &mut Document,
+    world: Point2,
+    admitted: fn(&GeoObject) -> bool,
+) -> Option<String> {
+    let tolerance = 10.0 / document.view().scale;
+    let id = document.pick_object(world, tolerance)?;
+    let obj = document.get_object(id)?;
+    if admitted(obj) && !obj.label().trim().is_empty() {
+        Some(obj.label().to_string())
+    } else {
+        None
+    }
+}
+
+fn is_point_object(obj: &GeoObject) -> bool {
+    matches!(obj, GeoObject::Point(_))
+}
+
+fn is_reflectable(obj: &GeoObject) -> bool {
+    matches!(
+        obj,
+        GeoObject::Point(_) | GeoObject::Line(_) | GeoObject::Circle(_) | GeoObject::Polygon(_)
+    )
+}
+
+/// Clic-1 de las transformaciones puntuales: si no hay fuente, intenta tomar
+/// el punto bajo el clic y devuelve `Ok(None)` (clic consumido: pedir el
+/// próximo paso). Si ya hay fuente, devuelve `Ok(Some(etiqueta))` y el
+/// llamador trata el clic actual como primer parámetro.
+fn take_point_driver(
+    state: &mut ToolState,
+    document: &mut Document,
+    world: Point2,
+    tool_name: &str,
+) -> Result<Option<String>, ToolResult> {
+    if state.driver.is_none() {
+        match labeled_source_at(document, world, is_point_object) {
+            Some(_) => {
+                let tolerance = 10.0 / document.view().scale;
+                state.driver = document.pick_object(world, tolerance);
+                return Ok(None);
+            }
+            None => {
+                return Err(tool_hint(&format!(
+                    "{tool_name}: clic sobre el punto a transformar (el motor solo admite puntos)"
+                )));
+            }
+        }
+    }
+    let Some(id) = state.driver else {
+        return Err(tool_honest_reset(
+            state,
+            &format!("{tool_name}: se perdió la selección; reintentá"),
+        ));
+    };
+    match document.get_object(id) {
+        Some(GeoObject::Point(point)) if !point.label.trim().is_empty() => {
+            Ok(Some(point.label.clone()))
+        }
+        _ => Err(tool_honest_reset(
+            state,
+            &format!("{tool_name}: se perdió la selección; reintentá"),
+        )),
+    }
+}
+
+fn handle_reflect(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    let tolerance = 10.0 / document.view().scale;
+    if state.driver.is_none() {
+        match labeled_source_at(document, world, is_reflectable) {
+            Some(_) => {
+                state.driver = document.pick_object(world, tolerance);
+            }
+            None => {
+                return tool_hint("Refleja: clic sobre un punto, recta, círculo o polígono");
+            }
+        }
+        return tool_hint(
+            "Refleja: clic en el primer punto del eje (repetilo para simetría central)",
+        );
+    }
+    state.pending.push(world);
+    if state.pending.len() < 2 {
+        return tool_hint("Refleja: clic en el segundo punto del eje");
+    }
+    let axis = [state.pending[0], state.pending[1]];
+    let Some(src_id) = state.driver else {
+        return tool_honest_reset(state, "Refleja: se perdió la selección; reintentá");
+    };
+    let src_label = document
+        .get_object(src_id)
+        .map(|obj| obj.label().to_string())
+        .unwrap_or_default();
+    if src_label.trim().is_empty() {
+        return tool_honest_reset(state, "Refleja: el objeto perdió su etiqueta; reintentá");
+    }
+    // Eje degenerado = simetría central (equivale a rotar 180°). El motor
+    // Rotate solo admite puntos: otro objeto da error honesto, no botón mudo.
+    if axis[0].distance(&axis[1]) < tolerance {
+        if !matches!(document.get_object(src_id), Some(GeoObject::Point(_))) {
+            return tool_honest_reset(
+                state,
+                "Refleja: la simetría central solo admite puntos (la axial admite punto, recta, círculo o polígono)",
+            );
+        }
+        let center = point_arg(document, axis[0]);
+        return finish_with_command(
+            state,
+            document,
+            format!("Rotate[{src_label}, {center}, 180]"),
+            format!("{src_label} reflejado (simetría central)"),
+            false,
+        );
+    }
+    let axis_a = point_arg(document, axis[0]);
+    let axis_b = point_arg(document, axis[1]);
+    finish_with_command(
+        state,
+        document,
+        format!("Reflect[{src_label}, {axis_a}, {axis_b}]"),
+        format!("{src_label} reflejado"),
+        false,
+    )
+}
+
+fn handle_rotate(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    let src_label = match take_point_driver(state, document, world, "Rota") {
+        Ok(None) => return tool_hint("Rota: clic en el centro de rotación"),
+        Ok(Some(label)) => label,
+        Err(guide) => return guide,
+    };
+    // El clic actual es el centro; el próximo define el ángulo.
+    state.pending.push(world);
+    if state.pending.len() < 2 {
+        return tool_hint("Rota: clic para definir el ángulo (polar respecto al centro)");
+    }
+    let center = state.pending[0];
+    let angle_at = state.pending[1];
+    let angle = (angle_at.y - center.y)
+        .atan2(angle_at.x - center.x)
+        .to_degrees();
+    if !angle.is_finite() {
+        return tool_honest_reset(state, "Rota: el ángulo no es finito; reintentá");
+    }
+    let center_arg = point_arg(document, center);
+    finish_with_command(
+        state,
+        document,
+        format!("Rotate[{src_label}, {center_arg}, {angle:.2}]"),
+        format!("{src_label} rotado {angle:.1}°"),
+        false,
+    )
+}
+
+fn handle_translate(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    let src_label = match take_point_driver(state, document, world, "Traslada") {
+        Ok(None) => return tool_hint("Traslada: clic en el inicio del vector"),
+        Ok(Some(label)) => label,
+        Err(guide) => return guide,
+    };
+    state.pending.push(world);
+    if state.pending.len() < 2 {
+        return tool_hint("Traslada: clic en el extremo del vector");
+    }
+    let start = state.pending[0];
+    let end = state.pending[1];
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    if dx.hypot(dy) <= 1e-9 {
+        return tool_honest_reset(state, "Traslada: vector nulo; elegí dos puntos distintos");
+    }
+    finish_with_command(
+        state,
+        document,
+        format!("Translate[{src_label}, ({dx:.4}, {dy:.4})]"),
+        format!("{src_label} trasladado ({dx:.2}, {dy:.2})"),
+        false,
+    )
+}
+
+fn handle_dilate(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    let src_label = match take_point_driver(state, document, world, "Homotecia") {
+        Ok(None) => return tool_hint("Homotecia: clic en el centro"),
+        Ok(Some(label)) => label,
+        Err(guide) => return guide,
+    };
+    state.pending.push(world);
+    if state.pending.len() < 2 {
+        return tool_hint("Homotecia: clic donde debe caer la imagen (define el factor)");
+    }
+    let center = state.pending[0];
+    let image_at = state.pending[1];
+    let Some(src_id) = state.driver else {
+        return tool_honest_reset(state, "Homotecia: se perdió la selección; reintentá");
+    };
+    let Some(GeoObject::Point(src)) = document.get_object(src_id) else {
+        return tool_honest_reset(state, "Homotecia: se perdió la selección; reintentá");
+    };
+    let base = center.distance(&src.position);
+    if base <= 1e-9 {
+        return tool_honest_reset(
+            state,
+            "Homotecia: el punto coincide con el centro (factor indefinido)",
+        );
+    }
+    let factor = center.distance(&image_at) / base;
+    if !factor.is_finite() {
+        return tool_honest_reset(state, "Homotecia: el factor no es finito; reintentá");
+    }
+    let center_arg = point_arg(document, center);
+    finish_with_command(
+        state,
+        document,
+        format!("Dilate[{src_label}, {factor:.6}, {center_arg}]"),
+        format!("{src_label} homotecia k={factor:.3}"),
+        false,
+    )
+}
+
+fn handle_compass(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    state.pending.push(world);
+    if state.pending.len() < 2 {
+        return tool_hint("Compás: clic en el punto del radio");
+    }
+    let center = state.pending[0];
+    let edge = state.pending[1];
+    let radius = center.distance(&edge);
+    if !radius.is_finite() || radius <= 1e-9 {
+        state.pending.clear();
+        return tool_hint("Compás: elegí dos puntos distintos");
+    }
+    finish_with_command(
+        state,
+        document,
+        format!(
+            "Compasses[({:.2},{:.2}), ({:.2},{:.2})]",
+            center.x, center.y, edge.x, edge.y
+        ),
+        format!("Compás: círculo r={radius:.3}"),
+        false,
+    )
+}
+
+fn handle_semicircle(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    state.pending.push(world);
+    if state.pending.len() < 2 {
+        return tool_hint("Semicírculo: clic en el punto del radio");
+    }
+    let center = state.pending[0];
+    let edge = state.pending[1];
+    let radius = center.distance(&edge);
+    if !radius.is_finite() || radius <= 1e-9 {
+        state.pending.clear();
+        return tool_hint("Semicírculo: elegí dos puntos distintos");
+    }
+    finish_with_command(
+        state,
+        document,
+        format!("Semicircle[({:.2},{:.2}), {radius:.3}]", center.x, center.y),
+        format!("Semicírculo r={radius:.3}"),
+        false,
+    )
+}
+
+/// Puntos máximos por Spline de lienzo: el parser acota a 64 argumentos.
+const SPLINE_TOOL_MAX_POINTS: usize = 60;
+
+fn handle_spline(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    // Cierre por proximidad al primer punto (igual que Polígono: 20px).
+    if state.pending.len() >= 2 && world.distance(&state.pending[0]) < 20.0 / document.view().scale
+    {
+        let pts = std::mem::take(&mut state.pending);
+        return emit_spline(state, document, &pts);
+    }
+    state.pending.push(world);
+    if state.pending.len() >= SPLINE_TOOL_MAX_POINTS {
+        let pts = std::mem::take(&mut state.pending);
+        return emit_spline(state, document, &pts);
+    }
+    tool_hint(&format!(
+        "Spline: punto {} (clic cerca del inicio para cerrar)",
+        state.pending.len()
+    ))
+}
+
+fn emit_spline(state: &mut ToolState, document: &mut Document, pts: &[Point2]) -> ToolResult {
+    if pts.len() < 2 {
+        return tool_honest_reset(state, "Spline: se necesitan al menos 2 puntos");
+    }
+    let args = pts
+        .iter()
+        .map(|p| format!("({:.2},{:.2})", p.x, p.y))
+        .collect::<Vec<_>>()
+        .join(",");
+    finish_with_command(
+        state,
+        document,
+        format!("Spline[{args}]"),
+        "Spline creada".to_string(),
+        false,
+    )
+}
+
+fn handle_prism(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    let is_polygon = |obj: &GeoObject| matches!(obj, GeoObject::Polygon(_));
+    match labeled_source_at(document, world, is_polygon) {
+        Some(label) => finish_with_command(
+            state,
+            document,
+            format!("Prism[{label}, 2]"),
+            format!("Prisma sobre {label} (altura 2; ajustala con Prism[etiqueta, altura])"),
+            true,
+        ),
+        None => tool_hint("Prisma: clic sobre un polígono base"),
+    }
+}
+
+fn handle_tetrahedron(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    if !world.x.is_finite() || !world.y.is_finite() {
+        return tool_honest_reset(state, "Tetraedro: punto no finito");
+    }
+    finish_with_command(
+        state,
+        document,
+        format!("Tetrahedron[{:.2}, {:.2}, 0, 2]", world.x, world.y),
+        "Tetraedro creado (arista 2; ajustala con Tetrahedron[x, y, z, arista])".to_string(),
+        true,
+    )
+}
+
+fn handle_action_box(
+    state: &mut ToolState,
+    document: &mut Document,
+    command: &str,
+    caption_base: &str,
+    var_base: &str,
+) -> ToolResult {
+    // Variable única estilo Slider (`v{N}`): motor crea la variable en 0/1.
+    let mut index = document.variables.len() + 1;
+    let mut var = format!("{var_base}{index}");
+    while document.variables.contains_key(&var) {
+        index += 1;
+        if index > 1_000_000 {
+            return tool_honest_reset(state, "No hay nombres de variable libres");
+        }
+        var = format!("{var_base}{index}");
+    }
+    let caption = format!("{caption_base} {index}");
+    finish_with_command(
+        state,
+        document,
+        format!("{command}[{caption}, {var}]"),
+        format!("{caption} ligado a {var}"),
+        true,
+    )
+}
+
 #[cfg(test)]
 mod dispatcher_new_arms_tests {
     use super::*;
@@ -1285,5 +1722,343 @@ mod dispatcher_new_arms_tests {
         assert_eq!(resolve_polygon_sides(&state, &doc), 8);
         assert!(set_polygon_sides(&mut state, 2).is_err());
         assert!(set_polygon_sides(&mut state, 65).is_err());
+    }
+}
+
+#[cfg(test)]
+mod dispatcher_f3a_tests {
+    use super::*;
+    use grafito_core::{LineObj, PointObj, PolygonObj};
+
+    fn empty_doc() -> Document {
+        Document::new()
+    }
+
+    fn add_point(doc: &mut Document, label: &str, x: f64, y: f64) {
+        doc.try_add_object(GeoObject::Point(
+            PointObj::new(Point2::new(x, y)).with_label(label),
+        ))
+        .expect("punto de prueba");
+    }
+
+    fn point_positions(doc: &Document, label: &str) -> Vec<Point2> {
+        doc.objects_iter()
+            .filter_map(|(_, obj)| match obj {
+                GeoObject::Point(p) if p.label == label => Some(p.position),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn count_kind(doc: &Document, kind: &str) -> usize {
+        doc.objects_iter()
+            .filter(|(_, obj)| match obj {
+                GeoObject::Circle(_) => kind == "circle",
+                GeoObject::Sector(_) => kind == "sector",
+                GeoObject::Spline(_) => kind == "spline",
+                GeoObject::Prism3D(_) => kind == "prism",
+                GeoObject::Tetrahedron3D(_) => kind == "tetra",
+                GeoObject::Text(_) => kind == "text",
+                _ => false,
+            })
+            .count()
+    }
+
+    #[test]
+    fn reflect_across_axis_mirrors_point() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        add_point(&mut doc, "A", 1.0, 0.0);
+        let before = doc.object_count();
+        // Clic-1: fuente. Eje x=0 con dos clics.
+        let r1 = dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(1.0, 0.0));
+        assert!(!r1.reset_tool);
+        assert!(state.driver.is_some());
+        dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(0.0, -1.0));
+        dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(0.0, 1.0));
+        assert_eq!(doc.object_count(), before + 1, "Reflect crea el espejado");
+        assert!(state.pending.is_empty() && state.driver.is_none());
+        let mirrored = point_positions(&doc, "A'");
+        assert_eq!(mirrored.len(), 1, "etiqueta A' generada");
+        assert!(
+            (mirrored[0].x + 1.0).abs() < 1e-6 && mirrored[0].y.abs() < 1e-6,
+            "A(1,0) sobre eje x=0 -> (-1,0), dio {:?}",
+            mirrored[0]
+        );
+    }
+
+    #[test]
+    fn reflect_coincident_axis_clicks_do_central_symmetry() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        add_point(&mut doc, "A", 2.0, 0.0);
+        let before = doc.object_count();
+        dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(2.0, 0.0));
+        dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        let done = dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert!(done.message.is_some());
+        assert_eq!(doc.object_count(), before + 1);
+        let mirrored = point_positions(&doc, "A'");
+        assert_eq!(mirrored.len(), 1);
+        assert!(
+            (mirrored[0].x + 2.0).abs() < 1e-6 && mirrored[0].y.abs() < 1e-6,
+            "simetría central de (2,0) en origen -> (-2,0), dio {:?}",
+            mirrored[0]
+        );
+    }
+
+    #[test]
+    fn reflect_central_symmetry_rejects_non_point_honestly() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        doc.try_add_object(GeoObject::Line(
+            LineObj::new(Point2::new(0.0, 0.0), Point2::new(4.0, 0.0)).with_label("r"),
+        ))
+        .expect("recta r");
+        let before = doc.object_count();
+        dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(1.0, 0.0));
+        dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(5.0, 5.0));
+        let done = dispatch_tool(Tool::Reflect, &mut state, &mut doc, Point2::new(5.0, 5.0));
+        assert_eq!(
+            doc.object_count(),
+            before,
+            "sin mutación ante límite del motor"
+        );
+        let msg = done.message.expect("mensaje honesto");
+        assert!(msg.contains("simetría central"), "{msg}");
+    }
+
+    #[test]
+    fn rotate_angle_comes_from_third_click() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        add_point(&mut doc, "A", 1.0, 0.0);
+        let before = doc.object_count();
+        dispatch_tool(Tool::Rotate, &mut state, &mut doc, Point2::new(1.0, 0.0));
+        let r2 = dispatch_tool(Tool::Rotate, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert!(!r2.reset_tool, "tras el centro pide el ángulo");
+        dispatch_tool(Tool::Rotate, &mut state, &mut doc, Point2::new(0.0, 1.0));
+        assert_eq!(doc.object_count(), before + 1);
+        let rotated = point_positions(&doc, "A'");
+        assert_eq!(rotated.len(), 1);
+        assert!(
+            rotated[0].x.abs() < 1e-6 && (rotated[0].y - 1.0).abs() < 1e-6,
+            "rotar (1,0) 90° sobre origen -> (0,1), dio {:?}",
+            rotated[0]
+        );
+    }
+
+    #[test]
+    fn rotate_without_point_guides_without_mutating() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        let before = doc.object_count();
+        let r = dispatch_tool(Tool::Rotate, &mut state, &mut doc, Point2::new(5.0, 5.0));
+        assert_eq!(doc.object_count(), before);
+        assert!(state.driver.is_none());
+        let msg = r.message.expect("guía");
+        assert!(msg.contains("clic sobre el punto"), "{msg}");
+    }
+
+    #[test]
+    fn translate_vector_from_two_clicks() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        add_point(&mut doc, "A", 1.0, 1.0);
+        let before = doc.object_count();
+        dispatch_tool(Tool::Translate, &mut state, &mut doc, Point2::new(1.0, 1.0));
+        dispatch_tool(Tool::Translate, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        dispatch_tool(Tool::Translate, &mut state, &mut doc, Point2::new(2.0, 3.0));
+        assert_eq!(doc.object_count(), before + 1);
+        let moved = point_positions(&doc, "A'");
+        assert_eq!(moved.len(), 1);
+        assert!(
+            (moved[0].x - 3.0).abs() < 1e-6 && (moved[0].y - 4.0).abs() < 1e-6,
+            "(1,1)+(2,3) -> (3,4), dio {:?}",
+            moved[0]
+        );
+    }
+
+    #[test]
+    fn translate_rejects_null_vector_honestly() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        add_point(&mut doc, "A", 1.0, 1.0);
+        let before = doc.object_count();
+        dispatch_tool(Tool::Translate, &mut state, &mut doc, Point2::new(1.0, 1.0));
+        dispatch_tool(Tool::Translate, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        let done = dispatch_tool(Tool::Translate, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert_eq!(doc.object_count(), before);
+        let msg = done.message.expect("mensaje honesto");
+        assert!(msg.contains("vector nulo"), "{msg}");
+    }
+
+    #[test]
+    fn dilate_factor_from_image_click() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        add_point(&mut doc, "A", 2.0, 0.0);
+        let before = doc.object_count();
+        dispatch_tool(Tool::Dilate, &mut state, &mut doc, Point2::new(2.0, 0.0));
+        dispatch_tool(Tool::Dilate, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        dispatch_tool(Tool::Dilate, &mut state, &mut doc, Point2::new(3.0, 0.0));
+        assert_eq!(doc.object_count(), before + 1);
+        let scaled = point_positions(&doc, "A'");
+        assert_eq!(scaled.len(), 1);
+        assert!(
+            (scaled[0].x - 3.0).abs() < 1e-6 && scaled[0].y.abs() < 1e-6,
+            "k=3/2 sobre (2,0) -> (3,0), dio {:?}",
+            scaled[0]
+        );
+    }
+
+    #[test]
+    fn dilate_rejects_center_on_source_honestly() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        add_point(&mut doc, "A", 1.0, 1.0);
+        let before = doc.object_count();
+        dispatch_tool(Tool::Dilate, &mut state, &mut doc, Point2::new(1.0, 1.0));
+        dispatch_tool(Tool::Dilate, &mut state, &mut doc, Point2::new(1.0, 1.0));
+        let done = dispatch_tool(Tool::Dilate, &mut state, &mut doc, Point2::new(2.0, 2.0));
+        assert_eq!(doc.object_count(), before);
+        let msg = done.message.expect("mensaje honesto");
+        assert!(msg.contains("coincide con el centro"), "{msg}");
+    }
+
+    #[test]
+    fn compass_two_clicks_create_circle_with_radius() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        let before = doc.object_count();
+        dispatch_tool(Tool::Compass, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        dispatch_tool(Tool::Compass, &mut state, &mut doc, Point2::new(3.0, 0.0));
+        assert_eq!(doc.object_count(), before + 1);
+        assert_eq!(count_kind(&doc, "circle"), 1);
+        let radius = doc
+            .objects_iter()
+            .find_map(|(_, obj)| match obj {
+                GeoObject::Circle(c) => Some(c.radius),
+                _ => None,
+            })
+            .expect("círculo del compás");
+        assert!((radius - 3.0).abs() < 1e-6, "r=3, dio {radius}");
+    }
+
+    #[test]
+    fn semicircle_two_clicks_create_sector() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        let before = doc.object_count();
+        dispatch_tool(
+            Tool::Semicircle,
+            &mut state,
+            &mut doc,
+            Point2::new(1.0, 1.0),
+        );
+        dispatch_tool(
+            Tool::Semicircle,
+            &mut state,
+            &mut doc,
+            Point2::new(3.0, 1.0),
+        );
+        assert_eq!(doc.object_count(), before + 1);
+        assert_eq!(count_kind(&doc, "sector"), 1);
+    }
+
+    #[test]
+    fn spline_closes_near_first_point() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        let before = doc.object_count();
+        for p in [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0)] {
+            dispatch_tool(Tool::Spline, &mut state, &mut doc, Point2::new(p.0, p.1));
+        }
+        assert_eq!(state.pending.len(), 3);
+        dispatch_tool(Tool::Spline, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert_eq!(doc.object_count(), before + 1);
+        assert_eq!(count_kind(&doc, "spline"), 1);
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn prism_needs_polygon_then_extrudes() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        let before = doc.object_count();
+        let guide = dispatch_tool(Tool::Prism3D, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert_eq!(doc.object_count(), before, "sin polígono no muta");
+        let msg = guide.message.expect("guía");
+        assert!(msg.contains("polígono"), "{msg}");
+        let mut poly = PolygonObj::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(0.0, 2.0),
+        ]);
+        poly.label = "P".to_string();
+        doc.try_add_object(GeoObject::Polygon(poly))
+            .expect("polígono base");
+        let before = doc.object_count();
+        dispatch_tool(Tool::Prism3D, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert_eq!(doc.object_count(), before + 1);
+        assert_eq!(count_kind(&doc, "prism"), 1);
+    }
+
+    #[test]
+    fn tetrahedron_single_click_creates_default_solid() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        let before = doc.object_count();
+        let done = dispatch_tool(
+            Tool::Tetrahedron3D,
+            &mut state,
+            &mut doc,
+            Point2::new(1.0, 2.0),
+        );
+        assert!(done.reset_tool);
+        assert_eq!(doc.object_count(), before + 1);
+        assert_eq!(count_kind(&doc, "tetra"), 1);
+        let edge = doc
+            .objects_iter()
+            .find_map(|(_, obj)| match obj {
+                GeoObject::Tetrahedron3D(t) => Some(t.edge_length),
+                _ => None,
+            })
+            .expect("tetraedro");
+        assert!((edge - 2.0).abs() < 1e-9, "arista default 2, dio {edge}");
+    }
+
+    #[test]
+    fn checkbox_creates_variable_and_text() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        let done = dispatch_tool(Tool::Checkbox, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert!(done.reset_tool);
+        assert_eq!(doc.variables.get("casilla1"), Some(&0.0));
+        assert_eq!(count_kind(&doc, "text"), 1);
+        let msg = done.message.expect("mensaje del motor");
+        assert!(msg.contains("casilla1"), "{msg}");
+    }
+
+    #[test]
+    fn inputbox_creates_variable_and_text() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        let done = dispatch_tool(Tool::InputBox, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert!(done.reset_tool);
+        assert_eq!(doc.variables.get("entrada1"), Some(&0.0));
+        assert_eq!(count_kind(&doc, "text"), 1);
+        let msg = done.message.expect("mensaje del motor");
+        assert!(msg.contains("entrada1"), "{msg}");
+    }
+
+    #[test]
+    fn action_boxes_pick_unique_variable_names() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        dispatch_tool(Tool::Checkbox, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        dispatch_tool(Tool::Checkbox, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert_eq!(doc.variables.get("casilla1"), Some(&0.0));
+        assert_eq!(doc.variables.get("casilla2"), Some(&0.0));
     }
 }

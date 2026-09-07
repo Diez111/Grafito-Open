@@ -3,8 +3,8 @@
 //! Reúne los S/M cerrados sin pisar geometría exacta, A11Y ni perf:
 //! CSV RFC 4180 ([`csv`]), volumen/área 3D y vistas ortográficas
 //! ([`solids`]), capas/tabla viva/SVG/PDF/stubs ([`exchange`]), puerta
-//! CAS G-A ([`cas_motor`]: Gruntz, Risch-Norman, EDO 1er orden,
-//! Laurent/residuos) y Buchberger acotado para Groebner.
+//! CAS G-A ([`cas_motor`]: Gruntz, Risch-Norman F3c, EDO 1er/2º orden,
+//! sistemas 2×2, Laplace F3c, Laurent/residuos) y Buchberger acotado para Groebner.
 
 pub mod cas_motor;
 pub mod csv;
@@ -12,9 +12,10 @@ pub mod exchange;
 pub mod solids;
 
 pub use cas_motor::{
-    cas_definite_risch, cas_groebner, cas_integrate_risch, cas_limit_gruntz,
-    cas_limit_gruntz_infinite, cas_principal_part, cas_residue, cas_solve_ode,
-    cas_solve_ode_linear, cas_solve_ode_separable,
+    cas_definite_risch, cas_groebner, cas_integrate_risch, cas_laplace_direct, cas_laplace_inverse,
+    cas_limit_gruntz, cas_limit_gruntz_infinite, cas_principal_part, cas_residue, cas_solve_ode,
+    cas_solve_ode_linear, cas_solve_ode_second_order, cas_solve_ode_separable,
+    cas_solve_ode_system_2x2,
 };
 
 pub use csv::{escape_field, parse_csv, to_csv, CsvError, MAX_CSV_BYTES, MAX_CSV_ROWS};

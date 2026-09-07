@@ -3039,6 +3039,13 @@ impl GrafitoApp {
         let repaint = ctx.clone();
         let template_owned = template.to_string();
         let concept_owned = concept.clone();
+        // Wiring p→anim (F2c): si el documento tiene parámetro vivo "p",
+        // la animación paramétrica usa su rango en vez del default.
+        let live_p_range: Option<(f64, f64)> = self
+            .document
+            .live_param(grafito_core::DEFAULT_LIVE_PARAM_NAME)
+            .filter(|lp| lp.min.is_finite() && lp.max.is_finite() && lp.min < lp.max)
+            .map(|lp| (lp.min, lp.max));
         std::thread::spawn(move || {
             // I/O solo en el hilo (nunca en UI). El workdir se crea de forma
             // exclusiva y solo si el motor externo lo necesita (la vía nativa
@@ -3066,6 +3073,29 @@ impl GrafitoApp {
                     if let Some(anim) =
                         crate::anim_native::parametric_for_template(&template_owned, &concept_owned)
                     {
+                        // Rango vivo de "p" si el documento lo define (F2c).
+                        // `ParamName` no es `Copy`: se clona (cadenas de ≤16
+                        // chars) y ante `Err` se conserva la anim original.
+                        let anim = match live_p_range {
+                            Some((lo, hi))
+                                if anim.param.as_str() == grafito_core::DEFAULT_LIVE_PARAM_NAME =>
+                            {
+                                match grafito_anim::parametric::ParametricAnim::try_new(
+                                    anim.kind,
+                                    anim.expr_a.clone(),
+                                    anim.expr_b.clone(),
+                                    anim.param.clone(),
+                                    lo,
+                                    hi,
+                                    anim.frames,
+                                    anim.viewport,
+                                ) {
+                                    Ok(rebuilt) => rebuilt,
+                                    Err(_) => anim,
+                                }
+                            }
+                            _ => anim,
+                        };
                         let mut saw_cancel = false;
                         let rendered = crate::anim_native::render_parametric_frames_with_progress(
                             &anim,

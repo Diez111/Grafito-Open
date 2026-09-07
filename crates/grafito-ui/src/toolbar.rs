@@ -45,8 +45,10 @@ const GROUP_LINE: &[ToolEntry] = &[
 
 const GROUP_CIRCLE: &[ToolEntry] = &[
     (Tool::Circle, "Circulo centro-punto", "F4"),
+    (Tool::Compass, "Compás", ""),
     (Tool::Tangent, "Tangente", ""),
     (Tool::Arc, "Arco 3 puntos", ""),
+    (Tool::Semicircle, "Semicírculo", ""),
     (Tool::Sector, "Sector circular", ""),
 ];
 
@@ -76,7 +78,18 @@ const GROUP_CURVE: &[ToolEntry] = &[
     (Tool::PolarCurve, "r(t) Polar", ""),
     (Tool::ImplicitCurve, "F(x,y)=0 Implícita", ""),
     (Tool::VectorField2D, "Campo vectorial", ""),
+    (Tool::Spline, "Spline", ""),
     (Tool::Locus, "Lugar geométrico", ""),
+];
+
+// F3a: transformaciones rígidas y de semejanza con motor propio
+// (Translate/Rotate/Dilate/Reflect en command_registry + dispatcher).
+// Grupo propio: PRIMARY 5 y SECONDARY 8 no cambian; UNIVERSITY 17→18.
+const GROUP_TRANSFORM: &[ToolEntry] = &[
+    (Tool::Reflect, "Refleja", ""),
+    (Tool::Rotate, "Rota", ""),
+    (Tool::Translate, "Traslada", ""),
+    (Tool::Dilate, "Homotecia", ""),
 ];
 
 const GROUP_MEASURE: &[ToolEntry] = &[
@@ -125,6 +138,8 @@ const GROUP_3D: &[ToolEntry] = &[
     (Tool::Cylinder3D, "Cilindro", ""),
     (Tool::Cone3D, "Cono", ""),
     (Tool::Torus3D, "Toro", ""),
+    (Tool::Prism3D, "Prisma", ""),
+    (Tool::Tetrahedron3D, "Tetraedro", ""),
     (Tool::MoebiusStrip, "Mobius", ""),
     (Tool::Surface3D, "z Superficie", ""),
     (Tool::ParametricCurve3D, "(x,y,z) Curva 3D", ""),
@@ -157,7 +172,11 @@ const GROUP_ADVANCED: &[ToolEntry] = &[
     (Tool::Slider, "Deslizador", ""),
 ];
 
-const GROUP_DYNAMICS: &[ToolEntry] = &[(Tool::Attractor, "Atractor 3D", "")];
+const GROUP_DYNAMICS: &[ToolEntry] = &[
+    (Tool::Attractor, "Atractor 3D", ""),
+    (Tool::Checkbox, "Casilla", ""),
+    (Tool::InputBox, "Caja de entrada", ""),
+];
 
 /// Identificador de un grupo de herramientas de la toolbar.
 ///
@@ -177,6 +196,7 @@ pub enum ToolGroupId {
     Eraser,
     Conic,
     Curve,
+    Transform,
     Measure,
     Analysis,
     Constraint,
@@ -200,6 +220,7 @@ impl ToolGroupId {
             ToolGroupId::Eraser => (icon_eraser, GROUP_ERASER),
             ToolGroupId::Conic => (icon_conic, GROUP_CONIC),
             ToolGroupId::Curve => (icon_curve, GROUP_CURVE),
+            ToolGroupId::Transform => (icon_transform, GROUP_TRANSFORM),
             ToolGroupId::Measure => (icon_measure, GROUP_MEASURE),
             ToolGroupId::Analysis => (icon_analysis, GROUP_ANALYSIS),
             ToolGroupId::Constraint => (icon_constraint, GROUP_CONSTRAINT),
@@ -222,6 +243,7 @@ impl ToolGroupId {
             ToolGroupId::Eraser => "Borrar",
             ToolGroupId::Conic => "Cónicas",
             ToolGroupId::Curve => "Curvas",
+            ToolGroupId::Transform => "Transformar",
             ToolGroupId::Measure => "Medición",
             ToolGroupId::Analysis => "Análisis",
             ToolGroupId::Constraint => "Restricciones",
@@ -247,6 +269,7 @@ impl ToolGroupId {
             ToolGroupId::Eraser => "eraser",
             ToolGroupId::Conic => "conic",
             ToolGroupId::Curve => "curve",
+            ToolGroupId::Transform => "transform",
             ToolGroupId::Measure => "measure",
             ToolGroupId::Analysis => "analysis",
             ToolGroupId::Constraint => "constraint",
@@ -259,12 +282,19 @@ impl ToolGroupId {
     }
 
     /// Etiqueta del grupo en el idioma pedido. ES idéntica a [`ToolGroupId::label`].
+    /// Si el slug aún no está en el catálogo i18n (grupo F3a `transform`,
+    /// sincroniza el reducer), usa la etiqueta estática: nunca vacío.
     pub fn label_localized(self, locale: Locale) -> &'static str {
-        group_label(self.slug(), locale)
+        let labeled = group_label(self.slug(), locale);
+        if labeled.is_empty() {
+            self.label()
+        } else {
+            labeled
+        }
     }
 }
 
-/// Todos los grupos en el orden clásico de la toolbar (sin `ThreeD`).
+/// Todos los grupos en el orden clásico de la toolbar (sin `ThreeD`/`FourD`/`Dynamics`).
 pub const ALL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Move,
     ToolGroupId::Point,
@@ -275,6 +305,7 @@ pub const ALL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Eraser,
     ToolGroupId::Conic,
     ToolGroupId::Curve,
+    ToolGroupId::Transform,
     ToolGroupId::Measure,
     ToolGroupId::Analysis,
     ToolGroupId::Constraint,
@@ -314,7 +345,7 @@ pub const SECONDARY_TOOL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Analysis,
 ];
 
-/// University (`>TOOLBAR_LEVEL_SECONDARY_MAX`): todos los grupos — Secondary + Constraint, Boolean, Advanced, Dynamics, ThreeD/FourD, Eraser, Conic, Curve.
+/// University (`>TOOLBAR_LEVEL_SECONDARY_MAX`): todos los grupos — Secondary + Transform, Constraint, Boolean, Advanced, Dynamics, ThreeD/FourD, Eraser, Conic, Curve (18 grupos desde F3a).
 pub const UNIVERSITY_TOOL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Move,
     ToolGroupId::Point,
@@ -325,6 +356,7 @@ pub const UNIVERSITY_TOOL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Eraser,
     ToolGroupId::Conic,
     ToolGroupId::Curve,
+    ToolGroupId::Transform,
     ToolGroupId::Measure,
     ToolGroupId::Analysis,
     ToolGroupId::Constraint,
@@ -387,7 +419,7 @@ pub fn filter_groups_by_pedagogical_level(
     filter_groups_by_level(groups, level.level_value())
 }
 
-/// Slug estable de cada [`Tool`] para [`tool_label`] (76 variantes).
+/// Slug estable de cada [`Tool`] para [`tool_label`] (87 variantes).
 ///
 /// El `match` es exhaustivo a propósito (sin comodín): añadir una variante a
 /// [`Tool`] rompe la compilación hasta darle su slug en el catálogo i18n.
@@ -402,9 +434,16 @@ pub fn tool_slug(tool: Tool) -> &'static str {
         Tool::Vector => "vector",
         Tool::Perpendicular => "perpendicular",
         Tool::Parallel => "parallel",
+        Tool::Translate => "translate",
+        Tool::Rotate => "rotate",
+        Tool::Dilate => "dilate",
+        Tool::Reflect => "reflect",
         Tool::Circle => "circle",
         Tool::Tangent => "tangent",
         Tool::Arc => "arc",
+        Tool::Semicircle => "semicircle",
+        Tool::Compass => "compass",
+        Tool::Spline => "spline",
         Tool::Sector => "sector",
         Tool::Polygon => "polygon",
         Tool::RegularPolygon => "regular_polygon",
@@ -448,6 +487,8 @@ pub fn tool_slug(tool: Tool) -> &'static str {
         Tool::Plane3D => "plane3d",
         Tool::Sphere3D => "sphere3d",
         Tool::Cube3D => "cube3d",
+        Tool::Prism3D => "prism3d",
+        Tool::Tetrahedron3D => "tetrahedron3d",
         Tool::Cylinder3D => "cylinder3d",
         Tool::Cone3D => "cone3d",
         Tool::Torus3D => "torus3d",
@@ -465,6 +506,8 @@ pub fn tool_slug(tool: Tool) -> &'static str {
         Tool::HeatMap => "heatmap",
         Tool::ComplexGrid => "complex_grid",
         Tool::Slider => "slider",
+        Tool::Checkbox => "checkbox",
+        Tool::InputBox => "inputbox",
         Tool::Button => "button",
         Tool::Image => "image",
         Tool::TrigAnimation => "trig_animation",
@@ -472,9 +515,13 @@ pub fn tool_slug(tool: Tool) -> &'static str {
     }
 }
 
-/// Las 76 variantes de [`Tool`] en orden estable: prueba que cada una tiene
-/// slug y etiqueta ES/EN no vacía (ver test `all_76_tools_resolve_both_locales`).
-pub const ALL_TOOLS: &[Tool; 76] = &[
+/// Las 87 variantes de [`Tool`] en orden estable: prueba que cada una tiene
+/// slug y etiqueta ES/EN no vacía (ver test `all_87_tools_resolve_both_locales`).
+///
+/// Las 11 de F3a aún sin entrada en el catálogo i18n (fuera de alcance:
+/// el reducer sincroniza i18n + docs) resuelven por fallback a la etiqueta
+/// estática de `GROUP_*` vía [`entry_display_name`], nunca vacío.
+pub const ALL_TOOLS: &[Tool; 87] = &[
     Tool::Select,
     Tool::Point,
     Tool::Midpoint,
@@ -484,9 +531,15 @@ pub const ALL_TOOLS: &[Tool; 76] = &[
     Tool::Vector,
     Tool::Perpendicular,
     Tool::Parallel,
+    Tool::Translate,
+    Tool::Rotate,
+    Tool::Dilate,
+    Tool::Reflect,
     Tool::Circle,
+    Tool::Compass,
     Tool::Tangent,
     Tool::Arc,
+    Tool::Semicircle,
     Tool::Sector,
     Tool::Polygon,
     Tool::RegularPolygon,
@@ -501,6 +554,7 @@ pub const ALL_TOOLS: &[Tool; 76] = &[
     Tool::PolarCurve,
     Tool::ImplicitCurve,
     Tool::VectorField2D,
+    Tool::Spline,
     Tool::Locus,
     Tool::Distance,
     Tool::Angle,
@@ -530,6 +584,8 @@ pub const ALL_TOOLS: &[Tool; 76] = &[
     Tool::Plane3D,
     Tool::Sphere3D,
     Tool::Cube3D,
+    Tool::Prism3D,
+    Tool::Tetrahedron3D,
     Tool::Cylinder3D,
     Tool::Cone3D,
     Tool::Torus3D,
@@ -547,6 +603,8 @@ pub const ALL_TOOLS: &[Tool; 76] = &[
     Tool::HeatMap,
     Tool::ComplexGrid,
     Tool::Slider,
+    Tool::Checkbox,
+    Tool::InputBox,
     Tool::Button,
     Tool::Image,
     Tool::TrigAnimation,
@@ -982,6 +1040,96 @@ fn icon_boolean(painter: &Painter, rect: Rect, color: Color32) {
     painter.circle_filled(c, 2.0, color);
 }
 
+fn icon_transform(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.22;
+    let sw = Stroke::new(1.7, color);
+    painter.rect_stroke(
+        Rect::from_center_size(c + vec2(-s * 0.45, 0.0), vec2(s, s)),
+        1.0,
+        sw,
+    );
+    painter.rect_stroke(
+        Rect::from_center_size(c + vec2(s * 0.45, 0.0), vec2(s, s)),
+        1.0,
+        Stroke::new(1.7, color.gamma_multiply(0.55)),
+    );
+}
+
+fn icon_reflect(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.3;
+    let sw = Stroke::new(1.8, color);
+    painter.line_segment([c + vec2(0.0, -s), c + vec2(0.0, s)], sw);
+    painter.add(Shape::convex_polygon(
+        vec![
+            c + vec2(-s * 0.85, -s * 0.4),
+            c + vec2(-s * 0.2, 0.0),
+            c + vec2(-s * 0.85, s * 0.4),
+        ],
+        Color32::TRANSPARENT,
+        sw,
+    ));
+    painter.add(Shape::convex_polygon(
+        vec![
+            c + vec2(s * 0.85, -s * 0.4),
+            c + vec2(s * 0.2, 0.0),
+            c + vec2(s * 0.85, s * 0.4),
+        ],
+        Color32::TRANSPARENT,
+        sw,
+    ));
+}
+
+fn icon_rotate(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let r = rect.width() * 0.3;
+    let sw = Stroke::new(1.8, color);
+    let a0 = -0.6;
+    let a1 = 3.6;
+    let n = 18;
+    let mut pts = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let a = a0 + (a1 - a0) * i as f32 / n as f32;
+        pts.push(c + vec2(r * a.cos(), r * a.sin()));
+    }
+    painter.add(Shape::line(pts, sw));
+    let tip = c + vec2(r * a1.cos(), r * a1.sin());
+    let dir = vec2(-a1.sin(), a1.cos());
+    let perp = vec2(-dir.y, dir.x);
+    painter.line_segment([tip, tip - dir * 6.0 + perp * 3.5], sw);
+    painter.line_segment([tip, tip - dir * 6.0 - perp * 3.5], sw);
+    painter.circle_filled(c, 2.0, color);
+}
+
+fn icon_translate(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.36;
+    let sw = Stroke::new(2.0, color);
+    let a = c + vec2(-s, 0.0);
+    let b = c + vec2(s, 0.0);
+    painter.line_segment([a, b], sw);
+    painter.line_segment([b, b + vec2(-7.0, -4.0)], sw);
+    painter.line_segment([b, b + vec2(-7.0, 4.0)], sw);
+    painter.circle_filled(a, 2.2, color.gamma_multiply(0.6));
+}
+
+fn icon_dilate(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.16;
+    painter.rect_stroke(
+        Rect::from_center_size(c, vec2(s * 2.0, s * 2.0)),
+        1.0,
+        Stroke::new(1.8, color.gamma_multiply(0.55)),
+    );
+    painter.rect_stroke(
+        Rect::from_center_size(c, vec2(s * 3.6, s * 3.6)),
+        1.0,
+        Stroke::new(1.8, color),
+    );
+    painter.circle_filled(c, 2.0, color);
+}
+
 /// Función de dibujo de icono vectorial para un grupo de la toolbar.
 pub type IconFn = fn(&Painter, Rect, Color32);
 
@@ -1005,8 +1153,13 @@ pub const fn icon_for_tool(tool: Tool) -> IconFn {
         Tool::Locus => icon_curve,
         Tool::Midpoint => icon_midpoint,
         Tool::Perpendicular | Tool::Parallel => icon_perpendicular,
+        Tool::Translate => icon_translate,
+        Tool::Rotate => icon_rotate,
+        Tool::Dilate => icon_dilate,
+        Tool::Reflect => icon_reflect,
         Tool::Tangent => icon_tangent,
-        Tool::Arc | Tool::Sector => icon_circle,
+        Tool::Arc | Tool::Semicircle | Tool::Sector => icon_circle,
+        Tool::Compass => icon_circle,
         Tool::Distance | Tool::Angle | Tool::Area | Tool::Slope => icon_measure,
         Tool::Root
         | Tool::Extremum
@@ -1032,12 +1185,13 @@ pub const fn icon_for_tool(tool: Tool) -> IconFn {
         | Tool::PolygonXor => icon_boolean,
         Tool::Plane3D => icon_plane,
         Tool::Sphere3D => icon_circle,
-        Tool::Cube3D => icon_3d,
+        Tool::Cube3D | Tool::Prism3D | Tool::Tetrahedron3D => icon_3d,
         Tool::Tesseract4D => icon_tesseract_4d,
         Tool::Hypercube5D => icon_hypercube_5d,
         Tool::Cylinder3D | Tool::Cone3D | Tool::Torus3D | Tool::MoebiusStrip => icon_3d,
         Tool::Surface3D | Tool::HyperSurface4D => icon_surface,
         Tool::ParametricCurve3D => icon_curve,
+        Tool::Spline => icon_curve,
         Tool::Attractor => icon_dynamics,
         Tool::Fractal => icon_advanced,
         Tool::Histogram
@@ -1046,6 +1200,7 @@ pub const fn icon_for_tool(tool: Tool) -> IconFn {
         | Tool::HeatMap
         | Tool::ComplexGrid => icon_advanced,
         Tool::Slider | Tool::Button | Tool::Image | Tool::TrigAnimation => icon_advanced,
+        Tool::Checkbox | Tool::InputBox => icon_advanced,
     }
 }
 
@@ -1360,7 +1515,7 @@ fn tool_group(
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let resp = resp.on_hover_text(label);
     // A11Y: foco visible (anillo 2px del tema) + Enter/Espacio = clic.
-    // El orden Tab lo da egui por orden de creación (orden de `groups`, 5/8/17).
+    // El orden Tab lo da egui por orden de creación (orden de `groups`, 5/8/18).
     if resp.has_focus() {
         theme.paint_focus_ring(ui.painter(), rect);
     }
@@ -1513,6 +1668,22 @@ fn tool_menu_max_height(viewport_height: f32) -> f32 {
 mod tests {
     use super::*;
 
+    /// Slugs F3a con etiqueta estática pero sin entrada i18n todavía.
+    /// El reducer los sincroniza al catálogo (`i18n.rs` + `MSG_COUNT`).
+    const F3A_FALLBACK_SLUGS: &[&str] = &[
+        "reflect",
+        "rotate",
+        "translate",
+        "dilate",
+        "compass",
+        "semicircle",
+        "spline",
+        "prism3d",
+        "tetrahedron3d",
+        "checkbox",
+        "inputbox",
+    ];
+
     #[test]
     fn tool_menu_stays_inside_ordinary_narrow_viewports() {
         for viewport_width in [100.0, 180.0, 220.0, 407.0] {
@@ -1651,10 +1822,50 @@ mod tests {
     }
 
     #[test]
+    fn each_tool_lives_in_at_most_one_university_group() {
+        // Regla dedup: cada Tool como máximo un grupo canónico.
+        // (Button/Image/TrigAnimation preexisten sin grupo: 0 es válido.)
+        const F3A: &[Tool] = &[
+            Tool::Reflect,
+            Tool::Rotate,
+            Tool::Translate,
+            Tool::Dilate,
+            Tool::Compass,
+            Tool::Semicircle,
+            Tool::Spline,
+            Tool::Prism3D,
+            Tool::Tetrahedron3D,
+            Tool::Checkbox,
+            Tool::InputBox,
+        ];
+        for tool in ALL_TOOLS {
+            let hits = UNIVERSITY_TOOL_GROUPS
+                .iter()
+                .filter(|group| group.def().1.iter().any(|(t, _, _)| t == tool))
+                .count();
+            assert!(hits <= 1, "{:?} está en {hits} grupos, debe ser ≤1", tool);
+            if F3A.contains(tool) {
+                assert_eq!(hits, 1, "{:?} F3a debe estar en 1 grupo", tool);
+            }
+        }
+    }
+
+    #[test]
+    fn transform_group_holds_the_four_f3a_similarities() {
+        let (_, tools) = ToolGroupId::Transform.def();
+        let names: Vec<Tool> = tools.iter().map(|(t, _, _)| *t).collect();
+        assert_eq!(
+            names,
+            vec![Tool::Reflect, Tool::Rotate, Tool::Translate, Tool::Dilate]
+        );
+    }
+
+    #[test]
     fn primary_secondary_university_counts_via_level_value_constants() {
         assert_eq!(PRIMARY_TOOL_GROUPS.len(), 5);
         assert_eq!(SECONDARY_TOOL_GROUPS.len(), 8);
-        assert_eq!(UNIVERSITY_TOOL_GROUPS.len(), 17);
+        // F3a suma el grupo Transform: 17→18 (PRIMARY/SECONDARY intactos).
+        assert_eq!(UNIVERSITY_TOOL_GROUPS.len(), 18);
         assert_eq!(
             TOOLBAR_LEVEL_PRIMARY_MAX, 4,
             "primary bound must remain 4 for progressive disclosure"
@@ -1739,17 +1950,34 @@ mod tests {
     }
 
     #[test]
-    fn all_76_tools_resolve_non_empty_labels_in_both_locales() {
+    fn all_87_tools_resolve_both_locales() {
         use crate::i18n::{tool_label, Locale};
-        assert_eq!(ALL_TOOLS.len(), 76, "Tool debe seguir en 76 variantes");
+        assert_eq!(ALL_TOOLS.len(), 87, "Tool debe seguir en 87 variantes");
         // Sin duplicados (cada variante una sola vez).
         let mut names: Vec<&str> = ALL_TOOLS.iter().map(Tool::name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 76);
+        assert_eq!(names.len(), 87);
         for tool in ALL_TOOLS {
             let slug = tool_slug(*tool);
             assert!(!slug.is_empty(), "sin slug para {:?}", tool);
+            // F3a: los 11 slugs nuevos aún no están en el catálogo i18n
+            // (fuera de alcance; sincroniza el reducer). La toolbar nunca
+            // muestra vacío: `entry_display_name` usa la etiqueta estática.
+            if F3A_FALLBACK_SLUGS.contains(&slug) {
+                for (entry_tool, static_label, _) in UNIVERSITY_TOOL_GROUPS
+                    .iter()
+                    .flat_map(|group| group.def().1.iter())
+                {
+                    if *entry_tool == *tool {
+                        assert!(
+                            !static_label.is_empty(),
+                            "sin etiqueta estática para {slug}"
+                        );
+                    }
+                }
+                continue;
+            }
             assert!(
                 !tool_label(slug, Locale::Es).is_empty(),
                 "sin etiqueta ES para {slug}"

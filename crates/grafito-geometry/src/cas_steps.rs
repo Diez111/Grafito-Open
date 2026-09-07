@@ -45,6 +45,13 @@ pub enum RewriteRule {
     IntegrationConstantRule,
     IntegrationExpRule,
     IntegrationTrigRule,
+    // Frente F3c: parciales, arctan, EDO 2º orden, sistemas, Laplace.
+    IntegrationPartialFractions,
+    IntegrationArctanRule,
+    OdeSecondOrderRule,
+    OdeSystemRule,
+    LaplaceDirectRule,
+    LaplaceInverseRule,
     LimitRichardson,
     TaylorRule,
     Generic,
@@ -73,6 +80,12 @@ impl std::fmt::Display for RewriteRule {
             Self::IntegrationConstantRule => "IntegrationConstantRule",
             Self::IntegrationExpRule => "IntegrationExpRule",
             Self::IntegrationTrigRule => "IntegrationTrigRule",
+            Self::IntegrationPartialFractions => "IntegrationPartialFractions",
+            Self::IntegrationArctanRule => "IntegrationArctanRule",
+            Self::OdeSecondOrderRule => "OdeSecondOrderRule",
+            Self::OdeSystemRule => "OdeSystemRule",
+            Self::LaplaceDirectRule => "LaplaceDirectRule",
+            Self::LaplaceInverseRule => "LaplaceInverseRule",
             Self::LimitRichardson => "LimitRichardson",
             Self::TaylorRule => "TaylorRule",
             Self::Generic => "Generic",
@@ -1546,13 +1559,24 @@ pub fn steps_for_taylor(
 // ---------------------------------------------------------------------------
 
 fn push_ga_step(steps: &mut Vec<CasStep>, before: &str, after: &str, description: &str) {
+    push_ga_ruled_step(steps, RewriteRule::Generic, before, after, description);
+}
+
+/// Traza con regla explícita (frente F3c: parciales, EDO2, sistemas, Laplace).
+fn push_ga_ruled_step(
+    steps: &mut Vec<CasStep>,
+    rule: RewriteRule,
+    before: &str,
+    after: &str,
+    description: &str,
+) {
     if steps.len() >= MAX_CAS_STEPS {
         return;
     }
     let idx = steps.len();
     steps.push(CasStep {
         index: idx,
-        rule: RewriteRule::Generic,
+        rule,
         before: truncate_bytes(before, MAX_STEP_BYTES),
         after: truncate_bytes(after, MAX_STEP_BYTES),
         description: truncate_bytes(description, MAX_STEP_BYTES),
@@ -1632,18 +1656,40 @@ fn gruntz_form_label(ast: &Expr, var: &str, at: f64) -> &'static str {
     "otra"
 }
 
-/// Traza Risch-Norman: primitiva del subconjunto S/M.
+/// Traza Risch-Norman: primitiva del subconjunto S/M + F3c.
+///
+/// F3c cubre además `tan`/`sec²`, fracciones parciales sobre lineales
+/// reales (grado ≤ 4), `1/(x²+1)`-style (`atan` + `ln`) y `x^(p/q)`.
 pub fn steps_for_risch(expr: &str, var: &str) -> Result<Vec<CasStep>, String> {
     validate_identifier(var)?;
     validate_input_bytes(expr)?;
     let prim = crate::integral::risch_norman_integrate(expr, var)
         .map_err(|e| format!("Risch-Norman no cubre '{expr}': {e}"))?;
     let mut steps = Vec::new();
-    push_ga_step(
+    // Regla exacta según el camino tomado: `atan` solo lo emite la
+    // cuadrática irreducible; cociente con denominador no trivial solo
+    // lo resuelve `risch_rational` (el `1/x` rápido lleva `Var` abajo).
+    let rule = if prim.contains("atan") {
+        RewriteRule::IntegrationArctanRule
+    } else if let Ok(ast) = parse_ast(&expr.replace(' ', "")) {
+        match ast {
+            Expr::Div(_, den)
+                if !matches!(den.as_ref(), Expr::Var(_))
+                    && crate::cas::cas_const_value(&den).is_none() =>
+            {
+                RewriteRule::IntegrationPartialFractions
+            }
+            _ => RewriteRule::Generic,
+        }
+    } else {
+        RewriteRule::Generic
+    };
+    push_ga_ruled_step(
         &mut steps,
+        rule,
         &format!("∫ {expr} d{var}"),
         &prim,
-        "Risch-Norman: potencias/exponenciales/logaritmos + linealidad",
+        "Risch-Norman F3c: potencias x^(p/q), exp/log, tan/sec², parciales, arctan + linealidad",
     );
     push_ga_step(
         &mut steps,
@@ -1699,6 +1745,130 @@ pub fn steps_for_ode_separable(g: &str, h: &str, x: &str, y: &str) -> Result<Vec
         &format!("∫dy/({h}) = ∫({g}) dx"),
         &sol,
         "integrar ambos lados + C",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+// ---------------------------------------------------------------------------
+// Frente F3c: trazas de 2º orden, sistemas 2×2 y Laplace.
+// ---------------------------------------------------------------------------
+
+/// Traza EDO `a·y''+b·y'+c·y = rhs` (característica + indeterm. exactos).
+pub fn steps_for_ode_second_order(
+    a: &str,
+    b: &str,
+    c: &str,
+    rhs: &str,
+    x: &str,
+) -> Result<Vec<CasStep>, String> {
+    validate_identifier(x)?;
+    validate_input_bytes(a)?;
+    validate_input_bytes(b)?;
+    validate_input_bytes(c)?;
+    validate_input_bytes(rhs)?;
+    let sol = crate::ode::solve_ode_second_order_const(a, b, c, rhs, x)
+        .map_err(|e| format!("EDO 2º orden no resuelta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeSecondOrderRule,
+        &format!("({a})·y''+({b})·y'+({c})·y = {rhs}"),
+        "r²: a·r²+b·r+c = 0 (D = b²−4ac: reales distintas / doble / compleja)",
+        "ecuación característica",
+    );
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeSecondOrderRule,
+        "homogénea según D",
+        "C1·e^{r1·x}+C2·e^{r2·x} | (C1+C2·x)·e^{rx} | e^{αx}(C1·cos+C2·sin)",
+        "homogénea con C1, C2",
+    );
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeSecondOrderRule,
+        &format!("particular para {rhs}"),
+        &sol,
+        "coeficientes indeterminados exactos (resonancia → x^s) + y = hom + yp",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza sistema 2×2 constante (traza/determinante → autovalores).
+pub fn steps_for_ode_system_2x2(
+    a11: &str,
+    a12: &str,
+    a21: &str,
+    a22: &str,
+    t: &str,
+) -> Result<Vec<CasStep>, String> {
+    validate_identifier(t)?;
+    validate_input_bytes(a11)?;
+    validate_input_bytes(a12)?;
+    validate_input_bytes(a21)?;
+    validate_input_bytes(a22)?;
+    let sol = crate::ode::solve_ode_system_2x2(a11, a12, a21, a22, t)
+        .map_err(|e| format!("sistema 2×2 no resuelto: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeSystemRule,
+        &format!("x' = ({a11})x+({a12})y, y' = ({a21})x+({a22})y"),
+        "T = traza, D = det, Δ = T²−4D",
+        "traza y determinante",
+    );
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeSystemRule,
+        "autovalores según Δ",
+        "Δ>0: λ1,λ2 reales · Δ=0: λ doble (Jordan t·e^λt si defectivo) · Δ<0: α±iβ",
+        "autovalores y autovectores",
+    );
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeSystemRule,
+        "combinación con C1, C2",
+        &sol,
+        "solución con C1, C2",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza Laplace directa (tabla + linealidad).
+pub fn steps_for_laplace_direct(expr: &str, t: &str, s: &str) -> Result<Vec<CasStep>, String> {
+    validate_identifier(t)?;
+    validate_identifier(s)?;
+    validate_input_bytes(expr)?;
+    let out = crate::ode::laplace_direct(expr, t, s)
+        .map_err(|e| format!("Laplace directa no cubierta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::LaplaceDirectRule,
+        &format!("L{{{expr}}}(t → {s})"),
+        &out,
+        "tabla F3c (1, t^n, exp, sin/cos, t·exp) + linealidad",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza Laplace inversa (racional propio grado ≤ 2).
+pub fn steps_for_laplace_inverse(expr: &str, s: &str, t: &str) -> Result<Vec<CasStep>, String> {
+    validate_identifier(s)?;
+    validate_identifier(t)?;
+    validate_input_bytes(expr)?;
+    let out = crate::ode::laplace_inverse(expr, s, t)
+        .map_err(|e| format!("Laplace inversa no cubierta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::LaplaceInverseRule,
+        &format!("L⁻¹{{{expr}}}({s} → {t})"),
+        &out,
+        "parciales grado ≤ 2: K/(s−a), K/(s−a)², cuadrática (amortiguada)",
     );
     steps.truncate(MAX_CAS_STEPS);
     Ok(steps)
@@ -2136,5 +2306,68 @@ mod tests {
     fn ga_groebner_trace_rejects_over_budget() {
         let polys: Vec<String> = (0..20).map(|i| format!("x + {i}")).collect();
         assert!(steps_for_groebner(&polys, &["x".to_string()]).is_err());
+    }
+
+    // --- Frente F3c: trazas de 2º orden, sistemas, Laplace, Risch extendido ---
+
+    #[test]
+    fn f3c_ode_second_order_trace() {
+        let steps = steps_for_ode_second_order("1", "-3", "2", "exp(x)", "x").expect("traza EDO2");
+        assert!(!steps.is_empty());
+        assert!(steps.len() <= MAX_CAS_STEPS);
+        assert!(has_rule(&steps, RewriteRule::OdeSecondOrderRule));
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.description.contains("característica")),
+            "falta paso característico"
+        );
+        let last = steps.last().expect("último paso");
+        assert!(
+            last.after.contains('C'),
+            "solución con C1/C2, got {}",
+            last.after
+        );
+    }
+
+    #[test]
+    fn f3c_ode_second_order_trace_honest_err() {
+        assert!(steps_for_ode_second_order("0", "1", "1", "x", "x").is_err());
+        assert!(steps_for_ode_second_order("x", "1", "1", "0", "x").is_err());
+    }
+
+    #[test]
+    fn f3c_ode_system_trace() {
+        let steps = steps_for_ode_system_2x2("0", "1", "-2", "-3", "t").expect("traza sistema");
+        assert!(!steps.is_empty());
+        assert!(steps.len() <= MAX_CAS_STEPS);
+        assert!(has_rule(&steps, RewriteRule::OdeSystemRule));
+        assert!(
+            steps.iter().any(|s| s.description.contains("traza")),
+            "falta paso traza/determinante"
+        );
+    }
+
+    #[test]
+    fn f3c_laplace_traces() {
+        let direct = steps_for_laplace_direct("sin(t)", "t", "s").expect("traza Laplace");
+        assert!(!direct.is_empty());
+        assert!(has_rule(&direct, RewriteRule::LaplaceDirectRule));
+        assert!(direct[0].after.contains("s^2+1"), "got {}", direct[0].after);
+        let inverse = steps_for_laplace_inverse("1/(s+1)", "s", "t").expect("traza inversa");
+        assert!(has_rule(&inverse, RewriteRule::LaplaceInverseRule));
+        assert!(inverse[0].after.contains("exp"), "got {}", inverse[0].after);
+        assert!(steps_for_laplace_inverse("1/(s^3+1)", "s", "t").is_err());
+    }
+
+    #[test]
+    fn f3c_risch_extended_trace_rules() {
+        let atan_steps = steps_for_risch("1/(x^2+1)", "x").expect("traza atan");
+        assert!(has_rule(&atan_steps, RewriteRule::IntegrationArctanRule));
+        let partial = steps_for_risch("1/(x^2+x-2)", "x").expect("traza parciales");
+        assert!(has_rule(&partial, RewriteRule::IntegrationPartialFractions));
+        let tan_steps = steps_for_risch("tan(x)", "x").expect("traza tan");
+        assert!(!tan_steps.is_empty());
+        assert!(tan_steps.len() <= MAX_CAS_STEPS);
     }
 }

@@ -19,7 +19,7 @@ use grafito_ui::tokens::{
     PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM,
     SPACE_XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -4306,48 +4306,20 @@ const MAX_SPREADSHEET_ROWS: usize = 50;
 /// Tablas visibles en la hoja viva: el resto se avisa.
 const MAX_SPREADSHEET_TABLES: usize = 8;
 
-/// `ln Γ(x)` por Lanczos (g=7): base de Binomial/Poisson sin dependencias.
-fn ln_gamma(value: f64) -> f64 {
-    const COEFFS: [f64; 9] = [
-        0.999_999_999_999_809_9,
-        676.520_368_121_885_1,
-        -1_259.139_216_722_402_8,
-        771.323_428_777_653_1,
-        -176.615_029_162_140_6,
-        12.507_343_278_686_905,
-        -0.138_571_095_265_720_12,
-        9.984_369_578_019_572e-6,
-        1.505_632_735_149_311_6e-7,
-    ];
-    if value < 0.5 {
-        // Reflexión: Γ(1-x)Γ(x) = π/sin(πx).
-        return (std::f64::consts::PI / (std::f64::consts::PI * value).sin()).ln()
-            - ln_gamma(1.0 - value);
-    }
-    let value = value - 1.0;
-    let mut sum = COEFFS[0];
-    for (index, coeff) in COEFFS.iter().enumerate().skip(1) {
-        sum += coeff / (value + index as f64);
-    }
-    let tmp = value + 7.5;
-    0.5 * (2.0 * std::f64::consts::PI).ln() + (value + 0.5) * tmp.ln() - tmp + sum.ln()
-}
-
-/// `erf(x)` por Abramowitz & Stegun 7.1.26 (|ε| ≤ 1.5e-7). Sin dependencias.
-fn erf_approx(value: f64) -> f64 {
-    let sign = if value < 0.0 { -1.0 } else { 1.0 };
-    let x = value.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let poly = ((((1.061_405_429 * t - 1.453_152_027) * t + 1.421_413_741) * t - 0.284_496_736)
-        * t
-        + 0.254_829_592)
-        * t;
-    sign * (1.0 - poly * (-x * x).exp())
-}
-
+/// Motor único de probabilidad (F3b): este panel NO duplica matemática.
+/// Delega en `grafito_geometry::statistics` —el mismo motor que usan los
+/// comandos `Normal`/`Binomial`/`Poisson`/`InverseNormal`— y solo agrega el
+/// `Err` honesto en español + las cotas de UI. `NaN` del motor ⇒ `Err`.
 fn check_probability_point(value: f64, what: &str) -> Result<f64, String> {
     if !value.is_finite() {
         return Err(format!("{what} debe ser un número finito"));
+    }
+    Ok(value)
+}
+
+fn finish_probability_scalar(value: f64, what: &str) -> Result<f64, String> {
+    if !value.is_finite() {
+        return Err(format!("{what} no es finito con estos parámetros"));
     }
     Ok(value)
 }
@@ -4362,8 +4334,10 @@ pub(crate) fn normal_pdf(x: f64, mu: f64, sigma: f64) -> Result<f64, String> {
     if sigma <= 0.0 {
         return Err("σ debe ser mayor que 0".to_string());
     }
-    let z = (x - mu) / sigma;
-    Ok((-0.5 * z * z).exp() / (sigma * (2.0 * std::f64::consts::PI).sqrt()))
+    finish_probability_scalar(
+        grafito_geometry::statistics::normal_pdf(x, mu, sigma),
+        "La densidad",
+    )
 }
 
 /// Acumulada Normal(μ, σ) en x: P(X ≤ x).
@@ -4376,12 +4350,30 @@ pub(crate) fn normal_cdf(x: f64, mu: f64, sigma: f64) -> Result<f64, String> {
     if sigma <= 0.0 {
         return Err("σ debe ser mayor que 0".to_string());
     }
-    let root2 = std::f64::consts::SQRT_2;
-    Ok(0.5 * (1.0 + erf_approx((x - mu) / (sigma * root2))))
+    finish_probability_scalar(
+        grafito_geometry::statistics::normal_cdf(x, mu, sigma),
+        "La acumulada",
+    )
 }
 
-/// Masa Binomial(n, p) en k: P(X = k). Vía log-dominio (sin overflow).
-pub(crate) fn binomial_pmf(k: u64, n: u64, p: f64) -> Result<f64, String> {
+/// Cuantil Normal(μ, σ) en p: el x con P(X ≤ x) = p. Misma inversa que
+/// `InverseNormal[p, μ, σ]` (bisección honesta del motor, sin duplicar).
+pub(crate) fn normal_quantile_honest(p: f64, mu: f64, sigma: f64) -> Result<f64, String> {
+    if !(p.is_finite() && 0.0 < p && p < 1.0) {
+        return Err("p debe estar en el intervalo (0, 1)".to_string());
+    }
+    check_probability_point(mu, "μ")?;
+    check_probability_point(sigma, "σ")?;
+    if sigma <= 0.0 {
+        return Err("σ debe ser mayor que 0".to_string());
+    }
+    finish_probability_scalar(
+        grafito_geometry::statistics::normal_quantile(p, mu, sigma),
+        "El cuantil",
+    )
+}
+
+fn check_binomial_args(k: u64, n: u64, p: f64) -> Result<(u32, f64, u32), String> {
     if !p.is_finite() {
         return Err("p debe ser un número finito".to_string());
     }
@@ -4394,33 +4386,52 @@ pub(crate) fn binomial_pmf(k: u64, n: u64, p: f64) -> Result<f64, String> {
     if k > n {
         return Err("k no puede superar a n".to_string());
     }
-    if p == 0.0 {
-        return Ok(if k == 0 { 1.0 } else { 0.0 });
-    }
-    if p == 1.0 {
-        return Ok(if k == n { 1.0 } else { 0.0 });
-    }
-    let log_pmf =
-        ln_gamma(n as f64 + 1.0) - ln_gamma(k as f64 + 1.0) - ln_gamma((n - k) as f64 + 1.0)
-            + k as f64 * p.ln()
-            + (n - k) as f64 * (1.0 - p).ln();
-    Ok(log_pmf.exp())
+    let n32 = u32::try_from(n).map_err(|_| "n fuera de rango".to_string())?;
+    let k32 = u32::try_from(k).map_err(|_| "k fuera de rango".to_string())?;
+    Ok((n32, p, k32))
 }
 
-/// Acumulada Binomial(n, p) en k: P(X ≤ k). Suma honesta de `k+1` términos.
+/// Masa Binomial(n, p) en k: P(X = k). Delega en el motor.
+pub(crate) fn binomial_pmf(k: u64, n: u64, p: f64) -> Result<f64, String> {
+    let (n32, p, k32) = check_binomial_args(k, n, p)?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::binomial_pmf(n32, p, k32),
+        "La puntual",
+    )
+}
+
+/// Acumulada Binomial(n, p) en k: P(X ≤ k). Delega en el motor.
 pub(crate) fn binomial_cdf(k: u64, n: u64, p: f64) -> Result<f64, String> {
-    if k > n {
-        return Err("k no puede superar a n".to_string());
+    let (n32, p, k32) = check_binomial_args(k, n, p)?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::binomial_cdf(n32, p, k32),
+        "La acumulada",
+    )
+}
+
+/// Cuantil Binomial: el menor k con P(X ≤ k) ≥ p. Acumula `pmf` una sola vez
+/// (O(n), n ≤ 2000 por cota) en vez de sumar CDFs anidadas.
+pub(crate) fn binomial_quantile_honest(p: f64, n: u64, prob: f64) -> Result<u64, String> {
+    if !(p.is_finite() && 0.0 < p && p < 1.0) {
+        return Err("p debe estar en el intervalo (0, 1)".to_string());
+    }
+    if n > MAX_BINOMIAL_N {
+        return Err(format!("n ≤ {} en este panel (cota de UI)", MAX_BINOMIAL_N));
+    }
+    if !prob.is_finite() || !(0.0..=1.0).contains(&prob) {
+        return Err("p del modelo debe estar entre 0 y 1".to_string());
     }
     let mut acc = 0.0;
-    for term in 0..=k {
-        acc += binomial_pmf(term, n, p)?;
+    for k in 0..=n {
+        acc += binomial_pmf(k, n, prob)?;
+        if acc >= p {
+            return Ok(k);
+        }
     }
-    Ok(acc.min(1.0))
+    Ok(n)
 }
 
-/// Masa Poisson(λ) en k: P(X = k). Vía log-dominio (sin overflow de k!).
-pub(crate) fn poisson_pmf(k: u64, lambda: f64) -> Result<f64, String> {
+fn check_poisson_args(k: u64, lambda: f64) -> Result<(f64, u32), String> {
     if !lambda.is_finite() {
         return Err("λ debe ser un número finito".to_string());
     }
@@ -4436,20 +4447,53 @@ pub(crate) fn poisson_pmf(k: u64, lambda: f64) -> Result<f64, String> {
     if k > MAX_POISSON_K {
         return Err(format!("k ≤ {} en este panel (cota de UI)", MAX_POISSON_K));
     }
-    if k == 0 {
-        return Ok((-lambda).exp());
-    }
-    let log_pmf = -lambda + k as f64 * lambda.ln() - ln_gamma(k as f64 + 1.0);
-    Ok(log_pmf.exp())
+    let k32 =
+        u32::try_from(k.min(u64::from(u32::MAX))).map_err(|_| "k fuera de rango".to_string())?;
+    Ok((lambda, k32))
 }
 
-/// Acumulada Poisson(λ) en k: P(X ≤ k).
+/// Masa Poisson(λ) en k: P(X = k). Delega en el motor.
+pub(crate) fn poisson_pmf(k: u64, lambda: f64) -> Result<f64, String> {
+    let (lambda, k32) = check_poisson_args(k, lambda)?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::poisson_pmf(lambda, k32),
+        "La puntual",
+    )
+}
+
+/// Acumulada Poisson(λ) en k: P(X ≤ k). Delega en el motor.
 pub(crate) fn poisson_cdf(k: u64, lambda: f64) -> Result<f64, String> {
-    let mut acc = 0.0;
-    for term in 0..=k.min(MAX_POISSON_K) {
-        acc += poisson_pmf(term, lambda)?;
+    let (lambda, k32) = check_poisson_args(k, lambda)?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::poisson_cdf(lambda, k32),
+        "La acumulada",
+    )
+}
+
+/// Cuantil Poisson: el menor k con P(X ≤ k) ≥ p. Itera `pmf` con cota de
+/// 10 001 pasos (la del motor discreto); si no alcanza, `Err` honesto.
+pub(crate) fn poisson_quantile_honest(p: f64, lambda: f64) -> Result<u64, String> {
+    if !(p.is_finite() && 0.0 < p && p < 1.0) {
+        return Err("p debe estar en el intervalo (0, 1)".to_string());
     }
-    Ok(acc.min(1.0))
+    if !lambda.is_finite() || lambda <= 0.0 {
+        return Err("λ debe ser mayor que 0".to_string());
+    }
+    if lambda > MAX_POISSON_LAMBDA {
+        return Err(format!(
+            "λ ≤ {} en este panel (cota de UI)",
+            MAX_POISSON_LAMBDA
+        ));
+    }
+    let mut acc = 0.0;
+    let cap = MAX_POISSON_K.min(10_000);
+    for k in 0..=cap {
+        acc += poisson_pmf(k, lambda)?;
+        if acc >= p {
+            return Ok(k);
+        }
+    }
+    Err("La cola supera la cota de 10 001 pasos en este panel".to_string())
 }
 
 /// Prompt auto de velocidad para sliders Play. Acepta:
@@ -4511,6 +4555,7 @@ struct ProbabilityPanelState {
     p: f64,
     k: f64,
     lambda: f64,
+    p_inv: f64,
 }
 
 impl Default for ProbabilityPanelState {
@@ -4524,6 +4569,7 @@ impl Default for ProbabilityPanelState {
             p: 0.5,
             k: 5.0,
             lambda: 3.0,
+            p_inv: 0.95,
         }
     }
 }
@@ -4533,6 +4579,241 @@ impl Default for ProbabilityPanelState {
 struct TrigPromptState {
     text: String,
     error: Option<String>,
+}
+
+/// Curva + área P(X ≤ x) del panel de probabilidad (F3b). Puro render sobre
+/// el estado efímero: sin I/O, sin spawn, loops acotados (≤61 muestras).
+/// Reusa `normal_pdf`/`binomial_pmf`/`poisson_pmf` (motor único, sin duplicar).
+fn draw_probability_plot(
+    ui: &mut egui::Ui,
+    state: &ProbabilityPanelState,
+    accent: egui::Color32,
+    txt_dim: egui::Color32,
+) {
+    let plot_h = 84.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), plot_h + 14.0),
+        egui::Sense::hover(),
+    );
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter().with_clip_rect(rect);
+    let plot = rect.shrink2(egui::vec2(2.0, 2.0));
+    let plot_top = plot.min.y;
+    let plot_bot = plot.max.y - 14.0;
+    let plot_h = (plot_bot - plot_top).max(1.0);
+    let plot_w = plot.width().max(1.0);
+    painter.line_segment(
+        [
+            egui::pos2(plot.min.x, plot_bot),
+            egui::pos2(plot.max.x, plot_bot),
+        ],
+        egui::Stroke::new(1.0, txt_dim.gamma_multiply(0.35)),
+    );
+    let shade = accent.gamma_multiply(0.25);
+    match state.dist {
+        0 => {
+            if !state.mu.is_finite() || !state.sigma.is_finite() || state.sigma <= 0.0 {
+                return;
+            }
+            let (lo, hi) = (state.mu - 4.0 * state.sigma, state.mu + 4.0 * state.sigma);
+            if !(lo.is_finite() && hi.is_finite() && hi > lo) {
+                return;
+            }
+            const SAMPLES: usize = 61;
+            let mut pts: Vec<(f64, f64)> = Vec::with_capacity(SAMPLES);
+            for i in 0..SAMPLES {
+                let x = lo + (hi - lo) * i as f64 / (SAMPLES - 1) as f64;
+                let y = normal_pdf(x, state.mu, state.sigma).unwrap_or(0.0).max(0.0);
+                if y.is_finite() {
+                    pts.push((x, y));
+                }
+            }
+            if pts.is_empty() {
+                return;
+            }
+            let ymax = pts
+                .iter()
+                .map(|(_, y)| *y)
+                .fold(0.0f64, f64::max)
+                .max(1e-12);
+            let to_px = |x: f64| plot.min.x + ((x - lo) / (hi - lo)) as f32 * plot_w;
+            let to_py = |y: f64| plot_bot - (y / ymax) as f32 * plot_h;
+            for window in pts.windows(2) {
+                let [(x0, y0), (x1, y1)] = [window[0], window[1]];
+                if x1 <= state.x {
+                    let bar = egui::Rect::from_min_max(
+                        egui::pos2(to_px(x0), to_py(y0.max(y1))),
+                        egui::pos2(to_px(x1), plot_bot),
+                    );
+                    painter.rect_filled(bar, 0.0, shade);
+                }
+                painter.line_segment(
+                    [
+                        egui::pos2(to_px(x0), to_py(y0)),
+                        egui::pos2(to_px(x1), to_py(y1)),
+                    ],
+                    egui::Stroke::new(1.5, accent),
+                );
+            }
+            if state.x.is_finite() && state.x >= lo && state.x <= hi {
+                let px = to_px(state.x);
+                painter.line_segment(
+                    [egui::pos2(px, plot_top), egui::pos2(px, plot_bot)],
+                    egui::Stroke::new(1.0, accent.gamma_multiply(0.6)),
+                );
+            }
+            painter.text(
+                egui::pos2(plot.min.x, plot_bot + 2.0),
+                egui::Align2::LEFT_TOP,
+                format_statistic(lo),
+                egui::FontId::proportional(TYPE_XS),
+                txt_dim,
+            );
+            painter.text(
+                egui::pos2(plot.max.x, plot_bot + 2.0),
+                egui::Align2::RIGHT_TOP,
+                "P(X≤x) sombreada · μ±4σ".to_string(),
+                egui::FontId::proportional(TYPE_XS),
+                txt_dim,
+            );
+        }
+        1 => {
+            let n = state.n.round().clamp(1.0, MAX_BINOMIAL_N as f64) as u64;
+            let k_sel = (state.k.round().max(0.0) as u64).min(n);
+            let mean = n as f64 * state.p.clamp(0.0, 1.0);
+            let sd = (n as f64 * state.p.clamp(0.0, 1.0) * (1.0 - state.p.clamp(0.0, 1.0))).sqrt();
+            let (mut lo, mut hi) = if n <= 61 {
+                (0u64, n)
+            } else {
+                let span = (4.0 * sd).ceil().max(8.0) as u64;
+                let lo = (mean.floor().max(0.0) as u64)
+                    .saturating_sub(span / 2)
+                    .min(n);
+                let hi = (lo + 60).min(n);
+                (hi.saturating_sub(60).min(lo), hi)
+            };
+            lo = lo.min(k_sel);
+            hi = hi.max(k_sel);
+            if hi < lo {
+                return;
+            }
+            let count = (hi - lo + 1) as usize;
+            if count == 0 || count > 256 {
+                return;
+            }
+            let mut masses: Vec<(u64, f64)> = Vec::with_capacity(count);
+            for k in lo..=hi {
+                let pmf = binomial_pmf(k, n, state.p).unwrap_or(0.0).max(0.0);
+                if pmf.is_finite() {
+                    masses.push((k, pmf));
+                }
+                if masses.len() >= 256 {
+                    break;
+                }
+            }
+            if masses.is_empty() {
+                return;
+            }
+            let ymax = masses
+                .iter()
+                .map(|(_, y)| *y)
+                .fold(0.0f64, f64::max)
+                .max(1e-12);
+            let bar_w = plot_w / masses.len() as f32;
+            for (i, (k, pmf)) in masses.iter().enumerate() {
+                let h = (*pmf / ymax) as f32 * plot_h;
+                let bar = egui::Rect::from_min_size(
+                    egui::pos2(plot.min.x + i as f32 * bar_w + 1.0, plot_bot - h),
+                    egui::vec2((bar_w - 2.0).max(1.0), h.max(1.0)),
+                );
+                let selected = *k <= k_sel;
+                painter.rect_filled(
+                    bar,
+                    2.0,
+                    if selected {
+                        accent
+                    } else {
+                        txt_dim.gamma_multiply(0.35)
+                    },
+                );
+            }
+            painter.text(
+                egui::pos2(plot.min.x, plot_bot + 2.0),
+                egui::Align2::LEFT_TOP,
+                format!("k={lo}"),
+                egui::FontId::proportional(TYPE_XS),
+                txt_dim,
+            );
+            painter.text(
+                egui::pos2(plot.max.x, plot_bot + 2.0),
+                egui::Align2::RIGHT_TOP,
+                if n > 61 {
+                    format!("ventana {lo}..={hi} de 0..={n} · ≤k sombreado")
+                } else {
+                    "k ≤ seleccionado sombreado".to_string()
+                },
+                egui::FontId::proportional(TYPE_XS),
+                txt_dim,
+            );
+        }
+        _ => {
+            let k_sel = state.k.round().max(0.0) as u64;
+            let lambda = state.lambda;
+            if !lambda.is_finite() || lambda <= 0.0 {
+                return;
+            }
+            let hi_default = (lambda * 3.0 + 10.0).ceil().max(8.0) as u64;
+            let hi = hi_default.min(60).max(k_sel).min(MAX_POISSON_K);
+            let masses: Vec<(u64, f64)> = (0..=hi)
+                .filter_map(|k| {
+                    let pmf = poisson_pmf(k, lambda).unwrap_or(0.0).max(0.0);
+                    pmf.is_finite().then_some((k, pmf))
+                })
+                .collect();
+            if masses.is_empty() {
+                return;
+            }
+            let ymax = masses
+                .iter()
+                .map(|(_, y)| *y)
+                .fold(0.0f64, f64::max)
+                .max(1e-12);
+            let bar_w = plot_w / masses.len() as f32;
+            for (i, (k, pmf)) in masses.iter().enumerate() {
+                let h = (*pmf / ymax) as f32 * plot_h;
+                let bar = egui::Rect::from_min_size(
+                    egui::pos2(plot.min.x + i as f32 * bar_w + 1.0, plot_bot - h),
+                    egui::vec2((bar_w - 2.0).max(1.0), h.max(1.0)),
+                );
+                let selected = *k <= k_sel;
+                painter.rect_filled(
+                    bar,
+                    2.0,
+                    if selected {
+                        accent
+                    } else {
+                        txt_dim.gamma_multiply(0.35)
+                    },
+                );
+            }
+            painter.text(
+                egui::pos2(plot.min.x, plot_bot + 2.0),
+                egui::Align2::LEFT_TOP,
+                "k=0".to_string(),
+                egui::FontId::proportional(TYPE_XS),
+                txt_dim,
+            );
+            painter.text(
+                egui::pos2(plot.max.x, plot_bot + 2.0),
+                egui::Align2::RIGHT_TOP,
+                format!("0..={hi} · ≤k sombreado"),
+                egui::FontId::proportional(TYPE_XS),
+                txt_dim,
+            );
+        }
+    }
 }
 
 /// Sección Probabilidad: Normal / Binomial / Poisson con PDF/CDF honestos.
@@ -4670,6 +4951,63 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     .color(txt_dim)
                     .size(TYPE_XS),
             );
+            ui.add_space(SPACE_XS);
+            draw_probability_plot(ui, &state, accent, txt_dim);
+        }
+        Err(error) => {
+            ui.label(
+                egui::RichText::new(error)
+                    .color(current_theme(ctx).danger)
+                    .size(TYPE_XS),
+            );
+        }
+    }
+    ui.add_space(SPACE_XS);
+    ui.label(
+        egui::RichText::new("Cuantil (inversa)")
+            .color(txt_dim)
+            .size(TYPE_SM)
+            .strong(),
+    );
+    ui.add(
+        egui::Slider::new(&mut state.p_inv, 0.001..=0.999)
+            .text("p cuantil")
+            .fixed_decimals(3),
+    );
+    let quantile: Result<String, String> = (|| {
+        Ok(match state.dist {
+            0 => {
+                let q = normal_quantile_honest(state.p_inv, state.mu, state.sigma)?;
+                format!("x con P(X≤x)={:.3} → {}", state.p_inv, format_statistic(q))
+            }
+            1 => {
+                let n = state.n.round().clamp(1.0, MAX_BINOMIAL_N as f64) as u64;
+                let q = binomial_quantile_honest(state.p_inv, n, state.p)?;
+                format!("menor k con P(X≤k)≥{:.3} → {q} (n={n})", state.p_inv)
+            }
+            _ => {
+                let q = poisson_quantile_honest(state.p_inv, state.lambda)?;
+                format!(
+                    "menor k con P(X≤k)≥{:.3} → {q} (λ={})",
+                    state.p_inv,
+                    format_statistic(state.lambda)
+                )
+            }
+        })
+    })();
+    match quantile {
+        Ok(text) => {
+            ui.label(
+                egui::RichText::new(text)
+                    .color(txt_col)
+                    .size(TYPE_SM)
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new("Misma inversa que InverseNormal/InverseT… (motor único).")
+                    .color(txt_dim)
+                    .size(TYPE_XS),
+            );
         }
         Err(error) => {
             ui.label(
@@ -4682,8 +5020,196 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
     ctx.data_mut(|data| data.insert_temp(id, state));
 }
 
+/// Ventana visible de la hoja vinculada (F3b). La hoja real vive en el
+/// documento (`Document::MAX_SPREADSHEET_ROWS/COLS = 400×400`,
+/// `MAX_SPREADSHEET_RECOMPUTE_CELLS = 10_000`): la UI solo muestra esta
+/// ventana por rendimiento; el resto se edita con `FillColumn`/`FillCells`.
+const SHEET_VIEW_COLS: usize = 6;
+const SHEET_VIEW_ROWS: usize = 8;
+
+/// Borradores + errores por celda de la hoja editable. Vive en `ctx.data`
+/// (cero campos nuevos en `GrafitoApp`, cero I/O): la fuente canónica sigue
+/// en `Document.spreadsheet`; acá solo el texto en edición y el último error
+/// honesto por celda (una fórmula rota muestra `—` sin voltear la hoja).
+#[derive(Debug, Clone, Default)]
+struct SheetEditState {
+    drafts: HashMap<(usize, usize), String>,
+    errors: HashMap<(usize, usize), String>,
+}
+
+fn sheet_col_label(col: usize) -> String {
+    let mut column = col;
+    let mut letters = String::new();
+    loop {
+        letters.push(char::from(b'A' + (column % 26) as u8));
+        if column < 26 {
+            break;
+        }
+        column = column / 26 - 1;
+    }
+    letters.chars().rev().collect()
+}
+
+/// Grilla editable A1:F8 sobre `Document.spreadsheet` (F3b). Cada celda edita
+/// su fuente (`=A1+B1`, `=x(A)`, `(A1, B1*2)`); el commit es por celda vía
+/// `stage_spreadsheet_cell_edits` (atómico, con undo) y el error queda en esa
+/// celda sin voltear la hoja (una fórmula rota muestra `—`). Ventana acotada
+/// por rendimiento; los presupuestos reales (400×400/10k) los impone el core.
+fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
+    let ctx = ui.ctx().clone();
+    let (_is_dark, _accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(&ctx);
+    let id = egui::Id::new("gc_sheet_edit_state");
+    let mut edit: SheetEditState = ctx
+        .data_mut(|data| data.get_temp::<SheetEditState>(id))
+        .unwrap_or_default();
+    let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
+    let mut dirty: Vec<(usize, usize, String)> = Vec::new();
+
+    egui::Grid::new("gc_sheet_editable")
+        .num_columns(SHEET_VIEW_COLS + 1)
+        .striped(true)
+        .spacing([4.0, 2.0])
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("").size(TYPE_XS));
+            for col in 0..SHEET_VIEW_COLS {
+                ui.label(
+                    egui::RichText::new(sheet_col_label(col))
+                        .color(hdr_col)
+                        .size(TYPE_XS)
+                        .strong(),
+                );
+            }
+            ui.end_row();
+            for row in 0..SHEET_VIEW_ROWS {
+                ui.label(
+                    egui::RichText::new(format!("{}", row + 1))
+                        .color(txt_dim)
+                        .size(TYPE_XS),
+                );
+                for col in 0..SHEET_VIEW_COLS {
+                    let source = app.document.get_spreadsheet_cell(row, col);
+                    let draft = edit
+                        .drafts
+                        .entry((row, col))
+                        .or_insert_with(|| source.clone());
+                    if !edit.errors.contains_key(&(row, col)) && *draft != source {
+                        // Fuente cambió por fuera (otra celda/undo): re-sincroniza.
+                        *draft = source.clone();
+                    }
+                    let mut text = draft.clone();
+                    let resp = ui.add_sized(
+                        [64.0, 18.0],
+                        egui::TextEdit::singleline(&mut text)
+                            .hint_text("—")
+                            .font(egui::FontId::proportional(TYPE_XS)),
+                    );
+                    if resp.changed() {
+                        *draft = text.clone();
+                        edit.errors.remove(&(row, col));
+                    }
+                    let enter =
+                        resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if enter && *draft != source {
+                        dirty.push((row, col, draft.clone()));
+                    }
+                    // Valor computado honesto debajo de la fuente.
+                    let computed = app.document.eval_spreadsheet_cell(row, col);
+                    let value_text = match (computed, source.trim().is_empty()) {
+                        (_, true) => String::new(),
+                        (Some(v), false) => format!("= {}", format_statistic(v)),
+                        (None, false) => "—".to_string(),
+                    };
+                    if !value_text.is_empty() {
+                        ui.label(
+                            egui::RichText::new(value_text)
+                                .color(if computed.is_some() { txt_col } else { txt_dim })
+                                .size(TYPE_XS),
+                        );
+                    }
+                    if let Some(error) = edit.errors.get(&(row, col)) {
+                        ui.label(
+                            egui::RichText::new(error)
+                                .color(current_theme(&ctx).danger)
+                                .size(TYPE_XS),
+                        );
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    // “Aplicar” compromete todas las celdas sucias (ordenadas, una por vez
+    // para error por celda); Enter ya encoló la celda actual arriba.
+    let mut apply_all = ui
+        .small_button("Aplicar hoja")
+        .on_hover_text("Compromete las celdas editadas (una por vez, con undo)")
+        .clicked();
+    for ((row, col), draft) in &edit.drafts {
+        let source = app.document.get_spreadsheet_cell(*row, *col);
+        if *draft != source && !dirty.iter().any(|(r, c, _)| r == row && c == col) {
+            apply_all = true;
+            break;
+        }
+    }
+    if apply_all {
+        let mut batch: Vec<(usize, usize, String)> = edit
+            .drafts
+            .iter()
+            .filter_map(|((row, col), draft)| {
+                let source = app.document.get_spreadsheet_cell(*row, *col);
+                (*draft != source).then(|| (*row, *col, draft.clone()))
+            })
+            .collect();
+        batch.sort_unstable_by_key(|(row, col, _)| (*row, *col));
+        dirty.extend(batch);
+        dirty.sort_unstable_by_key(|(row, col, _)| (*row, *col));
+        dirty.dedup_by_key(|(row, col, _)| (*row, *col));
+    }
+    if !dirty.is_empty() {
+        snapshot.capture(&app.document);
+        let mut ok = 0usize;
+        for (row, col, value) in dirty {
+            let label = format!("{}{}", sheet_col_label(col), row + 1);
+            match app
+                .document
+                .stage_spreadsheet_cell_edits(&[(row, col, value)])
+            {
+                Ok(staged) => {
+                    app.document = staged;
+                    edit.drafts.remove(&(row, col));
+                    edit.errors.remove(&(row, col));
+                    ok += 1;
+                }
+                Err(error) => {
+                    edit.errors.insert((row, col), format!("{label}: {error}"));
+                }
+            }
+        }
+        if ok > 0 {
+            app.cas_result = format!("Hoja: {ok} celda(s) actualizada(s)");
+        } else if let Some(((row, col), _)) = edit.drafts.iter().next() {
+            let _ = (row, col);
+        }
+        snapshot.save_if_semantically_changed(
+            &mut app.document,
+            &mut app.undo_stack,
+            &mut app.redo_stack,
+        );
+        ctx.request_repaint();
+    }
+    ui.label(
+        egui::RichText::new(format!(
+            "Ventana A1:{}{} de 400×400 · 10 000 celdas recomputables (core). `—` = fórmula sin resolver, la hoja sigue viva.",
+            sheet_col_label(SHEET_VIEW_COLS - 1),
+            SHEET_VIEW_ROWS
+        ))
+        .color(txt_dim)
+        .size(TYPE_XS),
+    );
+    ctx.data_mut(|data| data.insert_temp(id, edit));
+}
+
 /// Fila de la hoja viva: una tabla del documento con sus columnas clonadas
-/// (lectura puntual por frame; la edición es P2).
+/// (lectura puntual por frame; las celdas editables están arriba).
 struct SheetTable {
     id: ObjectId,
     label: String,
@@ -4693,18 +5219,27 @@ struct SheetTable {
     ys: Vec<f64>,
 }
 
-/// Sección Datos: hoja viva en LECTURA sobre los `DataTable` del documento.
-/// Sin edición (honesto: la edición es P2); el vacío explica cómo crear una
-/// y el botón de ejemplo inserta de verdad (nunca mudo).
+/// Sección Datos: hoja vinculada editable (celdas) + tablas en lectura.
+/// La hoja edita `Document.spreadsheet` con validación por celda; las tablas
+/// (`DataTable`) siguen en lectura con botón de ejemplo real (nunca mudo).
 pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     let ctx = ui.ctx().clone();
     let (_is_dark, _accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(&ctx);
     ui.label(
-        egui::RichText::new("Datos · hoja viva (lectura)")
+        egui::RichText::new("Datos · hoja vinculada (editable)")
             .color(hdr_col)
             .size(TYPE_SM)
             .strong(),
     );
+    ui.label(
+        egui::RichText::new(
+            "Celda con `=A1+B1` o `=x(A)` se recomputa al cambiar la fuente; `(x, y)` con fórmulas crea punto.",
+        )
+        .color(txt_dim)
+        .size(TYPE_XS),
+    );
+    draw_sheet_editable_grid(ui, app);
+    ui.add_space(SPACE_XS);
 
     let tables: Vec<SheetTable> = app
         .document
@@ -4835,7 +5370,7 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
         );
     }
     ui.label(
-        egui::RichText::new("Solo lectura: la edición de celdas llega en P2.")
+        egui::RichText::new("Tablas en lectura; las celdas se editan arriba.")
             .color(txt_dim)
             .size(TYPE_XS),
     );
@@ -4896,9 +5431,11 @@ pub(crate) fn draw_trig_speed_prompt(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 #[cfg(test)]
 mod gc_piel_tests {
     use super::{
-        binomial_cdf, binomial_pmf, normal_cdf, normal_pdf, parse_slider_prompt, poisson_cdf,
-        poisson_pmf, MAX_BINOMIAL_N,
+        binomial_cdf, binomial_pmf, binomial_quantile_honest, normal_cdf, normal_pdf,
+        normal_quantile_honest, parse_slider_prompt, poisson_cdf, poisson_pmf,
+        poisson_quantile_honest, sheet_col_label, MAX_BINOMIAL_N, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
+    use grafito_core::Document;
 
     #[test]
     fn normal_standard_values_are_honest() {
@@ -4957,6 +5494,54 @@ mod gc_piel_tests {
         assert!(poisson_pmf(1, -2.0).is_err());
         assert!(poisson_pmf(1, f64::NAN).is_err());
         assert!(poisson_pmf(1, 1e9).is_err());
+    }
+
+    #[test]
+    fn f3b_area_coincide_con_comando_y_cuantil_consistente() {
+        // Normal: cuantil 97.5% ≈ 1.96 y su acumulada vuelve a 0.975.
+        let q = normal_quantile_honest(0.975, 0.0, 1.0).expect("cuantil normal");
+        assert!((q - 1.959_963_984_540_054).abs() < 1e-3, "q = {q}");
+        let area = normal_cdf(q, 0.0, 1.0).expect("área en el cuantil");
+        assert!((area - 0.975).abs() < 1e-3, "área = {area}");
+        // Binomial: el panel (motor estadístico) coincide con la cuenta
+        // combinatoria del comando `Binomial[10, 0.5, 5]` = 252/1024.
+        let pmf = binomial_pmf(5, 10, 0.5).expect("pmf panel");
+        assert!((pmf - 252.0 / 1024.0).abs() < 1e-9, "pmf = {pmf}");
+        let q_bin = binomial_quantile_honest(0.5, 10, 0.5).expect("cuantil binomial");
+        let cdf_q = binomial_cdf(q_bin, 10, 0.5).expect("cdf en cuantil");
+        assert!(cdf_q >= 0.5, "cdf({q_bin}) = {cdf_q}");
+        if q_bin > 0 {
+            let cdf_prev = binomial_cdf(q_bin - 1, 10, 0.5).expect("cdf previa");
+            assert!(cdf_prev < 0.5, "cdf({}) = {cdf_prev}", q_bin - 1);
+        }
+        // Poisson: coincide con `Poisson[3, 2]` = 9/(2e³) y el cuantil es
+        // el menor k con acumulada ≥ p.
+        let pmf_p = poisson_pmf(2, 3.0).expect("pmf poisson");
+        assert!(
+            (pmf_p - 9.0 / (2.0 * 3.0_f64.exp())).abs() < 1e-9,
+            "pmf = {pmf_p}"
+        );
+        let q_pois = poisson_quantile_honest(0.5, 3.0).expect("cuantil poisson");
+        let cdf_q = poisson_cdf(q_pois, 3.0).expect("cdf en cuantil");
+        assert!(cdf_q >= 0.5, "cdf({q_pois}) = {cdf_q}");
+        if q_pois > 0 {
+            let cdf_prev = poisson_cdf(q_pois - 1, 3.0).expect("cdf previa");
+            assert!(cdf_prev < 0.5, "cdf({}) = {cdf_prev}", q_pois - 1);
+        }
+        assert!(normal_quantile_honest(0.0, 0.0, 1.0).is_err());
+        assert!(binomial_quantile_honest(1.0, 10, 0.5).is_err());
+        assert!(poisson_quantile_honest(0.5, -1.0).is_err());
+    }
+
+    #[test]
+    fn f3b_sheet_view_respeta_presupuestos_del_core() {
+        const { assert!(Document::MAX_SPREADSHEET_ROWS == 400) };
+        const { assert!(Document::MAX_SPREADSHEET_COLS == 400) };
+        const { assert!(Document::MAX_SPREADSHEET_RECOMPUTE_CELLS == 10_000) };
+        const { assert!(SHEET_VIEW_COLS * SHEET_VIEW_ROWS <= Document::MAX_SPREADSHEET_RECOMPUTE_CELLS) };
+        assert_eq!(sheet_col_label(0), "A");
+        assert_eq!(sheet_col_label(5), "F");
+        assert_eq!(sheet_col_label(26), "AA");
     }
 
     #[test]

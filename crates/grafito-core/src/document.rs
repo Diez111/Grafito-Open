@@ -1512,6 +1512,10 @@ impl Document {
 
         let order = staged.propagation_order(&[id]);
         staged.re_evaluate_constraints_in_place(&order)?;
+        // F3b: mover un punto es cambiar la fuente de `=x(A)` y de las
+        // coordenadas con fórmulas: se recomputa la hoja vinculada (incluye
+        // secuencias vivas y sync de gráficos) antes de validar.
+        staged.recompute_spreadsheet_variables()?;
         crate::validation::validate_document(&staged)?;
         staged.version = self.version.wrapping_add(1);
         staged.spatial_dirty = true;
@@ -4262,6 +4266,7 @@ impl Document {
         }
         staged.propagate_changed_roots(&changed)?;
         staged.recompute_live_sequences()?;
+        staged.sync_linked_scatter_plots();
         crate::validation::validate_document(&staged)?;
         staged.version = self.version.wrapping_add(1);
         staged.spatial_dirty = true;
@@ -4283,8 +4288,9 @@ impl Document {
     {
         let mut staged = self.detached_clone_for_staging();
         mutate(&mut staged);
+        // `recompute_spreadsheet_variables` ya incluye secuencias vivas y sync
+        // de gráficos vinculados (F3b).
         staged.recompute_spreadsheet_variables()?;
-        staged.recompute_live_sequences()?;
         crate::validation::validate_document(&staged)?;
         staged.version = self.version.wrapping_add(1);
         staged.spatial_dirty = true;
@@ -4472,10 +4478,6 @@ impl Document {
         }
         if let Err(error) = staged.recompute_spreadsheet_variables() {
             log::warn!("Animation update rejected: {error}");
-            return false;
-        }
-        if let Err(error) = staged.recompute_live_sequences() {
-            log::warn!("Animation live sequences rejected: {error}");
             return false;
         }
         if let Err(error) = crate::validation::validate_document(&staged) {
@@ -4927,6 +4929,314 @@ impl Document {
         references
     }
 
+    /// Foto de coordenadas de puntos por etiqueta para la hoja vinculada (F3b).
+    /// Excluye los puntos generados por celdas-coordenada (son salidas, no
+    /// entradas: leerlos como entrada crearía un ciclo rancio) y las etiquetas
+    /// ambiguas o no finitas (honesto: no se inventa ningún valor).
+    fn spreadsheet_point_scalars(&self) -> HashMap<String, (f64, f64)> {
+        let mut scalars: HashMap<String, (f64, f64)> = HashMap::new();
+        let mut ambiguous: HashSet<String> = HashSet::new();
+        for object in self.objects.values() {
+            let GeoObject::Point(point) = object else {
+                continue;
+            };
+            if point.label.trim().is_empty() || ambiguous.contains(&point.label) {
+                continue;
+            }
+            if !point.position.x.is_finite() || !point.position.y.is_finite() {
+                continue;
+            }
+            if self
+                .spreadsheet_coordinate_points
+                .contains_key(&point.label)
+            {
+                continue;
+            }
+            if scalars.contains_key(&point.label) {
+                scalars.remove(&point.label);
+                ambiguous.insert(point.label.clone());
+                continue;
+            }
+            scalars.insert(point.label.clone(), (point.position.x, point.position.y));
+        }
+        scalars
+    }
+
+    /// Expande `x(Etiqueta)` / `y(Etiqueta)` (mayúsculas incluidas, espacios
+    /// opcionales) a literales de ida y vuelta. Sin `unwrap`, sin regex, sin
+    /// dependencias nuevas. Si la expresión supera `MAX_EXPR_LENGTH` o el
+    /// resultado lo superaría, devuelve la entrada intacta para que `evaluate`
+    /// la rechace con error honesto. Las etiquetas desconocidas se dejan
+    /// intactas (la celda queda sin resolver, no se inventa un 0).
+    fn expand_spreadsheet_object_refs(
+        expression: &str,
+        scalars: &HashMap<String, (f64, f64)>,
+    ) -> String {
+        if expression.len() > crate::validation::MAX_EXPR_LENGTH || scalars.is_empty() {
+            return expression.to_string();
+        }
+        if !expression.bytes().any(|byte| byte == b'(') {
+            return expression.to_string();
+        }
+        let chars: Vec<char> = expression.chars().collect();
+        let mut out = String::with_capacity(expression.len());
+        let mut index = 0;
+        while index < chars.len() {
+            let current = chars[index];
+            let is_axis = current == 'x' || current == 'X' || current == 'y' || current == 'Y';
+            let prev_ok = if index == 0 {
+                true
+            } else {
+                let prev = chars[index - 1];
+                !(prev.is_ascii_alphanumeric() || prev == '_')
+            };
+            if is_axis && prev_ok {
+                let mut cursor = index + 1;
+                while cursor < chars.len() && (chars[cursor] == ' ' || chars[cursor] == '\t') {
+                    cursor += 1;
+                }
+                if cursor < chars.len() && chars[cursor] == '(' {
+                    cursor += 1;
+                    while cursor < chars.len() && (chars[cursor] == ' ' || chars[cursor] == '\t') {
+                        cursor += 1;
+                    }
+                    let label_start = cursor;
+                    let is_label_start = cursor < chars.len()
+                        && (chars[cursor].is_ascii_alphabetic() || chars[cursor] == '_');
+                    if is_label_start {
+                        cursor += 1;
+                        while cursor < chars.len()
+                            && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_')
+                        {
+                            cursor += 1;
+                        }
+                        let label_end = cursor;
+                        while cursor < chars.len()
+                            && (chars[cursor] == ' ' || chars[cursor] == '\t')
+                        {
+                            cursor += 1;
+                        }
+                        if cursor < chars.len() && chars[cursor] == ')' {
+                            let label: String = chars[label_start..label_end].iter().collect();
+                            if let Some((px, py)) = scalars.get(&label) {
+                                let value = if current == 'x' || current == 'X' {
+                                    *px
+                                } else {
+                                    *py
+                                };
+                                if value.is_finite() {
+                                    out.push_str(&format!("{value:?}"));
+                                    index = cursor + 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            out.push(current);
+            index += 1;
+        }
+        if out.len() > crate::validation::MAX_EXPR_LENGTH {
+            return expression.to_string();
+        }
+        out
+    }
+
+    /// Parsea `(x, y)` literal o con componentes como fórmulas de hoja
+    /// (`A1+1`, `x(A)`, `=B2*2`). `vars` son las variables ya resueltas
+    /// (celdas previas + documento) y `scalars` la foto de puntos. Devuelve
+    /// `None` honesto si algo no es finito o no evalúa (la celda queda sin
+    /// punto, la planilla sigue viva).
+    fn parse_spreadsheet_coordinate_with_context(
+        value: &str,
+        vars: &[(String, f64)],
+        scalars: &HashMap<String, (f64, f64)>,
+    ) -> Option<Point2> {
+        if let Some(literal) = Self::parse_spreadsheet_coordinate(value) {
+            return Some(literal);
+        }
+        let trimmed = value.trim();
+        if trimmed.is_empty() || !trimmed.contains(',') {
+            return None;
+        }
+        let inner = trimmed
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or(trimmed);
+        let mut parts = inner.splitn(2, ',');
+        let left = parts.next()?.trim();
+        let right = parts.next()?.trim();
+        if left.is_empty() || right.is_empty() || left.contains(',') || right.contains(',') {
+            return None;
+        }
+        if left.len() > crate::validation::MAX_EXPR_LENGTH
+            || right.len() > crate::validation::MAX_EXPR_LENGTH
+        {
+            return None;
+        }
+        let eval_part = |part: &str| -> Option<f64> {
+            let expr = part.strip_prefix('=').unwrap_or(part).trim();
+            if expr.is_empty() {
+                return None;
+            }
+            let expanded = Self::expand_spreadsheet_object_refs(expr, scalars);
+            grafito_geometry::expr::evaluate(&expanded, vars)
+                .ok()
+                .filter(|v| v.is_finite())
+        };
+        let x = eval_part(left)?;
+        let y = eval_part(right)?;
+        Some(Point2::new(x, y))
+    }
+
+    /// Reconcilia TODAS las celdas con pinta de coordenada (contienen `,`)
+    /// contra sus puntos generados, usando variables frescas + foto de puntos.
+    /// Crea/actualiza/borra sin voltear la hoja: las colisiones de etiqueta con
+    /// objetos de usuario se saltean (la fuente se conserva, sin punto) y solo
+    /// el tope de objetos o una fuente inválida interna devuelve `Err`.
+    /// Acotado por `MAX_SPREADSHEET_RECOMPUTE_CELLS`. Devuelve los puntos
+    /// tocados para propagar.
+    fn reconcile_all_spreadsheet_coordinates(
+        &mut self,
+        vars: &[(String, f64)],
+        scalars: &HashMap<String, (f64, f64)>,
+    ) -> Result<Vec<ObjectId>, String> {
+        let mut candidates: Vec<(String, String)> = Vec::new();
+        let mut scanned = 0usize;
+        for (row, cells) in self.spreadsheet.iter().enumerate() {
+            for (col, value) in cells.iter().enumerate() {
+                if value.trim().is_empty() || !value.contains(',') {
+                    continue;
+                }
+                if scanned >= Self::MAX_SPREADSHEET_RECOMPUTE_CELLS {
+                    break;
+                }
+                scanned += 1;
+                candidates.push((Self::spreadsheet_cell_label(row, col), value.clone()));
+            }
+            if scanned >= Self::MAX_SPREADSHEET_RECOMPUTE_CELLS {
+                break;
+            }
+        }
+        let mut parsed: HashMap<String, Point2> = HashMap::new();
+        for (label, value) in &candidates {
+            if let Some(position) =
+                Self::parse_spreadsheet_coordinate_with_context(value, vars, scalars)
+            {
+                parsed.insert(label.clone(), position);
+            }
+        }
+        let mut changed: Vec<ObjectId> = Vec::new();
+        let mut changed_ids: HashSet<ObjectId> = HashSet::new();
+        let owned: Vec<(String, ObjectId)> = self
+            .spreadsheet_coordinate_points
+            .iter()
+            .map(|(cell, id)| (cell.clone(), *id))
+            .collect();
+        for (label, position) in &parsed {
+            if self.objects.len() >= crate::validation::MAX_OBJECT_COUNT
+                && self.spreadsheet_coordinate_point(label).is_none()
+            {
+                return Err(format!(
+                    "Document reached the maximum of {} objects",
+                    crate::validation::MAX_OBJECT_COUNT
+                ));
+            }
+            if self
+                .objects
+                .values()
+                .any(|existing| existing.label() == label)
+                && self.spreadsheet_coordinate_point(label).is_none()
+            {
+                continue;
+            }
+            if let Some(id) = self.spreadsheet_coordinate_point(label) {
+                if !self.constraints.is_free(&id) {
+                    continue;
+                }
+                let Some(GeoObject::Point(point)) = self.objects.get_mut(&id) else {
+                    continue;
+                };
+                if point.position != *position {
+                    point.position = *position;
+                    self.spatial_dirty = true;
+                    if changed_ids.insert(id) {
+                        changed.push(id);
+                    }
+                }
+            } else {
+                let id = self.try_add_object(GeoObject::Point(
+                    PointObj::new(*position).with_label(label.clone()),
+                ))?;
+                self.set_spreadsheet_coordinate_point(label.clone(), id);
+                if changed_ids.insert(id) {
+                    changed.push(id);
+                }
+            }
+        }
+        for (label, id) in owned {
+            if parsed.contains_key(&label) {
+                continue;
+            }
+            // Solo borra si hay fuente no vacía que ya no es coordenada; los
+            // dueños legacy sin fuente se conservan (contrato de carga).
+            let Some((row, col)) = Self::spreadsheet_coordinate_cell_indices(&label) else {
+                continue;
+            };
+            let has_source = self
+                .spreadsheet
+                .get(row)
+                .and_then(|cells| cells.get(col))
+                .is_some_and(|value| !value.trim().is_empty());
+            if has_source {
+                let _ = self.remove_object(id);
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Sincroniza cada `ScatterPlot.source_data` desde su `DataTable` fuente.
+    /// Si la tabla falta o los largos difieren de forma interna, el gráfico
+    /// queda intacto (honesto, no inventa puntos). Sin `unwrap`, sin I/O.
+    fn sync_linked_scatter_plots(&mut self) {
+        let links: Vec<(ObjectId, ObjectId)> = self
+            .objects
+            .values()
+            .filter_map(|object| match object {
+                GeoObject::ScatterPlot(scatter) => {
+                    scatter.source_data.map(|table_id| (scatter.id, table_id))
+                }
+                _ => None,
+            })
+            .collect();
+        if links.is_empty() {
+            return;
+        }
+        let mut touched = false;
+        for (scatter_id, table_id) in links {
+            let Some(GeoObject::DataTable(table)) = self.objects.get(&table_id) else {
+                continue;
+            };
+            if table.xs.len() != table.ys.len() {
+                continue;
+            }
+            let (xs, ys) = (table.xs.clone(), table.ys.clone());
+            let Some(GeoObject::ScatterPlot(scatter)) = self.objects.get_mut(&scatter_id) else {
+                continue;
+            };
+            if scatter.xs != xs || scatter.ys != ys {
+                scatter.xs = xs;
+                scatter.ys = ys;
+                touched = true;
+            }
+        }
+        if touched {
+            self.spatial_dirty = true;
+            self.bump_version();
+        }
+    }
+
     fn spreadsheet_coordinate_cell_indices(cell: &str) -> Option<(usize, usize)> {
         let letter_count = cell.bytes().take_while(u8::is_ascii_uppercase).count();
         if letter_count == 0 || letter_count == cell.len() {
@@ -5086,7 +5396,16 @@ impl Document {
                 .and_then(|cells| cells.get(column))
                 .filter(|source| !source.trim().is_empty())
             {
-                let Some(position) = Self::parse_spreadsheet_coordinate(source) else {
+                // F3b: la fuente puede ser literal o fórmula (`(A1, y(A))`).
+                let vars: Vec<(String, f64)> = self
+                    .variables
+                    .iter()
+                    .map(|(name, value)| (name.clone(), *value))
+                    .collect();
+                let scalars = self.spreadsheet_point_scalars();
+                let Some(position) =
+                    Self::parse_spreadsheet_coordinate_with_context(source, &vars, &scalars)
+                else {
                     return Err(format!(
                         "Spreadsheet coordinate owner '{cell}' has no coordinate cell source"
                     ));
@@ -5136,9 +5455,21 @@ impl Document {
     ) -> bool {
         let label = Self::spreadsheet_cell_label(row, column);
         let owns_coordinate_point = self.spreadsheet_coordinate_point(&label).is_some();
-        !owns_coordinate_point
-            || !value.trim_start().starts_with('(')
-            || Self::parse_spreadsheet_coordinate(value).is_some()
+        if !owns_coordinate_point || !value.trim_start().starts_with('(') {
+            return true;
+        }
+        if Self::parse_spreadsheet_coordinate(value).is_some() {
+            return true;
+        }
+        // F3b: una coordenada con fórmulas también es commiteable si resuelve
+        // con las variables actuales (si no, sigue como borrador local).
+        let vars: Vec<(String, f64)> = self
+            .variables
+            .iter()
+            .map(|(name, val)| (name.clone(), *val))
+            .collect();
+        let scalars = self.spreadsheet_point_scalars();
+        Self::parse_spreadsheet_coordinate_with_context(value, &vars, &scalars).is_some()
     }
 
     /// Stages sorted spreadsheet source changes on one detached document.
@@ -5184,6 +5515,7 @@ impl Document {
         staged.propagate_changed_roots(&changed_points)?;
         // Re-evalúa secuencias vivas cuyo rango o expresión dependa de variables cambiadas.
         staged.recompute_live_sequences()?;
+        staged.sync_linked_scatter_plots();
         crate::validation::validate_document(&staged)?;
         staged.version = self.version.wrapping_add(1);
         staged.spatial_dirty = true;
@@ -5302,6 +5634,7 @@ impl Document {
     /// Re-evalúa todas las secuencias vivas tras un cambio de variables.
     pub fn recompute_live_sequences(&mut self) -> Result<(), String> {
         if self.live_sequences.is_empty() {
+            self.sync_linked_scatter_plots();
             return Ok(());
         }
         // Snapshot de bindings para evitar borrow conflicts.
@@ -5369,6 +5702,8 @@ impl Document {
                 table.ys = ys;
             }
         }
+        // F3b: las tablas vivas alimentan gráficos enlazados.
+        self.sync_linked_scatter_plots();
         Ok(())
     }
 
@@ -5475,7 +5810,17 @@ impl Document {
         changed_points: &mut Vec<ObjectId>,
         changed_point_ids: &mut HashSet<ObjectId>,
     ) -> Result<(), String> {
-        if let Some(position) = Self::parse_spreadsheet_coordinate(cell_value) {
+        // F3b: literal primero (rápido), si no, fórmula con variables frescas.
+        let position = Self::parse_spreadsheet_coordinate(cell_value).or_else(|| {
+            let vars: Vec<(String, f64)> = self
+                .variables
+                .iter()
+                .map(|(name, val)| (name.clone(), *val))
+                .collect();
+            let scalars = self.spreadsheet_point_scalars();
+            Self::parse_spreadsheet_coordinate_with_context(cell_value, &vars, &scalars)
+        });
+        if let Some(position) = position {
             if let Some(id) = self.spreadsheet_coordinate_point(label) {
                 if self.constraints.is_free(&id) {
                     let Some(GeoObject::Point(point)) = self.objects.get_mut(&id) else {
@@ -5504,12 +5849,42 @@ impl Document {
         if row >= self.spreadsheet.len() || col >= self.spreadsheet[row].len() {
             return None;
         }
-        let expr = &self.spreadsheet[row][col];
+        let expr = self.spreadsheet[row][col].trim();
         if expr.is_empty() {
             return None;
         }
+        // Hoja vinculada: acepta `=A1+1` y `x(A)` como el recompute (F3b).
+        let expr = expr.strip_prefix('=').unwrap_or(expr).trim();
+        if expr.is_empty() {
+            return None;
+        }
+        // Las celdas-coordenada `(x, y)` no son escalares: honesto `None`.
+        if expr.contains(',')
+            && Self::parse_spreadsheet_coordinate(&self.spreadsheet[row][col]).is_some()
+        {
+            return None;
+        }
+        let scalars = self.spreadsheet_point_scalars();
+        let expanded = Self::expand_spreadsheet_object_refs(expr, &scalars);
+        // Si es coordenada con fórmulas, tampoco es escalar.
+        if expanded.contains(',') {
+            let vars: Vec<(String, f64)> = self
+                .variables
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            if Self::parse_spreadsheet_coordinate_with_context(
+                &self.spreadsheet[row][col],
+                &vars,
+                &scalars,
+            )
+            .is_some()
+            {
+                return None;
+            }
+        }
         grafito_geometry::expr::evaluate(
-            expr,
+            &expanded,
             &self
                 .variables
                 .iter()
@@ -5517,15 +5892,22 @@ impl Document {
                 .collect::<Vec<_>>(),
         )
         .ok()
+        .filter(|value| value.is_finite())
     }
 
     /// Recomputes the scalar variables owned by spreadsheet cells. A
     /// topological traversal resolves every acyclic dependency once, while
     /// cycles and invalid formulas remain unresolved without retaining stale
-    /// values.
+    /// values. F3b: expande `x(A)`/`y(A)` desde la foto de puntos, reconcilia
+    /// coordenadas con fórmulas y sincroniza `ScatterPlot` vinculados.
     pub fn recompute_spreadsheet_variables(&mut self) -> Result<(), String> {
         let changed = self.recompute_spreadsheet_variables_with_bound_changes()?;
-        self.propagate_changed_roots(&changed)
+        self.propagate_changed_roots(&changed)?;
+        self.recompute_live_sequences()?;
+        // `recompute_live_sequences` vuelve temprano sin sync si no hay
+        // secuencias: el sync explícito cubre ese caso (F3b).
+        self.sync_linked_scatter_plots();
+        Ok(())
     }
 
     fn recompute_spreadsheet_variables_with_bound_changes(
@@ -5597,6 +5979,8 @@ impl Document {
             .filter_map(|(index, count)| (*count == 0).then_some(index))
             .collect();
         let mut resolved = HashSet::new();
+        // F3b: foto de puntos para `x(A)`/`y(A)` (entradas, no salidas).
+        let scalars = self.spreadsheet_point_scalars();
         while let Some(index) = ready.pop_front() {
             let (label, expression) = &cells[index];
             // Hoja vinculada GeoGebra-like: soporta "=A1+B1" además de "A1+B1"
@@ -5609,7 +5993,17 @@ impl Document {
             if expr_for_eval.is_empty() {
                 continue;
             }
-            let Ok(value) = grafito_geometry::expr::evaluate(expr_for_eval, &variables) else {
+            // Las celdas-coordenada no son escalares: se reconcilian aparte.
+            if expr_for_eval.contains(',') {
+                let vars_now: Vec<(String, f64)> = variables.clone();
+                if Self::parse_spreadsheet_coordinate_with_context(expression, &vars_now, &scalars)
+                    .is_some()
+                {
+                    continue;
+                }
+            }
+            let expanded = Self::expand_spreadsheet_object_refs(expr_for_eval, &scalars);
+            let Ok(value) = grafito_geometry::expr::evaluate(&expanded, &variables) else {
                 continue;
             };
             if !value.is_finite() {
@@ -5636,7 +6030,20 @@ impl Document {
         self.spreadsheet_variables = resolved;
         self.variable_meta
             .retain(|name, _| self.variables.contains_key(name));
-        let changed = self.recompute_bound_parameters_with_changes();
+        let mut changed = self.recompute_bound_parameters_with_changes();
+        // F3b: coordenadas con fórmulas (`(A1, y(A))`) usan las variables
+        // frescas; los puntos tocados también se propagan.
+        let vars_for_coords: Vec<(String, f64)> = self
+            .variables
+            .iter()
+            .map(|(name, value)| (name.clone(), *value))
+            .collect();
+        let mut seen: HashSet<ObjectId> = changed.iter().copied().collect();
+        for point_id in self.reconcile_all_spreadsheet_coordinates(&vars_for_coords, &scalars)? {
+            if seen.insert(point_id) {
+                changed.push(point_id);
+            }
+        }
         self.bump_version();
         Ok(changed)
     }
@@ -6750,5 +7157,121 @@ mod live_param_tests {
         );
         assert_eq!(live.value, 3.0);
         assert!(doc.variable_meta("q").is_none(), "lectura no muta");
+    }
+
+    #[test]
+    fn f3b_celda_con_referencia_a_objeto_se_recomputa_al_mover_fuente() {
+        let mut doc = Document::new();
+        let point_id = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(1.0, 2.0)).with_label("A"),
+            ))
+            .expect("punto A");
+        doc.set_spreadsheet_cell(0, 0, "1".to_string()).expect("A1");
+        doc.set_spreadsheet_cell(0, 1, "=A1*3".to_string())
+            .expect("B1");
+        doc.set_spreadsheet_cell(0, 2, "=x(A)+10".to_string())
+            .expect("C1");
+        doc.recompute_spreadsheet_variables()
+            .expect("recompute inicial");
+        assert_eq!(doc.get_variable("B1"), Some(3.0));
+        assert_eq!(doc.get_variable("C1"), Some(11.0));
+        // Cambia la fuente escalar: la dependiente se recomputa.
+        let staged = doc
+            .stage_spreadsheet_cell_edits(&[(0, 0, "4".to_string())])
+            .expect("edita A1");
+        doc = staged;
+        assert_eq!(doc.get_variable("A1"), Some(4.0));
+        assert_eq!(doc.get_variable("B1"), Some(12.0));
+        // Mueve el punto fuente: la celda con `x(A)` se recomputa.
+        doc.try_update_point_and_re_evaluate(point_id, |point| {
+            point.position = Point2::new(5.0, 2.0);
+            Ok(())
+        })
+        .expect("mueve A");
+        assert_eq!(doc.get_variable("C1"), Some(15.0));
+        // Fórmula rota: no voltea la hoja, solo queda sin resolver.
+        let staged = doc
+            .stage_spreadsheet_cell_edits(&[(0, 3, "=ZZZ_NO_EXISTE+(".to_string())])
+            .expect("fuente rota se conserva");
+        doc = staged;
+        assert!(doc.get_variable("D1").is_none(), "rota no resuelve");
+        assert_eq!(doc.get_variable("B1"), Some(12.0), "sanas intactas");
+        assert_eq!(doc.get_variable("C1"), Some(15.0), "objeto-ref intacta");
+    }
+
+    #[test]
+    fn f3b_coordenada_con_formula_y_grafico_vinculado_se_actualizan() {
+        use crate::{DataTableObj, ScatterPlotObj};
+        let mut doc = Document::new();
+        doc.set_spreadsheet_cell(0, 0, "2".to_string()).expect("A1");
+        doc.set_spreadsheet_cell(0, 1, "3".to_string()).expect("B1");
+        // C1 es coordenada con fórmula sobre otras celdas.
+        let staged = doc
+            .stage_spreadsheet_cell_edits(&[(0, 2, "(A1+1, B1*2)".to_string())])
+            .expect("C1 coordenada");
+        doc = staged;
+        let owned = doc.spreadsheet_coordinate_point("C1").expect("punto C1");
+        let position = doc.point_position(owned).expect("posición C1");
+        assert!((position.x - 3.0).abs() < 1e-9, "x = {position:?}");
+        assert!((position.y - 6.0).abs() < 1e-9, "y = {position:?}");
+        // Cambia la fuente: el punto generado se actualiza.
+        let staged = doc
+            .stage_spreadsheet_cell_edits(&[(0, 0, "10".to_string())])
+            .expect("edita A1");
+        doc = staged;
+        let renewed = doc.spreadsheet_coordinate_point("C1").expect("sigue C1");
+        let position = doc.point_position(renewed).expect("nueva posición");
+        assert!(
+            (position.x - 11.0).abs() < 1e-9,
+            "x tras fuente = {position:?}"
+        );
+        // Gráfico vinculado: el Scatter sigue a su DataTable vía live.
+        let table = DataTableObj::new("x", "y", vec![0.0, 1.0], vec![0.0, 1.0]).with_label("t");
+        let table_id = doc
+            .try_add_object(GeoObject::DataTable(table))
+            .expect("tabla");
+        let scatter = ScatterPlotObj::new(vec![0.0, 1.0], vec![0.0, 1.0]).linked_to(table_id);
+        let scatter_id = doc
+            .try_add_object(GeoObject::ScatterPlot(scatter))
+            .expect("scatter");
+        doc.try_add_live_sequence(
+            table_id,
+            LiveSequenceBinding {
+                expr: "k*k".to_string(),
+                var: "k".to_string(),
+                start_expr: "0".to_string(),
+                end_expr: "3".to_string(),
+            },
+        )
+        .expect("secuencia viva");
+        doc.recompute_live_sequences().expect("live");
+        let (table_xs, table_ys) = match doc.get_object(table_id).expect("tabla existe") {
+            GeoObject::DataTable(table) => (table.xs.clone(), table.ys.clone()),
+            _ => panic!("tabla esperada"),
+        };
+        assert_eq!(table_xs, vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(table_ys, vec![0.0, 1.0, 4.0, 9.0]);
+        match doc.get_object(scatter_id).expect("scatter existe") {
+            GeoObject::ScatterPlot(scatter) => {
+                assert_eq!(scatter.xs, table_xs, "scatter sigue xs");
+                assert_eq!(scatter.ys, table_ys, "scatter sigue ys");
+            }
+            _ => panic!("scatter esperado"),
+        }
+    }
+
+    #[test]
+    fn f3b_presupuestos_spreadsheet_siguen_enforced() {
+        assert_eq!(Document::MAX_SPREADSHEET_ROWS, 400);
+        assert_eq!(Document::MAX_SPREADSHEET_COLS, 400);
+        assert_eq!(Document::MAX_SPREADSHEET_RECOMPUTE_CELLS, 10_000);
+        let mut doc = Document::new();
+        assert!(doc
+            .set_spreadsheet_cell(Document::MAX_SPREADSHEET_ROWS, 0, "1".to_string())
+            .is_err());
+        assert!(doc
+            .set_spreadsheet_cell(0, Document::MAX_SPREADSHEET_COLS, "1".to_string())
+            .is_err());
     }
 }

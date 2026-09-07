@@ -59,6 +59,8 @@ pub enum Tool {
     Cylinder3D,
     Cone3D,
     Torus3D,
+    Prism3D,
+    Tetrahedron3D,
     MoebiusStrip,
     Surface3D,
     ParametricCurve3D,
@@ -87,6 +89,9 @@ pub enum Tool {
     VectorField2D,
     Arc,
     Sector,
+    Semicircle,
+    Compass,
+    Spline,
     // Construction tools
     Segment,
     Ray,
@@ -97,6 +102,11 @@ pub enum Tool {
     Parallel,
     Locus,
     Midpoint,
+    // Rigid & similarity transforms (GeoGebra parity, motor: Translate/Rotate/Dilate/Reflect)
+    Translate,
+    Rotate,
+    Dilate,
+    Reflect,
     // Measurement tools
     Distance,
     Angle,
@@ -106,6 +116,8 @@ pub enum Tool {
     Slider,
     Button,
     Image,
+    Checkbox,
+    InputBox,
     Eraser,
     // Complex & Visualization
     DomainColoring,
@@ -151,6 +163,8 @@ impl Tool {
             Tool::Cylinder3D => "Cylinder3D",
             Tool::Cone3D => "Cone3D",
             Tool::Torus3D => "Torus3D",
+            Tool::Prism3D => "Prism3D",
+            Tool::Tetrahedron3D => "Tetrahedron3D",
             Tool::MoebiusStrip => "MoebiusStrip",
             Tool::Surface3D => "Surface3D",
             Tool::ParametricCurve3D => "ParametricCurve3D",
@@ -175,6 +189,9 @@ impl Tool {
             Tool::VectorField2D => "VectorField2D",
             Tool::Arc => "Arc",
             Tool::Sector => "Sector",
+            Tool::Semicircle => "Semicircle",
+            Tool::Compass => "Compass",
+            Tool::Spline => "Spline",
             Tool::Segment => "Segment",
             Tool::Ray => "Ray",
             Tool::Vector => "Vector",
@@ -182,6 +199,10 @@ impl Tool {
             Tool::Tangent => "Tangent",
             Tool::Perpendicular => "Perpendicular",
             Tool::Parallel => "Parallel",
+            Tool::Translate => "Translate",
+            Tool::Rotate => "Rotate",
+            Tool::Dilate => "Dilate",
+            Tool::Reflect => "Reflect",
             Tool::Locus => "Locus",
             Tool::Midpoint => "Midpoint",
             Tool::Distance => "Distance",
@@ -190,6 +211,8 @@ impl Tool {
             Tool::Slope => "Slope",
             Tool::Slider => "Slider",
             Tool::Button => "Button",
+            Tool::Checkbox => "Checkbox",
+            Tool::InputBox => "InputBox",
             Tool::Image => "Image",
             Tool::DomainColoring => "DomainColoring",
             Tool::HeatMap => "HeatMap",
@@ -232,6 +255,8 @@ impl Tool {
             | Tool::Cylinder3D
             | Tool::Cone3D
             | Tool::Torus3D
+            | Tool::Prism3D
+            | Tool::Tetrahedron3D
             | Tool::MoebiusStrip
             | Tool::Surface3D
             | Tool::ParametricCurve3D
@@ -254,6 +279,9 @@ impl Tool {
             | Tool::VectorField2D
             | Tool::Arc
             | Tool::Sector
+            | Tool::Semicircle
+            | Tool::Compass
+            | Tool::Spline
             | Tool::Segment
             | Tool::Ray
             | Tool::Vector
@@ -261,6 +289,12 @@ impl Tool {
             | Tool::Tangent
             | Tool::Perpendicular
             | Tool::Parallel
+            | Tool::Translate
+            | Tool::Rotate
+            | Tool::Dilate
+            | Tool::Reflect
+            | Tool::Checkbox
+            | Tool::InputBox
             | Tool::Locus
             | Tool::Midpoint
             | Tool::Distance

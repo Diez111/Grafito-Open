@@ -2108,8 +2108,1061 @@ pub fn solve_ode_first_order(rhs: &str, x: &str, y: &str) -> Result<String, OdeS
         return Ok(format!("{left} = {right} + C"));
     }
     Err(OdeSymbolicError::NotSupported {
-        hint: "SolveODE soporta EDOs lineales y' = a(x)*y + b(x) y separables y' = g(x)*h(y); el resto (Riccati, Bernoulli general, 2do orden) es L en Tasks.md F10.W5".to_string(),
+        hint: "SolveODE de 1er orden soporta EDOs lineales y' = a(x)*y + b(x) y separables y' = g(x)*h(y); 2º orden constante en solve_ode_second_order_const; resto (Riccati, Bernoulli general, orden ≥ 3, coef. variables salvo Euler, resonancias no cubiertas) fuera del subset F3c (detalle en Tasks.md F10.W5)".to_string(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Frente F3c: EDOs lineales de 2º orden con coeficientes constantes,
+// sistemas lineales 2×2 constantes (autovalores) y transformada de Laplace
+// directa/inversa del subset (racionales + exp/sin/cos/t).
+//
+// Homogénea por ecuación característica; particular por coeficientes
+// indeterminados exactos (recurrencia descendente, sin colocación
+// numérica): polinomios, `K·exp(αx)`, `K·sin/cos(wx)`, `P(x)·exp(αx)`,
+// con resonancia simple/doble (`x^s`). Sistemas por traza/determinante:
+// reales distintas, repetido (Jordan con `t·e^λt` si defectivo),
+// complejo conjugado. Laplace directa por tabla + linealidad; inversa de
+// racionales propios con denominador grado ≤ 2.
+//
+// Fuera del subset → `Err` honesto que nombra el límite: orden ≥ 3,
+// coeficientes variables (incluida Euler), resonancias no cubiertas
+// (frecuencia nula, casi-resonancia), denominadores grado ≥ 3,
+// retardos/impulsos. Referencia GeoGebra: `SolveODE`, `Laplace`.
+// Presupuestos: entradas ≤ 2000 bytes, salida ≤ 8000,
+// polinomios RHS grado ≤ 8 (`MAX_ODE2_POLY_DEGREE`), potencias Laplace
+// `n ≤ 20`, denominador inverso grado ≤ 2.
+// ---------------------------------------------------------------------------
+
+/// Grado máximo del RHS polinómico en 2º orden (muy por debajo de
+/// `MAX_BUCHBERGER_DEGREE` 64; la recurrencia es O(n) sin explosión).
+pub const MAX_ODE2_POLY_DEGREE: usize = 8;
+/// Potencia máxima `t^n` en Laplace directa (`20!` cabe en `u64` exacto).
+pub const MAX_LAPLACE_POWER: u32 = 20;
+/// Grado máximo del denominador en Laplace inversa (tabla exacta).
+pub const MAX_LAPLACE_RATIONAL_DEGREE: usize = 2;
+
+/// Tolerancia de cero para coeficientes característicos.
+const ODE2_EPS: f64 = 1e-9;
+
+/// Formatea un finito de forma compacta y re-parseable (`-2`, `0.5`).
+fn fmt_num(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 && v.abs() < 1e12 {
+        return format!("{}", v.round() as i64);
+    }
+    let s = format!("{v:.6}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Une términos con signos sin emitir `+ -` (siempre re-parseable).
+fn join_sum_terms(terms: &[String]) -> String {
+    let mut out = String::new();
+    for t in terms {
+        if t.is_empty() {
+            continue;
+        }
+        if out.is_empty() {
+            out.push_str(t);
+        } else if let Some(rest) = t.strip_prefix('-') {
+            out.push_str(" - (");
+            out.push_str(rest);
+            out.push(')');
+        } else {
+            out.push_str(" + ");
+            out.push_str(t);
+        }
+    }
+    if out.is_empty() {
+        "0".to_string()
+    } else {
+        out
+    }
+}
+
+/// Coeficiente constante desde string (honesto si depende de variables).
+fn const_coeff(expr: &str, role: &str) -> Result<f64, OdeSymbolicError> {
+    let ast = parse_normalized(&check_ode_bytes(expr)?)?;
+    crate::cas::cas_const_value(&ast).filter(|v| v.is_finite()).ok_or_else(|| {
+        OdeSymbolicError::NotSupported {
+            hint: format!(
+                "{role} debe ser constante ('{expr}'); coeficientes variables (incluida Euler) fuera del subset F3c"
+            ),
+        }
+    })
+}
+
+/// RHS del método de coeficientes indeterminados (canónico).
+#[derive(Debug, Clone)]
+enum RhsKind {
+    /// Polinomio ascendente.
+    Poly(Vec<f64>),
+    /// `k·exp(a·x+b)`.
+    Exp { k: f64, a: f64, b: f64 },
+    /// `ks·sin(w·x)+kc·cos(w·x)` (fase ya plegada).
+    Trig { ks: f64, kc: f64, w: f64 },
+    /// `P(x)·exp(a·x+b)`.
+    PolyExp { poly: Vec<f64>, a: f64, b: f64 },
+}
+
+/// Separa un factor constante: `k·resto` (`k = 1` si no hay).
+fn split_const_factor(e: &crate::ast::Expr) -> (f64, crate::ast::Expr) {
+    use crate::ast::Expr;
+    if let Expr::Mul(a, b) = e {
+        if let Some(k) = crate::cas::cas_const_value(a) {
+            if k.is_finite() {
+                return (k, b.as_ref().clone());
+            }
+        }
+        if let Some(k) = crate::cas::cas_const_value(b) {
+            if k.is_finite() {
+                return (k, a.as_ref().clone());
+            }
+        }
+    }
+    (1.0, e.clone())
+}
+
+/// Un término `Sin`/`Cos` lineal a canónico `(ks, kc, w)` con fase plegada.
+fn trig_term_canonical(e: &crate::ast::Expr, x: &str) -> Option<(f64, f64, f64)> {
+    use crate::ast::Expr;
+    let (k, rest) = split_const_factor(e);
+    if !k.is_finite() {
+        return None;
+    }
+    match &rest {
+        Expr::Sin(arg) => {
+            let (w, phi) = crate::cas::cas_linear_coeff(arg, x)?;
+            if w.abs() < ODE2_EPS || !w.is_finite() || !phi.is_finite() {
+                return None;
+            }
+            Some((k * phi.cos(), k * phi.sin(), w))
+        }
+        Expr::Cos(arg) => {
+            let (w, phi) = crate::cas::cas_linear_coeff(arg, x)?;
+            if w.abs() < ODE2_EPS || !w.is_finite() || !phi.is_finite() {
+                return None;
+            }
+            Some((k * phi.sin(), k * phi.cos(), w))
+        }
+        _ => None,
+    }
+}
+
+/// Clasifica el RHS en el subset de coeficientes indeterminados.
+fn classify_rhs(e: &crate::ast::Expr, x: &str) -> Result<RhsKind, OdeSymbolicError> {
+    use crate::ast::Expr;
+    let unsupported = |detail: String| {
+        OdeSymbolicError::NotSupported {
+        hint: format!(
+            "RHS '{detail}' fuera del subset F3c (polinomios grado ≤ {MAX_ODE2_POLY_DEGREE}, K·exp(αx), K·sin/cos(wx), P(x)·exp(αx)); orden ≥ 3 y resonancias no cubiertas tampoco"
+        ),
+    }
+    };
+    if let Some(p) = crate::integral::poly_coeffs_bounded(e, x, MAX_ODE2_POLY_DEGREE) {
+        return Ok(RhsKind::Poly(p));
+    }
+    match e {
+        Expr::Exp(arg) => {
+            let (a, b) = crate::cas::cas_linear_coeff(arg, x)
+                .ok_or_else(|| unsupported(e.to_expr_string()))?;
+            if !a.is_finite() || !b.is_finite() {
+                return Err(unsupported(e.to_expr_string()));
+            }
+            Ok(RhsKind::Exp { k: 1.0, a, b })
+        }
+        Expr::Sin(_) | Expr::Cos(_) => {
+            let (ks, kc, w) = trig_term_canonical(e, x).ok_or_else(|| {
+                unsupported(format!(
+                    "{}; frecuencia nula o fase no lineal",
+                    e.to_expr_string()
+                ))
+            })?;
+            Ok(RhsKind::Trig { ks, kc, w })
+        }
+        Expr::Mul(_, _) => {
+            let (k, rest) = split_const_factor(e);
+            if (k - 1.0).abs() > ODE2_EPS {
+                let inner = classify_rhs(&rest, x)?;
+                return Ok(scale_rhs(&inner, k));
+            }
+            // `P(x)·exp` sin factor constante externo.
+            if let Expr::Mul(p_side, e_side) = &rest {
+                for (pp, ee) in [(p_side, e_side), (e_side, p_side)] {
+                    if let Expr::Exp(arg) = ee.as_ref() {
+                        if let Some(p) =
+                            crate::integral::poly_coeffs_bounded(pp, x, MAX_ODE2_POLY_DEGREE)
+                        {
+                            let (a, b) = crate::cas::cas_linear_coeff(arg, x)
+                                .ok_or_else(|| unsupported(e.to_expr_string()))?;
+                            if a.is_finite() && b.is_finite() {
+                                return Ok(RhsKind::PolyExp { poly: p, a, b });
+                            }
+                        }
+                    }
+                }
+            }
+            Err(unsupported(e.to_expr_string()))
+        }
+        Expr::Add(a, b) | Expr::Sub(a, b) => {
+            let (l, r) = (trig_term_canonical(a, x), trig_term_canonical(b, x));
+            match (l, r) {
+                (Some((ks1, kc1, w1)), Some((ks2, kc2, w2))) => {
+                    if (w1 - w2).abs() > 1e-9 {
+                        return Err(unsupported(format!(
+                            "mezcla de frecuencias {w1} ≠ {w2}; suma de resonancias fuera del subset"
+                        )));
+                    }
+                    let (ks, kc) = if matches!(e, Expr::Add(_, _)) {
+                        (ks1 + ks2, kc1 + kc2)
+                    } else {
+                        (ks1 - ks2, kc1 - kc2)
+                    };
+                    if ks.abs() < ODE2_EPS && kc.abs() < ODE2_EPS {
+                        Ok(RhsKind::Poly(vec![0.0]))
+                    } else {
+                        Ok(RhsKind::Trig { ks, kc, w: w1 })
+                    }
+                }
+                _ => Err(unsupported(e.to_expr_string())),
+            }
+        }
+        _ => Err(unsupported(e.to_expr_string())),
+    }
+}
+
+/// Escala un RHS clasificado por una constante.
+fn scale_rhs(kind: &RhsKind, k: f64) -> RhsKind {
+    match kind {
+        RhsKind::Poly(p) => RhsKind::Poly(p.iter().map(|c| c * k).collect()),
+        RhsKind::Exp { k: k0, a, b } => RhsKind::Exp {
+            k: k0 * k,
+            a: *a,
+            b: *b,
+        },
+        RhsKind::Trig { ks, kc, w } => RhsKind::Trig {
+            ks: ks * k,
+            kc: kc * k,
+            w: *w,
+        },
+        RhsKind::PolyExp { poly, a, b } => RhsKind::PolyExp {
+            poly: poly.iter().map(|c| c * k).collect(),
+            a: *a,
+            b: *b,
+        },
+    }
+}
+
+/// Resuelve `P(D)Q = rhs` con `P(r) = a·r²+b·r+c` por recurrencia
+/// descendente exacta. Devuelve `(Q ascendente, s)` con `s` la
+/// multiplicidad de la raíz 0 (`yp = x^s·Q`).
+fn solve_poly_operator(
+    a: f64,
+    b: f64,
+    c: f64,
+    rhs: &[f64],
+) -> Result<(Vec<f64>, usize), OdeSymbolicError> {
+    let deg_fail = || {
+        OdeSymbolicError::NotSupported {
+        hint: "recurrencia de coeficientes indeterminados degeneró (casi-resonancia); fuera del subset F3c".to_string(),
+    }
+    };
+    let s = if c.abs() > ODE2_EPS {
+        0
+    } else if b.abs() > ODE2_EPS {
+        1
+    } else {
+        2
+    };
+    let mut n = rhs.len().saturating_sub(1);
+    while n > 0 && rhs.get(n).is_some_and(|v| v.abs() < ODE2_EPS) {
+        n -= 1;
+    }
+    if rhs.iter().take(n + 1).all(|v| v.abs() < ODE2_EPS) {
+        return Ok((vec![0.0], s));
+    }
+    let mut q = vec![0.0; n + 1];
+    // Coeficiente de `x^j` en `L[x^s·Q]`: con `k = j−s`,
+    // `c·q[k] + b·(k+1)·q[k+1] + a·(k+2)(k+1)·q[k+2] = rhs[j]`
+    // (términos con `c = 0` o `b = 0` se anulan según `s`); descendente.
+    for k in (0..=n).rev() {
+        let rhs_k = rhs.get(k).copied().unwrap_or(0.0);
+        let q1 = q.get(k + 1).copied().unwrap_or(0.0);
+        let q2 = q.get(k + 2).copied().unwrap_or(0.0);
+        let kf = k as f64;
+        let (qk, denom_ok) = if s == 0 {
+            (
+                (rhs_k - b * (kf + 1.0) * q1 - a * (kf + 2.0) * (kf + 1.0) * q2) / c,
+                c.abs() > ODE2_EPS,
+            )
+        } else if s == 1 {
+            (
+                (rhs_k - a * (kf + 2.0) * (kf + 1.0) * q1) / (b * (kf + 1.0)),
+                b.abs() > ODE2_EPS,
+            )
+        } else {
+            (rhs_k / (a * (kf + 2.0) * (kf + 1.0)), a.abs() > ODE2_EPS)
+        };
+        if !denom_ok || !qk.is_finite() {
+            return Err(deg_fail());
+        }
+        q[k] = qk;
+    }
+    Ok((q, s))
+}
+
+/// Raíces de `a·r²+b·r+c = 0` (`a ≠ 0` validado por el llamador).
+#[derive(Debug, Clone, Copy)]
+enum CharRoots {
+    Real(f64, f64),
+    Double(f64),
+    Complex(f64, f64),
+}
+
+fn char_roots(a: f64, b: f64, c: f64) -> CharRoots {
+    let disc = b * b - 4.0 * a * c;
+    if disc > ODE2_EPS {
+        let s = disc.sqrt();
+        CharRoots::Real((-b + s) / (2.0 * a), (-b - s) / (2.0 * a))
+    } else if disc >= -ODE2_EPS {
+        CharRoots::Double(-b / (2.0 * a))
+    } else {
+        CharRoots::Complex(-b / (2.0 * a), (-disc).sqrt() / (2.0 * a.abs()))
+    }
+}
+
+/// Homogénea como string con `C1, C2`.
+fn homogeneous_string(roots: CharRoots, x: &str) -> String {
+    match roots {
+        CharRoots::Real(r1, r2) => {
+            format!("C1*exp({}*{x}) + C2*exp({}*{x})", fmt_num(r1), fmt_num(r2))
+        }
+        CharRoots::Double(r) => format!("(C1 + C2*{x})*exp({}*{x})", fmt_num(r)),
+        CharRoots::Complex(al, be) => format!(
+            "exp({}*{x})*(C1*cos({}*{x}) + C2*sin({}*{x}))",
+            fmt_num(al),
+            fmt_num(be),
+            fmt_num(be)
+        ),
+    }
+}
+
+/// `x^p` como AST (`p = 0` → `1`, `p = 1` → `x`).
+fn x_pow_ast(x: &str, p: usize) -> crate::ast::Expr {
+    use crate::ast::Expr;
+    match p {
+        0 => Expr::Const(1.0),
+        1 => Expr::Var(x.to_string()),
+        _ => Expr::Pow(
+            Box::new(Expr::Var(x.to_string())),
+            Box::new(Expr::Const(p as f64)),
+        ),
+    }
+}
+
+/// Polinomio ascendente como AST (términos ~0 omitidos).
+fn poly_ast(coeffs: &[f64], x: &str) -> crate::ast::Expr {
+    use crate::ast::Expr;
+    let mut acc: Option<Expr> = None;
+    for (k, c) in coeffs.iter().enumerate() {
+        if c.abs() < ODE2_EPS {
+            continue;
+        }
+        let term = if k == 0 {
+            Expr::Const(*c)
+        } else {
+            Expr::Mul(Box::new(Expr::Const(*c)), Box::new(x_pow_ast(x, k)))
+        };
+        acc = Some(match acc {
+            Some(prev) => Expr::Add(Box::new(prev), Box::new(term)),
+            None => term,
+        });
+    }
+    acc.unwrap_or(Expr::Const(0.0))
+}
+
+/// `exp(a·x+b)` como AST (`b ≈ 0` → `exp(a·x)`).
+fn exp_ast(a: f64, b: f64, x: &str) -> crate::ast::Expr {
+    use crate::ast::Expr;
+    let lin = if b.abs() < ODE2_EPS {
+        Expr::Mul(Box::new(Expr::Const(a)), Box::new(Expr::Var(x.to_string())))
+    } else {
+        Expr::Add(
+            Box::new(Expr::Mul(
+                Box::new(Expr::Const(a)),
+                Box::new(Expr::Var(x.to_string())),
+            )),
+            Box::new(Expr::Const(b)),
+        )
+    };
+    Expr::Exp(Box::new(lin))
+}
+
+/// Particular exacta como AST (`None` si el RHS es idénticamente nulo).
+fn ode2_particular_expr(
+    a: f64,
+    b: f64,
+    c: f64,
+    rhs: &RhsKind,
+    x: &str,
+) -> Result<Option<crate::ast::Expr>, OdeSymbolicError> {
+    use crate::ast::Expr;
+    let resonance_fail = || OdeSymbolicError::NotSupported {
+        hint: "resonancia no cubierta (casi-resonancia o denominador nulo); fuera del subset F3c"
+            .to_string(),
+    };
+    match rhs {
+        RhsKind::Poly(p) => {
+            let (q, s) = solve_poly_operator(a, b, c, p)?;
+            if q.iter().all(|v| v.abs() < ODE2_EPS) {
+                return Ok(None);
+            }
+            let mut terms: Vec<Expr> = Vec::new();
+            for (k, qk) in q.iter().enumerate() {
+                if qk.abs() < ODE2_EPS {
+                    continue;
+                }
+                terms.push(Expr::Mul(
+                    Box::new(Expr::Const(*qk)),
+                    Box::new(x_pow_ast(x, k + s)),
+                ));
+            }
+            let acc = terms
+                .into_iter()
+                .reduce(|u, v| Expr::Add(Box::new(u), Box::new(v)));
+            Ok(acc)
+        }
+        RhsKind::Exp { k, a: al, b: bl } => {
+            if k.abs() < ODE2_EPS {
+                return Ok(None);
+            }
+            let p_val = a * al * al + b * al + c;
+            let pp_val = 2.0 * a * al + b;
+            let (s, amp) = if p_val.abs() > ODE2_EPS {
+                (0, k / p_val)
+            } else if pp_val.abs() > ODE2_EPS {
+                (1, k / pp_val)
+            } else if a.abs() > ODE2_EPS {
+                (2, k / (2.0 * a))
+            } else {
+                return Err(resonance_fail());
+            };
+            if !amp.is_finite() {
+                return Err(resonance_fail());
+            }
+            let mut yp = exp_ast(*al, *bl, x);
+            if s > 0 {
+                yp = Expr::Mul(Box::new(x_pow_ast(x, s)), Box::new(yp));
+            }
+            if (amp - 1.0).abs() > ODE2_EPS {
+                yp = Expr::Mul(Box::new(Expr::Const(amp)), Box::new(yp));
+            }
+            Ok(Some(yp))
+        }
+        RhsKind::Trig { ks, kc, w } => {
+            if ks.abs() < ODE2_EPS && kc.abs() < ODE2_EPS {
+                return Ok(None);
+            }
+            let u = c - a * w * w;
+            let v = b * w;
+            let det = u * u + v * v;
+            let (s, big_a, big_b) = if det > ODE2_EPS {
+                (0, (u * ks + v * kc) / det, (u * kc - v * ks) / det)
+            } else if u.abs() < 1e-6 && v.abs() < 1e-6 {
+                // Resonancia `b = 0, c/a = w²`: `yp = x·(A·sin+B·cos)`.
+                if a.abs() < ODE2_EPS || w.abs() < ODE2_EPS {
+                    return Err(resonance_fail());
+                }
+                (1, kc / (2.0 * a * w), -ks / (2.0 * a * w))
+            } else {
+                return Err(resonance_fail());
+            };
+            if !big_a.is_finite() || !big_b.is_finite() {
+                return Err(resonance_fail());
+            }
+            let sin_t = Expr::Sin(Box::new(Expr::Mul(
+                Box::new(Expr::Const(*w)),
+                Box::new(Expr::Var(x.to_string())),
+            )));
+            let cos_t = Expr::Cos(Box::new(Expr::Mul(
+                Box::new(Expr::Const(*w)),
+                Box::new(Expr::Var(x.to_string())),
+            )));
+            let mut inner: Option<Expr> = None;
+            for (coef, fun) in [(big_a, sin_t), (big_b, cos_t)] {
+                if coef.abs() < ODE2_EPS {
+                    continue;
+                }
+                let term = Expr::Mul(Box::new(Expr::Const(coef)), Box::new(fun));
+                inner = Some(match inner {
+                    Some(prev) => Expr::Add(Box::new(prev), Box::new(term)),
+                    None => term,
+                });
+            }
+            let Some(combo) = inner else {
+                return Ok(None);
+            };
+            if s == 0 {
+                Ok(Some(combo))
+            } else {
+                Ok(Some(Expr::Mul(
+                    Box::new(Expr::Var(x.to_string())),
+                    Box::new(combo),
+                )))
+            }
+        }
+        RhsKind::PolyExp { poly, a: al, b: bl } => {
+            // `L[e^{αx}Q] = e^{αx}·P(D+α)Q` con `P(D+α) = (a, P'(α), P(α))`.
+            let p_val = a * al * al + b * al + c;
+            let pp_val = 2.0 * a * al + b;
+            let (q, s) = solve_poly_operator(a, pp_val, p_val, poly)?;
+            if q.iter().all(|v| v.abs() < ODE2_EPS) {
+                return Ok(None);
+            }
+            let mut yp = Expr::Mul(Box::new(poly_ast(&q, x)), Box::new(exp_ast(*al, *bl, x)));
+            if s > 0 {
+                yp = Expr::Mul(Box::new(x_pow_ast(x, s)), Box::new(yp));
+            }
+            Ok(Some(yp))
+        }
+    }
+}
+
+/// Resuelve `a·y''+b·y'+c·y = rhs(x)` con `a, b, c` constantes (`a ≠ 0`).
+///
+/// Homogénea por raíces características; particular por coeficientes
+/// indeterminados exactos. Devuelve `y = hom + yp` con `C1, C2`.
+pub fn solve_ode_second_order_const(
+    a_expr: &str,
+    b_expr: &str,
+    c_expr: &str,
+    rhs_expr: &str,
+    x: &str,
+) -> Result<String, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let (a, b, c) = (
+        const_coeff(a_expr, "a")?,
+        const_coeff(b_expr, "b")?,
+        const_coeff(c_expr, "c")?,
+    );
+    if !a.is_finite() || !b.is_finite() || !c.is_finite() {
+        return Err(OdeSymbolicError::NotSupported {
+            hint: "coeficientes no finitos; fuera del subset F3c".to_string(),
+        });
+    }
+    if a.abs() < ODE2_EPS {
+        return Err(OdeSymbolicError::NotSupported {
+            hint: "a = 0: no es de 2º orden (usa SolveODE de 1er orden); orden ≥ 3 fuera del subset F3c".to_string(),
+        });
+    }
+    let rhs_ast = parse_normalized(&check_ode_bytes(rhs_expr)?)?;
+    let kind = classify_rhs(&rhs_ast, &x)?;
+    let hom = homogeneous_string(char_roots(a, b, c), &x);
+    let out = match ode2_particular_expr(a, b, c, &kind, &x)? {
+        Some(yp) => format!("y = {hom} + {}", yp.to_expr_string()),
+        None => format!("y = {hom}"),
+    };
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "solución excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Sistemas lineales 2×2 constantes.
+// ---------------------------------------------------------------------------
+
+/// Autovalores/vectores de un sistema 2×2 constante (cerrado F3c).
+#[derive(Debug, Clone)]
+enum SystemKind {
+    /// Reales distintas: `(λ1, v1, λ2, v2)`.
+    Distinct {
+        l1: f64,
+        v1: (f64, f64),
+        l2: f64,
+        v2: (f64, f64),
+    },
+    /// Repetido diagonal (`A = λI`).
+    Diagonal { l: f64 },
+    /// Repetido defectivo: `(λ, v, w)` con `(A−λI)w = v`.
+    Jordan {
+        l: f64,
+        v: (f64, f64),
+        w: (f64, f64),
+    },
+    /// Complejo conjugado: `(α, β, p, q)` con `v = p+iq`.
+    Complex {
+        al: f64,
+        be: f64,
+        p: (f64, f64),
+        q: (f64, f64),
+    },
+}
+
+/// Clasifica `x' = A·x` por traza/determinante (todo `O(1)`, sin iterar).
+fn classify_system_2x2(a11: f64, a12: f64, a21: f64, a22: f64) -> SystemKind {
+    /// Vector propio de `(A−λI)` por la fila no nula (`v ≠ 0` garantizado
+    /// si la matriz no es `λI`).
+    fn eigenvec(a11: f64, a12: f64, a21: f64, a22: f64, l: f64) -> (f64, f64) {
+        if a12.abs() > ODE2_EPS || (l - a11).abs() > ODE2_EPS {
+            (a12, l - a11)
+        } else {
+            (l - a22, a21)
+        }
+    }
+    let (tr, det) = (a11 + a22, a11 * a22 - a12 * a21);
+    let disc = tr * tr - 4.0 * det;
+    if disc > ODE2_EPS {
+        let s = disc.sqrt();
+        let (l1, l2) = ((tr + s) / 2.0, (tr - s) / 2.0);
+        return SystemKind::Distinct {
+            l1,
+            v1: eigenvec(a11, a12, a21, a22, l1),
+            l2,
+            v2: eigenvec(a11, a12, a21, a22, l2),
+        };
+    }
+    if disc < -ODE2_EPS {
+        let (al, be) = (tr / 2.0, (-disc).sqrt() / 2.0);
+        // `v = (a12, λ−a11)` (o la otra fila si `a12 ≈ 0`).
+        let (p, q) = if a12.abs() > ODE2_EPS || (al - a11).abs() > ODE2_EPS {
+            ((a12, al - a11), (0.0, be))
+        } else {
+            ((al - a22, a21), (be, 0.0))
+        };
+        return SystemKind::Complex { al, be, p, q };
+    }
+    let l = tr / 2.0;
+    let (d11, d12, d21, d22) = (a11 - l, a12, a21, a22 - l);
+    if d11.abs() < ODE2_EPS && d12.abs() < ODE2_EPS && d21.abs() < ODE2_EPS && d22.abs() < ODE2_EPS
+    {
+        return SystemKind::Diagonal { l };
+    }
+    let v = eigenvec(a11, a12, a21, a22, l);
+    // Generalizado `(A−λI)w = v` por la fila de mayor norma.
+    let n1 = d11.abs() + d12.abs();
+    let n2 = d21.abs() + d22.abs();
+    let w = if n1 >= n2 {
+        if d11.abs() >= d12.abs() {
+            (v.0 / d11, 0.0)
+        } else {
+            (0.0, v.0 / d12)
+        }
+    } else if d21.abs() >= d22.abs() {
+        (v.1 / d21, 0.0)
+    } else {
+        (0.0, v.1 / d22)
+    };
+    SystemKind::Jordan { l, v, w }
+}
+
+/// Resuelve `x' = A·x` 2×2 constante por autovalores.
+///
+/// Devuelve `x = …, y = …` con `C1, C2`. Coeficientes no constantes,
+/// dimensión ≠ 2 o sistemas no lineales → `Err` honesto.
+pub fn solve_ode_system_2x2(
+    a11_expr: &str,
+    a12_expr: &str,
+    a21_expr: &str,
+    a22_expr: &str,
+    t: &str,
+) -> Result<String, OdeSymbolicError> {
+    let t = check_ode_identifier(t)?;
+    let (a11, a12, a21, a22) = (
+        const_coeff(a11_expr, "a11")?,
+        const_coeff(a12_expr, "a12")?,
+        const_coeff(a21_expr, "a21")?,
+        const_coeff(a22_expr, "a22")?,
+    );
+    if ![a11, a12, a21, a22].iter().all(|v| v.is_finite()) {
+        return Err(OdeSymbolicError::NotSupported {
+            hint: "matriz no finita; fuera del subset F3c".to_string(),
+        });
+    }
+    let out = match classify_system_2x2(a11, a12, a21, a22) {
+        SystemKind::Distinct { l1, v1, l2, v2 } => {
+            let terms_x = [
+                format!("C1*{}*exp({}*{t})", fmt_num(v1.0), fmt_num(l1)),
+                format!("C2*{}*exp({}*{t})", fmt_num(v2.0), fmt_num(l2)),
+            ];
+            let terms_y = [
+                format!("C1*{}*exp({}*{t})", fmt_num(v1.1), fmt_num(l1)),
+                format!("C2*{}*exp({}*{t})", fmt_num(v2.1), fmt_num(l2)),
+            ];
+            format!(
+                "x = {}, y = {}",
+                join_sum_terms(&terms_x),
+                join_sum_terms(&terms_y)
+            )
+        }
+        SystemKind::Diagonal { l } => format!(
+            "x = C1*exp({}*{t}), y = C2*exp({}*{t})",
+            fmt_num(l),
+            fmt_num(l)
+        ),
+        SystemKind::Jordan { l, v, w } => {
+            let le = format!("exp({}*{t})", fmt_num(l));
+            format!(
+                "x = (C1*{} + C2*({} + {}*{t}))*{le}, y = (C1*{} + C2*({} + {}*{t}))*{le}",
+                fmt_num(v.0),
+                fmt_num(w.0),
+                fmt_num(v.0),
+                fmt_num(v.1),
+                fmt_num(w.1),
+                fmt_num(v.1),
+            )
+        }
+        SystemKind::Complex { al, be, p, q } => {
+            let ea = format!("exp({}*{t})", fmt_num(al));
+            let (cb, sb) = (
+                format!("cos({}*{t})", fmt_num(be)),
+                format!("sin({}*{t})", fmt_num(be)),
+            );
+            // `sol1 = e^αt(p·cos−q·sin)`, `sol2 = e^αt(p·sin+q·cos)`.
+            let s1x = format!("{}*{cb} - ({})*{sb}", fmt_num(p.0), fmt_num(q.0));
+            let s2x = format!("{}*{sb} + ({})*{cb}", fmt_num(p.0), fmt_num(q.0));
+            let s1y = format!("{}*{cb} - ({})*{sb}", fmt_num(p.1), fmt_num(q.1));
+            let s2y = format!("{}*{sb} + ({})*{cb}", fmt_num(p.1), fmt_num(q.1));
+            format!("x = {ea}*(C1*({s1x}) + C2*({s2x})), y = {ea}*(C1*({s1y}) + C2*({s2y}))")
+        }
+    };
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "solución excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Transformada de Laplace directa/inversa (subset F3c).
+// ---------------------------------------------------------------------------
+
+/// `n!` exacto (`n ≤ 20` cabe en `u64`).
+fn checked_factorial(n: u32) -> Option<u64> {
+    let mut acc = 1_u64;
+    for k in 2..=n {
+        acc = acc.checked_mul(u64::from(k))?;
+    }
+    Some(acc)
+}
+
+/// `(s−a)` con signo plegado (`a < 0` → `(s+|a|)`).
+fn lap_s_minus_a(s: &str, a: f64) -> String {
+    if a < 0.0 {
+        format!("({s}+{})", fmt_num(-a))
+    } else {
+        format!("({s}-{})", fmt_num(a))
+    }
+}
+
+/// `L{f(t)}` por tabla + linealidad.
+///
+/// Subset: constantes, `t^n` (`n ≤ 20` entero), `exp(a·t+b)`,
+/// `sin/cos(w·t+φ)`, `t·exp(a·t+b)` y combinaciones lineales.
+/// Todo lo demás → `Err` honesto.
+pub fn laplace_direct(expr: &str, t: &str, s: &str) -> Result<String, OdeSymbolicError> {
+    let t = check_ode_identifier(t)?;
+    let s = check_ode_identifier(s)?;
+    if t == s {
+        return Err(OdeSymbolicError::InvalidVariable {
+            variable: format!("{t} == {s}"),
+        });
+    }
+    let clean = check_ode_bytes(expr)?;
+    let ast = parse_normalized(&clean)?;
+    let out = laplace_direct_ast(&ast, &t, &s)?;
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "transformada excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn laplace_direct_ast(e: &crate::ast::Expr, t: &str, s: &str) -> Result<String, OdeSymbolicError> {
+    use crate::ast::Expr;
+    let subset = || {
+        OdeSymbolicError::NotSupported {
+        hint: "Laplace directa cubre 1, t^n (n ≤ 20 entero), exp(a·t+b), sin/cos(w·t+φ), t·exp(a·t+b) y combinaciones lineales; resto (t·sin, exp(t²), racionales en t, orden ≥ 3) fuera del subset F3c".to_string(),
+    }
+    };
+    if !crate::cas::cas_contains_var(e, t) {
+        let k = crate::cas::cas_const_value(e).ok_or_else(subset)?;
+        if !k.is_finite() {
+            return Err(subset());
+        }
+        if k.abs() < ODE2_EPS {
+            return Ok("0".to_string());
+        }
+        return Ok(format!("{}/{s}", fmt_num(k)));
+    }
+    match e {
+        Expr::Var(name) if name == t => Ok(format!("1/{s}^2")),
+        Expr::Pow(base, exp) => {
+            if let Expr::Var(name) = base.as_ref() {
+                if name == t {
+                    if let Some(n) = crate::cas::cas_const_value(exp) {
+                        if n >= 0.0
+                            && (n - n.round()).abs() < 1e-9
+                            && n.round() <= f64::from(MAX_LAPLACE_POWER)
+                        {
+                            let ni = n.round() as u32;
+                            let Some(fact) = checked_factorial(ni) else {
+                                return Err(subset());
+                            };
+                            if ni == 0 {
+                                return Ok(format!("1/{s}"));
+                            }
+                            return Ok(format!("{fact}/{s}^{}", ni + 1));
+                        }
+                    }
+                }
+            }
+            Err(subset())
+        }
+        Expr::Exp(arg) => {
+            let (a, b) = crate::cas::cas_linear_coeff(arg, t).ok_or_else(subset)?;
+            if !a.is_finite() || !b.is_finite() {
+                return Err(subset());
+            }
+            if a.abs() < ODE2_EPS {
+                // `exp(b)` constante → `e^b/s`.
+                return Ok(format!("{}/{s}", fmt_num(b.exp())));
+            }
+            let den = lap_s_minus_a(s, a);
+            if b.abs() < ODE2_EPS {
+                Ok(format!("1/{den}"))
+            } else {
+                Ok(format!("{}/{den}", fmt_num(b.exp())))
+            }
+        }
+        Expr::Sin(arg) => {
+            let (w, phi) = crate::cas::cas_linear_coeff(arg, t).ok_or_else(subset)?;
+            Ok(laplace_sin_cos(s, w, phi, true).ok_or_else(subset)?)
+        }
+        Expr::Cos(arg) => {
+            let (w, phi) = crate::cas::cas_linear_coeff(arg, t).ok_or_else(subset)?;
+            Ok(laplace_sin_cos(s, w, phi, false).ok_or_else(subset)?)
+        }
+        Expr::Add(a, b) => Ok(format!(
+            "({} + {})",
+            laplace_direct_ast(a, t, s)?,
+            laplace_direct_ast(b, t, s)?
+        )),
+        Expr::Sub(a, b) => Ok(format!(
+            "({} - ({}))",
+            laplace_direct_ast(a, t, s)?,
+            laplace_direct_ast(b, t, s)?
+        )),
+        Expr::Mul(a, b) => {
+            if let Some(k) = crate::cas::cas_const_value(a) {
+                if !k.is_finite() {
+                    return Err(subset());
+                }
+                if k.abs() < ODE2_EPS {
+                    return Ok("0".to_string());
+                }
+                return Ok(format!("{}*({})", fmt_num(k), laplace_direct_ast(b, t, s)?));
+            }
+            if let Some(k) = crate::cas::cas_const_value(b) {
+                if !k.is_finite() {
+                    return Err(subset());
+                }
+                if k.abs() < ODE2_EPS {
+                    return Ok("0".to_string());
+                }
+                return Ok(format!("{}*({})", fmt_num(k), laplace_direct_ast(a, t, s)?));
+            }
+            // `t·exp(a·t+b)` → `e^b/(s−a)²`.
+            for (t_side, e_side) in [(a, b), (b, a)] {
+                if matches!(t_side.as_ref(), Expr::Var(name) if name == t) {
+                    if let Expr::Exp(arg) = e_side.as_ref() {
+                        let (ea, eb) = crate::cas::cas_linear_coeff(arg, t).ok_or_else(subset)?;
+                        if !ea.is_finite() || !eb.is_finite() || ea.abs() < ODE2_EPS {
+                            return Err(subset());
+                        }
+                        let den = lap_s_minus_a(s, ea);
+                        if eb.abs() < ODE2_EPS {
+                            return Ok(format!("1/{den}^2"));
+                        }
+                        return Ok(format!("{}/{den}^2", fmt_num(eb.exp())));
+                    }
+                }
+            }
+            Err(subset())
+        }
+        _ => Err(subset()),
+    }
+}
+
+/// `L{sin(w·t+φ)}` (`is_sin`) o `L{cos(w·t+φ)}` por suma de ángulos.
+fn laplace_sin_cos(s: &str, w: f64, phi: f64, is_sin: bool) -> Option<String> {
+    if !w.is_finite() || !phi.is_finite() || w.abs() < ODE2_EPS {
+        return None;
+    }
+    let w2 = fmt_num(w * w);
+    let den = format!("({s}^2+{w2})");
+    let (cw, sw) = (phi.cos(), phi.sin());
+    if phi.abs() < ODE2_EPS {
+        if is_sin {
+            return Some(format!("{}/{den}", fmt_num(w)));
+        }
+        return Some(format!("{s}/{den}"));
+    }
+    if !cw.is_finite() || !sw.is_finite() {
+        return None;
+    }
+    // `sin(wt+φ) = cw·sin+sw·cos`, `cos(wt+φ) = cw·cos−sw·sin`.
+    let (ks, kc) = if is_sin { (cw, sw) } else { (-sw, cw) };
+    Some(format!(
+        "({}*{}/{den} + {}*{s}/{den})",
+        fmt_num(ks),
+        fmt_num(w),
+        fmt_num(kc),
+    ))
+}
+
+/// `L⁻¹{F(s)}` de racionales propios con denominador grado ≤ 2.
+///
+/// Tabla: `K/(s−a)`, `K/(s−a)²`, `(A·s+B)/(s²+…)` (reales distintas,
+/// doble, cuadrática irreducible → `e^{αt}` con `cos/sin`). Grado ≥ 3,
+/// impropias, retardos e impulsos → `Err` honesto.
+pub fn laplace_inverse(expr: &str, s: &str, t: &str) -> Result<String, OdeSymbolicError> {
+    let s = check_ode_identifier(s)?;
+    let t = check_ode_identifier(t)?;
+    if t == s {
+        return Err(OdeSymbolicError::InvalidVariable {
+            variable: format!("{t} == {s}"),
+        });
+    }
+    let clean = check_ode_bytes(expr)?;
+    let ast = parse_normalized(&clean)?;
+    let out = laplace_inverse_ast(&ast, &s, &t)?;
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "inversa excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn laplace_inverse_ast(e: &crate::ast::Expr, s: &str, t: &str) -> Result<String, OdeSymbolicError> {
+    use crate::ast::Expr;
+    let subset = || {
+        OdeSymbolicError::NotSupported {
+        hint: format!(
+            "Laplace inversa cubre racionales propios con denominador grado ≤ {MAX_LAPLACE_RATIONAL_DEGREE} (lineales reales, (s−a)², cuadrática irreducible); grado ≥ 3, impropias, retardos e impulsos fuera del subset F3c"
+        ),
+    }
+    };
+    let Expr::Div(num, den) = e else {
+        return Err(subset());
+    };
+    let p = crate::integral::poly_coeffs_bounded(num, s, MAX_LAPLACE_RATIONAL_DEGREE)
+        .ok_or_else(subset)?;
+    let q = crate::integral::poly_coeffs_bounded(den, s, MAX_LAPLACE_RATIONAL_DEGREE)
+        .ok_or_else(subset)?;
+    let mut dq = q.len().saturating_sub(1);
+    while dq > 0 && q.get(dq).is_some_and(|v| v.abs() < ODE2_EPS) {
+        dq -= 1;
+    }
+    if dq == 0 || dq > MAX_LAPLACE_RATIONAL_DEGREE {
+        return Err(subset());
+    }
+    let mut dp = p.len().saturating_sub(1);
+    while dp > 0 && p.get(dp).is_some_and(|v| v.abs() < ODE2_EPS) {
+        dp -= 1;
+    }
+    if dp >= dq {
+        return Err(OdeSymbolicError::NotSupported {
+            hint: "racional impropia (grado numerador ≥ denominador): divide primero o usa fracciones parciales; fuera del subset F3c".to_string(),
+        });
+    }
+    if dq == 1 {
+        let (d0, d1) = (q[0], q[1]);
+        if d1.abs() < ODE2_EPS {
+            return Err(subset());
+        }
+        let r = -d0 / d1;
+        let k = p.first().copied().unwrap_or(0.0) / d1;
+        if !r.is_finite() || !k.is_finite() {
+            return Err(subset());
+        }
+        return Ok(format!("{}*exp({}*{t})", fmt_num(k), fmt_num(r)));
+    }
+    // `dq == 2`.
+    let (c0, c1, c2) = (q[0], q[1], q[2]);
+    if c2.abs() < ODE2_EPS {
+        return Err(subset());
+    }
+    let (p0, p1) = (
+        p.first().copied().unwrap_or(0.0),
+        p.get(1).copied().unwrap_or(0.0),
+    );
+    let disc = c1 * c1 - 4.0 * c2 * c0;
+    if disc > ODE2_EPS {
+        let sq = disc.sqrt();
+        let (r1, r2) = ((-c1 + sq) / (2.0 * c2), (-c1 - sq) / (2.0 * c2));
+        let mut terms = Vec::new();
+        for r in [r1, r2] {
+            let qp = 2.0 * c2 * r + c1;
+            if qp.abs() < ODE2_EPS {
+                return Err(subset());
+            }
+            let coef = (p1 * r + p0) / qp;
+            if !coef.is_finite() {
+                return Err(subset());
+            }
+            terms.push(format!("{}*exp({}*{t})", fmt_num(coef), fmt_num(r)));
+        }
+        return Ok(join_sum_terms(&terms));
+    }
+    if disc >= -ODE2_EPS {
+        // Doble `(s−r)²` con `P(s) = p1·(s−r)+(p0+p1·r)`:
+        // `(p1/c2)·e^{rt} + ((p0+p1·r)/c2)·t·e^{rt}`.
+        let r = -c1 / (2.0 * c2);
+        let (e_coef, t_coef) = (p1, p0 + p1 * r);
+        if !r.is_finite() {
+            return Err(subset());
+        }
+        let e = format!("exp({}*{t})", fmt_num(r));
+        let mut terms = Vec::new();
+        if (e_coef / c2).abs() > ODE2_EPS {
+            terms.push(format!("{}*{e}", fmt_num(e_coef / c2)));
+        }
+        if (t_coef / c2).abs() > ODE2_EPS {
+            terms.push(format!("{}*{t}*{e}", fmt_num(t_coef / c2)));
+        }
+        if terms.is_empty() {
+            return Ok("0".to_string());
+        }
+        return Ok(join_sum_terms(&terms));
+    }
+    // Irreducible: `e^{αt}(A·cos βt + C·sin βt)`.
+    let disc4 = 4.0 * c2 * c0 - c1 * c1;
+    if !disc4.is_finite() || disc4 <= 0.0 {
+        return Err(subset());
+    }
+    let (al, be) = (-c1 / (2.0 * c2), disc4.sqrt() / (2.0 * c2.abs()));
+    // `P(s) = p1·(s−α)+B'` con `B' = P(α) = p0−p1·c1/2c2`.
+    let (big_a, big_c) = (p1 / c2, (p0 - p1 * c1 / (2.0 * c2)) / (c2 * be));
+    if ![al, be, big_a, big_c].iter().all(|v| v.is_finite()) || be.abs() < ODE2_EPS {
+        return Err(subset());
+    }
+    let e = format!("exp({}*{t})", fmt_num(al));
+    let mut terms = Vec::new();
+    if big_a.abs() > ODE2_EPS {
+        terms.push(format!("{}*{e}*cos({}*{t})", fmt_num(big_a), fmt_num(be)));
+    }
+    if big_c.abs() > ODE2_EPS {
+        terms.push(format!("{}*{e}*sin({}*{t})", fmt_num(big_c), fmt_num(be)));
+    }
+    if terms.is_empty() {
+        return Ok("0".to_string());
+    }
+    Ok(join_sum_terms(&terms))
 }
 
 #[cfg(test)]
@@ -2189,6 +3242,277 @@ mod ode_symbolic_tests {
         assert!(matches!(
             solve_ode_first_order("y +", "x", "y"),
             Err(OdeSymbolicError::Parse { .. })
+        ));
+    }
+
+    // --- Frente F3c: 2º orden, sistemas 2×2, Laplace ---
+
+    /// Verifica `a·yp''+b·yp'+c·yp = rhs` evaluando la particular interna.
+    fn check_ode2_residual(a: f64, b: f64, c: f64, rhs: &str, x: &str) {
+        let ast = parse_normalized(rhs).expect("rhs parse F3c");
+        let kind = classify_rhs(&ast, x).expect("rhs clasifica F3c");
+        let yp = ode2_particular_expr(a, b, c, &kind, x)
+            .expect("yp F3c")
+            .expect("yp no nula F3c");
+        let d1 = yp.diff(x);
+        let d2 = d1.diff(x);
+        let rhs_ast = parse_normalized(rhs).expect("rhs eval F3c");
+        for at in [0.37, 1.13, -0.53, 2.0] {
+            let lhs = a * d2.eval_at(x, at) + b * d1.eval_at(x, at) + c * yp.eval_at(x, at);
+            let r = rhs_ast.eval_at(x, at);
+            assert!(
+                lhs.is_finite() && r.is_finite(),
+                "punto no finito en {at}: lhs={lhs} rhs={r}"
+            );
+            assert!(
+                (lhs - r).abs() < 1e-6,
+                "residuo no nulo en {at}: lhs={lhs} rhs={r} ({a},{b},{c} ← {rhs})"
+            );
+        }
+    }
+
+    #[test]
+    fn ode2_homogeneous_three_discriminants() {
+        let distinct = solve_ode_second_order_const("1", "-3", "2", "0", "x").expect("D>0");
+        assert!(distinct.contains("exp(2*x)"), "got {distinct}");
+        assert!(distinct.contains("exp(1*x)"), "got {distinct}");
+        let double = solve_ode_second_order_const("1", "2", "1", "0", "x").expect("D=0");
+        assert!(double.contains("C2*x"), "got {double}");
+        assert!(double.contains("exp(-1*x)"), "got {double}");
+        let complex = solve_ode_second_order_const("1", "0", "1", "0", "x").expect("D<0");
+        assert!(complex.contains("cos"), "got {complex}");
+        assert!(complex.contains("sin"), "got {complex}");
+    }
+
+    #[test]
+    fn ode2_particular_poly() {
+        let sol = solve_ode_second_order_const("1", "1", "1", "x", "x").expect("poly");
+        assert!(sol.contains('C'), "got {sol}");
+        check_ode2_residual(1.0, 1.0, 1.0, "x", "x");
+        check_ode2_residual(1.0, 0.0, 2.0, "x^2+3*x+1", "x");
+    }
+
+    #[test]
+    fn ode2_particular_poly_resonance() {
+        // `c = 0` → `s = 1` (`y''+y' = x`); `b = c = 0` → `s = 2` (`y'' = x`).
+        check_ode2_residual(1.0, 1.0, 0.0, "x", "x");
+        check_ode2_residual(1.0, 0.0, 0.0, "x", "x");
+        let sol = solve_ode_second_order_const("1", "0", "0", "x", "x").expect("s=2");
+        assert!(
+            flat(&sol).contains("x^3") || flat(&sol).contains("x^2"),
+            "got {sol}"
+        );
+    }
+
+    fn flat(s: &str) -> String {
+        s.replace(' ', "")
+    }
+
+    #[test]
+    fn ode2_particular_exp_and_resonance() {
+        let sol = solve_ode_second_order_const("1", "0", "1", "exp(2*x)", "x").expect("exp");
+        assert!(flat(&sol).contains("exp(2*x)"), "got {sol}");
+        check_ode2_residual(1.0, 0.0, 1.0, "exp(2*x)", "x");
+        // Resonancia: `y''−3y'+2y = exp(x)`, raíz 1 simple → `−x·e^x`.
+        let res = solve_ode_second_order_const("1", "-3", "2", "exp(x)", "x").expect("resonante");
+        assert!(res.contains('x'), "got {res}");
+        check_ode2_residual(1.0, -3.0, 2.0, "exp(x)", "x");
+        // Doble: `y''−2y'+y = exp(x)` → `x²·e^x/2`.
+        check_ode2_residual(1.0, -2.0, 1.0, "exp(x)", "x");
+    }
+
+    #[test]
+    fn ode2_particular_trig_and_resonance() {
+        check_ode2_residual(1.0, 1.0, 1.0, "sin(2*x)", "x");
+        check_ode2_residual(1.0, 0.0, 4.0, "cos(x)", "x");
+        // Resonancia: `y''+y = sin(x)` → `−x·cos(x)/2`.
+        let res = solve_ode_second_order_const("1", "0", "1", "sin(x)", "x").expect("resonante");
+        assert!(res.contains('x'), "got {res}");
+        check_ode2_residual(1.0, 0.0, 1.0, "sin(x)", "x");
+        // Suma misma frecuencia canónica.
+        check_ode2_residual(2.0, 0.0, 2.0, "sin(x)+cos(x)", "x");
+    }
+
+    #[test]
+    fn ode2_particular_poly_times_exp() {
+        check_ode2_residual(1.0, 0.0, 1.0, "x*exp(x)", "x");
+        check_ode2_residual(1.0, -3.0, 2.0, "x*exp(3*x)", "x");
+    }
+
+    #[test]
+    fn ode2_rejects_outside_subset_honestly() {
+        // `a = 0`: no es 2º orden.
+        let err = solve_ode_second_order_const("0", "1", "1", "x", "x").expect_err("a=0");
+        assert!(format!("{err}").contains("1er orden"), "got {err}");
+        // Coeficiente variable (incluida Euler `x^2·y''`).
+        let euler = solve_ode_second_order_const("x^2", "x", "1", "0", "x").expect_err("Euler");
+        assert!(format!("{euler}").contains("constante"), "got {euler}");
+        // RHS fuera del subset.
+        let rhs = solve_ode_second_order_const("1", "0", "1", "sin(x)*cos(x)", "x")
+            .expect_err("producto trig");
+        assert!(
+            matches!(rhs, OdeSymbolicError::NotSupported { .. }),
+            "got {rhs}"
+        );
+        // Frecuencia nula honesta.
+        let w0 = solve_ode_second_order_const("1", "0", "1", "sin(0*x)", "x").expect_err("w=0");
+        assert!(format!("{w0}").contains("frecuencia"), "got {w0}");
+    }
+
+    #[test]
+    fn ode_system_distinct_real_eigenvalues() {
+        let sol = solve_ode_system_2x2("0", "1", "-2", "-3", "t").expect("distintas");
+        assert!(sol.contains("exp(-1*t)"), "got {sol}");
+        assert!(sol.contains("exp(-2*t)"), "got {sol}");
+        // Verifica `A·v = λ·v` en la clasificación interna.
+        match classify_system_2x2(0.0, 1.0, -2.0, -3.0) {
+            SystemKind::Distinct { l1, v1, l2, v2 } => {
+                assert!(((0.0 * v1.0 + 1.0 * v1.1) - l1 * v1.0).abs() < 1e-9);
+                assert!(((-2.0 * v1.0 - 3.0 * v1.1) - l1 * v1.1).abs() < 1e-9);
+                assert!(((0.0 * v2.0 + 1.0 * v2.1) - l2 * v2.0).abs() < 1e-9);
+                assert!(((-2.0 * v2.0 - 3.0 * v2.1) - l2 * v2.1).abs() < 1e-9);
+            }
+            other => panic!("esperaba distintas, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ode_system_repeated_jordan_and_diagonal() {
+        let jordan = solve_ode_system_2x2("2", "1", "0", "2", "t").expect("Jordan");
+        assert!(jordan.contains("*t)"), "t·e^λt esperado, got {jordan}");
+        assert!(jordan.contains("exp(2*t)"), "got {jordan}");
+        match classify_system_2x2(2.0, 1.0, 0.0, 2.0) {
+            SystemKind::Jordan { l, v, w } => {
+                // `(A−λI)w = v`.
+                assert!(((2.0 - l) * w.0 + w.1 - v.0).abs() < 1e-9);
+                assert!(((2.0 - l) * w.1 - v.1).abs() < 1e-9);
+            }
+            other => panic!("esperaba Jordan, got {other:?}"),
+        }
+        let diag = solve_ode_system_2x2("3", "0", "0", "3", "t").expect("diagonal");
+        assert!(diag.contains("C1*exp(3*t)"), "got {diag}");
+    }
+
+    #[test]
+    fn ode_system_complex_conjugate() {
+        let sol = solve_ode_system_2x2("0", "-1", "1", "0", "t").expect("complejo");
+        assert!(sol.contains("cos"), "got {sol}");
+        assert!(sol.contains("sin"), "got {sol}");
+        assert!(
+            matches!(
+                classify_system_2x2(0.0, -1.0, 1.0, 0.0),
+                SystemKind::Complex { .. }
+            ),
+            "esperaba complejo"
+        );
+    }
+
+    #[test]
+    fn ode_system_rejects_variable_coefficients() {
+        let err = solve_ode_system_2x2("t", "1", "0", "1", "t").expect_err("variable");
+        assert!(format!("{err}").contains("constante"), "got {err}");
+    }
+
+    #[test]
+    fn laplace_direct_table() {
+        let cases = [
+            ("1", "1/s"),
+            ("t", "1/s^2"),
+            ("t^2", "2/s^3"),
+            ("exp(2*t)", "(s-2)"),
+            ("sin(3*t)", "3/(s^2+9)"),
+            ("cos(3*t)", "s/(s^2+9)"),
+        ];
+        for (f, frag) in cases {
+            let out = laplace_direct(f, "t", "s").expect("tabla");
+            assert!(out.contains(frag), "{f}: esperaba '{frag}', got {out}");
+        }
+        let combo = laplace_direct("2*t + 3*exp(-t)", "t", "s").expect("linealidad");
+        assert!(
+            combo.contains("s^2") && combo.contains("(s+1)"),
+            "got {combo}"
+        );
+    }
+
+    #[test]
+    fn laplace_direct_rejects_outside_subset() {
+        for f in ["t^21", "exp(t^2)", "t*sin(t)", "sin(t)/t"] {
+            let err = laplace_direct(f, "t", "s").expect_err("fuera de tabla");
+            assert!(
+                matches!(err, OdeSymbolicError::NotSupported { .. }),
+                "{f}: got {err}"
+            );
+        }
+        let same = laplace_direct("t", "s", "s").expect_err("t == s");
+        assert!(
+            matches!(same, OdeSymbolicError::InvalidVariable { .. }),
+            "got {same}"
+        );
+    }
+
+    #[test]
+    fn laplace_inverse_table() {
+        let cases = [
+            ("1/(s+1)", "exp(-1*t)"),
+            ("1/(s+1)^2", "t*exp(-1*t)"),
+            ("3/(s^2+4)", "sin(2*t)"),
+            ("s/(s^2+9)", "cos(3*t)"),
+            ("1/(s^2+3*s+2)", "exp(-1*t)"),
+            ("(s+1)/(s^2+2*s+5)", "cos(2*t)"),
+        ];
+        for (f, frag) in cases {
+            let out = laplace_inverse(f, "s", "t").expect("tabla inversa");
+            assert!(out.contains(frag), "{f}: esperaba '{frag}', got {out}");
+        }
+    }
+
+    #[test]
+    fn laplace_inverse_numeric_roundtrip() {
+        // `L{f}(s0) = F(s0)` por Simpson en `[0, 30]` (funciones que decaen).
+        let cases = [
+            ("1/(s+1)", 2.0),
+            ("1/(s+1)^2", 2.0),
+            ("1/(s^2+3*s+2)", 2.0),
+            ("(s+1)/(s^2+2*s+5)", 2.0),
+        ];
+        for (f_s, s0) in cases {
+            let f_t = laplace_inverse(f_s, "s", "t").expect("inversa");
+            let f_ast = crate::ast::parse_ast(&f_t.replace(' ', "")).expect("parse f(t)");
+            let f_s_ast = crate::ast::parse_ast(&f_s.replace(' ', "")).expect("parse F(s)");
+            let expected = f_s_ast.eval_at("s", s0);
+            let n = 4096_usize;
+            let tmax = 30.0;
+            let h = tmax / n as f64;
+            let g = |i: usize| {
+                let tt = i as f64 * h;
+                f_ast.eval_at("t", tt) * (-s0 * tt).exp()
+            };
+            let mut acc = g(0) + g(n);
+            for i in 1..n {
+                acc += if i % 2 == 1 { 4.0 } else { 2.0 } * g(i);
+            }
+            let numeric = acc * h / 3.0;
+            assert!(
+                (numeric - expected).abs() < 1e-3,
+                "{f_s}: Simpson={numeric} vs F({s0})={expected} (f={f_t})"
+            );
+        }
+    }
+
+    #[test]
+    fn laplace_inverse_rejects_outside_subset() {
+        // Grado 3: honesto con el límite.
+        let err = laplace_inverse("1/(s^3+1)", "s", "t").expect_err("grado 3");
+        let msg = format!("{err}");
+        assert!(msg.contains("grado ≤ 2"), "got {msg}");
+        // Impropia y no racional.
+        assert!(matches!(
+            laplace_inverse("s/(s+1)", "s", "t"),
+            Err(OdeSymbolicError::NotSupported { .. })
+        ));
+        assert!(matches!(
+            laplace_inverse("exp(-s)", "s", "t"),
+            Err(OdeSymbolicError::NotSupported { .. })
         ));
     }
 }

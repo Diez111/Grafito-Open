@@ -30,6 +30,14 @@ url.workspace = true
 default = ["assistant-net"]
 assistant-net = ["dep:reqwest"]
 
+[dev-dependencies]
+# F5: bench SSE-truncado informativo (sin gate). Misma version que grafito-geometry.
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "sse_truncation"
+harness = false
+
 [lints]
 workspace = true
 

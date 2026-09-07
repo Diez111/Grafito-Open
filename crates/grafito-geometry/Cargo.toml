@@ -30,5 +30,10 @@ proptest = "1"
 name = "expr_bench"
 harness = false
 
+# F5: bench informativo de la matematica de frames de integral (sin gate).
+[[bench]]
+name = "integral_frames"
+harness = false
+
 [lints]
 workspace = true

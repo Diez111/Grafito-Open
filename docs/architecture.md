@@ -1,4 +1,4 @@
-# docs/architecture.md — Grafito v1.2.35 (Plan supera GeoGebra 2026-08-26; sync BUILD 2026-09-04)
+# docs/architecture.md — Grafito v1.2.35 (Plan supera GeoGebra 2026-08-26; sync BUILD 2026-09-04 + F5 2026-09-07)
 
 ## 1. Vision
 Grafito es pizarra geometrica con **Cerebro** (Rust puro) y **Piel** (egui/wgpu).
@@ -101,10 +101,10 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 
 - **Tokens** (grafito-ui/src/tokens.rs): TYPE_XS..XXL (11..28, ratio 1.25), SPACE_XS..XXL (4..32, base 4), RADIUS_SM..LG, ICON_SM..XL — unica fuente de verdad.
 - **Assistant panel** (`crates/grafito-ui/src/assistant.rs:99-105`): SidePanel 300..520 (default 400) o TopBottomPanel bottom-sheet cuando el viewport < 740px (`ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH = 440 + 300`, `:103-105`; `assistant_uses_bottom_sheet`, `:1778-1780`), composer con clamp 88..260, sin ScrollArea envolvente (fix overflow), wrapping, clip.
-- **App shell** (grafito-app/src/app.rs ~5564L): eframe::App::update dispatch (god function, deuda P1), GrafitoApp ~75 campos (god object), `MAX_UNDO` 50 + `MAX_UNDO_BYTES` 50 MiB con `VecDeque<Document/ChangeSet>` (`pop_front` O(1), `Vec` previo era O(n) shift — corregido), `controllers.rs` stubs `DocumentController/ViewController/AssistantController` con `VecDeque` (P1), ViewMode/Perspective/CanvasMode redundancia (deuda P1), repaint intervals 150ms settle, 33ms multidimensional 30Hz, 16ms whiteboard 60Hz.
+- **App shell** (grafito-app/src/app.rs ~7590L medido F5 con `wc -l`; assistant.rs ~8370L): eframe::App::update dispatch (god function, deuda P1), GrafitoApp ~96 campos (god object), `MAX_UNDO` 50 + `MAX_UNDO_BYTES` 50 MiB con `VecDeque<Document/ChangeSet>` (`pop_front` O(1), `Vec` previo era O(n) shift — corregido), `controllers.rs` stubs `DocumentController/ViewController/AssistantController` con `VecDeque` (P1), ViewMode/Perspective/CanvasMode redundancia (deuda P1), repaint intervals 150ms settle, 33ms multidimensional 30Hz, 16ms whiteboard 60Hz.
 - **Atajos verificados** (handlers en `grafito-app/src/app.rs:4088-4290`; menús en `ui.rs:141-227`; etiquetas toolbar en `grafito-ui/src/toolbar.rs:36-156`): Ctrl+N/O/S + Ctrl+Shift+S archivo (`lifecycle.rs:20-31`), Ctrl+Z/Y deshacer/rehacer (+Shift en Ctrl+Y = herramienta YIntercept, `app.rs:237-248`), Supr eliminar, Esc cancelar, F1-F6 herramientas 2D, F8 Esfera 3D + F9 Cubo 3D (`app.rs:4135-4144`), R/E/I/X/N/S/Y/V/M/G herramientas sin modificadores, Ctrl+A Analizar, Shift+L/K/J toggles log X/Y/ambos, G snap, Ctrl+K paleta, Ctrl+T tema (`app.rs:4259-4267`), Ctrl+P Lápiz + Ctrl+E Borrador (`app.rs:4268-4278`), Ctrl+Shift+1..9,0 perspectivas (10, `app.rs:4236-4242`). Cero fantasmas desde BUILD 2026-09-04 (antes: Ctrl+P, Ctrl+E, F8, F9 documentados sin handler).
 - **Responsive shell**: rail 60px (`RAIL_WIDTH`, `tokens.rs:164`; `ui.rs:549-552`) visible sólo en Medium/Wide (≥1360, `lib.rs:417-424,441-442`) — colapsado en Compact, luego también <780px; drawer derecho 292..440 con clamp (`clamp_drawer_right_width`, `tokens.rs:207-210`; dock 3D `ui.rs:727-731`; Inspector `panels.rs:2125-2132`); panel izquierdo min 180 + max 45% viewport (`PANEL_LEFT_MIN`, `PANEL_LEFT_MAX_FRACTION`, `tokens.rs:151-154`; `panels.rs:1201-1206`).
-- **Onboarding** (`app.rs:1763`, `:4922-5033`; `utils.rs:46-48`): gating `show_onboarding = !config.onboarding_completed`; Window 420px, 3 bullets (5/8/17 grupos), botones [Probar ejemplo][Empezar vacío][No mostrar]; Probar ejemplo y No mostrar persisten `onboarding_completed=true`.
+- **Onboarding** (`app.rs:1763`, `:4922-5033`; `utils.rs:46-48`): gating `show_onboarding = !config.onboarding_completed`; Window 420px, 3 bullets (5/8/18 grupos en codigo; el copy visible aun dice 17 en `grafito-ui/src/i18n.rs:216` y `app.rs:6914` — sucios F1-F4, sync pendiente), botones [Probar ejemplo][Empezar vacío][No mostrar]; Probar ejemplo y No mostrar persisten `onboarding_completed=true`.
 - **Paleta de comandos** (`grafito-ui/src/command_palette.rs`): fuzzy subsecuencia sin tildes (`fuzzy_match`, `:224-251`), bilingüe es/en (`filtered_commands`, `:275-296`), footer en español con conteo "N de M · ↑↓ navegar · Enter abrir · Esc cerrar" (`:394-403`), 14 acciones UI en español con clave inglesa estable (`UI_ACTIONS`, `:58-199`; test `:528-584`).
 
 ## 8. Presupuestos y Limites
@@ -135,8 +135,9 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Comandos | COMMANDS registrados | 250 (`command!(`) | command/src/command_registry.rs (`grep -c 'command!('` = 250 únicos; +18 scripting G-D) |
 | Comandos | palette-visible | 206 (44 ocultos) + 14 acciones UI = 220 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
-| Toolbar | ToolGroupId / UNIVERSITY | 17 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 (+tests :1317-1319) |
-| Toolbar | Tool variantes | 76 | grafito-ui/src/lib.rs `pub enum Tool` (+Parallel/Arc/Sector F9) |
+| Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
+| Toolbar | ToolGroupId / ALL_GROUPS | 15 (diverge de UNIVERSITY 18: sin Dynamics/ThreeD/FourD; unificar fuera de F5 — toolbar.rs sucio) | grafito-ui/src/toolbar.rs:298-315 (medido F5) |
+| Toolbar | Tool variantes | 87 | grafito-ui/src/lib.rs `pub enum Tool` (contado F5, 87 variantes; Parallel/Arc/Sector F9 ya incluidos) |
 | App | Perspectivas | 10 (Ctrl+Shift+1..9,0) | grafito-app/src/lib.rs:90-111 + app.rs:4236-4242 |
 | Workspace | crates | 18 | `crates/` (agent, anim, app, assistant, assistant-types, classroom, command, complex, core, geometry, ggb, pedagogy, plugins, profile, release-tests, render, ui, whiteboard) |
 | UI | BREAKPOINT_COMPACT | 1360 | tokens.rs:142 (is_compact_viewport :188-191) |
@@ -177,15 +178,15 @@ MSRV 1.92 (`rust-version.workspace = "1.92"`) verificada en matriz `toolchain: [
 | 11 | `cross-platform-smoke` | `cargo test -p grafito-app --test app_smoke --locked` | matrix os: ubuntu/windows/macos, fail-fast false |
 | 12 | `supply-chain` | `cargo audit 0.22.2` + `cargo deny 0.20.2` + `verify_advisory_exceptions.py` | cache cargo-tools |
 | 13 | `workflow-lint` | `actionlint 1.7.7` + `shellcheck` + `bash -n` + `bash packaging/tests/packaging-fixtures.sh` + Debian version mapping (`1.2.20~beta < 1.2.20`) | valida packaging fixtures como gate |
-| 14 | `coverage` | `cargo llvm-cov --workspace --all-targets --all-features --locked` con gate `--fail-under-lines 75` + fallback `cargo test` | stable + llvm-tools-preview, artefacto lcov 14 días |
-| 15 | `bench-regression` | `cargo bench --workspace --benches --locked` (criterion, baseline `main`, regresión >10%) | stable, artefacto target/criterion 7 días |
-| 16 | `mutation` | `cargo mutants 24.11.1 --workspace --timeout 60 --in-place` | sólo `schedule` semanal / `workflow_dispatch`, 60 min |
+| 14 | `coverage` | `cargo llvm-cov --workspace --all-targets --all-features --locked` con gate `--fail-under-lines 75`, SIN fallback `cargo test` (F5: duplicaba el job `test`; GPU hace SKIP sin adapter, gate calibrado para esa ruta) | stable + llvm-tools-preview, artefacto lcov 14 días |
+| 15 | `bench-regression` | `cargo bench --workspace --benches --locked` (criterion, baseline `main` INFORMATIVO sin gate >10% hasta baseline estable; F5 agrega benches SSE-truncado + frames nativos integral/morph con numero base impreso) | stable, artefacto target/criterion 7 días |
+| 16 | `mutation` | `cargo mutants 24.11.1 --workspace --timeout 60 --in-place` (semanal a proposito: 60min + muta el arbol, no apto como gate de PR) | sólo `schedule` semanal / `workflow_dispatch`, 60 min |
 | 17 | `package-debian` | `desktop-file-validate` + `packaging/build-deb.sh` + `dpkg-deb --info/--ctrl-tarfile` ownership `root:root`, permisos, `lintian --fail-on error`, `dpkg --install` + `/usr/bin/grafito --help` + purge | ubuntu-22.04, Needs `dpkg-dev lintian desktop-file-utils` |
 
 Notas:
 - `gpu-compute` ahora **requerido** con `WGPU_BACKEND=vulkan` (antes `gl` headless SKIP); `GRAFITO_REQUIRE_GPU_TESTS=1` hace fail-closed si el adapter no esta disponible.
 - Packaging fixtures (`packaging/tests/packaging-fixtures.sh`) es gate en `workflow-lint`: verifica iconos `16..512` + scalable `hicolor/scalable/apps/grafito.svg`, `grafito-icon.svg`, abort si falta asset, y `desktop Icon=grafito`, mas plugins `usr/share/grafito/plugins` (`j-space`), `postrm` parse, MSRV 1.92 docs, MSVC static CRT, e icon asset existencia; `assets/mora.png/.svg` existen y se embeben via `include_bytes!` (verificado en `app.rs:4870` test `<32 KiB`).
-- Baseline 2026-08-20: 7/8 PASS (gpu_compute SKIP headless, release-build SKIP 45m). Desde 14-job split: gpu-compute ya no SKIP, package-debian y workflow-lint son blocking. BUILD 2026-09-04: 17 jobs (se suman `coverage` 75%, `bench-regression` >10%, `mutation` semanal).
+- Baseline 2026-08-20: 7/8 PASS (gpu_compute SKIP headless, release-build SKIP 45m). Desde 14-job split: gpu-compute ya no SKIP, package-debian y workflow-lint son blocking. BUILD 2026-09-04: 17 jobs (se suman `coverage` 75%, `bench-regression` >10%, `mutation` semanal). F5 2026-09-07: `coverage` sin fallback (el job `test` ya cubre), `bench-regression` degradado a informativo explicito (sin baseline estable no hay comparacion >10% real), `mutation` documentado semanal a proposito.
 
 ## 10. Novedades v1.2.35 — supera GeoGebra (2026-08-26)
 
@@ -204,7 +205,7 @@ Notas:
 - `TeachingTopic` 14 variantes, `teaching_ui::whiteboard_elements_for_hint` 14 mappings (fracción, vector, matriz, prob, serie, trig, cónica...), `anim_native` templates pedagógicos, `AssistantExerciseCard` inline `grafito-exercise`
 
 **UI Scandinavian sin laberinto**
-- `toolbar.rs` `PRIMARY 5` `SECONDARY 8` `UNIVERSITY 17` + `toolbar_groups_for_level_value(u32)` + `udl.rs` helper sin depender de pedagogy; `filter_groups_by_level`
+- `toolbar.rs` `PRIMARY 5` `SECONDARY 8` `UNIVERSITY 18` (F3a suma Transform; `ALL_GROUPS` 15 diverge — ver §8) + `toolbar_groups_for_level_value(u32)` + `udl.rs` helper sin depender de pedagogy; `filter_groups_by_level`
 - `AssistantPanelState` `max_composer 88..260` quiet, tokens 64%/44%/10%/5% documentados, `whiteboard:WhiteboardDoc` persistente en `Document` (serde, cota 500 elementos), `spreadsheet` `=A1+B1` stripping, `AppConfig::onboarding_completed`
 
 **Gates:** `cargo fmt 0` `clippy -D warnings 0` `test --workspace ~1500 verdes`
@@ -214,7 +215,7 @@ Notas:
 - BTreeMap determinismo total pendiente (mitigado `ValidatedDocument` + ordenación explícita; próximo: migrar `objects: HashMap→BTreeMap`)
 - `Transformed` Jacobian det pendiente
 - `fill_compute` aún `None` (ahorra 128 MiB, habilitar lazy si `ImplicitCurve != Eq`)
-- App God Object `app.rs 4752L` parcialmente extraído (`controllers.rs` stubs)
+- App God Object `app.rs 7590L` (medido F5) parcialmente extraído (`controllers.rs` stubs)
 
 ## 12. Próximos pasos
 
@@ -231,8 +232,8 @@ Notas:
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
 | 250 comandos (`command!(`), 206 visibles + 14 UI = 220 en paleta | `crates/grafito-command/src/command_registry.rs` (250 únicos; +18 scripting G-D) |
 | 14 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs:58-199`, `:224-251`, `:394-403` |
-| 17 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 17) | `crates/grafito-ui/src/toolbar.rs:263-284`, tests `:1317-1319` |
-| 76 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (+Parallel/Arc/Sector F9) |
+| 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
+| 87 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (contado F5: 87 variantes) |
 | 10 perspectivas (Ctrl+Shift+1..9,0) | `crates/grafito-app/src/lib.rs:90-111`, `app.rs:4236-4242` |
 | 18 crates workspace | `crates/` (ls: +classroom R5, +ggb F9) |
 | 17 jobs CI | `.github/workflows/ci.yml:24-496` |

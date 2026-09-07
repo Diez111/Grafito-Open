@@ -1278,6 +1278,18 @@ fn status_hint_for_tool(tool: Tool) -> String {
         Tool::PolygonXor => "XOR: dos poligonos".to_string(),
         Tool::Sphere3D => "Esfera 3D: clic centro y borde".to_string(),
         Tool::Cube3D => "Cubo 3D: clic centro y borde".to_string(),
+        // F3d: hints de las 11 tools F3a (antes caían al fallback genérico).
+        Tool::Translate => "Traslada: clic inicio del vector, clic extremo".to_string(),
+        Tool::Rotate => "Rota: clic centro, clic para definir el ángulo".to_string(),
+        Tool::Dilate => "Homotecia: clic centro, clic donde cae la imagen".to_string(),
+        Tool::Reflect => "Refleja: clic objeto, clic dos puntos del eje".to_string(),
+        Tool::Compass => "Compás: clic centro, clic punto del radio".to_string(),
+        Tool::Semicircle => "Semicírculo: clic centro, clic punto del radio".to_string(),
+        Tool::Spline => "Spline: clic puntos, clic cerca del inicio para cerrar".to_string(),
+        Tool::Prism3D => "Prisma: clic sobre un polígono base".to_string(),
+        Tool::Tetrahedron3D => "Tetraedro: clic para crear (arista 2)".to_string(),
+        Tool::Checkbox => "Casilla: clic para crear ligada a variable".to_string(),
+        Tool::InputBox => "Caja de entrada: clic para crear ligada a variable".to_string(),
         Tool::Tesseract4D => {
             "Teseracto 4D: clic para crear un objeto centrado y proyectado".to_string()
         }
@@ -1743,4 +1755,36 @@ pub(crate) fn complete_autocomplete_selection(
     autocomplete.open = false;
     autocomplete.selected = 0;
     true
+}
+
+#[cfg(test)]
+mod status_hint_tests {
+    use super::status_hint_for_tool;
+    use grafito_ui::Tool;
+
+    #[test]
+    fn f3a_tools_have_specific_hints() {
+        // F3d: las 11 tools F3a no caen al fallback genérico.
+        let fallback = "Espacio / clic medio: mover vista";
+        for (tool, word) in [
+            (Tool::Translate, "Traslada"),
+            (Tool::Rotate, "Rota"),
+            (Tool::Dilate, "Homotecia"),
+            (Tool::Reflect, "Refleja"),
+            (Tool::Compass, "Compás"),
+            (Tool::Semicircle, "Semicírculo"),
+            (Tool::Spline, "Spline"),
+            (Tool::Prism3D, "Prisma"),
+            (Tool::Tetrahedron3D, "Tetraedro"),
+            (Tool::Checkbox, "Casilla"),
+            (Tool::InputBox, "Caja de entrada"),
+        ] {
+            let hint = status_hint_for_tool(tool);
+            assert_ne!(hint, fallback, "{tool:?} sin hint propio");
+            assert!(
+                hint.contains(word),
+                "{tool:?} debe mencionar '{word}': {hint}"
+            );
+        }
+    }
 }
