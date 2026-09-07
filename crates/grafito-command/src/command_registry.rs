@@ -1218,9 +1218,9 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.groebner-degrevlex",
         "GroebnerDegRevLex",
-        ["groebner", "groebnerbasis", "groebnerlex", "groebner_basis"],
+        ["groebner", "groebnerlex"],
         "CAS",
-        "Base de Groebner degrevlex: exacta para 2 polinomios lineales en 2 variables; con mas de 2x2 devuelve error honesto, usa Eliminate.",
+        "Base de Groebner degrevlex: exacta para 2 polinomios lineales en 2 variables; con mas de 2x2 devuelve error honesto, usa Eliminate o GroebnerBasis.",
         ReadOnly,
         Low,
         true,
@@ -1742,6 +1742,30 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "Histogram",
         [signature!("Histogram[{data}, bins]"; "data": Data required, "bins": Integer optional)]
+    ),
+    command!(
+        "statistics.bar-chart",
+        "BarChart",
+        ["barras", "bar"],
+        "Estadística",
+        "Crea un gráfico de barras por categoría (una barra por dato).",
+        CreatesObject,
+        Medium,
+        true,
+        "BarChart",
+        [signature!("BarChart[{data}]"; "data": Data required)]
+    ),
+    command!(
+        "statistics.pie-chart",
+        "PieChart",
+        ["torta", "pie"],
+        "Estadística",
+        "Crea un gráfico de torta proporcional (valores no negativos con total positivo).",
+        CreatesObject,
+        Medium,
+        true,
+        "PieChart",
+        [signature!("PieChart[{data}]"; "data": Data required)]
     ),
     command!(
         "statistics.scatter-plot",
@@ -3578,6 +3602,104 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia]"; "expr1": Expression required, "expr2": Expression required, "t0": Number required, "x0": Number required, "y0": Number required, "t_end": Number optional, "steps": Integer optional, "metodo": Expression optional, "tolerancia": Number optional)
         ]
     ),
+    // Frente W1: puerta simbólica del motor (cas_motor). Nombres elegidos para
+    // no pisar colisiones existentes: `Laplace` es la distribución estadística
+    // (commands.rs) y `LaplaceExpansion` el cofactor matricial; `ODESystem` es
+    // el integrador numérico. Por eso `SolveODE2`/`ODESystem2`/`LaplaceT`/
+    // `InvLaplaceT`/`RischInt`/`GroebnerBasis` (este último libera los alias
+    // `groebnerbasis`/`groebner_basis` que antes caían en GroebnerDegRevLex).
+    command!(
+        "cas.solve-ode2",
+        "SolveODE2",
+        ["edo2", "edo_2"],
+        "CAS",
+        "Resolvé EDO lineal de 2do orden a·y''+b·y'+c·y=rhs con a, b, c constantes (a≠0): SolveODE2[a, b, c, rhs] o SolveODE2[a, b, c, rhs, variable]. Orden ≥3 o coeficientes variables quedan fuera del subset y dan error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "SolveODE2",
+        [
+            signature!("SolveODE2[a, b, c, rhs]"; "a": Expression required, "b": Expression required, "c": Expression required, "rhs": Expression required),
+            signature!("SolveODE2[a, b, c, rhs, variable]"; "a": Expression required, "b": Expression required, "c": Expression required, "rhs": Expression required, "variable": Variable optional)
+        ]
+    ),
+    command!(
+        "cas.ode-system2",
+        "ODESystem2",
+        ["sistemaedo2", "odesys2"],
+        "CAS",
+        "Resolvé sistema lineal 2x2 constante x'=A·x por autovalores: ODESystem2[a11, a12, a21, a22] o ODESystem2[a11, a12, a21, a22, t]. No lineal o no constante queda fuera del subset y da error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "ODESystem2",
+        [
+            signature!("ODESystem2[a11, a12, a21, a22]"; "a11": Expression required, "a12": Expression required, "a21": Expression required, "a22": Expression required),
+            signature!("ODESystem2[a11, a12, a21, a22, t]"; "a11": Expression required, "a12": Expression required, "a21": Expression required, "a22": Expression required, "t": Variable optional)
+        ]
+    ),
+    command!(
+        "cas.laplace-t",
+        "LaplaceT",
+        ["transformadalaplace", "laplace_t"],
+        "CAS",
+        "Calculá la transformada de Laplace directa del subset F3c (1, t^n con n≤20, exp, sin/cos y combinaciones lineales): LaplaceT[expr] o LaplaceT[expr, t, s]. El resto da error honesto, no inventa.",
+        ReadOnly,
+        Low,
+        true,
+        "LaplaceT",
+        [
+            signature!("LaplaceT[expr]"; "expr": Expression required),
+            signature!("LaplaceT[expr, t]"; "expr": Expression required, "t": Variable optional),
+            signature!("LaplaceT[expr, t, s]"; "expr": Expression required, "t": Variable optional, "s": Variable optional)
+        ]
+    ),
+    command!(
+        "cas.inv-laplace-t",
+        "InvLaplaceT",
+        ["laplaceinversa", "invlaplace_t"],
+        "CAS",
+        "Calculá la Laplace inversa de racionales propios con denominador de grado ≤2: InvLaplaceT[expr] o InvLaplaceT[expr, s, t]. Grado ≥3, impropias o retardos quedan fuera del subset y dan error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "InvLaplaceT",
+        [
+            signature!("InvLaplaceT[expr]"; "expr": Expression required),
+            signature!("InvLaplaceT[expr, s]"; "expr": Expression required, "s": Variable optional),
+            signature!("InvLaplaceT[expr, s, t]"; "expr": Expression required, "s": Variable optional, "t": Variable optional)
+        ]
+    ),
+    command!(
+        "cas.risch-int",
+        "RischInt",
+        ["risch", "risch_int"],
+        "CAS",
+        "Integrá por Risch-Norman (polinomios, exponenciales, logaritmos): RischInt[expr], RischInt[expr, variable] o definida RischInt[expr, variable, a, b] por FTC. Sin primitiva en el subset (p. ej. exp(x^2)) da error honesto que deriva a cuadratura.",
+        ReadOnly,
+        Low,
+        true,
+        "RischInt",
+        [
+            signature!("RischInt[expr]"; "expr": Expression required),
+            signature!("RischInt[expr, variable]"; "expr": Expression required, "variable": Variable optional),
+            signature!("RischInt[expr, variable, a, b]"; "expr": Expression required, "variable": Variable required, "a": Number required, "b": Number required)
+        ]
+    ),
+    command!(
+        "cas.groebner-basis",
+        "GroebnerBasis",
+        ["groebner_basis", "basegroebner"],
+        "CAS",
+        "Calculá la base de Groebner por Buchberger acotado (hasta 8 polinomios en 4 variables, 128 S-polinomios; 3x3 lineal verificado): GroebnerBasis[polinomios, variables]. Fuera de cota o no polinómico da error honesto que deriva a Eliminate.",
+        ReadOnly,
+        Low,
+        true,
+        "GroebnerBasis",
+        [
+            signature!("GroebnerBasis[polinomios, variables]"; "polinomios": Expression required, "variables": ParameterList required)
+        ]
+    ),
     ];
 
 /// Returns every registered stable text command.
@@ -3905,6 +4027,12 @@ mod registry_tests {
             "SurfaceOfRevolution",
             "ODE",
             "ODESystem",
+            "SolveODE2",
+            "ODESystem2",
+            "LaplaceT",
+            "InvLaplaceT",
+            "RischInt",
+            "GroebnerBasis",
             "PerpendicularBisector",
             "AngleBisector",
             "Midpoint",
@@ -3996,6 +4124,8 @@ mod registry_tests {
             "Binomial",
             "Poisson",
             "Histogram",
+            "BarChart",
+            "PieChart",
             "ScatterPlot",
             "BoxPlot",
             "LinearRegression",
@@ -4414,11 +4544,11 @@ mod registry_tests {
     fn registry_counts_match_documented_architecture() {
         // Blindaje docs↔código (architecture.md §8/§13). Si agregás un
         // comando, actualizá ESTE test + architecture.md juntos.
-        assert_eq!(all().len(), 250, "COMMANDS registrados (docs §8)");
+        assert_eq!(all().len(), 258, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            206,
-            "comandos visibles en paleta (docs §8: 206 + 14 UI = 220)"
+            214,
+            "comandos visibles en paleta (docs §8: 214 + 14 UI = 228)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

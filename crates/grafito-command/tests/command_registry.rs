@@ -387,3 +387,184 @@ fn taylor_handler_accepts_every_documented_optional_form() {
         );
     }
 }
+
+// Frente W1: puerta simbólica cableada a paleta (ida/vuelta spec→brazo→test).
+// Cada comando nuevo delega al motor sin duplicar matemática; el `Err` se
+// vuelve mensaje honesto con el límite del subset.
+#[test]
+fn w1_symbolic_gate_specs_resolve_and_match_handlers() {
+    for (canonical, aliases, counts) in [
+        ("SolveODE2", &["edo2", "edo_2"][..], &[4, 5][..]),
+        ("ODESystem2", &["sistemaedo2", "odesys2"][..], &[4, 5][..]),
+        (
+            "LaplaceT",
+            &["transformadalaplace", "laplace_t"][..],
+            &[1, 2, 3][..],
+        ),
+        (
+            "InvLaplaceT",
+            &["laplaceinversa", "invlaplace_t"][..],
+            &[1, 2, 3][..],
+        ),
+        ("RischInt", &["risch", "risch_int"][..], &[1, 2, 4][..]),
+        (
+            "GroebnerBasis",
+            &["groebner_basis", "basegroebner"][..],
+            &[2][..],
+        ),
+    ] {
+        let spec = command_registry::resolve(canonical)
+            .unwrap_or_else(|| panic!("{canonical} must have stable metadata"));
+        assert!(spec.palette_visible, "{canonical} must be palette-visible");
+        assert_eq!(spec.dispatch_key, canonical);
+        for count in counts {
+            assert!(
+                spec.accepts_argument_count(*count),
+                "{canonical} arity {count} must remain registered"
+            );
+        }
+        for alias in aliases {
+            assert_eq!(
+                command_registry::canonicalize(alias),
+                Some(canonical),
+                "alias {alias} must resolve to {canonical}"
+            );
+        }
+    }
+    // Sin formas fantasma: aridades no documentadas se rechazan en el gate.
+    assert!(!command_registry::resolve("RischInt")
+        .expect("RischInt registered")
+        .accepts_argument_count(3));
+    assert!(!command_registry::resolve("GroebnerBasis")
+        .expect("GroebnerBasis registered")
+        .accepts_argument_count(1));
+    // Colisiones evitadas: la distribución sigue legado sin spec registrada.
+    assert!(command_registry::resolve("Laplace").is_none());
+    assert_eq!(
+        command_registry::canonicalize("groebnerbasis"),
+        Some("GroebnerBasis")
+    );
+}
+
+#[test]
+fn w1_symbolic_gate_handlers_delegate_to_motor() {
+    fn run(command: &str) -> CommandOutcome {
+        let mut document = Document::new();
+        let mut input = command.to_owned();
+        process_input(&mut document, &mut input)
+    }
+    for (command, needle) in [
+        ("SolveODE2[1, -3, 2, exp(x)]", "C1"),
+        ("SolveODE2[1, -3, 2, exp(x), x]", "C1"),
+        ("ODESystem2[0, 1, -2, -3]", "exp(-1*t)"),
+        ("ODESystem2[0, 1, -2, -3, t]", "exp(-1*t)"),
+        ("LaplaceT[sin(t)]", "s^2+1"),
+        ("LaplaceT[sin(t), t, s]", "s^2+1"),
+        ("LaplaceT[1]", "1/s"),
+        ("InvLaplaceT[1/(s+1)]", "exp(-1*t)"),
+        ("InvLaplaceT[1/(s+1), s, t]", "exp(-1*t)"),
+        ("RischInt[x^2]", "∫ x^2 dx"),
+        ("RischInt[x^2, x]", "∫ x^2 dx"),
+        ("RischInt[x^2, x, 0, 1]", "0.33333333"),
+        ("GroebnerBasis[{x+y-3, x-y-1}, {x, y}]", "S-polinomios"),
+    ] {
+        match run(command) {
+            CommandOutcome::Message(message) => assert!(
+                message.contains(needle),
+                "{command} → {message} (esperaba '{needle}')"
+            ),
+            other => panic!("{command} debe dar Message, dio {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn w1_symbolic_gate_errors_are_honest_with_subset_limits() {
+    fn run(command: &str) -> CommandOutcome {
+        let mut document = Document::new();
+        let mut input = command.to_owned();
+        process_input(&mut document, &mut input)
+    }
+    let over_budget: Vec<String> = (0..20).map(|i| format!("x + {i}")).collect();
+    let over_budget_cmd = format!("GroebnerBasis[{{{}}}, {{x}}]", over_budget.join(", "));
+    let cases: Vec<(String, Vec<&str>)> = vec![
+        (
+            "SolveODE2[0, 1, 1, x]".to_string(),
+            vec!["SolveODE2", "1er orden"],
+        ),
+        ("ODESystem2[t, 1, 0, 1]".to_string(), vec!["ODESystem2"]),
+        ("LaplaceT[exp(t^2)]".to_string(), vec!["LaplaceT"]),
+        ("InvLaplaceT[1/(s^3+1)]".to_string(), vec!["InvLaplaceT"]),
+        ("RischInt[exp(x^2)]".to_string(), vec!["RischInt"]),
+        (
+            "GroebnerBasis[{sin(x)+y, x-y}, {x, y}]".to_string(),
+            vec!["GroebnerBasis"],
+        ),
+        (over_budget_cmd, vec!["GroebnerBasis", "Eliminate"]),
+    ];
+    for (command, needles) in cases {
+        match run(&command) {
+            CommandOutcome::Error(message) => {
+                for needle in needles {
+                    assert!(
+                        message.contains(needle),
+                        "{command} → {message} (esperaba '{needle}')"
+                    );
+                }
+            }
+            other => panic!("{command} debe dar Error honesto, dio {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn w1_symbolic_gate_validates_max_expr_length_budget() {
+    fn run(command: &str) -> CommandOutcome {
+        let mut document = Document::new();
+        let mut input = command.to_owned();
+        process_input(&mut document, &mut input)
+    }
+    let big = "x".repeat(2001);
+    for command in [
+        format!("SolveODE2[1, 1, 1, {big}]"),
+        format!("RischInt[{big}]"),
+        format!("LaplaceT[{big}]"),
+        format!("GroebnerBasis[{big}, {{x}}]"),
+    ] {
+        match run(&command) {
+            CommandOutcome::Error(message) => assert!(
+                message.contains("MAX_EXPR_LENGTH"),
+                "{message} debe citar el presupuesto"
+            ),
+            other => panic!("entrada >2000 debe dar Error, dio {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn w1_new_names_do_not_shadow_laplace_distribution_or_numeric_ode() {
+    fn run(command: &str) -> CommandOutcome {
+        let mut document = Document::new();
+        let mut input = command.to_owned();
+        process_input(&mut document, &mut input)
+    }
+    // La distribución Laplace[media, b] sigue viva (legado sin spec).
+    match run("Laplace[0, 1]") {
+        CommandOutcome::Message(message) => {
+            assert!(
+                message.contains("PDF"),
+                "distribución intacta, got {message}"
+            )
+        }
+        other => panic!("Laplace[0, 1] debe seguir siendo la distribución, dio {other:?}"),
+    }
+    // El integrador numérico conserva su spec y dispatch.
+    assert_eq!(
+        command_registry::canonicalize("ODESystem"),
+        Some("ODESystem")
+    );
+    assert_eq!(
+        command_registry::canonicalize("ODESystem2"),
+        Some("ODESystem2")
+    );
+}

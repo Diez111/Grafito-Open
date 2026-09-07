@@ -144,8 +144,8 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
                 "ParametricDerivative"
             }
             "asymptote" | "asintota" | "asíntota" => "Asymptote",
-            "groebner" | "groebnerbasis" | "groebner_basis" | "groebnerdegrevlex"
-            | "groebnerlex" => "GroebnerDegRevLex",
+            "groebner" | "groebnerdegrevlex" | "groebnerlex" => "GroebnerDegRevLex",
+            "groebnerbasis" | "groebner_basis" => "GroebnerBasis",
             "factor" | "factorizar" => "Factor",
             "expand" | "expandir" => "Expand",
             "simplify" | "simplificar" => "Simplify",
@@ -388,6 +388,10 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
                 // principal devuelva el mensaje informativo sin pánico.
                 resolved_expr = "Groebner no implementado, use Eliminate".to_string();
             }
+            "GroebnerBasis" => {
+                // W1: sin expansión anidada; el handler principal delega al motor.
+                resolved_expr = current[range.clone()].to_string();
+            }
             _ => {
                 resolved_expr = current[range.clone()].to_string();
             }
@@ -460,8 +464,8 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
                     "ParametricDerivative"
                 }
                 "asymptote" | "asintota" | "asíntota" => "Asymptote",
-                "groebner" | "groebnerbasis" | "groebner_basis" | "groebnerdegrevlex"
-                | "groebnerlex" => "GroebnerDegRevLex",
+                "groebner" | "groebnerdegrevlex" | "groebnerlex" => "GroebnerDegRevLex",
+                "groebnerbasis" | "groebner_basis" => "GroebnerBasis",
                 "factor" | "factorizar" => "Factor",
                 "expand" | "expandir" => "Expand",
                 "simplify" | "simplificar" => "Simplify",

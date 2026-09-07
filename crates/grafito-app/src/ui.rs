@@ -177,10 +177,30 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                 ("PNG...", crate::export::ExportFormat::Png),
                 ("TikZ...", crate::export::ExportFormat::Tikz),
             ] {
-                if ui.button(label).clicked() {
+                // W3 — "…" = abre diálogo (elegís carpeta y nombre ahí).
+                if ui
+                    .button(label)
+                    .on_hover_text("Elegís la carpeta y el nombre en el diálogo.")
+                    .clicked()
+                {
                     app.export_with_dialog(format, Some(ui.ctx()));
                     ui.close_menu();
                 }
+            }
+            ui.separator();
+            // W3 — export con salida: revela la carpeta de la última exportación.
+            let reveal = ui.add_enabled(
+                app.last_export_dir.is_some(),
+                egui::Button::new("Mostrar en carpeta"),
+            );
+            let reveal = reveal.on_hover_text(if app.last_export_dir.is_some() {
+                "Abre la carpeta de tu última exportación."
+            } else {
+                "Exportá algo primero para activar esto."
+            });
+            if reveal.clicked() {
+                app.reveal_last_export();
+                ui.close_menu();
             }
         });
         ui.separator();
@@ -317,6 +337,16 @@ fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                     .color(current_theme(ui.ctx()).text_tertiary)
                     .size(TYPE_XS),
             );
+        }
+        ui.separator();
+        if ui.button("Guardar herramienta personalizada…").clicked() {
+            app.show_custom_tool_dialog = true;
+            app.custom_tool_name.clear();
+            ui.close_menu();
+        }
+        if ui.button("Cargar herramienta (.ggt)…").clicked() {
+            app.load_custom_tool_from_dialog();
+            ui.close_menu();
         }
     });
 }

@@ -24,7 +24,7 @@ pub use grafito_command::assistant_proposals::{AssistantParameterAssignment, Ass
 // wake sources locales con constantes nombradas; quedan subsumidas por el
 // scheduler unificado de `app.rs` (16ms) mientras `is_pending`.
 
-/// Intervalo de repintado del pulso "Generando animación…" (F17).
+/// Intervalo de repintado del pulso "Armando tu animación…" (F17).
 /// Subsumido por el scheduler de `app.rs` (16ms) mientras `is_pending`.
 pub const ANIMATION_PROGRESS_REPAINT_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(48);
@@ -4733,6 +4733,13 @@ fn draw_panel_contents(
                         if let Some(live) = assistant_live_text(state) {
                             crate::toolbar::tag_live_region(&err_resp, live);
                         }
+                        // W3 — el error no culpa: el borrador sigue a salvo en
+                        // el historial (begin_request lo dejó visible).
+                        ui.label(
+                            egui::RichText::new("Se cortó la conexión. Tu texto está a salvo.")
+                                .color(theme.text_secondary)
+                                .size(crate::tokens::TYPE_XS),
+                        );
                         if state.proposal_correction_available
                             && ui.small_button("Pedir una corrección").clicked()
                         {
@@ -4741,9 +4748,39 @@ fn draw_panel_contents(
                                 Some(AssistantUiAction::RetryProposalCorrection),
                             );
                         }
-                        if ui.small_button("Limpiar error").clicked() {
-                            state.clear_error();
-                        }
+                        ui.horizontal(|ui| {
+                            // W3 — Reintentar reenvía el borrador guardado
+                            // (último turno de usuario) vía `Submit`.
+                            let draft = last_user_question(&state.conversation);
+                            let retry = ui
+                                .add_enabled(
+                                    draft.is_some(),
+                                    egui::Button::new(
+                                        egui::RichText::new("Reintentar")
+                                            .size(crate::tokens::TYPE_XS)
+                                            .strong(),
+                                    ),
+                                )
+                                .on_disabled_hover_text("No hay pregunta previa para reintentar.");
+                            if retry.clicked() {
+                                if let Some(question) = draft {
+                                    state.problem = question;
+                                    state.clear_error();
+                                    retain_first_assistant_action(
+                                        &mut action,
+                                        Some(AssistantUiAction::Submit),
+                                    );
+                                } else {
+                                    state.clear_error();
+                                }
+                            }
+                            if ui.small_button("Empezar de nuevo").clicked() {
+                                retain_first_assistant_action(
+                                    &mut action,
+                                    Some(AssistantUiAction::ClearConversation),
+                                );
+                            }
+                        });
                     });
                 ui.add_space(SPACE_SM);
             }
@@ -4847,7 +4884,10 @@ fn draw_panel_contents(
             // Se mantiene fallback global solo si no hay conversación (empty state con animación previa)
             if should_draw_empty_state(state) {
                 if state.anim_progress {
-                    draw_animation_progress(ui, state, visuals);
+                    retain_first_assistant_action(
+                        &mut action,
+                        draw_animation_progress(ui, state, visuals),
+                    );
                 } else if state.media.is_some() {
                     retain_first_assistant_action(&mut action, draw_media_card(ui, state));
                 }
@@ -4862,15 +4902,16 @@ fn draw_panel_contents(
 }
 
 /// Tarjeta en vivo mientras se genera la animación (progreso sin fricción).
-/// Con tamaño mínimo legible y label de estado (`generando`).
+/// Copy W3 con expectativa honesta (~20 s) y [Cancelar] real (`Cancel`).
 fn draw_animation_progress(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
     visuals: AssistantVisuals,
-) {
+) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let _ = visuals;
     let time = ui.input(|input| input.time);
+    let mut action = None;
     egui::Frame::none()
         .fill(theme.input_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -4887,15 +4928,24 @@ fn draw_animation_progress(
                 ui.painter().circle_filled(rect.center(), 5.0, color);
                 ui.add_space(SPACE_XS);
                 ui.add(egui::Label::new(
-                    egui::RichText::new("Generando animación…")
+                    egui::RichText::new("Armando tu animación… ~20 s")
                         .color(theme.text_primary)
                         .size(TYPE_SM)
                         .strong(),
                 ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("Cancelar")
+                        .on_hover_text("Detiene la animación en curso")
+                        .clicked()
+                    {
+                        action = Some(AssistantUiAction::Cancel);
+                    }
+                });
             });
             ui.add_space(SPACE_XS);
             ui.label(
-                egui::RichText::new("Estado: generando")
+                egui::RichText::new("Te aviso cuando esté lista.")
                     .color(theme.text_tertiary)
                     .size(TYPE_XS)
                     .weak(),
@@ -4905,6 +4955,7 @@ fn draw_animation_progress(
     ui.ctx()
         .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
     let _ = state;
+    action
 }
 
 /// Duración del loop para `frame_count` fotogramas a `fps` (B5).
@@ -5100,17 +5151,25 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 );
                 ui.add_space(SPACE_XS);
                 ui.label(
-                    egui::RichText::new("Preparando animación…")
+                    egui::RichText::new("Armando tu animación… ~20 s")
                         .color(theme.text_secondary)
                         .size(TYPE_SM),
                 );
                 ui.add_space(SPACE_XS);
                 ui.label(
-                    egui::RichText::new("Estado: generando")
+                    egui::RichText::new("Te aviso cuando esté lista.")
                         .color(theme.text_tertiary)
                         .size(TYPE_XS)
                         .weak(),
                 );
+                ui.add_space(SPACE_XS);
+                if ui
+                    .small_button("Cancelar")
+                    .on_hover_text("Detiene la animación en curso")
+                    .clicked()
+                {
+                    action = Some(AssistantUiAction::Cancel);
+                }
             });
         return action;
     };
@@ -5879,6 +5938,44 @@ fn draw_assistant_empty_state(
                 .size(crate::tokens::TYPE_SM)
                 .weak(),
         );
+        ui.add_space(crate::tokens::SPACE_XS);
+        // W3 — vacío con camino: chips que envían el texto al turno.
+        // Piel pura: setean el borrador y emiten `Submit`; la app decide.
+        ui.horizontal(|ui| {
+            let left = ((ui.available_width() - crate::tokens::SPACE_SM) / 2.0).max(0.0);
+            if ui
+                .add_sized(
+                    egui::vec2(left, 28.0),
+                    egui::Button::new(
+                        egui::RichText::new("Graficá y=x²").size(crate::tokens::TYPE_XS),
+                    )
+                    .rounding(crate::tokens::RADIUS_PILL)
+                    .fill(theme.accent.gamma_multiply(0.10))
+                    .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35))),
+                )
+                .on_hover_text("La dibujo en el lienzo")
+                .clicked()
+            {
+                state.problem = "Graficá y=x²".to_owned();
+                action = Some(AssistantUiAction::Submit);
+            }
+            if ui
+                .add_sized(
+                    egui::vec2(left, 28.0),
+                    egui::Button::new(
+                        egui::RichText::new("Animá una derivada").size(crate::tokens::TYPE_XS),
+                    )
+                    .rounding(crate::tokens::RADIUS_PILL)
+                    .fill(theme.accent.gamma_multiply(0.10))
+                    .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35))),
+                )
+                .on_hover_text("Armo la animación paso a paso")
+                .clicked()
+            {
+                state.problem = "Animá la derivada de x²".to_owned();
+                action = Some(AssistantUiAction::Submit);
+            }
+        });
         ui.add_space(crate::tokens::SPACE_SM);
         // B7 — entrada al ciclo de ejercicio sin conversación previa.
         if ui
@@ -6011,9 +6108,9 @@ fn draw_assistant_composer(
     };
     let editor_rows = if collapsed { 1 } else { 2 };
     let editor_hint = if collapsed {
-        "Escribí tu pregunta"
+        "Pedí algo, ej. \"graficá y=x²\"…"
     } else {
-        "Escribí tu pregunta · Enter envía, Shift+Enter salta"
+        "Pedí algo, ej. \"graficá y=x²\"… · Enter envía"
     };
 
     if let Some(focus) = &state.focus {
@@ -6180,7 +6277,11 @@ fn draw_assistant_composer(
                                 theme.button_bg.gamma_multiply(0.6)
                             })
                             .stroke(egui::Stroke::NONE);
-                            if ui.add_enabled(can_submit, btn).clicked() || submit_on_enter {
+                            let send_response =
+                                ui.add_enabled(can_submit, btn).on_disabled_hover_text(
+                                    "Escribí una pregunta dentro del límite para enviar.",
+                                );
+                            if send_response.clicked() || submit_on_enter {
                                 action = Some(AssistantUiAction::Submit);
                             }
                         }
@@ -6205,11 +6306,19 @@ fn draw_assistant_composer(
                         ui.add_space(crate::tokens::SPACE_XS);
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(
-                                    "Te pasaste del límite… acortá la pregunta para enviar.",
-                                )
-                                .color(theme.danger)
-                                .size(crate::tokens::TYPE_XS),
+                                egui::RichText::new(over_budget_hint(budget))
+                                    .color(theme.danger)
+                                    .size(crate::tokens::TYPE_XS),
+                            )
+                            .wrap(),
+                        );
+                    } else if state.problem.trim().is_empty() {
+                        ui.add_space(crate::tokens::SPACE_XS);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("Escribí algo para activar Enviar.")
+                                    .color(theme.text_tertiary)
+                                    .size(crate::tokens::TYPE_XS),
                             )
                             .wrap(),
                         );
@@ -6354,6 +6463,64 @@ pub fn andamiar_topic_for_content(content: &str) -> String {
         return ANDAMIAR_DEFAULT_TOPIC.to_string();
     }
     primera.chars().take(60).collect()
+}
+
+/// W3 — Saludos sin camino («hola»): respuesta con siguiente paso ofrecido.
+///
+/// Pura: minúsculas, recorta signos de puntuación, lista cerrada de saludos.
+/// `None` = no es un saludo (sigue el flujo normal). Testeable.
+pub fn greeting_answer(text: &str) -> Option<String> {
+    let norm: String = text
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '!' | '¡' | '?' | '¿' | '.' | ',' | ';' | ':'))
+        .collect();
+    let norm = norm.trim();
+    const SALUDOS: &[&str] = &[
+        "hola",
+        "hello",
+        "hi",
+        "hey",
+        "buenas",
+        "buenas tardes",
+        "buenas noches",
+        "buenos dias",
+        "buenos días",
+        "que tal",
+        "qué tal",
+        "como estas",
+        "cómo estás",
+        "como andas",
+        "cómo andás",
+    ];
+    if SALUDOS.contains(&norm) {
+        Some("¡Hola! Soy Mora. Probá con “graficá y=x²” o pedime “animá una derivada”.".to_owned())
+    } else {
+        None
+    }
+}
+
+/// W3 — Última pregunta del usuario (borrador a salvo para [Reintentar]).
+///
+/// Pura: recorre el historial; `None` si no hay turno de usuario no vacío.
+/// El turno del usuario ya queda visible vía `begin_request`, así que el
+/// reintento reenvía ese borrador guardado. Testeable.
+pub fn last_user_question(conversation: &[ConversationTurn]) -> Option<String> {
+    conversation
+        .iter()
+        .rev()
+        .find(|turn| matches!(turn.role, ConversationRole::User))
+        .map(|turn| turn.content.clone())
+        .filter(|text| !text.trim().is_empty())
+}
+
+/// W3 — Razón inline cuando el borrador supera el presupuesto de entrada.
+///
+/// Pura: incluye el límite numérico para que el contador `usado/límite`
+/// deje de ser críptico. Testeable.
+pub fn over_budget_hint(budget: usize) -> String {
+    format!("Acortá un poco para enviar (límite {budget}).")
 }
 
 /// Decide si una respuesta merece el botón "Explícame paso a paso".
@@ -6587,7 +6754,10 @@ fn draw_conversation_turn(
             if is_last {
                 if state.anim_progress {
                     ui.add_space(SPACE_SM);
-                    draw_animation_progress(ui, state, visuals);
+                    retain_first_assistant_action(
+                        &mut action,
+                        draw_animation_progress(ui, state, visuals),
+                    );
                 } else if state.media.is_some() {
                     ui.add_space(SPACE_SM);
                     retain_first_assistant_action(&mut action, draw_media_card(ui, state));
@@ -8758,6 +8928,48 @@ mod tests {
         // El fallback siempre resuelve a un LO real del currículum.
         let los = grafito_pedagogy::Curriculum::find_for_concept(ANDAMIAR_DEFAULT_TOPIC);
         assert!(los.iter().any(|lo| lo.id == "am1-der"));
+    }
+
+    #[test]
+    fn w3_greeting_answer_ofrece_siguiente_paso() {
+        for saludo in ["hola", "Hola", "¡hola!", "buenas", "qué tal"] {
+            let respuesta = greeting_answer(saludo).expect("saludo con camino");
+            assert!(
+                respuesta.contains("graficá y=x²"),
+                "el saludo ofrece graficar: {respuesta}"
+            );
+            assert!(
+                respuesta.contains("derivada"),
+                "el saludo ofrece animar: {respuesta}"
+            );
+        }
+        assert_eq!(greeting_answer("2 + 2"), None);
+        assert_eq!(greeting_answer(""), None);
+        assert_eq!(greeting_answer("graficá y=x²"), None);
+    }
+
+    #[test]
+    fn w3_last_user_question_rescata_borrador_para_reintentar() {
+        assert_eq!(last_user_question(&[]), None);
+        let mut state = AssistantPanelState::default();
+        state.begin_request("Graficá y=x²".into());
+        state.complete_local_request("listo".into());
+        state.begin_request("Animá la derivada de x²".into());
+        state.fail_request("Se cortó la conexión.");
+        assert_eq!(
+            last_user_question(&state.conversation).as_deref(),
+            Some("Animá la derivada de x²")
+        );
+    }
+
+    #[test]
+    fn w3_over_budget_hint_incluye_limite() {
+        let hint = over_budget_hint(8192);
+        assert!(
+            hint.contains("8192"),
+            "el límite deja de ser críptico: {hint}"
+        );
+        assert!(hint.contains("Acortá"), "tono rioplatense: {hint}");
     }
 
     #[test]

@@ -4,6 +4,7 @@ use egui::{Color32, Pos2, Rect, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_core::parametric_sampling;
+use grafito_core::tex_raster::{TexBitmap, MAX_TEX_LINE_CHARS, MAX_TEX_MTEXT_BYTES};
 use grafito_core::vector_field_sampling;
 use grafito_core::{GeoObject, ImplicitCurveObj, ObjectId, RelationOperator};
 use grafito_geometry::expr::{
@@ -1916,6 +1917,115 @@ fn get_label(base: &str, style: Option<StyleOverride>) -> &str {
         }
     }
     base
+}
+
+// ── Etiquetas matemáticas TeX en canvas (W2) ──
+//
+// Donde el canvas mostraba ASCII (`f`), compone `"f = x^2"` y dibuja el
+// raster de `grafito_core::tex_raster` si el subset lo cubre entero; si un
+// glifo falta, la línea es larguísima o el bitmap excede la cota de dibujo,
+// deja el ASCII original (jamás tofu, jamás texto truncado a escondidas).
+// Render inmediato por píxeles (rects 2×2): sin texturas, sin estado, puro
+// por frame como el resto del canvas. Puro y acotado, sin `unwrap`.
+
+/// Escala del píxel TeX a píxel de pantalla (5×7 → 10×14 por glifo).
+pub(crate) const TEX_LABEL_SCALE_PX: f32 = 2.0;
+/// Ancho máximo dibujado (px pantalla): bitmaps más anchos caen a ASCII.
+pub(crate) const TEX_LABEL_MAX_WIDTH_PX: f32 = 480.0;
+/// Alto máximo dibujado (px pantalla): bitmaps más altos caen a ASCII.
+pub(crate) const TEX_LABEL_MAX_HEIGHT_PX: f32 = 64.0;
+
+/// Decisión pura de dibujo para la etiqueta de una función del canvas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FunctionLabelDraw {
+    /// ASCII de siempre (`label` tal cual, sin tocar).
+    Ascii,
+    /// Raster total: `text` compuesta (`"f = x^2"`) + su bitmap cubierto.
+    TexRaster { text: String, bitmap: TexBitmap },
+}
+
+/// Compone `"label = expr"` y decide ASCII vs raster.
+///
+/// `TexRaster` solo si: ambas partes no vacías, la compuesta entra en
+/// `MAX_TEX_LINE_CHARS` (si no, el raster truncaría y mentiría → ASCII),
+/// el raster no falla por cotas, `omitted_glyphs == 0` (cobertura total) y
+/// el bitmap escalado entra en las cotas de dibujo. Todo lo demás → ASCII.
+pub(crate) fn decide_function_label(label: &str, expr: &str) -> FunctionLabelDraw {
+    let label = label.trim();
+    let expr = expr.trim();
+    if label.is_empty() || expr.is_empty() {
+        return FunctionLabelDraw::Ascii;
+    }
+    if label.len() + expr.len() > MAX_TEX_MTEXT_BYTES {
+        return FunctionLabelDraw::Ascii;
+    }
+    let text = format!("{label} = {expr}");
+    if text.chars().count() > MAX_TEX_LINE_CHARS {
+        return FunctionLabelDraw::Ascii;
+    }
+    let outcome = match grafito_core::tex_raster::render_plain_math_to_bitmap(&text) {
+        Ok(outcome) => outcome,
+        Err(_) => return FunctionLabelDraw::Ascii,
+    };
+    if outcome.omitted_glyphs != 0 || outcome.bitmap.is_empty() {
+        return FunctionLabelDraw::Ascii;
+    }
+    let width_px = outcome.bitmap.width as f32 * TEX_LABEL_SCALE_PX;
+    let height_px = outcome.bitmap.height as f32 * TEX_LABEL_SCALE_PX;
+    if !width_px.is_finite()
+        || !height_px.is_finite()
+        || width_px > TEX_LABEL_MAX_WIDTH_PX
+        || height_px > TEX_LABEL_MAX_HEIGHT_PX
+    {
+        return FunctionLabelDraw::Ascii;
+    }
+    FunctionLabelDraw::TexRaster {
+        text,
+        bitmap: outcome.bitmap,
+    }
+}
+
+/// Dibuja un bitmap TeX como rects de `TEX_LABEL_SCALE_PX` desde `origin`
+/// (esquina superior-izquierda). No-op con bitmap vacío, origen no finito o
+/// sobre la cota (defensa en profundidad: `decide_function_label` ya filtra).
+/// Sin `panic`: índices con `checked_*`, píxeles por `.get`.
+pub(crate) fn draw_tex_bitmap(
+    painter: &egui::Painter,
+    origin: Pos2,
+    bitmap: &TexBitmap,
+    color: Color32,
+) {
+    if bitmap.is_empty() || !origin.is_finite() {
+        return;
+    }
+    if bitmap.width as f32 * TEX_LABEL_SCALE_PX > TEX_LABEL_MAX_WIDTH_PX
+        || bitmap.height as f32 * TEX_LABEL_SCALE_PX > TEX_LABEL_MAX_HEIGHT_PX
+    {
+        return;
+    }
+    for y in 0..bitmap.height {
+        for x in 0..bitmap.width {
+            let index = (y as usize)
+                .checked_mul(bitmap.width as usize)
+                .and_then(|base| base.checked_add(x as usize));
+            let Some(index) = index else { continue };
+            if bitmap.pixels.get(index).is_none_or(|ink| *ink == 0) {
+                continue;
+            }
+            let pos = Pos2::new(
+                origin.x + x as f32 * TEX_LABEL_SCALE_PX,
+                origin.y + y as f32 * TEX_LABEL_SCALE_PX,
+            );
+            if !pos.is_finite() {
+                continue;
+            }
+            painter.rect_filled(
+                Rect::from_min_size(pos, Vec2::splat(TEX_LABEL_SCALE_PX)),
+                0.0,
+                color,
+            );
+        }
+    }
 }
 
 /// HSL to RGB conversion for domain coloring
@@ -3966,13 +4076,36 @@ impl GrafitoApp {
                         if let Some(position) = function_screen_point(view, canvas_rect, mid_x, y) {
                             let label_position = position + Vec2::new(0.0, 14.0);
                             if draw_bounds.contains(label_position) {
-                                painter.text(
-                                    label_position,
-                                    egui::Align2::CENTER_TOP,
-                                    label,
-                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
-                                    label_color,
-                                );
+                                // W2 TeX: raster si cubre, ASCII idéntico si no.
+                                match decide_function_label(label, &fun.expr) {
+                                    FunctionLabelDraw::TexRaster { bitmap, .. } => {
+                                        let half = bitmap.width as f32 * TEX_LABEL_SCALE_PX * 0.5;
+                                        let origin =
+                                            Pos2::new(label_position.x - half, label_position.y);
+                                        if origin.is_finite() {
+                                            draw_tex_bitmap(&painter, origin, &bitmap, label_color);
+                                        } else {
+                                            painter.text(
+                                                label_position,
+                                                egui::Align2::CENTER_TOP,
+                                                label,
+                                                egui::FontId::proportional(
+                                                    grafito_ui::tokens::TYPE_SM,
+                                                ),
+                                                label_color,
+                                            );
+                                        }
+                                    }
+                                    FunctionLabelDraw::Ascii => {
+                                        painter.text(
+                                            label_position,
+                                            egui::Align2::CENTER_TOP,
+                                            label,
+                                            egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
+                                            label_color,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -4129,6 +4262,83 @@ impl GrafitoApp {
                     );
                     painter.rect_filled(rect, 0.0, fill);
                     painter.rect_stroke(rect, 0.0, stroke);
+                }
+            }
+            GeoObject::BarChart(b) => {
+                // Barras por índice: la altura es el valor en mundo
+                // (proporcional a `fraction_of_max` del motor, que valida).
+                let bars = match grafito_core::symbolic::bar_chart_bars(&b.data) {
+                    Ok(bars) => bars,
+                    Err(_) => return,
+                };
+                if bars.is_empty() {
+                    return;
+                }
+                let stroke = Stroke::new(b.width, to_color32(b.color));
+                let fill = b
+                    .fill_color
+                    .map(to_color32)
+                    .unwrap_or(Color32::from_rgba_premultiplied(50, 120, 220, 100));
+                for bar in &bars {
+                    let x = bar.index as f64;
+                    let y_lo = 0.0_f64.min(bar.value);
+                    let y_hi = 0.0_f64.max(bar.value);
+                    let bl = view.world_to_screen(Point2::new(x - 0.4, y_lo));
+                    let tr = view.world_to_screen(Point2::new(x + 0.4, y_hi));
+                    let rect = Rect::from_min_max(
+                        canvas_rect.min + Vec2::new(bl.x, tr.y),
+                        canvas_rect.min + Vec2::new(tr.x, bl.y),
+                    );
+                    painter.rect_filled(rect, 0.0, fill);
+                    painter.rect_stroke(rect, 0.0, stroke);
+                }
+            }
+            GeoObject::PieChart(p) => {
+                // Sectores desde el ángulo 0 con `start_angle` del motor;
+                // el relleno rota el matiz del color del objeto por sector.
+                let slices = match grafito_core::symbolic::pie_chart_slices(&p.data) {
+                    Ok(slices) => slices,
+                    Err(_) => return,
+                };
+                if slices.is_empty() {
+                    return;
+                }
+                if !(p.radius.is_finite() && p.radius > 0.0) {
+                    return;
+                }
+                let count = slices.len();
+                let steps = if count <= 64 {
+                    24
+                } else if count <= 512 {
+                    6
+                } else {
+                    2
+                };
+                let base_fill = p.fill_color.unwrap_or(Color::new(0.2, 0.5, 0.9, 0.4));
+                let stroke = Stroke::new(p.width, to_color32(p.color));
+                let center = view.world_to_screen(p.center);
+                let center_pos = canvas_rect.min + Vec2::new(center.x, center.y);
+                for slice in &slices {
+                    let mut points = Vec::with_capacity(steps + 2);
+                    points.push(center_pos);
+                    for step in 0..=steps {
+                        let angle =
+                            slice.start_angle + slice.sweep_angle * step as f64 / steps as f64;
+                        let world = Point2::new(
+                            p.center.x + p.radius * angle.cos(),
+                            p.center.y + p.radius * angle.sin(),
+                        );
+                        let screen = view.world_to_screen(world);
+                        points.push(canvas_rect.min + Vec2::new(screen.x, screen.y));
+                    }
+                    let fill =
+                        to_color32(grafito_core::pie_slice_color(base_fill, slice.index, count));
+                    painter.add(Shape::Path(egui::epaint::PathShape {
+                        points,
+                        closed: true,
+                        fill,
+                        stroke: stroke.into(),
+                    }));
                 }
             }
             GeoObject::ScatterPlot(sp) => {
@@ -5903,5 +6113,86 @@ mod number_plane_tests {
         let migrated: grafito_core::Document =
             serde_json::from_value(value).expect("migra sin el campo");
         assert!(migrated.number_plane_labels);
+    }
+}
+
+#[cfg(test)]
+mod tex_label_tests {
+    use super::{
+        decide_function_label, draw_tex_bitmap, FunctionLabelDraw, TEX_LABEL_MAX_WIDTH_PX,
+        TEX_LABEL_SCALE_PX,
+    };
+    use egui::{Pos2, Rect, Vec2};
+
+    #[test]
+    fn ascii_math_label_rasterizes_fully() {
+        // El caso pedido: `y = x^2` ASCII pasa a raster cubierto, sin pánico.
+        match decide_function_label("f", "x^2") {
+            FunctionLabelDraw::TexRaster { text, bitmap } => {
+                assert_eq!(text, "f = x^2");
+                assert!(!bitmap.is_empty());
+                assert!(bitmap.ink_pixels() > 0);
+                // Una línea de 7 px de alto.
+                assert_eq!(bitmap.height, grafito_core::tex_raster::GLYPH_H);
+            }
+            FunctionLabelDraw::Ascii => panic!("'f = x^2' debería rasterizar"),
+        }
+        // Multi-símbolo pedido por F2c también cubre.
+        assert!(matches!(
+            decide_function_label("g", "x² + π"),
+            FunctionLabelDraw::TexRaster { .. }
+        ));
+    }
+
+    #[test]
+    fn missing_glyph_falls_back_to_original_ascii() {
+        // Glifo sin cobertura (emoji) → ASCII original, jamás tofu: la
+        // decisión no porta ningún string alterado, el call-site dibuja
+        // `label` tal cual (verificado por construcción: `Ascii` no muta).
+        assert_eq!(
+            decide_function_label("f", "x^2😀"),
+            FunctionLabelDraw::Ascii
+        );
+        assert_eq!(decide_function_label("", "x^2"), FunctionLabelDraw::Ascii);
+        assert_eq!(decide_function_label("f", ""), FunctionLabelDraw::Ascii);
+        assert_eq!(decide_function_label("  ", "x^2"), FunctionLabelDraw::Ascii);
+    }
+
+    #[test]
+    fn overlong_label_falls_back_instead_of_truncating() {
+        // Expresiones larguísimas: el raster truncaría a escondidas, así que
+        // se cae a ASCII honesto (la etiqueta completa sigue legible).
+        let long = "x+".repeat(200);
+        assert_eq!(decide_function_label("f", &long), FunctionLabelDraw::Ascii);
+    }
+
+    #[test]
+    fn draw_tex_bitmap_never_panics_headless() {
+        let ctx = egui::Context::default();
+        let canvas = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(800.0, 600.0));
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        let color = egui::Color32::WHITE;
+        // Bitmap real dibuja sin pánico.
+        if let FunctionLabelDraw::TexRaster { bitmap, .. } = decide_function_label("f", "x^2") {
+            draw_tex_bitmap(&painter, Pos2::new(10.0, 10.0), &bitmap, color);
+            // Centrado del call-site: ancho conocido, origen finito.
+            let half = bitmap.width as f32 * TEX_LABEL_SCALE_PX * 0.5;
+            assert!(half.is_finite() && half > 0.0);
+            assert!(half * 2.0 <= TEX_LABEL_MAX_WIDTH_PX);
+        } else {
+            panic!("'f = x^2' debería rasterizar");
+        }
+        // Bordes: vacío y origen no finito son no-op, no pánico.
+        draw_tex_bitmap(
+            &painter,
+            Pos2::new(10.0, 10.0),
+            &grafito_core::tex_raster::TexBitmap::empty(),
+            color,
+        );
+        if let FunctionLabelDraw::TexRaster { bitmap, .. } = decide_function_label("f", "x^2") {
+            draw_tex_bitmap(&painter, Pos2::new(f32::NAN, 0.0), &bitmap, color);
+            draw_tex_bitmap(&painter, Pos2::new(f32::INFINITY, 0.0), &bitmap, color);
+        }
+        let _ = canvas;
     }
 }

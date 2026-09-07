@@ -3703,6 +3703,32 @@ impl Document {
                 }
                 false
             }
+            GeoObject::BarChart(b) => {
+                // Barras por índice: x en [i-0.4, i+0.4], y entre 0 y el valor.
+                for (index, value) in b.data.iter().enumerate() {
+                    if !value.is_finite() {
+                        continue;
+                    }
+                    let x = index as f64;
+                    let y_lo = 0.0_f64.min(*value);
+                    let y_hi = 0.0_f64.max(*value);
+                    if world.x >= x - 0.4 - tolerance
+                        && world.x <= x + 0.4 + tolerance
+                        && world.y >= y_lo - tolerance
+                        && world.y <= y_hi + tolerance
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            GeoObject::PieChart(p) => {
+                // La torta ocupa el disco centro/radio: hit dentro del disco.
+                if !p.radius.is_finite() || p.radius <= 0.0 {
+                    return false;
+                }
+                p.center.distance(&world) <= p.radius + tolerance
+            }
             GeoObject::BoxPlot(bp) => {
                 // Check if point is inside the box
                 if let Some((_, q1, _, q3, _, _)) =
@@ -4009,6 +4035,26 @@ impl Document {
                     let x_min = h.data.iter().cloned().fold(f64::INFINITY, f64::min);
                     let x_max = h.data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     (x_min, 0.0, x_max, h.data.len() as f64)
+                }
+                GeoObject::BarChart(b) => {
+                    if b.data.is_empty() {
+                        continue;
+                    }
+                    let y_min = b.data.iter().cloned().fold(0.0_f64, f64::min);
+                    let y_max = b.data.iter().cloned().fold(0.0_f64, f64::max);
+                    (-0.5, y_min, b.data.len() as f64 - 0.5, y_max)
+                }
+                GeoObject::PieChart(p) => {
+                    if !p.radius.is_finite() || p.radius <= 0.0 {
+                        continue;
+                    }
+                    let r = p.radius.abs();
+                    (
+                        p.center.x - r,
+                        p.center.y - r,
+                        p.center.x + r,
+                        p.center.y + r,
+                    )
                 }
                 GeoObject::BoxPlot(bp) => {
                     if bp.data.is_empty() {
@@ -6249,6 +6295,12 @@ impl Document {
                 .checked_add(o.expr_dy.len())
                 .unwrap_or(usize::MAX),
             GeoObject::Histogram(o) => 256usize
+                .checked_add(o.data.len().checked_mul(8).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::BarChart(o) => 256usize
+                .checked_add(o.data.len().checked_mul(8).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::PieChart(o) => 256usize
                 .checked_add(o.data.len().checked_mul(8).unwrap_or(usize::MAX))
                 .unwrap_or(usize::MAX),
             GeoObject::ScatterPlot(o) => 256usize

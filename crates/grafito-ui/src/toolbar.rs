@@ -294,7 +294,8 @@ impl ToolGroupId {
     }
 }
 
-/// Todos los grupos en el orden clásico de la toolbar (sin `ThreeD`/`FourD`/`Dynamics`).
+/// Grupos de la toolbar clásica (15, sin `ThreeD`/`FourD`/`Dynamics` a propósito:
+/// disclosure progresivo — ver `UNIVERSITY_TOOL_GROUPS` para los 18).
 pub const ALL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Move,
     ToolGroupId::Point,
@@ -654,6 +655,7 @@ pub fn toolbar_live_text(current: Tool, locale: Locale) -> String {
     match locale {
         Locale::Es => format!("Herramienta: {name}"),
         Locale::En => format!("Tool: {name}"),
+        Locale::Pt => format!("Ferramenta: {name}"),
     }
 }
 
@@ -1237,7 +1239,7 @@ pub fn toolbar_localized(
     }
 }
 
-/// Selector compacto de idioma ES/EN para la barra de herramientas.
+/// Selector compacto de idioma ES/EN/PT para la barra de herramientas.
 ///
 /// Piel pura: muta `locale` en memoria, sin I/O ni spawn. La persistencia vive
 /// en `AppConfig::locale` (grafito-app/src/utils.rs): tras el cambio, el caller
@@ -1247,12 +1249,51 @@ pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
     ui.horizontal(|ui| {
         let _ = ui
             .selectable_value(locale, Locale::Es, "ES")
-            .on_hover_text("Idioma · Language: Español");
+            .on_hover_text("Idioma · Language · Idioma: Español");
         let _ = ui
             .selectable_value(locale, Locale::En, "EN")
-            .on_hover_text("Idioma · Language: English");
+            .on_hover_text("Idioma · Language · Idioma: English");
+        let _ = ui
+            .selectable_value(locale, Locale::Pt, "PT")
+            .on_hover_text("Idioma · Language · Idioma: Português");
     })
     .response
+}
+
+// ── Custom tools en la toolbar (W2, superficie API) ──
+//
+// Mismo contrato que `custom_tool_entries` en `command_palette.rs`: solo se
+// expone lo validado del `CustomToolStore` (versión, nombre, cotas,
+// allowlist), el `template` une pasos con `"\n"` para que `process_input` lo
+// ejecute como batch, y vacío si el store está vacío (la toolbar no muestra
+// sección custom entonces). El dibujado real (grupo extra + click que inserta
+// el template) vive en la app y queda BLOCKER W2: faltan campo en
+// `GrafitoApp` + brazo en `apply_palette_command`, fuera de este frente.
+
+/// Un botón de custom tool listo para dibujar (datos propios, sin `&'static`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomToolButton {
+    /// Nombre validado de la herramienta.
+    pub name: String,
+    /// Tooltip: `CustomToolStore::describe` (formato de `LoadTool`).
+    pub tooltip: String,
+    /// Pasos unidos con `"\n"`: ejecutable vía `process_input` (batch).
+    pub template: String,
+}
+
+/// Un botón por herramienta del store, en orden de carga.
+pub fn custom_tool_buttons(
+    store: &grafito_command::ggbscript::CustomToolStore,
+) -> Vec<CustomToolButton> {
+    store
+        .list()
+        .iter()
+        .map(|tool| CustomToolButton {
+            name: tool.name.clone(),
+            tooltip: store.describe(&tool.name).unwrap_or_default(),
+            template: tool.steps.join("\n"),
+        })
+        .collect()
 }
 
 pub fn toolbar_uses_overflow(viewport_width: f32) -> bool {
@@ -2064,6 +2105,13 @@ mod tests {
         assert!(es.len() > "Herramienta: ".len());
         let en = toolbar_live_text(Tool::Line, Locale::En);
         assert!(en.starts_with("Tool: "), "{en}");
+        // W2: PT anuncia con prefijo propio y etiqueta ES donde no hay PT.
+        let pt = toolbar_live_text(Tool::Line, Locale::Pt);
+        assert!(pt.starts_with("Ferramenta: "), "{pt}");
+        assert!(pt.contains("Recta"), "{pt}");
+        // Sin PT (tools): cae a ES, jamás vacío ni slug crudo.
+        let pt_tool = toolbar_live_text(Tool::Translate, Locale::Pt);
+        assert_eq!(pt_tool, "Ferramenta: Traslada");
         // Cambiar de herramienta cambia el anuncio (el lector anuncia el cambio).
         assert_ne!(
             toolbar_live_text(Tool::Line, Locale::Es),
@@ -2092,5 +2140,61 @@ mod tests {
                 });
             },
         );
+    }
+
+    #[test]
+    fn locale_selector_offers_pt_and_toolbar_renders_in_pt() {
+        use crate::i18n::Locale;
+        let ctx = egui::Context::default();
+        let mut current = Tool::Select;
+        let mut locale = Locale::Pt;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1_280.0, 160.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // W2: la toolbar completa + el selector dibujan en PT sin pánico.
+                    toolbar_filtered_localized(
+                        ui,
+                        &mut current,
+                        UNIVERSITY_TOOL_GROUPS,
+                        Locale::Pt,
+                    );
+                    toolbar_inline_localized(ui, &mut current, UNIVERSITY_TOOL_GROUPS, Locale::Pt);
+                    locale_selector(ui, &mut locale);
+                });
+            },
+        );
+        assert_eq!(current, Tool::Select);
+        assert_eq!(locale, Locale::Pt);
+        // Grupo con PT resuelve al overlay; tool sin PT cae a ES.
+        assert_eq!(ToolGroupId::Point.label_localized(Locale::Pt), "Pontos");
+        assert_eq!(
+            entry_display_name(Tool::Point, "Punto", Locale::Pt),
+            "Punto"
+        );
+    }
+
+    #[test]
+    fn custom_tool_buttons_mirror_validated_store_only() {
+        use grafito_command::ggbscript::CustomToolStore;
+        let store = CustomToolStore::new();
+        assert!(custom_tool_buttons(&store).is_empty());
+        let mut store = CustomToolStore::new();
+        store.define("Acerca", "ZoomIn[]").expect("define");
+        store.define("Macro", "Show[A]; Hide[A]").expect("define");
+        let buttons = custom_tool_buttons(&store);
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0].name, "Acerca");
+        assert_eq!(buttons[0].template, "ZoomIn[]");
+        assert!(buttons[1].tooltip.contains("'Macro' válida con 2 paso(s)"));
+        assert_eq!(buttons[1].template, "Show[A]\nHide[A]");
+        // El maligno no entra al store → ningún botón fantasma.
+        assert!(store
+            .load_json("{\"grafito_tool\":1,\"name\":\"Evil\",\"steps\":[\"EraseAll[]\"]}")
+            .is_err());
+        assert_eq!(custom_tool_buttons(&store).len(), 2);
     }
 }

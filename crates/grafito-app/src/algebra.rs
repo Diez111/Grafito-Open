@@ -211,6 +211,15 @@ pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
             format!("{} {} {}", ic.expr_lhs, op, ic.expr_rhs)
         }
         GeoObject::Histogram(h) => format!("{} datos · {} bins", h.data.len(), h.bins),
+        GeoObject::BarChart(b) => format!("BarChart[{} datos]", b.data.len()),
+        GeoObject::PieChart(p) => {
+            let total: f64 = p.data.iter().sum();
+            if total.is_finite() {
+                format!("PieChart[total={:.3}]", total)
+            } else {
+                format!("PieChart[{} datos]", p.data.len())
+            }
+        }
         GeoObject::ScatterPlot(s) => format!("{} puntos", s.xs.len().min(s.ys.len())),
         GeoObject::BoxPlot(b) => format!("{} datos", b.data.len()),
         GeoObject::RegressionLine(r) => format!("y = {:.3}x + {:.3}", r.slope, r.intercept),

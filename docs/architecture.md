@@ -132,11 +132,11 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | AttachmentLimits max_total_bytes | 1 MiB | assistant-types/src/lib.rs:251 |
 | Assistant | AttachmentLimits max_pixels / max_total_pixels | 1 MiP / 2 MiP | assistant-types/src/lib.rs:249,252 |
 | Assistant | AttachmentLimits max_attachments | 2 | assistant-types/src/lib.rs:250 |
-| Comandos | COMMANDS registrados | 250 (`command!(`) | command/src/command_registry.rs (`grep -c 'command!('` = 250 únicos; +18 scripting G-D) |
-| Comandos | palette-visible | 206 (44 ocultos) + 14 acciones UI = 220 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs |
+| Comandos | COMMANDS registrados | 258 (`command!(`) | command/src/command_registry.rs (`grep -c 'command!('` = 258 únicos; +6 CAS W1 + Bar/Pie) |
+| Comandos | palette-visible | 214 (44 ocultos) + 14 acciones UI = 228 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
-| Toolbar | ToolGroupId / ALL_GROUPS | 15 (diverge de UNIVERSITY 18: sin Dynamics/ThreeD/FourD; unificar fuera de F5 — toolbar.rs sucio) | grafito-ui/src/toolbar.rs:298-315 (medido F5) |
+| Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
 | Toolbar | Tool variantes | 87 | grafito-ui/src/lib.rs `pub enum Tool` (contado F5, 87 variantes; Parallel/Arc/Sector F9 ya incluidos) |
 | App | Perspectivas | 10 (Ctrl+Shift+1..9,0) | grafito-app/src/lib.rs:90-111 + app.rs:4236-4242 |
 | Workspace | crates | 18 | `crates/` (agent, anim, app, assistant, assistant-types, classroom, command, complex, core, geometry, ggb, pedagogy, plugins, profile, release-tests, render, ui, whiteboard) |
@@ -230,7 +230,7 @@ Notas:
 |---|---|
 | RequestBudget 8192 / 2048 / 8 / 60s | `crates/grafito-assistant-types/src/lib.rs:198-209` |
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
-| 250 comandos (`command!(`), 206 visibles + 14 UI = 220 en paleta | `crates/grafito-command/src/command_registry.rs` (250 únicos; +18 scripting G-D) |
+| 258 comandos (`command!(`), 214 visibles + 14 UI = 228 en paleta | `crates/grafito-command/src/command_registry.rs` (258 únicos; +6 CAS W1 + Bar/Pie) |
 | 14 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs:58-199`, `:224-251`, `:394-403` |
 | 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
 | 87 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (contado F5: 87 variantes) |

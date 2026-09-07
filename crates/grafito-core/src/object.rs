@@ -65,6 +65,8 @@ pub enum GeoObject {
     HyperSurface4D(HyperSurface4DObj),
     VectorField3D(VectorField3DObj),
     Histogram(HistogramObj),
+    BarChart(BarChartObj),
+    PieChart(PieChartObj),
     ScatterPlot(ScatterPlotObj),
     BoxPlot(BoxPlotObj),
     RegressionLine(RegressionLineObj),
@@ -108,6 +110,8 @@ impl GeoObject {
             | GeoObject::ComplexIntegral(_)
             | GeoObject::Fractal2D(_)
             | GeoObject::Histogram(_)
+            | GeoObject::BarChart(_)
+            | GeoObject::PieChart(_)
             | GeoObject::ScatterPlot(_)
             | GeoObject::BoxPlot(_)
             | GeoObject::RegressionLine(_)
@@ -187,6 +191,8 @@ impl GeoObject {
             GeoObject::HyperSurface4D(o) => o.id,
             GeoObject::VectorField3D(o) => o.id,
             GeoObject::Histogram(o) => o.id,
+            GeoObject::BarChart(o) => o.id,
+            GeoObject::PieChart(o) => o.id,
             GeoObject::ScatterPlot(o) => o.id,
             GeoObject::BoxPlot(o) => o.id,
             GeoObject::RegressionLine(o) => o.id,
@@ -242,6 +248,8 @@ impl GeoObject {
             GeoObject::HyperSurface4D(o) => &o.label,
             GeoObject::VectorField3D(o) => &o.label,
             GeoObject::Histogram(o) => &o.label,
+            GeoObject::BarChart(o) => &o.label,
+            GeoObject::PieChart(o) => &o.label,
             GeoObject::ScatterPlot(o) => &o.label,
             GeoObject::BoxPlot(o) => &o.label,
             GeoObject::RegressionLine(o) => &o.label,
@@ -297,6 +305,8 @@ impl GeoObject {
             GeoObject::HyperSurface4D(o) => o.label = label,
             GeoObject::VectorField3D(o) => o.label = label,
             GeoObject::Histogram(o) => o.label = label,
+            GeoObject::BarChart(o) => o.label = label,
+            GeoObject::PieChart(o) => o.label = label,
             GeoObject::ScatterPlot(o) => o.label = label,
             GeoObject::BoxPlot(o) => o.label = label,
             GeoObject::RegressionLine(o) => o.label = label,
@@ -353,6 +363,8 @@ impl GeoObject {
             GeoObject::HyperSurface4D(o) => o.color,
             GeoObject::VectorField3D(o) => o.color,
             GeoObject::Histogram(o) => o.color,
+            GeoObject::BarChart(o) => o.color,
+            GeoObject::PieChart(o) => o.color,
             GeoObject::ScatterPlot(o) => o.color,
             GeoObject::BoxPlot(o) => o.color,
             GeoObject::RegressionLine(o) => o.color,
@@ -408,6 +420,8 @@ impl GeoObject {
             GeoObject::HyperSurface4D(o) => o.color = color,
             GeoObject::VectorField3D(o) => o.color = color,
             GeoObject::Histogram(o) => o.color = color,
+            GeoObject::BarChart(o) => o.color = color,
+            GeoObject::PieChart(o) => o.color = color,
             GeoObject::ScatterPlot(o) => o.color = color,
             GeoObject::BoxPlot(o) => o.color = color,
             GeoObject::RegressionLine(o) => o.color = color,
@@ -463,6 +477,8 @@ impl GeoObject {
             GeoObject::HyperSurface4D(o) => o.visible,
             GeoObject::VectorField3D(o) => o.visible,
             GeoObject::Histogram(o) => o.visible,
+            GeoObject::BarChart(o) => o.visible,
+            GeoObject::PieChart(o) => o.visible,
             GeoObject::ScatterPlot(o) => o.visible,
             GeoObject::BoxPlot(o) => o.visible,
             GeoObject::RegressionLine(o) => o.visible,
@@ -520,6 +536,8 @@ impl GeoObject {
             GeoObject::HyperSurface4D(o) => o.visible = visible,
             GeoObject::VectorField3D(o) => o.visible = visible,
             GeoObject::Histogram(o) => o.visible = visible,
+            GeoObject::BarChart(o) => o.visible = visible,
+            GeoObject::PieChart(o) => o.visible = visible,
             GeoObject::ScatterPlot(o) => o.visible = visible,
             GeoObject::BoxPlot(o) => o.visible = visible,
             GeoObject::RegressionLine(o) => o.visible = visible,
@@ -618,6 +636,8 @@ impl GeoObject {
             GeoObject::Pencil(pencil) => pencil.is_dynamic_locus(),
             GeoObject::DataTable(_)
             | GeoObject::Histogram(_)
+            | GeoObject::BarChart(_)
+            | GeoObject::PieChart(_)
             | GeoObject::ScatterPlot(_)
             | GeoObject::BoxPlot(_)
             | GeoObject::RegressionLine(_) => true,
@@ -674,6 +694,8 @@ impl GeoObject {
             GeoObject::HyperSurface4D(_) => "HyperSurface4D",
             GeoObject::VectorField3D(_) => "VectorField3D",
             GeoObject::Histogram(_) => "Histogram",
+            GeoObject::BarChart(_) => "BarChart",
+            GeoObject::PieChart(_) => "PieChart",
             GeoObject::ScatterPlot(_) => "ScatterPlot",
             GeoObject::BoxPlot(_) => "BoxPlot",
             GeoObject::RegressionLine(_) => "RegressionLine",
@@ -3753,6 +3775,173 @@ impl HistogramObj {
     }
 }
 
+/// Tope de datos por gráfico de barras/torta (ver `MAX_TABLE_ROWS` en
+/// `symbolic::exchange`). Constante local para evitar ciclo entre módulos.
+const MAX_CHART_DATA: usize = 20_000;
+
+/// Barras por categoría (objeto real, no deriva a `Histogram`).
+///
+/// `data[i]` es la altura con signo de la barra `i`; el render usa
+/// `fraction_of_max` del motor (`bar_chart_bars`) contra `max|v|`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BarChartObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub data: Vec<f64>,
+    pub x_min: f64,
+    pub x_max: f64,
+    pub y_min: f64,
+    pub y_max: f64,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+    pub fill_color: Option<Color>,
+}
+impl BarChartObj {
+    pub fn new(data: Vec<f64>) -> Self {
+        let mut data: Vec<f64> = data.into_iter().filter(|value| value.is_finite()).collect();
+        data.truncate(MAX_CHART_DATA);
+        let count = data.len();
+        let (x_min, x_max, y_min, y_max) = if count == 0 {
+            (-0.5, 0.5, 0.0, 1.0)
+        } else {
+            let lo = data.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let base_lo = 0.0_f64.min(lo);
+            let base_hi = 0.0_f64.max(hi);
+            let span = (base_hi - base_lo).abs();
+            let margin = if span < 1e-12 { 0.5 } else { span * 0.05 };
+            let y_min = if base_lo < 0.0 { base_lo - margin } else { 0.0 };
+            let mut y_max = if base_hi > 0.0 { base_hi + margin } else { 1.0 };
+            if !(y_max.is_finite() && y_max > y_min) {
+                y_max = y_min + 1.0;
+            }
+            (-0.5, count as f64 - 0.5, y_min, y_max)
+        };
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            data,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+            fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.4)),
+        }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+    pub fn with_view(mut self, x: (f64, f64), y: (f64, f64)) -> Self {
+        self.x_min = x.0;
+        self.x_max = x.1;
+        self.y_min = y.0;
+        self.y_max = y.1;
+        self
+    }
+}
+
+/// Torta proporcional (objeto real). Los sectores se derivan en el render
+/// desde el ángulo 0 con `start_angle` del motor (`pie_chart_slices`);
+/// el comando exige no-negativos y total `> 0`, el constructor solo filtra
+/// no-finitos y acota (la validación rechaza lo demás con `Err` honesto).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PieChartObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub data: Vec<f64>,
+    pub center: Point2,
+    pub radius: f64,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+    pub fill_color: Option<Color>,
+}
+impl PieChartObj {
+    pub fn new(data: Vec<f64>) -> Self {
+        let mut data: Vec<f64> = data.into_iter().filter(|value| value.is_finite()).collect();
+        data.truncate(MAX_CHART_DATA);
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            data,
+            center: Point2::new(0.0, 0.0),
+            radius: 3.0,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+            fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.4)),
+        }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+    pub fn with_geometry(mut self, center: Point2, radius: f64) -> Self {
+        if center.x.is_finite() && center.y.is_finite() && radius.is_finite() && radius > 0.0 {
+            self.center = center;
+            self.radius = radius;
+        }
+        self
+    }
+}
+
+/// Color de relleno del sector `index` de una torta con `total` sectores:
+/// rota el matiz del color base del objeto una vuelta completa a lo largo
+/// de los sectores, con saturación/valor mínimos para que se distingan
+/// aunque la base sea gris. Reusa el color existente del objeto en vez de
+/// inventar una paleta nueva; puro y testeable headless.
+pub fn pie_slice_color(base: Color, index: usize, total: usize) -> Color {
+    let total = total.max(1);
+    let (hue, sat, val) = rgb_to_hsv(base.r, base.g, base.b);
+    let shift = (index % total) as f32 / total as f32;
+    let (red, green, blue) = hsv_to_rgb(hue + shift, sat.max(0.55), val.max(0.85));
+    Color::new(red, green, blue, base.a)
+}
+
+fn rgb_to_hsv(red: f32, green: f32, blue: f32) -> (f32, f32, f32) {
+    let max = red.max(green).max(blue);
+    let min = red.min(green).min(blue);
+    let delta = max - min;
+    let value = max;
+    let saturation = if max <= 0.0 { 0.0 } else { delta / max };
+    let hue = if delta <= f32::EPSILON {
+        0.0
+    } else if max == red {
+        (((green - blue) / delta) % 6.0 + 6.0) % 6.0 / 6.0
+    } else if max == green {
+        ((blue - red) / delta + 2.0) / 6.0
+    } else {
+        ((red - green) / delta + 4.0) / 6.0
+    };
+    (hue, saturation, value)
+}
+
+fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> (f32, f32, f32) {
+    let hue = ((hue % 1.0) + 1.0) % 1.0;
+    let chroma = value * saturation;
+    let x = chroma * (1.0 - ((hue * 6.0) % 2.0 - 1.0).abs());
+    let min = value - chroma;
+    let (red, green, blue) = if hue < 1.0 / 6.0 {
+        (chroma, x, 0.0)
+    } else if hue < 2.0 / 6.0 {
+        (x, chroma, 0.0)
+    } else if hue < 3.0 / 6.0 {
+        (0.0, chroma, x)
+    } else if hue < 4.0 / 6.0 {
+        (0.0, x, chroma)
+    } else if hue < 5.0 / 6.0 {
+        (x, 0.0, chroma)
+    } else {
+        (chroma, 0.0, x)
+    };
+    (red + min, green + min, blue + min)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScatterPlotObj {
     pub id: ObjectId,
@@ -4438,5 +4627,56 @@ mod tests {
 
         assert_eq!(histogram.data, vec![1.0, 3.0]);
         assert!(histogram.x_min.is_finite() && histogram.x_max.is_finite());
+    }
+
+    #[test]
+    fn bar_chart_constructor_filters_and_bounds_like_histogram() {
+        let bar = BarChartObj::new(vec![1.0, f64::NAN, f64::NEG_INFINITY, -2.0, 3.0]);
+        assert_eq!(bar.data, vec![1.0, -2.0, 3.0]);
+        assert_eq!(bar.data.len(), 3);
+        assert!(bar.visible);
+        assert_eq!(bar.color, Color::DEFAULT_STROKE);
+        // Una barra por índice: x cubre 0..n.
+        assert_eq!((bar.x_min, bar.x_max), (-0.5, 2.5));
+        // Con negativos, el mínimo baja de 0 con margen.
+        assert!(bar.y_min < 0.0);
+        assert!(bar.y_max > 3.0);
+        assert!(bar.x_min.is_finite() && bar.y_max.is_finite());
+    }
+
+    #[test]
+    fn pie_chart_constructor_filters_without_inventing_angles() {
+        let pie = PieChartObj::new(vec![1.0, f64::NAN, 2.0]);
+        assert_eq!(pie.data, vec![1.0, 2.0]);
+        assert!(pie.visible);
+        assert_eq!(pie.color, Color::DEFAULT_STROKE);
+        assert_eq!(pie.center, Point2::new(0.0, 0.0));
+        assert!(pie.radius > 0.0 && pie.radius.is_finite());
+        // La geometría inválida se ignora, no se persiste rota.
+        let kept = pie.clone().with_geometry(Point2::new(1.0, 1.0), 2.0);
+        assert_eq!(kept.center, Point2::new(1.0, 1.0));
+        let ignored = pie.with_geometry(Point2::new(f64::NAN, 0.0), -1.0);
+        assert_eq!(ignored.center, Point2::new(0.0, 0.0));
+        assert!(ignored.radius > 0.0);
+    }
+
+    #[test]
+    fn pie_slice_colors_rotate_and_keep_alpha() {
+        let base = Color::new(0.2, 0.5, 0.9, 0.4);
+        let first = pie_slice_color(base, 0, 4);
+        let second = pie_slice_color(base, 1, 4);
+        assert_eq!(first.a, base.a);
+        assert_eq!(second.a, base.a);
+        // Sectores distintos tienen rellenos distintos.
+        assert_ne!(
+            (first.r.to_bits(), first.g.to_bits(), first.b.to_bits()),
+            (second.r.to_bits(), second.g.to_bits(), second.b.to_bits())
+        );
+        // Vuelta completa vuelve al mismo matiz.
+        let again = pie_slice_color(base, 4, 4);
+        assert_eq!(
+            (again.r.to_bits(), again.g.to_bits(), again.b.to_bits()),
+            (first.r.to_bits(), first.g.to_bits(), first.b.to_bits())
+        );
     }
 }

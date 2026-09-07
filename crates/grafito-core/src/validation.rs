@@ -1265,6 +1265,30 @@ fn validate_geo_object_legacy_match(doc: &Document, obj: &GeoObject) -> Result<(
             validate_positive_f32(o.width, "Histogram.width")?;
             validate_optional_color(o.fill_color, "Histogram.fill_color")?;
         }
+        GeoObject::BarChart(o) => {
+            validate_finite_slice(&o.data, "BarChart data")?;
+            validate_plot_bounds(o.x_min, o.x_max, o.y_min, o.y_max, "BarChart")?;
+            validate_positive_f32(o.width, "BarChart.width")?;
+            validate_optional_color(o.fill_color, "BarChart.fill_color")?;
+        }
+        GeoObject::PieChart(o) => {
+            validate_finite_slice(&o.data, "PieChart data")?;
+            if o.data.iter().any(|value| *value < 0.0) {
+                return Err("PieChart data must be non-negative".to_string());
+            }
+            let total: f64 = o.data.iter().sum();
+            if !total.is_finite() || total <= 0.0 {
+                return Err("PieChart data must have a positive total".to_string());
+            }
+            validate_finite(o.center.x, "PieChart.center.x")?;
+            validate_finite(o.center.y, "PieChart.center.y")?;
+            validate_finite(o.radius, "PieChart.radius")?;
+            if o.radius <= 0.0 {
+                return Err("PieChart radius must be positive".to_string());
+            }
+            validate_positive_f32(o.width, "PieChart.width")?;
+            validate_optional_color(o.fill_color, "PieChart.fill_color")?;
+        }
         GeoObject::ScatterPlot(o) => {
             validate_finite_slice(&o.xs, "ScatterPlot.xs")?;
             validate_finite_slice(&o.ys, "ScatterPlot.ys")?;

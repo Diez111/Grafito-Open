@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result as AnyResult};
 use grafito_core::symbolic::{
-    clipboard_png_stub, datatable_to_csv, document_to_pdf, ExchangeError, MAX_EXCHANGE_OBJECTS,
+    datatable_to_csv, document_to_pdf, ExchangeError, MAX_EXCHANGE_OBJECTS,
 };
 use grafito_core::{Document, GeoObject, LineKind, ObjectId, RelationOperator};
 use grafito_geometry::{Color, Point2, ViewTransform, AABB};
@@ -90,6 +90,8 @@ impl ExportFormat {
             | ExportObjectKind::ImplicitCurve
             | ExportObjectKind::VectorField2D
             | ExportObjectKind::Histogram
+            | ExportObjectKind::BarChart
+            | ExportObjectKind::PieChart
             | ExportObjectKind::ScatterPlot
             | ExportObjectKind::BoxPlot
             | ExportObjectKind::RegressionLine
@@ -215,6 +217,8 @@ pub(crate) enum ExportObjectKind {
     HyperSurface4D,
     VectorField3D,
     Histogram,
+    BarChart,
+    PieChart,
     ScatterPlot,
     BoxPlot,
     RegressionLine,
@@ -227,7 +231,7 @@ pub(crate) enum ExportObjectKind {
 
 impl ExportObjectKind {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 50] = [
+    pub(crate) const ALL: [Self; 52] = [
         Self::Point,
         Self::Line,
         Self::Circle,
@@ -270,6 +274,8 @@ impl ExportObjectKind {
         Self::HyperSurface4D,
         Self::VectorField3D,
         Self::Histogram,
+        Self::BarChart,
+        Self::PieChart,
         Self::ScatterPlot,
         Self::BoxPlot,
         Self::RegressionLine,
@@ -324,6 +330,8 @@ impl ExportObjectKind {
             Self::HyperSurface4D => "HyperSurface4D",
             Self::VectorField3D => "VectorField3D",
             Self::Histogram => "Histogram",
+            Self::BarChart => "BarChart",
+            Self::PieChart => "PieChart",
             Self::ScatterPlot => "ScatterPlot",
             Self::BoxPlot => "BoxPlot",
             Self::RegressionLine => "RegressionLine",
@@ -379,6 +387,8 @@ impl ExportObjectKind {
             GeoObject::HyperSurface4D(_) => Self::HyperSurface4D,
             GeoObject::VectorField3D(_) => Self::VectorField3D,
             GeoObject::Histogram(_) => Self::Histogram,
+            GeoObject::BarChart(_) => Self::BarChart,
+            GeoObject::PieChart(_) => Self::PieChart,
             GeoObject::ScatterPlot(_) => Self::ScatterPlot,
             GeoObject::BoxPlot(_) => Self::BoxPlot,
             GeoObject::RegressionLine(_) => Self::RegressionLine,
@@ -493,12 +503,6 @@ pub(crate) enum ExportError {
         format: ExportFormat,
         reason: String,
     },
-    /// Funcionalidad pendiente (p. ej. PDF sin `printpdf`): nunca toca el
-    /// destino; el mensaje pinnea "no disponible en esta build".
-    Unavailable {
-        feature: &'static str,
-        reason: String,
-    },
     Io {
         format: ExportFormat,
         path: PathBuf,
@@ -573,10 +577,6 @@ impl fmt::Display for ExportError {
                     "{format} no reemplazo el destino; codificacion: {reason}"
                 )
             }
-            Self::Unavailable { feature, reason } => write!(
-                formatter,
-                "{feature} no disponible en esta build; {reason} (destino intacto)"
-            ),
             Self::Io {
                 format,
                 path,
@@ -1885,6 +1885,12 @@ impl SceneBuilder<'_> {
             GeoObject::Histogram(histogram) => {
                 self.build_histogram(item, histogram, &mut primitives)?;
             }
+            GeoObject::BarChart(bar) => {
+                self.build_bar_chart(item, bar, &mut primitives)?;
+            }
+            GeoObject::PieChart(pie) => {
+                self.build_pie_chart(item, pie, &mut primitives)?;
+            }
             GeoObject::ScatterPlot(scatter) => {
                 if scatter.xs.is_empty() || scatter.xs.len() != scatter.ys.len() {
                     return Err(invalid_object(
@@ -2415,6 +2421,93 @@ impl SceneBuilder<'_> {
             let top_right = self
                 .required_projection(item, Point2::new(right, histogram.y_min + count * y_scale))?;
             self.push_screen_rect(item, primitives, bottom_left, top_right, Some(stroke), fill)?;
+        }
+        Ok(())
+    }
+
+    fn build_bar_chart(
+        &mut self,
+        item: &ExportItem,
+        bar: &grafito_core::BarChartObj,
+        primitives: &mut Vec<ScenePrimitive>,
+    ) -> std::result::Result<(), ExportError> {
+        // El motor valida (vacío/todo-cero/no-finitos); el `Err` se vuelve
+        // error honesto de objeto en vez de exportar barras inventadas.
+        let bars = grafito_core::symbolic::bar_chart_bars(&bar.data).map_err(|error| {
+            invalid_object(
+                self.format,
+                item,
+                format!("el gráfico de barras no es exportable: {error}"),
+            )
+        })?;
+        if bars.is_empty() {
+            return Err(invalid_object(
+                self.format,
+                item,
+                "el gráfico de barras visible no contiene datos",
+            ));
+        }
+        let stroke = validate_stroke(self.format, item, bar.width, bar.color)?;
+        let fill = validate_fill(self.format, item, bar.fill_color)?;
+        for segment in &bars {
+            let x = segment.index as f64;
+            let y_lo = 0.0_f64.min(segment.value);
+            let y_hi = 0.0_f64.max(segment.value);
+            let bottom_left = self.required_projection(item, Point2::new(x - 0.4, y_lo))?;
+            let top_right = self.required_projection(item, Point2::new(x + 0.4, y_hi))?;
+            self.push_screen_rect(item, primitives, bottom_left, top_right, Some(stroke), fill)?;
+        }
+        Ok(())
+    }
+
+    fn build_pie_chart(
+        &mut self,
+        item: &ExportItem,
+        pie: &grafito_core::PieChartObj,
+        primitives: &mut Vec<ScenePrimitive>,
+    ) -> std::result::Result<(), ExportError> {
+        // Sectores desde el ángulo 0 con `start_angle` del motor; el `Err`
+        // (negativos, total 0) se vuelve error honesto de objeto.
+        let slices = grafito_core::symbolic::pie_chart_slices(&pie.data).map_err(|error| {
+            invalid_object(
+                self.format,
+                item,
+                format!("el gráfico de torta no es exportable: {error}"),
+            )
+        })?;
+        if slices.is_empty() {
+            return Err(invalid_object(
+                self.format,
+                item,
+                "el gráfico de torta visible no contiene datos",
+            ));
+        }
+        if !(pie.radius.is_finite() && pie.radius > 0.0) {
+            return Err(invalid_object(
+                self.format,
+                item,
+                "el gráfico de torta necesita un radio finito y positivo",
+            ));
+        }
+        let stroke = validate_stroke(self.format, item, pie.width, pie.color)?;
+        let base_fill = pie.fill_color.unwrap_or(Color::new(0.2, 0.5, 0.9, 0.4));
+        let count = slices.len();
+        for slice in &slices {
+            let mut world = Vec::with_capacity(26);
+            world.push(pie.center);
+            for step in 0..=24 {
+                let angle = slice.start_angle + slice.sweep_angle * step as f64 / 24.0;
+                world.push(Point2::new(
+                    pie.center.x + pie.radius * angle.cos(),
+                    pie.center.y + pie.radius * angle.sin(),
+                ));
+            }
+            let fill = validate_fill(
+                self.format,
+                item,
+                Some(grafito_core::pie_slice_color(base_fill, slice.index, count)),
+            )?;
+            self.push_closed_world_shape(item, primitives, &world, stroke, fill)?;
         }
         Ok(())
     }
@@ -3999,20 +4092,18 @@ pub(crate) fn sanitize_export_stem(raw: &str) -> String {
     }
 }
 
-/// Portapapeles PNG honesto: el core exige raster (`image`/`tiny-skia` en
-/// app, fuera del frente F10-C), así que hoy siempre es `Unavailable` con
-/// destino intacto. Mantiene viva la variante para el mensaje honesto.
-pub(crate) fn clipboard_png_honest() -> Result<Vec<u8>, ExportError> {
-    clipboard_png_stub().map_err(|error| match error {
-        ExchangeError::NotImplemented { feature, hint } => ExportError::Unavailable {
-            feature: "Portapapeles PNG",
-            reason: format!("{feature}: {hint}"),
-        },
-        other => ExportError::Encoding {
-            format: ExportFormat::Png,
-            reason: other.to_string(),
-        },
-    })
+/// Bytes PNG reales sin I/O (frente W4): reutiliza la escena + `render_png`
+/// de tiny-skia del export a archivo, sin motor nuevo ni framebuffer extra.
+///
+/// El documento con solo 3D/soportes no compatibles falla honesto con
+/// `UnsupportedObjects` (igual que `export_png`); el copiado OS de imagen
+/// queda para el reducer (sin crate de clipboard en deps, ver BLOCKER W4) que
+/// cablea estos bytes al `Portapapeles PNG` de `panels.rs:1993` o a archivo.
+#[allow(dead_code)] // W4: wiring portapapeles PNG en panels.rs (P2, prohibido aquí).
+pub(crate) fn clipboard_png_bytes(document: &Document) -> Result<Vec<u8>, ExportError> {
+    let options = ExportOptions::from_document(document, ExportFormat::Png)?;
+    let scene = build_export_scene(document, ExportFormat::Png, options)?;
+    render_png(&scene, ExportFormat::Png)
 }
 
 pub(crate) fn write_text_atomic(path: impl AsRef<Path>, text: &str) -> io::Result<()> {
@@ -4897,10 +4988,10 @@ mod tests {
 
     fn common_2d_document() -> Document {
         use grafito_core::{
-            BoxPlotObj, CircleObj, EllipseObj, FunctionObj, HistogramObj, HyperbolaObj,
-            ImplicitCurveObj, LineObj, ParabolaObj, ParametricCurve2DObj, PhasePortraitObj,
-            PolarCurveObj, PolygonObj, RegressionLineObj, ScatterPlotObj, TextObj,
-            VectorField2DObj,
+            BarChartObj, BoxPlotObj, CircleObj, EllipseObj, FunctionObj, HistogramObj,
+            HyperbolaObj, ImplicitCurveObj, LineObj, ParabolaObj, ParametricCurve2DObj,
+            PhasePortraitObj, PieChartObj, PolarCurveObj, PolygonObj, RegressionLineObj,
+            ScatterPlotObj, TextObj, VectorField2DObj,
         };
         use grafito_core::{PencilObj, RelationOperator};
 
@@ -4944,6 +5035,8 @@ mod tests {
             GeoObject::ImplicitCurve(ImplicitCurveObj::new("x^2+y^2", "4", RelationOperator::Eq)),
             GeoObject::VectorField2D(VectorField2DObj::new("-y", "x")),
             GeoObject::Histogram(HistogramObj::new(vec![1.0, 1.5, 2.0, 2.5], 2)),
+            GeoObject::BarChart(BarChartObj::new(vec![1.0, 2.0, 3.0])),
+            GeoObject::PieChart(PieChartObj::new(vec![1.0, 1.0, 2.0])),
             GeoObject::ScatterPlot(ScatterPlotObj::new(
                 vec![-1.0, 0.0, 1.0],
                 vec![1.0, 0.0, 1.0],
@@ -5019,6 +5112,8 @@ mod tests {
             "ImplicitCurve",
             "VectorField2D",
             "Histogram",
+            "BarChart",
+            "PieChart",
             "ScatterPlot",
             "BoxPlot",
             "RegressionLine",
@@ -5046,8 +5141,8 @@ mod tests {
             let path = temp_export_path(format.extension());
             let report = export_document_with_options(&document, format, &path, options)
                 .expect("all common 2D families should export");
-            assert_eq!(report.exported_objects, 19);
-            assert_eq!(report.object_types.len(), 19);
+            assert_eq!(report.exported_objects, 21);
+            assert_eq!(report.object_types.len(), 21);
             assert!(report.primitive_count > 19);
 
             let bytes = std::fs::read(&path).expect("export should exist");
@@ -5063,6 +5158,8 @@ mod tests {
                         "PolarCurve",
                         "ImplicitCurve",
                         "Histogram",
+                        "BarChart",
+                        "PieChart",
                         "ScatterPlot",
                         "BoxPlot",
                         "RegressionLine",
@@ -5488,7 +5585,7 @@ mod tests {
             ExportOptions::new(320, 240),
         )
         .expect("export sin pizarra");
-        assert_eq!(report.exported_objects, 19);
+        assert_eq!(report.exported_objects, 21);
         assert!(!report.object_types.contains_key("Whiteboard"));
         let _ = std::fs::remove_file(path);
     }
@@ -5674,12 +5771,22 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_png_stays_honest_unavailable() {
-        let error = clipboard_png_honest().expect_err("PNG pendiente");
+    fn clipboard_png_bytes_reuses_tiny_skia_scene_without_io() {
+        use grafito_core::PointObj;
+        let mut document = Document::new();
+        document
+            .try_add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))))
+            .expect("punto fixture");
+        let bytes = clipboard_png_bytes(&document).expect("png real sin I/O");
         assert!(
-            error.to_string().contains("no disponible en esta build"),
-            "error honesto esperado, fue: {error}"
+            bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]),
+            "firma PNG esperada"
         );
+        assert!(!bytes.is_empty());
+        // Decodifica con `image` (ya en deps, pineado supply-chain).
+        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .expect("png decodificable");
+        assert!(decoded.width() > 0 && decoded.height() > 0);
     }
 }
 

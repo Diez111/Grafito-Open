@@ -1,9 +1,6 @@
 //! Paneles laterales removibles e inspectores (CAS, vista, estadística, propiedades).
 
-use crate::export::{
-    clipboard_png_honest, datatable_csv_text, sanitize_export_stem, spawn_csv_export,
-    spawn_pdf_export,
-};
+use crate::export::{datatable_csv_text, sanitize_export_stem, spawn_csv_export, spawn_pdf_export};
 use crate::GrafitoApp;
 use egui::Color32;
 use grafito_core::symbolic::{clipboard_svg, LayerTable, MAX_LAYERS};
@@ -755,6 +752,8 @@ pub(crate) fn inspector_type_caption(obj: &GeoObject) -> &'static str {
         GeoObject::HyperSurface4D(_) => "hiperficie 4D",
         GeoObject::VectorField3D(_) => "campo vectorial 3D",
         GeoObject::Histogram(_) => "histograma",
+        GeoObject::BarChart(_) => "gráfico de barras",
+        GeoObject::PieChart(_) => "gráfico de torta",
         GeoObject::ScatterPlot(_) => "dispersión",
         GeoObject::BoxPlot(_) => "diagrama de caja",
         GeoObject::RegressionLine(_) => "recta de regresión",
@@ -936,7 +935,7 @@ fn draw_inspector_empty_state(ui: &mut egui::Ui) {
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(
-                            egui::RichText::new("Inspector listo")
+                            egui::RichText::new("Tocá un objeto del lienzo para editarlo acá.")
                                 .color(theme.text_primary)
                                 .size(TYPE_BASE)
                                 .strong(),
@@ -944,7 +943,7 @@ fn draw_inspector_empty_state(ui: &mut egui::Ui) {
                         ui.add_space(SPACE_XS);
                         ui.label(
                             egui::RichText::new(
-                                "Seleccioná un objeto del canvas para ajustar su geometría, apariencia y controles avanzados.",
+                                "Geometría, apariencia y controles avanzados aparecen acá.",
                             )
                             .color(theme.text_secondary)
                             .size(TYPE_SM),
@@ -1984,30 +1983,16 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             }
                                         }
                                         if ui
-                                            .small_button("Copiar PNG")
+                                            .small_button("Guardar PNG…")
                                             .on_hover_text(
-                                                "Pendiente honesto: exige raster con image/tiny-skia (fuera del frente F10-C); usa Copiar SVG",
+                                                "Rasteriza el lienzo a PNG real (tiny-skia) y lo guarda donde elijas",
                                             )
                                             .clicked()
                                         {
-                                            match clipboard_png_honest() {
-                                                Ok(_) => {
-                                                    app.cas_result =
-                                                        "PNG listo pero sin portapapeles en esta build; usa Copiar SVG"
-                                                            .to_string();
-                                                    app.notify(
-                                                        app.cas_result.clone(),
-                                                        grafito_ui::toast::ToastKind::Error,
-                                                    );
-                                                }
-                                                Err(error) => {
-                                                    app.cas_result = error.to_string();
-                                                    app.notify(
-                                                        app.cas_result.clone(),
-                                                        grafito_ui::toast::ToastKind::Error,
-                                                    );
-                                                }
-                                            }
+                                            app.export_with_dialog(
+                                                crate::export::ExportFormat::Png,
+                                                Some(ui.ctx()),
+                                            );
                                         }
                                     });
                                     // Texto (G-C): MathML / TikZ-eje / HTML puros al portapapeles.
@@ -2174,9 +2159,25 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                                 .clicked()
                             {
                                 app.set_trig_function(idx as u8);
-                            }
-                        }
-                    });
+                                            }
+                                        }
+                                    });
+                                    // W3 — la exportación deja de ser muda: revela
+                                    // la carpeta de la última exportación exitosa.
+                                    if app.last_export_dir.is_some() {
+                                        ui.add_space(SPACE_XS);
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .small_button("Mostrar en carpeta")
+                                                .on_hover_text(
+                                                    "Abre la carpeta de tu última exportación.",
+                                                )
+                                                .clicked()
+                                            {
+                                                app.reveal_last_export();
+                                            }
+                                        });
+                                    }
 
                     ui.add_space(6.0);
 
@@ -2398,6 +2399,8 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             matches!(
                                 obj,
                                 GeoObject::Histogram(_)
+                                    | GeoObject::BarChart(_)
+                                    | GeoObject::PieChart(_)
                                     | GeoObject::ScatterPlot(_)
                                     | GeoObject::BoxPlot(_)
                                     | GeoObject::RegressionLine(_)
@@ -3019,6 +3022,17 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                                 });
                             }
                         }
+                    }
+                    // Medida exacta del sólido (volumen/área) cuando el motor
+                    // la calcula en forma cerrada; cuádricas → `None` honesto.
+                    if let Some(measure) =
+                        crate::render_3d::solid_measure_text(&edited_object)
+                    {
+                        ui.label(
+                            egui::RichText::new(format!("Medida: {measure}"))
+                                .color(txt_dim)
+                                .size(TYPE_XS),
+                        );
                     }
                     ui.add_space(SPACE_MD);
                     let mut changed = false;

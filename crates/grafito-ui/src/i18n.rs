@@ -10,7 +10,7 @@
 //!   [`palette_footer`]. Piel pura: sin I/O, sin spawn, sin lógica.
 //! - Español idéntico al UI actual (sin normalizar tildes ausentes como
 //!   `"Circulo centro-punto"` o `"Lapiz"` — Oleada 3 los migra tal cual).
-//! - Números: [`format_number`] es sólo display (ES coma, EN punto, sin
+//! - Números: [`format_number`] es sólo display (ES/PT coma, EN punto, sin
 //!   miles, `NaN`/`∞`); [`parse_number_tolerant`] mapea `,`→`.` y rechaza
 //!   miles ambiguos (`"1.234,56"` → `None`).
 //!
@@ -20,17 +20,11 @@
 //! estas tablas estáticas son suficientes (lookup lineal, `&'static str`,
 //! cero deps, `clippy -D warnings` limpio). Migrar a `fluent` cuando:
 //! 1. el catálogo supere ~500 claves (el lineal deja de ser trivial), o
-//! 2. se necesiten plurales/género/selectores ICU (`{ $n -> [one] ... *[other] ... }`), o
-//! 3. se añada un tercer idioma.
+//! 2. se necesiten plurales/género/selectores ICU (`{ $n -> [one] ... *[other] ... }`).
 //!
-//! Plan de migración (sin romper call-sites): añadir dependencia `fluent`,
-//! mover cada `key` a `crates/grafito-ui/locales/{es,en}/grafito.ftl` con el
-//! mismo identificador con puntos como message-id, y reimplementar `t()` como
-//! lookup al `FluentBundle` manteniendo la firma
-//! `t(key: &'static str, locale: Locale) -> String` (el `&'static str` pasa a
-//! `String` porque fluent formatea en tiempo de ejecución). Los helpers
-//! (`group_label`, `onboarding_msg`, …) no cambian de firma salvo el tipo de
-//! retorno.
+//! El tercer idioma (`Locale::Pt`, frente W2) NO exige `fluent`: vive como
+//! variante plena con fallback PT→ES→EN en [`t`] (overlay [`PT_MESSAGES`] +
+//! catálogo ES/EN, ver docs de [`Locale`]). Nada de migración en este frente.
 
 /// Idioma de la interfaz.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,6 +34,13 @@ pub enum Locale {
     Es,
     /// English.
     En,
+    /// Português (europeo neutro en las claves W2; el overlay inicial nació
+    /// BR-neutro en F3d y se conserva tal cual donde no choque).
+    ///
+    /// Variante plena desde W2: [`t`] resuelve PT si la clave está en
+    /// [`PT_MESSAGES`], si no cae a ES (default, siempre completo) y en
+    /// última instancia a EN. Ningún `t(key, Pt)` devuelve vacío.
+    Pt,
 }
 
 impl Locale {
@@ -48,6 +49,7 @@ impl Locale {
         match self {
             Locale::Es => "es",
             Locale::En => "en",
+            Locale::Pt => "pt",
         }
     }
 }
@@ -65,21 +67,26 @@ pub struct Msg {
 
 impl Msg {
     /// Texto de la entrada en el idioma pedido.
+    ///
+    /// `Pt` cae a ES aquí a propósito: el `const` no puede buscar el overlay
+    /// [`PT_MESSAGES`]; el runtime [`t`] sí resuelve PT primero y solo usa
+    /// este fallback cuando la clave no tiene PT.
     pub const fn get(self, locale: Locale) -> &'static str {
         match locale {
             Locale::Es => self.es,
             Locale::En => self.en,
+            Locale::Pt => self.es,
         }
     }
 }
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 165;
+pub const MSG_COUNT: usize = 167;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
-/// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (17) +
-/// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) = 165.
+/// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (18) +
+/// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) = 167.
 pub static MESSAGES: &[Msg] = &[
     // ── toolbar.group (18) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
@@ -207,16 +214,18 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "palette.action.toggle_dark", es: "Alternar modo oscuro", en: "Toggle Dark Mode" },
     Msg { key: "palette.title", es: "Paleta de Comandos", en: "Command Palette" },
     Msg { key: "palette.empty", es: "No se encontraron comandos", en: "No commands found" },
+    Msg { key: "palette.custom_tools", es: "Herramientas personalizadas", en: "Custom tools" },
     Msg { key: "palette.footer_nav", es: "↑↓ navegar · Enter abrir · Esc cerrar", en: "↑↓ navigate · Enter open · Esc close" },
     // ── onboarding (11) — ES idéntico a `draw_onboarding_window` (app.rs) ──
     Msg { key: "onboarding.title", es: "Bienvenido a Grafito", en: "Welcome to Grafito" },
     Msg { key: "onboarding.subtitle", es: "Grafito — pizarra geométrica interactiva", en: "Grafito — interactive geometry board" },
-    Msg { key: "onboarding.bullet_primary", es: "• Construye con 5 herramientas esenciales — Mover, Punto, Recta, Círculo, Polígono", en: "• Build with 5 essential tools — Move, Point, Line, Circle, Polygon" },
-    Msg { key: "onboarding.bullet_secondary", es: "• Secundaria añade 3 más — Lápiz, Medida, Análisis (8 total)", en: "• Secondary adds 3 more — Pencil, Measure, Analysis (8 total)" },
+    Msg { key: "onboarding.bullet_primary", es: "1. Dibujá un punto y una recta", en: "1. Draw a point and a line" },
+    Msg { key: "onboarding.bullet_secondary", es: "2. Pedí “graficá y=x²” en el asistente", en: "2. Ask the assistant for “graficá y=x²”" },
+    Msg { key: "onboarding.bullet_tertiary", es: "3. Animá la derivada con un clic", en: "3. Animate the derivative in one click" },
     Msg { key: "onboarding.bullet_university", es: "• Universidad desbloquea 18 grupos — Cónicas, 3D, CAS, Estadística, Complejos, Dinámica…", en: "• University unlocks 18 groups — Conics, 3D, CAS, Statistics, Complex, Dynamics…" },
     Msg { key: "onboarding.btn_example", es: "Probar ejemplo", en: "Try an example" },
     Msg { key: "onboarding.btn_empty", es: "Empezar vacío", en: "Start empty" },
-    Msg { key: "onboarding.btn_dismiss", es: "No mostrar", en: "Don't show again" },
+    Msg { key: "onboarding.btn_dismiss", es: "No mostrar de nuevo", en: "Don't show again" },
     Msg { key: "onboarding.toast_example", es: "Ejemplo cargado — ¡explora Grafito!", en: "Example loaded — explore Grafito!" },
     Msg { key: "onboarding.about_title", es: "Acerca de Grafito", en: "About Grafito" },
     Msg { key: "onboarding.hint", es: "Puedes reabrir esta ventana desde Ayuda → Bienvenida", en: "You can reopen this window from Help → Welcome" },
@@ -247,10 +256,10 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "app.menu_edit", es: "Editar", en: "Edit" },
     Msg { key: "app.menu_view", es: "Vista", en: "View" },
     Msg { key: "app.menu_help", es: "Ayuda", en: "Help" },
-    Msg { key: "assistant.composer_hint", es: "Escribe un mensaje…", en: "Type a message…" },
+    Msg { key: "assistant.composer_hint", es: "Pedí algo, ej. \"graficá y=x²\"… · Enter envía", en: "Ask for something, e.g. \"graficá y=x²\"… · Enter sends" },
     Msg { key: "assistant.limit_hint", es: "Caracteres usados del límite de entrada · Enter envía, Shift+Enter salta", en: "Characters used of the input limit · Enter sends, Shift+Enter adds a line" },
     Msg { key: "assistant.copied", es: "Mensaje copiado.", en: "Message copied." },
-    Msg { key: "assistant.generating", es: "Generando animación…", en: "Generating animation…" },
+    Msg { key: "assistant.generating", es: "Armando tu animación… ~20 s", en: "Building your animation… ~20 s" },
     Msg { key: "assistant.teaching_started", es: "Enseñanza iniciada: {topic}", en: "Lesson started: {topic}" },
     Msg { key: "panel.cas_empty", es: "Sin resultado — ejecuta un comando CAS", en: "No result — run a CAS command" },
     Msg { key: "common.cancel", es: "Cancelar", en: "Cancel" },
@@ -264,7 +273,14 @@ pub static MESSAGES: &[Msg] = &[
 /// La clave debe ser `&'static str` (literal en el call-site) para poder
 /// devolver `&'static str` sin asignar. Si la clave no existe, devuelve la
 /// propia clave (fallback visible que la Oleada 3 detecta en revisión).
+/// `Pt`: overlay [`PT_MESSAGES`] primero; si la clave no tiene PT, cae a ES
+/// (default, siempre completo) y en última instancia a EN. Jamás vacío.
 pub fn t(key: &'static str, locale: Locale) -> &'static str {
+    if locale == Locale::Pt {
+        if let Some(text) = pt(key) {
+            return text;
+        }
+    }
     let mut i = 0;
     while i < MESSAGES.len() {
         if MESSAGES[i].key == key {
@@ -444,7 +460,7 @@ pub fn palette_action(slug: &str, locale: Locale) -> &'static str {
 /// ES idéntico al formato actual de `command_palette.rs`.
 pub fn palette_footer(filtered: usize, total: usize, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!(
+        Locale::Es | Locale::Pt => format!(
             "{filtered} de {total} · {}",
             t("palette.footer_nav", locale)
         ),
@@ -554,20 +570,19 @@ pub fn toast_msg(suffix: &'static str, locale: Locale) -> &'static str {
     }
 }
 
-// ── Portugués: overlay parcial F3d (sin variante `Locale`) ──
+// ── Portugués: overlay parcial F3d, variante plena W2 ──
 //
-// Por qué overlay y no `Locale::Pt`: los `match` sobre `Locale` en
-// `toolbar.rs` (`toolbar_live_text`) y `grafito-app/src/utils.rs` (`AppLocale`)
-// son exhaustivos y esos archivos están fuera del alcance de F3d
-// (PROHIBIDO: pertenecen a F3a/b/c). Añadir una variante rompería su
-// compilación. El tercer idioma completo llega con la migración a `fluent`
-// (ver docs del módulo); mientras tanto el PT vive como tabla parcial
-// `clave → texto` con fallback al EN en el call-site. El lint `unwrap_used`
-// sigue prohibido en prod: el fallback se escribe con `match` o `if let`.
+// F3d lo dejó como tabla parcial `clave → texto` con fallback al EN en el
+// call-site porque añadir la variante rompía matches exhaustivos fuera del
+// frente. W2 levanta esa restricción: `Locale::Pt` existe y `t(key, Pt)`
+// resuelve PT→ES→EN solo (ver `t`). El overlay sigue parcial a propósito:
+// 78 claves principales (18 grupos + 17 paleta + 11 onboarding + 10 cheat +
+// 10 toast + 12 app/misc); las 87 `toolbar.tool` caen a ES vía `Msg::get`.
+// El lint `unwrap_used` sigue prohibido en prod: el fallback se escribe con
+// `match` o `if let`.
 //
-// Cobertura F3d: 78 claves principales (18 grupos + 17 paleta + 11 onboarding
-// + 10 cheat + 10 toast + 12 app/misc). Las 87 `toolbar.tool` quedan en
-// fallback ES/EN a propósito: se miden en el test `pt_reports_tool_fallback`.
+// Cobertura: 79/167 (47.3%). Medida real en el test `pt_covers_main_ui_keys`
+// (imprime el % por `--nocapture`).
 
 /// Una entrada del overlay portugués: clave del catálogo + texto PT.
 #[derive(Debug, Clone, Copy)]
@@ -619,6 +634,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "palette.action.toggle_dark", pt: "Alternar modo escuro" },
     PtMsg { key: "palette.title", pt: "Paleta de Comandos" },
     PtMsg { key: "palette.empty", pt: "Nenhum comando encontrado" },
+    PtMsg { key: "palette.custom_tools", pt: "Ferramentas personalizadas" },
     PtMsg { key: "palette.footer_nav", pt: "↑↓ navegar · Enter abrir · Esc fechar" },
     // ── onboarding (11) ──
     PtMsg { key: "onboarding.title", pt: "Bem-vindo ao Grafito" },
@@ -693,9 +709,9 @@ pub fn pt_coverage() -> (usize, usize) {
 
 /// Formatea un número sólo para mostrar (nunca para persistir ni calcular).
 ///
-/// - ES: coma decimal (`3,14`); EN: punto (`3.14`). Sin separador de miles.
+/// - ES/PT: coma decimal (`3,14`); EN: punto (`3.14`). Sin separador de miles.
 /// - `-0.0` se muestra como `"0"`.
-/// - `NaN` → `"NaN"`; `+∞` → `"∞"`; `-∞` → `"-∞"` (igual en ambas lenguas).
+/// - `NaN` → `"NaN"`; `+∞` → `"∞"`; `-∞` → `"-∞"` (igual en todas las lenguas).
 pub fn format_number(value: f64, locale: Locale) -> String {
     if value.is_nan() {
         return "NaN".to_string();
@@ -711,7 +727,7 @@ pub fn format_number(value: f64, locale: Locale) -> String {
     }
     let plain = format!("{value}");
     match locale {
-        Locale::Es => plain.replace('.', ","),
+        Locale::Es | Locale::Pt => plain.replace('.', ","),
         Locale::En => plain,
     }
 }
@@ -759,7 +775,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 165);
+        assert_eq!(MSG_COUNT, 167);
     }
 
     #[test]
@@ -813,7 +829,10 @@ mod tests {
         assert_eq!(super::t("onboarding.title", es), "Bienvenido a Grafito");
         assert_eq!(super::t("onboarding.btn_example", es), "Probar ejemplo");
         assert_eq!(super::t("onboarding.btn_empty", es), "Empezar vacío");
-        assert_eq!(super::t("onboarding.btn_dismiss", es), "No mostrar");
+        assert_eq!(
+            super::t("onboarding.btn_dismiss", es),
+            "No mostrar de nuevo"
+        );
         assert_eq!(
             super::t("onboarding.toast_example", es),
             "Ejemplo cargado — ¡explora Grafito!"
@@ -925,8 +944,8 @@ mod tests {
     fn pt_covers_main_ui_keys() {
         // F3d: overlay parcial PT — 78 claves principales, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 78);
-        assert_eq!(pt_coverage(), (78, 165));
+        assert_eq!(PT_MESSAGES.len(), 79);
+        assert_eq!(pt_coverage(), (79, 167));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -1042,8 +1061,9 @@ mod tests {
 
     #[test]
     fn pt_reports_tool_fallback() {
-        // Medición honesta del recorte F3d: las 87 `toolbar.tool` quedan en
-        // fallback ES/EN. `pt()` devuelve `None` y el call-site usa EN.
+        // Medición honesta del recorte F3d/W2: las 87 `toolbar.tool` quedan en
+        // fallback ES (vía `Msg::get`). `pt()` devuelve `None` y `t(key, Pt)`
+        // cae al ES.
         let mut tool_total = 0;
         let mut tool_covered = 0;
         for m in MESSAGES {
@@ -1057,9 +1077,50 @@ mod tests {
         assert_eq!(tool_total, 87);
         assert_eq!(
             tool_covered, 0,
-            "tools en PT: el recorte F3d es 0 a propósito"
+            "tools en PT: el recorte F3d/W2 es 0 a propósito"
         );
         assert_eq!(pt("toolbar.tool.translate"), None);
         assert_eq!(tool_label("translate", Locale::En), "Translate");
+    }
+
+    #[test]
+    fn pt_locale_resolves_overlay_then_spanish_then_key() {
+        use super::t;
+        // Con PT directo donde hay overlay.
+        assert_eq!(t("toolbar.group.move", Locale::Pt), "Selecionar");
+        assert_eq!(t("palette.title", Locale::Pt), "Paleta de Comandos");
+        assert_eq!(t("toast.saved", Locale::Pt), "Documento salvo em {path}");
+        // Sin PT (87 tools): cae a ES, jamás vacío.
+        assert_eq!(t("toolbar.tool.translate", Locale::Pt), "Traslada");
+        assert_eq!(t("toolbar.tool.circle", Locale::Pt), "Circulo centro-punto");
+        assert!(!t("toolbar.tool.translate", Locale::Pt).is_empty());
+        // Clave inexistente: la propia clave (igual que ES/EN).
+        assert_eq!(t("does.not.exist", Locale::Pt), "does.not.exist");
+        // Helpers por dominio fluyen a PT.
+        assert_eq!(group_label("move", Locale::Pt), "Selecionar");
+        assert_eq!(palette_action("save", Locale::Pt), "Salvar");
+        assert_eq!(onboarding_msg("btn_example", Locale::Pt), "Testar exemplo");
+        assert_eq!(cheat_sheet_msg("save", Locale::Pt), "Salvar: Ctrl+S");
+        assert_eq!(toast_msg("anim_ready", Locale::Pt), "Animação pronta.");
+        // Pie y números en PT (coma como ES).
+        assert_eq!(
+            palette_footer(3, 213, Locale::Pt),
+            "3 de 213 · ↑↓ navegar · Enter abrir · Esc fechar"
+        );
+        assert_eq!(format_number(3.25, Locale::Pt), "3,25");
+        assert_eq!(Locale::Pt.code(), "pt");
+        assert_eq!(Locale::default(), Locale::Es);
+    }
+
+    #[test]
+    fn pt_coverage_prints_real_percentage() {
+        // Cobertura PT medida: 79/167 ≈ 47.3%. Se imprime el % real con
+        // `--nocapture`; el assert fija el numerador para que cualquier
+        // agregado (o faltante) de PT rompa el test a propósito.
+        let (covered, total) = pt_coverage();
+        assert_eq!((covered, total), (79, 167));
+        let pct = covered as f64 * 100.0 / total as f64;
+        eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (tools 0/87 en fallback ES)");
+        assert!((pct - 47.3).abs() < 0.1, "pct real: {pct}");
     }
 }

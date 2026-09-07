@@ -266,6 +266,8 @@ fn static_geometry_covers_every_assistant_enabled_2d_curve_and_data_route() {
         GeoObject::PolarCurve(PolarCurveObj::new("1", 0.0, std::f64::consts::TAU)),
         GeoObject::ImplicitCurve(ImplicitCurveObj::new("x^2+y^2", "1", RelationOperator::Eq)),
         GeoObject::Histogram(HistogramObj::new(vec![-1.0, 0.0, 0.5, 1.0], 4)),
+        GeoObject::BarChart(BarChartObj::new(vec![1.0, 2.0, 3.0])),
+        GeoObject::PieChart(PieChartObj::new(vec![1.0, 1.0, 2.0])),
         GeoObject::ScatterPlot(ScatterPlotObj::new(
             vec![-1.0, 0.0, 1.0],
             vec![1.0, 0.0, 1.0],

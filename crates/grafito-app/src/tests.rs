@@ -2944,7 +2944,7 @@ fn geometry_3d_polytope_inspectors_expose_labeled_scrollable_controls() {
     assert!(inspector.contains(".auto_shrink([false, true])"));
     assert!(inspector.contains("draw_inspector_identity"));
     assert!(source.contains("fn draw_inspector_empty_state"));
-    assert!(source.contains("Inspector listo"));
+    assert!(source.contains("Tocá un objeto del lienzo para editarlo acá."));
     assert!(source.contains("inspector_equation_text"));
     assert!(source.contains("inspector_type_caption"));
     assert!(source.contains("Ecuación no disponible para este tipo"));
@@ -4992,4 +4992,38 @@ fn toolbar_and_panel_layout_constants_are_sane() {
         let (_, tools) = group.def();
         assert!(!tools.is_empty());
     }
+}
+
+#[test]
+fn custom_tool_runs_steps_through_pipeline() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    // Objeto base por el pipeline normal para Show/Hide (allowlist GGBScript).
+    app.execute_command_and_record_with_outcome("Point[(0,0)]", 0.0);
+    let label = app
+        .document
+        .objects()
+        .values()
+        .next()
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    assert!(!label.is_empty());
+    app.custom_tools
+        .define("parpadeo", &format!("Hide[{label}]; Show[{label}]"))
+        .expect("define válido");
+    app.run_custom_tool("parpadeo", &ctx);
+    // Tras Hide+Show, el objeto sigue visible y el conteo intacto.
+    let obj = app.document.objects().values().next().expect("objeto");
+    assert!(obj.is_visible());
+    // Nombre desconocido: error honesto, sin pánico ni cambios.
+    let before = app.document.objects().len();
+    app.run_custom_tool("noexiste", &ctx);
+    assert_eq!(app.document.objects().len(), before);
+    // Paso roto a mitad: aplica el primero y corta honesto.
+    app.custom_tools
+        .define("mitad", &format!("Hide[{label}]; Hide[ZZZ999]"))
+        .expect("define válido");
+    app.run_custom_tool("mitad", &ctx);
+    let obj = app.document.objects().values().next().expect("objeto");
+    assert!(!obj.is_visible());
 }

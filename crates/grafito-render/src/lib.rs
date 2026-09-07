@@ -148,6 +148,8 @@ pub fn object_cull_margin_world(obj: &GeoObject, scale: f64) -> f64 {
         GeoObject::BezierCurve(b) => b.width,
         GeoObject::Spline(s) => s.width,
         GeoObject::Histogram(h) => h.width,
+        GeoObject::BarChart(b) => b.width,
+        GeoObject::PieChart(p) => p.width,
         GeoObject::BoxPlot(b) => b.width,
         GeoObject::RegressionLine(r) => r.width,
         GeoObject::Text(t) => t.font_size,
@@ -210,6 +212,26 @@ pub fn object_world_aabb(
             Some(AABB::new(
                 Point2::new(lo, h.y_min),
                 Point2::new(hi, h.y_max),
+            ))
+        }
+        GeoObject::BarChart(b) => {
+            if b.data.is_empty() {
+                return None;
+            }
+            let (lo, hi) = finite_min_max(b.data.iter().copied())?;
+            Some(AABB::new(
+                Point2::new(-0.5, lo.min(0.0)),
+                Point2::new(b.data.len() as f64 - 0.5, hi.max(0.0)),
+            ))
+        }
+        GeoObject::PieChart(p) => {
+            if !p.radius.is_finite() || p.radius <= 0.0 {
+                return None;
+            }
+            let radius = p.radius.abs();
+            Some(AABB::new(
+                Point2::new(p.center.x - radius, p.center.y - radius),
+                Point2::new(p.center.x + radius, p.center.y + radius),
             ))
         }
         GeoObject::ScatterPlot(sp) => {
@@ -839,6 +861,8 @@ pub fn scene_layer_2d(object: &GeoObject) -> SceneLayer2D {
         | GeoObject::Polygon(_)
         | GeoObject::Ellipse(_)
         | GeoObject::Histogram(_)
+        | GeoObject::BarChart(_)
+        | GeoObject::PieChart(_)
         | GeoObject::BoxPlot(_)
         | GeoObject::Sector(_) => SceneLayer2D::Region,
         GeoObject::Point(_) | GeoObject::ScatterPlot(_) => SceneLayer2D::Marker,
@@ -1976,6 +2000,65 @@ impl Renderer {
                                 );
                             }
                         }
+                    }
+                }
+                GeoObject::BarChart(bar) => {
+                    let Ok(bars) = grafito_core::symbolic::bar_chart_bars(&bar.data) else {
+                        continue;
+                    };
+                    for segment in &bars {
+                        let x = segment.index as f64;
+                        let y_lo = 0.0_f64.min(segment.value);
+                        let y_hi = 0.0_f64.max(segment.value);
+                        let bottom = view.world_to_screen(Point2::new(x - 0.4, y_lo));
+                        let top = view.world_to_screen(Point2::new(x + 0.4, y_hi));
+                        if bottom.is_finite() && top.is_finite() {
+                            Self::add_rect(
+                                &mut vertices,
+                                &mut indices,
+                                bottom,
+                                top.x - bottom.x,
+                                top.y - bottom.y,
+                                bar.color,
+                            );
+                        }
+                    }
+                }
+                GeoObject::PieChart(pie) => {
+                    let Ok(slices) = grafito_core::symbolic::pie_chart_slices(&pie.data) else {
+                        continue;
+                    };
+                    if !(pie.radius.is_finite() && pie.radius > 0.0) {
+                        continue;
+                    }
+                    let count = slices.len();
+                    let steps = if count <= 64 {
+                        16
+                    } else if count <= 512 {
+                        4
+                    } else {
+                        2
+                    };
+                    let base_fill = pie.fill_color.unwrap_or(Color::new(0.2, 0.5, 0.9, 0.4));
+                    let center = view.world_to_screen(Point2::new(pie.center.x, pie.center.y));
+                    for slice in &slices {
+                        let mut screen_verts = Vec::with_capacity(steps + 2);
+                        screen_verts.push(center);
+                        for step in 0..=steps {
+                            let angle =
+                                slice.start_angle + slice.sweep_angle * step as f64 / steps as f64;
+                            screen_verts.push(view.world_to_screen(Point2::new(
+                                pie.center.x + pie.radius * angle.cos(),
+                                pie.center.y + pie.radius * angle.sin(),
+                            )));
+                        }
+                        Self::add_polygon_fill(
+                            &mut vertices,
+                            &mut indices,
+                            &screen_verts,
+                            grafito_core::pie_slice_color(base_fill, slice.index, count),
+                            view,
+                        );
                     }
                 }
                 GeoObject::ScatterPlot(scatter) => {
@@ -3797,6 +3880,59 @@ impl Renderer {
                         let h_bar = tr.y - bl.y;
                         Self::add_rect(vertices, indices, bl, w, h_bar, h.color);
                     }
+                }
+            }
+            GeoObject::BarChart(bar) => {
+                let Ok(bars) = grafito_core::symbolic::bar_chart_bars(&bar.data) else {
+                    return;
+                };
+                for segment in &bars {
+                    let x = segment.index as f64;
+                    let y_lo = 0.0_f64.min(segment.value);
+                    let y_hi = 0.0_f64.max(segment.value);
+                    let bl = view_transform.world_to_screen(Point2::new(x - 0.4, y_lo));
+                    let tr = view_transform.world_to_screen(Point2::new(x + 0.4, y_hi));
+                    let w = tr.x - bl.x;
+                    let h_bar = tr.y - bl.y;
+                    Self::add_rect(vertices, indices, bl, w, h_bar, bar.color);
+                }
+            }
+            GeoObject::PieChart(pie) => {
+                let Ok(slices) = grafito_core::symbolic::pie_chart_slices(&pie.data) else {
+                    return;
+                };
+                if !(pie.radius.is_finite() && pie.radius > 0.0) {
+                    return;
+                }
+                let count = slices.len();
+                let steps = if count <= 64 {
+                    16
+                } else if count <= 512 {
+                    4
+                } else {
+                    2
+                };
+                let base_fill = pie.fill_color.unwrap_or(Color::new(0.2, 0.5, 0.9, 0.4));
+                let center =
+                    view_transform.world_to_screen(Point2::new(pie.center.x, pie.center.y));
+                for slice in &slices {
+                    let mut screen_verts = Vec::with_capacity(steps + 2);
+                    screen_verts.push(center);
+                    for step in 0..=steps {
+                        let angle =
+                            slice.start_angle + slice.sweep_angle * step as f64 / steps as f64;
+                        screen_verts.push(view_transform.world_to_screen(Point2::new(
+                            pie.center.x + pie.radius * angle.cos(),
+                            pie.center.y + pie.radius * angle.sin(),
+                        )));
+                    }
+                    Self::add_polygon_fill(
+                        vertices,
+                        indices,
+                        &screen_verts,
+                        grafito_core::pie_slice_color(base_fill, slice.index, count),
+                        view_transform,
+                    );
                 }
             }
             GeoObject::ScatterPlot(sp) => {

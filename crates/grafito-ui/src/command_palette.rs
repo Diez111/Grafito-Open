@@ -316,12 +316,112 @@ pub fn all_commands_localized(locale: Locale) -> Vec<PaletteCommand> {
     commands
 }
 
+// ── Custom tools en la paleta (W2, superficie API) ──
+//
+// El store vive en la app (ver `CustomToolStore` en
+// `grafito-command/src/ggbscript.rs`); la app aún no lo instancia (BLOCKER
+// W2 documentado: falta campo en `GrafitoApp` + brazo en
+// `apply_palette_command` + diálogo `.ggt`, todo en archivos fuera de este
+// frente). Lo que sí queda cerrado aquí, sin fantasma:
+//
+// - Solo se expone lo validado: el store solo guarda `parse_tool_json` /
+//   `define_tool_json` (versión, nombre, cotas, allowlist), así que cada
+//   entrada existe en el registry y ejecuta.
+// - El `template` une pasos con `"\n"`: `process_input` ejecuta el batch
+//   línea por línea (`try_handle_batch_input` en `commands.rs`) con el mismo
+//   presupuesto compartido. El test `custom_tool_templates_execute_batch`
+//   lo prueba contra un documento real.
+// - `PaletteCommand` guarda `&'static str` y los nombres custom son runtime:
+//   por eso la entrada es un struct propio con `String`, no un
+//   `PaletteCommand` a medias.
+
+/// Una custom tool lista para mostrar en paleta/toolbar (datos propios, sin
+/// `&'static`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomToolPaletteEntry {
+    /// Nombre validado de la herramienta (`MAX_GGT_NAME_LEN`, ASCII).
+    pub name: String,
+    /// Línea mostrable (`CustomToolStore::describe`, formato de `LoadTool`).
+    pub detail: String,
+    /// Pasos unidos con `"\n"`: se inserta en la entrada y `process_input`
+    /// lo ejecuta como batch (misma allowlist, mismo presupuesto).
+    pub template: String,
+    /// Texto de búsqueda: nombre + pasos (bilingüe por construcción, los
+    /// pasos son canónicos del registry).
+    pub keywords: String,
+}
+
+impl CustomToolPaletteEntry {
+    /// ¿Coincide `query` (mismas reglas que el filtro de la paleta: cada
+    /// palabra debe aparecer como subcadena o subsecuencia en orden en algún
+    /// campo, sin tildes)?
+    pub fn matches_query(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        query.split_whitespace().all(|token| {
+            [
+                self.name.as_str(),
+                self.detail.as_str(),
+                self.keywords.as_str(),
+            ]
+            .iter()
+            .any(|haystack| fuzzy_match(token, haystack))
+        })
+    }
+}
+
+/// Una entrada por herramienta del store, en orden de carga. Vacío si el
+/// store está vacío (la UI no muestra sección custom entonces).
+pub fn custom_tool_entries(
+    store: &grafito_command::ggbscript::CustomToolStore,
+) -> Vec<CustomToolPaletteEntry> {
+    store
+        .list()
+        .iter()
+        .map(|tool| {
+            let detail = store.describe(&tool.name).unwrap_or_default();
+            let template = tool.steps.join("\n");
+            let mut keywords = tool.name.clone();
+            keywords.push(' ');
+            keywords.push_str(&tool.steps.join(" "));
+            CustomToolPaletteEntry {
+                name: tool.name.clone(),
+                detail,
+                template,
+                keywords,
+            }
+        })
+        .collect()
+}
+
+/// Filtra entradas custom con la query de la paleta (mismas reglas).
+pub fn filter_custom_tool_entries(
+    entries: &[CustomToolPaletteEntry],
+    query: &str,
+) -> Vec<CustomToolPaletteEntry> {
+    entries
+        .iter()
+        .filter(|entry| entry.matches_query(query))
+        .cloned()
+        .collect()
+}
+
 #[derive(Default)]
 pub struct CommandPaletteState {
     pub open: bool,
     pub search: String,
     pub selected_index: usize,
+    /// Herramientas personalizadas (`.ggt`) que la app alimenta cada frame;
+    /// se muestran en sección propia y despachan como `CustomTool:{nombre}`.
+    pub custom_tools: Vec<CustomToolPaletteEntry>,
 }
+
+/// Prefijo de despacho de una herramienta personalizada en la paleta.
+/// Los nombres de comandos del registry son alfanuméricos, así que el
+/// prefijo con `:` no colisiona jamás con un comando real.
+pub const CUSTOM_TOOL_SELECTION_PREFIX: &str = "CustomTool:";
 
 /// Recientes de la paleta (MRU en memoria, sin I/O ni persistencia).
 /// La app lo alimenta con cada despacho; el filtro lo usa para ordenar.
@@ -541,6 +641,28 @@ impl CommandPaletteState {
                 }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     dismissed = true;
+                }
+
+                // Sección de herramientas personalizadas (.ggt): fuera de la
+                // navegación por teclado de la lista principal a propósito
+                // (índices estables), con click directo.
+                let custom_shown = filter_custom_tool_entries(&self.custom_tools, &self.search);
+                if !custom_shown.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(t("palette.custom_tools", locale))
+                            .small()
+                            .strong(),
+                    );
+                    for entry in &custom_shown {
+                        if ui
+                            .button(format!("🔧 {} — {}", entry.name, entry.detail))
+                            .clicked()
+                        {
+                            selected_command =
+                                Some(format!("{CUSTOM_TOOL_SELECTION_PREFIX}{}", entry.name));
+                        }
+                    }
                 }
 
                 ui.separator();
@@ -869,6 +991,86 @@ mod tests {
                 || super::fuzzy_match("punto", cmd.help)
                 || super::fuzzy_match("punto", cmd.keywords)
         }));
+    }
+
+    // ── Custom tools W2: visible solo si ejecuta ──
+
+    #[test]
+    fn custom_tool_entries_exponen_store_en_orden() {
+        use grafito_command::ggbscript::CustomToolStore;
+        let mut store = CustomToolStore::new();
+        assert!(super::custom_tool_entries(&store).is_empty());
+        store.define("Acerca", "ZoomIn[]").expect("define");
+        store.define("Macro", "Show[A]; Hide[A]").expect("define");
+        let entries = super::custom_tool_entries(&store);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "Acerca");
+        assert_eq!(entries[1].name, "Macro");
+        // Detalle con formato LoadTool + template multi-línea.
+        assert!(entries[1].detail.contains("'Macro' válida con 2 paso(s)"));
+        assert_eq!(entries[1].template, "Show[A]\nHide[A]");
+        assert!(entries[1].keywords.contains("Macro"));
+    }
+
+    #[test]
+    fn custom_tool_templates_execute_batch() {
+        // Cero fantasma: cada template expuesto ejecuta vía `process_input`
+        // (batch por `\n`) sobre un documento real, sin error.
+        use grafito_command::commands::{process_input, CommandOutcome};
+        use grafito_command::ggbscript::CustomToolStore;
+        let mut store = CustomToolStore::new();
+        store
+            .define("IdaVuelta", "Show[A]; Hide[A]")
+            .expect("define");
+        store.define("Acerca", "ZoomIn[]").expect("define");
+        let entries = super::custom_tool_entries(&store);
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            let mut doc = grafito_core::Document::new();
+            let mut setup = "A = (1, 2)".to_string();
+            assert!(
+                matches!(process_input(&mut doc, &mut setup), CommandOutcome::Ok),
+                "fixture punto A"
+            );
+            let mut input = entry.template.clone();
+            match process_input(&mut doc, &mut input) {
+                CommandOutcome::Ok | CommandOutcome::Message(_) => {}
+                CommandOutcome::Error(message) => {
+                    panic!("template '{}' no ejecutó: {message}", entry.name)
+                }
+            }
+        }
+        // Efecto real: IdaVuelta deja A oculto (Show luego Hide).
+        let mut doc = grafito_core::Document::new();
+        let mut setup = "A = (1, 2)".to_string();
+        let _ = process_input(&mut doc, &mut setup);
+        let mut input = entries[0].template.clone();
+        let _ = process_input(&mut doc, &mut input);
+        let id = grafito_command::commands::find_object_by_label(&doc, "A").expect("A");
+        assert!(!doc.get_object(id).expect("obj").is_visible());
+    }
+
+    #[test]
+    fn custom_tool_filter_respeta_query() {
+        use grafito_command::ggbscript::CustomToolStore;
+        let mut store = CustomToolStore::new();
+        store.define("Acerca", "ZoomIn[]").expect("define");
+        store.define("Macro", "Show[A]; Hide[A]").expect("define");
+        let entries = super::custom_tool_entries(&store);
+        assert_eq!(super::filter_custom_tool_entries(&entries, "").len(), 2);
+        let by_name = super::filter_custom_tool_entries(&entries, "acerca");
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].name, "Acerca");
+        // Búsqueda por paso (los pasos viajan en keywords).
+        let by_step = super::filter_custom_tool_entries(&entries, "zoomin");
+        assert_eq!(by_step.len(), 1);
+        assert!(super::filter_custom_tool_entries(&entries, "zzzqqqx").is_empty());
+        // Store con maligno nunca expone nada: `load_json` lo rechaza.
+        let mut evil_store = CustomToolStore::new();
+        assert!(evil_store
+            .load_json("{\"grafito_tool\":1,\"name\":\"Evil\",\"steps\":[\"EraseAll[]\"]}")
+            .is_err());
+        assert!(super::custom_tool_entries(&evil_store).is_empty());
     }
 }
 

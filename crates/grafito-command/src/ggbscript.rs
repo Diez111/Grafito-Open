@@ -47,6 +47,7 @@ use grafito_core::validation::MAX_EXPR_LENGTH;
 use grafito_core::{Document, GeoObject};
 use grafito_geometry::expr::evaluate;
 use grafito_geometry::Point2;
+use std::path::{Component, Path};
 
 // ── Presupuestos G-D ────────────────────────────────────────────────
 
@@ -1182,6 +1183,182 @@ impl CustomToolStore {
     }
 }
 
+// ── Persistencia archivo `.ggt` (superficie P2-piel) ──
+//
+// F3d declaró la persistencia como trabajo de la piel; el núcleo sigue puro
+// sobre strings y este bloque es su única I/O, autorizada como P2-piel para
+// el frente W2. Validación estilo `validate_media_path`
+// (`grafito-anim/src/engine.rs:886`): sin escapes del directorio base, solo
+// extensión `.ggt` exacta, sin symlinks en el componente final, bytes
+// acotados a [`MAX_GGT_BYTES`]. El JSON se revalida con [`parse_tool_json`]
+// al guardar y al cargar: en disco nunca hay nada que el motor no ejecute
+// (cero fantasma persistido).
+//
+// Límite honesto (sin `libc` en este crate): el rechazo de symlinks se hace
+// con `symlink_metadata` (no sigue enlaces) antes de leer/escribir, no con
+// `O_NOFOLLOW` atómico. La ventana TOCTOU residual es solo de usuario local
+// y el contenido igual se revalida tras leer: el peor caso es cargar una
+// herramienta válida desde un path inesperado, nunca código arbitrario.
+
+/// Extensión obligatoria (exacta, minúsculas) de archivos de custom tools.
+pub const GGT_FILE_EXTENSION: &str = "ggt";
+
+/// Valida que `path` sea un archivo `.ggt` relativo contenido en `base_dir`.
+///
+/// Rechaza: vacío, NUL interior, absoluto, componentes `..`/`.`/prefijo,
+/// sin nombre de archivo, extensión distinta de `.ggt` (incluido `.GGT`),
+/// symlink en el componente final y —si los padres ya existen en disco—
+///
+/// escape por symlink tras `canonicalize` (el `join` debe seguir dentro del
+/// base canonizado). Padres inexistentes pasan solo el chequeo léxico: la
+/// verificación total ocurre al crearlos en [`save_ggt_file`].
+pub fn validate_ggt_path(base_dir: &Path, path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("ggt: el path no debe estar vacío".to_string());
+    }
+    if path.as_os_str().as_encoded_bytes().contains(&0) {
+        return Err("ggt: el path contiene NUL".to_string());
+    }
+    let mut has_normal = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_normal = true,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "ggt: el path '{}' escapa el directorio base",
+                    path.display()
+                ));
+            }
+            Component::CurDir => {
+                return Err(format!(
+                    "ggt: el path '{}' debe ser relativo simple",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if !has_normal {
+        return Err("ggt: el path no nombra un archivo".to_string());
+    }
+    let extension_ok = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext == GGT_FILE_EXTENSION);
+    if !extension_ok {
+        return Err(format!(
+            "ggt: solo archivos '.{GGT_FILE_EXTENSION}' (recibido '{}')",
+            path.display()
+        ));
+    }
+    // Symlink en el componente final: nunca se sigue, se rechaza.
+    let full = base_dir.join(path);
+    if let Ok(meta) = std::fs::symlink_metadata(&full) {
+        if meta.file_type().is_symlink() {
+            return Err(format!("ggt: '{}' es un enlace simbólico", path.display()));
+        }
+    }
+    // Si los padres existen, el canonizado debe seguir dentro del base.
+    let base_canon = std::fs::canonicalize(base_dir)
+        .map_err(|error| format!("ggt: directorio base inválido: {error}"))?;
+    if let Some(parent) = full.parent() {
+        if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+            if !canon_parent.starts_with(&base_canon) {
+                return Err(format!(
+                    "ggt: el path '{}' escapa el directorio base",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Guarda un JSON `.ggt` en `base_dir/path`.
+///
+/// Revalida el JSON con [`parse_tool_json`] antes de tocar disco (nada
+/// inválido se persiste) y acota a [`MAX_GGT_BYTES`]. Crea padres solo bajo
+// el base ya validado y re-chequea el escape tras crearlos.
+pub fn save_ggt_file(base_dir: &Path, path: &Path, json: &str) -> Result<(), String> {
+    validate_ggt_path(base_dir, path).map_err(|error| format!("save .ggt: {error}"))?;
+    if json.len() > MAX_GGT_BYTES {
+        return Err(format!("save .ggt: el JSON excede {MAX_GGT_BYTES} bytes"));
+    }
+    parse_tool_json(json).map_err(|error| format!("save .ggt: {error}"))?;
+    let full = base_dir.join(path);
+    if let Some(parent) = full.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("save .ggt: no se pudo crear padres: {error}"))?;
+        }
+        // Re-chequeo post-mkdir: si un padre apareció como symlink entre el
+        // validate y el mkdir, el canonizado lo delata.
+        let base_canon = std::fs::canonicalize(base_dir)
+            .map_err(|error| format!("save .ggt: directorio base inválido: {error}"))?;
+        let canon_parent = std::fs::canonicalize(parent)
+            .map_err(|error| format!("save .ggt: padres inválidos: {error}"))?;
+        if !canon_parent.starts_with(&base_canon) {
+            return Err(format!(
+                "save .ggt: el path '{}' escapa el directorio base",
+                path.display()
+            ));
+        }
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(&full) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "save .ggt: '{}' es un enlace simbólico",
+                path.display()
+            ));
+        }
+        if !meta.file_type().is_file() {
+            return Err(format!(
+                "save .ggt: '{}' no es un archivo regular",
+                path.display()
+            ));
+        }
+    }
+    std::fs::write(&full, json).map_err(|error| format!("save .ggt: {error}"))?;
+    Ok(())
+}
+
+/// Carga y revalida un archivo `.ggt` desde `base_dir/path`.
+///
+/// Rechaza symlinks, no-regulares y tamaños sobre [`MAX_GGT_BYTES`] antes de
+/// leer; el contenido se revalida con [`parse_tool_json`] (versión, nombre,
+/// cotas, allowlist). Lo que vuelve es ejecutable por el motor o es error.
+pub fn load_ggt_file(base_dir: &Path, path: &Path) -> Result<CustomToolDef, String> {
+    validate_ggt_path(base_dir, path).map_err(|error| format!("load .ggt: {error}"))?;
+    let full = base_dir.join(path);
+    let meta = std::fs::symlink_metadata(&full)
+        .map_err(|error| format!("load .ggt: no se pudo leer '{}': {error}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "load .ggt: '{}' es un enlace simbólico",
+            path.display()
+        ));
+    }
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "load .ggt: '{}' no es un archivo regular",
+            path.display()
+        ));
+    }
+    if meta.len() > MAX_GGT_BYTES as u64 {
+        return Err(format!(
+            "load .ggt: el archivo excede {MAX_GGT_BYTES} bytes"
+        ));
+    }
+    let bytes = std::fs::read(&full).map_err(|error| format!("load .ggt: {error}"))?;
+    if bytes.len() > MAX_GGT_BYTES {
+        return Err(format!(
+            "load .ggt: el archivo excede {MAX_GGT_BYTES} bytes"
+        ));
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|error| format!("load .ggt: UTF-8 inválido: {error}"))?;
+    parse_tool_json(&text).map_err(|error| format!("load .ggt: {error}"))
+}
+
 fn run_define_tool(args: &[String], input_text: &mut String) -> CommandOutcome {
     if args.len() != 2 {
         return CommandOutcome::Error("DefineTool: usa DefineTool[nombre, pasos]".into());
@@ -1707,5 +1884,110 @@ mod tests {
                 "{step} fuera del subset"
             );
         }
+    }
+
+    // ── Persistencia `.ggt` (P2-piel): ida y vuelta + rechazos ──
+
+    #[cfg(test)]
+    fn ggt_tmp_base(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "grafito_ggt_{}_{}_{tag}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).expect("tmp base");
+        dir
+    }
+
+    #[test]
+    fn ggt_file_round_trip_save_load() {
+        let base = ggt_tmp_base("roundtrip");
+        let json = define_tool_json("MiMacro", "Show[A]; Hide[A]").expect("define");
+        save_ggt_file(&base, std::path::Path::new("macros/macro.ggt"), &json)
+            .expect("save con padres inexistentes");
+        assert!(base.join("macros/macro.ggt").is_file());
+        let tool = load_ggt_file(&base, std::path::Path::new("macros/macro.ggt")).expect("load");
+        assert_eq!(tool.name, "MiMacro");
+        assert_eq!(tool.steps.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ggt_file_never_persists_invalid_json() {
+        let base = ggt_tmp_base("invalid");
+        let evil = "{\"grafito_tool\":1,\"name\":\"Evil\",\"steps\":[\"EraseAll[]\"]}";
+        let path = std::path::Path::new("evil.ggt");
+        assert!(save_ggt_file(&base, path, evil).is_err());
+        assert!(!base.join(path).exists(), "nada inválido queda en disco");
+        // JSON gigante (válido en forma, excedido en bytes) tampoco se guarda.
+        let big = format!(
+            "{{\"grafito_tool\":1,\"name\":\"G\",\"steps\":[\"Show[A]\"]}}{}",
+            " ".repeat(MAX_GGT_BYTES)
+        );
+        assert!(save_ggt_file(&base, path, &big).is_err());
+        assert!(!base.join(path).exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ggt_path_rejects_escape_and_wrong_extension() {
+        let base = ggt_tmp_base("paths");
+        for bad in [
+            "",
+            "tool.json",
+            "tool.GGT",
+            "tool",
+            "/absoluta.ggt",
+            "../afuera.ggt",
+            "sub/../../afuera.ggt",
+            "./relativa.ggt",
+        ] {
+            assert!(
+                validate_ggt_path(&base, std::path::Path::new(bad)).is_err(),
+                "{bad:?} debe rechazarse"
+            );
+        }
+        assert!(validate_ggt_path(&base, std::path::Path::new("ok.ggt")).is_ok());
+        assert!(validate_ggt_path(&base, std::path::Path::new("sub/ok.ggt")).is_ok());
+        // Cargar lo inexistente falla honesto (no pánico).
+        assert!(load_ggt_file(&base, std::path::Path::new("falta.ggt")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ggt_file_rejects_oversized_and_non_utf8() {
+        let base = ggt_tmp_base("sizes");
+        std::fs::write(base.join("grande.ggt"), vec![b'x'; MAX_GGT_BYTES + 1])
+            .expect("write grande");
+        assert!(load_ggt_file(&base, std::path::Path::new("grande.ggt")).is_err());
+        std::fs::write(base.join("bin.ggt"), [0xFF, 0xFE, 0x00]).expect("write bin");
+        assert!(load_ggt_file(&base, std::path::Path::new("bin.ggt")).is_err());
+        // Directorio con extensión .ggt no es archivo regular.
+        std::fs::create_dir_all(base.join("dir.ggt")).expect("mkdir");
+        assert!(load_ggt_file(&base, std::path::Path::new("dir.ggt")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ggt_file_rejects_symlinks() {
+        use std::os::unix::ffi::OsStringExt;
+        let base = ggt_tmp_base("links");
+        let json = define_tool_json("Real", "ZoomIn[]").expect("define");
+        std::fs::write(base.join("real.ggt"), &json).expect("write real");
+        std::os::unix::fs::symlink(base.join("real.ggt"), base.join("link.ggt")).expect("symlink");
+        assert!(load_ggt_file(&base, std::path::Path::new("link.ggt")).is_err());
+        assert!(
+            save_ggt_file(&base, std::path::Path::new("link.ggt"), &json).is_err(),
+            "no se escribe sobre symlinks"
+        );
+        // NUL interior se rechaza antes de tocar disco.
+        let nul = std::ffi::OsString::from_vec(b"nu\0l.ggt".to_vec());
+        assert!(validate_ggt_path(&base, std::path::Path::new(&nul)).is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

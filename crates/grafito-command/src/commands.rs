@@ -3,19 +3,20 @@ pub use crate::cas_parse::{
 };
 use crate::cas_parse::{looks_like_bracketed_command, sanitize_unicode_input};
 use geo::BooleanOps;
+use grafito_core::symbolic::cas_motor as cas_gate;
 use grafito_core::{
     analyzable::{self, default_analysis_features},
     implicit_curve::validate_contour_levels,
-    AnimationMode, ArcObj, Attractor3DObj, BezierCurveObj, BoxPlotObj, CasWorksheetStatus,
-    CircleObj, ComplexGridObj, ComplexIntegralObj, ComplexMappingObj, Cone3DObj, Cube3DObj,
-    Cylinder3DObj, DataTableObj, Document, EllipseObj, FitMetadata, Fractal2DObj, FunctionObj,
-    GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, Line3DObj,
-    LineKind, LineObj, LiveSequenceBinding, MoebiusStripObj, ObjectId, ParabolaObj,
-    ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj, Plane3DObj,
-    Point3DObj, PointObj, PolarCurveObj, PolygonObj, Prism3DObj, Quadric3DObj, RegressionLineObj,
-    RegularPolychoron4DObj, RegularPolytopeNDObj, RelationOperator, ScatterPlotObj, SectorObj,
-    Segment3DObj, Sphere3DObj, SplineObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta,
-    VectorField2DObj, VectorField3DObj,
+    AnimationMode, ArcObj, Attractor3DObj, BarChartObj, BezierCurveObj, BoxPlotObj,
+    CasWorksheetStatus, CircleObj, ComplexGridObj, ComplexIntegralObj, ComplexMappingObj,
+    Cone3DObj, Cube3DObj, Cylinder3DObj, DataTableObj, Document, EllipseObj, FitMetadata,
+    Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj,
+    ImplicitCurveObj, Line3DObj, LineKind, LineObj, LiveSequenceBinding, MoebiusStripObj, ObjectId,
+    ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj,
+    PieChartObj, Plane3DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, Prism3DObj,
+    Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
+    RelationOperator, ScatterPlotObj, SectorObj, Segment3DObj, Sphere3DObj, SplineObj,
+    Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta, VectorField2DObj, VectorField3DObj,
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
@@ -408,6 +409,44 @@ fn is_math_identifier(value: &str) -> bool {
         .next()
         .is_some_and(|first| first.is_alphabetic() || first == '_')
         && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+/// Presupuesto W1: rechaza entradas que superen `MAX_EXPR_LENGTH` (2000).
+/// Cada brazo simbólico lo aplica antes de delegar al motor, que repite el
+/// chequeo en su frontera (defensa en profundidad, cero `unwrap`).
+fn check_w1_budget(command: &str, role: &str, value: &str) -> Result<(), String> {
+    if value.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return Err(format!(
+            "{command}: {role} excede el máximo {} (presupuesto MAX_EXPR_LENGTH)",
+            grafito_core::validation::MAX_EXPR_LENGTH
+        ));
+    }
+    Ok(())
+}
+
+/// Desarma `{a, b}` en lista (respeta anidado vía `split_args`); sin llaves
+/// devuelve un solo elemento. Recorta comillas/espacios y filtra vacíos.
+fn parse_w1_brace_list(arg: &str) -> Vec<String> {
+    let trimmed = arg.trim().trim_matches('"').trim_matches('\'').trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let inner = if trimmed.starts_with('{') && trimmed.ends_with('}') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        return vec![trimmed.to_string()];
+    };
+    split_args(inner)
+        .into_iter()
+        .map(|s| {
+            s.trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn require_finite(value: Result<f64, String>) -> Result<f64, String> {
@@ -7781,6 +7820,46 @@ fn handle_remaining_cas_commands(
                 return CommandOutcome::Message("Histogram created".into());
             }
         }
+        "BarChart" if !cmd.args.is_empty() => {
+            let data = command_result!(parse_data_command_arg(
+                "BarChart",
+                &cmd.args[0],
+                &document.variables,
+            ));
+            // El motor valida (vacío/todo-cero/no-finitos); el `Err` es
+            // mensaje honesto y no se crea ningún objeto inventado.
+            match grafito_core::symbolic::bar_chart_bars(&data) {
+                Ok(_) => {
+                    let obj = GeoObject::BarChart(BarChartObj::new(data));
+                    insert_command_object!(document, obj);
+                    input_text.clear();
+                    return CommandOutcome::Message("BarChart created".into());
+                }
+                Err(error) => {
+                    return CommandOutcome::Error(format!("BarChart: {error}"));
+                }
+            }
+        }
+        "PieChart" if !cmd.args.is_empty() => {
+            let data = command_result!(parse_data_command_arg(
+                "PieChart",
+                &cmd.args[0],
+                &document.variables,
+            ));
+            // La torta exige no-negativos y total > 0; el motor lo chequea
+            // y el `Err` se vuelve mensaje honesto sin crear objeto.
+            match grafito_core::symbolic::pie_chart_slices(&data) {
+                Ok(_) => {
+                    let obj = GeoObject::PieChart(PieChartObj::new(data));
+                    insert_command_object!(document, obj);
+                    input_text.clear();
+                    return CommandOutcome::Message("PieChart created".into());
+                }
+                Err(error) => {
+                    return CommandOutcome::Error(format!("PieChart: {error}"));
+                }
+            }
+        }
         "Image" => {
             return CommandOutcome::Error(
                     "Image no está disponible: Grafito aún no tiene un modelo persistente de imagen en el documento."
@@ -11652,7 +11731,7 @@ fn execute_cas_command_typed(
                 }
             }
         }
-        "GroebnerDegRevLex" | "GroebnerBasis" | "Groebner" | "GroebnerLex" => {
+        "GroebnerDegRevLex" | "Groebner" | "GroebnerLex" => {
             let polys_arg = cmd.args.first().map(|s| s.as_str()).unwrap_or("");
             let vars_arg = cmd.args.get(1).map(|s| s.as_str()).unwrap_or("");
             let polys_vec: Vec<String> = if polys_arg.trim().is_empty() {
@@ -11680,6 +11759,239 @@ fn execute_cas_command_typed(
                 grafito_geometry::outcome::MathResult::NotConverged(err) => {
                     Some(Err(format!("Groebner no convergió: {err:?}")))
                 }
+            }
+        }
+        // Frente W1: puerta simbólica al motor (`grafito_core::cas_motor`).
+        // Cero matemática duplicada: cada brazo valida presupuesto/identificador
+        // y delega; el `Err` del motor se vuelve mensaje honesto con el límite
+        // del subset. Nombres sin colisión: `Laplace` es la distribución y
+        // `LaplaceExpansion` el cofactor; `ODESystem` el integrador numérico.
+        "SolveODE2" => {
+            if cmd.args.len() != 4 && cmd.args.len() != 5 {
+                return Some(Err(
+                    "Error: SolveODE2 requiere SolveODE2[a, b, c, rhs] o SolveODE2[a, b, c, rhs, variable]"
+                        .into(),
+                ));
+            }
+            let (a, b, c) = (
+                cmd.args[0].trim().to_string(),
+                cmd.args[1].trim().to_string(),
+                cmd.args[2].trim().to_string(),
+            );
+            let rhs = expand_all_cas(cmd.args[3].trim(), document);
+            for (role, value) in [("a", &a), ("b", &b), ("c", &c), ("rhs", &rhs)] {
+                if value.is_empty() {
+                    return Some(Err(format!("Error: SolveODE2 requiere {role} no vacío")));
+                }
+                if let Err(error) = check_w1_budget("SolveODE2", role, value) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            let var = cmd
+                .args
+                .get(4)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: SolveODE2 requiere una variable válida".into()));
+            }
+            match cas_gate::cas_solve_ode_second_order(&a, &b, &c, &rhs, var) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("SolveODE2: {error}"))),
+            }
+        }
+        "ODESystem2" => {
+            if cmd.args.len() != 4 && cmd.args.len() != 5 {
+                return Some(Err(
+                    "Error: ODESystem2 requiere ODESystem2[a11, a12, a21, a22] u ODESystem2[a11, a12, a21, a22, t]"
+                        .into(),
+                ));
+            }
+            let coeffs: Vec<String> = cmd.args[..4].iter().map(|s| s.trim().to_string()).collect();
+            for (i, value) in coeffs.iter().enumerate() {
+                if value.is_empty() {
+                    return Some(Err(format!(
+                        "Error: ODESystem2 requiere el coeficiente {} no vacío",
+                        i + 1
+                    )));
+                }
+                if let Err(error) = check_w1_budget("ODESystem2", &format!("a{}", i + 1), value) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            let t = cmd
+                .args
+                .get(4)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("t");
+            if !is_math_identifier(t) {
+                return Some(Err("Error: ODESystem2 requiere una variable válida".into()));
+            }
+            match cas_gate::cas_solve_ode_system_2x2(
+                &coeffs[0], &coeffs[1], &coeffs[2], &coeffs[3], t,
+            ) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("ODESystem2: {error}"))),
+            }
+        }
+        "LaplaceT" => {
+            if cmd.args.is_empty() || cmd.args.len() > 3 {
+                return Some(Err(
+                    "Error: LaplaceT requiere LaplaceT[expr] o LaplaceT[expr, t, s]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if expr.trim().is_empty() {
+                return Some(Err("Error: LaplaceT requiere una expresión no vacía".into()));
+            }
+            if let Err(error) = check_w1_budget("LaplaceT", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let t = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("t");
+            let s = cmd
+                .args
+                .get(2)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("s");
+            if !is_math_identifier(t) || !is_math_identifier(s) {
+                return Some(Err("Error: LaplaceT requiere variables válidas".into()));
+            }
+            match cas_gate::cas_laplace_direct(&expr, t, s) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("LaplaceT: {error}"))),
+            }
+        }
+        "InvLaplaceT" => {
+            if cmd.args.is_empty() || cmd.args.len() > 3 {
+                return Some(Err(
+                    "Error: InvLaplaceT requiere InvLaplaceT[expr] o InvLaplaceT[expr, s, t]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: InvLaplaceT requiere una expresión no vacía".into()
+                ));
+            }
+            if let Err(error) = check_w1_budget("InvLaplaceT", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let s = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("s");
+            let t = cmd
+                .args
+                .get(2)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("t");
+            if !is_math_identifier(s) || !is_math_identifier(t) {
+                return Some(Err("Error: InvLaplaceT requiere variables válidas".into()));
+            }
+            match cas_gate::cas_laplace_inverse(&expr, s, t) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("InvLaplaceT: {error}"))),
+            }
+        }
+        "RischInt" => {
+            if cmd.args.is_empty() || cmd.args.len() == 3 || cmd.args.len() > 4 {
+                return Some(Err(
+                    "Error: RischInt requiere RischInt[expr], RischInt[expr, variable] o RischInt[expr, variable, a, b]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?.trim(), document);
+            if expr.trim().is_empty() {
+                return Some(Err("Error: RischInt requiere una expresión no vacía".into()));
+            }
+            if let Err(error) = check_w1_budget("RischInt", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: RischInt requiere una variable válida".into()));
+            }
+            if cmd.args.len() == 4 {
+                let a = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Some(Err(format!(
+                            "Error en límite inferior de RischInt: {error}"
+                        )))
+                    }
+                };
+                let b = match require_finite(parse_numeric_arg(&cmd.args[3], &document.variables)) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Some(Err(format!(
+                            "Error en límite superior de RischInt: {error}"
+                        )))
+                    }
+                };
+                match cas_gate::cas_definite_risch(&expr, var, a, b) {
+                    Ok(out) => Some(Ok(out)),
+                    Err(error) => Some(Err(format!("RischInt: {error}"))),
+                }
+            } else {
+                match cas_gate::cas_integrate_risch(&expr, var) {
+                    Ok(out) => Some(Ok(out)),
+                    Err(error) => Some(Err(format!("RischInt: {error}"))),
+                }
+            }
+        }
+        "GroebnerBasis" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: GroebnerBasis requiere GroebnerBasis[polinomios, variables]".into(),
+                ));
+            }
+            let polys = parse_w1_brace_list(&cmd.args[0]);
+            let vars = parse_w1_brace_list(&cmd.args[1]);
+            if polys.is_empty() {
+                return Some(Err(
+                    "Error: GroebnerBasis requiere al menos un polinomio".into()
+                ));
+            }
+            if vars.is_empty() {
+                return Some(Err(
+                    "Error: GroebnerBasis requiere al menos una variable".into()
+                ));
+            }
+            for poly in &polys {
+                if let Err(error) = check_w1_budget("GroebnerBasis", "polinomio", poly) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            for var in &vars {
+                if let Err(error) = check_w1_budget("GroebnerBasis", "variable", var) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+                if !is_math_identifier(var) {
+                    return Some(Err(format!(
+                        "Error: GroebnerBasis requiere variables válidas ('{var}')"
+                    )));
+                }
+            }
+            match cas_gate::cas_groebner(&polys, &vars) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("GroebnerBasis: {error}"))),
             }
         }
         "CompleteSquare" => {
@@ -18684,6 +18996,68 @@ fn matrix_from_columns(cols: &[Vec<f64>]) -> Option<Matrix> {
 mod tests {
     use super::*;
     use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
+
+    #[test]
+    fn bar_chart_creates_real_object_and_rejects_honestly() {
+        let mut doc = Document::new();
+        let mut input = "BarChart[{1, 2, 3}]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(matches!(out, CommandOutcome::Message(_)), "crea: {out:?}");
+        assert!(
+            doc.objects_iter()
+                .any(|(_, obj)| matches!(obj, GeoObject::BarChart(_))),
+            "el documento tiene un BarChart real"
+        );
+        // Todo-cero: `Err` honesto del motor, sin objeto nuevo.
+        let before = doc.objects_iter().count();
+        let mut input = "BarChart[{0, 0}]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "todo-cero: {out:?}"
+        );
+        assert_eq!(doc.objects_iter().count(), before);
+    }
+
+    #[test]
+    fn pie_chart_creates_real_object_and_rejects_negatives_and_empty_total() {
+        let mut doc = Document::new();
+        let mut input = "PieChart[{1, 1, 2}]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(matches!(out, CommandOutcome::Message(_)), "crea: {out:?}");
+        assert!(
+            doc.objects_iter()
+                .any(|(_, obj)| matches!(obj, GeoObject::PieChart(_))),
+            "el documento tiene un PieChart real"
+        );
+        let before = doc.objects_iter().count();
+        // Negativos: `Err` honesto, sin objeto nuevo.
+        let mut input = "PieChart[{-1, 2}]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "negativos: {out:?}"
+        );
+        // Total cero: `Err` honesto, sin objeto nuevo.
+        let mut input = "PieChart[{0, 0}]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "total cero: {out:?}"
+        );
+        assert_eq!(doc.objects_iter().count(), before);
+    }
+
+    #[test]
+    fn chart_validation_rejects_negative_pie_and_accepts_bar() {
+        use grafito_core::{BarChartObj, PieChartObj};
+        let mut doc = Document::new();
+        // El constructor conserva negativos; la validación los rechaza honesto.
+        let pie = GeoObject::PieChart(PieChartObj::new(vec![-1.0, 2.0]));
+        assert!(doc.try_add_object(pie).is_err());
+        let bar = GeoObject::BarChart(BarChartObj::new(vec![-1.0, 2.0]));
+        assert!(doc.try_add_object(bar).is_ok());
+    }
 
     #[test]
     fn rastro_command_toggles_sets_and_rejects() {

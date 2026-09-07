@@ -269,6 +269,8 @@ mod tests {
                 0.9,
             )),
             GeoObject::Histogram(HistogramObj::new(vec![1.0, 2.0, 3.0, 4.0, 5.0], 5)),
+            GeoObject::BarChart(BarChartObj::new(vec![1.0, 2.0, 3.0])),
+            GeoObject::PieChart(PieChartObj::new(vec![1.0, 1.0, 2.0])),
             GeoObject::VectorField2D(VectorField2DObj::new("x", "y")),
             GeoObject::PhasePortrait(PhasePortraitObj::new(
                 "x+y", "x-y", -10.0, 10.0, -10.0, 10.0,

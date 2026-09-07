@@ -1354,6 +1354,21 @@ impl GrafitoApp {
         // pedagógica pasa exclusivamente por el loop agente cuando `assistant.agent_mode==true`.
         match action {
             AssistantUiAction::Submit => {
+                // W3 — saludo sin camino ("hola"): respuesta local con el
+                // siguiente paso ofrecido, sin media ni hilo ni remoto.
+                if let Some(respuesta) =
+                    grafito_ui::assistant::greeting_answer(&self.assistant.problem)
+                {
+                    let pregunta = self.assistant.problem.clone();
+                    self.assistant.begin_request(pregunta);
+                    self.assistant.problem.clear();
+                    let humano = grafito_ui::assistant::humanize_prose_text(&respuesta);
+                    self.assistant.complete_local_request(humano.clone());
+                    self.assistant.set_media(None, ctx);
+                    self.notify(humano, ToastKind::Info);
+                    ctx.request_repaint();
+                    return;
+                }
                 let problem_clone = self.assistant.problem.clone();
                 let lower = problem_clone.to_lowercase();
                 // Punto único de decisión honesto (`decide_animacion`): media

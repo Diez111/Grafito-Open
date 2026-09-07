@@ -115,7 +115,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `LimitBelow[expr, variable, punto]`: Estima un límite lateral por la izquierda (x→a⁻). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_inferior`, `limite_izquierdo`.
 - `ParametricDerivative[x(t), y(t), variable]`: Deriva paramétrica dy/dx = (dy/dt)/(dx/dt) simbólicamente. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ParametricDerivative[x(t), y(t)]`. Alias: `derivada_parametrica`, `derivadaParametrica`.
 - `Asymptote[expr]`: Calcula asíntota oblicua y = m·x + b con m = lim f/x, b = lim f−m·x. Mutacion: solo consulta. Riesgo: medio. Formas alternativas: `Asymptote[expr, variable]`. Alias: `asintota`, `asíntota`.
-- `GroebnerDegRevLex[polinomios]`: Base de Groebner degrevlex: exacta para 2 polinomios lineales en 2 variables; con mas de 2x2 devuelve error honesto, usa Eliminate. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`. Alias: `groebner`, `groebnerbasis`, `groebnerlex`, `groebner_basis`.
+- `GroebnerDegRevLex[polinomios]`: Base de Groebner degrevlex: exacta para 2 polinomios lineales en 2 variables; con mas de 2x2 devuelve error honesto, usa Eliminate o GroebnerBasis. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`. Alias: `groebner`, `groebnerlex`.
 - `Factor[expr, variable]`: Factoriza polinomios equivalentes. Mutacion: solo consulta. Riesgo: bajo. Alias: `factorizar`.
 - `Expand[expr]`: Expande productos y potencias algebraicas. Mutacion: solo consulta. Riesgo: bajo. Alias: `expandir`.
 - `Simplify[expr]`: Simplifica una expresion mediante reglas seguras. Mutacion: solo consulta. Riesgo: bajo. Alias: `simplificar`.
@@ -169,6 +169,8 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Estadística
 
 - `Histogram[{data}, bins]`: Crea un histograma. Mutacion: crea objetos. Riesgo: medio. Alias: `histograma`.
+- `BarChart[{data}]`: Crea un gráfico de barras por categoría (una barra por dato). Mutacion: crea objetos. Riesgo: medio. Alias: `barras`, `bar`.
+- `PieChart[{data}]`: Crea un gráfico de torta proporcional (valores no negativos con total positivo). Mutacion: crea objetos. Riesgo: medio. Alias: `torta`, `pie`.
 - `ScatterPlot[{xs}, {ys}]`: Crea un grafico de dispersion. Mutacion: crea objetos. Riesgo: medio. Alias: `scatter`.
 - `BoxPlot[{data}]`: Crea un diagrama de caja. Mutacion: crea objetos. Riesgo: medio.
 - `LinearRegression[{xs}, {ys}]`: Calcula una regresion lineal. Mutacion: crea objetos. Riesgo: medio. Alias: `regression`, `regresion`.
@@ -340,6 +342,12 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 
 - `ODE[expr, t0, y0, t_end]`: Resuelve EDO y'=f(t,y): ODE[expr, t0, y0, t_end, steps, metodo, tolerancia] con metodos euler/rk4/rk45/backward; genera PencilObj. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `ODE[expr, t0, y0, t_end, steps]`, `ODE[expr, t0, y0, t_end, steps, metodo]`, `ODE[expr, t0, y0, t_end, steps, metodo, tolerancia]`. Alias: `EDO`.
 - `ODESystem[expr1, expr2, t0, x0, y0]`: Resuelve sistema 2D x'=f(t,x,y), y'=g(t,x,y): ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia]. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `ODESystem[expr1, expr2, t0, x0, y0, t_end]`, `ODESystem[expr1, expr2, t0, x0, y0, t_end, steps]`, `ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo]`, `ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia]`. Alias: `SistemaEDO`, `sistema_edo`.
+- `SolveODE2[a, b, c, rhs]`: Resolvé EDO lineal de 2do orden a·y''+b·y'+c·y=rhs con a, b, c constantes (a≠0): SolveODE2[a, b, c, rhs] o SolveODE2[a, b, c, rhs, variable]. Orden ≥3 o coeficientes variables quedan fuera del subset y dan error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SolveODE2[a, b, c, rhs, variable]`. Alias: `edo2`, `edo_2`.
+- `ODESystem2[a11, a12, a21, a22]`: Resolvé sistema lineal 2x2 constante x'=A·x por autovalores: ODESystem2[a11, a12, a21, a22] o ODESystem2[a11, a12, a21, a22, t]. No lineal o no constante queda fuera del subset y da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ODESystem2[a11, a12, a21, a22, t]`. Alias: `sistemaedo2`, `odesys2`.
+- `LaplaceT[expr]`: Calculá la transformada de Laplace directa del subset F3c (1, t^n con n≤20, exp, sin/cos y combinaciones lineales): LaplaceT[expr] o LaplaceT[expr, t, s]. El resto da error honesto, no inventa. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LaplaceT[expr, t]`, `LaplaceT[expr, t, s]`. Alias: `transformadalaplace`, `laplace_t`.
+- `InvLaplaceT[expr]`: Calculá la Laplace inversa de racionales propios con denominador de grado ≤2: InvLaplaceT[expr] o InvLaplaceT[expr, s, t]. Grado ≥3, impropias o retardos quedan fuera del subset y dan error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InvLaplaceT[expr, s]`, `InvLaplaceT[expr, s, t]`. Alias: `laplaceinversa`, `invlaplace_t`.
+- `RischInt[expr]`: Integrá por Risch-Norman (polinomios, exponenciales, logaritmos): RischInt[expr], RischInt[expr, variable] o definida RischInt[expr, variable, a, b] por FTC. Sin primitiva en el subset (p. ej. exp(x^2)) da error honesto que deriva a cuadratura. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `RischInt[expr, variable]`, `RischInt[expr, variable, a, b]`. Alias: `risch`, `risch_int`.
+- `GroebnerBasis[polinomios, variables]`: Calculá la base de Groebner por Buchberger acotado (hasta 8 polinomios en 4 variables, 128 S-polinomios; 3x3 lineal verificado): GroebnerBasis[polinomios, variables]. Fuera de cota o no polinómico da error honesto que deriva a Eliminate. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebner_basis`, `basegroebner`.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 

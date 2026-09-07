@@ -50,7 +50,7 @@ pub(crate) struct AppConfig {
     /// Opt-in explícito para Aula/red avanzada (loopback F0 sin red).
     #[serde(default)]
     pub(crate) advanced_red_opt_in: bool,
-    /// Idioma de la interfaz ES/EN (O2 i18n, catálogo `grafito-ui/src/i18n.rs`).
+    /// Idioma de la interfaz ES/EN/PT (O2 i18n + W2 PT, catálogo `grafito-ui/src/i18n.rs`).
     /// `#[serde(default)]` conserva configs viejas sin el campo (resuelven a español).
     #[serde(default)]
     pub(crate) locale: AppLocale,
@@ -72,7 +72,8 @@ fn default_assistant_model() -> String {
 ///
 /// `Es` por defecto. En instalaciones frescas [`AppConfig::default`] detecta el
 /// idioma del sistema con [`AppLocale::resolve`] (variables `LANGUAGE` →
-/// `LC_ALL` → `LANG` → `LC_MESSAGES`); cualquier valor no inglés resuelve a español.
+/// `LC_ALL` → `LANG` → `LC_MESSAGES`): subtag primario `en` → inglés, `pt` →
+/// portugués, cualquier otro valor resuelve a español.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum AppLocale {
@@ -81,14 +82,17 @@ pub(crate) enum AppLocale {
     Es,
     /// English.
     En,
+    /// Português (W2: seleccionable en el selector ES/EN/PT, persiste `"pt"`).
+    Pt,
 }
 
 impl AppLocale {
-    /// Código BCP-47 persistido en `grafito_config.json` (`"es"` / `"en"`).
+    /// Código BCP-47 persistido en `grafito_config.json` (`"es"` / `"en"` / `"pt"`).
     pub(crate) const fn code(self) -> &'static str {
         match self {
             AppLocale::Es => "es",
             AppLocale::En => "en",
+            AppLocale::Pt => "pt",
         }
     }
 
@@ -110,9 +114,10 @@ impl AppLocale {
     /// Núcleo testeable de [`AppLocale::resolve`]: la primera etiqueta no vacía
     /// en orden `LANGUAGE` → `LC_ALL` → `LANG` → `LC_MESSAGES` gana; `LANGUAGE`
     /// admite lista separada por `':'` (se toma la primera etiqueta útil).
-    /// Solo el subtag primario `en` (insensible a mayúsculas, sin importar
-    /// región ni codificación: `en`, `en_US.UTF-8`, `EN-us`…) resuelve a inglés;
-    /// todo lo demás (`es`, `C`, `POSIX`, vacío, desconocido) resuelve a español.
+    /// Solo los subtags primarios `en`/`pt` (insensibles a mayúsculas, sin
+    /// importar región ni codificación: `en`, `en_US.UTF-8`, `pt_BR`…)
+    /// resuelven a su idioma; todo lo demás (`es`, `C`, `POSIX`, vacío,
+    /// desconocido) resuelve a español.
     pub(crate) fn resolve_for_env(
         language: Option<&str>,
         lc_all: Option<&str>,
@@ -135,12 +140,16 @@ impl AppLocale {
         AppLocale::Es
     }
 
-    /// Un subtag primario `en` resuelve a inglés; el resto a español (default ES).
+    /// Subtags primarios `en`/`pt` resuelven a su idioma; el resto a español
+    /// (default ES).
     fn resolve_for_tag(tag: &str) -> Self {
         let without_codeset = tag.split(['.', '@']).next().unwrap_or("");
         let primary = without_codeset.split(['_', '-']).next().unwrap_or("");
-        if primary.trim().eq_ignore_ascii_case("en") {
+        let primary = primary.trim();
+        if primary.eq_ignore_ascii_case("en") {
             AppLocale::En
+        } else if primary.eq_ignore_ascii_case("pt") {
+            AppLocale::Pt
         } else {
             AppLocale::Es
         }
@@ -151,14 +160,16 @@ impl AppLocale {
         match self {
             AppLocale::Es => grafito_ui::i18n::Locale::Es,
             AppLocale::En => grafito_ui::i18n::Locale::En,
+            AppLocale::Pt => grafito_ui::i18n::Locale::Pt,
         }
     }
 
-    /// Conversión inversa (el selector ES/EN escribe [`AppConfig::locale`]).
+    /// Conversión inversa (el selector ES/EN/PT escribe [`AppConfig::locale`]).
     pub(crate) const fn from_ui_locale(locale: grafito_ui::i18n::Locale) -> Self {
         match locale {
             grafito_ui::i18n::Locale::Es => AppLocale::Es,
             grafito_ui::i18n::Locale::En => AppLocale::En,
+            grafito_ui::i18n::Locale::Pt => AppLocale::Pt,
         }
     }
 }
@@ -602,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn locale_defaults_to_spanish_for_anything_not_english() {
+    fn locale_defaults_to_spanish_for_anything_not_english_or_portuguese() {
         for tag in [
             "es",
             "es_AR.UTF-8",
@@ -612,9 +623,9 @@ mod tests {
             "",
             "   ",
             "fr_FR.UTF-8",
-            "pt_BR",
             "english",
             "enx",
+            "portugues",
         ] {
             assert_eq!(
                 AppLocale::resolve_for_env(None, None, Some(tag), None),
@@ -625,6 +636,23 @@ mod tests {
         assert_eq!(
             AppLocale::resolve_for_env(None, None, None, None),
             AppLocale::Es
+        );
+    }
+
+    #[test]
+    fn locale_resolves_portuguese_primary_subtag() {
+        // W2: el sistema en portugués arranca en PT (cualquier región).
+        for tag in ["pt", "PT", " pt ", "pt_BR", "pt_BR.UTF-8", "pt-PT", "PT-pt"] {
+            assert_eq!(
+                AppLocale::resolve_for_env(None, None, Some(tag), None),
+                AppLocale::Pt,
+                "tag {tag:?} debería resolver a portugués"
+            );
+        }
+        // LANGUAGE lista ':' respeta la primera útil también en PT.
+        assert_eq!(
+            AppLocale::resolve_for_env(Some("pt:es"), Some("en_US.UTF-8"), Some("en"), None),
+            AppLocale::Pt
         );
     }
 
@@ -658,9 +686,11 @@ mod tests {
     fn locale_codes_and_ui_round_trip() {
         assert_eq!(AppLocale::Es.code(), "es");
         assert_eq!(AppLocale::En.code(), "en");
+        assert_eq!(AppLocale::Pt.code(), "pt");
         assert_eq!(AppLocale::default(), AppLocale::Es);
         assert_eq!(AppLocale::Es.as_ui_locale(), grafito_ui::i18n::Locale::Es);
         assert_eq!(AppLocale::En.as_ui_locale(), grafito_ui::i18n::Locale::En);
+        assert_eq!(AppLocale::Pt.as_ui_locale(), grafito_ui::i18n::Locale::Pt);
         assert_eq!(
             AppLocale::from_ui_locale(grafito_ui::i18n::Locale::Es),
             AppLocale::Es
@@ -668,6 +698,10 @@ mod tests {
         assert_eq!(
             AppLocale::from_ui_locale(grafito_ui::i18n::Locale::En),
             AppLocale::En
+        );
+        assert_eq!(
+            AppLocale::from_ui_locale(grafito_ui::i18n::Locale::Pt),
+            AppLocale::Pt
         );
     }
 
@@ -684,5 +718,12 @@ mod tests {
         assert!(json.contains(r#""locale":"en""#), "JSON inesperado: {json}");
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.locale, AppLocale::En);
+        // W2: el portugués persiste como "pt" y vuelve intacto.
+        updated.locale = AppLocale::Pt;
+        let json = serde_json::to_string(&updated).unwrap();
+        assert!(json.contains(r#""locale":"pt""#), "JSON inesperado: {json}");
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.locale, AppLocale::Pt);
+        assert_eq!(back.locale.as_ui_locale(), grafito_ui::i18n::Locale::Pt);
     }
 }

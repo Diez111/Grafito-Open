@@ -20,9 +20,10 @@ pub use cas_motor::{
 
 pub use csv::{escape_field, parse_csv, to_csv, CsvError, MAX_CSV_BYTES, MAX_CSV_ROWS};
 pub use exchange::{
-    bar_chart_stub, clipboard_png_stub, clipboard_svg, datatable_cell, datatable_rows,
-    datatable_to_csv, document_to_pdf, document_to_svg, l_stub, pie_chart_stub, ExchangeError,
-    LayerTable, MAX_EXCHANGE_OBJECTS, MAX_LAYERS, MAX_TABLE_ROWS,
+    bar_chart_bars, bar_chart_stub, clipboard_png_stub, clipboard_svg, datatable_cell,
+    datatable_rows, datatable_to_csv, document_to_pdf, document_to_svg, l_stub, pie_chart_slices,
+    pie_chart_stub, solid_measure_summary, BarSegment, ExchangeError, LayerTable, PieSlice,
+    SolidMeasure, MAX_EXCHANGE_OBJECTS, MAX_LAYERS, MAX_TABLE_ROWS,
 };
 pub use solids::{
     cone_area, cone_volume, cube_area, cube_volume, cylinder_area, cylinder_volume, project_ortho,

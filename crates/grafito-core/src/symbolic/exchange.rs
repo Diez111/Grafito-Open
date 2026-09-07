@@ -22,6 +22,7 @@ use thiserror::Error;
 use crate::{DataTableObj, Document, GeoObject, ObjectId};
 
 use super::csv::{self, CsvError};
+use super::solids;
 
 /// Máximo de capas (0..=255, GeoGebra no las numera pero el orden importa).
 pub const MAX_LAYERS: u32 = 255;
@@ -146,6 +147,8 @@ fn set_visible(object: &mut GeoObject, visible: bool) {
         GeoObject::Arc(o) => o.visible = visible,
         GeoObject::Sector(o) => o.visible = visible,
         GeoObject::Histogram(o) => o.visible = visible,
+        GeoObject::BarChart(o) => o.visible = visible,
+        GeoObject::PieChart(o) => o.visible = visible,
         GeoObject::ScatterPlot(o) => o.visible = visible,
         GeoObject::BoxPlot(o) => o.visible = visible,
         GeoObject::Sphere3D(o) => o.visible = visible,
@@ -384,6 +387,167 @@ pub fn pie_chart_stub(data: &[f64]) -> Result<String, ExchangeError> {
     })
 }
 
+/// Barra propia mínima (frente W4, sin registry): valida como el stub y
+/// devuelve una barra por dato con fracciones listas para renderizar.
+///
+/// - `fraction_of_max`: `value / max|v|` (rango `-1..=1`; `1` es la mayor).
+/// - `fraction_of_total`: `value / suma` (`0` si la suma es `0`).
+///
+/// Puro, sin I/O. El comando `BarChart[...]` (registry, fuera de este frente)
+/// consume estas fracciones sin revalidar de más.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BarSegment {
+    /// Índice del dato en el slice de entrada.
+    pub index: usize,
+    /// Valor original (finito, tal cual entró).
+    pub value: f64,
+    /// Proporción contra el mayor `|v|` (`-1..=1`).
+    pub fraction_of_max: f64,
+    /// Proporción contra la suma (`0` si la suma es `0`).
+    pub fraction_of_total: f64,
+}
+
+/// Calcula las barras propias de `BarChart` (valida, nunca inventa).
+pub fn bar_chart_bars(data: &[f64]) -> Result<Vec<BarSegment>, ExchangeError> {
+    check_chart_data("BarChart", data)?;
+    let mut max_abs = 0.0_f64;
+    for value in data {
+        let magnitude = value.abs();
+        if magnitude > max_abs {
+            max_abs = magnitude;
+        }
+    }
+    if !max_abs.is_finite() || max_abs <= 0.0 {
+        return Err(ExchangeError::InvalidData {
+            feature: "BarChart",
+            detail: "sin escala: todos los valores son cero".to_string(),
+        });
+    }
+    let mut total = 0.0_f64;
+    for value in data {
+        total += *value;
+    }
+    let total_is_usable = total.is_finite() && total != 0.0;
+    let mut bars = Vec::with_capacity(data.len());
+    for (index, value) in data.iter().enumerate() {
+        let fraction_of_max = *value / max_abs;
+        let fraction_of_total = if total_is_usable { *value / total } else { 0.0 };
+        if !fraction_of_max.is_finite() || !fraction_of_total.is_finite() {
+            return Err(ExchangeError::InvalidData {
+                feature: "BarChart",
+                detail: "las fracciones deben ser finitas".to_string(),
+            });
+        }
+        bars.push(BarSegment {
+            index,
+            value: *value,
+            fraction_of_max,
+            fraction_of_total,
+        });
+    }
+    Ok(bars)
+}
+
+/// Sector propio mínimo (frente W4, sin registry): valida (finitos +
+/// no negativos + total `> 0` finito) y devuelve un sector por dato con
+/// ángulos acumulados en radianes (`0..=TAU`, como GeoGebra).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PieSlice {
+    /// Índice del dato en el slice de entrada.
+    pub index: usize,
+    /// Valor original (finito, no negativo).
+    pub value: f64,
+    /// Proporción contra el total (`0..=1`).
+    pub fraction: f64,
+    /// Ángulo inicial acumulado (radianes, `0..=TAU`).
+    pub start_angle: f64,
+    /// Barrido del sector (radianes, `>= 0`, suma `TAU`).
+    pub sweep_angle: f64,
+}
+
+/// Calcula los sectores propios de `PieChart` (valida, nunca inventa).
+pub fn pie_chart_slices(data: &[f64]) -> Result<Vec<PieSlice>, ExchangeError> {
+    check_chart_data("PieChart", data)?;
+    if data.iter().any(|v| *v < 0.0) {
+        return Err(ExchangeError::InvalidData {
+            feature: "PieChart",
+            detail: "los valores deben ser no negativos".to_string(),
+        });
+    }
+    let mut total = 0.0_f64;
+    for value in data {
+        total += *value;
+    }
+    if !total.is_finite() || total <= 0.0 {
+        return Err(ExchangeError::InvalidData {
+            feature: "PieChart",
+            detail: "sin total positivo que repartir".to_string(),
+        });
+    }
+    let tau = std::f64::consts::TAU;
+    let mut slices = Vec::with_capacity(data.len());
+    let mut start_angle = 0.0_f64;
+    for (index, value) in data.iter().enumerate() {
+        let fraction = *value / total;
+        let sweep_angle = fraction * tau;
+        if !fraction.is_finite() || !sweep_angle.is_finite() {
+            return Err(ExchangeError::InvalidData {
+                feature: "PieChart",
+                detail: "las fracciones deben ser finitas".to_string(),
+            });
+        }
+        slices.push(PieSlice {
+            index,
+            value: *value,
+            fraction,
+            start_angle,
+            sweep_angle,
+        });
+        start_angle += sweep_angle;
+    }
+    Ok(slices)
+}
+
+/// Medida exacta de un sólido 3D (frente W4, sin registry): expone el motor
+/// [`solids`](super::solids) sin tocar comandos ni paneles.
+///
+/// `Ok` trae `(volumen, área)` finitos con estado `"exacto"`; si el objeto no
+/// tiene forma cerrada (cuádrica, superficies) devuelve `Err::NotImplemented`
+/// con el estado honesto de [`solids::solid_measure_status`] para que la piel
+/// lo muestre tal cual en vez de inventar un número.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SolidMeasure {
+    /// Volumen exacto del sólido.
+    pub volume: f64,
+    /// Área total exacta del sólido.
+    pub area: f64,
+    /// Estado del motor (`"exacto"` en `Ok`).
+    pub status: &'static str,
+}
+
+/// Resume volumen/área exactos o falla honesto si no hay forma cerrada.
+pub fn solid_measure_summary(object: &GeoObject) -> Result<SolidMeasure, ExchangeError> {
+    let status = solids::solid_measure_status(object);
+    let (Some(volume), Some(area)) = (solids::solid_volume(object), solids::solid_area(object))
+    else {
+        return Err(ExchangeError::NotImplemented {
+            feature: "Volumen/Área 3D",
+            hint: status.to_string(),
+        });
+    };
+    if !volume.is_finite() || !area.is_finite() {
+        return Err(ExchangeError::InvalidData {
+            feature: "Volumen/Área 3D",
+            detail: "la medida debe ser finita".to_string(),
+        });
+    }
+    Ok(SolidMeasure {
+        volume,
+        area,
+        status,
+    })
+}
+
 /// Diseño + stub de los L de Tasks.md F10.W5: siempre `Err` explicativo.
 ///
 /// `Gruntz`/`Risch` ya tienen motor S/M real (puerta [`super::cas_motor`]
@@ -544,6 +708,59 @@ mod tests {
             .expect_err("PieChart pendiente")
             .to_string()
             .contains("Histogram"));
+    }
+
+    #[test]
+    fn bar_chart_bars_are_proportional_and_honest() {
+        let bars = bar_chart_bars(&[1.0, 2.0, 3.0]).expect("barras fixture");
+        assert_eq!(bars.len(), 3);
+        assert_eq!(bars[2].index, 2);
+        assert!((bars[2].fraction_of_max - 1.0).abs() < 1e-12);
+        assert!((bars[0].fraction_of_max - 1.0 / 3.0).abs() < 1e-12);
+        let total: f64 = bars.iter().map(|bar| bar.fraction_of_total).sum();
+        assert!((total - 1.0).abs() < 1e-12);
+        // Sin escala (todo cero) falla honesto, no divide por cero.
+        assert!(bar_chart_bars(&[0.0, 0.0])
+            .expect_err("sin escala")
+            .to_string()
+            .contains("sin escala"));
+        assert!(bar_chart_bars(&[]).is_err());
+        assert!(bar_chart_bars(&[f64::INFINITY]).is_err());
+    }
+
+    #[test]
+    fn pie_chart_slices_cover_tau_and_reject_empty_total() {
+        let slices = pie_chart_slices(&[1.0, 1.0, 2.0]).expect("torta fixture");
+        assert_eq!(slices.len(), 3);
+        assert!((slices[0].fraction - 0.25).abs() < 1e-12);
+        assert!((slices[2].fraction - 0.5).abs() < 1e-12);
+        let swept: f64 = slices.iter().map(|slice| slice.sweep_angle).sum();
+        assert!((swept - std::f64::consts::TAU).abs() < 1e-9);
+        assert_eq!(slices[0].start_angle, 0.0);
+        assert!(slices[1].start_angle > 0.0);
+        // Total cero o negativos: honesto, sin NaN.
+        assert!(pie_chart_slices(&[0.0, 0.0])
+            .expect_err("sin total")
+            .to_string()
+            .contains("sin total"));
+        assert!(pie_chart_slices(&[-1.0]).is_err());
+        assert!(pie_chart_slices(&[]).is_err());
+    }
+
+    #[test]
+    fn solid_measure_summary_is_exact_or_honest() {
+        use crate::{Quadric3DObj, Sphere3DObj};
+        use grafito_geometry::Point3D;
+        let sphere = GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(0.0, 0.0, 0.0), 1.0));
+        let measure = solid_measure_summary(&sphere).expect("esfera mide exacto");
+        assert!((measure.volume - 4.188_790_204_786_390_5).abs() < 1e-9);
+        assert!((measure.area - 12.566_370_614_359_172).abs() < 1e-9);
+        assert_eq!(measure.status, "exacto");
+        let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        let err = solid_measure_summary(&quadric).expect_err("cuádrica sin forma cerrada");
+        assert!(err.to_string().contains("Volumen/Área 3D"));
     }
 
     #[test]

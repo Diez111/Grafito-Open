@@ -1559,7 +1559,7 @@ pub struct GrafitoApp {
     /// Ver `crate::controllers::DocumentController::undo_total_bytes`.
     pub undo_total_bytes: usize,
     /// Ventana onboarding Scandinavian 30s — true si `config.onboarding_completed` es false.
-    /// Se muestra una vez con 3 bullets + [Probar ejemplo][Empezar vacío][No mostrar].
+    /// Se muestra una vez con 3 pasos + [Probar ejemplo][Empezar vacío][No mostrar de nuevo].
     pub show_onboarding: bool,
     /// Jobs de I/O en background para no bloquear UI thread (60fps) — save/open/export.
     /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
@@ -1573,6 +1573,10 @@ pub struct GrafitoApp {
     /// `None` = sin pendiente (arranque normal con documento vacío).
     startup_pending_doc: Option<PathBuf>,
     pub(crate) pending_export_job: Option<PendingExportJob>,
+    /// Carpeta de la última exportación exitosa de la sesión (W3).
+    /// Permite "Mostrar en carpeta" sin guardar rutas de archivo: sólo el
+    /// directorio padre. `None` = aún no se exportó nada.
+    pub last_export_dir: Option<PathBuf>,
     /// Job de importación `.ggb` en background (F1-1): lectura + parse fuera del
     /// UI thread, resultado aplicado con undo único vía `process_input`.
     pub(crate) pending_ggb_import_job: Option<PendingGgbImportJob>,
@@ -1613,6 +1617,11 @@ pub struct GrafitoApp {
     pub snapshot_version: u64,
     pub snapshot_render_quality: RenderQuality,
     pub command_palette: grafito_ui::command_palette::CommandPaletteState,
+    /// Herramientas personalizadas `.ggt` (store en memoria; persistencia por archivo).
+    pub custom_tools: grafito_command::ggbscript::CustomToolStore,
+    /// Diálogo "Guardar herramienta" (nombre) y último error mostrable.
+    pub show_custom_tool_dialog: bool,
+    pub custom_tool_name: String,
     /// Estado sin I/O del asistente matemático.
     pub assistant: grafito_ui::assistant::AssistantPanelState,
     /// Trabajos remotos y claves de sesión que nunca se serializan.
@@ -2232,6 +2241,7 @@ impl GrafitoApp {
             pending_open_job: None,
             startup_pending_doc,
             pending_export_job: None,
+            last_export_dir: None,
             pending_ggb_import_job: None,
             pending_import_job: None,
             pending_text_job: None,
@@ -2269,6 +2279,9 @@ impl GrafitoApp {
             snapshot_version,
             snapshot_render_quality,
             command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
+            custom_tools: grafito_command::ggbscript::CustomToolStore::new(),
+            show_custom_tool_dialog: false,
+            custom_tool_name: String::new(),
             assistant,
             assistant_runtime: crate::assistant::AssistantRuntime::default(),
             right_drawer_open: true,
@@ -3359,7 +3372,7 @@ impl GrafitoApp {
 
     /// Ejecuta un comando de texto, gestiona su `CommandOutcome` y registra
     /// el paso de construcción resultante (snapshot+diff de etiquetas).
-    fn execute_command_and_record_with_outcome(
+    pub(crate) fn execute_command_and_record_with_outcome(
         &mut self,
         cmd: &str,
         time: f64,
@@ -3511,6 +3524,9 @@ impl GrafitoApp {
                     crate::export::export_tikz(&self.document, &path)
                 }
             };
+            if result.is_ok() {
+                self.last_export_dir = path.parent().map(|dir| dir.to_path_buf());
+            }
             apply_export_outcome(result, &mut self.cas_result, &mut self.toasts, self.ui_time);
             return;
         };
@@ -3520,6 +3536,50 @@ impl GrafitoApp {
         self.notify("Exportando…", grafito_ui::toast::ToastKind::Info);
     }
 
+    /// W3 — Abre la carpeta de la última exportación en el explorador.
+    ///
+    /// Piel fina: el `open`/`xdg-open`/`explorer` corre en un thread
+    /// (cero bloqueo del UI thread). Honesto si falla: sin carpeta en la
+    /// sesión o carpeta ya inexistente → toast de error, sin `unwrap`.
+    pub(crate) fn reveal_last_export(&mut self) {
+        let Some(dir) = self.last_export_dir.clone() else {
+            self.notify(
+                "Todavía no exportaste nada en esta sesión.",
+                grafito_ui::toast::ToastKind::Info,
+            );
+            return;
+        };
+        if !dir.is_dir() {
+            self.notify(
+                "La carpeta de la última exportación ya no existe.",
+                grafito_ui::toast::ToastKind::Error,
+            );
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("reveal-export".into())
+            .spawn(move || {
+                #[cfg(target_os = "macos")]
+                let status = std::process::Command::new("open").arg(&dir).status();
+                #[cfg(target_os = "windows")]
+                let status = std::process::Command::new("explorer").arg(&dir).status();
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                let status = std::process::Command::new("xdg-open").arg(&dir).status();
+                let _ = status;
+            });
+        if spawned.is_err() {
+            self.notify(
+                "No se pudo abrir la carpeta de exportación.",
+                grafito_ui::toast::ToastKind::Error,
+            );
+        } else {
+            self.notify(
+                "Abriendo la carpeta de tu exportación…",
+                grafito_ui::toast::ToastKind::Info,
+            );
+        }
+    }
+
     /// Ejecuta la acción elegida desde la paleta de comandos (Ctrl+K).
     ///
     /// Los comandos de tipo herramienta seleccionan el `Tool` correspondiente;
@@ -3527,6 +3587,14 @@ impl GrafitoApp {
     /// el resto se inserta en la barra de entrada como `Nombre[` para que el
     /// usuario complete los argumentos y se procese vía `process_input`.
     pub(crate) fn apply_palette_command(&mut self, name: &str, ctx: &egui::Context) {
+        // 0) Herramienta personalizada (.ggt): ejecuta sus pasos por el
+        //    pipeline normal de comandos (misma allowlist y presupuesto).
+        if let Some(tool_name) =
+            name.strip_prefix(grafito_ui::command_palette::CUSTOM_TOOL_SELECTION_PREFIX)
+        {
+            self.run_custom_tool(tool_name, ctx);
+            return;
+        }
         // 1) Selección de herramienta.
         let tool = match name {
             "Point Tool" => Some(Tool::Point),
@@ -3592,6 +3660,149 @@ impl GrafitoApp {
             .and_then(|cmd| cmd.input_template())
         {
             self.input_text = template;
+        }
+    }
+
+    /// Ejecuta una herramienta personalizada (.ggt) paso a paso por el
+    /// pipeline normal de comandos (misma allowlist y presupuesto por paso).
+    /// Corta en el primer error honesto; el undo queda por pasos aplicados.
+    pub(crate) fn run_custom_tool(&mut self, tool_name: &str, ctx: &egui::Context) {
+        let Some(def) = self.custom_tools.get(tool_name).cloned() else {
+            self.notify(
+                format!("Herramienta '{tool_name}' no encontrada"),
+                grafito_ui::toast::ToastKind::Error,
+            );
+            return;
+        };
+        let time = ctx.input(|i| i.time);
+        let total = def.steps.len();
+        let mut done = 0_usize;
+        for step in &def.steps {
+            match self.execute_command_and_record_with_outcome(step, time) {
+                grafito_command::commands::CommandOutcome::Error(message) => {
+                    self.notify(
+                        format!("{tool_name}: paso {} de {total} falló: {message}", done + 1),
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    return;
+                }
+                _ => done += 1,
+            }
+        }
+        self.notify(
+            format!("{tool_name}: {done} de {total} pasos aplicados"),
+            grafito_ui::toast::ToastKind::Success,
+        );
+    }
+
+    /// Diálogo "Guardar herramienta personalizada": nombre + pasos del
+    /// historial CAS reciente; persiste el `.ggt` elegido por diálogo.
+    pub(crate) fn draw_custom_tool_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_custom_tool_dialog {
+            return;
+        }
+        let mut open = true;
+        let mut save_requested = false;
+        let mut load_requested = false;
+        egui::Window::new("Guardar herramienta personalizada")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Se guardan los últimos {} comandos del historial como pasos.",
+                    self.cas_history.len().min(64)
+                ));
+                ui.text_edit_singleline(&mut self.custom_tool_name);
+                ui.horizontal(|ui| {
+                    save_requested = ui.button("Guardar .ggt…").clicked();
+                    load_requested = ui.button("Cargar .ggt…").clicked();
+                });
+            });
+        if !open {
+            self.show_custom_tool_dialog = false;
+            return;
+        }
+        if load_requested {
+            self.show_custom_tool_dialog = false;
+            self.load_custom_tool_from_dialog();
+        } else if save_requested {
+            self.save_custom_tool_from_history();
+        }
+    }
+
+    /// Guarda el historial CAS como `.ggt` (define + archivo vía diálogo).
+    /// I/O acotado a un JSON chico (cota `MAX_GGT_BYTES` del parser).
+    pub(crate) fn save_custom_tool_from_history(&mut self) {
+        use grafito_command::ggbscript as ggt;
+        let history: Vec<String> = self.cas_history.iter().take(64).cloned().collect();
+        let name = self.custom_tool_name.trim().to_string();
+        let json = match self.custom_tools.define_from_history(&name, &history) {
+            Ok(json) => json,
+            Err(message) => {
+                self.notify(message, grafito_ui::toast::ToastKind::Error);
+                return;
+            }
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Herramienta Grafito", &["ggt"])
+            .set_file_name(format!("{name}.ggt"))
+            .save_file()
+        else {
+            return;
+        };
+        let base = path.parent().unwrap_or(std::path::Path::new("."));
+        let file = path
+            .file_name()
+            .map(std::path::Path::new)
+            .unwrap_or(path.as_path());
+        match ggt::save_ggt_file(base, file, &json) {
+            Ok(()) => {
+                self.show_custom_tool_dialog = false;
+                self.custom_tool_name.clear();
+                self.notify(
+                    format!("Herramienta '{name}' guardada"),
+                    grafito_ui::toast::ToastKind::Success,
+                );
+            }
+            Err(message) => self.notify(message, grafito_ui::toast::ToastKind::Error),
+        }
+    }
+
+    /// Carga un `.ggt` desde diálogo al store (revalidado por el parser).
+    pub(crate) fn load_custom_tool_from_dialog(&mut self) {
+        use grafito_command::ggbscript as ggt;
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Herramienta Grafito", &["ggt"])
+            .pick_file()
+        else {
+            return;
+        };
+        let base = path.parent().unwrap_or(std::path::Path::new("."));
+        let file = path
+            .file_name()
+            .map(std::path::Path::new)
+            .unwrap_or(path.as_path());
+        if let Err(message) = ggt::validate_ggt_path(base, file) {
+            self.notify(message, grafito_ui::toast::ToastKind::Error);
+            return;
+        }
+        let text = match std::fs::read_to_string(base.join(file)) {
+            Ok(text) => text,
+            Err(error) => {
+                self.notify(
+                    format!("No se pudo leer el .ggt: {error}"),
+                    grafito_ui::toast::ToastKind::Error,
+                );
+                return;
+            }
+        };
+        match self.custom_tools.load_json(&text) {
+            Ok(name) => self.notify(
+                format!("Herramienta '{name}' cargada (Ctrl+K para usarla)"),
+                grafito_ui::toast::ToastKind::Success,
+            ),
+            Err(message) => self.notify(message, grafito_ui::toast::ToastKind::Error),
         }
     }
 
@@ -3749,8 +3960,9 @@ impl GrafitoApp {
             match job.receiver.try_recv() {
                 // Mismo UX que el path sincrónico (`apply_export_outcome`): el worker
                 // ya calculó el summary, aquí solo se publica.
-                Ok(Ok((_path, summary))) => {
+                Ok(Ok((path, summary))) => {
                     self.cas_result = summary.clone();
+                    self.last_export_dir = path.parent().map(|dir| dir.to_path_buf());
                     self.toasts.push(
                         wrap_toast_message(&summary, 52),
                         grafito_ui::toast::ToastKind::Success,
@@ -5988,12 +6200,16 @@ impl eframe::App for GrafitoApp {
         }
 
         // Paleta de comandos (Ctrl+K): ventana flotante de búsqueda rápida.
+        // Las herramientas personalizadas (.ggt) entran como sección propia.
+        self.command_palette.custom_tools =
+            grafito_ui::command_palette::custom_tool_entries(&self.custom_tools);
         if let Some(name) = self
             .command_palette
             .show_localized(ctx, self.config_locale())
         {
             self.apply_palette_command(&name, ctx);
         }
+        self.draw_custom_tool_dialog(ctx);
 
         // Modal "Acerca de Grafito": muestra versión y resumen de los cambios
         // de la release 1.1.4 en español. Se abre desde Ayuda > Acerca de.
@@ -6865,7 +7081,7 @@ mod ggb_import_local_tests {
 
 impl GrafitoApp {
     /// Ventana onboarding 30s Scandinavian — gating `AppConfig::onboarding_completed` (utils.rs:46-48).
-    /// 420px, 3 bullets progressive disclosure (5/8/17 grupos), botones [Probar ejemplo][Empezar vacío][No mostrar].
+    /// 420px, 3 pasos accionables, botones [Probar ejemplo][Empezar vacío][No mostrar de nuevo].
     /// Si no se alcanza UI completa, al menos Window stub con “No mostrar” que setea `onboarding_completed=true`.
     pub(crate) fn draw_onboarding_window(&mut self, ctx: &egui::Context) {
         if !self.show_onboarding {
@@ -6901,17 +7117,17 @@ impl GrafitoApp {
                 ui.separator();
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.label(
-                    egui::RichText::new("• Construye con 5 herramientas esenciales — Mover, Punto, Recta, Círculo, Polígono")
+                    egui::RichText::new("1. Dibujá un punto y una recta")
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_primary),
                 );
                 ui.label(
-                    egui::RichText::new("• Secundaria añade 3 más — Lápiz, Medida, Análisis (8 total)")
+                    egui::RichText::new("2. Pedí “graficá y=x²” en el asistente")
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_primary),
                 );
                 ui.label(
-                    egui::RichText::new("• Universidad desbloquea 18 grupos — Cónicas, 3D, CAS, Estadística, Complejos, Dinámica…")
+                    egui::RichText::new("3. Animá la derivada con un clic")
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_primary),
                 );
@@ -6926,10 +7142,13 @@ impl GrafitoApp {
                     if ui
                         .add_sized(
                             egui::vec2(120.0, 32.0),
-                            egui::Button::new(egui::RichText::new("Probar ejemplo").size(grafito_ui::tokens::TYPE_SM))
-                                .rounding(grafito_ui::tokens::RADIUS_MD)
-                                .fill(theme.accent)
-                                .stroke(egui::Stroke::NONE),
+                            egui::Button::new(
+                                egui::RichText::new("Probar ejemplo")
+                                    .size(grafito_ui::tokens::TYPE_SM),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_MD)
+                            .fill(theme.accent)
+                            .stroke(egui::Stroke::NONE),
                         )
                         .clicked()
                     {
@@ -6938,25 +7157,35 @@ impl GrafitoApp {
                         let mut cfg = load_config();
                         cfg.onboarding_completed = true;
                         save_config(&cfg);
-                        self.notify("Ejemplo cargado — ¡explora Grafito!", grafito_ui::toast::ToastKind::Success);
-                    }
-                    if ui
-                        .add_sized(
-                            egui::vec2(120.0, 32.0),
-                            egui::Button::new(egui::RichText::new("Empezar vacío").size(grafito_ui::tokens::TYPE_SM))
-                                .rounding(grafito_ui::tokens::RADIUS_MD)
-                                .fill(theme.panel_bg)
-                                .stroke(egui::Stroke::new(1.0, theme.separator)),
-                        )
-                        .clicked()
-                    {
-                        self.show_onboarding = false;
+                        self.notify(
+                            "Ejemplo cargado — ¡explora Grafito!",
+                            grafito_ui::toast::ToastKind::Success,
+                        );
                     }
                     if ui
                         .add_sized(
                             egui::vec2(120.0, 32.0),
                             egui::Button::new(
-                                egui::RichText::new("No mostrar")
+                                egui::RichText::new("Empezar vacío")
+                                    .size(grafito_ui::tokens::TYPE_SM),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_MD)
+                            .fill(theme.panel_bg)
+                            .stroke(egui::Stroke::new(1.0, theme.separator)),
+                        )
+                        .clicked()
+                    {
+                        self.show_onboarding = false;
+                        // W3 — "Empezar vacío" también persiste: no reaparece.
+                        let mut cfg = load_config();
+                        cfg.onboarding_completed = true;
+                        save_config(&cfg);
+                    }
+                    if ui
+                        .add_sized(
+                            egui::vec2(120.0, 32.0),
+                            egui::Button::new(
+                                egui::RichText::new("No mostrar de nuevo")
                                     .size(grafito_ui::tokens::TYPE_SM)
                                     .color(theme.text_secondary),
                             )
@@ -6976,6 +7205,10 @@ impl GrafitoApp {
             });
         if !open {
             self.show_onboarding = false;
+            // W3 — cerrar con X equivale a "No mostrar de nuevo".
+            let mut cfg = load_config();
+            cfg.onboarding_completed = true;
+            save_config(&cfg);
         }
     }
 
@@ -7506,6 +7739,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         pending_open_job: None,
         startup_pending_doc: None,
         pending_export_job: None,
+        last_export_dir: None,
         pending_ggb_import_job: None,
         pending_import_job: None,
         pending_text_job: None,
@@ -7541,6 +7775,9 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         snapshot_version,
         snapshot_render_quality,
         command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
+        custom_tools: grafito_command::ggbscript::CustomToolStore::new(),
+        show_custom_tool_dialog: false,
+        custom_tool_name: String::new(),
         assistant: grafito_ui::assistant::AssistantPanelState::default(),
         assistant_runtime: crate::assistant::AssistantRuntime::default(),
         right_drawer_open: true,

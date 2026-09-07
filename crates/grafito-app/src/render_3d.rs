@@ -3940,6 +3940,65 @@ pub(crate) fn solid_measure_text(object: &GeoObject) -> Option<String> {
     Some(format!("V={volume:.4} A={area:.4}"))
 }
 
+/// Estado honesto de la medida para el inspector 3D (`"exacto"` o el motivo
+/// de `solid_measure_status`). Puro display, sin motor nuevo.
+#[allow(dead_code)] // W4: wiring display volumen/área en inspector 3D (P2).
+pub(crate) fn solid_measure_status_text(object: &GeoObject) -> &'static str {
+    grafito_core::symbolic::solid_measure_status(object)
+}
+
+/// Puente `OrthoProjection` (piel) → `OrthoView` (cerebro `solids.rs`).
+/// `Perspective` no tiene vista ortográfica (`None`).
+#[allow(dead_code)] // W4: wiring selector de vista en canvas 3D (P2).
+pub(crate) fn ortho_view_for_projection(
+    view: OrthoProjection,
+) -> Option<grafito_core::symbolic::OrthoView> {
+    match view {
+        OrthoProjection::Front => Some(grafito_core::symbolic::OrthoView::Front),
+        OrthoProjection::Top => Some(grafito_core::symbolic::OrthoView::Top),
+        OrthoProjection::Side => Some(grafito_core::symbolic::OrthoView::Side),
+        OrthoProjection::Perspective => None,
+    }
+}
+
+/// Nombres estables es/en para el futuro selector/comando de vista 3D.
+/// `None` si no es una vista conocida (el caller muestra ayuda honesta).
+#[allow(dead_code)] // W4: wiring selector de vista en canvas 3D (P2).
+pub(crate) fn parse_ortho_projection(name: &str) -> Option<OrthoProjection> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "perspectiva" | "perspective" | "orbital" => Some(OrthoProjection::Perspective),
+        "alzado" | "front" | "frontal" | "xy" => Some(OrthoProjection::Front),
+        "planta" | "top" | "cenital" | "xz" => Some(OrthoProjection::Top),
+        "perfil" | "side" | "lateral" | "yz" => Some(OrthoProjection::Side),
+        _ => None,
+    }
+}
+
+/// Proyecta un punto 3D según la vista del canvas: `Perspective` usa la
+/// cámara orbital (`Camera3D::project`), las ortográficas usan
+/// [`project_point_ortho`] con escala y centro dados. `None` honesto si no
+/// proyecta (detrás de cámara, escala inválida o no finito).
+#[allow(dead_code)] // W4: wiring cámara ortho/perspectiva en canvas 3D (P2).
+pub(crate) fn project_with_view(
+    point: Point3D,
+    view: OrthoProjection,
+    camera: &Camera3D,
+    canvas_w: f32,
+    canvas_h: f32,
+    pixels_per_unit: f32,
+    center: Pos2,
+) -> Option<Pos2> {
+    match view {
+        OrthoProjection::Perspective => {
+            let (x, y) = camera.project(&point, canvas_w, canvas_h)?;
+            (x.is_finite() && y.is_finite()).then(|| Pos2::new(x, y))
+        }
+        OrthoProjection::Front | OrthoProjection::Top | OrthoProjection::Side => {
+            project_point_ortho(point, view, pixels_per_unit, center)
+        }
+    }
+}
+
 #[cfg(test)]
 mod gpu_overlay_tests {
     use super::*;
@@ -4139,6 +4198,90 @@ mod gpu_overlay_tests {
             1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         ]));
         assert_eq!(solid_measure_text(&quadric), None);
+    }
+
+    #[test]
+    fn ortho_wiring_bridges_core_and_camera_honestly() {
+        use grafito_core::symbolic::OrthoView;
+        assert_eq!(
+            ortho_view_for_projection(OrthoProjection::Front),
+            Some(OrthoView::Front)
+        );
+        assert_eq!(
+            ortho_view_for_projection(OrthoProjection::Top),
+            Some(OrthoView::Top)
+        );
+        assert_eq!(
+            ortho_view_for_projection(OrthoProjection::Side),
+            Some(OrthoView::Side)
+        );
+        assert_eq!(
+            ortho_view_for_projection(OrthoProjection::Perspective),
+            None
+        );
+        // Nombres es/en para el futuro selector.
+        assert_eq!(
+            parse_ortho_projection("alzado"),
+            Some(OrthoProjection::Front)
+        );
+        assert_eq!(parse_ortho_projection("Planta"), Some(OrthoProjection::Top));
+        assert_eq!(
+            parse_ortho_projection("PERFIL"),
+            Some(OrthoProjection::Side)
+        );
+        assert_eq!(
+            parse_ortho_projection("perspectiva"),
+            Some(OrthoProjection::Perspective)
+        );
+        assert_eq!(parse_ortho_projection("top"), Some(OrthoProjection::Top));
+        assert_eq!(parse_ortho_projection("invento"), None);
+        // Display honesto del estado.
+        use grafito_core::{GeoObject, Quadric3DObj, Sphere3DObj};
+        let sphere = GeoObject::Sphere3D(Sphere3DObj::new(
+            grafito_geometry::Point3D::new(0.0, 0.0, 0.0),
+            1.0,
+        ));
+        assert_eq!(solid_measure_status_text(&sphere), "exacto");
+        let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        assert!(solid_measure_status_text(&quadric).contains("no soportado"));
+        // `project_with_view`: ortho delega a píxeles, perspectiva a cámara.
+        let center = egui::pos2(400.0, 300.0);
+        let point = grafito_geometry::Point3D::new(1.0, 2.0, 3.0);
+        let front = project_with_view(
+            point,
+            OrthoProjection::Front,
+            &test_camera(),
+            800.0,
+            600.0,
+            50.0,
+            center,
+        )
+        .expect("alzado");
+        assert_eq!(front, egui::pos2(450.0, 200.0));
+        assert_eq!(
+            project_with_view(
+                point,
+                OrthoProjection::Front,
+                &test_camera(),
+                800.0,
+                600.0,
+                0.0,
+                center
+            ),
+            None
+        );
+        let perspective = project_with_view(
+            grafito_geometry::Point3D::new(0.0, 0.0, 0.0),
+            OrthoProjection::Perspective,
+            &test_camera(),
+            800.0,
+            600.0,
+            50.0,
+            center,
+        );
+        assert!(perspective.is_some());
     }
 }
 
