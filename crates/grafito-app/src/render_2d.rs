@@ -292,6 +292,95 @@ fn to_color32(c: Color) -> Color32 {
     )
 }
 
+// ── F2c · NumberPlane (plano numerado) ─────────────────────────────────────
+// Pasos "lindos" 1/2/5×10^n + skip adaptativo anti-solape + toggle en vista.
+// Puro y testeable headless (sin egui): el renderer solo los consume.
+// - `nice_number_plane_step`: mismo 1/2/5 que `draw_grid`/`draw_3d_grid`.
+// - `adaptive_label_skip`: si los ticks no entran, etiqueta 1 de cada N.
+// - `format_number_plane_label`: entero sin decimales, resto con 2 y recorte.
+// El toggle vive en `Document::number_plane_labels` (default visible para
+// JSON viejo); `draw_axes` lo respeta además del `show_numeric_ticks` que ya
+// le pasa `app.rs` (sin tocar `app.rs`: solo se lee el documento acá).
+
+/// Máximo de ticks numerados por eje (igual que el tope histórico de 500).
+pub(crate) const MAX_NUMBER_PLANE_TICKS: usize = 500;
+/// Ancho mínimo por etiqueta en X para no solapar (px, `TYPE_SM` ≈ 12px).
+pub(crate) const NUMBER_PLANE_MIN_LABEL_PX_X: f32 = 48.0;
+/// Alto mínimo por etiqueta en Y para no solapar (px).
+pub(crate) const NUMBER_PLANE_MIN_LABEL_PX_Y: f32 = 20.0;
+
+/// Paso "lindo" 1/2/5×10^n para un paso mundo objetivo. No-finito o ≤0 →
+/// 1.0 (honesto, nunca NaN/inf al renderer).
+pub(crate) fn nice_number_plane_step(target_world_step: f64) -> f64 {
+    if !target_world_step.is_finite() || target_world_step <= 0.0 {
+        return 1.0;
+    }
+    // `log10` de un positivo finito siempre es finito; el `floor` también.
+    let magnitude = target_world_step.log10().floor();
+    if !magnitude.is_finite() {
+        return 1.0;
+    }
+    // `powf` puede desbordar a inf en extremos: se sanea a 1.0.
+    let base = 10_f64.powf(magnitude);
+    if !base.is_finite() || base <= 0.0 {
+        return 1.0;
+    }
+    let factor = target_world_step / base;
+    if !factor.is_finite() {
+        return 1.0;
+    }
+    if factor < 2.0 {
+        base
+    } else if factor < 5.0 {
+        2.0 * base
+    } else {
+        5.0 * base
+    }
+}
+
+/// Cada cuántos ticks se etiqueta para no solapar.
+/// `tick_count` 0/1 → 1 (todo); si no entran en `available_px`, salta.
+/// Sin `unwrap`: divisiones protegidas, mínimo 1.
+pub(crate) fn adaptive_label_skip(
+    tick_count: usize,
+    available_px: f32,
+    min_label_px: f32,
+) -> usize {
+    if tick_count <= 1 {
+        return 1;
+    }
+    if !available_px.is_finite() || !min_label_px.is_finite() {
+        return 1;
+    }
+    if available_px <= 0.0 || min_label_px <= 0.0 {
+        return 1;
+    }
+    let max_labels = (available_px / min_label_px).floor().max(1.0) as usize;
+    if max_labels == 0 || tick_count <= max_labels {
+        return 1;
+    }
+    // `div_ceil` manual sin `unwrap` (usize, siempre >0 acá).
+    tick_count.div_ceil(max_labels).max(1)
+}
+
+/// Etiqueta numérica del plano: entero sin decimales, resto con 2 y recorte
+/// de ceros (`1.50` → `1.5`). No-finito → `"0"` (el renderer ya filtra el
+/// origen por separado; esto es solo display honesto).
+pub(crate) fn format_number_plane_label(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    if value.fract().abs() < 1e-9 {
+        // `as i64` satura en extremos sin `panic` (comportamiento definido).
+        format!("{}", value as i64)
+    } else {
+        format!("{value:.2}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
 /// Posición representativa 2D para muestrear el rastro de un objeto.
 ///
 /// Punto→posición, línea→punto medio, círculo→centro, polígono→centroide.
@@ -2112,6 +2201,9 @@ impl GrafitoApp {
         if !show_numeric_ticks {
             return;
         }
+        if !self.document.number_plane_labels {
+            return;
+        }
 
         // Tick marks and labels — log-appropriate or linear
         let text_color = current_theme(painter.ctx()).axis_label;
@@ -2162,26 +2254,20 @@ impl GrafitoApp {
         } else {
             let pixels_per_unit = view.scale;
             let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
-            let magnitude = target_world_step.log10().floor();
-            let base = 10f64.powf(magnitude);
-            let factor = target_world_step / base;
-            let major_step = if factor < 2.0 {
-                1.0 * base
-            } else if factor < 5.0 {
-                2.0 * base
-            } else {
-                5.0 * base
-            };
+            let major_step = nice_number_plane_step(target_world_step);
             let min_x = (world_tl.x / major_step).floor() as i64;
             let max_x = (world_br.x / major_step).ceil() as i64;
             let mut min_x = min_x.saturating_sub(1);
             let mut max_x = max_x.saturating_add(1);
-            if max_x.saturating_sub(min_x) > 500 {
+            if max_x.saturating_sub(min_x) > MAX_NUMBER_PLANE_TICKS as i64 {
                 let center = (min_x + max_x) / 2;
-                min_x = center - 250;
-                max_x = center + 250;
+                min_x = center - (MAX_NUMBER_PLANE_TICKS as i64 / 2);
+                max_x = center + (MAX_NUMBER_PLANE_TICKS as i64 / 2);
             }
-            for xi in min_x..=max_x {
+            let tick_count = max_x.saturating_sub(min_x).max(0) as usize + 1;
+            let label_skip =
+                adaptive_label_skip(tick_count, canvas_rect.width(), NUMBER_PLANE_MIN_LABEL_PX_X);
+            for (tick_idx, xi) in (min_x..=max_x).enumerate() {
                 let x = xi as f64 * major_step;
                 if x.abs() < 1e-9 {
                     continue;
@@ -2192,15 +2278,12 @@ impl GrafitoApp {
                     [pos + Vec2::new(0.0, -3.0), pos + Vec2::new(0.0, 3.0)],
                     stroke,
                 );
+                // Skip adaptativo anti-solape: el tick queda, la etiqueta no.
+                if tick_idx % label_skip != 0 {
+                    continue;
+                }
                 // Format nicely
-                let label = if (x.fract()).abs() < 1e-9 {
-                    format!("{}", x as i64)
-                } else {
-                    format!("{:.2}", x)
-                        .trim_end_matches('0')
-                        .trim_end_matches('.')
-                        .to_string()
-                };
+                let label = format_number_plane_label(x);
                 painter.text(
                     pos + Vec2::new(0.0, 6.0),
                     egui::Align2::CENTER_TOP,
@@ -2254,26 +2337,23 @@ impl GrafitoApp {
         } else {
             let pixels_per_unit = view.scale;
             let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
-            let magnitude = target_world_step.log10().floor();
-            let base = 10f64.powf(magnitude);
-            let factor = target_world_step / base;
-            let major_step = if factor < 2.0 {
-                1.0 * base
-            } else if factor < 5.0 {
-                2.0 * base
-            } else {
-                5.0 * base
-            };
+            let major_step = nice_number_plane_step(target_world_step);
             let min_y = (world_br.y / major_step).floor() as i64;
             let max_y = (world_tl.y / major_step).ceil() as i64;
             let mut min_y = min_y.saturating_sub(1);
             let mut max_y = max_y.saturating_add(1);
-            if max_y.saturating_sub(min_y) > 500 {
+            if max_y.saturating_sub(min_y) > MAX_NUMBER_PLANE_TICKS as i64 {
                 let center = (min_y + max_y) / 2;
-                min_y = center - 250;
-                max_y = center + 250;
+                min_y = center - (MAX_NUMBER_PLANE_TICKS as i64 / 2);
+                max_y = center + (MAX_NUMBER_PLANE_TICKS as i64 / 2);
             }
-            for yi in min_y..=max_y {
+            let tick_count = max_y.saturating_sub(min_y).max(0) as usize + 1;
+            let label_skip = adaptive_label_skip(
+                tick_count,
+                canvas_rect.height(),
+                NUMBER_PLANE_MIN_LABEL_PX_Y,
+            );
+            for (tick_idx, yi) in (min_y..=max_y).enumerate() {
                 let y = yi as f64 * major_step;
                 if y.abs() < 1e-9 {
                     continue;
@@ -2284,14 +2364,10 @@ impl GrafitoApp {
                     [pos + Vec2::new(-3.0, 0.0), pos + Vec2::new(3.0, 0.0)],
                     stroke,
                 );
-                let label = if (y.fract()).abs() < 1e-9 {
-                    format!("{}", y as i64)
-                } else {
-                    format!("{:.2}", y)
-                        .trim_end_matches('0')
-                        .trim_end_matches('.')
-                        .to_string()
-                };
+                if tick_idx % label_skip != 0 {
+                    continue;
+                }
+                let label = format_number_plane_label(y);
                 painter.text(
                     pos + Vec2::new(-6.0, 0.0),
                     egui::Align2::RIGHT_CENTER,
@@ -5765,5 +5841,67 @@ mod trail_tests {
             ],
             base,
         );
+    }
+}
+
+#[cfg(test)]
+mod number_plane_tests {
+    use super::*;
+
+    #[test]
+    fn nice_step_sigue_1_2_5_por_decada() {
+        assert_eq!(nice_number_plane_step(0.9), 0.5);
+        assert_eq!(nice_number_plane_step(1.5), 1.0);
+        assert_eq!(nice_number_plane_step(3.0), 2.0);
+        assert_eq!(nice_number_plane_step(7.0), 5.0);
+        assert_eq!(nice_number_plane_step(15.0), 10.0);
+        assert_eq!(nice_number_plane_step(0.03), 0.02);
+    }
+
+    #[test]
+    fn nice_step_sanea_no_finitos_sin_panic() {
+        assert_eq!(nice_number_plane_step(f64::NAN), 1.0);
+        assert_eq!(nice_number_plane_step(f64::INFINITY), 1.0);
+        assert_eq!(nice_number_plane_step(0.0), 1.0);
+        assert_eq!(nice_number_plane_step(-4.0), 1.0);
+    }
+
+    #[test]
+    fn adaptive_skip_etiqueta_1_de_cada_n_sin_solape() {
+        assert_eq!(adaptive_label_skip(0, 800.0, 48.0), 1);
+        assert_eq!(adaptive_label_skip(1, 800.0, 48.0), 1);
+        // 800px / 48px ≈ 16 etiquetas: 10 entran todas.
+        assert_eq!(adaptive_label_skip(10, 800.0, 48.0), 1);
+        // 100 ticks en 800px → 1 de cada 7 (100/16 → 7).
+        assert_eq!(adaptive_label_skip(100, 800.0, 48.0), 7);
+        // Sin espacio o sin cota → 1 (no esconde todo).
+        assert_eq!(adaptive_label_skip(100, 0.0, 48.0), 1);
+        assert_eq!(adaptive_label_skip(100, f32::NAN, 48.0), 1);
+    }
+
+    #[test]
+    fn format_label_entero_y_decimal_recortado() {
+        assert_eq!(format_number_plane_label(3.0), "3");
+        assert_eq!(format_number_plane_label(-12.0), "-12");
+        assert_eq!(format_number_plane_label(1.5), "1.5");
+        assert_eq!(format_number_plane_label(2.50), "2.5");
+        assert_eq!(format_number_plane_label(f64::NAN), "0");
+    }
+
+    #[test]
+    fn document_toggle_plano_numerado_migra_a_visible() {
+        let doc = grafito_core::Document::new();
+        assert!(doc.number_plane_labels, "default visible");
+        let json = serde_json::to_string(&doc).expect("serializa");
+        assert!(json.contains("number_plane_labels"));
+        // JSON viejo sin el campo migra a visible (comportamiento histórico).
+        let mut value = serde_json::to_value(&doc).expect("a valor");
+        value
+            .as_object_mut()
+            .expect("objeto")
+            .remove("number_plane_labels");
+        let migrated: grafito_core::Document =
+            serde_json::from_value(value).expect("migra sin el campo");
+        assert!(migrated.number_plane_labels);
     }
 }

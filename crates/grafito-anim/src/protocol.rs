@@ -1252,3 +1252,793 @@ mod universal_tests {
         );
     }
 }
+
+// ── F2b: Composición estilo Manim (Succession / Group / Wait) ─────────────
+// `Playlist` es una `Succession`: steps secuenciales `{request, run_time,
+// wait_after}` estilo `Succession(*anims)` de Manim. `AnimationGroup` es el
+// `Group` simultáneo con `lag_ratio` estilo `LaggedStart` (solo timings de
+// arranque escalonado; el compositado simultáneo de píxeles NO se hace acá,
+// ver doc de `AnimationGroup`). `Wait` es silencio que congela el último
+// frame: o `wait_after_ms` tras un step o un step de pausa (`request: None`).
+//
+// Todo puro, sin I/O, sin `unwrap` en prod. Todo lo que excede presupuestos
+// (`steps ≤ 8`, `frames totales ≤ 96`, OOM por set) es `Err` honesto en
+// español: jamás nada parcial en silencio.
+//
+// El scheduler mapea tiempo global → `(step, t_local)` reutilizando
+// `Timeline::sample` (el mismo camino que `media_frame_at` del player del
+// chat): `step_timeline()` arma keys en los bordes de cada step y
+// `sample_at()` redondea hacia abajo; `global_timeline()` + `playlist_frame_at()`
+// extienden el scrub por animación a tiempo global sin tocar la UI.
+
+/// Tope de steps por playlist (Succession acotada, anti-OOM de cola).
+pub const PLAYLIST_MAX_STEPS: usize = 8;
+/// Tope de fotogramas totales del set concatenado (todas las plantillas
+/// nativas dan 48; dos de 48 entran justo, tres no).
+pub const PLAYLIST_MAX_FRAMES_TOTAL: usize = 96;
+/// `run_time` mínimo por step animado (igual que `AnimDuration` 0.1 s).
+pub const PLAYLIST_MIN_RUN_MS: u64 = 100;
+/// `run_time` máximo por step animado (igual que `AnimDuration` 30 s).
+pub const PLAYLIST_MAX_RUN_MS: u64 = MAX_TIMELINE_DURATION_MS;
+/// Silencio máximo por espera (`wait_after` o pausa sola).
+pub const PLAYLIST_MAX_WAIT_MS: u64 = 10_000;
+/// Bytes por píxel RGBA (espejo de `egui::ColorImage`, solo para estimar OOM).
+pub const PLAYLIST_BYTES_PER_PIXEL: usize = 4;
+
+/// Un step de la playlist: animación + sus timings estilo Manim.
+///
+/// `request: None` = `Wait` silencio puro (congela el último frame, 0 frames
+/// propios). `wait_after_ms` = silencio tras el step (también congelando).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistStep {
+    /// `None` = pausa silenciosa (ver `PlaylistStep::pausa`).
+    pub request: Option<AnimRequest>,
+    /// Tiempo de corrida en ms (anim: 100..=30000; pausa: 1..=10000).
+    pub run_time_ms: u64,
+    /// Silencio posterior en ms (0..=10000, congela el último frame).
+    pub wait_after_ms: u64,
+}
+
+impl PlaylistStep {
+    /// Step animado estilo Manim (`run_time` + `wait` posterior).
+    pub fn anim(
+        request: AnimRequest,
+        run_time_ms: u64,
+        wait_after_ms: u64,
+    ) -> Result<Self, ProtocolError> {
+        let step = Self {
+            request: Some(request),
+            run_time_ms,
+            wait_after_ms,
+        };
+        step.validate()?;
+        Ok(step)
+    }
+
+    /// `Wait` silencio puro de `wait_ms` (0 frames, congela el último frame).
+    pub fn pausa(wait_ms: u64) -> Result<Self, ProtocolError> {
+        let step = Self {
+            request: None,
+            run_time_ms: wait_ms,
+            wait_after_ms: 0,
+        };
+        step.validate()?;
+        Ok(step)
+    }
+
+    /// ¿Es silencio puro (sin animación)?
+    pub fn is_wait(&self) -> bool {
+        self.request.is_none()
+    }
+
+    /// Duración total del step (`run + wait_after`, saturada, nunca panic).
+    pub fn duration_ms(&self) -> u64 {
+        self.run_time_ms.saturating_add(self.wait_after_ms)
+    }
+
+    /// Validación estricta (todo `Err` en español, sin pánicos).
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.wait_after_ms > PLAYLIST_MAX_WAIT_MS {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.wait_after_ms",
+                reason: format!(
+                    "{} excede el máximo de {PLAYLIST_MAX_WAIT_MS}",
+                    self.wait_after_ms
+                ),
+            });
+        }
+        match &self.request {
+            Some(request) => {
+                request
+                    .validate()
+                    .map_err(|e| ProtocolError::InvalidField {
+                        field: "playlist.request",
+                        reason: e.to_string(),
+                    })?;
+                if !(PLAYLIST_MIN_RUN_MS..=PLAYLIST_MAX_RUN_MS).contains(&self.run_time_ms) {
+                    return Err(ProtocolError::InvalidField {
+                        field: "playlist.run_time_ms",
+                        reason: format!(
+                            "{} fuera de {PLAYLIST_MIN_RUN_MS}..={PLAYLIST_MAX_RUN_MS}",
+                            self.run_time_ms
+                        ),
+                    });
+                }
+            }
+            None => {
+                if self.wait_after_ms != 0 {
+                    return Err(ProtocolError::InvalidField {
+                        field: "playlist.wait_after_ms",
+                        reason: "la pausa sola no lleva espera posterior: usá otro step".into(),
+                    });
+                }
+                if self.run_time_ms == 0 || self.run_time_ms > PLAYLIST_MAX_WAIT_MS {
+                    return Err(ProtocolError::InvalidField {
+                        field: "playlist.run_time_ms",
+                        reason: format!(
+                            "pausa de {} fuera de 1..={PLAYLIST_MAX_WAIT_MS}",
+                            self.run_time_ms
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Un step ya ubicado en tiempo global (salida pura de `Playlist::schedule`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduledStep {
+    /// Índice en `Playlist::steps`.
+    pub index: usize,
+    /// Arranque global en ms.
+    pub start_ms: u64,
+    /// Corrida en ms (igual que el step).
+    pub run_ms: u64,
+    /// Silencio posterior en ms (igual que el step).
+    pub wait_after_ms: u64,
+    /// `true` si es pausa silenciosa.
+    pub is_wait: bool,
+}
+
+impl ScheduledStep {
+    /// Fin global (`start + run + wait`, saturado).
+    pub fn end_ms(&self) -> u64 {
+        self.start_ms
+            .saturating_add(self.run_ms)
+            .saturating_add(self.wait_after_ms)
+    }
+}
+
+/// Playlist estilo Manim `Succession`: steps estrictamente secuenciales.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Playlist {
+    /// 1..=`PLAYLIST_MAX_STEPS` steps en orden de reproducción.
+    pub steps: Vec<PlaylistStep>,
+}
+
+impl Playlist {
+    /// Constructor validado (todo `Err` honesto, nada parcial en silencio).
+    pub fn try_new(steps: Vec<PlaylistStep>) -> Result<Self, ProtocolError> {
+        if steps.is_empty() {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.steps",
+                reason: "vacía: pasame al menos 1 step (o una pausa)".into(),
+            });
+        }
+        if steps.len() > PLAYLIST_MAX_STEPS {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.steps",
+                reason: format!(
+                    "{} steps exceden el tope de {PLAYLIST_MAX_STEPS}: partila en dos playlists",
+                    steps.len()
+                ),
+            });
+        }
+        for step in &steps {
+            step.validate()?;
+        }
+        Ok(Self { steps })
+    }
+
+    /// Cantidad de steps.
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// ¿Vacía? (nunca tras `try_new`, pero la deserialización puede).
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// Validación estricta (para valores armados por struct literal).
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        Self::try_new(self.steps.clone()).map(|_| ())
+    }
+
+    /// Duración total (`Σ run + wait_after`, saturada, nunca panic).
+    pub fn total_duration_ms(&self) -> u64 {
+        let mut total: u64 = 0;
+        for step in &self.steps {
+            total = total.saturating_add(step.duration_ms());
+        }
+        total
+    }
+
+    /// Agenda secuencial: cada step arranca donde terminó el anterior.
+    /// Pura, sin pánicos (sumas saturadas).
+    pub fn schedule(&self) -> Vec<ScheduledStep> {
+        let mut out = Vec::with_capacity(self.steps.len());
+        let mut cursor: u64 = 0;
+        for (index, step) in self.steps.iter().enumerate() {
+            out.push(ScheduledStep {
+                index,
+                start_ms: cursor,
+                run_ms: step.run_time_ms,
+                wait_after_ms: step.wait_after_ms,
+                is_wait: step.is_wait(),
+            });
+            cursor = cursor.saturating_add(step.duration_ms());
+        }
+        out
+    }
+
+    /// Timeline global step→índice para `Timeline::sample`.
+    ///
+    /// Keys en cada borde (`start → índice`) + key final (`total → último
+    /// índice`): el sample interpola entre enteros y `sample_at` redondea
+    /// hacia abajo. `None` si no hay steps o la duración es 0. Pura.
+    pub fn step_timeline(&self) -> Option<Timeline> {
+        if self.steps.is_empty() {
+            return None;
+        }
+        let total = self.total_duration_ms();
+        if total == 0 {
+            return None;
+        }
+        let mut keyframes = Vec::with_capacity(self.steps.len().saturating_add(1));
+        for item in self.schedule() {
+            keyframes.push(Keyframe {
+                t_ms: item.start_ms,
+                value: item.index as f32,
+            });
+        }
+        if let Some(last_index) = self.steps.len().checked_sub(1) {
+            keyframes.push(Keyframe {
+                t_ms: total,
+                value: last_index as f32,
+            });
+        }
+        let timeline = Timeline {
+            duration_ms: total,
+            keyframes,
+        };
+        timeline.validate().ok()?;
+        Some(timeline)
+    }
+
+    /// Mapea tiempo global → `(step, t_local)` reutilizando `Timeline::sample`.
+    ///
+    /// El índice sale del sample (floor + clamp + verificación por
+    /// intervalos, por si el redondeo flotante cae un borde afuera);
+    /// `t_local` es `global - start` congelado en `run_ms` durante el
+    /// `wait_after` (silencio = último frame quieto). `None` si la playlist
+    /// está vacía o `global_ms` ya pasó el total (terminó). Pura, sin pánicos.
+    pub fn sample_at(&self, global_ms: u64) -> Option<(usize, u64)> {
+        let agenda = self.schedule();
+        if agenda.is_empty() {
+            return None;
+        }
+        let total = self.total_duration_ms();
+        if global_ms >= total {
+            return None;
+        }
+        let timeline = self.step_timeline()?;
+        let value = timeline.sample(global_ms);
+        let mut candidate = if value.is_finite() {
+            value.floor() as usize
+        } else {
+            0
+        };
+        if candidate >= agenda.len() {
+            candidate = agenda.len().saturating_sub(1);
+        }
+        // Verificación por intervalos (el sample puede redondear un borde).
+        let inside = |item: &ScheduledStep| global_ms >= item.start_ms && global_ms < item.end_ms();
+        if !inside(&agenda[candidate]) {
+            let mut found = None;
+            for item in &agenda {
+                if inside(item) {
+                    found = Some(item.index);
+                    break;
+                }
+            }
+            candidate = found.unwrap_or(0);
+        }
+        let item = agenda.iter().find(|item| item.index == candidate)?;
+        let elapsed = global_ms.saturating_sub(item.start_ms);
+        // En la espera posterior el tiempo local se congela al final del run.
+        let t_local = elapsed.min(item.run_ms);
+        Some((item.index, t_local))
+    }
+
+    /// Suma chequeada de fotogramas por step (`None` = desborde).
+    /// Pura, con `checked_add` (nunca panic ni wrap silencioso).
+    pub fn checked_total_frames(counts: &[usize]) -> Option<usize> {
+        let mut total: usize = 0;
+        for count in counts {
+            total = total.checked_add(*count)?;
+        }
+        Some(total)
+    }
+
+    /// Valida el presupuesto de frames: `len` igual a steps, pausas con 0,
+    /// animados con ≥1 y total ≤ `PLAYLIST_MAX_FRAMES_TOTAL`.
+    /// Todo `Err` honesto (nada parcial en silencio).
+    pub fn validate_frame_counts(&self, frames_per_step: &[usize]) -> Result<usize, ProtocolError> {
+        if frames_per_step.len() != self.steps.len() {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: format!(
+                    "tenés {} conteos para {} steps: pasalos 1 a 1",
+                    frames_per_step.len(),
+                    self.steps.len()
+                ),
+            });
+        }
+        for (index, (step, count)) in self.steps.iter().zip(frames_per_step.iter()).enumerate() {
+            if step.is_wait() {
+                if *count != 0 {
+                    return Err(ProtocolError::InvalidField {
+                        field: "playlist.frames",
+                        reason: format!("el step {index} es pausa (0 frames), no {count}"),
+                    });
+                }
+            } else if *count == 0 {
+                return Err(ProtocolError::InvalidField {
+                    field: "playlist.frames",
+                    reason: format!("el step {index} animado necesita al menos 1 frame"),
+                });
+            }
+        }
+        let Some(total) = Self::checked_total_frames(frames_per_step) else {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: "la suma de frames desborda el contador: achicá los steps".into(),
+            });
+        };
+        if total == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: "la playlist no tiene ningún frame: agregá un step animado".into(),
+            });
+        }
+        if total > PLAYLIST_MAX_FRAMES_TOTAL {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: format!(
+                    "{total} frames exceden el tope de {PLAYLIST_MAX_FRAMES_TOTAL}: sacá un step o bajá los frames por step"
+                ),
+            });
+        }
+        Ok(total)
+    }
+
+    /// Timeline global de scrub para `frames_per_step` (extiende el scrub por
+    /// animación a tiempo global sin tocar la UI).
+    ///
+    /// Dos keys lineales `0 → 0.0` y `total → total_frames-1`, igual que
+    /// `media_scrub_timeline`: el player existente mapea fracción → `t_ms` →
+    /// `playlist_frame_at` (`Timeline::sample` + round + clamp). Valida el
+    /// presupuesto de frames antes de armar (todo `Err` honesto).
+    pub fn global_timeline(&self, frames_per_step: &[usize]) -> Result<Timeline, ProtocolError> {
+        let total_frames = self.validate_frame_counts(frames_per_step)?;
+        let total_ms = self.total_duration_ms();
+        if total_ms == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.duration_ms",
+                reason: "duración total 0: revisá los run_time".into(),
+            });
+        }
+        let last = total_frames.saturating_sub(1) as f32;
+        let timeline = Timeline {
+            duration_ms: total_ms,
+            keyframes: vec![
+                Keyframe {
+                    t_ms: 0,
+                    value: 0.0,
+                },
+                Keyframe {
+                    t_ms: total_ms,
+                    value: last,
+                },
+            ],
+        };
+        timeline
+            .validate()
+            .map_err(|e| ProtocolError::InvalidField {
+                field: "playlist.timeline",
+                reason: e.to_string(),
+            })?;
+        Ok(timeline)
+    }
+
+    /// Estima los bytes RGBA del set concatenado (`w*h*4*total`). `None` si
+    /// desborda (`checked`, sin pánicos). Puro, sin allocs.
+    pub fn estimate_set_bytes(w: usize, h: usize, total_frames: usize) -> Option<usize> {
+        w.checked_mul(h)
+            .and_then(|v| v.checked_mul(PLAYLIST_BYTES_PER_PIXEL))
+            .and_then(|v| v.checked_mul(total_frames))
+    }
+}
+
+/// Índice global a mostrar en `t_ms` vía `Timeline::sample` (scrub total).
+///
+/// Lerp + round + clamp a `0..total`: mismo camino que `media_frame_at`, pero
+/// sobre el timeline global de la playlist. Timeline vacío o `total == 0` →
+/// 0. Pura, sin pánicos.
+pub fn playlist_frame_at(timeline: &Timeline, t_ms: u64, total_frames: usize) -> usize {
+    if total_frames == 0 {
+        return 0;
+    }
+    let value = timeline.sample(t_ms);
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.round() as usize).min(total_frames.saturating_sub(1))
+}
+
+/// `Group` simultáneo estilo Manim (`LaggedStart`): arranque escalonado.
+///
+/// Solo timings: `lag_ratio` 0..=1 desplaza cada sub-animación
+/// `lag_ratio * run_ms` tras la anterior (`0` = todo junto, `1` = una tras
+/// otra). El compositado simultáneo de píxeles NO se hace en este crate
+/// (cada renderer nativo dibuja frame completo; mezclarlos exige un
+/// compositor alfa que hoy no existe): el runner FIFO los ejecuta en orden
+/// con estos offsets documentados. `indices` refiere a posiciones de la
+/// playlist (validar con `validate_for_playlist`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnimationGroup {
+    /// Posiciones de la playlist que arrancan escalonadas (2..=8, únicas).
+    pub indices: Vec<usize>,
+    /// Desfase entre arranques como fracción del run (0..=1, finito).
+    pub lag_ratio: f32,
+}
+
+impl AnimationGroup {
+    /// Constructor validado (`indices` contra el tope grueso 8; lo exacto va
+    /// en `validate_for_playlist`). Todo `Err` honesto.
+    pub fn try_new(indices: Vec<usize>, lag_ratio: f32) -> Result<Self, ProtocolError> {
+        if !lag_ratio.is_finite() || !(0.0..=1.0).contains(&lag_ratio) {
+            return Err(ProtocolError::InvalidField {
+                field: "group.lag_ratio",
+                reason: format!("{lag_ratio} fuera de 0..=1: 0 es todo junto, 1 es uno tras otro"),
+            });
+        }
+        if indices.len() < 2 {
+            return Err(ProtocolError::InvalidField {
+                field: "group.indices",
+                reason: "el grupo necesita al menos 2 animaciones (para 1 sola usá la playlist)"
+                    .into(),
+            });
+        }
+        if indices.len() > PLAYLIST_MAX_STEPS {
+            return Err(ProtocolError::InvalidField {
+                field: "group.indices",
+                reason: format!(
+                    "{} animaciones exceden el tope de {PLAYLIST_MAX_STEPS}",
+                    indices.len()
+                ),
+            });
+        }
+        let mut ordenados = indices.clone();
+        ordenados.sort_unstable();
+        ordenados.dedup();
+        if ordenados.len() != indices.len() {
+            return Err(ProtocolError::InvalidField {
+                field: "group.indices",
+                reason: "hay índices repetidos: cada animación entra una sola vez".into(),
+            });
+        }
+        for index in &indices {
+            if *index >= PLAYLIST_MAX_STEPS {
+                return Err(ProtocolError::InvalidField {
+                    field: "group.indices",
+                    reason: format!("índice {index} fuera de 0..{PLAYLIST_MAX_STEPS}"),
+                });
+            }
+        }
+        Ok(Self { indices, lag_ratio })
+    }
+
+    /// Valida los índices contra una playlist concreta (`len` real).
+    pub fn validate_for_playlist(&self, playlist_len: usize) -> Result<(), ProtocolError> {
+        for index in &self.indices {
+            if *index >= playlist_len {
+                return Err(ProtocolError::InvalidField {
+                    field: "group.indices",
+                    reason: format!("índice {index} fuera de la playlist de {playlist_len} steps"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Offsets de arranque en ms para un `run_ms` dado.
+    ///
+    /// `offset[i] = round(lag_ratio * run_ms * i)` (el primero siempre 0).
+    /// Puro, sin pánicos (f64 finito + saturación a `u64`).
+    pub fn start_offsets_ms(&self, run_ms: u64) -> Vec<u64> {
+        let lag = f64::from(self.lag_ratio);
+        let run = run_ms as f64;
+        self.indices
+            .iter()
+            .enumerate()
+            .map(|(orden, _)| {
+                let offset = lag * run * (orden as f64);
+                if !offset.is_finite() || offset <= 0.0 {
+                    0
+                } else if offset >= u64::MAX as f64 {
+                    u64::MAX
+                } else {
+                    offset.round() as u64
+                }
+            })
+            .collect()
+    }
+
+    /// Extensión total del grupo (`run + lag*run*(n-1)`, saturada).
+    pub fn span_ms(&self, run_ms: u64) -> u64 {
+        let lag = f64::from(self.lag_ratio);
+        let extra = lag * (run_ms as f64) * ((self.indices.len().saturating_sub(1)) as f64);
+        let extra = if !extra.is_finite() || extra <= 0.0 {
+            0
+        } else if extra >= u64::MAX as f64 {
+            u64::MAX
+        } else {
+            extra.round() as u64
+        };
+        run_ms.saturating_add(extra)
+    }
+}
+
+/// Timings estilo Manim (`run_time` + `wait` por animación).
+///
+/// `items`: `(request, run_secs, wait_after_secs)` con `run` 0.1..=30 y
+/// `wait` 0..=10 (finitos). Convierte a ms con round y arma la `Succession`
+/// validada (1..=8 steps, cada request validado). Todo `Err` honesto.
+pub fn build_animations_with_timings(
+    items: Vec<(AnimRequest, f64, f64)>,
+) -> Result<Playlist, ProtocolError> {
+    if items.is_empty() {
+        return Err(ProtocolError::InvalidField {
+            field: "playlist.steps",
+            reason: "vacía: pasame al menos 1 animación con su timing".into(),
+        });
+    }
+    if items.len() > PLAYLIST_MAX_STEPS {
+        return Err(ProtocolError::InvalidField {
+            field: "playlist.steps",
+            reason: format!(
+                "{} animaciones exceden el tope de {PLAYLIST_MAX_STEPS}",
+                items.len()
+            ),
+        });
+    }
+    let mut steps = Vec::with_capacity(items.len());
+    for (orden, (request, run_s, wait_s)) in items.into_iter().enumerate() {
+        if !run_s.is_finite() || !(0.1..=30.0).contains(&run_s) {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.run_time_ms",
+                reason: format!("el step {orden} pide run_time {run_s}s (válido 0.1..=30)"),
+            });
+        }
+        if !wait_s.is_finite() || !(0.0..=10.0).contains(&wait_s) {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.wait_after_ms",
+                reason: format!("el step {orden} pide espera {wait_s}s (válido 0..=10)"),
+            });
+        }
+        let run_ms = (run_s * 1000.0).round() as u64;
+        let wait_ms = (wait_s * 1000.0).round() as u64;
+        steps.push(PlaylistStep::anim(request, run_ms, wait_ms)?);
+    }
+    Playlist::try_new(steps)
+}
+
+/// `Succession` con defaults honestos: cada request corre su `duration_ms`
+/// (0 = compat → 2000 ms) y sin espera posterior.
+pub fn build_succession(requests: Vec<AnimRequest>) -> Result<Playlist, ProtocolError> {
+    if requests.is_empty() {
+        return Err(ProtocolError::InvalidField {
+            field: "playlist.steps",
+            reason: "vacía: pasame al menos 1 animación".into(),
+        });
+    }
+    if requests.len() > PLAYLIST_MAX_STEPS {
+        return Err(ProtocolError::InvalidField {
+            field: "playlist.steps",
+            reason: format!(
+                "{} animaciones exceden el tope de {PLAYLIST_MAX_STEPS}",
+                requests.len()
+            ),
+        });
+    }
+    let mut steps = Vec::with_capacity(requests.len());
+    for request in requests {
+        let run_ms = if request.duration_ms == 0 {
+            2000
+        } else {
+            request.duration_ms
+        };
+        steps.push(PlaylistStep::anim(request, run_ms, 0)?);
+    }
+    Playlist::try_new(steps)
+}
+
+#[cfg(test)]
+mod playlist_f2b_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn pedido(template: &str, concept: &str) -> AnimRequest {
+        AnimRequest {
+            template: template.to_string(),
+            concept: concept.to_string(),
+            params: BTreeMap::new(),
+            spec: None,
+            export: ExportFormat::Gif,
+            canvas: (640, 480),
+            duration_ms: 2000,
+        }
+    }
+
+    #[test]
+    fn succession_secuencial_agenda_y_mapea_tiempo_global() {
+        let lista = build_animations_with_timings(vec![
+            (pedido("derivative-slope", "derivada"), 2.0, 0.5),
+            (pedido("integral-area", "integral"), 1.0, 0.0),
+        ])
+        .unwrap();
+        assert_eq!(lista.len(), 2);
+        assert_eq!(lista.total_duration_ms(), 3500);
+        let agenda = lista.schedule();
+        assert_eq!(agenda[0].start_ms, 0);
+        assert_eq!(agenda[1].start_ms, 2500);
+        // Scheduler: 0..2000 step 0 run, 2000..2500 step 0 espera (t_local
+        // congelado en 2000), 2500..3500 step 1, 3500 fin.
+        assert_eq!(lista.sample_at(0), Some((0, 0)));
+        assert_eq!(lista.sample_at(1500), Some((0, 1500)));
+        assert_eq!(lista.sample_at(2200), Some((0, 2000)));
+        assert_eq!(lista.sample_at(2500), Some((1, 0)));
+        assert_eq!(lista.sample_at(3499), Some((1, 999)));
+        assert_eq!(lista.sample_at(3500), None);
+        assert_eq!(lista.sample_at(99_999), None);
+    }
+
+    #[test]
+    fn wait_silencio_congela_sin_frames_propios() {
+        let lista = Playlist::try_new(vec![
+            PlaylistStep::anim(pedido("derivative-slope", "derivada"), 1000, 500).unwrap(),
+            PlaylistStep::pausa(1000).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(lista.total_duration_ms(), 2500);
+        // La espera posterior congela t_local al final del run.
+        assert_eq!(lista.sample_at(1200), Some((0, 1000)));
+        // La pausa sola ocupa su intervalo con t_local = espera vivida.
+        assert_eq!(lista.sample_at(1500), Some((1, 0)));
+        assert_eq!(lista.sample_at(2000), Some((1, 500)));
+        assert_eq!(lista.sample_at(2500), None);
+        // Presupuesto de frames: la pausa aporta 0.
+        assert_eq!(lista.validate_frame_counts(&[48, 0]).unwrap(), 48);
+        assert!(lista.validate_frame_counts(&[48, 1]).is_err());
+    }
+
+    #[test]
+    fn scrub_global_reutiliza_timeline_sample() {
+        let lista = build_succession(vec![
+            pedido("derivative-slope", "derivada"),
+            pedido("integral-area", "integral"),
+        ])
+        .unwrap();
+        let timeline = lista.global_timeline(&[48, 48]).unwrap();
+        assert_eq!(timeline.duration_ms, 4000);
+        // Mismo camino que el player: sample + round + clamp.
+        assert_eq!(playlist_frame_at(&timeline, 0, 96), 0);
+        assert_eq!(playlist_frame_at(&timeline, 4000, 96), 95);
+        assert_eq!(playlist_frame_at(&timeline, 2000, 96), 48);
+        assert_eq!(playlist_frame_at(&timeline, 99_999, 96), 95);
+        assert_eq!(playlist_frame_at(&timeline, 0, 0), 0);
+    }
+
+    #[test]
+    fn presupuestos_fallan_honesto_nada_parcial() {
+        // 0 steps.
+        assert!(Playlist::try_new(vec![]).is_err());
+        // 9 steps (>8).
+        let nueve: Vec<PlaylistStep> = (0..9)
+            .map(|_| PlaylistStep::anim(pedido("derivative-slope", "d"), 1000, 0).unwrap())
+            .collect();
+        let err = Playlist::try_new(nueve).unwrap_err().to_string();
+        assert!(err.contains("8"), "tope 8 en el mensaje, got: {err}");
+        // 97 frames (>96).
+        let lista = build_succession(vec![
+            pedido("derivative-slope", "d"),
+            pedido("integral-area", "i"),
+        ])
+        .unwrap();
+        let err = lista
+            .validate_frame_counts(&[48, 49])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("96"), "tope 96 en el mensaje, got: {err}");
+        // Conteos desparejos o step animado sin frames.
+        assert!(lista.validate_frame_counts(&[48]).is_err());
+        assert!(lista.validate_frame_counts(&[0, 48]).is_err());
+        // run_time fuera de rango y espera gigante.
+        assert!(PlaylistStep::anim(pedido("derivative-slope", "d"), 50, 0).is_err());
+        assert!(PlaylistStep::anim(pedido("derivative-slope", "d"), 31_000, 0).is_err());
+        assert!(PlaylistStep::anim(pedido("derivative-slope", "d"), 1000, 99_999).is_err());
+        assert!(PlaylistStep::pausa(0).is_err());
+        assert!(PlaylistStep::pausa(99_999).is_err());
+        // Timings no finitos o fuera de rango.
+        assert!(build_animations_with_timings(vec![(
+            pedido("derivative-slope", "d"),
+            f64::NAN,
+            0.0
+        )])
+        .is_err());
+        assert!(build_animations_with_timings(vec![(
+            pedido("derivative-slope", "d"),
+            2.0,
+            f64::INFINITY
+        )])
+        .is_err());
+        assert!(build_succession(vec![]).is_err());
+    }
+
+    #[test]
+    fn group_lag_ratio_escalona_arranques() {
+        let grupo = AnimationGroup::try_new(vec![0, 1, 2], 0.5).unwrap();
+        assert_eq!(grupo.start_offsets_ms(2000), vec![0, 1000, 2000]);
+        assert_eq!(grupo.span_ms(2000), 4000);
+        // Extremos honestos: 0 = todo junto, 1 = uno tras otro.
+        assert_eq!(
+            AnimationGroup::try_new(vec![0, 1], 0.0)
+                .unwrap()
+                .start_offsets_ms(2000),
+            vec![0, 0]
+        );
+        assert_eq!(
+            AnimationGroup::try_new(vec![0, 1], 1.0)
+                .unwrap()
+                .start_offsets_ms(2000),
+            vec![0, 2000]
+        );
+        grupo.validate_for_playlist(3).unwrap();
+        assert!(grupo.validate_for_playlist(2).is_err());
+        // Malformados: lag fuera de rango, repetidos, de a 1.
+        assert!(AnimationGroup::try_new(vec![0, 1], 1.5).is_err());
+        assert!(AnimationGroup::try_new(vec![0, 1], f32::NAN).is_err());
+        assert!(AnimationGroup::try_new(vec![0, 0], 0.5).is_err());
+        assert!(AnimationGroup::try_new(vec![0], 0.5).is_err());
+        assert!(AnimationGroup::try_new(vec![0, 99], 0.5).is_err());
+    }
+
+    #[test]
+    fn oom_por_set_con_checked_sin_panic() {
+        assert_eq!(
+            Playlist::estimate_set_bytes(640, 480, 96),
+            Some(640 * 480 * 4 * 96)
+        );
+        assert_eq!(Playlist::estimate_set_bytes(usize::MAX, 480, 96), None);
+        assert_eq!(Playlist::checked_total_frames(&[48, 48]), Some(96));
+        assert_eq!(
+            Playlist::checked_total_frames(&[usize::MAX, 1]),
+            None,
+            "desborde honesto, no wrap"
+        );
+    }
+}

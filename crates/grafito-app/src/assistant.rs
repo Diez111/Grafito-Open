@@ -127,6 +127,60 @@ pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
     crate::anim_native::detect_template_for_concept(pedido)
 }
 
+/// Parte un pedido playlist "X y después Y" (puro, sin I/O ni spawn).
+///
+/// Solo el conector "y después"/"y despues" (insensible a mayúsculas y al
+/// acento, exigido con espacios alrededor). El resto → `None` y el flujo
+/// single queda intacto. Ambos lados deben traer al menos 3 caracteres
+/// alfanuméricos y no puede haber un segundo conector (eso no es "X y
+/// después Y" y cae al single honesto en vez de armar 3 steps en silencio).
+/// Devuelve los lados recortados en su caso original. Nunca panic (índices
+/// por chars, jamás slicing por bytes).
+pub(crate) fn split_playlist_request(pedido: &str) -> Option<(String, String)> {
+    const CONECTOR: &str = " y despues ";
+    let norma = pedido.to_lowercase().replace("después", "despues");
+    let (izq_n, der_n) = norma.split_once(CONECTOR)?;
+    // Un solo conector: dos conectores no son "X y después Y".
+    if der_n.contains(CONECTOR) {
+        return None;
+    }
+    // Mapeo a caso original por conteo de chars (los conectores miden 11
+    // chars con o sin acento; `take`/`skip` por chars nunca hacen panic).
+    let n_izq = izq_n.chars().count();
+    let n_conector = CONECTOR.chars().count();
+    let mut resto = pedido.chars();
+    let izq: String = resto.by_ref().take(n_izq).collect();
+    let puente: String = resto.by_ref().take(n_conector).collect();
+    let der: String = resto.collect();
+    if puente.to_lowercase().replace("después", "despues") != CONECTOR {
+        return None;
+    }
+    let izq = izq.trim().to_string();
+    let der = der.trim().to_string();
+    let alfanum = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).count();
+    if alfanum(&izq) < 3 || alfanum(&der) < 3 {
+        return None;
+    }
+    Some((izq, der))
+}
+
+/// Arma la playlist para "X y después Y" (puro, sin I/O ni spawn).
+///
+/// Cada lado resuelve su plantilla por el punto único (`plantilla_para_pedido`)
+/// y corre 2 s (el primero con 0.5 s de `Wait` posterior). `None` si no hay
+/// conector o si la playlist no valida (el llamante cae al single honesto:
+/// o playlist entera o una sola animación, jamás nada parcial en silencio).
+pub(crate) fn playlist_para_pedido(pedido: &str) -> Option<grafito_anim::protocol::Playlist> {
+    let (a, b) = split_playlist_request(pedido)?;
+    let req_a = grafito_anim::protocol::request_for_concept(&a, plantilla_para_pedido(&a));
+    let req_b = grafito_anim::protocol::request_for_concept(&b, plantilla_para_pedido(&b));
+    grafito_anim::protocol::build_animations_with_timings(vec![
+        (req_a, 2.0, 0.5),
+        (req_b, 2.0, 0.0),
+    ])
+    .ok()
+}
+
 /// Decisión honesta única para animación: media sí/no + prosa coherente.
 ///
 /// - `NoAnimacion`: no pide animación → flujo chat normal (puede ir remoto).
@@ -1325,6 +1379,32 @@ impl GrafitoApp {
                     self.notify(honesto, ToastKind::Info);
                     ctx.request_repaint();
                     return;
+                }
+                // F2b — "X y después Y": playlist entera en una sola media con
+                // scrub total (Succession + scheduler global del protocolo; el
+                // player existente ya mapea fracción → frame global vía
+                // `Timeline::sample`, sin tocar la UI). Solo este patrón y
+                // solo sobre decisiones Render (la guía de arriba ya filtró
+                // lo ambiguo): nada de guards/cards nuevos, la prosa es la
+                // referencia de siempre y el título nombra ambos lados.
+                if matches!(
+                    decision,
+                    DecisionAnimacion::RenderCanonico { .. }
+                        | DecisionAnimacion::RenderExplicito { .. }
+                        | DecisionAnimacion::RenderGenerico { .. }
+                ) {
+                    if let Some(playlist) = playlist_para_pedido(&problem_clone) {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                        let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                        self.assistant.complete_local_request(humano);
+                        self.assistant.set_media(None, ctx);
+                        self.run_assistant_playlist_with(ctx, playlist);
+                        ctx.request_repaint();
+                        return;
+                    }
                 }
                 // Heurística de memoria: si el usuario pide recordar o expresa preferencia, guardarlo
                 if lower.contains("recuerda que")
@@ -2820,8 +2900,10 @@ impl GrafitoApp {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis())
             .unwrap_or(0);
-        let path =
-            std::env::temp_dir().join(format!("grafito_animacion_{stamp}_{frame_count}.gif"));
+        let path = std::env::temp_dir().join(format!(
+            "grafito_animacion_{}_{stamp}_{frame_count}.gif",
+            std::process::id()
+        ));
         let handle = crate::anim_native::spawn_gif_export(frames, path, delay_cs);
         self.assistant_runtime.gif_export_job = Some(GifExportJob {
             handle,
@@ -2936,7 +3018,7 @@ impl GrafitoApp {
                 .map(|duration| duration.as_nanos())
                 .unwrap_or(0)
         ));
-        // Sin I/O en UI: el workdir lo crea el hilo (`create_dir_all` abajo).
+        // Sin I/O en UI: el workdir lo crea el hilo de forma exclusiva (abajo).
         let canvas = (720, 540);
         let resolution =
             grafito_anim::protocol::Resolution::try_new(canvas.0, canvas.1).unwrap_or_default();
@@ -2958,8 +3040,17 @@ impl GrafitoApp {
         let template_owned = template.to_string();
         let concept_owned = concept.clone();
         std::thread::spawn(move || {
-            // I/O solo en el hilo (nunca en UI): el workdir se crea aquí.
-            let _ = std::fs::create_dir_all(&work_dir);
+            // I/O solo en el hilo (nunca en UI). El workdir se crea de forma
+            // exclusiva y solo si el motor externo lo necesita (la vía nativa
+            // no toca disco): si ya existe — symlink plantado incluido — se
+            // aborta cerrado en vez de escribir a través del enlace.
+            if engine.is_some() {
+                if let Err(error) = crate::anim_native::prepare_anim_workdir_exclusive(&work_dir) {
+                    let _ = sender.send(Err(error));
+                    repaint.request_repaint();
+                    return;
+                }
+            }
             if worker_cancellation.is_cancelled() {
                 let _ = sender.send(Err(
                     "La generación se canceló antes de completarse.".to_string()
@@ -3095,6 +3186,133 @@ impl GrafitoApp {
             };
             let _ = sender.send(result);
             let _ = std::fs::remove_dir_all(&work_dir);
+            repaint.request_repaint();
+        });
+        self.assistant.anim_progress = true;
+        self.assistant_runtime.anim_job = Some(AssistantAnimJob {
+            cancellation,
+            receiver,
+        });
+        self.notify("Generando animación…", ToastKind::Info);
+    }
+
+    /// Reproduce una playlist F2b ("X y después Y") como UNA media (scrub total).
+    ///
+    /// Nativa-only y en hilo (nunca en UI): cada step animado se renderiza por
+    /// el mismo camino que el single (`parametric_for_template` o
+    /// `render_anim_with_progress` a 480×360, cancelable entre frames) y los
+    /// sets se concatenan con holds (`concat_playlist_fitting` a 12 fps, tope
+    /// 96 con ajuste de cadencia que preserva extremos). El player del chat ya
+    /// hace scrub por animación vía `Timeline::sample`: sobre el set
+    /// concatenado ese scrub cubre el tiempo global sin tocar la UI. La vía
+    /// externa multijob vive en `grafito_anim::engine::run_playlist_sequential`
+    /// (FIFO honesto); acá no se mezcla para no componer GIFs ajenos sin
+    /// presupuesto. Ante cualquier fallo (incluida playlist de solo pausas)
+    /// se publica `Err` honesto en la card, jamás media parcial en silencio.
+    pub(crate) fn run_assistant_playlist_with(
+        &mut self,
+        ctx: &egui::Context,
+        playlist: grafito_anim::protocol::Playlist,
+    ) {
+        if self.assistant_runtime.cancel_anim_job() {
+            self.assistant.anim_progress = false;
+        }
+        let cancellation = CancellationToken::default();
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let mut partes: Vec<(Vec<egui::ColorImage>, u64)> = Vec::new();
+            let mut nombres: Vec<String> = Vec::new();
+            for step in &playlist.steps {
+                if worker_cancellation.is_cancelled() {
+                    let _ = sender.send(Err(
+                        "La generación se canceló antes de completarse.".to_string()
+                    ));
+                    repaint.request_repaint();
+                    return;
+                }
+                // Pausa: sin frames propios; el hold lo agrega el concat.
+                let Some(request) = step.request.as_ref() else {
+                    continue;
+                };
+                let titulo: String = request.concept.chars().take(40).collect();
+                if !titulo.trim().is_empty() {
+                    nombres.push(titulo.trim().to_string());
+                }
+                let plantilla = request.template.clone();
+                let concepto = request.concept.clone();
+                let params = request.params.clone();
+                let mut saw_cancel = false;
+                let mut mira_cancel = |_: usize, _: usize| {
+                    if worker_cancellation.is_cancelled() {
+                        saw_cancel = true;
+                    }
+                };
+                // Mismo camino que el single: paramétrico si hay equivalente,
+                // si no el clásico. Sin motor externo (ver doc del método).
+                let frames = if let Some(anim) =
+                    crate::anim_native::parametric_for_template(&plantilla, &concepto)
+                {
+                    match crate::anim_native::render_parametric_frames_with_progress(
+                        &anim,
+                        &mut mira_cancel,
+                    ) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            let _ = sender.send(Err(error.to_string()));
+                            repaint.request_repaint();
+                            return;
+                        }
+                    }
+                } else {
+                    crate::anim_native::render_anim_with_progress(
+                        &plantilla,
+                        &concepto,
+                        480,
+                        360,
+                        &params,
+                        &mut mira_cancel,
+                    )
+                };
+                if worker_cancellation.is_cancelled() || saw_cancel {
+                    let _ = sender.send(Err(
+                        "La generación se canceló antes de completarse.".to_string()
+                    ));
+                    repaint.request_repaint();
+                    return;
+                }
+                if frames.is_empty() {
+                    let _ = sender.send(Err("el motor nativo no produjo fotogramas".to_string()));
+                    repaint.request_repaint();
+                    return;
+                }
+                partes.push((frames, step.wait_after_ms));
+            }
+            if partes.is_empty() {
+                let _ = sender.send(Err(
+                    "la playlist solo trae pausas: nada para mostrar".to_string()
+                ));
+                repaint.request_repaint();
+                return;
+            }
+            match crate::anim_native::concat_playlist_fitting(
+                partes,
+                crate::anim_native::GIF_BASE_FPS,
+            ) {
+                Ok(frames) => {
+                    let title = if nombres.is_empty() {
+                        "playlist (nativa)".to_string()
+                    } else {
+                        format!("{} (playlist nativa)", nombres.join(" y después "))
+                    };
+                    let _ =
+                        sender.send(Ok(grafito_ui::assistant::AssistantMedia { title, frames }));
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error.to_string()));
+                }
+            }
             repaint.request_repaint();
         });
         self.assistant.anim_progress = true;
@@ -5560,12 +5778,12 @@ mod tests {
         commit_assistant_graph_preflight, decide_animacion, inspect_remote_action_proposals,
         inspect_remote_proposals, inspect_remote_proposals_cancellable,
         is_agent_spark_responses_unsupported_error, is_socratic_repair_error,
-        limpiar_media_si_no_animacion, plantilla_para_pedido, pop_provisional_stream_turn,
-        preflight_assistant_flower_scene, preflight_assistant_graph_command,
-        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
-        preflight_assistant_scene, prosa_integral_explicita, read_bounded_attachment,
-        remote_error_message, should_fallback_agent_spark_to_deepseek,
-        should_fallback_remote_spark_to_deepseek, socratic_guard_context,
+        limpiar_media_si_no_animacion, plantilla_para_pedido, playlist_para_pedido,
+        pop_provisional_stream_turn, preflight_assistant_flower_scene,
+        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
+        preflight_assistant_parameter, preflight_assistant_scene, prosa_integral_explicita,
+        read_bounded_attachment, remote_error_message, should_fallback_agent_spark_to_deepseek,
+        should_fallback_remote_spark_to_deepseek, socratic_guard_context, split_playlist_request,
         stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
         wants_exercise_request, AgentChannelMsg, AssistantAgentJob, AssistantAnimJob,
         AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
@@ -6425,6 +6643,107 @@ mod tests {
         // Sin gatillo no es animación (no debe disparar hilo).
         assert!(!crate::anim_ui::wants_animation_request("derivá x^2"));
         assert!(crate::anim_ui::animation_concept_from_request("derivá x^2").is_err());
+    }
+
+    #[test]
+    fn playlist_solo_y_despues_parte_en_dos_con_templates_propios() {
+        // El patrón exacto parte en dos, con caso y acento variados.
+        let (a, b) =
+            split_playlist_request("explica la derivada y después la integral con animación")
+                .expect("debe partir");
+        assert!(a.contains("derivada"), "lado A: {a}");
+        assert!(b.contains("integral"), "lado B: {b}");
+        let (a2, b2) = split_playlist_request("derivada Y DESPUÉS integral con animación")
+            .expect("mayúsculas");
+        assert!(a2.contains("derivada"), "{a2}");
+        assert!(b2.contains("integral"), "{b2}");
+        let (_a3, _b3) = split_playlist_request("derivada y despues integral con animación")
+            .expect("sin acento");
+        // Cada lado resuelve su plantilla por el punto único.
+        let lista = playlist_para_pedido("explica la derivada y después la integral con animación")
+            .expect("playlist válida");
+        assert_eq!(lista.len(), 2);
+        assert_eq!(lista.total_duration_ms(), 4500);
+        let t0 = lista.steps[0]
+            .request
+            .as_ref()
+            .expect("step animado")
+            .template
+            .clone();
+        let t1 = lista.steps[1]
+            .request
+            .as_ref()
+            .expect("step animado")
+            .template
+            .clone();
+        assert_eq!(t0, "derivative-slope", "lado derivada");
+        assert_eq!(t1, "integral-area", "lado integral");
+        // Scheduler global: el primer step ocupa 0..2500 (2 s + 0.5 espera).
+        assert_eq!(lista.sample_at(100), Some((0, 100)));
+        assert_eq!(lista.sample_at(2600), Some((1, 100)));
+        assert_eq!(lista.sample_at(4500), None);
+    }
+
+    #[test]
+    fn playlist_fuera_de_patron_cae_al_single_honesto() {
+        // Sin conector, conector solo, lados vacíos o doble conector: None
+        // (el llamante sigue el flujo single, jamás arma parcial).
+        assert!(split_playlist_request("explica la derivada con animación").is_none());
+        assert!(split_playlist_request("y después con animación").is_none());
+        assert!(split_playlist_request("derivada y después con animación").is_some());
+        assert!(split_playlist_request("derivada y después").is_none());
+        assert!(split_playlist_request(
+            "derivada y después integral y después taylor con animación"
+        )
+        .is_none());
+        assert!(playlist_para_pedido("explica la derivada con animación").is_none());
+        // "luego" no es el conector (SOLO "y después").
+        assert!(split_playlist_request("derivada luego integral con animación").is_none());
+    }
+    #[test]
+    fn playlist_concat_entra_en_presupuesto_y_titulo_nombra_ambos() {
+        // Dos steps nativos de 48 + espera de 0.5 s: el fitting ajusta la
+        // cadencia para entrar en 96 preservando extremos (nada parcial).
+        use std::collections::BTreeMap;
+        let lista = playlist_para_pedido("explica la derivada y después la integral con animación")
+            .expect("playlist válida");
+        let mut partes = Vec::new();
+        for step in &lista.steps {
+            let request = step.request.as_ref().expect("step animado");
+            let frames = crate::anim_native::render_anim_with_progress(
+                &request.template,
+                &request.concept,
+                64,
+                48,
+                &BTreeMap::new(),
+                &mut |_, _| {},
+            );
+            assert!(!frames.is_empty());
+            partes.push((frames, step.wait_after_ms));
+        }
+        // Sin fitting no entraría (48+48+6 holds = 102 > 96): el fitting lo
+        // deja en 25+25+6 = 56 con extremos intactos.
+        assert!(crate::anim_native::concat_playlist_with_holds(
+            partes.iter().map(|(f, w)| (f.clone(), *w)).collect(),
+            crate::anim_native::GIF_BASE_FPS,
+        )
+        .is_err());
+        let todo =
+            crate::anim_native::concat_playlist_fitting(partes, crate::anim_native::GIF_BASE_FPS)
+                .expect("el fitting debe entrar en 96");
+        assert!(todo.len() <= grafito_anim::protocol::PLAYLIST_MAX_FRAMES_TOTAL);
+        assert_eq!(todo.len(), 56, "25+25+6 holds, got: {}", todo.len());
+        let timeline = lista
+            .global_timeline(&[48, 48])
+            .expect("timeline global válida");
+        assert_eq!(
+            grafito_anim::protocol::playlist_frame_at(&timeline, 0, todo.len()),
+            0
+        );
+        assert_eq!(
+            grafito_anim::protocol::playlist_frame_at(&timeline, 4499, todo.len()),
+            todo.len() - 1
+        );
     }
 
     #[test]

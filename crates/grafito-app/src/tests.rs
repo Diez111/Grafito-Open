@@ -3078,6 +3078,27 @@ fn inspector_type_caption_is_spanish_tertiary() {
 }
 
 #[test]
+fn inspector_cuadrica_placeholder_lleva_badge() {
+    use grafito_core::{GeoObject, Quadric3DObj};
+    // Elipsoide real: caption limpio.
+    let elipsoide = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+        0.25, 1.0, 1.0, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, -0.75,
+    ]));
+    assert_eq!(
+        crate::panels::inspector_type_caption(&elipsoide),
+        "cuádrica 3D"
+    );
+    // Hiperboloide (se dibuja el elipsoide aproximado): badge visible.
+    let aproximada = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+        1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+    ]));
+    assert_eq!(
+        crate::panels::inspector_type_caption(&aproximada),
+        "cuádrica 3D · vista aproximada"
+    );
+}
+
+#[test]
 fn collapsed_rail_shows_icons_only_without_text_slivers() {
     // Rail sano (60px) → icono + etiqueta.
     assert!(crate::ui::rail_labels_visible(60.0));

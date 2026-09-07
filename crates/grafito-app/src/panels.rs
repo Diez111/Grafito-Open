@@ -736,6 +736,9 @@ pub(crate) fn inspector_type_caption(obj: &GeoObject) -> &'static str {
         GeoObject::Surface3D(s) if s.is_complex => "superficie compleja 3D",
         GeoObject::Surface3D(_) => "superficie 3D",
         GeoObject::Prism3D(_) => "prisma 3D",
+        GeoObject::Quadric3D(quadric) if grafito_render::quadric_uses_placeholder(quadric) => {
+            "cuádrica 3D · vista aproximada"
+        }
         GeoObject::Quadric3D(_) => "cuádrica 3D",
         GeoObject::ParametricCurve2D(_) => "curva paramétrica 2D",
         GeoObject::ParametricCurve3D(_) => "curva paramétrica 3D",
@@ -1490,11 +1493,11 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             });
                             ui.add_space(CARD_SPACING);
 
-                            // Ejes — escala logarítmica
+                            // Ejes — escala logarítmica + plano numerado (F2c)
                             draw_inspector_section(
                                 ui,
                                 "Ejes",
-                                "Escalas logarítmicas por eje.",
+                                "Escalas logarítmicas y plano numerado.",
                                 |ui| {
                                     ui.checkbox(
                                         &mut app.document.view_mut().x_log,
@@ -1504,6 +1507,120 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         &mut app.document.view_mut().y_log,
                                         "Eje Y logarítmico",
                                     );
+                                    ui.checkbox(
+                                        &mut app.document.number_plane_labels,
+                                        "Plano numerado (ticks + etiquetas + origen)",
+                                    )
+                                    .on_hover_text(
+                                        "Muestra los números de los ejes con pasos lindos 1/2/5×10^n y skip anti-solape",
+                                    );
+                                },
+                            );
+                            ui.add_space(CARD_SPACING);
+
+                            // Parámetro vivo (F2c · ValueTracker→slider).
+                            // Un parámetro nombrado (`p`) bound al slider y a la
+                            // animación paramétrica: el slider escribe vía
+                            // `set_live_param` (re-evalúa dependientes y sube
+                            // versión; las funciones se re-muestrean por clave
+                            // con hash de variables) y la animación lo lee con
+                            // `live_param_value("p", fallback)` si existe.
+                            draw_inspector_section(
+                                ui,
+                                "Parámetro vivo",
+                                "Slider bound a `p`: mueve la geometría que lo usa.",
+                                |ui| {
+                                    if let Some(live) = app.document.live_param("p") {
+                                        let mut value = live.value;
+                                        let slider = egui::Slider::new(
+                                            &mut value,
+                                            live.min..=live.max,
+                                        )
+                                        .text("p")
+                                        .clamping(egui::SliderClamping::Edits)
+                                        .trailing_fill(true);
+                                        let response = ui.add(slider).on_hover_text(format!(
+                                            "p = {value:.3} en [{:.3}, {:.3}] · las funciones con `p` se re-muestrean solas",
+                                            live.min, live.max
+                                        ));
+                                        if response.changed() {
+                                            let mut snapshot =
+                                                crate::app::DeferredPanelSnapshot::new(
+                                                    app.undo_stack.len(),
+                                                );
+                                            snapshot.capture(&app.document);
+                                            if let Err(error) =
+                                                app.document.set_live_param("p", value)
+                                            {
+                                                let message =
+                                                    format!("Parámetro vivo: {error}");
+                                                app.cas_result = message.clone();
+                                                app.notify(
+                                                    message,
+                                                    grafito_ui::toast::ToastKind::Error,
+                                                );
+                                            }
+                                            snapshot.save_if_semantically_changed(
+                                                &mut app.document,
+                                                &mut app.undo_stack,
+                                                &mut app.redo_stack,
+                                            );
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "p = {value:.3} en [{:.3}, {:.3}]",
+                                                    live.min, live.max
+                                                ))
+                                                .size(TYPE_XS)
+                                                .color(
+                                                    current_theme(ui.ctx()).text_secondary,
+                                                ),
+                                            );
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Todavía no hay parámetro `p`: las funciones con `p` usan su valor por defecto.",
+                                            )
+                                            .size(TYPE_XS)
+                                            .color(current_theme(ui.ctx()).text_secondary),
+                                        );
+                                        if ui
+                                            .small_button("Crear parámetro p en [-5, 5]")
+                                            .on_hover_text(
+                                                "Crea la variable `p` con slider y la deja lista para la animación paramétrica",
+                                            )
+                                            .clicked()
+                                        {
+                                            let mut snapshot =
+                                                crate::app::DeferredPanelSnapshot::new(
+                                                    app.undo_stack.len(),
+                                                );
+                                            snapshot.capture(&app.document);
+                                            match app.document.ensure_live_param(
+                                                "p", -5.0, 5.0, 0.0,
+                                            ) {
+                                                Ok(_) => {
+                                                    app.cas_result =
+                                                        "Parámetro `p` creado en [-5, 5]".to_string();
+                                                }
+                                                Err(error) => {
+                                                    let message =
+                                                        format!("Parámetro vivo: {error}");
+                                                    app.cas_result = message.clone();
+                                                    app.notify(
+                                                        message,
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                            }
+                                            snapshot.save_if_semantically_changed(
+                                                &mut app.document,
+                                                &mut app.undo_stack,
+                                                &mut app.redo_stack,
+                                            );
+                                        }
+                                    }
                                 },
                             );
                             ui.add_space(CARD_SPACING);

@@ -657,7 +657,7 @@ fn suggest_next_tool(call: &ToolCall) -> ToolResult {
         let payload = json!({
             "mock": true,
             "next": fallback,
-            "note": "perfil mock vacío; se sugiere am1-func por defecto",
+            "note": "perfil mock vacío; se sugiere am1-func por defecto (beta: heurística demo, sin EM calibrado)",
         });
         return ToolResult::text(&call.id, true, payload.to_string());
     }
@@ -665,7 +665,7 @@ fn suggest_next_tool(call: &ToolCall) -> ToolResult {
         "mock": true,
         "count": items.len(),
         "next": items,
-        "note": "perfil mock puro; en la app real se usa StudentProfile persistido (recommend_next)",
+        "note": "perfil mock puro; en la app real se usa StudentProfile persistido (recommend_next) (beta: heurística demo, sin EM calibrado)",
     });
     ToolResult::text(&call.id, true, payload.to_string())
 }
@@ -3144,6 +3144,11 @@ mod tests {
         let value: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(value["mock"], true);
         assert!(value["next"].is_array() || value["next"].is_object());
+        assert!(
+            value["note"].as_str().unwrap_or_default().contains("beta"),
+            "la sugerencia demo se rotula beta, got: {}",
+            value["note"]
+        );
     }
 
     #[test]

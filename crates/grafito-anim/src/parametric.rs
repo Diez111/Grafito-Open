@@ -2116,3 +2116,393 @@ mod hostile_crash_f10 {
         );
     }
 }
+
+// ── F2a: Transform general entre formas (polilínea→polilínea) ───────────────
+// Extiende el kind `Morph` más allá del univariado `y=(1-s)·A+s·B` (que queda
+// intacto en `eval_frame`): cualquier par de formas 2D por correspondencia
+// de puntos, estilo Manim `Transform`. La matemática vive en
+// `grafito-geometry/src/morph.rs`; acá solo el adaptador fino (validación de
+// borde + conversión `[f64;2] ↔ Point2`) para que el evaluador existente
+// exponga frames sin renderer nuevo (seam F2b: `anim_native.rs` dibuja cada
+// `Vec<[f64;2]>` como polilínea con el viewport ya validado).
+use grafito_geometry::morph::{
+    morph_shapes, MorphConfig, MorphEasing as GeoEasing, MORPH_MAX_INPUT_POINTS, MORPH_MAX_SAMPLES,
+};
+use grafito_geometry::Point2;
+
+/// Easing del morph de formas (los 8 de la piel, mismos valores que
+/// `grafito_geometry::morph::MorphEasing`; la cuenta delega ahí).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ShapeEasing {
+    /// Progresión constante.
+    Linear,
+    /// Acelera desde cero.
+    QuadraticIn,
+    /// Desacelera hasta el final.
+    QuadraticOut,
+    /// Acelera cúbico.
+    CubicIn,
+    /// Desacelera cúbico.
+    CubicOut,
+    /// Acelera y desacelera cúbico (default).
+    #[default]
+    CubicInOut,
+    /// Suave sinusoidal.
+    SinInOut,
+    /// Sobrepasa la meta y vuelve (rebote).
+    EaseOutBack,
+}
+
+impl ShapeEasing {
+    /// Nombre estable para wire/logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::QuadraticIn => "quadratic_in",
+            Self::QuadraticOut => "quadratic_out",
+            Self::CubicIn => "cubic_in",
+            Self::CubicOut => "cubic_out",
+            Self::CubicInOut => "cubic_in_out",
+            Self::SinInOut => "sin_in_out",
+            Self::EaseOutBack => "ease_out_back",
+        }
+    }
+
+    /// Parsea por nombre (minúsculas, con/sin guiones); `None` honesto.
+    pub fn from_name(raw: &str) -> Option<Self> {
+        match GeoEasing::from_name(raw)? {
+            GeoEasing::Linear => Some(Self::Linear),
+            GeoEasing::QuadraticIn => Some(Self::QuadraticIn),
+            GeoEasing::QuadraticOut => Some(Self::QuadraticOut),
+            GeoEasing::CubicIn => Some(Self::CubicIn),
+            GeoEasing::CubicOut => Some(Self::CubicOut),
+            GeoEasing::CubicInOut => Some(Self::CubicInOut),
+            GeoEasing::SinInOut => Some(Self::SinInOut),
+            GeoEasing::EaseOutBack => Some(Self::EaseOutBack),
+        }
+    }
+
+    fn geo(self) -> GeoEasing {
+        match self {
+            Self::Linear => GeoEasing::Linear,
+            Self::QuadraticIn => GeoEasing::QuadraticIn,
+            Self::QuadraticOut => GeoEasing::QuadraticOut,
+            Self::CubicIn => GeoEasing::CubicIn,
+            Self::CubicOut => GeoEasing::CubicOut,
+            Self::CubicInOut => GeoEasing::CubicInOut,
+            Self::SinInOut => GeoEasing::SinInOut,
+            Self::EaseOutBack => GeoEasing::EaseOutBack,
+        }
+    }
+
+    /// Aplica el easing a `t` en 0..1 (delega en geometría, sin pánicos).
+    pub fn apply(self, t: f64) -> f64 {
+        self.geo().apply(t)
+    }
+}
+
+/// Morph polilínea→polilínea validado: dos formas + muestras + frames +
+/// topología + easing. El univariado (`ParametricAnim::eval_frame`) no se toca.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolylineMorph {
+    /// Forma A como pares `[x, y]` en mundo.
+    pub a: Vec<[f64; 2]>,
+    /// Forma B como pares `[x, y]` en mundo.
+    pub b: Vec<[f64; 2]>,
+    /// Puntos remuestreados por forma (2..=512).
+    pub samples: usize,
+    /// Fotogramas (1..=48, ya validado por `FrameCount`).
+    pub frames: FrameCount,
+    /// `true` = polígono cerrado.
+    pub closed: bool,
+    /// `true` = alinear el inicio de B con el de A.
+    pub align_start: bool,
+    /// Curva de easing entre frames.
+    pub easing: ShapeEasing,
+}
+
+impl PolylineMorph {
+    /// Constructor validado (todo `Err` es honesto en rioplatense, sin pánicos).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        a: Vec<[f64; 2]>,
+        b: Vec<[f64; 2]>,
+        samples: usize,
+        frames: FrameCount,
+        closed: bool,
+        align_start: bool,
+        easing: ShapeEasing,
+    ) -> ParametricResult<Self> {
+        valida_lado(&a, "A", closed)?;
+        valida_lado(&b, "B", closed)?;
+        if !(2..=MORPH_MAX_SAMPLES).contains(&samples) {
+            return Err(ParametricError::NoSoportado {
+                detalle: format!(
+                    "muestras fuera de rango: pediste {samples}, usá entre 2 y {MORPH_MAX_SAMPLES}"
+                ),
+            });
+        }
+        Ok(Self {
+            a,
+            b,
+            samples,
+            frames,
+            closed,
+            align_start,
+            easing,
+        })
+    }
+
+    /// Cantidad de fotogramas (1..=48).
+    pub fn frame_count(&self) -> usize {
+        self.frames.get()
+    }
+
+    /// Fotogramas como polilíneas en mundo (`frames × samples`).
+    ///
+    /// Vía el evaluador existente: cada frame es un `Vec<[f64;2]>` listo para
+    /// que F2b lo dibuje como polilínea (el frame 0 es A remuestreada, el
+    /// último es B). Sin I/O, sin pánicos.
+    pub fn frames_puntos(&self) -> ParametricResult<Vec<Vec<[f64; 2]>>> {
+        let pa: Vec<Point2> = self.a.iter().map(|p| Point2::new(p[0], p[1])).collect();
+        let pb: Vec<Point2> = self.b.iter().map(|p| Point2::new(p[0], p[1])).collect();
+        let cfg = MorphConfig::try_new(
+            self.samples,
+            self.frames.get(),
+            self.closed,
+            self.align_start,
+            self.easing.geo(),
+        )
+        .map_err(|e| ParametricError::NoSoportado {
+            detalle: e.to_string(),
+        })?;
+        let frames = morph_shapes(&pa, &pb, &cfg).map_err(|e| ParametricError::NoSoportado {
+            detalle: e.to_string(),
+        })?;
+        Ok(frames
+            .iter()
+            .map(|fila| fila.iter().map(|p| [p.x, p.y]).collect())
+            .collect())
+    }
+}
+
+/// Valida un lado del morph (no vacío, acotado, finito, cerrada honesta).
+fn valida_lado(pts: &[[f64; 2]], cual: &str, closed: bool) -> ParametricResult<()> {
+    if pts.is_empty() {
+        return Err(ParametricError::NoSoportado {
+            detalle: format!(
+                "la forma {cual} está vacía: pasame al menos 1 punto (2 si es abierta, 3 si es cerrada)"
+            ),
+        });
+    }
+    if pts.len() > MORPH_MAX_INPUT_POINTS {
+        return Err(ParametricError::NoSoportado {
+            detalle: format!(
+                "la forma {cual} tiene {} puntos y el tope es {MORPH_MAX_INPUT_POINTS}: simplificala",
+                pts.len()
+            ),
+        });
+    }
+    for (i, p) in pts.iter().enumerate() {
+        if !p[0].is_finite() || !p[1].is_finite() {
+            return Err(ParametricError::NoSoportado {
+                detalle: format!(
+                    "la forma {cual} tiene un punto no finito en el índice {i}: revisá NaN o infinitos"
+                ),
+            });
+        }
+    }
+    if closed && pts.len() == 2 {
+        return Err(ParametricError::NoSoportado {
+            detalle: format!(
+                "la forma {cual} cerrada necesita al menos 3 puntos (o 1 si es un punto que crece); pasaste 2"
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod shape_morph_f2a {
+    use super::*;
+
+    fn cuadrada() -> Vec<[f64; 2]> {
+        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+    }
+
+    fn triangulo() -> Vec<[f64; 2]> {
+        vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]
+    }
+
+    fn morph(samples: usize, n: usize) -> PolylineMorph {
+        PolylineMorph::try_new(
+            cuadrada(),
+            triangulo(),
+            samples,
+            FrameCount::try_new(n).unwrap(),
+            false,
+            true,
+            ShapeEasing::Linear,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn frames_miden_n_por_samples_y_extremos_son_a_b() {
+        let m = morph(16, 5);
+        let frames = m.frames_puntos().unwrap();
+        assert_eq!(frames.len(), 5);
+        assert!(frames.iter().all(|f| f.len() == 16));
+        // Frame 0 ≈ A remuestreada, último ≈ B.
+        assert!((frames[0][0][0]).abs() < 1e-9 && (frames[0][0][1]).abs() < 1e-9);
+        assert!((frames[4][0][0]).abs() < 1e-9 && (frames[4][0][1]).abs() < 1e-9);
+        // Punto medio lineal: promedio de A y B remuestreadas.
+        let mid = (frames[0][4][0] + frames[4][4][0]) * 0.5;
+        assert!((frames[2][4][0] - mid).abs() < 1e-9);
+    }
+
+    #[test]
+    fn punto_a_figura_crece_y_curva_a_curva_interpola() {
+        let punto = vec![[0.5, 0.5]];
+        let m = PolylineMorph::try_new(
+            punto,
+            cuadrada(),
+            8,
+            FrameCount::try_new(3).unwrap(),
+            false,
+            true,
+            ShapeEasing::CubicInOut,
+        )
+        .unwrap();
+        let frames = m.frames_puntos().unwrap();
+        assert!(frames[0]
+            .iter()
+            .all(|p| (p[0] - 0.5).abs() < 1e-12 && (p[1] - 0.5).abs() < 1e-12));
+        // Curva→curva (seno→recta): el medio no es ni A ni B.
+        let seno: Vec<[f64; 2]> = (0..9)
+            .map(|k| [k as f64 * 0.5, (k as f64 * 0.5).sin()])
+            .collect();
+        let recta: Vec<[f64; 2]> = (0..9).map(|k| [k as f64 * 0.5, 0.0]).collect();
+        let mc = PolylineMorph::try_new(
+            seno,
+            recta,
+            16,
+            FrameCount::try_new(4).unwrap(),
+            false,
+            true,
+            ShapeEasing::Linear,
+        )
+        .unwrap();
+        let fc = mc.frames_puntos().unwrap();
+        assert_eq!(fc.len(), 4);
+        assert!(fc[1][8][1].abs() > 1e-6 && fc[1][8][1].abs() < 1.0);
+    }
+
+    #[test]
+    fn cerrada_vs_abierta_honesto_con_flag() {
+        let m_c = PolylineMorph::try_new(
+            cuadrada(),
+            triangulo(),
+            12,
+            FrameCount::try_new(3).unwrap(),
+            true,
+            true,
+            ShapeEasing::Linear,
+        )
+        .unwrap();
+        let fc = m_c.frames_puntos().unwrap();
+        assert_eq!(fc.len(), 3);
+        assert!(fc.iter().all(|f| f.len() == 12));
+        // Cerrada con 2 puntos: Err, no cierra en silencio.
+        let dos = vec![[0.0, 0.0], [1.0, 0.0]];
+        assert!(PolylineMorph::try_new(
+            dos,
+            triangulo(),
+            8,
+            FrameCount::try_new(3).unwrap(),
+            true,
+            true,
+            ShapeEasing::Linear,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn incompatibles_fallan_honesto_sin_deformar() {
+        let fc = FrameCount::try_new(4).unwrap();
+        assert!(PolylineMorph::try_new(
+            vec![],
+            triangulo(),
+            8,
+            fc,
+            false,
+            true,
+            ShapeEasing::Linear
+        )
+        .is_err());
+        assert!(PolylineMorph::try_new(
+            cuadrada(),
+            vec![],
+            8,
+            fc,
+            false,
+            true,
+            ShapeEasing::Linear
+        )
+        .is_err());
+        assert!(PolylineMorph::try_new(
+            cuadrada(),
+            triangulo(),
+            1,
+            fc,
+            false,
+            true,
+            ShapeEasing::Linear
+        )
+        .is_err());
+        assert!(PolylineMorph::try_new(
+            cuadrada(),
+            triangulo(),
+            513,
+            fc,
+            false,
+            true,
+            ShapeEasing::Linear
+        )
+        .is_err());
+        let nan = vec![[f64::NAN, 0.0], [1.0, 0.0]];
+        assert!(
+            PolylineMorph::try_new(nan, triangulo(), 8, fc, false, true, ShapeEasing::Linear)
+                .is_err()
+        );
+        let msg =
+            PolylineMorph::try_new(vec![], triangulo(), 8, fc, false, true, ShapeEasing::Linear)
+                .unwrap_err()
+                .to_string();
+        assert!(msg.contains("vacía"));
+    }
+
+    #[test]
+    fn easings_delegan_en_geometria_y_univariado_intacto() {
+        for e in [
+            ShapeEasing::Linear,
+            ShapeEasing::QuadraticIn,
+            ShapeEasing::QuadraticOut,
+            ShapeEasing::CubicIn,
+            ShapeEasing::CubicOut,
+            ShapeEasing::CubicInOut,
+            ShapeEasing::SinInOut,
+            ShapeEasing::EaseOutBack,
+        ] {
+            assert!((e.apply(0.0)).abs() < 1e-12, "{e:?}");
+            assert!((e.apply(1.0) - 1.0).abs() < 1e-9, "{e:?}");
+            assert_eq!(ShapeEasing::from_name(e.as_str()), Some(e));
+        }
+        // El univariado sigue igual: morph A→B de funciones intacto.
+        let anim =
+            infer_parametric_anim("transición de f(x)=x^2 a f(x)=x^3 con p en [0,1]").unwrap();
+        assert_eq!(anim.kind, ParametricKind::Morph);
+        let v0 = anim.eval_frame(0, 2.0).unwrap();
+        assert!((v0 - 4.0).abs() < 1e-9, "frame 0 = A: {v0}");
+    }
+}

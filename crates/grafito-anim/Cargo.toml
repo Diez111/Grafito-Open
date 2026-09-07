@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Puente de Grafito hacia motores de animación externos (IPC stdio, protocolo JSON versionado)"
 
 [dependencies]
+grafito-geometry = { path = "../grafito-geometry" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

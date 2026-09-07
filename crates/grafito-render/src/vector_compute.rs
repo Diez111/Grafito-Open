@@ -15,6 +15,33 @@ use grafito_core::object::{VectorField2DObj, VectorFieldSamples};
 use grafito_core::vector_field_sampling;
 use std::collections::HashMap;
 
+/// Cota del lado de la grilla (paridad con `MAX_IMPLICIT_GRID_SIZE`):
+/// con 1024 el buffer máximo es 1025²·4·4 B ≈ 16,8 MB, sin desborde posible.
+pub const MAX_VECTOR_GRID_SIZE: usize = 1024;
+
+/// Cantidad de valores f32 `((lado+1)²·4)` con aritmética verificada.
+///
+/// `None` si `max_grid` supera la cota o si alguna multiplicación desborda.
+/// Pura, sin GPU: testeable sin adapter.
+fn vector_value_count(max_grid: usize) -> Option<usize> {
+    if max_grid > MAX_VECTOR_GRID_SIZE {
+        return None;
+    }
+    let side = max_grid.checked_add(1)?;
+    side.checked_mul(side)?.checked_mul(4)
+}
+
+/// Lado de la grilla como `u32` (`grid_size + 1`) sin truncar.
+///
+/// `None` si supera la cota o no entra en `u32` (paridad con
+/// `domain_coloring_compute`/`complex_compute`, que usan `u32::try_from`).
+fn grid_side_u32(grid_size: usize) -> Option<u32> {
+    if grid_size > MAX_VECTOR_GRID_SIZE {
+        return None;
+    }
+    u32::try_from(grid_size).ok()?.checked_add(1)
+}
+
 /// GPU resources needed to evaluate one 2D vector field per dispatch.
 pub struct VectorComputePipeline {
     pipeline: wgpu::ComputePipeline,
@@ -43,7 +70,9 @@ struct VectorParamsUniform {
 }
 
 impl VectorComputePipeline {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, max_grid: usize) -> Self {
+    /// Constructor falible: `None` si `max_grid` supera
+    /// [`MAX_VECTOR_GRID_SIZE`] o si el tamaño del buffer desborda.
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, max_grid: usize) -> Option<Self> {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Vector Field Compute Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("vector_compute.wgsl").into()),
@@ -110,7 +139,7 @@ impl VectorComputePipeline {
             cache: None,
         });
 
-        let max_values = (max_grid + 1) * (max_grid + 1) * 4;
+        let max_values = vector_value_count(max_grid)?;
 
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vector Compute Params"),
@@ -145,21 +174,24 @@ impl VectorComputePipeline {
             &[0u8; 256 * std::mem::size_of::<f32>()],
         );
 
+        let values_bytes =
+            u64::try_from(max_values.checked_mul(std::mem::size_of::<f32>())?).ok()?;
+
         let values_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vector Compute Values"),
-            size: (max_values * std::mem::size_of::<f32>()) as u64,
+            size: values_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let values_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vector Compute Values Readback"),
-            size: (max_values * std::mem::size_of::<f32>()) as u64,
+            size: values_bytes,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
-        Self {
+        Some(Self {
             pipeline,
             bind_group_layout,
             params_buffer,
@@ -169,7 +201,7 @@ impl VectorComputePipeline {
             values_readback,
             max_grid,
             timing: crate::gpu_timing::create(device, queue, "Vector Compute", 1),
-        }
+        })
     }
 
     /// Evaluate the 2D vector field on the GPU and return (x, y, u, v) samples.
@@ -204,14 +236,15 @@ impl VectorComputePipeline {
         if !f32_bounds_have_precision(&[x_min, x_max, y_min, y_max], min_step) {
             return None;
         }
+        let side = grid_side_u32(grid_size)?;
         let params = VectorParamsUniform {
             x_min: x_min as f32,
             x_max: x_max as f32,
             y_min: y_min as f32,
             y_max: y_max as f32,
-            nx: (grid_size + 1) as u32,
-            ny: (grid_size + 1) as u32,
-            code_len: prog.code.len() as u32,
+            nx: side,
+            ny: side,
+            code_len: u32::try_from(prog.code.len()).ok()?,
             _pad0: 0,
         };
 
@@ -258,18 +291,18 @@ impl VectorComputePipeline {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let wg_x = (grid_size as u32 + 1).div_ceil(16).max(1);
-            let wg_y = (grid_size as u32 + 1).div_ceil(16).max(1);
+            let wg_x = side.div_ceil(16).max(1);
+            let wg_y = side.div_ceil(16).max(1);
             cpass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
-        let output_count = (grid_size + 1) * (grid_size + 1) * 4;
+        let output_count = vector_value_count(grid_size)?;
         encoder.copy_buffer_to_buffer(
             &self.values_buffer,
             0,
             &self.values_readback,
             0,
-            (output_count * std::mem::size_of::<f32>()) as u64,
+            u64::try_from(output_count.checked_mul(std::mem::size_of::<f32>())?).ok()?,
         );
         crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
@@ -301,7 +334,10 @@ impl VectorComputePipeline {
         }
         let data = slice.get_mapped_range();
         let values_f32: &[f32] = bytemuck::cast_slice(&data);
-        let mut samples = Vec::with_capacity((grid_size + 1) * (grid_size + 1));
+        let side_len = usize::try_from(grid_side_u32(grid_size)?).ok()?;
+        let cell_count = side_len.checked_mul(side_len)?;
+        let mut samples = Vec::new();
+        samples.try_reserve_exact(cell_count).ok()?;
 
         for j in 0..=grid_size {
             for i in 0..=grid_size {
@@ -379,4 +415,40 @@ pub fn maybe_compute_vector_field_on_gpu(
         p.into_inner()
     }) = Some(key);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_sizes_honestos_pasan_y_enormes_fallan_cerrado() {
+        assert_eq!(vector_value_count(0), Some(4));
+        assert_eq!(vector_value_count(1), Some(16));
+        assert_eq!(vector_value_count(128), Some(129 * 129 * 4));
+        assert_eq!(
+            vector_value_count(MAX_VECTOR_GRID_SIZE),
+            Some(1025 * 1025 * 4)
+        );
+        // Sin checked esto desbordaría `usize` en 64 bits al multiplicar por 4.
+        assert_eq!(vector_value_count(usize::MAX), None);
+        assert_eq!(
+            vector_value_count(usize::try_from(u32::MAX).unwrap_or(usize::MAX)),
+            None
+        );
+        assert_eq!(vector_value_count(MAX_VECTOR_GRID_SIZE + 1), None);
+    }
+
+    #[test]
+    fn lado_u32_no_trunca_valores_enormes() {
+        assert_eq!(grid_side_u32(0), Some(1));
+        assert_eq!(grid_side_u32(127), Some(128));
+        assert_eq!(grid_side_u32(MAX_VECTOR_GRID_SIZE), Some(1025));
+        // `as u32` truncaría a 0; `try_from` falla cerrado.
+        assert_eq!(grid_side_u32(usize::MAX), None);
+        assert_eq!(
+            grid_side_u32(usize::try_from(u32::MAX).unwrap_or(usize::MAX)),
+            None
+        );
+    }
 }

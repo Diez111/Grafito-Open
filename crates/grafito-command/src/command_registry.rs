@@ -296,7 +296,7 @@ const COMMANDS: &[CommandSpec] = &[
         "GenerateAnimation",
         [],
         "Animaciones",
-        "Genera una animación didáctica (placeholder o Manim) para el concepto dado.",
+        "Genera una animación didáctica (vista previa nativa o Manim) para el concepto dado.",
         CreatesObject,
         Low,
         true,
@@ -4241,6 +4241,21 @@ mod registry_tests {
             "alias check: {} alias únicos, {} canonical únicos",
             alias_to_spec.len(),
             canon_seen.len()
+        );
+    }
+
+    #[test]
+    fn generate_animation_help_no_promete_placeholder() {
+        let spec = resolve("GenerateAnimation").expect("comando GenerateAnimation registrado");
+        assert!(
+            spec.help.contains("vista previa nativa o Manim"),
+            "help honesto, got: {}",
+            spec.help
+        );
+        assert!(
+            !spec.help.to_lowercase().contains("placeholder"),
+            "sin 'placeholder', got: {}",
+            spec.help
         );
     }
 

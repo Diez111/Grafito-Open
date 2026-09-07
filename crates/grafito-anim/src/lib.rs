@@ -18,8 +18,9 @@ pub use engine::{
 };
 pub use parametric::{
     infer_parametric_anim, parametric_hint, FrameCount, ParamName, ParametricAnim, ParametricError,
-    ParametricKind, PARAMETRIC_DEFAULT_FRAMES, PARAMETRIC_EVAL_MAX_DEPTH, PARAMETRIC_MAX_BYTES,
-    PARAMETRIC_MAX_EXPR_CHARS, PARAMETRIC_MAX_FRAMES,
+    ParametricKind, PolylineMorph, ShapeEasing, PARAMETRIC_DEFAULT_FRAMES,
+    PARAMETRIC_EVAL_MAX_DEPTH, PARAMETRIC_MAX_BYTES, PARAMETRIC_MAX_EXPR_CHARS,
+    PARAMETRIC_MAX_FRAMES,
 };
 pub use protocol::{
     downcast, kinds, localize_worker_error, normalize_concept, request_for_concept,

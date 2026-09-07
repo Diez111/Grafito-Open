@@ -691,6 +691,15 @@ impl QuadricEllipsoid {
     }
 }
 
+/// ¿Esta cuádrica cae al elipsoide aproximado ([`QuadricEllipsoid::placeholder`])?
+///
+/// Pura y testeable: la UI la usa para rotular "vista aproximada" donde la
+/// cuádrica se muestre (inspector), en vez de pasar un elipsoide genérico
+/// por la superficie real.
+pub fn quadric_uses_placeholder(quadric: &Quadric3DObj) -> bool {
+    quadric_ellipsoid_params(quadric).is_none()
+}
+
 /// Deriva el elipsoide de una cuádrica sin términos cruzados.
 ///
 /// Completa el cuadrado de `a*x² + b*y² + c*z² + g*x + h*y + i*z + j = 0`:
@@ -1489,9 +1498,7 @@ impl Renderer {
             None
         };
         let vector_compute = if has_compute_storage {
-            Some(crate::vector_compute::VectorComputePipeline::new(
-                device, queue, 128,
-            ))
+            crate::vector_compute::VectorComputePipeline::new(device, queue, 128)
         } else {
             None
         };

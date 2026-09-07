@@ -3,7 +3,7 @@
 mod tests {
     use grafito_core::{
         CircleObj, Document, Fractal2DObj, GeoObject, ImplicitCurveObj, LineObj, PointObj,
-        PolygonObj, RelationOperator,
+        PolygonObj, Quadric3DObj, RelationOperator,
     };
     use grafito_geometry::{Camera3D, Point2, ViewTransform};
 
@@ -507,5 +507,18 @@ mod tests {
             .expect("scatter plot has a bounded AABB");
         assert!(aabb.max.x >= 1000.0 && aabb.max.y >= 1000.0);
         assert!(aabb.min.x <= 0.0 && aabb.min.y <= 0.0);
+    }
+    #[test]
+    fn quadric_no_elipsoide_usa_placeholder() {
+        // Elipsoide real: parámetros derivables, sin placeholder.
+        let elipsoide =
+            Quadric3DObj::from_coeffs([0.25, 1.0, 1.0, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, -0.75]);
+        assert!(crate::quadric_ellipsoid_params(&elipsoide).is_some());
+        assert!(!crate::quadric_uses_placeholder(&elipsoide));
+        // Hiperboloide (c < 0): no es elipsoide real → placeholder.
+        let hiperboloide =
+            Quadric3DObj::from_coeffs([1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]);
+        assert!(crate::quadric_ellipsoid_params(&hiperboloide).is_none());
+        assert!(crate::quadric_uses_placeholder(&hiperboloide));
     }
 }

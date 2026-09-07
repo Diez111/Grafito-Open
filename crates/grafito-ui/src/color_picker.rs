@@ -644,19 +644,48 @@ fn hsv_to_color32(hue: f32, saturation: f32, value: f32) -> Color32 {
     color_to_color32(color)
 }
 
+/// Canal `f32` → `u8` estable: `NaN` → 0, infinitos a su extremo,
+/// resto con clamp + round (el `as u8` a secas trunca 127,5 a 127).
+fn channel_to_u8(value: f32) -> u8 {
+    if value.is_nan() {
+        return 0;
+    }
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 /// Convertir Color a Color32
 fn color_to_color32(color: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(
-        (color.r * 255.0) as u8,
-        (color.g * 255.0) as u8,
-        (color.b * 255.0) as u8,
-        (color.a * 255.0) as u8,
+        channel_to_u8(color.r),
+        channel_to_u8(color.g),
+        channel_to_u8(color.b),
+        channel_to_u8(color.a),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_to_u8_clampe_redondea_y_nunca_paniquea() {
+        assert_eq!(channel_to_u8(0.0), 0);
+        assert_eq!(channel_to_u8(1.0), 255);
+        // 0,5 → 127,5 → redondea a 128 (el `as` a secas truncaba a 127).
+        assert_eq!(channel_to_u8(0.5), 128);
+        // Fuera de rango: estable en los extremos.
+        assert_eq!(channel_to_u8(2.0), 255);
+        assert_eq!(channel_to_u8(-1.0), 0);
+        assert_eq!(channel_to_u8(f32::INFINITY), 255);
+        assert_eq!(channel_to_u8(f32::NEG_INFINITY), 0);
+        assert_eq!(channel_to_u8(f32::NAN), 0);
+        // El wrapper hereda la estabilidad.
+        let extremo = color_to_color32(Color::new(2.0, f32::NAN, -3.0, 1.0));
+        assert_eq!(
+            (extremo.r(), extremo.g(), extremo.b(), extremo.a()),
+            (255, 0, 0, 255)
+        );
+    }
 
     #[test]
     fn test_rgb_to_hsv_red() {

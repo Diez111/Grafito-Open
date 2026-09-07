@@ -464,7 +464,8 @@ fn required_vulkan_vector_evaluator_matches_cpu_edge_semantics() {
     let Some(gpu) = gpu_context_or_skip() else {
         return;
     };
-    let compute = VectorComputePipeline::new(&gpu.device, &gpu.queue, 1);
+    let compute = VectorComputePipeline::new(&gpu.device, &gpu.queue, 1)
+        .expect("grilla 1 siempre entra en la cota");
 
     for (u_expr, v_expr) in [
         ("mod(x - 5.5, 2)", "round(y - 0.5)"),
@@ -583,7 +584,8 @@ fn required_vulkan_scalar_evaluators_reject_nonfinite_clamp_bounds() {
         .expect("nonfinite clamp parametric curve should execute on the GPU");
     assert!(samples.iter().all(|(x, _)| x.is_nan()));
 
-    let vector = VectorComputePipeline::new(&gpu.device, &gpu.queue, 1);
+    let vector = VectorComputePipeline::new(&gpu.device, &gpu.queue, 1)
+        .expect("grilla 1 siempre entra en la cota");
     let field = VectorField2DObj::new("clamp(x, -1, upper)", "0");
     let samples = vector
         .evaluate(

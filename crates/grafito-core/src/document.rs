@@ -43,6 +43,43 @@ pub struct VariableMeta {
     pub animation_mode: AnimationMode,
 }
 
+/// Parámetro vivo bound a slider del panel y a la animación paramétrica `p` (F2c).
+///
+/// Vista honesta sobre `variables` + `variable_meta`: no duplica estado.
+/// `name` es el identificador de variable (`p` por defecto en la UI);
+/// `min`/`max` vienen de `VariableMeta` (o del fallback -5..=5 si la
+/// variable existe sin meta); `value` es el valor actual en `variables`.
+/// El slider escribe vía `set_live_param` (que delega en `try_set_variable`:
+/// re-evalúa dependientes, invalida por `version` y por clave de caché con
+/// hash de variables, sin `unwrap`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveParam {
+    /// Nombre de la variable (ej. `"p"`).
+    pub name: String,
+    /// Mínimo del slider (finito, < max).
+    pub min: f64,
+    /// Máximo del slider (finito, > min).
+    pub max: f64,
+    /// Valor actual (finito, dentro de [min, max]).
+    pub value: f64,
+}
+
+/// Nombre del parámetro vivo por defecto para la animación paramétrica.
+pub const DEFAULT_LIVE_PARAM_NAME: &str = "p";
+/// Rango fallback cuando la variable existe sin `VariableMeta`.
+pub const LIVE_PARAM_FALLBACK_MIN: f64 = -5.0;
+/// Rango fallback cuando la variable existe sin `VariableMeta`.
+pub const LIVE_PARAM_FALLBACK_MAX: f64 = 5.0;
+/// Largo máximo del nombre de un `LiveParam` (igual que `MAX_STRING_LENGTH`).
+pub const MAX_LIVE_PARAM_NAME_LEN: usize = 256;
+
+/// Default `serde` para `Document::number_plane_labels`: JSON viejo sin el
+/// campo migra a plano numerado visible (comportamiento histórico de
+/// `draw_axes` con ticks).
+fn default_number_plane_labels() -> bool {
+    true
+}
+
 /// Binding de una secuencia viva que depende de variables y se re-evalúa en cada cambio.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveSequenceBinding {
@@ -806,6 +843,11 @@ pub struct Document {
     /// Muestras de la estela por objeto (efímeras, fuera de `PartialEq`/hash).
     #[serde(skip)]
     trails: BTreeMap<ObjectId, TrailBuffer>,
+    /// Plano numerado 2D (F2c): `true` = ticks + labels + origen en el canvas.
+    /// Toggle en panel Vista. `#[serde(default = ...)]` migra JSON viejo a
+    /// visible (comportamiento histórico). Solo vista, sin validación.
+    #[serde(default = "default_number_plane_labels")]
+    pub number_plane_labels: bool,
 }
 
 /// Máximo de muestras por estela de rastro (512 pts × 16 B ≈ 8 KiB/objeto).
@@ -888,6 +930,7 @@ impl Default for Document {
             live_sequences: HashMap::new(),
             trace_enabled: BTreeMap::new(),
             trails: BTreeMap::new(),
+            number_plane_labels: true,
         }
     }
 }
@@ -4483,6 +4526,189 @@ impl Document {
         &self.variable_meta
     }
 
+    /// ── F2c · ValueTracker → `LiveParam` ───────────────────────────────
+    /// Vista honesta sobre `variables` + `variable_meta`, sin estado nuevo.
+    /// El slider del panel y la animación paramétrica `p` leen/escriben por
+    /// acá: escribir re-evalúa dependientes vía `try_set_variable`
+    /// (recomputa spreadsheet + secuencias vivas, valida, sube `version`;
+    /// las funciones se re-muestrean por clave de caché con hash de
+    /// variables en `function_sampling::samples_or_compute`).
+    /// Valida un nombre de `LiveParam`: 1..=256, ASCII letra/`_` inicial y
+    /// resto alfanumérico/`_` (igual que `is_valid_live_var`).
+    fn validate_live_param_name(name: &str) -> Result<String, String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Parámetro vivo: el nombre no puede estar vacío".to_string());
+        }
+        if trimmed.len() > MAX_LIVE_PARAM_NAME_LEN {
+            return Err(format!(
+                "Parámetro vivo: el nombre supera {MAX_LIVE_PARAM_NAME_LEN} bytes"
+            ));
+        }
+        if !Self::is_valid_live_var(trimmed) {
+            return Err(format!(
+                "Parámetro vivo: '{trimmed}' no es un identificador válido (letra o _ + letras/dígitos/_)"
+            ));
+        }
+        Ok(trimmed.to_string())
+    }
+
+    /// Lee el parámetro vivo `name`, si la variable existe y es finita.
+    /// Sin meta → fallback `LIVE_PARAM_FALLBACK_MIN..=MAX` (sin mutar).
+    /// `None` si no existe, es no-finita o su meta es inválida.
+    pub fn live_param(&self, name: &str) -> Option<LiveParam> {
+        let key = name.trim();
+        if key.is_empty() {
+            return None;
+        }
+        let value = self.variables.get(key).copied()?;
+        if !value.is_finite() {
+            return None;
+        }
+        let (min, max) = match self.variable_meta.get(key) {
+            Some(meta) => {
+                if !meta.min.is_finite() || !meta.max.is_finite() || meta.min >= meta.max {
+                    return None;
+                }
+                (meta.min, meta.max)
+            }
+            None => (LIVE_PARAM_FALLBACK_MIN, LIVE_PARAM_FALLBACK_MAX),
+        };
+        if !value.is_finite() {
+            return None;
+        }
+        let clamped = value.clamp(min, max);
+        Some(LiveParam {
+            name: key.to_string(),
+            min,
+            max,
+            value: clamped,
+        })
+    }
+
+    /// Valor del parámetro vivo para la animación paramétrica.
+    /// Lee `name` si existe y es finito; si no, devuelve `fallback`
+    /// (finito o 0.0). Puro, sin `unwrap`, sin mutar. La animación `p`
+    /// usa `live_param_value("p", p0)` para no inventar valores.
+    pub fn live_param_value(&self, name: &str, fallback: f64) -> f64 {
+        let safe_fallback = if fallback.is_finite() { fallback } else { 0.0 };
+        let key = name.trim();
+        if key.is_empty() {
+            return safe_fallback;
+        }
+        self.variables
+            .get(key)
+            .copied()
+            .filter(|v| v.is_finite())
+            .map(|v| match self.variable_meta.get(key) {
+                Some(meta)
+                    if meta.min.is_finite() && meta.max.is_finite() && meta.min < meta.max =>
+                {
+                    v.clamp(meta.min, meta.max)
+                }
+                _ => v,
+            })
+            .unwrap_or(safe_fallback)
+    }
+
+    /// Escribe el valor del parámetro vivo (slider del panel).
+    /// Delega en `try_set_variable`: valida finitud, rechaza variables de
+    /// spreadsheet, recomputa dependientes y sube `version`. El llamador
+    /// (panel) aporta el undo vía `DeferredPanelSnapshot`.
+    pub fn set_live_param(&mut self, name: &str, value: f64) -> Result<(), String> {
+        let key = Self::validate_live_param_name(name)?;
+        if !value.is_finite() {
+            return Err("Parámetro vivo: el valor debe ser finito".to_string());
+        }
+        if !self.variables.contains_key(&key) {
+            return Err(format!(
+                "Parámetro vivo: '{key}' no existe (crealo primero)"
+            ));
+        }
+        // Clampea a la meta si es válida, para que el slider nunca saque el
+        // valor de rango; sin meta válida, escribe tal cual (finito).
+        let clamped = match self.variable_meta.get(&key) {
+            Some(meta) if meta.min.is_finite() && meta.max.is_finite() && meta.min < meta.max => {
+                value.clamp(meta.min, meta.max)
+            }
+            _ => value,
+        };
+        self.try_set_variable(key, clamped)
+    }
+
+    /// Crea el parámetro vivo si falta (botón "Crear parámetro p" del panel).
+    /// Valida nombre/rango finitos con `min < max`, valor finito clampea­do al
+    /// rango; registra `VariableMeta` visible con `step = span/100` y conserva
+    /// `position`/`animating` previos si existían. Todo en una sola mutación
+    /// validada (`commit_variable_mutation`): dependientes re-evaluados.
+    pub fn ensure_live_param(
+        &mut self,
+        name: &str,
+        min: f64,
+        max: f64,
+        value: f64,
+    ) -> Result<LiveParam, String> {
+        let key = Self::validate_live_param_name(name)?;
+        if !min.is_finite() || !max.is_finite() || !value.is_finite() {
+            return Err("Parámetro vivo: min/max/valor deben ser finitos".to_string());
+        }
+        if min >= max {
+            return Err("Parámetro vivo: el mínimo debe ser menor que el máximo".to_string());
+        }
+        if self.is_spreadsheet_owned_variable(&key) {
+            return Err("Spreadsheet-owned variables must be edited in their cell".to_string());
+        }
+        let clamped = value.clamp(min, max);
+        let span = max - min;
+        let fallback_step = (span / 100.0).max(f64::MIN_POSITIVE);
+        let previous = self.variable_meta.get(&key).cloned();
+        let meta = VariableMeta {
+            position: previous
+                .as_ref()
+                .map(|meta| meta.position)
+                .unwrap_or_else(|| Point2::new(0.0, 0.0)),
+            min,
+            max,
+            step: previous
+                .as_ref()
+                .map(|meta| meta.step)
+                .filter(|step| step.is_finite() && *step > 0.0)
+                .unwrap_or(fallback_step),
+            visible: previous.as_ref().map(|meta| meta.visible).unwrap_or(true),
+            animating: previous
+                .as_ref()
+                .map(|meta| meta.animating)
+                .unwrap_or(false),
+            animation_speed: previous
+                .as_ref()
+                .map(|meta| meta.animation_speed)
+                .filter(|speed| speed.is_finite())
+                .unwrap_or(1.0),
+            animation_mode: previous
+                .as_ref()
+                .map(|meta| meta.animation_mode)
+                .unwrap_or(AnimationMode::PingPong),
+        };
+        let key_for_insert = key.clone();
+        let key_for_meta = key.clone();
+        let meta_clone = meta.clone();
+        self.commit_variable_mutation(move |document| {
+            document.variables.insert(key_for_insert, clamped);
+            document.variable_meta.insert(key_for_meta, meta_clone);
+        })?;
+        Ok(LiveParam {
+            name: key,
+            min,
+            max,
+            value: clamped,
+        })
+    }
+
+    /// Alterna el plano numerado 2D (toggle del panel Vista). Solo vista.
+    pub fn set_number_plane_labels(&mut self, visible: bool) {
+        self.number_plane_labels = visible;
+    }
+
     /// Máximo de celdas CAS retenidas en un documento local.
     pub const MAX_CAS_WORKSHEET_CELLS: usize = 200;
     /// Máximo de bytes para la entrada de una celda CAS persistida.
@@ -6465,5 +6691,64 @@ mod trace_tests {
         assert_eq!(buf.len(), 1);
         buf.clear();
         assert!(buf.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod live_param_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_crea_p_y_slider_lo_lee() {
+        let mut doc = Document::new();
+        assert!(doc.live_param("p").is_none());
+        let live = doc.ensure_live_param("p", -5.0, 5.0, 0.0).expect("crea p");
+        assert_eq!(live.name, "p");
+        assert_eq!((live.min, live.max, live.value), (-5.0, 5.0, 0.0));
+        let read = doc.live_param("p").expect("slider lo lee");
+        assert_eq!(read.value, 0.0);
+        // La animación lo lee si existe, con fallback si no.
+        assert_eq!(doc.live_param_value("p", 99.0), 0.0);
+        assert_eq!(doc.live_param_value("ausente", 99.0), 99.0);
+    }
+
+    #[test]
+    fn set_revalua_dependientes_y_version_sube() {
+        let mut doc = Document::new();
+        doc.ensure_live_param("p", -2.0, 2.0, 0.0).expect("crea p");
+        let before = doc.version;
+        doc.set_live_param("p", 1.5).expect("mueve slider");
+        assert_eq!(doc.live_param("p").expect("lee").value, 1.5);
+        assert!(doc.version.wrapping_sub(before) >= 1);
+        // Clampea al rango en vez de rechazar (slider honesto).
+        doc.set_live_param("p", 99.0).expect("clampea");
+        assert_eq!(doc.live_param("p").expect("lee").value, 2.0);
+    }
+
+    #[test]
+    fn ensure_rechaza_rangos_y_nombres_sin_mutar() {
+        let mut doc = Document::new();
+        assert!(doc.ensure_live_param("", -1.0, 1.0, 0.0).is_err());
+        assert!(doc.ensure_live_param("9mal", -1.0, 1.0, 0.0).is_err());
+        assert!(doc.ensure_live_param("p", 2.0, -2.0, 0.0).is_err());
+        assert!(doc.ensure_live_param("p", f64::NAN, 1.0, 0.0).is_err());
+        assert!(doc.live_param("p").is_none(), "rechazo no deja rastro");
+        doc.ensure_live_param("p", -1.0, 1.0, 0.0).expect("crea");
+        assert!(doc.set_live_param("p", f64::INFINITY).is_err());
+        assert!(doc.set_live_param("ausente", 1.0).is_err());
+    }
+
+    #[test]
+    fn variable_sin_meta_usa_fallback_sin_mutar() {
+        let mut doc = Document::new();
+        doc.try_set_variable("q".to_string(), 3.0)
+            .expect("variable suelta");
+        let live = doc.live_param("q").expect("fallback");
+        assert_eq!(
+            (live.min, live.max),
+            (LIVE_PARAM_FALLBACK_MIN, LIVE_PARAM_FALLBACK_MAX)
+        );
+        assert_eq!(live.value, 3.0);
+        assert!(doc.variable_meta("q").is_none(), "lectura no muta");
     }
 }

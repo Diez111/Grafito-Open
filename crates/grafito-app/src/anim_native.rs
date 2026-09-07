@@ -239,15 +239,43 @@ pub fn encode_frames_to_gif_bytes(
 }
 
 /// Escribe los frames como GIF animado en `path` (bloquea: llamar en hilo).
+///
+/// Creación exclusiva (`create_new`, `O_EXCL`): si el destino ya existe —
+/// symlink plantado incluido — falla cerrado sin seguir ni truncar nada.
 pub fn export_frames_to_gif_file(
     frames: &[egui::ColorImage],
     path: &Path,
     delay_cs: u16,
 ) -> Result<PathBuf, GifExportError> {
     let bytes = encode_frames_to_gif_bytes(frames, delay_cs)?;
-    std::fs::write(path, &bytes)
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            GifExportError::Io(format!(
+                "no se pudo crear {} sin sobrescribir: {e}",
+                path.display()
+            ))
+        })?;
+    use std::io::Write as _;
+    file.write_all(&bytes)
         .map_err(|e| GifExportError::Io(format!("no se pudo escribir {}: {e}", path.display())))?;
     Ok(path.to_path_buf())
+}
+
+/// Crea el workdir de animación de forma exclusiva (equivale a `O_EXCL` en
+/// directorios: `create_dir` falla si ya existe, sin seguir symlinks).
+///
+/// Solo llamarla cuando el motor externo la necesite; la vía nativa no toca
+/// disco. `Err` honesto en español para mostrar en la card.
+pub fn prepare_anim_workdir_exclusive(work_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir(work_dir).map_err(|e| {
+        format!(
+            "no se pudo preparar el área de trabajo {}: {e}",
+            work_dir.display()
+        )
+    })
 }
 
 /// Exporta en un hilo aparte (no bloquea la UI).
@@ -3578,7 +3606,12 @@ mod tests {
     #[test]
     fn gif_export_en_hilo_escribe_archivo_real() {
         let frames = synthetic_frames(4);
-        let dir = std::env::temp_dir().join(format!("grafito_gif_export_{}", std::process::id()));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("grafito_gif_export_{}_{stamp}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("anim.gif");
         let handle = spawn_gif_export(frames, path.clone(), GIF_EXPORT_DELAY_CS);
@@ -3586,6 +3619,72 @@ mod tests {
         assert_eq!(out, path);
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..6], b"GIF89a");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gif_export_no_sigue_ni_trunca_symlink_plantado() {
+        let frames = synthetic_frames(2);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("grafito_gif_guard_{}_{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Víctima con contenido conocido + symlink plantado en el destino.
+        let victima = dir.join("victima.gif");
+        std::fs::write(&victima, b"contenido original").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victima, dir.join("anim.gif")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&victima, dir.join("anim.gif")).unwrap();
+        let destino = dir.join("anim.gif");
+        let error = export_frames_to_gif_file(&frames, &destino, GIF_EXPORT_DELAY_CS)
+            .expect_err("symlink plantado debe fallar cerrado");
+        assert!(
+            error.to_string().contains("sin sobrescribir"),
+            "error honesto, got: {error}"
+        );
+        // La víctima intacta y el enlace sin reemplazar por archivo real.
+        assert_eq!(std::fs::read(&victima).unwrap(), b"contenido original");
+        assert!(std::fs::symlink_metadata(&destino)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn workdir_exclusiva_falla_cerrado_ante_enlace_plantado() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "grafito_workdir_guard_{}_{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let enlace = dir.join("work");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &enlace).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &enlace).unwrap();
+        let error =
+            prepare_anim_workdir_exclusive(&enlace).expect_err("enlace plantado: falla cerrado");
+        assert!(
+            error.contains("área de trabajo"),
+            "error honesto, got: {error}"
+        );
+        // Nada escrito a través del enlace.
+        let dentro: Vec<_> = std::fs::read_dir(&real).unwrap().collect();
+        assert!(dentro.is_empty());
+        // Caso legítimo: dir inexistente se crea sin error.
+        prepare_anim_workdir_exclusive(&dir.join("nuevo")).unwrap();
+        assert!(dir.join("nuevo").is_dir());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -4052,5 +4151,687 @@ mod hostile_crash_f10 {
         assert_eq!(d.len(), NATIVE_ANIM_FRAME_COUNT);
         let i = render_integral_frames_with_params(64, 64, &bad);
         assert_eq!(i.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+}
+
+// ── F2b: renderer morph polilínea + concat playlist (Succession) ───────────
+// Dibuja el seam de F2a (`PolylineMorph::frames_puntos()`: 1 frame = 1
+// `Vec<[f64;2]>` en mundo) como polilínea con viewport validado
+// (`resolve_native_size` 64..=4096 + `to_pixel` mundo [-3,3]², puntos fuera se
+// clampan al borde sin panic). Los 8 easings NO se reimplementan: viajan
+// dentro del `PolylineMorph` (`ShapeEasing`, mismos valores que
+// `grafito-geometry::morph::MorphEasing`); acá solo se resuelven por nombre
+// (`morph_easing_from_name`). La playlist se reproduce como UN set
+// concatenado (`concat_playlist_frames`): el player del chat ya hace scrub
+// por animación vía `Timeline::sample` y así el scrub cubre el tiempo global
+// sin tocar la UI. Presupuestos: frames totales ≤96
+// (`grafito-anim::protocol::PLAYLIST_MAX_FRAMES_TOTAL`), OOM por set con
+// `checked` + `try_reserve`. Todo `Err` honesto en rioplatense, nada parcial
+// en silencio.
+use grafito_anim::parametric::{PolylineMorph, ShapeEasing};
+
+/// Nombres de los 8 easings del morph (los ya definidos en `ShapeEasing`).
+pub const MORPH_EASING_NAMES: [&str; 8] = [
+    "linear",
+    "quadratic_in",
+    "quadratic_out",
+    "cubic_in",
+    "cubic_out",
+    "cubic_in_out",
+    "sin_in_out",
+    "ease_out_back",
+];
+
+/// Error tipado del render morph / concat (mensajes en español, sin pánicos).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MorphRenderError {
+    /// La forma no valida o el set pedido es incoherente.
+    InvalidShape(String),
+    /// El set estimado excede `PARAMETRIC_MAX_BYTES` o desborda.
+    Oom { got: Option<usize>, max: usize },
+    /// La reserva del frame falló (OOM real del SO).
+    AllocFailed { bytes: usize },
+}
+
+impl std::fmt::Display for MorphRenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidShape(detail) => write!(f, "forma inválida: {detail}"),
+            Self::Oom { got, max } => match got {
+                Some(got) => write!(
+                    f,
+                    "el set estimado ({got} bytes) excede el tope de {max} bytes: bajá la resolución o los fotogramas"
+                ),
+                None => write!(
+                    f,
+                    "el set estimado desborda el contador: bajá la resolución o los fotogramas (tope {max} bytes)"
+                ),
+            },
+            Self::AllocFailed { bytes } => {
+                write!(f, "sin memoria para reservar el frame ({bytes} bytes)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MorphRenderError {}
+
+/// Resuelve un easing por nombre a los 8 ya definidos (`ShapeEasing`).
+///
+/// `None`/desconocido → `Err` honesto que lista los 8 (jamás default
+/// silencioso que cambie la curva sin avisar).
+pub fn morph_easing_from_name(name: &str) -> Result<ShapeEasing, MorphRenderError> {
+    ShapeEasing::from_name(name).ok_or_else(|| {
+        MorphRenderError::InvalidShape(format!(
+            "easing desconocido {name:?}: usá uno de {}",
+            MORPH_EASING_NAMES.join(", ")
+        ))
+    })
+}
+
+/// Dibuja una polilínea del mundo sobre el buffer (corta en puntos no
+/// finitos sin unir ramas rotas; `closed` une último→primero).
+fn draw_polyline_mundo(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    puntos: &[[f64; 2]],
+    closed: bool,
+    color: [u8; 4],
+) {
+    let px: Vec<Option<(usize, usize)>> = puntos
+        .iter()
+        .map(|p| {
+            if p[0].is_finite() && p[1].is_finite() {
+                Some(to_pixel(w, h, p[0], p[1]))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for par in px.windows(2) {
+        if let (Some(a), Some(b)) = (par[0], par[1]) {
+            draw_line(buf, w, h, a, b, color);
+        }
+    }
+    if closed {
+        let primero = px.first().copied().flatten();
+        let ultimo = px.last().copied().flatten();
+        if let (Some(a), Some(b)) = (ultimo, primero) {
+            if a != b {
+                draw_line(buf, w, h, a, b, color);
+            }
+        }
+    }
+}
+
+/// Renderiza un `PolylineMorph` (seam F2a) a fotogramas RGBA en memoria.
+///
+/// 1 frame de `frames_puntos()` = 1 polilínea en mundo. OOM acotado igual que
+/// el paramétrico: presupuesto con `estimate_frames_bytes` + reserva con
+/// `try_reserve` (`AllocFailed` honesto en vez de abortar). Determinista:
+/// mismo morph → mismos píxeles.
+pub fn render_morph_frames(
+    morph: &PolylineMorph,
+    width: u32,
+    height: u32,
+) -> Result<Vec<egui::ColorImage>, MorphRenderError> {
+    let puntos = morph
+        .frames_puntos()
+        .map_err(|e| MorphRenderError::InvalidShape(e.to_string()))?;
+    if puntos.is_empty() {
+        return Err(MorphRenderError::InvalidShape(
+            "el morph no produjo fotogramas".to_string(),
+        ));
+    }
+    let n = puntos.len();
+    // Viewport validado (clamp 64..=4096, nunca panic).
+    let ((w, h), _) = resolve_native_size(width, height);
+    match estimate_frames_bytes(w, h, n) {
+        Some(got) if got <= PARAMETRIC_MAX_BYTES => {}
+        other => {
+            return Err(MorphRenderError::Oom {
+                got: other,
+                max: PARAMETRIC_MAX_BYTES,
+            });
+        }
+    }
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(n)
+        .map_err(|_| MorphRenderError::Oom {
+            got: estimate_frames_bytes(w, h, n),
+            max: PARAMETRIC_MAX_BYTES,
+        })?;
+    let cerrada = morph.closed;
+    for (indice, forma) in puntos.iter().enumerate() {
+        let total = n.max(1);
+        let t = if total <= 1 {
+            0.0
+        } else {
+            (indice as f64) / ((total - 1) as f64)
+        };
+        let mut buf = alloc_frame_buffer(w, h).map_err(|_| {
+            let got = estimate_frames_bytes(w, h, 1);
+            MorphRenderError::AllocFailed {
+                bytes: got.unwrap_or(w.saturating_mul(h).saturating_mul(4)),
+            }
+        })?;
+        draw_parametric_base(&mut buf, w, h, t, "morph");
+        draw_polyline_mundo(&mut buf, w, h, forma, cerrada, CURVE_MAIN);
+        // Punto inicial marcado (misma semántica que la tangente: rojo).
+        if let Some(primero) = forma.first() {
+            if primero[0].is_finite() && primero[1].is_finite() {
+                let (px, py) = to_pixel(w, h, primero[0], primero[1]);
+                draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+            }
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+    }
+    Ok(frames)
+}
+
+/// Atajo: arma el morph por nombre de easing (los 8 ya definidos) y lo
+/// renderiza. `frames_n` en 1..=48 (`FrameCount`), `samples` en 2..=512.
+/// Todo `Err` honesto (easing, formas, frames o memoria).
+#[allow(clippy::too_many_arguments)]
+pub fn render_morph_with_easing(
+    a: Vec<[f64; 2]>,
+    b: Vec<[f64; 2]>,
+    samples: usize,
+    frames_n: usize,
+    closed: bool,
+    align_start: bool,
+    easing_name: &str,
+    width: u32,
+    height: u32,
+) -> Result<Vec<egui::ColorImage>, MorphRenderError> {
+    let easing = morph_easing_from_name(easing_name)?;
+    let frames = FrameCount::try_new(frames_n)
+        .map_err(|e| MorphRenderError::InvalidShape(format!("fotogramas inválidos: {e}")))?;
+    let morph = PolylineMorph::try_new(a, b, samples, frames, closed, align_start, easing)
+        .map_err(|e| MorphRenderError::InvalidShape(e.to_string()))?;
+    render_morph_frames(&morph, width, height)
+}
+
+/// Frames de hold para un `wait_after_ms` a `fps` (silencio = último frame
+/// quieto). Pura: `fps` no finito o ≤0 → 0; saturada al tope de playlist.
+pub fn playlist_hold_frames(wait_ms: u64, fps: f32) -> usize {
+    if wait_ms == 0 || !fps.is_finite() || fps <= 0.0 {
+        return 0;
+    }
+    let frames = (wait_ms as f64) / 1000.0 * f64::from(fps);
+    if !frames.is_finite() || frames <= 0.0 {
+        return 0;
+    }
+    (frames.round() as usize).min(grafito_anim::protocol::PLAYLIST_MAX_FRAMES_TOTAL)
+}
+
+/// Concatena sets de frames en UN set para el player (scrub total).
+///
+/// Chequeos honestos, nada parcial: total vacío → `Err`; total >96 →
+/// `Err`; dimensiones inconsistentes → `Err` con el índice; OOM por set →
+/// `Err`. Mueve los frames (sin re-render ni copia de píxeles).
+pub fn concat_playlist_frames(
+    sets: Vec<Vec<egui::ColorImage>>,
+) -> Result<Vec<egui::ColorImage>, MorphRenderError> {
+    let mut total: usize = 0;
+    for set in &sets {
+        total = total.checked_add(set.len()).ok_or(MorphRenderError::Oom {
+            got: None,
+            max: PARAMETRIC_MAX_BYTES,
+        })?;
+    }
+    if total == 0 {
+        return Err(MorphRenderError::InvalidShape(
+            "la playlist no tiene ningún frame: agregá un step animado".to_string(),
+        ));
+    }
+    if total > grafito_anim::protocol::PLAYLIST_MAX_FRAMES_TOTAL {
+        return Err(MorphRenderError::InvalidShape(format!(
+            "{total} frames exceden el tope de {}: sacá un step o bajá los frames por step",
+            grafito_anim::protocol::PLAYLIST_MAX_FRAMES_TOTAL
+        )));
+    }
+    let (w, h) = sets
+        .iter()
+        .flatten()
+        .next()
+        .map_or((0, 0), |frame| (frame.size[0], frame.size[1]));
+    for (conjunto, set) in sets.iter().enumerate() {
+        for (indice, frame) in set.iter().enumerate() {
+            if frame.size != [w, h] {
+                return Err(MorphRenderError::InvalidShape(format!(
+                    "el frame {indice} del set {conjunto} mide {:?} y el primero mide [{w},{h}]: renderá todo a la misma resolución",
+                    frame.size
+                )));
+            }
+        }
+    }
+    match estimate_frames_bytes(w, h, total) {
+        Some(got) if got <= PARAMETRIC_MAX_BYTES => {}
+        other => {
+            return Err(MorphRenderError::Oom {
+                got: other,
+                max: PARAMETRIC_MAX_BYTES,
+            });
+        }
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(total)
+        .map_err(|_| MorphRenderError::Oom {
+            got: estimate_frames_bytes(w, h, total),
+            max: PARAMETRIC_MAX_BYTES,
+        })?;
+    for set in sets {
+        out.extend(set);
+    }
+    Ok(out)
+}
+
+/// Concatena steps `(frames, wait_after_ms)` agregando holds del último frame.
+///
+/// Cada espera suma `playlist_hold_frames(wait_ms, fps)` copias del último
+/// frame del step (silencio quieto estilo `Wait`). Presupuesto total (frames
+/// + holds) ≤96 con `checked`, todo `Err` honesto.
+pub fn concat_playlist_with_holds(
+    steps: Vec<(Vec<egui::ColorImage>, u64)>,
+    fps: f32,
+) -> Result<Vec<egui::ColorImage>, MorphRenderError> {
+    let mut total: usize = 0;
+    for (frames, espera) in &steps {
+        total = total
+            .checked_add(frames.len())
+            .ok_or(MorphRenderError::Oom {
+                got: None,
+                max: PARAMETRIC_MAX_BYTES,
+            })?;
+        total = total
+            .checked_add(playlist_hold_frames(*espera, fps))
+            .ok_or(MorphRenderError::Oom {
+                got: None,
+                max: PARAMETRIC_MAX_BYTES,
+            })?;
+    }
+    if total == 0 {
+        return Err(MorphRenderError::InvalidShape(
+            "la playlist no tiene ningún frame: agregá un step animado".to_string(),
+        ));
+    }
+    if total > grafito_anim::protocol::PLAYLIST_MAX_FRAMES_TOTAL {
+        return Err(MorphRenderError::InvalidShape(format!(
+            "{total} frames (con esperas) exceden el tope de {}: sacá un step o acortá las esperas",
+            grafito_anim::protocol::PLAYLIST_MAX_FRAMES_TOTAL
+        )));
+    }
+    let mut sets: Vec<Vec<egui::ColorImage>> = Vec::with_capacity(steps.len());
+    for (frames, espera) in steps {
+        let hold = playlist_hold_frames(espera, fps);
+        let mut set = frames;
+        if hold > 0 {
+            if let Some(ultimo) = set.last().cloned() {
+                set.try_reserve_exact(hold)
+                    .map_err(|_| MorphRenderError::Oom {
+                        got: None,
+                        max: PARAMETRIC_MAX_BYTES,
+                    })?;
+                for _ in 0..hold {
+                    set.push(ultimo.clone());
+                }
+            }
+        }
+        sets.push(set);
+    }
+    concat_playlist_frames(sets)
+}
+
+/// Cuántos frames quedan de un step de `n` con stride `s` (preservando primer
+/// y último: índices `0, s, 2s…` más `n-1` si falta). Pura, sin allocs.
+fn strided_len(n: usize, stride: usize) -> usize {
+    if n == 0 || stride == 0 {
+        return 0;
+    }
+    // ceil(n/s) índices base; +1 si el último no cae en la grilla.
+    let base = n.saturating_add(stride.saturating_sub(1)) / stride;
+    if (n.saturating_sub(1)).is_multiple_of(stride) {
+        base
+    } else {
+        base.saturating_add(1)
+    }
+}
+
+/// Submuestrea un step con stride `s` preservando primer y último frame.
+/// Pura (clona los frames elegidos, mueve el resto).
+fn stride_frames(frames: &[egui::ColorImage], stride: usize) -> Vec<egui::ColorImage> {
+    if frames.is_empty() || stride <= 1 {
+        return frames.to_vec();
+    }
+    let n = frames.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        out.push(frames[i].clone());
+        i = i.saturating_add(stride);
+    }
+    if !(n.saturating_sub(1)).is_multiple_of(stride) {
+        if let Some(ultimo) = frames.last() {
+            out.push(ultimo.clone());
+        }
+    }
+    out
+}
+
+/// Concatena steps ajustando la cadencia por step para entrar en 96.
+///
+/// Política honesta y determinista (nada parcial en silencio):
+/// 1. holds por step = `playlist_hold_frames(wait_ms, fps)` (silencio quieto).
+/// 2. si frames + holds ≤ 96 → concat directo (stride 1, sin tocar nada).
+/// 3. si no, el menor stride `s` uniforme con `Σ strided + holds ≤ 96`
+///    (baja la cadencia, jamás corta contenido: primer y último frame de
+///    cada step siempre presentes, los extremos A→B intactos).
+/// 4. si ni 1 frame por step + holds entra → `Err` honesto.
+///
+/// Todo lo demás lo valida `concat_playlist_frames` (dims, OOM).
+pub fn concat_playlist_fitting(
+    steps: Vec<(Vec<egui::ColorImage>, u64)>,
+    fps: f32,
+) -> Result<Vec<egui::ColorImage>, MorphRenderError> {
+    if steps.is_empty() {
+        return Err(MorphRenderError::InvalidShape(
+            "la playlist no tiene ningún step".to_string(),
+        ));
+    }
+    let mut holds = Vec::with_capacity(steps.len());
+    let mut frames_total: usize = 0;
+    let mut max_step: usize = 0;
+    for (frames, espera) in &steps {
+        holds.push(playlist_hold_frames(*espera, fps));
+        frames_total = frames_total
+            .checked_add(frames.len())
+            .ok_or(MorphRenderError::Oom {
+                got: None,
+                max: PARAMETRIC_MAX_BYTES,
+            })?;
+        max_step = max_step.max(frames.len());
+    }
+    let holds_total: usize = holds.iter().sum();
+    let sin_stride = frames_total.saturating_add(holds_total);
+    let tope = grafito_anim::protocol::PLAYLIST_MAX_FRAMES_TOTAL;
+    // Caso directo: entra tal cual (el común: 2×48 sin esperas largas).
+    if sin_stride <= tope && frames_total > 0 {
+        return concat_playlist_with_holds(steps, fps);
+    }
+    if frames_total == 0 {
+        return Err(MorphRenderError::InvalidShape(
+            "la playlist no tiene ningún frame: agregá un step animado".to_string(),
+        ));
+    }
+    // Busca el menor stride uniforme que entra con los holds.
+    let mut elegido: Option<usize> = None;
+    for stride in 1..=max_step.max(1) {
+        let mut total = holds_total;
+        let mut ok = true;
+        for (frames, _) in &steps {
+            total = match total.checked_add(strided_len(frames.len(), stride)) {
+                Some(v) => v,
+                None => {
+                    ok = false;
+                    break;
+                }
+            };
+            if total > tope {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            elegido = Some(stride);
+            break;
+        }
+    }
+    let Some(stride) = elegido else {
+        return Err(MorphRenderError::InvalidShape(format!(
+            "ni con 1 frame por step + esperas entra en {tope}: sacá un step o acortá las esperas"
+        )));
+    };
+    let rebajados: Vec<(Vec<egui::ColorImage>, u64)> = steps
+        .into_iter()
+        .map(|(frames, espera)| (stride_frames(&frames, stride), espera))
+        .collect();
+    concat_playlist_with_holds(rebajados, fps)
+}
+
+#[cfg(test)]
+mod morph_playlist_f2b_tests {
+    use super::*;
+
+    fn cuadrada() -> Vec<[f64; 2]> {
+        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+    }
+
+    fn triangulo() -> Vec<[f64; 2]> {
+        vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]
+    }
+
+    fn morph_lineal() -> PolylineMorph {
+        PolylineMorph::try_new(
+            cuadrada(),
+            triangulo(),
+            16,
+            FrameCount::try_new(5).unwrap(),
+            false,
+            true,
+            ShapeEasing::Linear,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn morph_dibuja_polilinea_con_extremos_distintos() {
+        let frames = render_morph_frames(&morph_lineal(), 64, 64).unwrap();
+        assert_eq!(frames.len(), 5);
+        for frame in &frames {
+            assert_eq!(frame.size, [64, 64]);
+        }
+        // El morph se mueve: primero ≠ último (algún píxel cambia).
+        let primero = &frames[0].pixels;
+        let ultimo = &frames[4].pixels;
+        assert_ne!(primero, ultimo, "el morph debe progresar entre frames");
+        // Progresión monótona del seam: el frame medio no es ni A ni B.
+        assert_ne!(&frames[2].pixels, primero);
+        assert_ne!(&frames[2].pixels, ultimo);
+    }
+
+    #[test]
+    fn morph_cerrada_cierra_el_lazo_y_viewport_clampeado() {
+        let morph = PolylineMorph::try_new(
+            cuadrada(),
+            triangulo(),
+            12,
+            FrameCount::try_new(3).unwrap(),
+            true,
+            true,
+            ShapeEasing::CubicInOut,
+        )
+        .unwrap();
+        let frames = render_morph_frames(&morph, 64, 64).unwrap();
+        assert_eq!(frames.len(), 3);
+        // Viewport bajo mínimo (8 < 64): clampeado a 64 sin panic.
+        let chicos = render_morph_frames(&morph_lineal(), 8, 8).unwrap();
+        assert!(chicos.iter().all(|f| f.size == [64, 64]));
+    }
+
+    #[test]
+    fn easings_los_8_por_nombre_sin_reimplementar() {
+        assert_eq!(MORPH_EASING_NAMES.len(), 8);
+        for nombre in MORPH_EASING_NAMES {
+            let easing = morph_easing_from_name(nombre).unwrap();
+            assert_eq!(easing.as_str(), nombre);
+            assert!((easing.apply(0.0)).abs() < 1e-12, "{nombre}");
+            assert!((easing.apply(1.0) - 1.0).abs() < 1e-9, "{nombre}");
+            // El atajo renderiza con cada easing (4 frames chicos).
+            let frames = render_morph_with_easing(
+                cuadrada(),
+                triangulo(),
+                8,
+                4,
+                false,
+                true,
+                nombre,
+                64,
+                64,
+            )
+            .unwrap();
+            assert_eq!(frames.len(), 4, "{nombre}");
+        }
+        let err = morph_easing_from_name("bounce").unwrap_err().to_string();
+        assert!(
+            err.contains("linear") && err.contains("cubic_in_out"),
+            "lista los 8, got: {err}"
+        );
+    }
+
+    #[test]
+    fn morph_invalido_falla_honesto() {
+        let frames = render_morph_frames(&morph_lineal(), 64, 64).unwrap();
+        assert_eq!(frames.len(), 5);
+        // Forma vacía: Err con guía, no deforma en silencio.
+        let vacio = PolylineMorph::try_new(
+            vec![],
+            triangulo(),
+            8,
+            FrameCount::try_new(3).unwrap(),
+            false,
+            true,
+            ShapeEasing::Linear,
+        );
+        assert!(vacio.is_err());
+        // Easing desconocido + frames fuera de rango: Err honesto.
+        assert!(render_morph_with_easing(
+            cuadrada(),
+            triangulo(),
+            8,
+            0,
+            false,
+            true,
+            "linear",
+            64,
+            64
+        )
+        .is_err());
+        assert!(render_morph_with_easing(
+            cuadrada(),
+            triangulo(),
+            8,
+            4,
+            false,
+            true,
+            "rebote-magico",
+            64,
+            64
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn concat_respeta_tope_96_y_dimensiones() {
+        let a = render_morph_frames(&morph_lineal(), 64, 64).unwrap();
+        let b = render_morph_frames(&morph_lineal(), 64, 64).unwrap();
+        assert_eq!(a.len() + b.len(), 10);
+        let todo = concat_playlist_frames(vec![a, b]).unwrap();
+        assert_eq!(todo.len(), 10);
+        // Vacío y exceso fallan honestos (nada parcial).
+        assert!(concat_playlist_frames(vec![]).is_err());
+        let muchos: Vec<Vec<egui::ColorImage>> = (0..20)
+            .map(|_| render_morph_frames(&morph_lineal(), 64, 64).unwrap())
+            .collect();
+        let err = concat_playlist_frames(muchos).unwrap_err().to_string();
+        assert!(err.contains("96"), "tope 96 en el mensaje, got: {err}");
+        // Dimensiones mezcladas: Err con el índice.
+        let chico = egui::ColorImage::new([32, 32], egui::Color32::BLACK);
+        let grande = egui::ColorImage::new([64, 64], egui::Color32::BLACK);
+        assert!(concat_playlist_frames(vec![vec![chico, grande]]).is_err());
+    }
+
+    #[test]
+    fn holds_suman_silencio_quieto_y_piden_fps_sano() {
+        assert_eq!(playlist_hold_frames(0, 12.0), 0);
+        assert_eq!(playlist_hold_frames(1000, 12.0), 12);
+        assert_eq!(playlist_hold_frames(500, 12.0), 6);
+        assert_eq!(playlist_hold_frames(1000, f32::NAN), 0);
+        assert_eq!(playlist_hold_frames(1000, 0.0), 0);
+        // Con holds: 5 frames + 12 de espera = 17 (últimos 12 idénticos).
+        let base = render_morph_frames(&morph_lineal(), 64, 64).unwrap();
+        let ultimo = base.last().unwrap().pixels.clone();
+        let todo = concat_playlist_with_holds(vec![(base, 1000)], 12.0).unwrap();
+        assert_eq!(todo.len(), 17);
+        for frame in todo.iter().skip(5) {
+            assert_eq!(frame.pixels, ultimo, "la espera congela el último frame");
+        }
+        // Holds que pasan 96: Err honesto.
+        let base2 = render_morph_frames(&morph_lineal(), 64, 64).unwrap();
+        let err = concat_playlist_with_holds(vec![(base2, 10_000)], 12.0)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("96"), "got: {err}");
+    }
+
+    #[test]
+    fn fitting_ajusta_cadencia_preservando_extremos_o_falla_honesto() {
+        // Sets de 48 (los nativos reales): 2×48 + 6 holds = 102 > 96 →
+        // stride 2 → 25+25+6 = 56 con extremos intactos.
+        let morph48 = || {
+            render_morph_with_easing(
+                cuadrada(),
+                triangulo(),
+                16,
+                48,
+                false,
+                true,
+                "linear",
+                64,
+                64,
+            )
+            .unwrap()
+        };
+        let a = morph48();
+        let b = morph48();
+        let primero_a = a.first().unwrap().pixels.clone();
+        let ultimo_b = b.last().unwrap().pixels.clone();
+        let todo = concat_playlist_fitting(vec![(a, 500), (b, 0)], 12.0).unwrap();
+        assert_eq!(todo.len(), 25 + 25 + 6, "got: {}", todo.len());
+        assert_eq!(
+            todo.first().unwrap().pixels,
+            primero_a,
+            "primer frame intacto"
+        );
+        assert_eq!(
+            todo.last().unwrap().pixels,
+            ultimo_b,
+            "último frame intacto"
+        );
+        // Caso directo sin tocar: 2×48 sin esperas = 96 clavados.
+        let directo = concat_playlist_fitting(vec![(morph48(), 0), (morph48(), 0)], 12.0).unwrap();
+        assert_eq!(directo.len(), 96);
+        // Imposible: ni 1 frame por step + holds entra → Err honesto.
+        let muchos: Vec<(Vec<egui::ColorImage>, u64)> = (0..8)
+            .map(|_| {
+                (
+                    render_morph_frames(&morph_lineal(), 64, 64).unwrap(),
+                    10_000,
+                )
+            })
+            .collect();
+        let err = concat_playlist_fitting(muchos, 12.0)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("96"), "got: {err}");
+        // Vacío: Err honesto.
+        assert!(concat_playlist_fitting(vec![], 12.0).is_err());
+        // stride cuenta bien los bordes.
+        assert_eq!(strided_len(48, 1), 48);
+        assert_eq!(strided_len(48, 2), 25);
+        assert_eq!(strided_len(5, 2), 3);
+        assert_eq!(strided_len(0, 2), 0);
     }
 }

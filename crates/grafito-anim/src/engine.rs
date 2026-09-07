@@ -830,21 +830,9 @@ pub fn run_job(
                 if result.job_id != job_id {
                     continue;
                 }
-                // Asegura que el parent existe antes de validar (evita TOCTOU por subdir inexistente).
-                {
-                    let working = config.working_dir.as_deref().unwrap_or(Path::new("."));
-                    let candidate = Path::new(&result.media_path);
-                    let absolute = if candidate.is_absolute() {
-                        candidate.to_path_buf()
-                    } else {
-                        working.join(candidate)
-                    };
-                    if let Some(parent) = absolute.parent() {
-                        if !parent.exists() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                    }
-                }
+                // Validar ANTES de crear nada: un path con escape no debe
+                // dejar directorios creados (fail-closed; `validate_media_path`
+                // solo crea el subdir tras verificar contención).
                 if !validate_media_path(
                     config.working_dir.as_deref().unwrap_or(Path::new(".")),
                     &result.media_path,
@@ -915,31 +903,28 @@ pub fn validate_media_path(working_dir: &Path, media_path: &str) -> bool {
     let Some(parent) = absolute.parent() else {
         return false;
     };
-    // Si el parent no existe, intenta crearlo (el caller debería haberlo hecho,
-    // pero aquí toleramos races donde el subdir aún no existe).
-    let parent_canonical = match parent.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(_) => {
-            if !parent.exists() {
-                if let Err(err) = std::fs::create_dir_all(parent) {
-                    log::warn!(
-                        "validate_media_path: no se pudo crear parent {}: {err}",
-                        parent.display()
-                    );
-                    return false;
-                }
-            }
-            match parent.canonicalize() {
-                Ok(canonical) => canonical,
-                Err(err) => {
-                    log::warn!(
-                        "validate_media_path: canonicalize falló para {}: {err}",
-                        parent.display()
-                    );
-                    return false;
-                }
-            }
+    // Contención ANTES de crear nada: si el ancestro existente más cercano
+    // ya está fuera del cwd, falla cerrado sin tocar disco.
+    if !nearest_existing_ancestor_inside(parent, &cwd) {
+        return false;
+    }
+    // Recién ahora se tolera crear el subdir (races donde aún no existe);
+    // se re-verifica post-creación contra symlinks plantados en el medio.
+    if !parent.exists() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            log::warn!(
+                "validate_media_path: no se pudo crear parent {}: {err}",
+                parent.display()
+            );
+            return false;
         }
+    }
+    let Ok(parent_canonical) = parent.canonicalize() else {
+        log::warn!(
+            "validate_media_path: canonicalize falló para {}",
+            parent.display()
+        );
+        return false;
     };
     if !parent_canonical.starts_with(&cwd) {
         return false;
@@ -947,6 +932,23 @@ pub fn validate_media_path(working_dir: &Path, media_path: &str) -> bool {
     // TOCTOU documentado: verificar post-open que fd sigue dentro de cwd via /proc/self/fd
     // El caller debe verificar post-open que el fd abierto sigue dentro de cwd.
     true
+}
+
+/// ¿El ancestro existente más cercano de `path` queda dentro de `cwd`?
+///
+/// Puro salvo `canonicalize` (solo lectura): nunca crea directorios.
+/// Termina porque cada paso acorta el path; vacío o raíz ajena → `false`.
+fn nearest_existing_ancestor_inside(path: &Path, cwd: &Path) -> bool {
+    let mut probe = path;
+    loop {
+        match probe.canonicalize() {
+            Ok(canonical) => return canonical.starts_with(cwd),
+            Err(_) => match probe.parent() {
+                Some(up) if !up.as_os_str().is_empty() => probe = up,
+                _ => return false,
+            },
+        }
+    }
 }
 
 fn spawn_reader(stdout: ChildStdout, sender: SyncSender<WireMessage>, line_cap: usize) {
@@ -1211,6 +1213,35 @@ for line in sys.stdin:
         // NUL rechazado
         assert!(!validate_media_path(&dir, "out\0.png"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn traversal_media_path_creates_nothing_on_disk() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("grafito_media_guard_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("wd")).unwrap();
+        let wd = base.join("wd");
+        // Path con escape cuyo parent no existe: debe fallar cerrado.
+        assert!(!validate_media_path(
+            &wd,
+            "../../evil_evil_evil_dir_de_prueba/p.png"
+        ));
+        assert!(!validate_media_path(&wd, "../out.png"));
+        // Nada creado fuera ni dentro: solo sigue existiendo "wd".
+        let entries: Vec<_> = fs::read_dir(&base)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("wd")]);
+        assert!(!base.join("evil_evil_evil_dir_de_prueba").exists());
+        // Path legítimo con subdir inexistente sí se permite (y crea el subdir).
+        assert!(validate_media_path(&wd, "sub legitimo_legitimo/out.png"));
+        assert!(base.join("wd").join("sub legitimo_legitimo").exists());
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
@@ -1722,5 +1753,290 @@ print("sandbox path-traversal OK")
         });
         assert!(ok.is_ok(), "sin cancel el job completa");
         assert!(saw_progress, "el stub emite progress real");
+    }
+}
+
+// ── F2b: FIFO honesto para playlists (encolar varios jobs) ─────────────────
+// Por qué el engine persistente NO multiplexa (documentado, no en silencio):
+// `AnimEngine` habla por un solo stdin/stdout con deadlines absolutas por job
+// y cancel <200 ms con kill. Dos `submit` concurrentes mezclarían
+// `progress`/`result` en el mismo canal: el filtro por `job_id` no alcanza
+// para deadlines ni cancels independientes ni para un `shutdown` cooperativo
+// por job. Por eso `submit` en `Running` se rechaza (test
+// `submit_while_running_is_rejected_no_fifo_queue` lo pinnea) y la FIFO vive
+// UN nivel arriba: `PlaylistQueue` (pura, cap 8 = `PLAYLIST_MAX_STEPS`)
+// drena con `run_job` efímero (spawn→wait_ready→submit→recv→shutdown) un
+// request por vez, en orden de llegada. `run_playlist_sequential` es ese
+// drenaje: valida la playlist primero y ante el primer fallo aborta cerrado
+// (nada parcial en silencio: no devuelve resultados a medias).
+//
+// Las pausas (`PlaylistStep` sin request) NO se encolan: son espera local del
+// player (hold del último frame en el concat nativo). Los `wait_after_ms`
+// tampoco duermen este hilo: el worker externo ya impone su duración por
+// job; el hold se aplica al concatenar frames en `grafito-app`.
+
+/// Tope de la cola FIFO (igual que `PLAYLIST_MAX_STEPS`: 8).
+pub const PLAYLIST_QUEUE_CAP: usize = crate::protocol::PLAYLIST_MAX_STEPS;
+
+/// Cola FIFO pura de requests externos (sin I/O, sin spawn, sin `unwrap`).
+///
+/// Solo guarda requests ya validados; el drenaje (`run_playlist_sequential`)
+/// los ejecuta en orden con `run_job` efímero.
+#[derive(Debug, Default)]
+pub struct PlaylistQueue {
+    inner: std::collections::VecDeque<AnimRequest>,
+}
+
+impl PlaylistQueue {
+    /// Cola vacía.
+    pub fn new() -> Self {
+        Self {
+            inner: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Cantidad encolada.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// ¿Vacía?
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Encola un request validado (respeta el tope de 8, `Err` honesto).
+    pub fn push(&mut self, request: AnimRequest) -> Result<(), String> {
+        request
+            .validate()
+            .map_err(|e| format!("petición inválida: {e}"))?;
+        if self.inner.len() >= PLAYLIST_QUEUE_CAP {
+            return Err(format!(
+                "cola llena ({} jobs): terminá o drená antes de encolar más",
+                PLAYLIST_QUEUE_CAP
+            ));
+        }
+        self.inner.push_back(request);
+        Ok(())
+    }
+
+    /// Encola los steps animados de una playlist, en orden.
+    ///
+    /// Valida la playlist primero (todo `Err` honesto, sin encolar parcial);
+    /// las pausas se saltan (son hold local del player). Si la playlist no
+    /// trae ningún step animado → `Err` (encolar silencio no tiene sentido).
+    pub fn push_playlist(&mut self, playlist: &crate::protocol::Playlist) -> Result<(), String> {
+        playlist
+            .validate()
+            .map_err(|e| format!("playlist inválida: {e}"))?;
+        let animados: Vec<&AnimRequest> = playlist
+            .steps
+            .iter()
+            .filter_map(|step| step.request.as_ref())
+            .collect();
+        if animados.is_empty() {
+            return Err("la playlist solo trae pausas: nada para encolar".to_string());
+        }
+        if self.inner.len().saturating_add(animados.len()) > PLAYLIST_QUEUE_CAP {
+            return Err(format!(
+                "la playlist no entra en la cola ({} encolados + {} nuevos > {PLAYLIST_QUEUE_CAP}): drená primero",
+                self.inner.len(),
+                animados.len()
+            ));
+        }
+        for request in animados {
+            self.inner.push_back(request.clone());
+        }
+        Ok(())
+    }
+
+    /// Saca el primero (FIFO). `None` si vacía.
+    pub fn pop_front(&mut self) -> Option<AnimRequest> {
+        self.inner.pop_front()
+    }
+
+    /// Vacía la cola devolviendo los requests en orden FIFO.
+    pub fn drain_ordered(&mut self) -> Vec<AnimRequest> {
+        self.inner.drain(..).collect()
+    }
+}
+
+/// Drena una playlist contra el motor externo, un job por vez en orden FIFO.
+///
+/// - Valida la playlist ANTES de spawnear nada (falla cerrado sin tocar el
+///   worker).
+/// - Cada step animado corre `run_job` efímero; los eventos viajan con su
+///   índice de step (`on_event(step, ev)`).
+/// - Cancelación cooperativa: se chequea antes de cada job (además del poll
+///   interno de `run_job`).
+/// - Fail-fast honesto: ante el primer `Err` aborta con el índice del step
+///   (`"playlist: falló el step {i} (de {n}): {causa}"`) y NO devuelve
+///   resultados parciales.
+/// - Las pausas se saltan (hold local del player, ver doc del módulo).
+/// - Sin `unwrap` en prod; bloquea el hilo llamante (nunca la UI: llamar en
+///   worker como `run_job`).
+pub fn run_playlist_sequential(
+    config: &EngineConfig,
+    playlist: &crate::protocol::Playlist,
+    cancel: Option<&dyn Fn() -> bool>,
+    mut on_event: impl FnMut(usize, JobEvent),
+) -> Result<Vec<AnimResult>, String> {
+    playlist
+        .validate()
+        .map_err(|e| format!("playlist inválida: {e}"))?;
+    let total_animados = playlist
+        .steps
+        .iter()
+        .filter(|step| step.request.is_some())
+        .count();
+    if total_animados == 0 {
+        return Err("la playlist solo trae pausas: nada para ejecutar".to_string());
+    }
+    let mut step_index: usize = 0;
+    let mut ordered: usize = 0;
+    let mut results = Vec::new();
+    for step in &playlist.steps {
+        let Some(request) = step.request.as_ref() else {
+            step_index = step_index.saturating_add(1);
+            continue;
+        };
+        if cancel.is_some_and(|cancel| cancel()) {
+            return Err(crate::protocol::localize_worker_error(
+                "cancelled",
+                "la playlist se canceló antes del step",
+            ));
+        }
+        let current = step_index;
+        let attempt = run_job(config, request, cancel, |ev| on_event(current, ev));
+        match attempt {
+            Ok(result) => {
+                results.push(result);
+                ordered = ordered.saturating_add(1);
+            }
+            Err(causa) => {
+                return Err(format!(
+                    "playlist: falló el step {current} (de {total_animados} animados): {causa}"
+                ));
+            }
+        }
+        step_index = step_index.saturating_add(1);
+    }
+    if results.len() != ordered || ordered != total_animados {
+        return Err("playlist: conteo interno inconsistente, nada parcial".to_string());
+    }
+    Ok(results)
+}
+
+#[cfg(test)]
+mod playlist_fifo_f2b_tests {
+    use super::*;
+    use crate::protocol::{ExportFormat, PlaylistStep};
+
+    fn pedido(template: &str) -> AnimRequest {
+        AnimRequest {
+            template: template.to_string(),
+            concept: "derivada".to_string(),
+            params: std::collections::BTreeMap::new(),
+            spec: None,
+            export: ExportFormat::Gif,
+            canvas: (640, 480),
+            duration_ms: 2000,
+        }
+    }
+
+    fn lista_dos() -> crate::protocol::Playlist {
+        crate::protocol::Playlist::try_new(vec![
+            PlaylistStep::anim(pedido("derivative-slope"), 2000, 0).unwrap(),
+            PlaylistStep::anim(pedido("integral-area"), 1000, 500).unwrap(),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn fifo_encola_en_orden_y_respeta_tope_8() {
+        let mut cola = PlaylistQueue::new();
+        assert!(cola.is_empty());
+        cola.push(pedido("derivative-slope")).unwrap();
+        cola.push(pedido("integral-area")).unwrap();
+        assert_eq!(cola.len(), 2);
+        assert_eq!(cola.pop_front().unwrap().template, "derivative-slope");
+        assert_eq!(cola.pop_front().unwrap().template, "integral-area");
+        assert!(cola.pop_front().is_none());
+        // Tope: 8 entran, el 9º falla cerrado sin encolar parcial.
+        let mut llena = PlaylistQueue::new();
+        for _ in 0..PLAYLIST_QUEUE_CAP {
+            llena.push(pedido("derivative-slope")).unwrap();
+        }
+        let err = llena.push(pedido("derivative-slope")).unwrap_err();
+        assert!(err.contains("llena"), "tope honesto, got: {err}");
+        assert_eq!(llena.len(), PLAYLIST_QUEUE_CAP);
+    }
+
+    #[test]
+    fn push_playlist_salta_pausas_y_falla_si_todo_pausa() {
+        let mut cola = PlaylistQueue::new();
+        cola.push_playlist(&lista_dos()).unwrap();
+        assert_eq!(cola.len(), 2);
+        assert_eq!(
+            cola.drain_ordered()
+                .iter()
+                .map(|r| r.template.clone())
+                .collect::<Vec<_>>(),
+            vec!["derivative-slope".to_string(), "integral-area".to_string()]
+        );
+        // Con pausa intercalada: solo los animados, en orden.
+        let con_pausa = crate::protocol::Playlist::try_new(vec![
+            PlaylistStep::anim(pedido("derivative-slope"), 1000, 0).unwrap(),
+            PlaylistStep::pausa(500).unwrap(),
+            PlaylistStep::anim(pedido("integral-area"), 1000, 0).unwrap(),
+        ])
+        .unwrap();
+        let mut cola2 = PlaylistQueue::new();
+        cola2.push_playlist(&con_pausa).unwrap();
+        assert_eq!(cola2.len(), 2);
+        // Todo pausas: Err honesto, cola intacta.
+        let solo_pausas = crate::protocol::Playlist::try_new(vec![
+            PlaylistStep::pausa(500).unwrap(),
+            PlaylistStep::pausa(300).unwrap(),
+        ])
+        .unwrap();
+        let mut cola3 = PlaylistQueue::new();
+        let err = cola3.push_playlist(&solo_pausas).unwrap_err();
+        assert!(err.contains("pausas"), "got: {err}");
+        assert!(cola3.is_empty());
+        // Request inválido: push rechaza sin encolar.
+        let mut malo = pedido("");
+        malo.concept.clear();
+        let mut cola4 = PlaylistQueue::new();
+        assert!(cola4.push(malo).is_err());
+        assert!(cola4.is_empty());
+    }
+
+    #[test]
+    fn run_playlist_valida_antes_de_spawnear_y_falla_cerrado() {
+        // Playlist inválida (struct literal vacío, bypasea try_new): ni siquiera
+        // intenta spawnear (config con binario inexistente daría otro error).
+        let vacia = crate::protocol::Playlist { steps: vec![] };
+        let config = EngineConfig {
+            command: vec!["/definitivamente/no/existe/grafito_stub".to_string()],
+            working_dir: None,
+            idle_timeout: std::time::Duration::from_secs(1),
+            job_timeout: std::time::Duration::from_secs(1),
+            line_cap_bytes: DEFAULT_LINE_CAP_BYTES,
+        };
+        let err = run_playlist_sequential(&config, &vacia, None, |_, _| {}).unwrap_err();
+        assert!(
+            err.contains("playlist inválida"),
+            "valida primero, got: {err}"
+        );
+        // Solo pausas: Err honesto sin spawnear.
+        let solo_pausas =
+            crate::protocol::Playlist::try_new(vec![PlaylistStep::pausa(500).unwrap()]).unwrap();
+        let err = run_playlist_sequential(&config, &solo_pausas, None, |_, _| {}).unwrap_err();
+        assert!(err.contains("pausas"), "got: {err}");
+        // Cancelado de entrada: no corre ningún job.
+        let err =
+            run_playlist_sequential(&config, &lista_dos(), Some(&|| true), |_, _| {}).unwrap_err();
+        assert!(err.contains("cancel"), "got: {err}");
     }
 }

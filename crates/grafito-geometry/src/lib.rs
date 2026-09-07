@@ -41,6 +41,7 @@ pub mod interval;
 pub mod lines;
 pub mod locus_equation;
 pub mod matrices;
+pub mod morph;
 pub mod ode;
 pub mod outcome;
 pub mod planes3d;
