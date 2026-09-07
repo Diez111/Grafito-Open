@@ -1,0 +1,16 @@
+[package]
+name = "grafito-ggb"
+version = "1.0.0"
+edition = "2021"
+authors = ["Grafito Contributors"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Diez111/Grafito"
+rust-version = "1.92"
+description = "Importador .ggb"
+
+[dependencies]
+zip = { version = "8", default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.42", default-features = false }
+
+[lints]
+workspace = true

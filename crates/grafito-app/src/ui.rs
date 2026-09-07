@@ -11,9 +11,10 @@ use grafito_ui::animation::interpolate_color;
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
-    BREAKPOINT_COMPACT, ICON_MD, RADIUS_LG, RADIUS_MD, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM,
-    SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS,
-    TYPE_SM, TYPE_XS,
+    BREAKPOINT_COMPACT, DRAWER_RIGHT_DEFAULT, DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, ICON_MD,
+    RADIUS_LG, RADIUS_MD, RADIUS_PILL, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
+    SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS, TYPE_SM,
+    TYPE_XS,
 };
 use grafito_ui::Tool;
 use std::collections::VecDeque;
@@ -26,6 +27,16 @@ pub(crate) struct CommandInputResponse {
 /// The native minimum is 960 logical points; this also covers HiDPI windows
 /// whose physical captures look much narrower than their egui width.
 pub(crate) const COMPACT_TOP_CHROME_MAX_WIDTH: f32 = BREAKPOINT_COMPACT;
+
+/// Ancho mínimo del rail para pintar sus etiquetas cortas. Debajo de este
+/// ancho el rail colapsa a iconos puros: pintar texto en una franja de 1-2px
+/// deja slivers (fragmentos en zigzag) en el borde del panel. Puro y
+/// testeable headless.
+pub(crate) const RAIL_LABEL_MIN_WIDTH: f32 = 40.0;
+
+pub(crate) fn rail_labels_visible(rect_width: f32) -> bool {
+    rect_width >= RAIL_LABEL_MIN_WIDTH
+}
 
 pub(crate) fn top_chrome_uses_overflow(viewport_width: f32) -> bool {
     viewport_width <= COMPACT_TOP_CHROME_MAX_WIDTH
@@ -154,6 +165,10 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         }
         if ui.button("Guardar como... (Ctrl+Shift+S)").clicked() {
             app.handle_file_command(FileCommand::SaveAs);
+            ui.close_menu();
+        }
+        if ui.button("Importar GeoGebra (.ggb)…").clicked() {
+            app.choose_and_import_ggb(ui.ctx());
             ui.close_menu();
         }
         ui.menu_button("Exportar", |ui| {
@@ -364,6 +379,13 @@ fn draw_help_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         {
             app.show_about = true;
             ui.close_menu();
+        }
+        ui.separator();
+        // O2 i18n: selector ES/EN con persistencia (Piel pura: el selector
+        // solo setea el flag local; `set_locale` escribe fuera del closure).
+        let mut loc = app.config_locale();
+        if grafito_ui::toolbar::locale_selector(ui, &mut loc).changed() {
+            app.set_locale(loc);
         }
     });
 }
@@ -623,13 +645,18 @@ pub(crate) fn draw_top_bar(
                                         egui::vec2(ICON_MD, ICON_MD),
                                     );
                                     draw_icon(ui.painter(), icon_rect, *icon, ic_color);
-                                    ui.painter().text(
-                                        rect.center() + egui::vec2(0.0, 14.0),
-                                        Align2::CENTER_CENTER,
-                                        *label,
-                                        egui::FontId::proportional(TYPE_2XS),
-                                        ic_color,
-                                    );
+                                    // Iconos puros si el rail está colapsado: el texto
+                                    // de `painter` no respeta layout y, sin clip,
+                                    // pinta slivers de 1-2px en el borde.
+                                    if rail_labels_visible(rect.width()) {
+                                        ui.painter().with_clip_rect(rect).text(
+                                            rect.center() + egui::vec2(0.0, 14.0),
+                                            Align2::CENTER_CENTER,
+                                            *label,
+                                            egui::FontId::proportional(TYPE_2XS),
+                                            ic_color,
+                                        );
+                                    }
                                 }
 
                                 resp.widget_info(|| {
@@ -666,13 +693,19 @@ fn draw_geometry_utility_contents(
     let mut close_requested = false;
 
     ui.add_space(SPACE_SM);
+    // Wrap honesto en el dock: evita slivers clipados en docks angostos.
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Espacio de trabajo")
-                .color(theme.text_secondary)
-                .size(12.0)
-                .strong(),
-        );
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Espacio de trabajo")
+                    .color(theme.text_secondary)
+                    .size(grafito_ui::tokens::TYPE_SM)
+                    .strong(),
+            )
+            .truncate(),
+        )
+        .on_hover_text("Espacio de trabajo");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             close_requested = action_icon_button(
                 ui,
@@ -684,10 +717,42 @@ fn draw_geometry_utility_contents(
         });
     });
     ui.add_space(SPACE_XS);
+    // Tabs centrados: control segmentado de ancho completo (dos mitades
+    // iguales = grupo centrado por construcción, con jerarquía). El activo
+    // es un pill con contraste real (mismo par fill/texto que los pills de
+    // acción); tamaño TYPE_SM; SPACE_SM debajo antes del contenido.
+    let tab_width = ((ui.available_width() - SPACE_SM) / 2.0).max(0.0);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
         let inspector_selected = app.workspace_dock_tab == WorkspaceDockTab::Inspector;
+        let inspector_fill = if inspector_selected {
+            theme.keyboard_enter_bg
+        } else {
+            Color32::TRANSPARENT
+        };
+        let inspector_text = if inspector_selected {
+            theme.keyboard_enter_text
+        } else {
+            theme.text_secondary
+        };
         if ui
-            .selectable_label(inspector_selected, "Inspector")
+            .add_sized(
+                egui::vec2(tab_width, 32.0),
+                egui::Button::new(
+                    egui::RichText::new("Inspector")
+                        .size(TYPE_SM)
+                        .strong()
+                        .color(inspector_text),
+                )
+                .selected(inspector_selected)
+                .fill(inspector_fill)
+                .stroke(if inspector_selected {
+                    egui::Stroke::NONE
+                } else {
+                    egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))
+                })
+                .rounding(RADIUS_PILL),
+            )
             .on_hover_text("Propiedades del objeto seleccionado")
             .clicked()
         {
@@ -699,17 +764,43 @@ fn draw_geometry_utility_contents(
             "Asistente"
         };
         let assistant_selected = app.workspace_dock_tab == WorkspaceDockTab::Assistant;
+        let assistant_fill = if assistant_selected {
+            theme.keyboard_enter_bg
+        } else {
+            Color32::TRANSPARENT
+        };
+        let assistant_text = if assistant_selected {
+            theme.keyboard_enter_text
+        } else {
+            theme.text_secondary
+        };
         if ui
-            .selectable_label(assistant_selected, assistant_label)
+            .add_sized(
+                egui::vec2(tab_width, 32.0),
+                egui::Button::new(
+                    egui::RichText::new(assistant_label)
+                        .size(TYPE_SM)
+                        .strong()
+                        .color(assistant_text),
+                )
+                .selected(assistant_selected)
+                .fill(assistant_fill)
+                .stroke(if assistant_selected {
+                    egui::Stroke::NONE
+                } else {
+                    egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))
+                })
+                .rounding(RADIUS_PILL),
+            )
             .on_hover_text("Asistente matemático")
             .clicked()
         {
             app.open_assistant_workspace();
         }
     });
-    ui.add_space(SPACE_XS);
+    ui.add_space(SPACE_SM);
     ui.separator();
-    ui.add_space(SPACE_XS);
+    ui.add_space(SPACE_SM);
 
     match app.workspace_dock_tab {
         WorkspaceDockTab::Inspector => crate::panels::draw_right_properties_contents(app, ui),
@@ -725,12 +816,14 @@ fn draw_geometry_utility_contents(
 pub(crate) fn draw_geometry_utility_dock(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     egui::SidePanel::right("geometry_utility_dock")
-        .default_width(344.0)
-        .min_width(292.0)
-        .max_width(440.0)
+        .default_width(DRAWER_RIGHT_DEFAULT)
+        .min_width(DRAWER_RIGHT_MIN)
+        .max_width(DRAWER_RIGHT_MAX)
         .resizable(true)
         .show_separator_line(false)
         .frame(
+            // Fondo opaco: sin esto el canvas 3D se transparenta por el
+            // borde y deja la tira de glifos en zigzag.
             egui::Frame::none()
                 .fill(theme.panel_bg)
                 .stroke(egui::Stroke::NONE),
@@ -1008,6 +1101,12 @@ fn dialog_contents(
     save_error: Option<&String>,
     decision: &mut Option<UnsavedDecision>,
 ) {
+    // A11Y: Esc descarta el modal persistente con la opción segura (Cancelar).
+    // El orden Tab lo da egui por orden de creación: Cancelar → Descartar →
+    // Guardar (el foco arranca en la opción segura).
+    if decision.is_none() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        *decision = Some(UnsavedDecision::Cancel);
+    }
     let theme = current_theme(ui.ctx());
     // Scandinavian: centered chapter, 24 outer, 16 between, single concise body — no duplicate subtitle
     egui::Frame::none()

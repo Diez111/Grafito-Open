@@ -1686,3 +1686,509 @@ mod tests {
         assert_eq!(solution[0], (0.0, 1.0));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Frente G-A: EDOs simbólicas de 1er orden (separables + lineales).
+//
+// `y' = a(x)·y + b(x)` por factor integrante `μ = exp(∫−a dx)`;
+// `y' = g(x)·h(y)` por separación `∫dy/h(y) = ∫g(x)dx`.
+// El resto devuelve `Err` honesto. Referencia GeoGebra: `SolveODE`.
+// Presupuesto: entradas ≤ 2000 bytes; integración delegada a
+// `symbolic::integrate_typed` (Hermite/Rothstein + Risch-Norman).
+// ---------------------------------------------------------------------------
+
+/// Máximo de bytes por expresión de una EDO simbólica.
+pub const MAX_ODE_SYMBOLIC_BYTES: usize = 2000;
+
+/// Error honesto del solver simbólico de EDOs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OdeSymbolicError {
+    /// Entrada vacía o mayor a 2000 bytes.
+    InputTooLong { provided: usize, maximum: usize },
+    /// Variable no es identificador válido.
+    InvalidVariable { variable: String },
+    /// No parsea con el AST de Grafito.
+    Parse { reason: String },
+    /// No es separable ni lineal de 1er orden.
+    NotSupported { hint: String },
+    /// Una integral del método no tiene primitiva implementada.
+    IntegrationFailed { expr: String },
+}
+
+impl std::fmt::Display for OdeSymbolicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InputTooLong { provided, maximum } => {
+                write!(f, "EDO de {provided} bytes excede el máximo {maximum}")
+            }
+            Self::InvalidVariable { variable } => {
+                write!(f, "variable '{variable}' no es un identificador válido")
+            }
+            Self::Parse { reason } => write!(f, "no se pudo parsear la EDO: {reason}"),
+            Self::NotSupported { hint } => write!(f, "EDO no soportada: {hint}"),
+            Self::IntegrationFailed { expr } => {
+                write!(f, "sin primitiva para '{expr}'; método no aplicable")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OdeSymbolicError {}
+
+/// Clase de una EDO de 1er orden `y' = rhs(x, y)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstOrderKind {
+    /// `rhs = a(x)·y + b(x)`.
+    Linear,
+    /// `rhs = g(x)·h(y)` (o `g(x)/k(y)`).
+    Separable,
+    /// Ninguna de las anteriores.
+    Unknown,
+}
+
+fn check_ode_identifier(name: &str) -> Result<String, OdeSymbolicError> {
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if !first_ok || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(OdeSymbolicError::InvalidVariable {
+            variable: name.to_string(),
+        });
+    }
+    Ok(name.to_string())
+}
+
+fn check_ode_bytes(expr: &str) -> Result<String, OdeSymbolicError> {
+    if expr.is_empty() || expr.len() > MAX_ODE_SYMBOLIC_BYTES {
+        return Err(OdeSymbolicError::InputTooLong {
+            provided: expr.len(),
+            maximum: MAX_ODE_SYMBOLIC_BYTES,
+        });
+    }
+    Ok(expr.replace(' ', ""))
+}
+
+fn parse_ode(expr: &str) -> Result<crate::ast::Expr, OdeSymbolicError> {
+    crate::ast::parse_ast(expr).map_err(|reason| OdeSymbolicError::Parse { reason })
+}
+
+/// Pliega `Neg(Const(c))` a `Const(-c)` en todo el AST.
+///
+/// El parser produce `Neg(Const)` para literales negativos y el integrador
+/// `symbolic` solo reconoce linealidad con lado `Const`; sin este
+/// normalizado `exp(-2*x)` no integraría. Recursión total sin pánico.
+fn fold_neg_const(e: &crate::ast::Expr) -> crate::ast::Expr {
+    use crate::ast::Expr;
+    match e {
+        Expr::Neg(a) => {
+            let inner = fold_neg_const(a);
+            if let Expr::Const(c) = inner {
+                Expr::Const(-c)
+            } else {
+                Expr::Neg(Box::new(inner))
+            }
+        }
+        Expr::Add(a, b) => Expr::Add(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Sub(a, b) => Expr::Sub(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Mul(a, b) => Expr::Mul(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Div(a, b) => Expr::Div(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Pow(a, b) => Expr::Pow(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Sin(a) => Expr::Sin(Box::new(fold_neg_const(a))),
+        Expr::Cos(a) => Expr::Cos(Box::new(fold_neg_const(a))),
+        Expr::Tan(a) => Expr::Tan(Box::new(fold_neg_const(a))),
+        Expr::Asin(a) => Expr::Asin(Box::new(fold_neg_const(a))),
+        Expr::Acos(a) => Expr::Acos(Box::new(fold_neg_const(a))),
+        Expr::Atan(a) => Expr::Atan(Box::new(fold_neg_const(a))),
+        Expr::Exp(a) => Expr::Exp(Box::new(fold_neg_const(a))),
+        Expr::Ln(a) => Expr::Ln(Box::new(fold_neg_const(a))),
+        Expr::Log(a) => Expr::Log(Box::new(fold_neg_const(a))),
+        Expr::Sqrt(a) => Expr::Sqrt(Box::new(fold_neg_const(a))),
+        Expr::Abs(a) => Expr::Abs(Box::new(fold_neg_const(a))),
+        Expr::Sinh(a) => Expr::Sinh(Box::new(fold_neg_const(a))),
+        Expr::Cosh(a) => Expr::Cosh(Box::new(fold_neg_const(a))),
+        Expr::Tanh(a) => Expr::Tanh(Box::new(fold_neg_const(a))),
+        Expr::Floor(a) => Expr::Floor(Box::new(fold_neg_const(a))),
+        Expr::Ceil(a) => Expr::Ceil(Box::new(fold_neg_const(a))),
+        Expr::Round(a) => Expr::Round(Box::new(fold_neg_const(a))),
+        Expr::Sec(a) => Expr::Sec(Box::new(fold_neg_const(a))),
+        Expr::Csc(a) => Expr::Csc(Box::new(fold_neg_const(a))),
+        Expr::Cot(a) => Expr::Cot(Box::new(fold_neg_const(a))),
+        Expr::Asinh(a) => Expr::Asinh(Box::new(fold_neg_const(a))),
+        Expr::Acosh(a) => Expr::Acosh(Box::new(fold_neg_const(a))),
+        Expr::Atanh(a) => Expr::Atanh(Box::new(fold_neg_const(a))),
+        Expr::Sign(a) => Expr::Sign(Box::new(fold_neg_const(a))),
+        Expr::Heaviside(a) => Expr::Heaviside(Box::new(fold_neg_const(a))),
+        Expr::Cbrt(a) => Expr::Cbrt(Box::new(fold_neg_const(a))),
+        Expr::Re(a) => Expr::Re(Box::new(fold_neg_const(a))),
+        Expr::Im(a) => Expr::Im(Box::new(fold_neg_const(a))),
+        Expr::Arg(a) => Expr::Arg(Box::new(fold_neg_const(a))),
+        Expr::Conj(a) => Expr::Conj(Box::new(fold_neg_const(a))),
+        Expr::Erf(a) => Expr::Erf(Box::new(fold_neg_const(a))),
+        Expr::Erfc(a) => Expr::Erfc(Box::new(fold_neg_const(a))),
+        Expr::Gamma(a) => Expr::Gamma(Box::new(fold_neg_const(a))),
+        Expr::LnGamma(a) => Expr::LnGamma(Box::new(fold_neg_const(a))),
+        Expr::Digamma(a) => Expr::Digamma(Box::new(fold_neg_const(a))),
+        Expr::Trigamma(a) => Expr::Trigamma(Box::new(fold_neg_const(a))),
+        Expr::Atan2(a, b) => Expr::Atan2(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Modulo(a, b) => {
+            Expr::Modulo(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b)))
+        }
+        Expr::Min(a, b) => Expr::Min(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Max(a, b) => Expr::Max(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Clamp(a, b, c) => Expr::Clamp(
+            Box::new(fold_neg_const(a)),
+            Box::new(fold_neg_const(b)),
+            Box::new(fold_neg_const(c)),
+        ),
+        Expr::Beta(a, b) => Expr::Beta(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::BesselJ(a, b) => {
+            Expr::BesselJ(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b)))
+        }
+        Expr::BesselY(a, b) => {
+            Expr::BesselY(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b)))
+        }
+        Expr::BesselI(a, b) => {
+            Expr::BesselI(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b)))
+        }
+        Expr::Sum(body, v, s, t) => Expr::Sum(
+            Box::new(fold_neg_const(body)),
+            v.clone(),
+            Box::new(fold_neg_const(s)),
+            Box::new(fold_neg_const(t)),
+        ),
+        Expr::Product(body, v, s, t) => Expr::Product(
+            Box::new(fold_neg_const(body)),
+            v.clone(),
+            Box::new(fold_neg_const(s)),
+            Box::new(fold_neg_const(t)),
+        ),
+        Expr::Piecewise(branches, default) => Expr::Piecewise(
+            branches
+                .iter()
+                .map(|(c, v)| (Box::new(fold_neg_const(c)), Box::new(fold_neg_const(v))))
+                .collect(),
+            Box::new(fold_neg_const(default)),
+        ),
+        Expr::Lt(a, b) => Expr::Lt(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Gt(a, b) => Expr::Gt(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Le(a, b) => Expr::Le(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Ge(a, b) => Expr::Ge(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Eq(a, b) => Expr::Eq(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Ne(a, b) => Expr::Ne(Box::new(fold_neg_const(a)), Box::new(fold_neg_const(b))),
+        Expr::Const(_) | Expr::Var(_) => e.clone(),
+    }
+}
+
+/// Parsea y normaliza (`fold_neg_const`) para el integrador `symbolic`.
+fn parse_normalized(expr: &str) -> Result<crate::ast::Expr, OdeSymbolicError> {
+    parse_ode(expr).map(|ast| fold_neg_const(&ast))
+}
+
+/// Descompone `e` como `coef(y)·y + resto` con `coef, resto` sin `y`.
+///
+/// `None` si no es lineal en `y` (p. ej. `y^2`, `sin(y)`).
+fn split_linear_in_y(
+    e: &crate::ast::Expr,
+    y: &str,
+) -> Option<(crate::ast::Expr, crate::ast::Expr)> {
+    use crate::ast::Expr;
+    match e {
+        Expr::Var(name) if name == y => Some((Expr::Const(1.0), Expr::Const(0.0))),
+        Expr::Const(_) => Some((Expr::Const(0.0), e.clone())),
+        Expr::Var(_) => Some((Expr::Const(0.0), e.clone())),
+        Expr::Neg(a) => {
+            let (c, r) = split_linear_in_y(a, y)?;
+            Some((Expr::Neg(Box::new(c)), Expr::Neg(Box::new(r))))
+        }
+        Expr::Add(a, b) => {
+            let (c1, r1) = split_linear_in_y(a, y)?;
+            let (c2, r2) = split_linear_in_y(b, y)?;
+            Some((
+                Expr::Add(Box::new(c1), Box::new(c2)),
+                Expr::Add(Box::new(r1), Box::new(r2)),
+            ))
+        }
+        Expr::Sub(a, b) => {
+            let (c1, r1) = split_linear_in_y(a, y)?;
+            let (c2, r2) = split_linear_in_y(b, y)?;
+            Some((
+                Expr::Sub(Box::new(c1), Box::new(c2)),
+                Expr::Sub(Box::new(r1), Box::new(r2)),
+            ))
+        }
+        Expr::Mul(a, b) => {
+            if !crate::cas::cas_contains_var(a, y) {
+                let (c, r) = split_linear_in_y(b, y)?;
+                return Some((
+                    Expr::Mul(a.clone(), Box::new(c)),
+                    Expr::Mul(a.clone(), Box::new(r)),
+                ));
+            }
+            if !crate::cas::cas_contains_var(b, y) {
+                let (c, r) = split_linear_in_y(a, y)?;
+                return Some((
+                    Expr::Mul(Box::new(c), b.clone()),
+                    Expr::Mul(Box::new(r), b.clone()),
+                ));
+            }
+            None
+        }
+        Expr::Div(a, b) => {
+            if crate::cas::cas_contains_var(b, y) {
+                return None;
+            }
+            let (c, r) = split_linear_in_y(a, y)?;
+            Some((
+                Expr::Div(Box::new(c), b.clone()),
+                Expr::Div(Box::new(r), b.clone()),
+            ))
+        }
+        _ => {
+            if crate::cas::cas_contains_var(e, y) {
+                None
+            } else {
+                Some((Expr::Const(0.0), e.clone()))
+            }
+        }
+    }
+}
+
+/// Factoriza `rhs` como `(g(x), h(y))` con `rhs = g·h` o `g/h`.
+fn factor_separable(
+    e: &crate::ast::Expr,
+    x: &str,
+    y: &str,
+) -> Option<(crate::ast::Expr, crate::ast::Expr, bool)> {
+    use crate::ast::Expr;
+    match e {
+        Expr::Mul(a, b) => {
+            if !crate::cas::cas_contains_var(a, y) && !crate::cas::cas_contains_var(b, x) {
+                return Some((a.as_ref().clone(), b.as_ref().clone(), true));
+            }
+            if !crate::cas::cas_contains_var(b, y) && !crate::cas::cas_contains_var(a, x) {
+                return Some((b.as_ref().clone(), a.as_ref().clone(), true));
+            }
+            None
+        }
+        Expr::Div(a, b) => {
+            if !crate::cas::cas_contains_var(a, y) && !crate::cas::cas_contains_var(b, x) {
+                return Some((a.as_ref().clone(), b.as_ref().clone(), false));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn integrate_or_fail(expr: &str, var: &str) -> Result<String, OdeSymbolicError> {
+    match crate::symbolic::integrate_typed(expr, var) {
+        crate::outcome::MathResult::Exact(prim) => Ok(prim),
+        _ => Err(OdeSymbolicError::IntegrationFailed {
+            expr: expr.to_string(),
+        }),
+    }
+}
+
+/// Primitiva sobre AST: primero Risch-Norman propio (tolera `Neg(Const)`
+/// de literales negativos), luego `symbolic` como respaldo.
+fn ode_prim(e: &crate::ast::Expr, var: &str) -> Result<String, OdeSymbolicError> {
+    if let Ok(prim) = crate::integral::risch_ast(e, var) {
+        return Ok(prim.to_expr_string());
+    }
+    integrate_or_fail(&e.to_expr_string(), var)
+}
+
+/// Clasifica `y' = rhs(x, y)` como lineal, separable o desconocida.
+pub fn classify_first_order(
+    rhs: &str,
+    x: &str,
+    y: &str,
+) -> Result<FirstOrderKind, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let y = check_ode_identifier(y)?;
+    let clean = check_ode_bytes(rhs)?;
+    let ast = parse_ode(&clean)?;
+    if split_linear_in_y(&ast, &y).is_some() {
+        return Ok(FirstOrderKind::Linear);
+    }
+    if factor_separable(&ast, &x, &y).is_some() {
+        return Ok(FirstOrderKind::Separable);
+    }
+    Ok(FirstOrderKind::Unknown)
+}
+
+/// Resuelve `y' + p(x)·y = q(x)` por factor integrante.
+///
+/// Devuelve `y = (H + C)/μ` con `μ = exp(∫p dx)` explícitos.
+pub fn solve_linear_first_order(
+    p_expr: &str,
+    q_expr: &str,
+    x: &str,
+) -> Result<String, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let p_ast = parse_normalized(&check_ode_bytes(p_expr)?)?;
+    let q_ast = parse_normalized(&check_ode_bytes(q_expr)?)?;
+
+    // μ = exp(∫p dx); H = ∫μ·q por Risch-AST (tolera Neg(Const)) con
+    // respaldo en `symbolic`. Si q ≡ 0, H = 0 sin integrar ruido.
+    let p_str = p_ast.to_expr_string();
+    let p_int = integrate_or_fail(&p_str, &x)?;
+    let p_int_ast = parse_normalized(&p_int)?;
+    let mu_ast = crate::ast::Expr::Exp(Box::new(p_int_ast));
+    let mu = mu_ast.to_expr_string();
+    let h = match crate::cas::cas_const_value(&q_ast) {
+        Some(0.0) => "0".to_string(),
+        _ => {
+            let mu_q_ast = crate::ast::Expr::Mul(Box::new(mu_ast), Box::new(q_ast));
+            ode_prim(&fold_neg_const(&mu_q_ast), &x).map_err(|_| {
+                OdeSymbolicError::IntegrationFailed {
+                    expr: mu_q_ast.to_expr_string(),
+                }
+            })?
+        }
+    };
+    let out = format!("y = ({h} + C)/({mu})");
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "solución excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Resuelve `y' = g(x)·h(y)` por separación `∫dy/h(y) = ∫g(x)dx`.
+pub fn solve_separable(g_x: &str, h_y: &str, x: &str, y: &str) -> Result<String, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let y = check_ode_identifier(y)?;
+    let g_ast = parse_normalized(&check_ode_bytes(g_x)?)?;
+    let h_ast = parse_normalized(&check_ode_bytes(h_y)?)?;
+
+    if !crate::cas::cas_contains_var(&h_ast, &y) {
+        let prod_ast = crate::ast::Expr::Mul(Box::new(h_ast), Box::new(g_ast));
+        let f = ode_prim(&fold_neg_const(&prod_ast), &x)?;
+        return Ok(format!("{y} = {f} + C"));
+    }
+    let inv_h_ast = crate::ast::Expr::Div(Box::new(crate::ast::Expr::Const(1.0)), Box::new(h_ast));
+    let left = ode_prim(&fold_neg_const(&inv_h_ast), &y)?;
+    let right = ode_prim(&fold_neg_const(&g_ast), &x)?;
+    Ok(format!("{left} = {right} + C"))
+}
+
+/// Resuelve `y' = rhs(x, y)` si es lineal o separable.
+///
+/// Lineal `a(x)·y + b(x)` → forma estándar con `p = −a`, `q = b`;
+/// separable `g(x)·h(y)` → separación. Resto: `Err` honesto.
+/// Referencia GeoGebra: `SolveODE`.
+pub fn solve_ode_first_order(rhs: &str, x: &str, y: &str) -> Result<String, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let y = check_ode_identifier(y)?;
+    let clean = check_ode_bytes(rhs)?;
+    let ast = parse_ode(&clean)?;
+
+    if let Some((coef, rest)) = split_linear_in_y(&ast, &y) {
+        // y' = a·y + b → forma estándar y' + p·y = q con p = −a, q = b.
+        let neg_a = crate::ast::Expr::Neg(Box::new(coef.simplify()));
+        let p = fold_neg_const(&neg_a.simplify()).to_expr_string();
+        let rest_s = fold_neg_const(&rest.simplify()).to_expr_string();
+        return solve_linear_first_order(&p, &rest_s, &x);
+    }
+    if let Some((g, h, is_mul)) = factor_separable(&ast, &x, &y) {
+        let g_s = g.simplify().to_expr_string();
+        let h_s = h.simplify().to_expr_string();
+        if is_mul {
+            return solve_separable(&g_s, &h_s, &x, &y);
+        }
+        let inv_k_ast = crate::ast::Expr::Div(
+            Box::new(crate::ast::Expr::Const(1.0)),
+            Box::new(parse_normalized(&h_s)?),
+        );
+        let left = ode_prim(&fold_neg_const(&inv_k_ast), &y)?;
+        let right = ode_prim(&fold_neg_const(&parse_normalized(&g_s)?), &x)?;
+        return Ok(format!("{left} = {right} + C"));
+    }
+    Err(OdeSymbolicError::NotSupported {
+        hint: "SolveODE soporta EDOs lineales y' = a(x)*y + b(x) y separables y' = g(x)*h(y); el resto (Riccati, Bernoulli general, 2do orden) es L en Tasks.md F10.W5".to_string(),
+    })
+}
+
+#[cfg(test)]
+mod ode_symbolic_tests {
+    use super::*;
+
+    #[test]
+    fn linear_homogeneous_growth() {
+        // y' = 2*y → p = -2, q = 0
+        let sol = solve_ode_first_order("2*y", "x", "y").expect("lineal");
+        assert!(sol.starts_with("y = "), "got {sol}");
+        assert!(sol.contains("exp"), "got {sol}");
+        assert!(sol.contains('C'), "got {sol}");
+    }
+
+    #[test]
+    fn linear_nonhomogeneous_factor_integrante() {
+        // y' = -2*y + 3 → p = 2, q = 3 → μ = exp(2*x)
+        let sol = solve_linear_first_order("2", "3", "x").expect("lineal p=2 q=3");
+        let flat = sol.replace(' ', "");
+        assert!(flat.contains("exp(2*x)"), "got {sol}");
+        assert!(sol.contains('C'), "got {sol}");
+    }
+
+    #[test]
+    fn separable_quotient() {
+        // y' = x/y → ln|y| = x^2/2 + C
+        let sol = solve_ode_first_order("x/y", "x", "y").expect("separable");
+        assert!(sol.contains('C'), "got {sol}");
+        assert!(sol.contains("ln") || sol.contains("log"), "got {sol}");
+    }
+
+    #[test]
+    fn separable_direct_api() {
+        let sol = solve_separable("x", "y", "x", "y").expect("separable directo");
+        assert!(sol.contains('C'), "got {sol}");
+        assert!(sol.contains("ln") || sol.contains("log"), "got {sol}");
+    }
+
+    #[test]
+    fn classify_distinguishes_families() {
+        assert_eq!(
+            classify_first_order("2*y + x", "x", "y").expect("clasifica"),
+            FirstOrderKind::Linear
+        );
+        assert_eq!(
+            classify_first_order("x*y", "x", "y").expect("clasifica"),
+            FirstOrderKind::Linear
+        );
+        assert_eq!(
+            classify_first_order("sin(x*y)", "x", "y").expect("clasifica"),
+            FirstOrderKind::Unknown
+        );
+    }
+
+    #[test]
+    fn unsupported_ode_is_honest_err() {
+        let err =
+            solve_ode_first_order("y^2 + sin(x*y)", "x", "y").expect_err("no lineal/separable");
+        assert!(
+            matches!(err, OdeSymbolicError::NotSupported { .. }),
+            "got {err}"
+        );
+        assert!(format!("{err}").contains("Tasks.md"), "got {err}");
+    }
+
+    #[test]
+    fn ode_rejects_bad_input() {
+        assert!(matches!(
+            solve_ode_first_order(&"y".repeat(2001), "x", "y"),
+            Err(OdeSymbolicError::InputTooLong { .. })
+        ));
+        assert!(matches!(
+            solve_ode_first_order("y", "x!", "y"),
+            Err(OdeSymbolicError::InvalidVariable { .. })
+        ));
+        assert!(matches!(
+            solve_ode_first_order("y +", "x", "y"),
+            Err(OdeSymbolicError::Parse { .. })
+        ));
+    }
+}

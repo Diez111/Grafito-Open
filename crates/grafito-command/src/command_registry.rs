@@ -1220,7 +1220,7 @@ const COMMANDS: &[CommandSpec] = &[
         "GroebnerDegRevLex",
         ["groebner", "groebnerbasis", "groebnerlex", "groebner_basis"],
         "CAS",
-        "Base de Groebner (stub: no implementado, use Eliminate).",
+        "Base de Groebner degrevlex: exacta para 2 polinomios lineales en 2 variables; con mas de 2x2 devuelve error honesto, usa Eliminate.",
         ReadOnly,
         Low,
         true,
@@ -2725,7 +2725,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Net",
         ["desarrollo", "desplegado", "unwrap"],
         "3D",
-        "Genera el desarrollo 2D de un poliedro (stub: informa disponibilidad).",
+        "Genera el desarrollo 2D de un poliedro (diseno L + stub honesto: devuelve error explicativo, ver Tasks.md F10.W5).",
         ReadOnly,
         Low,
         true,
@@ -3217,6 +3217,259 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("Slider[variable, min, max, paso]"; "variable": Variable required, "min": Number required, "max": Number required, "paso": Number required)
         ]
     ),
+    command!(
+        "dynamic.trace",
+        "Rastro",
+        ["Estela"],
+        "Dinámica",
+        "Activa/desactiva el rastro de un objeto: al arrastrarlo deja una estela con fade. Rastro[etiqueta] alterna; Rastro[etiqueta, true|false] fija el estado. (Trace con matriz sigue siendo traza matricial.)",
+        TransformsObject,
+        Low,
+        true,
+        "Rastro",
+        [
+            signature!("Rastro[objeto]"; "objeto": ObjectLabel required),
+            signature!("Rastro[objeto, estado]"; "objeto": ObjectLabel required, "estado": Expression required)
+        ]
+    ),
+    // ---- Frente G-D: action objects + subset GGBScript + custom tools .ggt ----
+    command!(
+        "scripting.button",
+        "Button",
+        ["Boton"],
+        "Dinámica",
+        "Crea un botón (action object sobre texto) con guion del subset GGBScript; el click lo ejecuta la UI.",
+        CreatesObject,
+        Low,
+        true,
+        "Button",
+        [signature!("Button[rotulo, guion]"; "rotulo": Expression required, "guion": Expression required)]
+    ),
+    command!(
+        "scripting.checkbox",
+        "Checkbox",
+        ["Casilla"],
+        "Dinámica",
+        "Crea un checkbox ligado a una variable (1 activado, 0 desactivado).",
+        CreatesObject,
+        Low,
+        true,
+        "Checkbox",
+        [
+            signature!("Checkbox[rotulo, variable]"; "rotulo": Expression required, "variable": Variable required),
+            signature!("Checkbox[rotulo, variable, inicial]"; "rotulo": Expression required, "variable": Variable required, "inicial": Expression required)
+        ]
+    ),
+    command!(
+        "scripting.input-box",
+        "InputBox",
+        ["CajaEntrada"],
+        "Dinámica",
+        "Crea una caja de entrada ligada a una variable numérica.",
+        CreatesObject,
+        Low,
+        true,
+        "InputBox",
+        [signature!("InputBox[rotulo, variable]"; "rotulo": Expression required, "variable": Variable required)]
+    ),
+    command!(
+        "scripting.text-field",
+        "TextField",
+        ["CampoTexto"],
+        "Dinámica",
+        "Crea un campo de texto ligado a una variable (variante de InputBox).",
+        CreatesObject,
+        Low,
+        true,
+        "TextField",
+        [signature!("TextField[rotulo, variable]"; "rotulo": Expression required, "variable": Variable required)]
+    ),
+    command!(
+        "scripting.show",
+        "Show",
+        ["Mostrar"],
+        "Dinámica",
+        "Hace visibles de uno a cuatro objetos por etiqueta.",
+        TransformsObject,
+        Low,
+        true,
+        "Show",
+        [signature!("Show[objeto]"; "objeto": ObjectLabel required, "objeto2": ObjectLabel optional, "objeto3": ObjectLabel optional, "objeto4": ObjectLabel optional)]
+    ),
+    command!(
+        "scripting.hide",
+        "Hide",
+        ["Ocultar"],
+        "Dinámica",
+        "Oculta de uno a cuatro objetos por etiqueta.",
+        TransformsObject,
+        Low,
+        true,
+        "Hide",
+        [signature!("Hide[objeto]"; "objeto": ObjectLabel required, "objeto2": ObjectLabel optional, "objeto3": ObjectLabel optional, "objeto4": ObjectLabel optional)]
+    ),
+    command!(
+        "scripting.zoom-in",
+        "ZoomIn",
+        ["Acercar"],
+        "Dinámica",
+        "Acerca la vista 2D (factor 1.25 por defecto, máximo 4 por invocación).",
+        TransformsObject,
+        Low,
+        true,
+        "ZoomIn",
+        [
+            signature!("ZoomIn[]";),
+            signature!("ZoomIn[factor]"; "factor": Number required)
+        ]
+    ),
+    command!(
+        "scripting.zoom-out",
+        "ZoomOut",
+        ["Alejar"],
+        "Dinámica",
+        "Aleja la vista 2D (factor 1.25 por defecto, máximo 4 por invocación).",
+        TransformsObject,
+        Low,
+        true,
+        "ZoomOut",
+        [
+            signature!("ZoomOut[]";),
+            signature!("ZoomOut[factor]"; "factor": Number required)
+        ]
+    ),
+    command!(
+        "scripting.play-pause",
+        "PlayPause",
+        ["AlternarAnimacion"],
+        "Dinámica",
+        "Alterna la animación de una variable o de todas si no se indica.",
+        TransformsObject,
+        Low,
+        true,
+        "PlayPause",
+        [
+            signature!("PlayPause[]";),
+            signature!("PlayPause[variable]"; "variable": Variable required)
+        ]
+    ),
+    command!(
+        "scripting.if",
+        "If",
+        ["Si"],
+        "Dinámica",
+        "Ejecuta un guion del subset si la condición numérica es cierta, con rama opcional.",
+        TransformsObject,
+        Low,
+        true,
+        "If",
+        [
+            signature!("If[condicion, guion_si]"; "condicion": Expression required, "guion_si": Expression required),
+            signature!("If[condicion, guion_si, guion_no]"; "condicion": Expression required, "guion_si": Expression required, "guion_no": Expression required)
+        ]
+    ),
+    command!(
+        "scripting.repeat",
+        "Repeat",
+        ["Repetir"],
+        "Dinámica",
+        "Repite un guion del subset de 1 a 1000 veces con presupuesto total de 1000 pasos.",
+        TransformsObject,
+        Medium,
+        true,
+        "Repeat",
+        [signature!("Repeat[n, guion]"; "n": Integer required, "guion": Expression required)]
+    ),
+    command!(
+        "scripting.define-tool",
+        "DefineTool",
+        ["DefinirHerramienta"],
+        "Dinámica",
+        "Define una custom tool desde una secuencia y devuelve su JSON .ggt versionado.",
+        ReadOnly,
+        Low,
+        true,
+        "DefineTool",
+        [signature!("DefineTool[nombre, pasos]"; "nombre": Expression required, "pasos": Expression required)]
+    ),
+    command!(
+        "scripting.load-tool",
+        "LoadTool",
+        ["CargarHerramienta"],
+        "Dinámica",
+        "Valida un JSON .ggt (versión, nombre, cotas, allowlist) y lo describe sin ejecutar.",
+        ReadOnly,
+        Low,
+        true,
+        "LoadTool",
+        [signature!("LoadTool[json]"; "json": Expression required)]
+    ),
+    command!(
+        "scripting.execute-stub",
+        "Execute",
+        ["Ejecutar"],
+        "Dinámica",
+        "No soportado: usa If/Repeat con pasos del subset o pulsa un Button.",
+        ReadOnly,
+        Low,
+        false,
+        "Execute",
+        [signature!("Execute[guion]"; "guion": Expression required)]
+    ),
+    command!(
+        "scripting.start-animation-stub",
+        "StartAnimation",
+        ["IniciarAnimacion"],
+        "Dinámica",
+        "No soportado: usa PlayPause[variable] o PlayPause[].",
+        ReadOnly,
+        Low,
+        false,
+        "StartAnimation",
+        [
+            signature!("StartAnimation[]";),
+            signature!("StartAnimation[variable]"; "variable": Variable required)
+        ]
+    ),
+    command!(
+        "scripting.stop-animation-stub",
+        "StopAnimation",
+        ["DetenerAnimacion"],
+        "Dinámica",
+        "No soportado: usa PlayPause[variable] o PlayPause[].",
+        ReadOnly,
+        Low,
+        false,
+        "StopAnimation",
+        [
+            signature!("StopAnimation[]";),
+            signature!("StopAnimation[variable]"; "variable": Variable required)
+        ]
+    ),
+    command!(
+        "scripting.delete-stub",
+        "Delete",
+        ["Eliminar", "Borrar"],
+        "Dinámica",
+        "No soportado: usa Erase[etiqueta] o EraseAll[].",
+        ReadOnly,
+        Low,
+        false,
+        "Delete",
+        [signature!("Delete[objeto]"; "objeto": ObjectLabel required)]
+    ),
+    command!(
+        "scripting.rename-stub",
+        "Rename",
+        ["Renombrar"],
+        "Dinámica",
+        "No soportado: Grafito aún no renombra objetos por comando; edita la etiqueta en la UI.",
+        ReadOnly,
+        Low,
+        false,
+        "Rename",
+        [signature!("Rename[objeto, nuevo_nombre]"; "objeto": ObjectLabel required, "nuevo_nombre": Expression required)]
+    ),
     // ---- P0 CAS analisis geometrico: TangentAt / NormalAt / ArcLength / CurvatureAt / Volume/SurfaceOfRevolution ----
     command!(
         "cas.tangent-at",
@@ -3466,11 +3719,15 @@ pub fn minimal_arg_for_kind(kind: ArgumentKind) -> &'static str {
 
 /// Construye un ejemplo mínimo ejecutable para un spec (usa la firma con menos args requeridos).
 pub fn minimal_example(spec: &CommandSpec) -> String {
-    let sig = spec
+    // F10-FIX (OOB latente): `signatures` vacío (imposible vía macro
+    // `command!`, posible a mano) → fallback honesto sin `[0]` (index OOB).
+    let Some(sig) = spec
         .signatures
         .iter()
         .min_by_key(|s| s.arguments.iter().filter(|a| !a.optional).count())
-        .unwrap_or(&spec.signatures[0]);
+    else {
+        return format!("{}[]", spec.canonical);
+    };
     let required = sig.arguments.iter().filter(|a| !a.optional).count();
     let args: Vec<&str> = sig
         .arguments
@@ -3809,6 +4066,24 @@ mod registry_tests {
             "Length",
             "Slope",
             "Script",
+            "Button",
+            "Checkbox",
+            "InputBox",
+            "TextField",
+            "Show",
+            "Hide",
+            "ZoomIn",
+            "ZoomOut",
+            "PlayPause",
+            "If",
+            "Repeat",
+            "DefineTool",
+            "LoadTool",
+            "Execute",
+            "StartAnimation",
+            "StopAnimation",
+            "Delete",
+            "Rename",
             "Erase",
             "EraseAll",
             "ImplicitCurve",
@@ -4043,6 +4318,7 @@ mod registry_tests {
             // Slider y aula despachan via lower-case handle_aula_commands, también cuentan
             let aula_extra = [
                 "slider",
+                "rastro",
                 "focus",
                 "directrix",
                 "center",
@@ -4120,6 +4396,19 @@ mod registry_tests {
     }
 
     #[test]
+    fn registry_counts_match_documented_architecture() {
+        // Blindaje docs↔código (architecture.md §8/§13). Si agregás un
+        // comando, actualizá ESTE test + architecture.md juntos.
+        assert_eq!(all().len(), 250, "COMMANDS registrados (docs §8)");
+        assert_eq!(
+            palette_commands().count(),
+            206,
+            "comandos visibles en paleta (docs §8: 206 + 14 UI = 220)"
+        );
+        assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
+    }
+
+    #[test]
     fn registry_resolve_is_case_insensitive_and_trims() {
         for spec in all() {
             let upper = spec.canonical.to_ascii_uppercase();
@@ -4135,5 +4424,72 @@ mod registry_tests {
                 spec.canonical
             );
         }
+    }
+}
+
+// ── F10 hostile fuzz (solo tests, sin tocar prod) ─────────────────────────
+// F10-FIX: spec con `signatures: &[]` ya no paniquea en `minimal_example`
+// (antes `unwrap_or(&spec.signatures[0])`, OOB); ahora fallback honesto.
+#[cfg(test)]
+mod hostile_crash_f10 {
+    use super::*;
+
+    fn empty_sig_spec() -> CommandSpec {
+        CommandSpec {
+            id: "hostil.vacio",
+            canonical: "Hostil",
+            aliases: &[],
+            signatures: &[],
+            help: "comando hostil sin firmas para cazar index OOB",
+            category: "Crear",
+            insertion: "Hostil[",
+            dispatch_key: "Hostil",
+            mutation: MutationClass::CreatesObject,
+            risk: RiskLevel::Low,
+            palette_visible: true,
+            palette_label: "Hostil",
+        }
+    }
+
+    #[test]
+    fn hostile_empty_signatures_minimal_example() {
+        // F10-FIX: assert directo de fallback (antes `catch_unwind` que
+        // documentaba el panic en [0]). Ya no paniquea: ejemplo mínimo
+        // honesto con cero args.
+        let spec = empty_sig_spec();
+        let leaked: &'static CommandSpec = Box::leak(Box::new(spec));
+        assert_eq!(minimal_example(leaked), "Hostil[]");
+    }
+
+    #[test]
+    fn hostile_empty_signatures_validate() {
+        // validate_spec_metadata SÍ chequea is_empty → debe dar Err, no panic.
+        let spec = empty_sig_spec();
+        assert!(validate_spec_metadata(&spec).is_err());
+    }
+
+    #[test]
+    fn hostile_empty_signatures_accepts_count() {
+        // accepts_argument_count usa iter().any → con &[] da false, no panic.
+        let spec = empty_sig_spec();
+        assert!(!spec.accepts_argument_count(0));
+        assert!(!spec.accepts_argument_count(1));
+        assert!(!spec.accepts_argument_count(usize::MAX));
+    }
+
+    #[test]
+    fn hostile_real_registry_nunca_vacio() {
+        // Invariante prod: ningún spec real tiene signatures vacío (el macro
+        // `command!` exige `[$($signature:expr),+]`). Si esto falla, el P0 es
+        // alcanzable en prod vía all()/palette_commands()/render_markdown().
+        for spec in all() {
+            assert!(
+                !spec.signatures.is_empty(),
+                "spec real sin firmas: {}",
+                spec.id
+            );
+        }
+        // render_markdown indexa [0] por cada spec real: no debe paniquear.
+        let _ = render_markdown();
     }
 }

@@ -56,9 +56,10 @@ Empty -> Loading -> Validating -> Ready -> Mutating -> Persisting -> Ready
 ### 4.3 AssistantRuntime (grafito-app/src/assistant.rs)
 
 ```
-Idle -> Thinking -> Verifying -> Animating{job_id} -> Done | Failed | Cancelled
+Idle -> Composing -> Thinking -> AwaitingAuthorization -> Verifying -> Animating{job_id} -> Failed | Cancelled
+(terminal hoy: Failed; sin Done — verificado AS5; local corre síncrono en UI, resto en thread)
 ```
-- Cada job (remote, proposal, model, image, agent, anim) en thread con CancellationToken y RequestBudget (max_input_chars 8192, max_steps 8, timeout_ms 60000 = 60s — `crates/grafito-assistant-types/src/lib.rs:198-209`; AttachmentLimits max_bytes 512 KiB + max_total_bytes 1 MiB — `lib.rs:245-255`).
+- Cada job remoto/proposal/model/agent/anim en thread con CancellationToken y RequestBudget (max_input_chars 8192, max_steps 8, timeout_ms 60000 = 60s — `crates/grafito-assistant-types/src/lib.rs:198-209`; AttachmentLimits max_bytes 512 KiB + max_total_bytes 1 MiB — `lib.rs:245-255`). Excepción: local síncrono en UI. Spark streaming: body cap 256 KiB con parcial `truncated` + aviso (`assistant.rs:2809-2813`); loop agente input cap 48K (`agent.rs:1130`).
 - Protocolos por modelo (OpenCodeGo) — `crates/grafito-assistant/src/lib.rs:938-951` (`remote_protocol`): Chat Completions default (`chat_completion_endpoint`, `:899-901`), Responses API `POST {base}/responses` para Muse Spark 1.2/1.3 (`responses_endpoint`, `:905-907`; router `uses_responses_api` = `model.contains("muse-spark")`, `:54-56`; por Chat devuelven 500 instantáneo con cualquier payload, verificado 2026-09-04 — comentario en `:50-53`), Anthropic Messages `POST {base}/messages` para mimo-2.5-vl (`messages_endpoint`, `:915-917`; match en `:946-947`), Fusion (draft+audit) para `fusion` (`:948`; `FUSION_AUDIT_MODEL = "deepseek-v4-pro"`, `:65`). Modo agente con tools aún no soportado en Spark → fallback sólo-sesión a deepseek (`crates/grafito-app/src/assistant.rs:2470-2485`, `:2595-2613`; aviso Responses en `:2916-2917`).
 - Modelos: default `deepseek-v4-flash` (`crates/grafito-app/src/utils.rs:59-61`); `qwen3.8-max` / `kimi-k3` sólo como sugerencia en el hint de error de Spark (`assistant.rs:2936`, sin tests dedicados); `mimo-2.5-vl` visión (`assistant.rs:36`, `lib.rs:48`); `fusion` (`lib.rs:49`). Tests wire: `spark_models_route_to_responses_api`, `responses_payload_shape_matches_verified_wire_format`, `responses_wire_uses_bearer_and_response_shape` (`lib.rs:2684-2920`); fallback sesión `assistant.rs:4585-4605`.
 - I/O nunca en UI thread; UI solo renderiza &AssistantState.
@@ -131,13 +132,13 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | AttachmentLimits max_total_bytes | 1 MiB | assistant-types/src/lib.rs:251 |
 | Assistant | AttachmentLimits max_pixels / max_total_pixels | 1 MiP / 2 MiP | assistant-types/src/lib.rs:249,252 |
 | Assistant | AttachmentLimits max_attachments | 2 | assistant-types/src/lib.rs:250 |
-| Comandos | COMMANDS registrados | 238 (`command!(`) | command/src/command_registry.rs:228 |
-| Comandos | palette-visible | 199 (39 ocultos) + 14 acciones UI = 213 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs:58-199 |
-| Comandos | categorías visibles | 26 (30 etiquetas raw con duplicados con/sin tilde) | command_registry.rs (verificado por script, BUILD 2026-09-04) |
+| Comandos | COMMANDS registrados | 250 (`command!(`) | command/src/command_registry.rs (`grep -c 'command!('` = 250 únicos; +18 scripting G-D) |
+| Comandos | palette-visible | 206 (44 ocultos) + 14 acciones UI = 220 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs |
+| Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 17 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 (+tests :1317-1319) |
-| Toolbar | Tool variantes | 73 | grafito-ui/src/lib.rs `pub enum Tool` |
+| Toolbar | Tool variantes | 76 | grafito-ui/src/lib.rs `pub enum Tool` (+Parallel/Arc/Sector F9) |
 | App | Perspectivas | 10 (Ctrl+Shift+1..9,0) | grafito-app/src/lib.rs:90-111 + app.rs:4236-4242 |
-| Workspace | crates | 16 | `crates/` (agent, anim, app, assistant, assistant-types, command, complex, core, geometry, pedagogy, plugins, profile, release-tests, render, ui, whiteboard) |
+| Workspace | crates | 18 | `crates/` (agent, anim, app, assistant, assistant-types, classroom, command, complex, core, geometry, ggb, pedagogy, plugins, profile, release-tests, render, ui, whiteboard) |
 | UI | BREAKPOINT_COMPACT | 1360 | tokens.rs:142 (is_compact_viewport :188-191) |
 | UI | PANEL_LEFT_DEFAULT | 260 (min 180, max 45% viewport via PANEL_LEFT_MAX_FRACTION) | tokens.rs + panels.rs/algebra.rs |
 | UI | PANEL_LEFT_MIN | 180 | tokens.rs |
@@ -228,12 +229,12 @@ Notas:
 |---|---|
 | RequestBudget 8192 / 2048 / 8 / 60s | `crates/grafito-assistant-types/src/lib.rs:198-209` |
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
-| 238 comandos (`command!(`), 199 visibles en paleta | `crates/grafito-command/src/command_registry.rs:228` (conteo por script) |
+| 250 comandos (`command!(`), 206 visibles + 14 UI = 220 en paleta | `crates/grafito-command/src/command_registry.rs` (250 únicos; +18 scripting G-D) |
 | 14 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs:58-199`, `:224-251`, `:394-403` |
 | 17 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 17) | `crates/grafito-ui/src/toolbar.rs:263-284`, tests `:1317-1319` |
-| 73 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` |
+| 76 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (+Parallel/Arc/Sector F9) |
 | 10 perspectivas (Ctrl+Shift+1..9,0) | `crates/grafito-app/src/lib.rs:90-111`, `app.rs:4236-4242` |
-| 16 crates workspace | `crates/` (ls) |
+| 18 crates workspace | `crates/` (ls: +classroom R5, +ggb F9) |
 | 17 jobs CI | `.github/workflows/ci.yml:24-496` |
 | Spark vía Responses API (`POST {base}/responses`) | `crates/grafito-assistant/src/lib.rs:50-56`, `:905-907`, `:938-951` |
 | Modelo default `deepseek-v4-flash` | `crates/grafito-app/src/utils.rs:59-61` |
@@ -242,3 +243,25 @@ Notas:
 | Ctrl+P/E lápiz/borrador, F8/F9 esfera/cubo | `crates/grafito-app/src/app.rs:4135-4144`, `:4268-4278` |
 | Onboarding 420px, 3 bullets, 3 botones | `crates/grafito-app/src/app.rs:4922-5033`, gating `:1763`, `utils.rs:46-48` |
 | Rail 60px, drawer 292..440, panel izq 180+45% | `crates/grafito-ui/src/tokens.rs:151-164,207-210`; `app/src/ui.rs:549-552,727-731`; `app/src/panels.rs:1201-1206,2125-2132` |
+
+## 14. Paridad GeoGebra 2026 — frente F10-C (BUILD 2026-09-05, rama f10-plan-total)
+
+Cerebro puro en `crates/grafito-core/src/symbolic/` (`csv.rs`, `solids.rs`,
+`exchange.rs`, `mod.rs` con `groebner_gate`); piel fina en
+`crates/grafito-app/src/render_3d.rs` (`OrthoProjection`,
+`project_point_ortho`, `solid_measure_text`); helps honestos en
+`crates/grafito-command/src/command_registry.rs` (Groebner 2×2, Net L).
+Sin tocar geometría exacta, A11Y ni perf; sin `unwrap` (gates §9).
+
+| Categoría | Grafito hoy (archivo) | GeoGebra | Esfuerzo |
+|---|---|---|---|
+| Capas | `symbolic/exchange.rs` (`LayerTable` 0..=255 + visibilidad) | capas con orden | S cerrado (API; wiring panel P2) |
+| Bar/Pie | `symbolic/exchange.rs` (`bar_chart_stub`/`pie_chart_stub` validan y derivan a Histogram) | BarChart/PieChart | S cerrado honesto |
+| Tabla viva lectura | `symbolic/exchange.rs` (`datatable_rows`/`cell`/`to_csv` sobre `DataTableObj`) | spreadsheet viva | S cerrado (edición P2) |
+| Volumen/área 3D | `symbolic/solids.rs` (esfera/cubo/cilindro/cono/toro/tetra/pirámide/prisma exactos; cuádrica → `None` + `solid_measure_status`) | Volume/Area 3D | S cerrado |
+| Vistas ortográficas | `symbolic/solids.rs` (`OrthoView` alzado/planta/perfil) + `render_3d.rs` (`OrthoProjection`, píxeles egui) | vistas 3D | S cerrado (cableado cámara P2) |
+| Groebner | `symbolic/mod.rs` (`groebner_gate`: 2×2 lineal exacto, >2×2 `Err` → Eliminate) | CAS Groebner | S cerrado; Buchberger = L (F10.W5) |
+| PDF | `symbolic/exchange.rs` (`document_to_pdf` 1.4 mínimo, 1 pág.); vectorial `printpdf` pendiente lead en `app/src/export.rs:3850-3880` | export PDF | M parcial (bloqueador: dep `printpdf` por crate) |
+| CSV RFC 4180 | `symbolic/csv.rs` (`to_csv` CRLF + `parse_csv` con `""`, cotas 20k filas/10M) | import/export CSV | S cerrado (wiring UI P2) |
+| Clipboard SVG/PNG | `symbolic/exchange.rs` (SVG real punto/círculo/polígono/texto; PNG `Err` honesto) | copiar SVG/PNG | S+M parcial (bloqueador: raster `image`/`tiny-skia` en app) |
+| Gruntz / Risch / marching cubes / Net / iroh / CRDT | `symbolic/exchange.rs` (`l_stub` siempre `Err` + diseño en mensaje) | CAS y P2P | L solo diseño + stub (F10.W5) |

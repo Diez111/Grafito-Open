@@ -5,6 +5,14 @@
 //! La resolución local es determinista. El transporte remoto sólo construye y
 //! ejecuta peticiones OpenAI-compatibles desde un hilo de trabajo; nunca se
 //! llama desde la UI ni persiste claves de API.
+//!
+//! Feature `assistant-net` (default ON): habilita `reqwest` y todo el
+//! transporte (`request_remote*`, `shared_http_client`, ...). Sin la feature
+//! sólo compila la resolución local + stubs honestos `NoNetwork`; los helpers
+//! puros remotos (endpoints/payloads/parseos) quedan sin llamantes y se
+//! permite `dead_code` en esa configuración (el build default los usa y el
+//! lint sigue vigente ahí).
+#![cfg_attr(not(feature = "assistant-net"), allow(dead_code))]
 
 pub mod agent;
 pub mod harness;
@@ -23,16 +31,22 @@ use grafito_geometry::{
     derivation::{derive_polynomial, normalize_scientific_notation},
     expr::evaluate,
 };
+use grafito_pedagogy::{PedagogicalLevel, Scaffold, ScaffoldEngine, SocraticFsm};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use serde_json::{json, Value};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
+#[cfg(feature = "assistant-net")]
+use std::io::Read;
 use std::net::IpAddr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    mpsc::SyncSender,
     Arc,
 };
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "assistant-net")]
+use std::time::Instant;
 use url::Url;
 
 const RESIDUAL_EPSILON: f64 = 128.0 * f64::EPSILON;
@@ -58,10 +72,13 @@ fn uses_responses_api(model: &str) -> bool {
 const RESPONSES_MIN_OUTPUT_TOKENS: usize = 16;
 /// Cap del cuerpo en la Responses API: los items `reasoning` traen
 /// `encrypted_content` opaco (se descarta) que supera el presupuesto de
-/// texto del usuario. 64 KiB transitorios por request (precedente: line_cap
-/// 64 KiB del motor de animaciones); el texto útil sigue acotado por
-/// `max_output_chars` en `completion_from_text`.
-const RESPONSES_MAX_BODY_BYTES: usize = 64 * 1024;
+/// texto del usuario. 256 KiB transitorios por request (precedente: line_cap
+/// 64 KiB del motor de animaciones; el Vec vive sólo durante el request y
+/// `read_bounded_response_body` pre-aloca como máximo 64 KiB, así que sigue
+/// OOM-safe); el texto útil sigue acotado por `max_output_chars` en
+/// `completion_from_text`. NO es configurable en Configuración → Modelo:
+/// los mensajes de error por este tope nunca deben mandar ahí.
+const RESPONSES_MAX_BODY_BYTES: usize = 256 * 1024;
 const FUSION_AUDIT_MODEL: &str = "deepseek-v4-pro";
 const FUSION_MAX_DRAFT_BYTES: usize = 2_048;
 /// Truncado del cuerpo de error HTTP en mensajes: 500 chars sin secretos.
@@ -73,6 +90,79 @@ const MAX_ERROR_BODY_CHARS: usize = 500;
 /// sólo se informa "reintentá en Ns" y la UI decide cuándo reintentar.
 const RETRY_AFTER_MIN_SECS: u64 = 1;
 const RETRY_AFTER_MAX_SECS: u64 = 120;
+/// Freno cliente ante 429 (cuota por minuto del proveedor).
+///
+/// El mensaje al usuario ("esperá ~1 minuto...") era correcto pero el fondo
+/// amplificaba: cada turno podía disparar varios POST (streaming+fallback,
+/// cascada draft+audit, loop agente con reintentos) y los reintentos
+/// inmediatos quemaban la cuota. Este freno comparte una pausa global entre
+/// hilos: ante un 429 se guarda `not_before = ahora + cooldown` y todo
+/// request posterior falla honesto y rápido sin tocar la red hasta que venza.
+/// - Con `Retry-After` legible: ese valor, con piso 1s y techo
+///   `RATE_LIMIT_MAX_COOLDOWN_SECS`.
+/// - Sin header: `RATE_LIMIT_DEFAULT_COOLDOWN_SECS` (60s, paridad con el
+///   mensaje "esperá ~1 minuto").
+///
+/// Nunca se duerme un worker: el reintento real lo hace el usuario de forma
+/// explícita cuando la pausa vence (jamás reintento inmediato en loop: los
+/// reintentos automáticos caen en la pausa y fallan sin red).
+pub const RATE_LIMIT_DEFAULT_COOLDOWN_SECS: u64 = 60;
+/// Techo de la pausa global ante 429 (5 min): evita bloquear la sesión si el
+/// proveedor pide una espera absurda. El clamp de *reporte* (`Retry-After`
+/// 1..120s en el texto del error) sigue intacto; esto sólo acota la pausa.
+pub const RATE_LIMIT_MAX_COOLDOWN_SECS: u64 = 300;
+/// TTL del cache de la lista de modelos (5 min): el botón "actualizar
+/// modelos" nunca está en el hot path del turno y dos pedidos seguidos no
+/// duplican el GET (`single-flight` vía cache compartido).
+pub const MODELS_CACHE_TTL_SECS: u64 = 300;
+/// Peor caso de red por turno de chat simple: streaming SSE (1 POST) + UN
+/// único fallback no-streaming si el servidor nunca habla SSE (= 2).
+/// Nunca hay reintento automático ante 429 en este path.
+pub const MAX_SIMPLE_CHAT_HTTP_REQUESTS_PER_TURN: usize = 2;
+/// Peor caso de red por turno Fusion: draft (Anthropic) + audit (OpenAI) = 2.
+/// Si el draft falla no hay audit (falla honesto, sin request extra).
+pub const MAX_FUSION_HTTP_REQUESTS_PER_TURN: usize = 2;
+/// Marcador interno de pausa por cuota (sólo logs/detección, jamás UI cruda):
+/// los workers devuelven `{MARKER}:{segundos}` y la app lo convierte a
+/// criollo con `rate_limit_paused_message`. Sin URL, sin claves, sin jerga.
+pub const RATE_LIMIT_PAUSED_MARKER: &str = "rate_limit_cooldown_paused";
+
+/// Segundos de pausa global ante un 429: `Retry-After` con piso 1s y techo
+/// 5 min; sin header, 60s (paridad con "esperá ~1 minuto"). Puro, testeable.
+fn rate_limit_cooldown_secs(retry_after_secs: Option<u64>) -> u64 {
+    match retry_after_secs {
+        Some(secs) => secs.clamp(1, RATE_LIMIT_MAX_COOLDOWN_SECS),
+        None => RATE_LIMIT_DEFAULT_COOLDOWN_SECS,
+    }
+}
+
+/// Mensaje criollo de pausa por cuota, con cuenta regresiva y sin jerga
+/// (nada de `429`/`quota`/`retry-after` crudos: eso queda en logs).
+/// Puro y determinista: la app lo usa en disparadores y en el mapeo de
+/// errores de workers.
+pub fn rate_limit_paused_message(remaining_secs: u64) -> String {
+    let remaining = remaining_secs.max(1);
+    format!(
+        "El proveedor pausó la cuota por un rato, che: probá de nuevo en {remaining}s. No hace falta cambiar el modelo ni la clave."
+    )
+}
+
+/// Si `error` es un marcador de pausa (`{MARKER}:{N}`), devuelve el mensaje
+/// criollo con su cuenta regresiva. Puro: la app lo usa en
+/// `remote_error_message` para no mostrar jerga interna. Un marcador roto
+/// cae al default honesto (60s), nunca pánico.
+pub fn rate_limit_paused_message_from_error(error: &str) -> Option<String> {
+    let rest = error.strip_prefix(RATE_LIMIT_PAUSED_MARKER)?;
+    let digits = rest.strip_prefix(':')?.trim();
+    let remaining: u64 = digits.parse().unwrap_or(RATE_LIMIT_DEFAULT_COOLDOWN_SECS);
+    Some(rate_limit_paused_message(remaining))
+}
+
+/// ¿Sigue fresca una entrada del cache de modelos? Puro sobre la edad: al
+/// cumplir el TTL se considera vencida y el próximo pedido refetchea.
+fn models_cache_is_fresh(age: Duration) -> bool {
+    age.as_secs() < MODELS_CACHE_TTL_SECS
+}
 /// Timeouts remotos: simple 60s (`RequestBudget::default`), agente 30s por
 /// turno (`AgentBudget::default` en grafito-agent/loop_engine.rs:43). Piso
 /// 100ms = mínimo válido de `RequestBudget::validate`; techo 120s = cap
@@ -80,6 +170,12 @@ const RETRY_AFTER_MAX_SECS: u64 = 120;
 /// `effective_remote_timeout`).
 const REMOTE_TIMEOUT_MIN_MS: u64 = 100;
 const REMOTE_TIMEOUT_MAX_MS: u64 = 120_000;
+/// Error honesto cuando el build es sin red (`--no-default-features`, sin
+/// `assistant-net`): el transporte remoto no existe y el llamante debe usar
+/// resolución local o informar al usuario. Sin URL ni claves.
+#[cfg(not(feature = "assistant-net"))]
+const NO_NETWORK_MESSAGE: &str =
+    "assistant network support is disabled in this build (feature assistant-net is off)";
 const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. When the user asks for Taylor/Integral/Derivative without specifying a function, reuse the most recent Function from the document context instead of defaulting to sin(x). Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
 const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
 const REMOTE_RESPONSE_GUIDANCE: &str = "Begin with `## Enfoque` and three to five concise, checkable steps. Do not reveal private chain-of-thought or hidden reasoning. Only catalog items marked [EJECUTABLE] may appear in grafito or grafito-scene fences; [REFERENCIA] items are explanatory only. A grafito fence must copy catalogued syntax exactly: use Function[expr] only, with no domain/sample arguments, and never use if or frac expressions. For a Fourier request, emit an executable Function only for a finite numeric partial sum. When the user gives no signal or order, a clearly labelled square-wave example may use `Function[(4/pi)*(sin(x)+sin(3*x)/3+sin(5*x)/5)]`; otherwise use the supplied finite values. Never emit a general Fourier transform, symbolic a_n or b_n coefficients, unknown N, or sum(...) as an executable proposal. A grafito-scene contains two to eight one-line executable commands and is for an atomic construction such as multiple Segment3D edges; never use Script, Polyhedron, or NumericArray. If Grafito cannot represent it with catalogued syntax, explain it in Markdown instead of emitting a fence.";
@@ -87,6 +183,12 @@ const REMOTE_TETRAHEDRON_GUIDANCE: &str = "For a tetrahedron, emit exactly one o
 const REMOTE_4D_POLYTOPE_GUIDANCE: &str = "For a regular 4D polytope, emit exactly one one-line grafito block with the appropriate named command: Pentachoron4D[scale, {xy, xz, xw, yz, yw, zw}], Tesseract4D[scale, {xy, xz, xw, yz, yw, zw}], SixteenCell4D[scale, {xy, xz, xw, yz, yw, zw}], TwentyFourCell4D[scale, {xy, xz, xw, yz, yw, zw}], OneTwentyCell4D[scale, {xy, xz, xw, yz, yw, zw}], or SixHundredCell4D[scale, {xy, xz, xw, yz, yw, zw}]. For higher-dimensional regular families use SimplexND[n, scale, {lexicographic-plane angles}], HypercubeND[n, scale, {lexicographic-plane angles}], or CrossPolytopeND[n, scale, {lexicographic-plane angles}]. Never substitute 3D Tetrahedron, bare Hypercube or tesseract, or many Segment3D edge lines.";
 const FUSION_AUDIT_SYSTEM_PROMPT: &str = "Audit the candidate response for mathematical correctness, completeness, and safe explanatory behavior. Return only the corrected final answer for the user. Do not mention this audit, the candidate, internal models, API keys, tools, files, shell commands, or network actions. If the problem is ambiguous, ask one concise clarifying question instead of guessing.";
 const FUSION_AUDIT_USER_PREFIX: &str = "Original user request and selected Grafito context:";
+/// Directiva socrática vinculante inyectada a TODO system prompt remoto.
+///
+/// No es sugerencia: el LLM debe obedecer el FSM y el scaffold. Si `attempts<2`,
+/// `can_reveal==false` y cualquier intento de `telling` (solución directa) debe
+/// ser bloqueado por el guard remoto. Telling_rate <5% es invariante medible.
+const SOCRATIC_BINDING_DIRECTIVE: &str = "MODO SOCRÁTICO VINCULANTE — ORDEN, NO SUGERENCIA:\n- Seguí estrictamente el FSM socrático Review→HeuristicQ→AwaitStudent→Rectify→Summarize (can_reveal = attempts>=2).\n- Si attempts<2 (can_reveal=false), NO reveles la solución directa (telling). Re-preguntá con la pregunta heurística exacta del scaffold y su pista.\n- Si el guard remoto detecta telling con attempts<2, tu respuesta será descartada y se forzará re-pregunta o repair_feedback.\n- Usá EXACTAMENTE la pregunta BKT actual (current_question) y la pista del scaffold inyectadas abajo; no inventes otra. Adaptá sólo el nivel de detalle según el historial.\n- Telling_rate debe mantenerse <5% (máx 1 telling cada 20 turnos). Si dudas, preguntá en vez de afirmar.\n- El system prompt es vinculante: desobedecerlo invalida la respuesta.";
 
 /// Resuelve el subconjunto local, determinista y sin red del MVP.
 pub fn solve_local(request: &AssistantRequest) -> AssistantResponse {
@@ -946,7 +1048,7 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
 ///
 /// | Fallo | chat (`send_openai_request`) | responses (`request_responses_completion`) | anthropic (`request_anthropic_completion`) | fusion (`request_fusion_completion_with_endpoints`) |
 /// |---|---|---|---|---|
-/// | HTTP 500 (u otro no-2xx) | `remote assistant returned HTTP {status}: {body:500}` | mismo formato, cap `RESPONSES_MAX_BODY_BYTES` 64 KiB antes de parsear | mismo formato | draft falla → `Fusion could not create a draft: {error}`; audit falla → `Fusion could not complete the audit; its draft was discarded.` (nunca se muestra el borrador) |
+/// | HTTP 500 (u otro no-2xx) | `remote assistant returned HTTP {status}: {body:500}` | mismo formato, cap `RESPONSES_MAX_BODY_BYTES` 256 KiB antes de parsear | mismo formato | draft falla → `Fusion could not create a draft: {error}`; audit falla → `Fusion could not complete the audit; its draft was discarded.` (nunca se muestra el borrador) |
 /// | HTTP 429 | mismo formato + ` (reintentá en {N}s)` con `Retry-After` parseado (entero o fecha HTTP, clamp 1..120s) | ídem | ídem | ídem por fase (draft/audit); el mensaje final conserva el prefijo Fusion |
 /// | timeout/transporte | `transport_error`: `timed out after {N}s` / `could not connect` / `request failed`, sin URL ni clave | ídem | ídem (requiere clave, si falta: `API key is unavailable`) | draft usa mitad del timeout, audit el resto (`checked_sub`, nunca 0); timeout total conserva `effective_remote_timeout` |
 /// | cuerpo largo | truncado a `MAX_ERROR_BODY_CHARS` 500 chars, sin eco de secretos | ídem | ídem | ídem |
@@ -1042,7 +1144,8 @@ fn parse_retry_after_secs(value: &str) -> Option<u64> {
     })
 }
 
-fn retry_after_secs_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+#[cfg(feature = "assistant-net")]
+pub(crate) fn retry_after_secs_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
@@ -1051,7 +1154,9 @@ fn retry_after_secs_from_headers(headers: &reqwest::header::HeaderMap) -> Option
 
 /// Error HTTP con cuerpo truncado y, sólo en 429 con `Retry-After` legible,
 /// sufijo ` (reintentá en {N}s)`. No incluye URL, headers ni claves.
-fn http_status_error(status: u16, body: &str, retry_after_secs: Option<u64>) -> String {
+/// `pub(crate)` porque el transporte agente (`agent.rs`) reutiliza el mismo
+/// formato en sus dos POST (Chat y Responses) sin tocar el wire.
+pub(crate) fn http_status_error(status: u16, body: &str, retry_after_secs: Option<u64>) -> String {
     let snippet = truncate_error_body(body);
     if status == 429 {
         if let Some(secs) = retry_after_secs {
@@ -1180,46 +1285,42 @@ fn parse_http_date_to_system_time(value: &str) -> Option<std::time::SystemTime> 
     None
 }
 
-// ADR-001 — Streaming SSE para Responses API (`response.stream=true`).
+// ADR-001 — Streaming SSE para Responses API (`stream:true`).
 //
-// Estado actual (2026-09-04): transporte NO-streaming (`stream` ausente en el
-// payload, `max_output_tokens` con piso 2048). Verificado contra el endpoint
-// real: 200 en ~2s para "ok". Se mantiene así en este turno para no romper el
-// wire format ni la cancelación cooperativa (el worker sólo chequea
-// `CancellationToken` antes/después de `send()`).
+// Estado (2026-09-05): CABLEADO end-to-end (antes: sólo parsers puros).
+//  - Transporte: `request_responses_completion_streaming` (abajo): clona el
+//    payload no-streaming con `"stream": true` + `Accept: text/event-stream`,
+//    lee chunks de 4 KiB con deadline absoluta (`effective_remote_timeout`,
+//    nunca más que el `timeout_ms` del `RequestBudget`) y poll de cancelación
+//    entre chunks (precedente: `grafito-anim` engine poll 200ms). Reensamblado
+//    por `\n` (corte char-safe: 0x0A nunca parte un scalar UTF-8), deltas
+//    `response.output_text.delta` acumulados y reportados por `progress` con
+//    el texto acumulado, cap `RESPONSES_MAX_BODY_BYTES` 256 KiB.
+//  - Fallback: cero eventos SSE al EOF → UN único reintento no-streaming con
+//    el mismo presupuesto y el timeout remanente (>=1s; si no queda tiempo no
+//    se reintenta). Transporte/cancelación/presupuesto/`response.failed` NO
+//    reintentan: se propagan igual que en el path no-streaming.
+//  - Forwarder: `request_remote_streaming_with_api_key_on_worker` rutea
+//    Responses→streaming (sufijos nuevos por `sync_channel(128)` best-effort
+//    con `try_send`) y el resto de protocolos→`request_remote`; aplica
+//    `guard_remote_completion` en AMBOS paths cuando recibe guard de sesión.
+//  - UI (`grafito-app/src/assistant.rs`): `poll_assistant_jobs` drena deltas
+//    a burbuja provisional y la limpia al terminar/cancelar.
+// Verificado contra stub TCP local (deltas fragmentados en varios `write_all`
+// + `flush`, fallback ante JSON no-SSE, guard en ambos protocolos); el wire
+// no-streaming previo sigue intacto (verificado 2026-09-04: 200 en ~2s).
 //
-// Diseño futuro (no cableado; helpers puros abajo como primer paso):
-//  1. Payload: `{"model","instructions","input","max_output_tokens","stream":true}`
-//     + header `Accept: text/event-stream`.
-//  2. Lectura: `reqwest::blocking::Response::chunk()` en bucle con deadline
-//     absoluta (`effective_remote_timeout`) y poll de cancelación cada ~200ms
-//     (precedente: `grafito-anim` engine poll 200ms). Cada chunk se acumula en
-//     un buffer con cap (p.ej. `RESPONSES_MAX_BODY_BYTES`); líneas parciales se
-//     reensamblan por `\n` antes de parsear.
-//  3. Parser: líneas `event: <tipo>` + `data: <json>`; tipos relevantes
-//     `response.output_text.delta` (acumula `delta`), `response.completed`
-//     (cierra con `truncated:false`), `response.incomplete` (cierra con
-//     `truncated:true`), `response.failed` (error acotado 200 chars).
-//     `data: [DONE]` termina el stream. Ver `responses_sse_delta_text` y
-//     `collect_responses_sse_text`.
-//  4. Progreso opcional: `Option<&mut dyn FnMut(&str)>` invocada sólo con el
-//     texto acumulado acotado (`max_output_chars`); nunca bloquea ni duerme:
-//     si el callback pisa cancelación, el loop aborta en el próximo poll.
-//  5. Fallback: cualquier error de stream (content-type inesperado, JSON
-//     inválido, timeout) cae a un único error `schema`/`transport` sin eco de
-//     secretos, idéntico al path no-streaming. No se reintenta en el worker.
-//  6. Puerta de activación: feature o parámetro `stream: bool` en
-//     `RequestBudget`/payload builder, con el default actual `false` hasta que
-//     la UI necesite render progresivo. Cuando se active, el test stub debe
-//     servir `Content-Type: text/event-stream` con deltas fragmentados en
-//     varios `write_all` + `flush` para probar reensamblado y cancelación.
-//
-// Decisión de este turno: NO se cambia el wire (sin `stream:true`, sin
-// `progress` en el path de red). Sólo se agregan los parsers puros + tests
-// unitarios para dejar el diseño verificado sin riesgo.
-/// Callback de progreso para futuro streaming SSE (ADR-001, aún no cableado
-/// al transporte: el wire sigue siendo no-streaming para no romper el formato
-/// verificado). Recibe el texto acumulado acotado; nunca duerme ni bloquea.
+// Parser: líneas `event: <tipo>` + `data: <json>`; tipos relevantes
+// `response.output_text.delta` (acumula `delta`), `response.completed`
+// (cierra con `truncated:false`), `response.incomplete` (cierra con
+// `truncated:true`), `response.failed` (error acotado 200 chars).
+// `data: [DONE]` termina el stream. Ver `responses_sse_delta_text` y
+// `collect_responses_sse_text` (helpers puros) + `ingest_sse_line` (lector).
+// Progreso: `Option<&mut dyn FnMut(&str)>` invocada sólo con el texto
+// acumulado acotado (`RESPONSES_MAX_BODY_BYTES`); nunca bloquea ni duerme:
+// si el callback pisa cancelación, el loop aborta en el próximo poll.
+/// Callback de progreso del streaming SSE (ADR-001, cableado al transporte
+/// Responses). Recibe el texto acumulado acotado; nunca duerme ni bloquea.
 pub type ResponsesProgressCallback<'a> = dyn FnMut(&str) + Send + 'a;
 
 /// Extrae el delta de texto de un evento SSE de Responses.
@@ -1271,6 +1372,302 @@ pub fn collect_responses_sse_text(sse_body: &str) -> (String, bool) {
         }
     }
     (text, truncated)
+}
+
+/// Resultado interno del lector SSE de la Responses API.
+enum SseStreamOutcome {
+    /// El servidor habló SSE: texto acumulado de deltas + flag de truncado.
+    Done { text: String, truncated: bool },
+    /// El servidor no emitió ningún evento SSE (JSON plano, cuerpo vacío o
+    /// forma desconocida): el llamante reintenta UNA vez sin `stream`.
+    FallbackToNonStreaming,
+}
+
+/// POST a la Responses API con `stream:true` y drenado progresivo de deltas.
+///
+/// Clona `base_payload` (el de `build_responses_payload`, sin `stream`) con
+/// `"stream": true` y `Accept: text/event-stream`. Cada delta válido se
+/// acumula y se reporta por `progress` con el texto acumulado acotado.
+///
+/// Garantías (presupuesto `RequestBudget` intacto):
+/// - El texto final pasa por `completion_from_text` con el mismo
+///   `max_output_chars`; el cuerpo SSE está acotado por
+///   `RESPONSES_MAX_BODY_BYTES` (256 KiB, igual que el path no-streaming).
+/// - Cancelación cooperativa: se chequea antes del `send()` y entre chunks
+///   de 4 KiB. Un stall del servidor sigue acotado por el `timeout` total de
+///   reqwest (cubre también la lectura del cuerpo en el cliente bloqueante).
+/// - Fallback: sólo si el servidor nunca emite eventos SSE, UN único
+///   reintento no-streaming con el mismo presupuesto y el timeout remanente
+///   (>=1s; sin tiempo remanente se devuelve error `schema` sin reintentar).
+///   Transporte, cancelación, presupuesto y `response.failed` NO reintentan.
+///
+/// Sin `assistant-net`: stub honesto que siempre retorna `Err(NoNetwork)`.
+#[cfg(feature = "assistant-net")]
+pub fn request_responses_completion_streaming(
+    endpoint: Url,
+    base_payload: Value,
+    api_key: Option<&str>,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+    max_output_chars: usize,
+    progress: Option<&mut ResponsesProgressCallback<'_>>,
+) -> Result<RemoteCompletion, String> {
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    // Freno 429: si la cuota está en pausa se falla honesto sin tocar la red
+    // (la cancelación ya se chequeó arriba y tiene prioridad).
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
+    let started = Instant::now();
+    let mut streaming_payload = base_payload.clone();
+    streaming_payload["stream"] = json!(true);
+    let client = shared_http_client()?;
+    let mut call = client
+        .post(endpoint.clone())
+        .header("Accept", "text/event-stream")
+        .json(&streaming_payload)
+        .timeout(timeout);
+    if let Some(key) = api_key {
+        call = call.bearer_auth(sanitize_api_key(key)?);
+    }
+    let response = call
+        .send()
+        .map_err(|error| transport_error("remote assistant stream", &error, Some(timeout)))?;
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    if !response.status().is_success() {
+        // Idéntico al path no-streaming: 429 con Retry-After, cuerpo acotado
+        // sin secretos. Además arma la pausa global para que el fallback
+        // no-streaming (abajo) y los reintentos del usuario no martillen.
+        let status = response.status().as_u16();
+        let retry_after = if status == 429 {
+            retry_after_secs_from_headers(response.headers())
+        } else {
+            None
+        };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
+        let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
+        return Err(http_status_error(status, &body, retry_after));
+    }
+    match read_responses_sse_stream(response, timeout, cancellation, progress)? {
+        SseStreamOutcome::Done { text, truncated } => {
+            completion_from_text(&text, max_output_chars, truncated)
+        }
+        SseStreamOutcome::FallbackToNonStreaming => {
+            // El servidor no habló SSE: UN reintento no-streaming con el
+            // MISMO presupuesto. El total nunca supera `effective_remote_timeout`.
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .filter(|remaining| *remaining >= Duration::from_secs(1));
+            let Some(remaining) = remaining else {
+                return Err(response_schema_error(
+                    "response did not stream any displayable events",
+                ));
+            };
+            request_responses_completion(
+                endpoint,
+                base_payload,
+                api_key,
+                cancellation,
+                remaining,
+                max_output_chars,
+            )
+        }
+    }
+}
+
+/// Stub sin red: el transporte SSE no existe sin `assistant-net`.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_responses_completion_streaming(
+    _endpoint: Url,
+    _base_payload: Value,
+    _api_key: Option<&str>,
+    _cancellation: &CancellationToken,
+    _timeout: Duration,
+    _max_output_chars: usize,
+    _progress: Option<&mut ResponsesProgressCallback<'_>>,
+) -> Result<RemoteCompletion, String> {
+    Err(NO_NETWORK_MESSAGE.into())
+}
+
+/// Lee un cuerpo `text/event-stream` con deadline absoluta y cancelación.
+///
+/// Drena por chunks (sin `chunk()`: el cliente bloqueante expone `Read`),
+/// reensambla líneas por `\n` e ingiere cada `data:` con `ingest_sse_line`.
+/// EOF abrupto tras deltas válidos conserva el parcial marcado `truncated`;
+/// EOF sin ningún evento → `FallbackToNonStreaming` (el servidor no habla
+/// SSE y el llamante reintenta sin `stream`).
+#[cfg(feature = "assistant-net")]
+fn read_responses_sse_stream(
+    response: reqwest::blocking::Response,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+    mut progress: Option<&mut ResponsesProgressCallback<'_>>,
+) -> Result<SseStreamOutcome, String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let maximum = RESPONSES_MAX_BODY_BYTES
+        .checked_add(1)
+        .ok_or_else(|| "remote assistant response limit is invalid".to_string())?;
+    let mut reader = response.take(maximum as u64);
+    let mut total_bytes = 0_usize;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut text = String::new();
+    let mut truncated = false;
+    let mut events_seen = 0_u32;
+    let mut done = false;
+    let mut chunk = [0_u8; 4096];
+    while !done {
+        if cancellation.is_cancelled() {
+            return Err("remote assistant request was cancelled".into());
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "remote assistant stream timed out after {}s",
+                timeout.as_secs().max(1)
+            ));
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(consumed) => {
+                total_bytes = total_bytes.saturating_add(consumed);
+                if total_bytes > RESPONSES_MAX_BODY_BYTES {
+                    if events_seen == 0 {
+                        return Err(response_body_budget_error(RESPONSES_MAX_BODY_BYTES));
+                    }
+                    // Tope superado con deltas válidos ya acumulados: no se
+                    // descarta lo útil. Se cierra como parcial truncado (la UI
+                    // avisa "alcanzó el límite... pedí que continúe" ante
+                    // `truncated:true`, verificado en app `assistant.rs`).
+                    // `text`/`pending` nunca superan el tope + un chunk: OOM-safe.
+                    return Ok(SseStreamOutcome::Done {
+                        text,
+                        truncated: true,
+                    });
+                }
+                pending.extend_from_slice(&chunk[..consumed]);
+                if let Some(split) = pending.iter().rposition(|byte| *byte == b'\n') {
+                    let complete: Vec<u8> = pending.drain(..=split).collect();
+                    // Cortar en `\n` (0x0A) nunca parte un scalar UTF-8: los
+                    // bytes multibyte son siempre >= 0x80.
+                    let block = String::from_utf8_lossy(&complete);
+                    for line in block.lines() {
+                        if ingest_sse_line(
+                            line,
+                            &mut text,
+                            &mut truncated,
+                            &mut events_seen,
+                            &mut progress,
+                        )? {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                return Err("remote assistant response body could not be read".to_string());
+            }
+        }
+    }
+    if !done && !pending.is_empty() {
+        // Cola final sin `\n` de cierre (el servidor cerró la conexión):
+        // es una línea completa válida.
+        let tail = String::from_utf8_lossy(&pending);
+        for line in tail.lines() {
+            if ingest_sse_line(
+                line,
+                &mut text,
+                &mut truncated,
+                &mut events_seen,
+                &mut progress,
+            )? {
+                done = true;
+                break;
+            }
+        }
+    }
+    if events_seen == 0 {
+        return Ok(SseStreamOutcome::FallbackToNonStreaming);
+    }
+    if !done {
+        truncated = true;
+    }
+    Ok(SseStreamOutcome::Done { text, truncated })
+}
+
+/// Ingiere una línea de un bloque SSE. Retorna `true` al alcanzar el estado
+/// terminal (`[DONE]`, `response.completed`, `response.incomplete`).
+///
+/// Indulgente con líneas sueltas (se ignoran `event:`/`:ping`/JSON ilegible):
+/// sólo cuentan los eventos parseables. `response.failed` es error directo
+/// del proveedor (NO dispara fallback: reintentar sin `stream` no lo arregla).
+fn ingest_sse_line(
+    line: &str,
+    text: &mut String,
+    truncated: &mut bool,
+    events_seen: &mut u32,
+    progress: &mut Option<&mut ResponsesProgressCallback<'_>>,
+) -> Result<bool, String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') {
+        return Ok(false);
+    }
+    let Some(data) = line.strip_prefix("data:") else {
+        // `event:`, `id:`, `retry:` se ignoran: el tipo viaja en el JSON.
+        return Ok(false);
+    };
+    let data = data.trim();
+    if data.is_empty() {
+        return Ok(false);
+    }
+    if data == "[DONE]" {
+        return Ok(true);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return Ok(false);
+    };
+    let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "response.output_text.delta" | "response.text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                *events_seen = events_seen.saturating_add(1);
+                text.push_str(delta);
+                if let Some(callback) = progress.as_mut() {
+                    (*callback)(text);
+                }
+            }
+            Ok(false)
+        }
+        "response.completed" => {
+            *events_seen = events_seen.saturating_add(1);
+            Ok(true)
+        }
+        "response.incomplete" => {
+            *events_seen = events_seen.saturating_add(1);
+            *truncated = true;
+            Ok(true)
+        }
+        "response.failed" => {
+            let detail: String = value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown provider error")
+                .chars()
+                .take(200)
+                .collect();
+            Err(response_schema_error(&format!(
+                "responses stream reported a failure: {detail}"
+            )))
+        }
+        _ => Ok(false),
+    }
 }
 
 fn endpoint_with_path(settings: &ProviderSettings, suffix: &str) -> Result<Url, String> {
@@ -1701,6 +2098,17 @@ pub fn assistant_system_prompt(request: &AssistantRequest) -> String {
     remote_system_prompt(request)
 }
 
+/// System prompt con inyección socrática determinista (BKT current_question + scaffold + history).
+///
+/// Wrapper público y testeable sobre `remote_system_prompt_with_socratic`.
+pub fn assistant_system_prompt_with_socratic(
+    request: &AssistantRequest,
+    fsm: &SocraticFsm,
+    scaffold: &Scaffold,
+) -> String {
+    remote_system_prompt_with_socratic(request, fsm, scaffold)
+}
+
 /// Prompt rico de usuario (problema + focus + catálogo + reparación).
 pub fn assistant_remote_prompt(request: &AssistantRequest) -> Result<String, String> {
     remote_prompt(request)
@@ -1742,7 +2150,7 @@ fn response_language_directive(language: &str) -> &'static str {
 
 fn remote_system_prompt(request: &AssistantRequest) -> String {
     let base = format!(
-        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}\n\n{}",
+        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}\n\n{SOCRATIC_BINDING_DIRECTIVE}\n\n{}",
         response_language_directive(&request.language)
     );
     let instructions = request.system_instructions.trim();
@@ -1753,6 +2161,88 @@ fn remote_system_prompt(request: &AssistantRequest) -> String {
             "--- SYSTEM ---\n{base}\n--- USER ---\nInstrucciones locales (plugins) para esta sesión:\n{instructions}\n--- END ---"
         )
     }
+}
+
+/// System prompt con inyección socrática determinista (BKT current_question + scaffold + history).
+///
+/// Inserta el segmento socrático antes del cierre final, de forma determinista.
+/// Si el prompt usa delimitador `--- END`, inyecta antes; si no, hace append.
+pub fn remote_system_prompt_with_socratic(
+    request: &AssistantRequest,
+    fsm: &SocraticFsm,
+    scaffold: &Scaffold,
+) -> String {
+    let mut base = remote_system_prompt(request);
+    let socratic_segment = fsm.socratic_system_segment(scaffold);
+    if let Some(pos) = base.rfind("--- END") {
+        base.insert_str(pos, &format!("{socratic_segment}\n\n"));
+    } else {
+        base.push_str("\n\n");
+        base.push_str(&socratic_segment);
+    }
+    base
+}
+
+/// Atajo que construye scaffold determinista desde `concept`/`level` + `history` y lo inyecta.
+///
+/// `concept` es el topic BKT actual, `level` el nivel pedagógico, `history` los turnos previos.
+/// Determinista: mismo FSM + concept/level/history → mismo prompt.
+pub fn remote_system_prompt_with_scaffold(
+    request: &AssistantRequest,
+    fsm: &SocraticFsm,
+    concept: &str,
+    level: PedagogicalLevel,
+    history: &[grafito_pedagogy::scaffold::Turn],
+) -> String {
+    let engine = ScaffoldEngine;
+    let scaffold = engine.scaffold(concept, level, history);
+    remote_system_prompt_with_socratic(request, fsm, &scaffold)
+}
+
+/// Heurística determinista: ¿el texto del LLM contiene marcadores de solución directa?
+///
+/// Wrapper puro sobre `SocraticFsm::contains_solution_marker` para tests desde `grafito-assistant`.
+pub fn contains_telling_markers(text: &str) -> bool {
+    SocraticFsm::contains_solution_marker(text)
+}
+
+/// Guard telling puro: verifica si el LLM reveló solución con `attempts<2`.
+///
+/// Retorna `Ok(())` si pasa, `Err("TellingTooEarly: ...")` si viola `can_reveal==false`.
+pub fn check_telling_guard(fsm: &SocraticFsm, response_text: &str) -> Result<(), String> {
+    fsm.check_telling_guard(response_text)
+        .map_err(|e| e.to_string())
+}
+
+/// Enforce: si es telling devuelve `Err(repair_prompt)` vinculante, si no `Ok(text)`.
+///
+/// El llamante remoto debe descartar la respuesta y re-preguntar o inyectar `repair_prompt` como
+/// `repair_feedback`/nuevo turno (ver `telling_repair_prompt`).
+pub fn enforce_telling_guard(
+    fsm: &SocraticFsm,
+    response_text: &str,
+    scaffold: &Scaffold,
+) -> Result<String, String> {
+    fsm.enforce_telling_guard(response_text, scaffold)
+}
+
+/// Aplica el guard a un `RemoteCompletion` completo.
+///
+/// Si es telling con `attempts<2`, fuerza la reparación (Err con re-pregunta); si no, Ok(completion).
+pub fn guard_remote_completion(
+    fsm: &SocraticFsm,
+    completion: RemoteCompletion,
+    scaffold: &Scaffold,
+) -> Result<RemoteCompletion, String> {
+    match fsm.enforce_telling_guard(&completion.text, scaffold) {
+        Ok(_) => Ok(completion),
+        Err(repair) => Err(repair),
+    }
+}
+
+/// Prompt de reparación determinista para telling, listo para inyectar en el próximo request.
+pub fn telling_repair_prompt(fsm: &SocraticFsm, scaffold: &Scaffold) -> String {
+    fsm.repair_prompt_for_telling(scaffold)
 }
 
 fn remote_prompt(request: &AssistantRequest) -> Result<String, String> {
@@ -1857,6 +2347,9 @@ pub struct RemoteCompletion {
 ///
 /// Las claves se leen exclusivamente desde la variable de entorno configurada
 /// dentro del hilo y nunca se almacenan ni se incluyen en los errores.
+///
+/// Sin `assistant-net`: stub honesto que retorna `Err(NoNetwork)` en el worker.
+#[cfg(feature = "assistant-net")]
 pub fn request_remote_on_worker(
     settings: ProviderSettings,
     request: AssistantRequest,
@@ -1877,11 +2370,24 @@ pub fn request_remote_on_worker(
     })
 }
 
+/// Stub sin red: el worker existe para conservar la firma, pero falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_remote_on_worker(
+    _settings: ProviderSettings,
+    _request: AssistantRequest,
+    _cancellation: CancellationToken,
+) -> JoinHandle<Result<RemoteCompletion, String>> {
+    std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
+}
+
 /// Inicia una petición remota usando una clave de memoria de una sesión de UI.
 ///
 /// La clave se consume sólo dentro del worker y nunca se serializa ni se informa
 /// en errores. Una clave `None` es válida para proveedores sin autenticación,
 /// como una instancia local de Ollama.
+///
+/// Sin `assistant-net`: stub honesto que retorna `Err(NoNetwork)` en el worker.
+#[cfg(feature = "assistant-net")]
 pub fn request_remote_with_api_key_on_worker(
     settings: ProviderSettings,
     request: AssistantRequest,
@@ -1891,10 +2397,151 @@ pub fn request_remote_with_api_key_on_worker(
     std::thread::spawn(move || request_remote(settings, request, api_key, cancellation))
 }
 
+/// Stub sin red: el worker existe para conservar la firma, pero falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_remote_with_api_key_on_worker(
+    _settings: ProviderSettings,
+    _request: AssistantRequest,
+    _api_key: Option<String>,
+    _cancellation: CancellationToken,
+) -> JoinHandle<Result<RemoteCompletion, String>> {
+    std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
+}
+
+/// Contexto socrático de sesión para el guard remoto (intentos + scaffold).
+///
+/// Lo construye la app desde la sesión (turnos previos + `WorkingMemory`) y el
+/// worker lo aplica sobre el `RemoteCompletion` final —tanto en el path
+/// streaming (Responses/Spark) como en el no-streaming (resto de protocolos)—
+/// vía `guard_remote_completion`. `None` desactiva el guard.
+#[derive(Debug, Clone)]
+pub struct SocraticGuardContext {
+    /// FSM con `attempts` sembrados desde los intentos previos del estudiante.
+    pub fsm: SocraticFsm,
+    /// Scaffold actual (pregunta BKT + pista) para la reparación forzada.
+    pub scaffold: Scaffold,
+}
+
+/// Adapta el callback de progreso (texto acumulado) a envíos de sufijos.
+///
+/// Retorna un `FnMut(&str)` que envía por `delta_tx` sólo el sufijo aún no
+/// confirmado, con `try_send` best-effort: si el canal está lleno no bloquea
+/// al worker; el próximo progreso reintenta desde el punto no confirmado (la
+/// UI reemplaza el preview por el último acumulado, así que nada se pierde).
+pub fn stream_progress_sender(delta_tx: SyncSender<String>) -> impl FnMut(&str) + Send {
+    let mut last_sent = 0_usize;
+    move |accumulated: &str| {
+        // `last_sent` es índice por bytes: se usa vía `get` para no paniquear
+        // si un llamante futuro pasa un acumulado no-monotónico o si el corte
+        // cae a mitad de un scalar multibyte (el acumulado real sólo crece
+        // por `push_str`, así que en el path SSE siempre es boundary válido;
+        // este `get` es defensa en profundidad, sin `unwrap`).
+        let Some(suffix) = accumulated.get(last_sent..) else {
+            return;
+        };
+        if !suffix.is_empty() && delta_tx.try_send(suffix.to_owned()).is_ok() {
+            last_sent = accumulated.len();
+        }
+    }
+}
+
+/// Inicia un POST remoto con streaming SSE cuando el protocolo lo soporta.
+///
+/// - `OpenAiResponses` (Muse Spark): `request_responses_completion_streaming`
+///   con `progress` adaptado por `stream_progress_sender` hacia `delta_tx`
+///   (`sync_channel(128)` best-effort: si la UI no drena, se descarta preview
+///   pero el resultado final sigue intacto).
+/// - Resto de protocolos: `request_remote` clásico (no-streaming, con su
+///   propio log; este wrapper sólo loguea el brazo streaming+guard).
+///   Tras el transporte (cualquiera de los dos paths) se aplica el guard
+///   socrático si `guard` es `Some`: telling con `attempts<2` retorna
+///   `Err(repair)` para forzar re-pregunta en vez de mostrar la solución.
+///
+/// La clave viaja sólo en el worker, igual que
+/// `request_remote_with_api_key_on_worker`: nunca se serializa ni se informa
+/// en errores.
+///
+/// Sin `assistant-net`: stub honesto que retorna `Err(NoNetwork)` en el worker.
+#[cfg(feature = "assistant-net")]
+pub fn request_remote_streaming_with_api_key_on_worker(
+    settings: ProviderSettings,
+    request: AssistantRequest,
+    api_key: Option<String>,
+    cancellation: CancellationToken,
+    delta_tx: SyncSender<String>,
+    guard: Option<SocraticGuardContext>,
+) -> JoinHandle<Result<RemoteCompletion, String>> {
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let protocol = remote_protocol(&settings);
+        let timeout = effective_remote_timeout(request.budget.timeout_ms);
+        let max_output_chars = request.budget.max_output_chars;
+        match protocol {
+            RemoteProtocol::OpenAiResponses => {
+                let model = settings.model.clone();
+                let prepared = responses_endpoint(&settings).and_then(|endpoint| {
+                    build_responses_payload(&settings, &request).map(|payload| (endpoint, payload))
+                });
+                let result = match prepared {
+                    Ok((endpoint, payload)) => {
+                        let mut on_progress = stream_progress_sender(delta_tx);
+                        request_responses_completion_streaming(
+                            endpoint,
+                            payload,
+                            api_key.as_deref(),
+                            &cancellation,
+                            timeout,
+                            max_output_chars,
+                            Some(&mut on_progress),
+                        )
+                    }
+                    Err(error) => Err(error),
+                };
+                // Guard socrático también en el path streaming.
+                let guarded = match (result, guard) {
+                    (Ok(completion), Some(context)) => {
+                        guard_remote_completion(&context.fsm, completion, &context.scaffold)
+                    }
+                    (result, _) => result,
+                };
+                log_remote_completion_event(&model, protocol, started.elapsed(), &guarded);
+                guarded
+            }
+            // El path no-streaming loguea dentro de `request_remote`; acá
+            // sólo se agrega el guard sobre su resultado.
+            _ => {
+                let result = request_remote(settings, request, api_key, cancellation);
+                match (result, guard) {
+                    (Ok(completion), Some(context)) => {
+                        guard_remote_completion(&context.fsm, completion, &context.scaffold)
+                    }
+                    (result, _) => result,
+                }
+            }
+        }
+    })
+}
+
+/// Stub sin red: el worker existe para conservar la firma, pero falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_remote_streaming_with_api_key_on_worker(
+    _settings: ProviderSettings,
+    _request: AssistantRequest,
+    _api_key: Option<String>,
+    _cancellation: CancellationToken,
+    _delta_tx: SyncSender<String>,
+    _guard: Option<SocraticGuardContext>,
+) -> JoinHandle<Result<RemoteCompletion, String>> {
+    std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
+}
+
 /// Consulta los identificadores de modelos disponibles en un proveedor remoto.
 ///
 /// Sólo devuelve `data[].id`, con tamaño y cantidad acotados; no propaga la
 /// metadata ni la respuesta completa del proveedor a la interfaz.
+///
+/// Sin `assistant-net`: stub honesto que retorna `Err(NoNetwork)` en el worker.
+#[cfg(feature = "assistant-net")]
 pub fn request_remote_models_with_api_key_on_worker(
     settings: ProviderSettings,
     api_key: Option<String>,
@@ -1903,6 +2550,14 @@ pub fn request_remote_models_with_api_key_on_worker(
     std::thread::spawn(move || {
         if cancellation.is_cancelled() {
             return Err("remote model request was cancelled".into());
+        }
+        // Freno 429 compartido + single-flight por TTL: en pausa se falla
+        // honesto sin red; con cache fresco se devuelve sin el GET.
+        if check_rate_limit_cooldown().is_err() {
+            return Err(rate_limit_paused_error());
+        }
+        if let Some(models) = cached_model_list() {
+            return Ok(models);
         }
         let endpoint = models_endpoint(&settings)?;
         let client = shared_http_client()?;
@@ -1922,12 +2577,16 @@ pub fn request_remote_models_with_api_key_on_worker(
         }
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            // 429 informa "reintentá en Ns" sin dormir el worker (cancelable).
+            // 429 informa "reintentá en Ns" sin dormir el worker (cancelable)
+            // y arma la pausa global (también frena chat/agente/modelos).
             let retry_after = if status == 429 {
                 retry_after_secs_from_headers(response.headers())
             } else {
                 None
             };
+            if status == 429 {
+                record_rate_limited(retry_after);
+            }
             if let Some(secs) = retry_after {
                 return Err(format!(
                     "remote model request returned HTTP 429 (reintentá en {secs}s)"
@@ -1955,10 +2614,23 @@ pub fn request_remote_models_with_api_key_on_worker(
         if models.is_empty() || models.len() > MAX_DISCOVERED_MODELS {
             return Err("remote model list is outside the allowed size".into());
         }
+        // Single-flight: el próximo pedido dentro del TTL sale del cache.
+        store_model_list(models.clone());
         Ok(models)
     })
 }
 
+/// Stub sin red: el worker existe para conservar la firma, pero falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_remote_models_with_api_key_on_worker(
+    _settings: ProviderSettings,
+    _api_key: Option<String>,
+    _cancellation: CancellationToken,
+) -> JoinHandle<Result<Vec<String>, String>> {
+    std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
+}
+
+#[cfg(feature = "assistant-net")]
 fn request_remote(
     settings: ProviderSettings,
     request: AssistantRequest,
@@ -2083,6 +2755,7 @@ fn remote_error_category(error: &str) -> &'static str {
     }
 }
 
+#[cfg(feature = "assistant-net")]
 fn request_fusion_completion(
     settings: &ProviderSettings,
     request: &AssistantRequest,
@@ -2101,6 +2774,7 @@ fn request_fusion_completion(
     )
 }
 
+#[cfg(feature = "assistant-net")]
 fn request_fusion_completion_with_endpoints(
     draft_endpoint: Url,
     audit_endpoint: Url,
@@ -2155,6 +2829,7 @@ fn request_fusion_completion_with_endpoints(
     })
 }
 
+#[cfg(feature = "assistant-net")]
 fn request_openai_completion(
     endpoint: Url,
     payload: Value,
@@ -2173,6 +2848,7 @@ fn request_openai_completion(
 
 /// POST a la Responses API (`{base}/responses`) con Bearer saneado.
 /// La usa Muse Spark, que por Chat Completions devuelve 500 instantáneo.
+#[cfg(feature = "assistant-net")]
 fn request_responses_completion(
     endpoint: Url,
     payload: Value,
@@ -2189,6 +2865,9 @@ fn request_responses_completion(
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
     let response = call
         .send()
         .map_err(|error| transport_error("remote assistant", &error, Some(timeout)))?;
@@ -2198,12 +2877,16 @@ fn request_responses_completion(
     if !response.status().is_success() {
         let status = response.status().as_u16();
         // Retry-After sólo en 429; no se duerme el worker cancelable, sólo se
-        // anota "reintentá en Ns" (clamp 1..120s, entero o fecha HTTP).
+        // anota "reintentá en Ns" (clamp 1..120s, entero o fecha HTTP) y se
+        // arma la pausa global.
         let retry_after = if status == 429 {
             retry_after_secs_from_headers(response.headers())
         } else {
             None
         };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
         let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
         return Err(http_status_error(status, &body, retry_after));
     }
@@ -2273,6 +2956,7 @@ fn responses_completion_text(body: &Value) -> Result<(String, bool), String> {
     Ok((text, truncated))
 }
 
+#[cfg(feature = "assistant-net")]
 fn request_anthropic_completion(
     endpoint: Url,
     payload: Value,
@@ -2296,6 +2980,9 @@ fn request_anthropic_completion(
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
     let response = call
         .send()
         .map_err(|error| transport_error("remote assistant", &error, Some(timeout)))?;
@@ -2309,6 +2996,9 @@ fn request_anthropic_completion(
         } else {
             None
         };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
         let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
         return Err(http_status_error(status, &body, retry_after));
     }
@@ -2324,6 +3014,7 @@ fn request_anthropic_completion(
 /// clave): timeout lleva "timed out", fallo de conexión/DNS/TLS lleva
 /// "could not connect", el resto lleva "request failed". La UI mapea cada
 /// caso a un mensaje distinto en criollo.
+#[cfg(feature = "assistant-net")]
 pub(crate) fn transport_error(
     context: &str,
     error: &reqwest::Error,
@@ -2360,6 +3051,7 @@ pub(crate) fn sanitize_api_key(key: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
+#[cfg(feature = "assistant-net")]
 fn send_openai_request(
     call: reqwest::blocking::RequestBuilder,
     cancellation: &CancellationToken,
@@ -2368,6 +3060,9 @@ fn send_openai_request(
 ) -> Result<RemoteCompletion, String> {
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
+    }
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
     }
     let response = call
         .send()
@@ -2382,6 +3077,9 @@ fn send_openai_request(
         } else {
             None
         };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
         let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
         return Err(http_status_error(status, &body, retry_after));
     }
@@ -2480,11 +3178,152 @@ fn response_content_error(reason: &str) -> String {
     format!("remote assistant response content is not displayable: {reason}")
 }
 
+/// Pausa global compartida ante 429 (`static` + `Mutex`: el transporte es
+/// por-request en hilos workers, así que el freno vive acá y no en el
+/// cliente). `None` = sin pausa. El `Mutex` se toma con `.ok()`: si está
+/// envenenado se ignora la pausa (fail-open a un request, nunca pánico).
+#[cfg(feature = "assistant-net")]
+static RATE_LIMIT_NOT_BEFORE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// Resta de la pausa con tiempo inyectado (para tests sin red ni sleeps):
+/// `Some(segundos)` si `not_before` sigue en el futuro, `None` si venció.
+#[cfg(feature = "assistant-net")]
+pub(crate) fn cooldown_remaining_secs(not_before: Instant, now: Instant) -> Option<u64> {
+    if not_before > now {
+        Some(not_before.duration_since(now).as_secs().max(1))
+    } else {
+        None
+    }
+}
+
+/// Guarda la pausa global ante un 429 (con/sin `Retry-After`). Sin red,
+/// sin sleep, sin pánico. La llama todo path que ve un 429 (los 7 `.send()`
+/// del crate, vía sus wrappers).
+#[cfg(feature = "assistant-net")]
+pub(crate) fn record_rate_limited(retry_after_secs: Option<u64>) {
+    let wait = rate_limit_cooldown_secs(retry_after_secs);
+    let not_before = Instant::now().checked_add(Duration::from_secs(wait));
+    if let Ok(mut guard) = RATE_LIMIT_NOT_BEFORE.lock() {
+        // `checked_add` casi nunca falla (≤300s); si fallara se conserva la
+        // pausa previa en vez de romper el invariante.
+        if let Some(deadline) = not_before {
+            *guard = Some(deadline);
+        }
+    }
+}
+
+/// ¿La cuota sigue en pausa? `Ok(())` = vía libre; `Err(segundos)` = el
+/// llamante falla honesto sin tocar la red.
+#[cfg(feature = "assistant-net")]
+pub(crate) fn check_rate_limit_cooldown() -> Result<(), u64> {
+    let not_before = RATE_LIMIT_NOT_BEFORE.lock().ok().and_then(|guard| *guard);
+    match not_before {
+        Some(deadline) => match cooldown_remaining_secs(deadline, Instant::now()) {
+            Some(left) => Err(left),
+            None => Ok(()),
+        },
+        None => Ok(()),
+    }
+}
+
+/// Vía libre o segundos restantes de la pausa global (para los disparadores
+/// de la app, que fallan honesto ANTES de spawnear workers).
+#[cfg(feature = "assistant-net")]
+pub fn rate_limit_cooldown_remaining_secs() -> Option<u64> {
+    check_rate_limit_cooldown().err()
+}
+
+/// Sin red no hay cuota que pausar: siempre vía libre.
+#[cfg(not(feature = "assistant-net"))]
+pub fn rate_limit_cooldown_remaining_secs() -> Option<u64> {
+    None
+}
+
+/// Error honesto de worker ante pausa: marcador interno (la app lo pasa a
+/// criollo; en logs queda el contador, sin secretos).
+#[cfg(feature = "assistant-net")]
+pub(crate) fn rate_limit_paused_error() -> String {
+    let remaining =
+        rate_limit_cooldown_remaining_secs().unwrap_or(RATE_LIMIT_DEFAULT_COOLDOWN_SECS);
+    format!("{RATE_LIMIT_PAUSED_MARKER}:{remaining}")
+}
+
+/// Limpia la pausa global (sólo tests: los stubs 429 la setean de verdad y
+/// no deben contaminar a los stubs 200 que corren en paralelo, incluidos los
+/// tests de integración en `tests/` que comparten el `static` del proceso).
+#[cfg(feature = "assistant-net")]
+#[doc(hidden)]
+pub fn clear_rate_limit_for_tests() {
+    if let Ok(mut guard) = RATE_LIMIT_NOT_BEFORE.lock() {
+        *guard = None;
+    }
+}
+
+/// Sin red no hay pausa que limpiar.
+#[cfg(not(feature = "assistant-net"))]
+#[doc(hidden)]
+pub fn clear_rate_limit_for_tests() {}
+
+/// Cache compartido de la lista de modelos (single-flight por TTL): dos
+/// pedidos seguidos no duplican el GET; el turno de chat nunca lo toca
+/// (no está en su hot path).
+#[cfg(feature = "assistant-net")]
+static MODELS_CACHE: std::sync::Mutex<Option<CachedModelList>> = std::sync::Mutex::new(None);
+
+/// Entrada del cache: modelos + instante de fetch (TTL `MODELS_CACHE_TTL_SECS`).
+#[cfg(feature = "assistant-net")]
+#[derive(Debug, Clone)]
+struct CachedModelList {
+    fetched_at: Instant,
+    models: Vec<String>,
+}
+
+/// Modelos cacheados si siguen frescos; `None` si hay que fetchear.
+/// Sin pánico: ante `Mutex` envenenado o reloj roto se refetchea.
+#[cfg(feature = "assistant-net")]
+pub(crate) fn cached_model_list() -> Option<Vec<String>> {
+    let guard = MODELS_CACHE.lock().ok()?;
+    let cached = guard.as_ref()?;
+    let age = Instant::now().checked_duration_since(cached.fetched_at)?;
+    if models_cache_is_fresh(age) {
+        Some(cached.models.clone())
+    } else {
+        None
+    }
+}
+
+/// Guarda la lista recién fetcheada. Sin pánico ante `Mutex` envenenado.
+#[cfg(feature = "assistant-net")]
+pub(crate) fn store_model_list(models: Vec<String>) {
+    if let Ok(mut guard) = MODELS_CACHE.lock() {
+        *guard = Some(CachedModelList {
+            fetched_at: Instant::now(),
+            models,
+        });
+    }
+}
+
+/// Limpia el cache de modelos (sólo tests, para aislar stubs; ver
+/// `clear_rate_limit_for_tests`).
+#[cfg(feature = "assistant-net")]
+#[doc(hidden)]
+pub fn clear_models_cache_for_tests() {
+    if let Ok(mut guard) = MODELS_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// Sin red no hay cache que limpiar.
+#[cfg(not(feature = "assistant-net"))]
+#[doc(hidden)]
+pub fn clear_models_cache_for_tests() {}
+
 /// Cliente bloqueante compartido por todos los proveedores.
 ///
 /// Se construye una única vez y su pool de conexiones se reutiliza entre
 /// peticiones, evitando el costo de TLS y de crear un `Client` por llamada.
 /// El timeout de cada petición se aplica sobre la `RequestBuilder`.
+#[cfg(feature = "assistant-net")]
 fn shared_http_client() -> Result<&'static reqwest::blocking::Client, String> {
     static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
         std::sync::OnceLock::new();
@@ -2504,20 +3343,24 @@ fn completion_from_text(
     max_output_chars: usize,
     truncated: bool,
 ) -> Result<RemoteCompletion, String> {
-    if text.trim().is_empty()
-        || text
-            .chars()
-            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-    {
+    // Higiene Bug A (2do turno post-animación): el proveedor a veces devuelve
+    // controles sueltos (NUL/BEL/ESC/DEL/C1) que antes volteaban todo el turno
+    // con "not displayable". Se filtran (se conservan `\n` `\r` `\t`); si no
+    // queda nada visible, error honesto igual que antes. Puro, sin `unwrap`.
+    let limpio: String = text
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+        .collect();
+    if limpio.trim().is_empty() {
         return Err(response_content_error(
             "expected a non-empty text message without control characters",
         ));
     }
-    if text.chars().count() > max_output_chars {
+    if limpio.chars().count() > max_output_chars {
         return Err("remote assistant completion exceeds the configured output budget".into());
     }
     Ok(RemoteCompletion {
-        text: text.into(),
+        text: limpio,
         truncated,
     })
 }
@@ -2528,6 +3371,22 @@ fn response_body_limit(max_output_chars: usize) -> usize {
         .saturating_add(MAX_RESPONSE_ENVELOPE_BYTES)
 }
 
+/// Error honesto cuando el cuerpo supera el tope interno de transporte.
+///
+/// El tope NO es configurable en Configuración → Modelo (verificado: ni
+/// `max_output_chars` ni ningún budget de cuerpo aparece en el panel de
+/// Configuración de `grafito-app`), así que el mensaje nunca manda ahí:
+/// nombra el tope en KiB y pide la respuesta por partes. ASCII a propósito
+/// (la UI recorta el error por bytes y un corte multibyte rompería).
+#[cfg(feature = "assistant-net")]
+fn response_body_budget_error(max_bytes: usize) -> String {
+    let kib = max_bytes / 1024;
+    format!(
+        "remote assistant response exceeded the {kib} KiB body cap with no usable text yet; ask for it in smaller parts"
+    )
+}
+
+#[cfg(feature = "assistant-net")]
 fn read_bounded_response_body(
     response: reqwest::blocking::Response,
     max_bytes: usize,
@@ -2541,7 +3400,7 @@ fn read_bounded_response_body(
         .read_to_end(&mut body)
         .map_err(|_| "remote assistant response body could not be read".to_string())?;
     if body.len() > max_bytes {
-        return Err("remote assistant response exceeds the configured body budget".into());
+        return Err(response_body_budget_error(max_bytes));
     }
     Ok(body)
 }
@@ -2554,8 +3413,10 @@ mod tests {
         AssistantRequest, ConversationTurn, ImmutableDocumentContext,
     };
     use image::{DynamicImage, Rgba, RgbaImage};
+    use std::io::Cursor;
+    #[cfg(feature = "assistant-net")]
     use std::{
-        io::{Cursor, Read, Write},
+        io::{Read, Write},
         net::TcpListener,
         thread,
     };
@@ -2940,6 +3801,7 @@ mod tests {
         assert!(validate_endpoint("http://[::1]:11434/v1").is_ok());
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn shared_http_client_reuses_a_single_client_instance() {
         let first = shared_http_client().expect("shared client builds");
@@ -3124,6 +3986,7 @@ mod tests {
         assert!(!rendered.contains("/home/"));
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn cancelled_remote_request_exits_before_any_network_attempt() {
         let mut request = request("2 + 2");
@@ -3180,8 +4043,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn minimax_wire_uses_anthropic_headers_and_response_shape() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/messages",
@@ -3220,8 +4085,10 @@ mod tests {
         assert_eq!(response.text, "draft");
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_wire_uses_bearer_and_response_shape() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -3268,8 +4135,10 @@ mod tests {
         assert!(!response.truncated);
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn fusion_returns_only_the_deepseek_audited_answer() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -3332,8 +4201,10 @@ mod tests {
         assert_eq!(response.text, "audited answer");
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn fusion_discards_the_draft_when_deepseek_audit_fails() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -3414,6 +4285,204 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_cooldown_maps_retry_after_with_cap_and_default() {
+        // Con header: tal cual, con piso 1s y techo 5 min.
+        assert_eq!(rate_limit_cooldown_secs(Some(7)), 7);
+        assert_eq!(rate_limit_cooldown_secs(Some(0)), 1);
+        assert_eq!(
+            rate_limit_cooldown_secs(Some(3_600)),
+            RATE_LIMIT_MAX_COOLDOWN_SECS
+        );
+        // Sin header: 60s (paridad con "esperá ~1 minuto").
+        assert_eq!(
+            rate_limit_cooldown_secs(None),
+            RATE_LIMIT_DEFAULT_COOLDOWN_SECS
+        );
+    }
+
+    #[test]
+    fn rate_limit_paused_message_counts_down_without_jargon() {
+        let message = rate_limit_paused_message(42);
+        assert!(message.contains("42"), "cuenta regresiva: {message}");
+        assert!(!message.contains("429"), "sin código crudo: {message}");
+        let lowered = message.to_lowercase();
+        assert!(!lowered.contains("quota"), "sin jerga inglesa: {message}");
+        assert!(
+            !message.contains("retry-after") && !message.contains("Retry-After"),
+            "sin header crudo: {message}"
+        );
+        assert!(
+            message.contains("modelo") && message.contains("clave"),
+            "tranquiliza sin mandar a reconfigurar: {message}"
+        );
+        // Piso honesto: nunca "0s".
+        assert!(rate_limit_paused_message(0).contains('1'));
+    }
+
+    #[test]
+    fn rate_limit_marker_round_trips_to_paused_message() {
+        let message =
+            rate_limit_paused_message_from_error(&format!("{RATE_LIMIT_PAUSED_MARKER}:9"))
+                .expect("marker válido mapea");
+        assert!(message.contains('9'), "conserva la cuenta: {message}");
+        assert!(!message.contains("429"), "sale en criollo: {message}");
+        assert!(
+            rate_limit_paused_message_from_error("remote assistant returned HTTP 500: x").is_none(),
+            "sólo el marcador mapea"
+        );
+        // Marcador roto: cae al default honesto, sin pánico.
+        let fallback =
+            rate_limit_paused_message_from_error(&format!("{RATE_LIMIT_PAUSED_MARKER}:???"))
+                .expect("marker roto no paniquea");
+        assert!(
+            fallback.contains(&RATE_LIMIT_DEFAULT_COOLDOWN_SECS.to_string()),
+            "default honesto: {fallback}"
+        );
+    }
+
+    #[test]
+    fn models_cache_freshness_follows_ttl() {
+        assert!(models_cache_is_fresh(Duration::from_secs(10)));
+        assert!(!models_cache_is_fresh(Duration::from_secs(
+            MODELS_CACHE_TTL_SECS
+        )));
+        assert!(!models_cache_is_fresh(Duration::from_secs(
+            MODELS_CACHE_TTL_SECS.saturating_add(1)
+        )));
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn rate_limit_cooldown_blocks_without_touching_network() {
+        // Sin red ni sleeps: la pausa se arma y se consulta en memoria.
+        clear_rate_limit_for_tests();
+        assert!(check_rate_limit_cooldown().is_ok());
+        record_rate_limited(Some(60));
+        assert!(check_rate_limit_cooldown().is_err(), "en pausa bloquea");
+        let remaining = rate_limit_cooldown_remaining_secs().expect("pausa armada");
+        assert!(
+            (1..=60).contains(&remaining),
+            "cuenta regresiva acotada: {remaining}"
+        );
+        assert!(rate_limit_cooldown_remaining_secs().is_some());
+        clear_rate_limit_for_tests();
+        assert!(check_rate_limit_cooldown().is_ok());
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn rate_limit_cooldown_honors_retry_after_and_expires() {
+        clear_rate_limit_for_tests();
+        // Con Retry-After: la pausa respeta el header (acotado al venir).
+        record_rate_limited(Some(7));
+        let remaining = rate_limit_cooldown_remaining_secs().expect("pausa armada");
+        assert!(
+            (1..=7).contains(&remaining),
+            "respeta Retry-After: {remaining}"
+        );
+        clear_rate_limit_for_tests();
+        assert!(
+            rate_limit_cooldown_remaining_secs().is_none(),
+            "limpiar vence la pausa"
+        );
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn models_cache_single_flight_avoids_duplicate_fetch() {
+        // El segundo lookup sale del cache: ningún GET extra (single-flight
+        // por TTL). Sin red en este test: sólo el registro compartido.
+        clear_models_cache_for_tests();
+        clear_rate_limit_for_tests();
+        assert!(cached_model_list().is_none());
+        store_model_list(vec!["deepseek-v4-flash".to_string()]);
+        assert_eq!(
+            cached_model_list(),
+            Some(vec!["deepseek-v4-flash".to_string()]),
+            "segundo pedido sin refetch"
+        );
+        clear_models_cache_for_tests();
+        assert!(cached_model_list().is_none());
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn models_second_lookup_reuses_cache_without_second_get() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        // Stub que cuenta GETs: el segundo pedido debe salir del cache (1 GET
+        // total). Si un bug refetchea, el contador lo delata sin colgar: el
+        // servidor acepta hasta 2 y cierra con ventana de 500ms.
+        clear_models_cache_for_tests();
+        clear_rate_limit_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let server = thread::spawn(move || {
+            let _ = listener.set_nonblocking(true);
+            let start = Instant::now();
+            let mut first_at: Option<Instant> = None;
+            while start.elapsed() < Duration::from_secs(10) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        if first_at.is_none() {
+                            first_at = Some(Instant::now());
+                        }
+                        let mut buffer = [0; 4096];
+                        let _ = stream.read(&mut buffer);
+                        let body = r#"{"data":[{"id":"deepseek-v4-flash"}]}"#;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                    }
+                    Err(_) => {
+                        // Tras el primer GET se da una ventana de 500ms por
+                        // si un bug dispara el segundo; después se cierra.
+                        if first_at.is_some_and(|at| at.elapsed() >= Duration::from_millis(500)) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                if counter.load(Ordering::SeqCst) >= 2 {
+                    break;
+                }
+            }
+        });
+        let settings =
+            ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "deepseek-v4-flash")
+                .with_endpoint(format!("http://{address}/v1"))
+                .unwrap();
+        let fetch = || {
+            request_remote_models_with_api_key_on_worker(
+                settings.clone(),
+                Some("test-key".to_string()),
+                CancellationToken::default(),
+            )
+            .join()
+            .unwrap()
+            .unwrap()
+        };
+        let first = fetch();
+        let second = fetch();
+        server.join().unwrap();
+        assert_eq!(first, vec!["deepseek-v4-flash".to_string()]);
+        assert_eq!(second, first);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "el segundo pedido sale del cache, sin segundo GET"
+        );
+        clear_models_cache_for_tests();
+        clear_rate_limit_for_tests();
+    }
+
+    #[test]
     fn http_status_error_truncates_body_and_announces_retry_without_secrets() {
         let long = "x".repeat(2_000);
         let error = http_status_error(500, &long, None);
@@ -3481,8 +4550,10 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_reports_429_with_retry_after_without_sleeping() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -3511,14 +4582,19 @@ mod tests {
             64,
         )
         .unwrap_err();
+        // Se limpia antes de los asserts: la pausa de ~7s no debe contaminar
+        // a los stubs 200 que corren en paralelo (el string ya está en mano).
+        clear_rate_limit_for_tests();
         server.join().unwrap();
         assert!(error.contains("429"), "{error}");
         assert!(error.contains("reintentá en 7s"), "{error}");
         assert!(!error.contains("test-key"), "{error}");
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_truncates_long_500_body_without_secrets() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -3561,8 +4637,10 @@ mod tests {
         assert!(long_body.starts_with(snippet));
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_marks_incomplete_as_truncated_with_partial_text() {
+        clear_rate_limit_for_tests();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -3594,5 +4672,779 @@ mod tests {
         server.join().unwrap();
         assert_eq!(completion.text, "parcial");
         assert!(completion.truncated);
+    }
+
+    #[test]
+    fn system_prompt_is_binding_and_contains_socratic_directive() {
+        let req = request("hola");
+        let prompt = remote_system_prompt(&req);
+        assert!(prompt.contains("MODO SOCRÁTICO VINCULANTE"), "{prompt}");
+        assert!(prompt.contains("can_reveal = attempts>=2"));
+        assert!(prompt.contains("Telling_rate") || prompt.contains("telling"));
+        // No debe ser sugerencia: debe decir ORDEN
+        assert!(prompt.contains("ORDEN"));
+    }
+
+    #[test]
+    fn socratic_injection_is_deterministic_and_contains_question_and_history() {
+        use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm};
+        let req = request("derivada");
+        let mut fsm = SocraticFsm::new("derivada");
+        fsm.record_attempt(Some("sign".into()));
+        let engine = ScaffoldEngine;
+        let history = vec![grafito_pedagogy::scaffold::Turn {
+            role: "user".into(),
+            content: "no entiendo bien".into(),
+        }];
+        let scaffold = engine.scaffold("derivada", PedagogicalLevel::Secondary, &history);
+        let prompt1 = remote_system_prompt_with_socratic(&req, &fsm, &scaffold);
+        let prompt2 = remote_system_prompt_with_socratic(&req, &fsm, &scaffold);
+        assert_eq!(prompt1, prompt2, "determinista");
+        assert!(prompt1.contains("Pregunta BKT actual"), "{prompt1}");
+        assert!(prompt1.contains("derivada"), "{prompt1}");
+        assert!(prompt1.contains("Pista scaffold"), "{prompt1}");
+        assert!(prompt1.contains("Historial"), "{prompt1}");
+        assert!(prompt1.contains("Attempts: 1"), "{prompt1}");
+        assert!(prompt1.contains("VINCULANTE"), "{prompt1}");
+    }
+
+    #[test]
+    fn telling_guard_blocks_early_reveal_and_forces_repreguntar() {
+        use grafito_pedagogy::{Scaffold, SocraticFsm};
+        let fsm = SocraticFsm::new("integral");
+        let scaffold = Scaffold {
+            question: "¿Qué representa integral en y=x²?".into(),
+            hint: Some("Mirá el área bajo la curva".into()),
+            explanation: "Integral es área".into(),
+        };
+        // attempts 0 -> telling debe bloquear (interno: diagnóstico con jerga solo para logs/detección).
+        let telling = "La solución es x = 4";
+        assert!(contains_telling_markers(telling));
+        assert!(check_telling_guard(&fsm, telling).is_err());
+        let repair = enforce_telling_guard(&fsm, telling, &scaffold).unwrap_err();
+        assert!(repair.contains("GUARD TELLING"), "{repair}");
+        assert!(repair.contains("¿Qué representa integral"), "{repair}");
+        // Transcript: voz de Mili SIN jerga (lo único que va al chat vía complete_request).
+        let student = fsm.repair_student_message(&scaffold);
+        assert!(!student.contains("GUARD"), "{student}");
+        assert!(
+            !student.contains("REPARACIÓN") && !student.contains("REPARACION"),
+            "{student}"
+        );
+        assert!(!student.contains("attempts"), "{student}");
+        assert!(!student.contains("can_reveal"), "{student}");
+        assert!(student.contains("Antes de mostrarte"), "{student}");
+        // con attempts>=2 pasa
+        let mut fsm2 = SocraticFsm::new("integral");
+        fsm2.record_attempt(None);
+        fsm2.record_attempt(None);
+        assert!(check_telling_guard(&fsm2, telling).is_ok());
+        assert!(enforce_telling_guard(&fsm2, telling, &scaffold).is_ok());
+        // sin marcador no es telling aunque attempts<2
+        assert!(check_telling_guard(&fsm, "¿Cómo lo pensaste?").is_ok());
+    }
+
+    #[test]
+    fn guard_remote_completion_forces_re_repair() {
+        use grafito_pedagogy::{Scaffold, SocraticFsm};
+        let fsm = SocraticFsm::new("derivada");
+        let scaffold = Scaffold {
+            question: "¿Cómo definirías derivada con límites?".into(),
+            hint: Some("Recordá f'(x)=lim".into()),
+            explanation: "formal".into(),
+        };
+        let completion = RemoteCompletion {
+            text: "La respuesta es x = 2".into(),
+            truncated: false,
+        };
+        let guarded = guard_remote_completion(&fsm, completion.clone(), &scaffold);
+        assert!(guarded.is_err(), "debe bloquear telling con attempts=0");
+        // El Err interno conserva jerga solo para detección/logs; el transcript usa voz humana.
+        let student = fsm.repair_student_message(&scaffold);
+        assert!(!student.contains("GUARD"), "{student}");
+        assert!(!student.contains("attempts"), "{student}");
+        assert!(student.contains("Antes de mostrarte"), "{student}");
+        let mut fsm2 = SocraticFsm::new("derivada");
+        fsm2.record_attempt(None);
+        fsm2.record_attempt(None);
+        let guarded2 = guard_remote_completion(&fsm2, completion, &scaffold);
+        assert!(guarded2.is_ok());
+    }
+
+    #[test]
+    fn scaffold_history_injection_is_deterministic() {
+        use grafito_pedagogy::{PedagogicalLevel, SocraticFsm};
+        let req = request("concepto test");
+        let fsm = SocraticFsm::new("integrales");
+        let hist = vec![
+            grafito_pedagogy::scaffold::Turn {
+                role: "user".into(),
+                content: "concepto incorrectoo".into(),
+            },
+            grafito_pedagogy::scaffold::Turn {
+                role: "assistant".into(),
+                content: "probá con x=1".into(),
+            },
+        ];
+        let prompt = remote_system_prompt_with_scaffold(
+            &req,
+            &fsm,
+            "integrales",
+            PedagogicalLevel::Secondary,
+            &hist,
+        );
+        assert!(prompt.contains("integrales"));
+        assert!(prompt.contains("Pista concreta") || prompt.contains("Pista scaffold"));
+        assert!(prompt.contains("Historial"));
+    }
+
+    /// Sirve `replies` conexiones TCP secuenciales con cuerpos prefijados.
+    ///
+    /// Cada reply es `(cuerpo, content-type, fragmentar)`: con `fragmentar` el
+    /// cuerpo se envía en dos `write_all` + `flush` con 50ms en medio para
+    /// forzar reensamblado en el lector SSE. Retorna la dirección y las
+    /// peticiones crudas en orden para aserciones en el hilo del test.
+    #[cfg(feature = "assistant-net")]
+    fn serve_stub_replies(
+        replies: Vec<(Vec<u8>, &'static str, bool)>,
+    ) -> (std::net::SocketAddr, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let count = replies.len();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(count);
+            for (body, content_type, fragment) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = vec![0u8; 32_768];
+                let bytes = stream.read(&mut buffer).unwrap_or(0);
+                requests.push(String::from_utf8_lossy(&buffer[..bytes]).into_owned());
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                if fragment && body.len() > 1 {
+                    let mid = body.len() / 2;
+                    stream.write_all(&body[..mid]).unwrap();
+                    stream.flush().unwrap();
+                    thread::sleep(Duration::from_millis(50));
+                    stream.write_all(&body[mid..]).unwrap();
+                } else {
+                    stream.write_all(&body).unwrap();
+                }
+                stream.flush().unwrap();
+            }
+            requests
+        });
+        (address, server)
+    }
+
+    #[cfg(feature = "assistant-net")]
+    fn telling_guard_context() -> SocraticGuardContext {
+        use grafito_pedagogy::{Scaffold, SocraticFsm};
+        SocraticGuardContext {
+            fsm: SocraticFsm::new("derivada"),
+            scaffold: Scaffold {
+                question: "¿Cómo definirías derivada con límites?".into(),
+                hint: Some("Recordá f'(x)=lim".into()),
+                explanation: "formal".into(),
+            },
+        }
+    }
+
+    #[cfg(feature = "assistant-net")]
+    fn remote_wire_request(problem: &str) -> AssistantRequest {
+        AssistantRequest::remote(problem, ImmutableDocumentContext::empty(0))
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_responses_reassembles_fragmented_deltas_with_progress() {
+        clear_rate_limit_for_tests();
+        let body = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" mundo\"}\n\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
+            .to_vec();
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", true)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let mut snapshots = Vec::new();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            64,
+            Some(&mut |accumulated: &str| {
+                snapshots.push(accumulated.to_owned());
+            }),
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+
+        assert_eq!(completion.text, "Hola mundo");
+        assert!(!completion.truncated);
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /responses HTTP/1.1"));
+        assert!(requests[0].contains("\"stream\":true"), "{}", requests[0]);
+        let lowered = requests[0].to_ascii_lowercase();
+        assert!(lowered.contains("accept: text/event-stream"), "{lowered}");
+        assert!(lowered.contains("authorization: bearer test-key"));
+        assert!(!snapshots.is_empty());
+        assert_eq!(snapshots.last().map(String::as_str), Some("Hola mundo"));
+        for pair in snapshots.windows(2) {
+            assert!(pair[1].starts_with(&pair[0]), "{pair:?}");
+        }
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_falls_back_to_non_streaming_when_server_never_speaks_sse() {
+        clear_rate_limit_for_tests();
+        let json_body =
+            br#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"listo"}]}]}"#
+                .to_vec();
+        let (address, server) = serve_stub_replies(vec![
+            (json_body.clone(), "application/json", false),
+            (json_body, "application/json", false),
+        ]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            64,
+            None,
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+
+        assert_eq!(completion.text, "listo");
+        assert!(!completion.truncated);
+        assert_eq!(requests.len(), 2, "un reintento no-streaming");
+        assert!(requests[0].contains("\"stream\":true"), "{}", requests[0]);
+        assert!(
+            !requests[1].contains("\"stream\":true"),
+            "el fallback reenvía el payload base sin stream: {}",
+            requests[1]
+        );
+    }
+
+    #[test]
+    fn responses_body_cap_is_256_kib_oom_bounded() {
+        // 256 KiB transitorios por request: dan margen a los
+        // `reasoning.encrypted_content` de Spark y siguen OOM-safe (el Vec
+        // vive sólo durante el request; pre-alocación inicial ≤ 64 KiB).
+        assert_eq!(RESPONSES_MAX_BODY_BYTES, 256 * 1024);
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_over_cap_with_prior_deltas_returns_truncated_partial() {
+        clear_rate_limit_for_tests();
+        // Bug del screenshot: el stream cortaba con Err duro aunque ya había
+        // deltas válidos en pantalla. Ahora devuelve el parcial con
+        // `truncated:true` (la UI lo avisa y ofrece continuar).
+        let delta = "x".repeat(3000);
+        let event =
+            format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{delta}\"}}\n");
+        let mut body = Vec::new();
+        while body.len() <= RESPONSES_MAX_BODY_BYTES + 16 * 1024 {
+            body.extend_from_slice(event.as_bytes());
+        }
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(10),
+            1_000_000,
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert!(completion.truncated);
+        assert!(!completion.text.is_empty());
+        assert!(completion.text.chars().all(|character| character == 'x'));
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_over_cap_without_events_keeps_honest_error() {
+        clear_rate_limit_for_tests();
+        // Sin ningún evento válido no hay parcial que rescatar: se mantiene
+        // el Err, pero honesto (nombra el tope, no manda a Configuración).
+        let mut body = Vec::new();
+        while body.len() <= RESPONSES_MAX_BODY_BYTES + 8 * 1024 {
+            body.extend_from_slice(b":ping\n");
+        }
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let error = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(10),
+            1_000_000,
+            None,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+
+        assert!(error.contains("256 KiB"), "{error}");
+        assert!(error.contains("smaller parts"), "{error}");
+        assert!(!error.contains("Configuraci"), "{error}");
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn non_streaming_body_over_cap_fails_honest_without_config_pointer() {
+        clear_rate_limit_for_tests();
+        // El path no-streaming comparte el tope de 256 KiB: cuerpo mayor →
+        // Err honesto con el mismo texto (límite OOM, no error de modelo).
+        let big_text = "y".repeat(RESPONSES_MAX_BODY_BYTES + 1024);
+        let body = format!(
+            "{{\"status\":\"completed\",\"output\":[{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{big_text}\"}}]}}]}}"
+        )
+        .into_bytes();
+        let (address, server) = serve_stub_replies(vec![(body, "application/json", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let error = request_responses_completion(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(10),
+            2_000_000,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+
+        assert!(error.contains("256 KiB"), "{error}");
+        assert!(error.contains("smaller parts"), "{error}");
+        assert!(!error.contains("Configuraci"), "{error}");
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_over_cap_with_multibyte_markdown_partial_no_done() {
+        clear_rate_limit_for_tests();
+        // Repro del reporte AS2: stream que supera el tope con deltas previos
+        // (parcial con markdown a medio cerrar + multibyte UTF-8 que parte
+        // los chunks de 4 KiB, `data: [DONE]` ausente). No debe paniquear:
+        // devuelve el parcial con `truncated:true` y el texto sigue siendo
+        // UTF-8 válido. El `fragment:true` del stub parte el cuerpo a la
+        // mitad (los reads de 4 KiB del lector cortan el resto); el
+        // reensamblado por `\n` nunca parte un scalar (0x0A < 0x80) y la
+        // cola se decodifica con `from_utf8_lossy`.
+        let chunk_text =
+            "## Enfoque\n**negrita sin cerrar áéíóú → ñ «» ✓ · × 🦀\n```grafito\nFunction[x^2]\n";
+        let event = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":{}}}\n",
+            serde_json::to_string(chunk_text).unwrap()
+        );
+        let mut body = Vec::new();
+        while body.len() <= RESPONSES_MAX_BODY_BYTES + 16 * 1024 {
+            body.extend_from_slice(event.as_bytes());
+        }
+        // Sin `data: [DONE]`: EOF abrupto tras deltas válidos.
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", true)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let mut snapshots = Vec::new();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(15),
+            1_000_000,
+            Some(&mut |accumulated: &str| {
+                snapshots.push(accumulated.len());
+            }),
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert!(completion.truncated);
+        assert!(!completion.text.is_empty());
+        assert!(completion.text.contains("## Enfoque"));
+        assert!(completion.text.contains("🦀"));
+        // Cotas OOM: `pending` + `text` nunca superan tope + un chunk 4 KiB.
+        assert!(completion.text.len() <= RESPONSES_MAX_BODY_BYTES + 4 * 1024);
+        assert!(!snapshots.is_empty());
+        // El parcial pasa por `completion_from_text` sin panic (budget amplio).
+        let via_completion =
+            completion_from_text(&completion.text, 1_000_000, completion.truncated).unwrap();
+        assert_eq!(via_completion.text, completion.text);
+        assert!(via_completion.truncated);
+        // Con budget chico falla honesto (output budget), no panic.
+        assert!(completion_from_text(&completion.text, 64, true).is_err());
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_huge_line_without_newline_stays_bounded() {
+        clear_rate_limit_for_tests();
+        // Línea de 300 KiB sin `\n`: `pending.extend` queda acotado por el
+        // tope (el chequeo es por `total_bytes` ANTES de extender de más y
+        // `take(maximum)` limita el reader). Con un delta previo válido se
+        // rescata el parcial truncado; sin eventos, Err honesto. Sin panic.
+        let first = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"previo áé\"}\n";
+        let mut body = first.as_bytes().to_vec();
+        body.extend_from_slice(&vec![b'x'; 300 * 1024]);
+        // Sin newline final ni [DONE]: EOF abrupto.
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(15),
+            1_000_000,
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert!(completion.truncated);
+        assert!(completion.text.contains("previo"));
+        assert!(completion.text.len() <= RESPONSES_MAX_BODY_BYTES + 4 * 1024);
+    }
+
+    #[test]
+    fn stream_progress_sender_forwards_only_unsent_suffixes_without_blocking() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1);
+        let mut send = stream_progress_sender(tx);
+        send("Hola");
+        // Canal lleno (cap 1): este progreso se descarta sin bloquear.
+        send("Hola mundo");
+        assert_eq!(rx.try_recv().unwrap(), "Hola");
+        // Reintenta desde lo no confirmado (" mundo!").
+        send("Hola mundo!");
+        assert_eq!(rx.try_recv().unwrap(), " mundo!");
+        // Sin crecimiento no hay envío.
+        send("Hola mundo!");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stream_progress_sender_never_panics_on_multibyte_or_shrinking_input() {
+        // Defensa en profundidad para el único slicing por bytes del path SSE
+        // (`accumulated[last_sent..]`): ni multibyte ni acumulados
+        // no-monotónicos (reemplazo/achique) pueden paniquear el worker.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(8);
+        let mut send = stream_progress_sender(tx);
+        send("áéí → ñ «» ✓");
+        assert_eq!(rx.try_recv().unwrap(), "áéí → ñ «» ✓");
+        // Crecimiento multibyte: el sufijo debe cortarse en boundary válido.
+        send("áéí → ñ «» ✓ 🦀");
+        assert_eq!(rx.try_recv().unwrap(), " 🦀");
+        // Achique / reemplazo no-monotónico: no hay envío y NO hay panic.
+        send("á");
+        assert!(rx.try_recv().is_err());
+        // Corte que caería a mitad de scalar si se indexara sin `get`:
+        // "aé" = [61, C3, A9]; un `last_sent=2` sería mid-scalar.
+        let (tx2, rx2) = std::sync::mpsc::sync_channel::<String>(8);
+        let mut send2 = stream_progress_sender(tx2);
+        send2("ab");
+        assert_eq!(rx2.try_recv().unwrap(), "ab");
+        // Reemplazo no-extensión con `len > last_sent` pero boundary inválido.
+        send2("aé");
+        assert!(rx2.try_recv().is_err());
+        // El acumulado válido posterior sigue funcionando.
+        send2("ab🦀");
+        assert_eq!(rx2.try_recv().unwrap(), "🦀");
+    }
+
+    #[test]
+    fn completion_from_text_is_char_safe_on_multibyte_over_budget() {
+        // `completion_from_text` cuenta por chars (no bytes): un parcial
+        // multibyte que supera el budget falla honesto, nunca paniquea.
+        let big = "áéí→".repeat(2_000);
+        let over = completion_from_text(&big, 64, true);
+        assert!(
+            matches!(over, Err(ref error) if error.contains("output budget")),
+            "{over:?}"
+        );
+        // Markdown a medio cerrar + multibyte dentro del budget pasa intacto.
+        let partial = "## Enfoque\n**negrita sin cerrar áé →\n```grafito\nFunction[x^2]\n";
+        let ok = completion_from_text(partial, 10_000, true).unwrap();
+        assert_eq!(ok.text, partial);
+        assert!(ok.truncated);
+        // Vacío se rechaza sin panic; los controles sueltos del proveedor
+        // (Bug A, 2do turno) se filtran y el turno igual se muestra.
+        assert!(completion_from_text("   ", 64, false).is_err());
+        let sanitizado = completion_from_text("hola\x07mundo", 64, false).unwrap();
+        assert_eq!(sanitizado.text, "holamundo");
+    }
+
+    #[test]
+    fn completion_from_text_sanitiza_controles_y_reporta_codepoints() {
+        // Bug A: la respuesta del 2do turno puede traer controles del
+        // proveedor (NUL/BEL/ESC/DEL/C1). Se filtran; solo se loguean los
+        // codepoints, jamás el contenido.
+        let sucio = "derivada\x00 explicada\x07 con\x1b escape\x7f y\u{80}c1\u{9f}\n\t\rñ";
+        let ok = completion_from_text(sucio, 10_000, false).unwrap();
+        assert_eq!(ok.text, "derivada explicada con escape yc1\n\t\rñ");
+        assert!(!ok.truncated);
+        for quitado in sucio
+            .chars()
+            .filter(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            eprintln!("control filtrado: U+{:04X}", quitado as u32);
+        }
+        // Solo-controles o solo-blancos siguen siendo error honesto.
+        assert!(completion_from_text("\x07\x1b\x7f", 64, false).is_err());
+        assert!(completion_from_text("  \n\t ", 64, false).is_err());
+        // `\n` `\r` `\t` legítimos se conservan tal cual.
+        let prosa = "línea uno\nlínea dos\r\ncon\ttab";
+        assert_eq!(completion_from_text(prosa, 64, false).unwrap().text, prosa);
+    }
+
+    #[test]
+    fn non_streaming_parse_of_streamed_partial_is_char_safe() {
+        // El mismo parcial que entrega el stream debe parsear sin panic por
+        // el path no-streaming (`responses_completion_text` + `completion_from_text`).
+        let partial = "## Enfoque **sin cerrar áéí → ñ «» ✓ 🦀\n```grafito\nFunction[x^2]";
+        let body = json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": partial}]
+            }]
+        });
+        let (text, truncated) = responses_completion_text(&body).unwrap();
+        assert_eq!(text, partial);
+        assert!(!truncated);
+        let completion = completion_from_text(&text, 10_000, true).unwrap();
+        assert_eq!(completion.text, partial);
+        assert!(completion.truncated);
+        // `incomplete` del no-streaming también marca truncado sin panic.
+        let incomplete = json!({
+            "status": "incomplete",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": partial}]
+            }]
+        });
+        let (text2, truncated2) = responses_completion_text(&incomplete).unwrap();
+        assert_eq!(text2, partial);
+        assert!(truncated2);
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_completion_flows_into_telling_guard() {
+        clear_rate_limit_for_tests();
+        // El worker aplica `guard_remote_completion` sobre el resultado del
+        // transporte streaming; acá se verifica la misma composición
+        // (transporte SSE stub → guard) que ejecuta el brazo Responses del
+        // worker. El worker con settings Spark no puede apuntar al stub: la
+        // allowlist de OpenCodeGo lo prohíbe por diseño (ver
+        // `validate_named_endpoint`); el ruteo Spark→Responses ya lo cubre
+        // `spark_models_route_to_responses_api` y el guard en worker el test
+        // de chat de abajo.
+        use grafito_pedagogy::{Scaffold, SocraticFsm};
+        let delta_a =
+            json!({"type": "response.output_text.delta", "delta": "La solución es "}).to_string();
+        let delta_b = json!({"type": "response.output_text.delta", "delta": "x = 4"}).to_string();
+        let done = json!({"type": "response.completed"}).to_string();
+        let sse_body =
+            format!("data: {delta_a}\ndata: {delta_b}\ndata: {done}\ndata: [DONE]\n").into_bytes();
+        let (address, server) = serve_stub_replies(vec![(sse_body, "text/event-stream", true)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+
+        let mut snapshots = Vec::new();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            256,
+            Some(&mut |accumulated: &str| {
+                snapshots.push(accumulated.to_owned());
+            }),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(completion.text, "La solución es x = 4");
+        assert_eq!(
+            snapshots.last().map(String::as_str),
+            Some("La solución es x = 4")
+        );
+
+        let scaffold = Scaffold {
+            question: "¿Cómo definirías derivada con límites?".into(),
+            hint: Some("Recordá f'(x)=lim".into()),
+            explanation: "formal".into(),
+        };
+        // attempts=0: el guard bloquea el telling del stream (interno con jerga solo para logs).
+        let fresh = SocraticFsm::new("derivada");
+        let blocked = guard_remote_completion(&fresh, completion.clone(), &scaffold);
+        assert!(
+            matches!(blocked, Err(ref error) if error.starts_with("GUARD TELLING")),
+            "{blocked:?}"
+        );
+        // Transcript: la voz de Mili (lo único publicable) no lleva jerga.
+        let student = fresh.repair_student_message(&scaffold);
+        assert!(!student.contains("GUARD"), "{student}");
+        assert!(!student.contains("attempts"), "{student}");
+        assert!(student.contains("Antes de mostrarte"), "{student}");
+        // attempts>=2: el mismo completado pasa.
+        let mut seasoned = SocraticFsm::new("derivada");
+        seasoned.record_attempt(None);
+        seasoned.record_attempt(None);
+        let allowed = guard_remote_completion(&seasoned, completion, &scaffold).unwrap();
+        assert_eq!(allowed.text, "La solución es x = 4");
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn guarded_chat_worker_blocks_telling_on_the_non_streaming_path() {
+        clear_rate_limit_for_tests();
+        let chat_body = br#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"La respuesta es x = 2"}}]}"#
+            .to_vec();
+        let (address, server) = serve_stub_replies(vec![
+            (chat_body.clone(), "application/json", false),
+            (chat_body, "application/json", false),
+        ]);
+        let settings = ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "test-model")
+            .with_endpoint(format!("http://{address}/v1"))
+            .unwrap();
+
+        // Path no-streaming (chat): sin deltas, pero el guard bloquea igual (interno, jerga solo logs).
+        let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
+        let blocked = request_remote_streaming_with_api_key_on_worker(
+            settings.clone(),
+            remote_wire_request("resolvé 2*x = 4"),
+            None,
+            CancellationToken::default(),
+            delta_tx,
+            Some(telling_guard_context()),
+        )
+        .join()
+        .unwrap();
+        assert!(
+            matches!(blocked, Err(ref error) if error.starts_with("GUARD TELLING")),
+            "{blocked:?}"
+        );
+        // Contrato de transcript: el poll convierte el diagnóstico a voz de Mili sin jerga
+        // (ver `repair_student_message` en grafito-pedagogy y el poll en grafito-app);
+        // el worker conserva el prefijo solo para detección.
+        assert!(
+            !telling_guard_context()
+                .fsm
+                .repair_student_message(&telling_guard_context().scaffold)
+                .contains("GUARD TELLING"),
+            "la voz de estudiante no debe llevar jerga interna"
+        );
+        assert!(
+            delta_rx.try_recv().is_err(),
+            "el path no-streaming no emite deltas de preview"
+        );
+
+        // Sin guard, el mismo completado pasa (el guard es lo que bloquea).
+        let (delta_tx, _delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
+        let unguarded = request_remote_streaming_with_api_key_on_worker(
+            settings,
+            remote_wire_request("resolvé 2*x = 4"),
+            None,
+            CancellationToken::default(),
+            delta_tx,
+            None,
+        )
+        .join()
+        .unwrap()
+        .unwrap();
+        assert_eq!(unguarded.text, "La respuesta es x = 2");
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].starts_with("POST /v1/chat/completions HTTP/1.1"),
+            "{}",
+            requests[0]
+        );
+        let lowered = requests[0].to_ascii_lowercase();
+        assert!(!lowered.contains("text/event-stream"), "{lowered}");
+        assert!(!requests[0].contains("\"stream\":true"), "{}", requests[0]);
+    }
+
+    /// Sin `assistant-net` los workers remotos existen por firma pero fallan
+    /// honesto (sin red, sin panic, sin I/O).
+    #[cfg(not(feature = "assistant-net"))]
+    #[test]
+    fn remote_workers_report_disabled_network_honestly() {
+        let settings = ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "local");
+        let cancellation = CancellationToken::default();
+        let disabled = "assistant-net";
+
+        let remote =
+            request_remote_on_worker(settings.clone(), request("2 + 2"), cancellation.clone())
+                .join()
+                .expect("stub worker joins");
+        assert!(
+            matches!(remote, Err(ref error) if error.contains(disabled)),
+            "{remote:?}"
+        );
+
+        let with_key = request_remote_with_api_key_on_worker(
+            settings.clone(),
+            request("2 + 2"),
+            None,
+            cancellation.clone(),
+        )
+        .join()
+        .expect("stub worker joins");
+        assert!(
+            matches!(with_key, Err(ref error) if error.contains(disabled)),
+            "{with_key:?}"
+        );
+
+        let (delta_tx, _delta_rx) = std::sync::mpsc::sync_channel::<String>(8);
+        let streaming = request_remote_streaming_with_api_key_on_worker(
+            settings.clone(),
+            request("2 + 2"),
+            None,
+            cancellation.clone(),
+            delta_tx,
+            None,
+        )
+        .join()
+        .expect("stub worker joins");
+        assert!(
+            matches!(streaming, Err(ref error) if error.contains(disabled)),
+            "{streaming:?}"
+        );
+
+        let models =
+            request_remote_models_with_api_key_on_worker(settings, None, cancellation.clone())
+                .join()
+                .expect("stub worker joins");
+        assert!(
+            matches!(models, Err(ref error) if error.contains(disabled)),
+            "{models:?}"
+        );
+
+        let direct = request_responses_completion_streaming(
+            Url::parse("http://127.0.0.1:9/responses").expect("test endpoint parses"),
+            json!({"model": "muse-spark-1.3-contributor"}),
+            None,
+            &cancellation,
+            Duration::from_secs(5),
+            256,
+            None,
+        );
+        assert!(
+            matches!(direct, Err(ref error) if error.contains(disabled)),
+            "{direct:?}"
+        );
     }
 }

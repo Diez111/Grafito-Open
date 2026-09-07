@@ -2,13 +2,16 @@
 
 use crate::{assistant_credentials, GrafitoApp};
 use grafito_assistant::{
-    harness, request_remote_models_with_api_key_on_worker, request_remote_with_api_key_on_worker,
+    harness, rate_limit_cooldown_remaining_secs, rate_limit_paused_message,
+    request_remote_models_with_api_key_on_worker, request_remote_streaming_with_api_key_on_worker,
     validate_attachment, CancellationToken, ProviderSettings, RemoteCompletion,
+    SocraticGuardContext, RATE_LIMIT_DEFAULT_COOLDOWN_SECS,
 };
 use grafito_assistant_types::{
     AssistantFocus, AssistantRepairFailure, AssistantRepairFailureKind, AssistantRepairFeedback,
-    AssistantRequest, AssistantResponse, AttachmentLimits, ImmutableDocumentContext,
-    LocalAssistantStatus, ProposedPlan, ProviderCapabilities, ProviderProfile,
+    AssistantRequest, AssistantResponse, AttachmentLimits, ConversationRole, ConversationTurn,
+    ImmutableDocumentContext, LocalAssistantStatus, ProposedPlan, ProviderCapabilities,
+    ProviderProfile, MAX_CONVERSATION_TURNS, MAX_CONVERSATION_TURN_CHARS,
     REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES,
     REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES, REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES,
     REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
@@ -18,8 +21,10 @@ use grafito_command::assistant_proposals::{
     AssistantCommandInvocation, AssistantParameterAssignment, AssistantProposal,
     AssistantProposalRejection, AssistantProposalRejectionKind,
 };
+use grafito_pedagogy::scaffold::{extract_concept, is_exploratory_request};
+use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm, Turn};
 use grafito_ui::assistant::{
-    AssistantCorrectionContext, AssistantUiAction, VerifiedAssistantProposal,
+    AssistantCorrectionContext, AssistantPanelState, AssistantUiAction, VerifiedAssistantProposal,
 };
 use grafito_ui::toast::ToastKind;
 use std::collections::VecDeque;
@@ -54,6 +59,197 @@ fn spawn_profile_save(profile: grafito_profile::StudentProfile, path: PathBuf) {
 enum AssistantRemoteRoute {
     SelectedModel,
     FusionFallback,
+}
+
+/// B7 — ¿El texto pide ejercitar? (botón «Andamiar» o pedido en el chat).
+/// Puro y testeable. No pisa preguntas («qué es una derivada» → false:
+/// sólo dispara con verbo de ejercitación explícito).
+pub(crate) fn wants_exercise_request(texto: &str) -> bool {
+    let lower = texto.to_lowercase();
+    [
+        "ejercicio",
+        "ejercitar",
+        "practic",
+        "andamia",
+        "poneme a prueba",
+        "tomame",
+        "practiquemos",
+    ]
+    .iter()
+    .any(|pista| lower.contains(pista))
+}
+
+/// Estado del pedido de integral/área frente a la función (N1, puro).
+///
+/// Coherente con `infer_area_anim` (inferencia) y el agente: sin función se
+/// renderiza la canónica y la prosa la declara; con función inválida hay
+/// error honesto sin frames ni hilo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IntegralPedido {
+    /// No es `integral-area` o no menciona área (flujo existente intacto;
+    /// probabilidad/fracciones usan ese renderer como soporte).
+    NoAplica,
+    /// Sin función: renderiza la canónica y la prosa la declara.
+    Canonica,
+    /// Con función válida del usuario: flujo existente intacto.
+    Explicita,
+    /// Con función inválida: error honesto sin frames ni hilo.
+    FuncionInvalida(String),
+}
+
+/// Clasifica un pedido de animación integral (puro, sin I/O).
+///
+/// Solo actúa cuando la plantilla resuelta es `integral-area` Y el texto
+/// menciona integral/área. El resto → `NoAplica` (nada cambia).
+pub(crate) fn clasifica_pedido_integral(pedido: &str, template: &str) -> IntegralPedido {
+    if template.trim().to_lowercase() != "integral-area"
+        || !grafito_anim::parametric::pedido_menciona_area(pedido)
+    {
+        return IntegralPedido::NoAplica;
+    }
+    match grafito_anim::parametric::infer_area_anim(pedido) {
+        Ok(resuelto) if resuelto.es_canonica() => IntegralPedido::Canonica,
+        Ok(_) => IntegralPedido::Explicita,
+        Err(error) => IntegralPedido::FuncionInvalida(error.to_string()),
+    }
+}
+
+/// Plantilla honesta para un pedido de animación (punto único de resolución).
+///
+/// Si el pedido menciona integral/área (con typos acotados vía
+/// `pedido_menciona_area`: "integrela"→"integral"), la plantilla es
+/// `integral-area` aunque `detect_template_for_concept` diga `universal`
+/// por el typo. El resto delega al detector clásico. Puro, sin I/O.
+pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
+    if grafito_anim::parametric::pedido_menciona_area(pedido) {
+        return "integral-area";
+    }
+    crate::anim_native::detect_template_for_concept(pedido)
+}
+
+/// Decisión honesta única para animación: media sí/no + prosa coherente.
+///
+/// - `NoAnimacion`: no pide animación → flujo chat normal (puede ir remoto).
+/// - `PreguntarSinMedia`: falta concepto o función inválida → turno guía
+///   local, SIN hilo ni media ni remoto. Nunca pregunta Y muestra.
+/// - `RenderCanonico`: integral sin función → hilo + prosa que declara la
+///   canónica (`INTEGRAL_CANONICAL_PROSA`). Nunca huérfana.
+/// - `RenderExplicito`: con función válida → hilo + prosa que la nombra.
+/// - `RenderGenerico`: otra animación válida → hilo + referencia.
+///
+/// Render* siempre es local-only (sin remoto): así la prosa y la media
+/// nunca divergen (el bug era Spark preguntando mientras el hilo mostraba).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DecisionAnimacion {
+    NoAnimacion,
+    PreguntarSinMedia(String),
+    RenderCanonico {
+        plantilla: String,
+        concepto: String,
+    },
+    RenderExplicito {
+        plantilla: String,
+        concepto: String,
+        expr: String,
+    },
+    RenderGenerico {
+        plantilla: String,
+        concepto: String,
+    },
+}
+
+/// Punto único de decisión para animación (puro, sin I/O ni spawn).
+///
+/// Orden: gatillo → concepto → integral (canónica/explícita/inválida) →
+/// genérico. Sin `unwrap`: los `Err` se vuelven `PreguntarSinMedia`.
+pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
+    if !crate::anim_ui::wants_animation_request(pedido) {
+        return DecisionAnimacion::NoAnimacion;
+    }
+    let concepto = match crate::anim_ui::animation_concept_from_request(pedido) {
+        Ok(concepto) => concepto,
+        Err(guia) => return DecisionAnimacion::PreguntarSinMedia(guia),
+    };
+    let plantilla = plantilla_para_pedido(pedido).to_string();
+    match clasifica_pedido_integral(pedido, &plantilla) {
+        IntegralPedido::FuncionInvalida(detalle) => DecisionAnimacion::PreguntarSinMedia(detalle),
+        IntegralPedido::Canonica => DecisionAnimacion::RenderCanonico {
+            plantilla,
+            concepto,
+        },
+        IntegralPedido::Explicita => {
+            let expr = match grafito_anim::parametric::infer_area_anim(pedido) {
+                Ok(resuelto) => resuelto.anim().expr_a.clone(),
+                Err(error) => return DecisionAnimacion::PreguntarSinMedia(error.to_string()),
+            };
+            DecisionAnimacion::RenderExplicito {
+                plantilla,
+                concepto,
+                expr,
+            }
+        }
+        IntegralPedido::NoAplica => DecisionAnimacion::RenderGenerico {
+            plantilla,
+            concepto,
+        },
+    }
+}
+
+/// Prosa rioplatense para integral explícita: nombra la función y el rango.
+///
+/// La usa el turno local-only para que la media nunca quede huérfana.
+/// Sin "pedime otra" (ese marcador es solo de la canónica). Pura, sin I/O.
+fn prosa_integral_explicita(expr: &str, pedido: &str) -> String {
+    let (_, p0, p1) = grafito_anim::parametric::infer_area_anim(pedido)
+        .map(|resuelto| {
+            let anim = resuelto.anim();
+            (anim.expr_a.clone(), anim.p0, anim.p1)
+        })
+        .unwrap_or_else(|_| {
+            (
+                expr.to_string(),
+                grafito_anim::parametric::INTEGRAL_CANONICAL_P0,
+                grafito_anim::parametric::INTEGRAL_CANONICAL_P1,
+            )
+        });
+    format!(
+        "te muestro con f(x)={expr} en [{p0},{p1}].\n\n{}",
+        crate::anim_ui::animation_reference_sentence()
+    )
+}
+
+/// Agrega la declaración de la canónica al último turno del asistente.
+///
+/// Idempotente por contenido ("pedime otra" ya presente → no duplica).
+/// Puro sobre el transcript (sin I/O ni spawn): el hilo de render no se
+/// toca acá.
+fn append_canonical_integral_prose(conversation: &mut [ConversationTurn]) {
+    let Some(turno) = conversation.last_mut() else {
+        return;
+    };
+    if turno.role != ConversationRole::Assistant || turno.content.contains("pedime otra") {
+        return;
+    }
+    turno.content.push_str("\n\n");
+    turno
+        .content
+        .push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+}
+
+/// Reset T1 por turno (Bug B: integral pegada).
+///
+/// Sin mención de animación en EL MENSAJE ACTUAL (`NoAnimacion`) → jamás
+/// media: limpia el slot para que el turno no-animación no re-muestre la
+/// animación del turno anterior. El resto de decisiones no se toca (Render*
+/// ya limpia antes de spawnear; la guía nunca tuvo media). Sin I/O ni spawn.
+pub(crate) fn limpiar_media_si_no_animacion(
+    panel: &mut grafito_ui::assistant::AssistantPanelState,
+    decision: &DecisionAnimacion,
+    ctx: &egui::Context,
+) {
+    if matches!(decision, DecisionAnimacion::NoAnimacion) {
+        panel.set_media(None, ctx);
+    }
 }
 
 enum LocalAssistantDisposition {
@@ -108,6 +304,9 @@ pub(crate) struct AssistantRuntime {
     image_job: Option<AssistantImageJob>,
     agent_job: Option<AssistantAgentJob>,
     anim_job: Option<AssistantAnimJob>,
+    /// Export a GIF de la card en vuelo (B5): `JoinHandle` de
+    /// `spawn_gif_export` que `poll_gif_export_job` drena sin bloquear.
+    gif_export_job: Option<GifExportJob>,
     session_api_key: Option<SessionApiKey>,
 }
 
@@ -235,7 +434,65 @@ impl AssistantRuntime {
             focus: job.focus,
             cancelled: job.cancellation.is_cancelled(),
             result,
+            stream_preview_active: job.preview_active,
         })
+    }
+
+    /// Drena los deltas de streaming a la burbuja provisional del chat.
+    ///
+    /// Lee todo lo disponible del canal acotado (128, best-effort) y crea o
+    /// actualiza UN turno asistente provisional al final de `conversation`
+    /// (se renderiza como burbuja porque el dibujado recorre toda la
+    /// conversación también con `is_pending`). El texto visible se capa a
+    /// `MAX_CONVERSATION_TURN_CHARS`; el resultado final llega por el canal
+    /// de completado con su propio presupuesto. Si la conversación ya está en
+    /// `MAX_CONVERSATION_TURNS`, se omite el preview sin perder el final.
+    /// Puro UI-state, sin I/O: se llama cada frame desde `poll_assistant_jobs`.
+    pub(crate) fn drain_remote_stream_preview(
+        &mut self,
+        panel: &mut AssistantPanelState,
+        ctx: &egui::Context,
+    ) -> bool {
+        let deltas: Vec<String> = {
+            let Some(job) = self.remote_job.as_ref() else {
+                return false;
+            };
+            let Some(stream) = job.stream_rx.as_ref() else {
+                return false;
+            };
+            stream.try_iter().collect()
+        };
+        if deltas.is_empty() {
+            return false;
+        }
+        let Some(job) = self.remote_job.as_mut() else {
+            return false;
+        };
+        for delta in deltas {
+            job.stream_text.push_str(&delta);
+        }
+        let display: String = job
+            .stream_text
+            .chars()
+            .take(MAX_CONVERSATION_TURN_CHARS)
+            .collect();
+        if !job.preview_active {
+            if panel.conversation.len() >= MAX_CONVERSATION_TURNS {
+                return false;
+            }
+            panel
+                .conversation
+                .push(ConversationTurn::assistant(display));
+            job.preview_active = true;
+        } else if let Some(last) = panel.conversation.last_mut() {
+            // Invariante: con el slot remoto ocupado nada más empuja turnos,
+            // así que el último sigue siendo nuestro provisional.
+            if last.role == ConversationRole::Assistant {
+                last.content = display;
+            }
+        }
+        ctx.request_repaint();
+        true
     }
 
     fn take_finished_proposal_job(&mut self) -> Option<FinishedProposalJob> {
@@ -317,9 +574,10 @@ impl AssistantRuntime {
     /// - `remote`/`proposal`/`agent`/`model` tienen token: se marcan cancelados
     ///   pero el slot se conserva hasta que `take_finished_*`/`poll_assistant_agent`
     ///   drene el worker (sin huérfanos; ver test `cancelled_remote_job_...`).
-    /// - `anim` no tiene token: se dropea el receiver. El worker es acotado
-    ///   (render nativo o `job_timeout` 15s del motor) y su `send` falla tras el
-    ///   drop, así que el hilo termina solo sin dejar trabajo huérfano.
+    /// - `anim` tiene token (AS4, como `agent`): se señala y se dropea el slot.
+    ///   El worker es acotado (render nativo <2 s con chequeo entre frames o
+    ///   `job_timeout` 15 s del motor con closure `cancel`) y su `send` falla
+    ///   tras el drop, así que el hilo termina solo sin dejar trabajo huérfano.
     ///
     /// Retorna `true` si había algún job en vuelo.
     fn cancel_all_assistant_jobs(&mut self) -> bool {
@@ -340,12 +598,138 @@ impl AssistantRuntime {
             job.cancellation.cancel();
             cancelled = true;
         }
-        if self.anim_job.is_some() {
-            self.anim_job = None;
+        if self.cancel_anim_job() {
             cancelled = true;
         }
         cancelled
     }
+
+    /// Cancela solo el job de animación (AS4): señala el token y dropea el slot.
+    ///
+    /// Headless y sin I/O: el hilo en vuelo observa el token entre frames
+    /// (closure de progreso) y descarta el resultado rancio en vez de
+    /// publicarlo. Retorna `true` si había job en vuelo.
+    pub(crate) fn cancel_anim_job(&mut self) -> bool {
+        if let Some(job) = self.anim_job.as_ref() {
+            job.cancellation.cancel();
+        }
+        if self.anim_job.is_some() {
+            self.anim_job = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Limpia la burbuja provisional del streaming (cancelación o resultado).
+///
+/// Sólo retira el último turno si es del asistente: con el slot remoto
+/// ocupado nada más empuja turnos, así que ese es el provisional creado por
+/// `drain_remote_stream_preview`. Si nunca hubo preview, no toca nada y la
+/// conversación queda como en el path no-streaming.
+fn pop_provisional_stream_turn(panel: &mut AssistantPanelState) {
+    if panel
+        .conversation
+        .last()
+        .is_some_and(|turn| turn.role == ConversationRole::Assistant)
+    {
+        panel.conversation.pop();
+    }
+}
+
+/// ¿El error remoto es una reparación socrática forzada por el guard?
+///
+/// El worker retorna el diagnóstico interno tal cual cuando
+/// `guard_remote_completion` detecta telling con `attempts<2`. El diagnóstico
+/// conserva la jerga `GUARD TELLING` SOLO para detección y logs; el poll JAMÁS
+/// lo publica: lo convierte a voz de Mili vía `repair_student_message`
+/// (sin `GUARD`/`attempts`/`estado`/`Re-preguntá`). Publicarlo crudo vía
+/// `complete_request` fue el bug P0.
+fn is_socratic_repair_error(error: &str) -> bool {
+    error.starts_with("GUARD TELLING")
+}
+
+/// Cuenta respuestas a pregunta heurística previa (no turnos totales).
+///
+/// Un turno de usuario cuenta solo si el turno asistente inmediato anterior
+/// contiene `?` (re-pregunta heurística). El turno actual (último, ya empujado
+/// por `begin_request`) se excluye: aún no es respuesta, es la pregunta en
+/// curso. Primer turno sin pregunta previa ⇒ 0 y no punitivo (el guard de
+/// sesión se bypassea en `session_socratic_guard`; ver `can_reveal_answer`).
+/// Puro y determinista, sin `unwrap`, saturante a `u8`.
+fn count_heuristic_answers(conversation: &[ConversationTurn]) -> u8 {
+    let minus_current = conversation.len().saturating_sub(1);
+    let mut count: usize = 0;
+    let mut idx = 0;
+    while idx < minus_current {
+        let is_user = conversation
+            .get(idx)
+            .map(|turn| turn.role == ConversationRole::User)
+            .unwrap_or(false);
+        if is_user {
+            let prev_is_question = idx
+                .checked_sub(1)
+                .and_then(|prev| conversation.get(prev))
+                .map(|prev| prev.role == ConversationRole::Assistant && prev.content.contains('?'))
+                .unwrap_or(false);
+            if prev_is_question {
+                count = count.saturating_add(1);
+            }
+        }
+        idx += 1;
+    }
+    count.min(255) as u8
+}
+
+/// Construye el guard socrático de sesión para un lanzamiento remoto.
+///
+/// - `attempts`: respuestas a pregunta heurística previa (ver
+///   `count_heuristic_answers`), no turnos totales. El turno actual se excluye.
+///   Primer turno sin pregunta previa ⇒ 0 y no punitivo.
+/// - `topic`: concepto sanitizado vía `extract_concept` (quita saludos/verbos
+///   como `hola`/`haceme`/`dame`, exige min 3 letras y allowlist). Sin tema
+///   reconocido → `String::new()` para que el scaffold caiga al fallback fijo
+///   `¿qué querés graficar primero: recta, parábola…?` en vez de interpolar el
+///   texto crudo (`¿Te imaginás hola...?` era el bug P0).
+/// - `level`: `PedagogicalLevel::from_level_value` del nivel del perfil.
+/// - `history`: últimos 4 turnos como `Turn` pedagógicos (contenido capado a
+///   200 chars; el engine vuelve a acotar al segmentar).
+///   Puro y determinista: misma sesión → mismo guard.
+fn socratic_guard_context(
+    level_value: u32,
+    working_topic: Option<&str>,
+    question: &str,
+    conversation: &[ConversationTurn],
+) -> SocraticGuardContext {
+    // Sanitiza: memoria primero, luego pregunta actual; sin tema → "" (fallback).
+    let sanitized_topic: String = working_topic
+        .map(str::trim)
+        .filter(|topic| !topic.is_empty())
+        .and_then(extract_concept)
+        .or_else(|| extract_concept(question))
+        .unwrap_or_default();
+    let mut fsm = SocraticFsm::new(sanitized_topic);
+    fsm.attempts = count_heuristic_answers(conversation);
+    let history: Vec<Turn> = conversation
+        .iter()
+        .rev()
+        .take(4)
+        .rev()
+        .map(|turn| Turn {
+            role: match turn.role {
+                ConversationRole::User => "user".into(),
+                ConversationRole::Assistant => "assistant".into(),
+            },
+            content: turn.content.chars().take(200).collect(),
+        })
+        .collect();
+    let scaffold = ScaffoldEngine.scaffold(
+        &fsm.topic.clone(),
+        PedagogicalLevel::from_level_value(level_value),
+        &history,
+    );
+    SocraticGuardContext { fsm, scaffold }
 }
 
 struct AssistantRemoteJob {
@@ -363,6 +747,14 @@ struct AssistantRemoteJob {
     focus: Option<AssistantFocus>,
     cancellation: CancellationToken,
     receiver: Receiver<Result<RemoteCompletion, String>>,
+    /// Deltas de streaming SSE (sólo protocolo Responses; el resto lo deja
+    /// desconectado y nunca hay preview). Acotado a 128 (best-effort).
+    stream_rx: Option<Receiver<String>>,
+    /// Texto acumulado del stream para la burbuja provisional.
+    stream_text: String,
+    /// Hay un turno provisional al final de `conversation` que debe limpiarse
+    /// al terminar/cancelar (ver `pop_provisional_stream_turn`).
+    preview_active: bool,
 }
 
 struct AssistantProposalJob {
@@ -396,6 +788,9 @@ struct AssistantRemoteLaunch {
     focus: Option<AssistantFocus>,
     correction_attempt: u8,
     repair_target_turn: Option<usize>,
+    /// Guard socrático de sesión: el worker lo aplica sobre el completado
+    /// final (streaming y no-streaming). `None` lo desactiva.
+    socratic_guard: Option<SocraticGuardContext>,
 }
 
 struct AssistantRepairRequest {
@@ -435,9 +830,60 @@ enum AgentChannelMsg {
     Done(Result<grafito_agent::loop_engine::AgentOutcome, String>),
 }
 
+/// Parsea el `args_summary` de un `ToolStarted{ask_user}` a pendiente UI (S2).
+///
+/// Puro y no bloqueante: `args_summary` es `arguments.to_string()` truncado a
+/// 160 chars; para preguntas cortas típicas alcanza. Si viene truncado con
+/// `…` se recorta y se intenta igual; si no parsea, `None` honesto (sin
+/// inventar pregunta ni opciones). El `call_id` real no viaja en el evento,
+/// así que se deriva estable de la pregunta (longitud) sin inventar UUID.
+fn parse_agent_ask_user_pending(
+    args_summary: &str,
+) -> Option<grafito_ui::assistant::PendingClarification> {
+    let cleaned = args_summary.trim().trim_end_matches('…').trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(cleaned).ok()?;
+    let question = value.get("question").and_then(serde_json::Value::as_str)?;
+    if question.trim().is_empty() {
+        return None;
+    }
+    let options = value
+        .get("options")
+        .and_then(|options| options.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let call_id = format!("ask_user-{}", question.len());
+    grafito_ui::assistant::PendingClarification::try_new(&call_id, question, options).ok()
+}
+
 /// Job que genera y carga una animación del motor externo.
+///
+/// AS4: con `cancellation` como `AssistantAgentJob` (cancel real: descartar
+/// señala el token, no solo dropea el receiver). El hilo la chequea entre
+/// frames en el closure de progreso (el render nativo no acepta token) y
+/// antes/después del transporte; el motor externo la recibe como closure
+/// `cancel` en `run_job` (aborto <200 ms).
 struct AssistantAnimJob {
+    cancellation: CancellationToken,
     receiver: std::sync::mpsc::Receiver<Result<grafito_ui::assistant::AssistantMedia, String>>,
+}
+
+/// Export a GIF de la card en vuelo (B5).
+///
+/// Guarda el `JoinHandle` de `spawn_gif_export` (hilo existente, reusable y
+/// probado) para drenarlo sin bloquear en `poll_gif_export_job`.
+/// `frame_count` es solo para el mensaje de éxito (cuántos fotogramas
+/// viajaron al GIF).
+struct GifExportJob {
+    handle: std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::GifExportError>>,
+    frame_count: usize,
 }
 
 /// Job del modo agente (loop con herramientas).
@@ -446,6 +892,11 @@ struct AssistantAgentJob {
     model: String,
     cancellation: grafito_agent::loop_engine::Cancellation,
     receiver: Receiver<AgentChannelMsg>,
+    /// Canal lateral S2 (`ask_user` real vía evento): el forwarder de
+    /// background reenvía el pendiente como `PendingClarification` sin
+    /// bloquear (try_send acotado). La UI lo drena en `sync_assistant_for_frame`
+    /// (hilo UI, try_recv) y lo muestra como botones; nunca toca la zona guard.
+    clarification_receiver: Receiver<grafito_ui::assistant::PendingClarification>,
 }
 
 struct FinishedRemoteJob {
@@ -462,6 +913,9 @@ struct FinishedRemoteJob {
     focus: Option<AssistantFocus>,
     cancelled: bool,
     result: Result<RemoteCompletion, String>,
+    /// El job dejó una burbuja provisional que el poll debe limpiar antes de
+    /// procesar el resultado (éxito, error o cancelación).
+    stream_preview_active: bool,
 }
 
 struct FinishedProposalJob {
@@ -610,33 +1064,62 @@ impl GrafitoApp {
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
             match job.receiver.try_recv() {
                 Ok(Ok(media)) => {
+                    let was_cancelled = job.cancellation.is_cancelled();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
-                    self.assistant.set_media(Some(media.clone()), ctx);
-                    self.notify("Animación lista.", ToastKind::Success);
+                    if was_cancelled {
+                        // Cancel real: el worker observó el token y el
+                        // resultado es rancio — se descarta sin publicar
+                        // (sin media rancia en el turno).
+                        self.notify("Generación cancelada.", ToastKind::Info);
+                    } else {
+                        // La animación vive DENTRO del turno del chat:
+                        // `set_media` la instala para el reproductor del
+                        // transcript (`ui/assistant.rs:915`, `draw_media_card`
+                        // en el último turno). Sin ventana compañera.
+                        self.assistant.set_media(Some(media), ctx);
+                        self.notify("Animación lista.", ToastKind::Success);
+                    }
                     ctx.request_repaint();
                 }
                 Ok(Err(error)) => {
+                    let was_cancelled =
+                        job.cancellation.is_cancelled() || error.to_lowercase().contains("cancel");
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
-                    self.assistant.set_media(None, ctx);
-                    let message = format!("No se pudo generar la animación: {error}");
-                    self.notify(&message, ToastKind::Error);
-                    self.show_assistant_error(message);
+                    if was_cancelled {
+                        self.notify("Generación cancelada.", ToastKind::Info);
+                    } else {
+                        self.assistant.set_media(None, ctx);
+                        let message = format!("No se pudo generar la animación: {error}");
+                        self.notify(&message, ToastKind::Error);
+                        self.show_assistant_error(message);
+                    }
                     ctx.request_repaint();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let was_cancelled = job.cancellation.is_cancelled();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
+                    if !was_cancelled {
+                        self.assistant.set_media(None, ctx);
+                        self.show_assistant_error(
+                            "La generación terminó inesperadamente antes de responder.",
+                        );
+                    }
                     ctx.request_repaint();
                 }
             }
         }
+        // B5: drena el export a GIF de la card (sin bloquear; solo join si terminó).
+        self.poll_gif_export_job(ctx);
         if !self.plugins_loaded {
             self.plugins_loaded = true;
             self.load_assistant_plugins();
         }
+        // S2: drena aclaraciones del canal lateral sin bloquear (try_recv).
+        self.drain_pending_clarifications();
         self.assistant.focus = grafito_command::assistant_context::selected_function_focus(
             &self.document,
             self.selected_object,
@@ -776,6 +1259,20 @@ impl GrafitoApp {
         if let Some(action) = action {
             self.handle_assistant_action(ctx, action);
         }
+        self.asentar_respuesta_ejercicio();
+        if let Some(pedido) =
+            crate::teaching_ui::draw_panel_ejercicio(ui, &mut self.teaching_ui.ejercicio)
+        {
+            match pedido {
+                crate::teaching_ui::AccionEjercicio::Otro => {
+                    let tema = self.teaching_ui.ejercicio.tema.clone();
+                    self.iniciar_ejercicio(ctx, &tema);
+                }
+                crate::teaching_ui::AccionEjercicio::Cerrar => {
+                    self.teaching_ui.ejercicio.cerrar();
+                }
+            }
+        }
         self.cancel_stale_model_request();
     }
 
@@ -803,22 +1300,31 @@ impl GrafitoApp {
         // pedagógica pasa exclusivamente por el loop agente cuando `assistant.agent_mode==true`.
         match action {
             AssistantUiAction::Submit => {
-                // Solo anima si pedís explícitamente "anim..." (animá, animación, animar)
                 let problem_clone = self.assistant.problem.clone();
                 let lower = problem_clone.to_lowercase();
-                let wants_animation = lower.contains("anim");
-                // Guardar para animación con template correcto
-                let anim_template = if wants_animation {
-                    crate::anim_native::detect_template_for_concept(&problem_clone).to_string()
-                } else {
-                    String::new()
-                };
-                let anim_concept = problem_clone.clone();
+                // Punto único de decisión honesto (`decide_animacion`): media
+                // sí/no + prosa coherente en un solo lugar. Antes había doble
+                // carril (hilo local + remoto Spark preguntón) que mostraba Y
+                // preguntaba a la vez. Ahora Render* es local-only sin remoto.
+                let decision = decide_animacion(&problem_clone);
                 // Cancela animación previa si existe — evita crash al pedir otra cosa tras animación
-                // y evita "tomo una ya hecha" (stale derivative)
-                if self.assistant_runtime.anim_job.is_some() {
-                    self.assistant_runtime.anim_job = None;
+                // y evita "tomo una ya hecha" (stale derivative). Cancel real:
+                // señala el token, el hilo descarta.
+                if self.assistant_runtime.cancel_anim_job() {
                     self.assistant.anim_progress = false;
+                }
+                // Pedido ambiguo o función inválida: turno guía local sin
+                // media ni hilo ni remoto, jamás inventa.
+                if let DecisionAnimacion::PreguntarSinMedia(guia) = &decision {
+                    let question = problem_clone.clone();
+                    self.assistant.begin_request(question);
+                    self.assistant.problem.clear();
+                    let honesto = grafito_ui::assistant::humanize_prose_text(guia);
+                    self.assistant.complete_local_request(honesto.clone());
+                    self.assistant.set_media(None, ctx);
+                    self.notify(honesto, ToastKind::Info);
+                    ctx.request_repaint();
+                    return;
                 }
                 // Heurística de memoria: si el usuario pide recordar o expresa preferencia, guardarlo
                 if lower.contains("recuerda que")
@@ -847,10 +1353,77 @@ impl GrafitoApp {
                         spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
                     }
                 }
-                self.start_local_assistant_request(ctx);
-                if wants_animation {
-                    self.run_assistant_animation_with(ctx, &anim_template, &anim_concept);
+                // Render* es local-only: turno propio que declara lo que la
+                // media muestra, SIN pasar por `start_local` (que estadía
+                // autorización remota y el Spark preguntón contradecía).
+                match &decision {
+                    DecisionAnimacion::RenderCanonico {
+                        plantilla,
+                        concepto,
+                    } => {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let mut prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                        prosa.push_str("\n\n");
+                        prosa.push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+                        let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                        self.assistant.complete_local_request(humano);
+                        self.assistant.set_media(None, ctx);
+                        self.run_assistant_animation_with(ctx, plantilla, concepto);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    DecisionAnimacion::RenderExplicito {
+                        plantilla,
+                        concepto,
+                        expr,
+                    } => {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let prosa = prosa_integral_explicita(expr, &problem_clone);
+                        let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                        self.assistant.complete_local_request(humano);
+                        self.assistant.set_media(None, ctx);
+                        self.run_assistant_animation_with(ctx, plantilla, concepto);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    DecisionAnimacion::RenderGenerico {
+                        plantilla,
+                        concepto,
+                    } => {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                        let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                        self.assistant.complete_local_request(humano);
+                        self.assistant.set_media(None, ctx);
+                        self.run_assistant_animation_with(ctx, plantilla, concepto);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    DecisionAnimacion::PreguntarSinMedia(_) => {
+                        // Ya retornado arriba; inalcanzable.
+                        return;
+                    }
+                    DecisionAnimacion::NoAnimacion => {
+                        // Reset T1 (Bug B): sin animación en este mensaje la
+                        // media anterior no se re-muestra en este turno.
+                        limpiar_media_si_no_animacion(&mut self.assistant, &decision, ctx);
+                    }
                 }
+                // B7 — Pedido de ejercicio en texto: genera la tarjeta en vez de
+                // una respuesta de chat. Acá ya no hay animación (Render* retornó).
+                if wants_exercise_request(&problem_clone) {
+                    self.iniciar_ejercicio(ctx, &problem_clone);
+                    self.assistant.problem.clear();
+                    ctx.request_repaint();
+                    return;
+                }
+                self.start_local_assistant_request(ctx);
             }
             AssistantUiAction::AuthorizeRemote => {
                 self.start_authorized_remote_assistant_request(ctx)
@@ -969,7 +1542,7 @@ impl GrafitoApp {
                 }
                 if is_generate_animation && committed {
                     if let Some((template_opt, concept_opt)) = generate_args {
-                        let template = template_opt
+                        let template_crudo = template_opt
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
                             .filter(|s| !s.is_empty())
@@ -978,7 +1551,74 @@ impl GrafitoApp {
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
                             .unwrap_or("");
-                        self.run_assistant_animation_with(ctx, template, concept);
+                        // Plantilla honesta: si el concepto menciona integral
+                        // (con typos), se coerciona a `integral-area` aunque el
+                        // LLM haya propuesto `universal` (mismo punto único
+                        // que Submit vía `plantilla_para_pedido`).
+                        let plantilla_efectiva: &str =
+                            if grafito_anim::parametric::pedido_menciona_area(concept) {
+                                "integral-area"
+                            } else {
+                                template_crudo
+                            };
+                        // N1: misma política que Submit (inferencia + agente).
+                        match clasifica_pedido_integral(concept, plantilla_efectiva) {
+                            IntegralPedido::FuncionInvalida(detalle) => {
+                                // Compromiso verificado pero función inválida:
+                                // prosa honesta sin hilo de render (sin frames).
+                                if let Some(turno) = self.assistant.conversation.last_mut() {
+                                    if turno.role == ConversationRole::Assistant {
+                                        turno.content.push_str("\n\n");
+                                        turno.content.push_str(
+                                            &grafito_ui::assistant::humanize_prose_text(&detalle),
+                                        );
+                                    }
+                                }
+                                self.notify(detalle, ToastKind::Info);
+                            }
+                            IntegralPedido::Explicita => {
+                                // Explícita: la prosa nombra la función (nunca huérfana).
+                                if let Some(turno) = self.assistant.conversation.last_mut() {
+                                    if turno.role == ConversationRole::Assistant
+                                        && !turno.content.contains("deslizador")
+                                    {
+                                        let expr =
+                                            grafito_anim::parametric::infer_area_anim(concept)
+                                                .map(|r| r.anim().expr_a.clone())
+                                                .unwrap_or_default();
+                                        turno.content.push_str("\n\n");
+                                        turno.content.push_str(
+                                            &grafito_ui::assistant::humanize_prose_text(
+                                                &prosa_integral_explicita(&expr, concept),
+                                            ),
+                                        );
+                                    }
+                                }
+                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                            }
+                            pedido_integral => {
+                                // El agente propuso `generate_animation` (vía
+                                // `GenerateAnimation` verificado): el hilo genera e
+                                // incrusta como `AssistantMedia` DEL TURNO.
+                                if let Some(turno) = self.assistant.conversation.last_mut() {
+                                    if turno.role == ConversationRole::Assistant
+                                        && !turno.content.contains("deslizador")
+                                    {
+                                        turno.content.push_str("\n\n");
+                                        turno.content.push_str(
+                                            crate::anim_ui::animation_reference_sentence(),
+                                        );
+                                    }
+                                }
+                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                                // N1: canónica renderizada Y declarada.
+                                if matches!(pedido_integral, IntegralPedido::Canonica) {
+                                    append_canonical_integral_prose(
+                                        &mut self.assistant.conversation,
+                                    );
+                                }
+                            }
+                        }
                     } else {
                         self.run_assistant_animation(ctx);
                     }
@@ -987,6 +1627,24 @@ impl GrafitoApp {
             AssistantUiAction::ApplyProposedPlan => self.apply_proposed_assistant_plan(),
             AssistantUiAction::RetryProposalCorrection => {
                 self.request_assistant_proposal_correction(ctx);
+            }
+            // S2 `ask_user` real vía evento: la tool devolvió el pendiente, la
+            // UI lo mostró como botones y la respuesta vuelve al loop como
+            // `function_call_output`/mensaje en un nuevo job (nunca bloquea).
+            AssistantUiAction::AskClarification { .. } => {
+                // Staging vía `stage_clarification` (el worker ya terminó);
+                // esta variante solo existe para contrato/tests, sin I/O.
+            }
+            AssistantUiAction::AnswerClarification { call_id, answer } => {
+                self.answer_pending_clarification(ctx, &call_id, &answer);
+            }
+            AssistantUiAction::DismissClarification => {
+                self.assistant.clear_pending_clarification();
+                self.notify(
+                    "Aclaración descartada. Escribí la respuesta en el chat si querés.",
+                    ToastKind::Info,
+                );
+                ctx.request_repaint();
             }
             AssistantUiAction::ClearConversation => {
                 self.assistant.clear_conversation();
@@ -1012,6 +1670,7 @@ impl GrafitoApp {
                 self.save_app_config();
             }
             AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
+            AssistantUiAction::ExportMedia => self.export_assistant_media(ctx),
             AssistantUiAction::AskNextTopic => {
                 let memory = self.profile.memory();
                 self.assistant.problem = format!(
@@ -1221,7 +1880,24 @@ impl GrafitoApp {
                 let outcome = self.execute_command_and_record(&command_text, self.ui_time);
                 match &outcome {
                     grafito_command::commands::CommandOutcome::Error(msg) => {
-                        self.show_assistant_error(msg.clone());
+                        // S3: ante fence/propuesta inválida, responde con
+                        // `vibecoder_explain` (negocio en rioplatense) + fix
+                        // propuesto en 1 click cuando sea seguro (solo
+                        // reescritura sintáctica, jamás cambio semántico
+                        // silencioso). El fix queda en la entrada para que el
+                        // usuario lo revise y lo aplique explícitamente.
+                        let (explained, fix) =
+                            grafito_assistant::agent::explain_invalid_proposal(&command_text, "");
+                        if let Some(fix) = fix {
+                            self.input_text = fix.clone();
+                            self.command_input_focus_requested = true;
+                            self.show_assistant_error(format!(
+                                "{} Te propongo un fix sintáctico en la entrada: {} Revisalo y aplicá.",
+                                explained.explanation, fix
+                            ));
+                        } else {
+                            self.show_assistant_error(format!("{} ({msg})", explained.explanation));
+                        }
                     }
                     _ => {
                         self.ensure_algebra_panel_visible();
@@ -1235,6 +1911,9 @@ impl GrafitoApp {
                 self.teaching_ui.start(&topic);
                 self.notify(format!("Enseñanza iniciada: {topic}"), ToastKind::Info);
             }
+            AssistantUiAction::RequestExercise { topic } => {
+                self.iniciar_ejercicio(ctx, &topic);
+            }
         }
     }
 
@@ -1242,6 +1921,19 @@ impl GrafitoApp {
         let error = error.into();
         self.assistant.error = Some(error.clone());
         self.notify(error, ToastKind::Error);
+    }
+
+    /// Freno 429 lado UI: si la cuota del proveedor sigue en pausa, muestra
+    /// el mensaje criollo con cuenta regresiva y no spawnea ningún worker
+    /// (cero red). Retorna `true` si frenó (el llamante debe volver). Sólo
+    /// disparadores lo usan (chat/agente/corrección/modelos).
+    fn fail_fast_if_rate_limited(&mut self) -> bool {
+        if let Some(remaining) = rate_limit_cooldown_remaining_secs() {
+            self.show_assistant_error(rate_limit_paused_message(remaining));
+            true
+        } else {
+            false
+        }
     }
 
     fn reject_assistant_command(&mut self) {
@@ -1273,6 +1965,11 @@ impl GrafitoApp {
         prerequisite_parameters: &[AssistantParameterAssignment],
     ) -> bool {
         let before = self.object_labels_snapshot();
+        let before_ids = self
+            .document
+            .objects_iter()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::HashSet<_>>();
         let command_text = command.canonical_text();
         match preflight_assistant_graph_command_with_prerequisites(
             &self.document,
@@ -1298,6 +1995,14 @@ impl GrafitoApp {
                     self.set_perspective(perspective);
                 }
                 if committed {
+                    // S1 auto-graficar 1-click: el objeto queda seleccionado y
+                    // visible. 2D encuadra con `zoom_to_fit` (el preflight ya
+                    // garantizó geometría visible); 3D queda visible con la
+                    // cámara actual (el preflight lo verificó) + selección.
+                    self.select_new_assistant_objects(&before_ids);
+                    if view == grafito_command::assistant_context::AssistantGraphView::TwoD {
+                        self.zoom_to_fit();
+                    }
                     self.ensure_algebra_panel_visible();
                 }
                 committed
@@ -1315,6 +2020,11 @@ impl GrafitoApp {
         prerequisite_parameters: &[AssistantParameterAssignment],
     ) -> bool {
         let before = self.object_labels_snapshot();
+        let before_ids = self
+            .document
+            .objects_iter()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::HashSet<_>>();
         match preflight_assistant_scene_with_prerequisites(
             &self.document,
             prerequisite_parameters,
@@ -1322,6 +2032,7 @@ impl GrafitoApp {
             self.camera,
         ) {
             Ok(preflight) => {
+                let view = preflight.view;
                 let before_document = self.document.clone();
                 self.document = preflight.staged;
                 crate::app::save_command_snapshot_if_mutated(
@@ -1338,10 +2049,14 @@ impl GrafitoApp {
                     "Escena 3D verificada",
                 );
                 self.record_step_from_diff("Escena 3D verificada", &before, true);
-                if let Some(perspective) =
-                    assistant_graph_perspective(preflight.view, self.current_view)
-                {
+                if let Some(perspective) = assistant_graph_perspective(view, self.current_view) {
                     self.set_perspective(perspective);
+                }
+                // S1: selección + encuadre (3D ya viene con cámara fitted del
+                // preflight; 2D homogénea encuadra con zoom_to_fit).
+                self.select_new_assistant_objects(&before_ids);
+                if view == grafito_command::assistant_context::AssistantGraphView::TwoD {
+                    self.zoom_to_fit();
                 }
                 self.ensure_algebra_panel_visible();
                 self.notify(
@@ -1353,6 +2068,106 @@ impl GrafitoApp {
             Err(error) => {
                 self.show_assistant_error(error);
                 false
+            }
+        }
+    }
+
+    /// Selecciona los objetos nuevos tras un Apply (S1 auto-graficar 1-click).
+    ///
+    /// Puro en intención (solo `selected_object`, sin Document ni I/O): difiere
+    /// `before_ids` del documento actual y fija el máximo (determinista por
+    /// `Ord`) como seleccionado para que quede visible en Álgebra y canvas.
+    /// Sin nuevos → conserva la selección previa (default honesto, no inventa).
+    fn select_new_assistant_objects(
+        &mut self,
+        before_ids: &std::collections::HashSet<grafito_core::ObjectId>,
+    ) {
+        let mut newest: Option<grafito_core::ObjectId> = None;
+        for (id, _) in self.document.objects_iter() {
+            if before_ids.contains(id) {
+                continue;
+            }
+            newest = Some(match newest {
+                None => *id,
+                Some(current) => current.max(*id),
+            });
+        }
+        if let Some(id) = newest {
+            self.selected_object = Some(id);
+        }
+    }
+
+    /// Retoma una aclaración pendiente (S2) con la respuesta del usuario.
+    ///
+    /// No bloquea threads: consume el pendiente y lanza un nuevo job local con
+    /// la respuesta como `function_call_output`/mensaje para que el loop la
+    /// retome. Si el `call_id` no coincide o la respuesta está vacía, se
+    /// descarta sin I/O y con aviso honesto en rioplatense.
+    fn answer_pending_clarification(&mut self, ctx: &egui::Context, call_id: &str, answer: &str) {
+        let pending = self.assistant.pending_clarification().cloned();
+        let Some(pending) = pending else {
+            self.notify("No hay aclaración pendiente.", ToastKind::Info);
+            return;
+        };
+        if pending.call_id != call_id {
+            self.assistant.clear_pending_clarification();
+            self.notify(
+                "La aclaración quedó obsoleta; volvé a preguntar si la necesitás.",
+                ToastKind::Info,
+            );
+            ctx.request_repaint();
+            return;
+        }
+        let Some(sanitized) = self
+            .assistant
+            .take_clarification_answer(call_id, answer)
+            .filter(|text| !text.trim().is_empty())
+        else {
+            self.notify(
+                "Escribí una respuesta no vacía para continuar.",
+                ToastKind::Info,
+            );
+            return;
+        };
+        // La respuesta vuelve al loop como mensaje + `function_call_output`
+        // (Responses) para trazabilidad; el nuevo job local la retoma sin
+        // bloquear la UI (I/O solo en background, como el resto de jobs).
+        let output = serde_json::json!({
+            "type": "function_call_output",
+            "call_id": pending.call_id,
+            "output": sanitized,
+        });
+        self.assistant.problem = format!(
+            "Aclaración ({}): {}\nRespuesta: {}",
+            pending.question, output, sanitized
+        );
+        self.notify(
+            "Aclaración respondida. Retomo la consulta…",
+            ToastKind::Info,
+        );
+        self.start_local_assistant_request(ctx);
+        ctx.request_repaint();
+    }
+
+    /// Drena aclaraciones `ask_user` del canal lateral (S2, sin bloquear).
+    ///
+    /// Hilo UI, `try_recv` acotado (máx 4 por frame): si hay pendiente nuevo y
+    /// no hay otro visible, lo estagia para mostrar botones en el turno. Nunca
+    /// bloquea threads ni toca la zona guard (el forwarder ya parseó en
+    /// background).
+    fn drain_pending_clarifications(&mut self) {
+        let Some(job) = self.assistant_runtime.agent_job.as_ref() else {
+            return;
+        };
+        for _ in 0..4 {
+            match job.clarification_receiver.try_recv() {
+                Ok(pending) => {
+                    if !self.assistant.has_pending_clarification() {
+                        self.assistant.stage_clarification(pending);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             }
         }
     }
@@ -1591,13 +2406,24 @@ impl GrafitoApp {
             focus,
             correction_attempt,
             repair_target_turn,
+            socratic_guard,
         } = launch;
         self.assistant_runtime.next_request_id =
             self.assistant_runtime.next_request_id.wrapping_add(1);
         let id = self.assistant_runtime.next_request_id;
         let cancellation = CancellationToken::default();
-        let worker =
-            request_remote_with_api_key_on_worker(settings, request, api_key, cancellation.clone());
+        // Canal acotado de deltas SSE (128, best-effort): el worker de
+        // streaming lo alimenta y `poll_assistant_jobs` lo drena a la burbuja
+        // provisional. Protocolos no-streaming lo dejan desconectado.
+        let (delta_tx, stream_rx) = sync_channel::<String>(128);
+        let worker = request_remote_streaming_with_api_key_on_worker(
+            settings,
+            request,
+            api_key,
+            cancellation.clone(),
+            delta_tx,
+            socratic_guard,
+        );
         let (sender, receiver) = sync_channel(1);
         let repaint = ctx.clone();
         let cancellation_for_thread = cancellation.clone();
@@ -1632,6 +2458,9 @@ impl GrafitoApp {
             focus,
             cancellation,
             receiver,
+            stream_rx: Some(stream_rx),
+            stream_text: String::new(),
+            preview_active: false,
         });
     }
 
@@ -1688,6 +2517,8 @@ impl GrafitoApp {
                 cancellation.clone(),
             );
         let (sender, receiver) = std::sync::mpsc::sync_channel(128);
+        // S2: canal lateral de aclaraciones (cap 4, try_send sin bloquear).
+        let (clarification_sender, clarification_receiver) = std::sync::mpsc::sync_channel(4);
         let repaint = ctx.clone();
         let cancellation_forwarder = cancellation.clone();
         std::thread::spawn(move || {
@@ -1699,6 +2530,18 @@ impl GrafitoApp {
                 }
                 match event_receiver.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(event) => {
+                        // S2 `ask_user` real vía evento: reenvía el pendiente al
+                        // canal lateral sin bloquear (try_send) para que la UI
+                        // lo muestre como botones. Nunca bloquea threads.
+                        if let grafito_agent::AgentEvent::ToolStarted { name, args_summary } =
+                            &event
+                        {
+                            if name == "ask_user" {
+                                if let Some(pending) = parse_agent_ask_user_pending(args_summary) {
+                                    let _ = clarification_sender.try_send(pending);
+                                }
+                            }
+                        }
                         if sender.send(AgentChannelMsg::Event(event)).is_err() {
                             break;
                         }
@@ -1728,10 +2571,93 @@ impl GrafitoApp {
             model,
             cancellation,
             receiver,
+            clarification_receiver,
         });
     }
 
     /// Genera una animación didáctica con el motor externo y la reproduce en el chat.
+    /// B7 — Arranca el ciclo de ejercicio: tema crudo → concepto → job en
+    /// background → tarjeta visible bajo el chat. Sin I/O en la UI.
+    fn iniciar_ejercicio(&mut self, ctx: &egui::Context, tema_crudo: &str) {
+        let tema = extract_concept(tema_crudo).unwrap_or_else(|| {
+            let recorte: String = tema_crudo
+                .trim()
+                .chars()
+                .take(crate::teaching_ui::MAX_TEMA_CHARS)
+                .collect();
+            if recorte.is_empty() {
+                grafito_ui::assistant::ANDAMIAR_DEFAULT_TOPIC.to_string()
+            } else {
+                recorte
+            }
+        });
+        let nivel = PedagogicalLevel::from_level_value(self.profile.level);
+        self.teaching_ui.ejercicio.pedir(&tema, nivel);
+        self.notify(
+            format!("Armo un ejercicio de {tema}, che."),
+            ToastKind::Info,
+        );
+        ctx.request_repaint();
+    }
+
+    /// B7 — Asienta la respuesta ya corregida en el perfil (BKT barato, en
+    /// memoria) y calcula el próximo paso. Corre tras dibujar la tarjeta;
+    /// registra una sola vez por respuesta (guardia `registrada`).
+    fn asentar_respuesta_ejercicio(&mut self) {
+        let (lo_id, tema, respuesta, fb) = match (
+            self.teaching_ui.ejercicio.ejercicio.as_ref(),
+            self.teaching_ui.ejercicio.tarjeta.devolucion.as_ref(),
+        ) {
+            (Some(ejercicio), Some(fb)) => (
+                ejercicio.lo_id.clone(),
+                self.teaching_ui.ejercicio.tema.clone(),
+                self.teaching_ui
+                    .ejercicio
+                    .tarjeta
+                    .respuesta
+                    .trim()
+                    .to_string(),
+                fb.clone(),
+            ),
+            _ => return,
+        };
+        if self.teaching_ui.ejercicio.registrada.as_deref() == Some(respuesta.as_str()) {
+            return;
+        }
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        self.profile
+            .record_outcome(&lo_id, &tema, epoch, fb.correct);
+        let pista = if fb.correct {
+            String::new()
+        } else {
+            format!("{:?}", fb.misconception)
+        };
+        self.profile.working_memory.record_attempt(&pista);
+        self.profile.working_memory.set_topic(&tema);
+        self.profile.working_memory.set_session_epoch(epoch);
+        self.assistant.working_memory = self.profile.working_memory.clone();
+        // I/O en background thread para no bloquear UI (60fps)
+        spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
+        // BKT en memoria (barato): próxima rama o texto honesto si no hay.
+        let proximo = self
+            .profile
+            .recommend_next()
+            .first()
+            .map(|rama| rama.name.clone());
+        let texto = match proximo {
+            Some(nombre) => format!("Próximo tema sugerido: {nombre}, che."),
+            None => {
+                "Seguí practicando este tema y pedí otro ejercicio cuando quieras, che.".to_string()
+            }
+        };
+        let panel = &mut self.teaching_ui.ejercicio;
+        panel.proximo = Some(texto);
+        panel.registrada = Some(respuesta);
+    }
+
     /// Genera y envía un mini-examen (3 preguntas) de la rama recomendada.
     fn run_mini_exam(&mut self, ctx: &egui::Context) {
         let branch = self
@@ -1846,10 +2772,135 @@ impl GrafitoApp {
         self.run_assistant_animation_with(ctx, "derivative-slope", "derivada como pendiente");
     }
 
-    fn run_assistant_animation_with(&mut self, ctx: &egui::Context, template: &str, concept: &str) {
-        // Si hay una animación en curso, cancelarla para regenerar la nueva (evita "tomo una ya hecha")
-        if self.assistant_runtime.anim_job.is_some() {
-            self.assistant_runtime.anim_job = None;
+    /// Exporta la animación visible en la card a GIF (B5, botón Exportar).
+    ///
+    /// Cablea al `spawn_gif_export` existente (hilo aparte, probado): la UI
+    /// solo emitió `ExportMedia`, acá corre el trabajo fuera del draw.
+    /// Jamás mudo:
+    /// - export en curso → aviso y no se duplica;
+    /// - sin animación o sin fotogramas → `Failed` en la card + aviso;
+    /// - preflight (`check_gif_export_budget`: 64 frames / 8 Mpx / dims) →
+    ///   motivo en la card + aviso;
+    /// - el destino es temporal (`temp_dir`, nombre único por instante) y se
+    ///   avisa la ruta al terminar; el delay sale de la velocidad de la card
+    ///   (`gif_delay_for_rate` sobre `GIF_EXPORT_DELAY_CS`).
+    fn export_assistant_media(&mut self, ctx: &egui::Context) {
+        use grafito_ui::assistant::MediaExportState;
+        if self.assistant_runtime.gif_export_job.is_some() {
+            self.notify("Ya se está exportando la animación.", ToastKind::Info);
+            return;
+        }
+        let frames = self
+            .assistant
+            .media
+            .as_ref()
+            .map_or_else(Vec::new, |media| media.frames.clone());
+        if frames.is_empty() {
+            self.assistant.set_media_export(MediaExportState::Failed(
+                "todavía no hay fotogramas para exportar".into(),
+            ));
+            self.notify("No hay animación para exportar.", ToastKind::Error);
+            ctx.request_repaint();
+            return;
+        }
+        if let Err(budget) = crate::anim_native::check_gif_export_budget(&frames) {
+            let reason = budget.to_string();
+            self.assistant
+                .set_media_export(MediaExportState::Failed(reason.clone()));
+            self.notify(format!("No se pudo exportar: {reason}"), ToastKind::Error);
+            ctx.request_repaint();
+            return;
+        }
+        let frame_count = frames.len();
+        let delay_cs = crate::anim_native::gif_delay_for_rate(
+            crate::anim_native::GIF_EXPORT_DELAY_CS,
+            self.assistant.media_playback_rate(),
+        );
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0);
+        let path =
+            std::env::temp_dir().join(format!("grafito_animacion_{stamp}_{frame_count}.gif"));
+        let handle = crate::anim_native::spawn_gif_export(frames, path, delay_cs);
+        self.assistant_runtime.gif_export_job = Some(GifExportJob {
+            handle,
+            frame_count,
+        });
+        self.assistant.set_media_export(MediaExportState::Exporting);
+        ctx.request_repaint();
+    }
+
+    /// Drena el export a GIF sin bloquear (B5).
+    ///
+    /// Solo hace `join` si el hilo terminó (`is_finished`); publica el
+    /// resultado en la card + aviso: éxito con ruta (verificando cota 5 MB
+    /// post-escritura: si excede, se borra y es error honesto), o motivo del
+    /// fallo. Se llama cada frame desde `sync_assistant_for_frame`.
+    fn poll_gif_export_job(&mut self, ctx: &egui::Context) {
+        use grafito_ui::assistant::MediaExportState;
+        let finished = self
+            .assistant_runtime
+            .gif_export_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished());
+        if !finished {
+            return;
+        }
+        let Some(job) = self.assistant_runtime.gif_export_job.take() else {
+            return;
+        };
+        match job.handle.join() {
+            Ok(Ok(path)) => {
+                let too_big = std::fs::metadata(&path)
+                    .map(|metadata| metadata.len() > crate::anim_native::GIF_EXPORT_MAX_FILE_BYTES)
+                    .unwrap_or(false);
+                if too_big {
+                    let _ = std::fs::remove_file(&path);
+                    let reason = "el GIF supera 5 MB";
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(reason.into()));
+                    self.notify(format!("No se pudo exportar: {reason}."), ToastKind::Error);
+                } else {
+                    self.assistant.set_media_export(MediaExportState::Done);
+                    self.notify(
+                        format!(
+                            "Se exportaron {} fotogramas a {}.",
+                            job.frame_count,
+                            path.display()
+                        ),
+                        ToastKind::Success,
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                let reason = error.to_string();
+                self.assistant
+                    .set_media_export(MediaExportState::Failed(reason.clone()));
+                self.notify(
+                    format!("No se pudo exportar la animación: {reason}."),
+                    ToastKind::Error,
+                );
+            }
+            Err(_) => {
+                self.assistant.set_media_export(MediaExportState::Failed(
+                    "la exportación terminó inesperadamente".into(),
+                ));
+                self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    pub(crate) fn run_assistant_animation_with(
+        &mut self,
+        ctx: &egui::Context,
+        template: &str,
+        concept: &str,
+    ) {
+        // Si hay una animación en curso, cancelarla para regenerar la nueva (evita "tomo una ya hecha").
+        // Cancel real (AS4): señala el token antes de dropear, el hilo descarta.
+        if self.assistant_runtime.cancel_anim_job() {
             self.assistant.anim_progress = false;
         }
         // No destruir texturas durante el draw (evita wgpu panic 'Texture has been destroyed').
@@ -1885,7 +2936,7 @@ impl GrafitoApp {
                 .map(|duration| duration.as_nanos())
                 .unwrap_or(0)
         ));
-        let _ = std::fs::create_dir_all(&work_dir);
+        // Sin I/O en UI: el workdir lo crea el hilo (`create_dir_all` abajo).
         let canvas = (720, 540);
         let resolution =
             grafito_anim::protocol::Resolution::try_new(canvas.0, canvas.1).unwrap_or_default();
@@ -1900,30 +2951,87 @@ impl GrafitoApp {
             spec: None,
         };
         let request = anim_params.into_request();
+        let cancellation = CancellationToken::default();
+        let worker_cancellation = cancellation.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let repaint = ctx.clone();
         let template_owned = template.to_string();
         let concept_owned = concept.clone();
         std::thread::spawn(move || {
-            // Generador nativo correcto: usa el dispatcher que elige por concepto y template
-            let native = || {
-                let frames = crate::anim_native::render_anim_for_concept(
-                    &template_owned,
-                    &concept_owned,
-                    480,
-                    360,
-                );
-                let title = match template_owned.as_str() {
-                    "integral-area" => "Integral — área bajo la curva (nativa)".to_string(),
-                    "derivative-slope" => "Derivada como pendiente (nativa)".to_string(),
-                    "pitagoras" | "pythagoras" => "Teorema de Pitágoras (nativa)".to_string(),
-                    "taylor-series" => "Serie de Taylor (nativa)".to_string(),
-                    "conformal-map" => "Mapeo conforme (nativa)".to_string(),
-                    "universal" => format!("{} (nativa)", concept_owned),
-                    _ => format!("{} (nativa)", concept_owned),
+            // I/O solo en el hilo (nunca en UI): el workdir se crea aquí.
+            let _ = std::fs::create_dir_all(&work_dir);
+            if worker_cancellation.is_cancelled() {
+                let _ = sender.send(Err(
+                    "La generación se canceló antes de completarse.".to_string()
+                ));
+                repaint.request_repaint();
+                return;
+            }
+            // Nativo cancelable (AS4): paramétrico si hay `ParametricAnim`, si
+            // no el clásico. El render no acepta token: el closure de progreso
+            // lo chequea entre frames y el hilo descarta el resultado rancio.
+            let render_native_cancellable =
+                || -> Result<grafito_ui::assistant::AssistantMedia, String> {
+                    if let Some(anim) =
+                        crate::anim_native::parametric_for_template(&template_owned, &concept_owned)
+                    {
+                        let mut saw_cancel = false;
+                        let rendered = crate::anim_native::render_parametric_frames_with_progress(
+                            &anim,
+                            &mut |_, _| {
+                                if worker_cancellation.is_cancelled() {
+                                    saw_cancel = true;
+                                }
+                            },
+                        );
+                        if worker_cancellation.is_cancelled() || saw_cancel {
+                            return Err(
+                                "La generación se canceló antes de completarse.".to_string()
+                            );
+                        }
+                        match rendered {
+                            Ok(frames) => {
+                                let title = format!("{} (paramétrica)", concept_owned);
+                                Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+                            }
+                            Err(error) => Err(error.to_string()),
+                        }
+                    } else {
+                        let mut saw_cancel = false;
+                        let frames = crate::anim_native::render_anim_with_progress(
+                            &template_owned,
+                            &concept_owned,
+                            480,
+                            360,
+                            &std::collections::BTreeMap::new(),
+                            &mut |_, _| {
+                                if worker_cancellation.is_cancelled() {
+                                    saw_cancel = true;
+                                }
+                            },
+                        );
+                        if worker_cancellation.is_cancelled() || saw_cancel {
+                            return Err(
+                                "La generación se canceló antes de completarse.".to_string()
+                            );
+                        }
+                        if frames.is_empty() {
+                            return Err("el motor nativo no produjo fotogramas".to_string());
+                        }
+                        let title = match template_owned.as_str() {
+                            "integral-area" => "Integral — área bajo la curva (nativa)".to_string(),
+                            "derivative-slope" => "Derivada como pendiente (nativa)".to_string(),
+                            "pitagoras" | "pythagoras" => {
+                                "Teorema de Pitágoras (nativa)".to_string()
+                            }
+                            "taylor-series" => "Serie de Taylor (nativa)".to_string(),
+                            "conformal-map" => "Mapeo conforme (nativa)".to_string(),
+                            "universal" => format!("{} (nativa)", concept_owned),
+                            _ => format!("{} (nativa)", concept_owned),
+                        };
+                        Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+                    }
                 };
-                grafito_ui::assistant::AssistantMedia { title, frames }
-            };
             let result = match engine {
                 Some(engine_section) => {
                     let config = grafito_anim::EngineConfig {
@@ -1935,34 +3043,65 @@ impl GrafitoApp {
                         job_timeout: std::time::Duration::from_secs(15),
                         ..Default::default()
                     };
-                    match grafito_anim::run_job(&config, &request, None, |_| {}) {
+                    // Cancel real en el motor externo: `run_job` aborta <200 ms.
+                    let cancel_flag = &worker_cancellation;
+                    match grafito_anim::run_job(
+                        &config,
+                        &request,
+                        Some(&|| cancel_flag.is_cancelled()),
+                        |_| {},
+                    ) {
                         Ok(result) => match load_gif_frames(&result.media_path) {
                             Ok(frames) if !frames.is_empty() => {
-                                let title = match template_owned.as_str() {
-                                    "integral-area" => "Integral — área bajo la curva".to_string(),
-                                    "derivative-slope" => "Derivada como pendiente".to_string(),
-                                    "pitagoras" | "pythagoras" => {
-                                        "Teorema de Pitágoras".to_string()
-                                    }
-                                    "taylor-series" => "Serie de Taylor".to_string(),
-                                    "conformal-map" => "Mapeo conforme".to_string(),
-                                    _ => concept_owned.clone(),
-                                };
-                                Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+                                if worker_cancellation.is_cancelled() {
+                                    Err("La generación se canceló antes de completarse."
+                                        .to_string())
+                                } else {
+                                    let title = match template_owned.as_str() {
+                                        "integral-area" => {
+                                            "Integral — área bajo la curva".to_string()
+                                        }
+                                        "derivative-slope" => "Derivada como pendiente".to_string(),
+                                        "pitagoras" | "pythagoras" => {
+                                            "Teorema de Pitágoras".to_string()
+                                        }
+                                        "taylor-series" => "Serie de Taylor".to_string(),
+                                        "conformal-map" => "Mapeo conforme".to_string(),
+                                        _ => concept_owned.clone(),
+                                    };
+                                    Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+                                }
                             }
-                            _ => Ok(native()),
+                            _ => render_native_cancellable(),
                         },
-                        Err(_) => Ok(native()),
+                        Err(error) => {
+                            if worker_cancellation.is_cancelled()
+                                || error.to_lowercase().contains("cancel")
+                            {
+                                Err(error)
+                            } else {
+                                render_native_cancellable()
+                            }
+                        }
                     }
                 }
-                None => Ok(native()),
+                None => render_native_cancellable(),
+            };
+            // Descarte final: si se canceló en el último instante, no se publica rancio.
+            let result = if worker_cancellation.is_cancelled() {
+                Err("La generación se canceló antes de completarse.".to_string())
+            } else {
+                result
             };
             let _ = sender.send(result);
             let _ = std::fs::remove_dir_all(&work_dir);
             repaint.request_repaint();
         });
         self.assistant.anim_progress = true;
-        self.assistant_runtime.anim_job = Some(AssistantAnimJob { receiver });
+        self.assistant_runtime.anim_job = Some(AssistantAnimJob {
+            cancellation,
+            receiver,
+        });
         self.notify("Generando animación…", ToastKind::Info);
     }
 
@@ -2086,6 +3225,7 @@ impl GrafitoApp {
             focus,
             correction_attempt: correction_attempt + 1,
             repair_target_turn: Some(target_turn),
+            socratic_guard: self.session_socratic_guard(question),
         })
     }
 
@@ -2122,7 +3262,10 @@ impl GrafitoApp {
             .map(|staged| staged.preview().changes.clone());
         match classify_local_assistant_response(local_result.response) {
             LocalAssistantDisposition::Solved { answer, plan } => {
-                self.assistant.complete_local_request(answer);
+                // Prosa con nombres humanos (mapa `humanize_control_name` de
+                // ui, solo lectura): jamás IDs literales en el turno.
+                let human = grafito_ui::assistant::humanize_prose_text(&answer);
+                self.assistant.complete_local_request(human);
                 if let Some(plan) = plan {
                     if let Some(changes) = staged_changes {
                         self.assistant.stage_proposed_plan(plan, changes);
@@ -2171,6 +3314,48 @@ impl GrafitoApp {
         self.start_remote_assistant_for(ctx, question, None);
     }
 
+    /// Guard socrático de la sesión actual para un lanzamiento remoto.
+    ///
+    /// Fuente: nivel del perfil + tema de `WorkingMemory` + conversación.
+    /// Bypass exploratorio (demo, no evaluación) → `None` (guard desactivado):
+    /// - pedido demostrativo (`ejemplos`/`probá`/`capacidades`/`graficá` vía
+    ///   `is_exploratory_request`), o
+    /// - sin `last_concept`/`current_topic` (primer turno sin tema previo), o
+    /// - sin pregunta heurística previa en la conversación (`?` asistente).
+    ///   Primer turno sin pregunta previa ⇒ no punitivo (ver `can_reveal_answer`
+    ///   y `count_heuristic_answers`).
+    ///
+    /// El modo agente lo ignora porque ya orquesta sus propias tools socráticas.
+    fn session_socratic_guard(&self, question: &str) -> Option<SocraticGuardContext> {
+        // Es demo, no evaluación: se salta el telling.
+        if is_exploratory_request(question) {
+            return None;
+        }
+        let topic = self.profile.working_memory.last_concept.as_deref().or(self
+            .profile
+            .working_memory
+            .current_topic
+            .as_deref());
+        // Sin concepto previo → demo, no evaluación.
+        let topic_trimmed = topic.map(str::trim).filter(|topic| !topic.is_empty())?;
+        let _ = topic_trimmed;
+        // Sin pregunta heurística previa → primer turno no punitivo.
+        let has_prior_question = self
+            .assistant
+            .conversation
+            .iter()
+            .any(|turn| turn.role == ConversationRole::Assistant && turn.content.contains('?'));
+        if !has_prior_question {
+            return None;
+        }
+        Some(socratic_guard_context(
+            self.profile.level,
+            topic,
+            question,
+            &self.assistant.conversation,
+        ))
+    }
+
     /// Lanza la consulta remota con la pregunta dada, sin depender del cartel.
     ///
     /// Con permiso completo, el consentimiento de imágenes se otorga automático;
@@ -2182,6 +3367,12 @@ impl GrafitoApp {
         question: String,
         model_override: Option<&str>,
     ) {
+        // Freno 429: en pausa se avisa con cuenta regresiva sin tocar la red.
+        // Cubre chat simple, modo agente y el fallback sólo-sesión (que
+        // también pasa por acá): ningún reintento automático quema cuota.
+        if self.fail_fast_if_rate_limited() {
+            return;
+        }
         if !self.assistant_runtime.remote_request_slot_is_free() {
             return;
         }
@@ -2271,6 +3462,7 @@ impl GrafitoApp {
             focus,
             correction_attempt: 0,
             repair_target_turn: None,
+            socratic_guard: self.session_socratic_guard(&question),
         };
         if self.assistant.agent_mode {
             self.start_agent_assistant_job(ctx, launch);
@@ -2320,6 +3512,11 @@ impl GrafitoApp {
     }
 
     fn request_assistant_proposal_correction(&mut self, ctx: &egui::Context) {
+        // Freno 429 primero: la sesión de corrección queda intacta para
+        // reintentarla cuando venza la pausa (se toma abajo, no acá).
+        if self.fail_fast_if_rate_limited() {
+            return;
+        }
         if self.assistant.is_pending || !self.assistant_runtime.remote_request_slot_is_free() {
             return;
         }
@@ -2377,6 +3574,11 @@ impl GrafitoApp {
     }
 
     fn start_model_request(&mut self, ctx: &egui::Context) {
+        // La lista de modelos también respeta la pausa (es un GET al mismo
+        // proveedor). Con cache fresco el worker ni sale a la red.
+        if self.fail_fast_if_rate_limited() {
+            return;
+        }
         if !self.assistant_runtime.request_model_refresh() {
             return;
         }
@@ -2431,7 +3633,8 @@ impl GrafitoApp {
         // Cancela remote+proposal+agent+model+anim (todos, sin else-if: aunque el
         // slot remoto sólo permite un job de consulta a la vez, model/anim son
         // independientes y deben cancelarse también). Los workers con token se
-        // drenan en poll (take_finished_*); anim se dropea (worker acotado).
+        // drenan en poll (take_finished_*); anim señala su token y dropea el
+        // slot (worker acotado con chequeo entre frames).
         let had_anim = self.assistant_runtime.anim_job.is_some();
         if self.assistant_runtime.cancel_all_assistant_jobs() {
             if had_anim {
@@ -2555,6 +3758,10 @@ impl GrafitoApp {
 
     fn poll_assistant_jobs(&mut self, ctx: &egui::Context) {
         self.poll_assistant_agent(ctx);
+        // Drena deltas SSE a la burbuja provisional antes de cosechar el
+        // resultado final (el preview se limpia en cada rama terminal).
+        self.assistant_runtime
+            .drain_remote_stream_preview(&mut self.assistant, ctx);
         if let Some(completion) = self.assistant_runtime.take_finished_remote_job() {
             let FinishedRemoteJob {
                 id,
@@ -2570,8 +3777,12 @@ impl GrafitoApp {
                 focus,
                 cancelled,
                 result,
+                stream_preview_active,
                 ..
             } = completion;
+            if stream_preview_active {
+                pop_provisional_stream_turn(&mut self.assistant);
+            }
             if cancelled
                 || !accepts_remote_result(
                     self.assistant.provider,
@@ -2636,11 +3847,40 @@ impl GrafitoApp {
                             );
                         }
                         Err(error) => {
-                            // Compatibilidad total SÓLO-SESIÓN: si muse-spark falla con 500 o timeout
-                            // en OpenCodeGo, se reintenta con deepseek SIN tocar la preferencia
-                            // guardada. El próximo pedido reintenta spark (auto-recupera si vuelve).
-                            // Si B1 aún no terminó, este fallback sigue funcionando igual.
-                            if should_fallback_remote_spark_to_deepseek(
+                            // Reparación socrática: el guard detectó telling
+                            // con attempts<2 en el worker (streaming o no).
+                            // El `error` es diagnóstico interno con jerga
+                            // (`GUARD TELLING...`, solo para detección y logs):
+                            // JAMÁS se publica crudo vía `complete_request`
+                            // (ese fue el bug P0). Se convierte a voz de Mili
+                            // vía `repair_student_message` (sin `GUARD`/
+                            // `attempts`/`estado`/`Re-preguntá`). No hay
+                            // fallback de modelo ni cartel de error aquí.
+                            if is_socratic_repair_error(&error) {
+                                if correction_attempt > 0 {
+                                    self.assistant.restore_proposal_correction();
+                                }
+                                // Jerga solo en logs/eventos internos.
+                                eprintln!(
+                                    "grafito: socratic repair interno (no al transcript): {error}"
+                                );
+                                // Convierte a voz de Mili; si no hay guard
+                                // (no debería pasar si hubo repair), fallback
+                                // humano sin jerga ni eco crudo.
+                                let student = self
+                                    .session_socratic_guard(&question)
+                                    .map(|guard| {
+                                        guard.fsm.repair_student_message(&guard.scaffold)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        "Antes de mostrarte la solución, ¿qué forma te imaginás? Contame qué probaste y lo vemos juntos.".to_owned()
+                                    });
+                                self.assistant.complete_request(student);
+                                self.notify(
+                                    "El tutor repregunta antes de mostrar la solución directa.",
+                                    ToastKind::Info,
+                                );
+                            } else if should_fallback_remote_spark_to_deepseek(
                                 &error,
                                 self.assistant.provider,
                                 &self.assistant.model,
@@ -2658,8 +3898,7 @@ impl GrafitoApp {
                                     Some("deepseek-v4-flash"),
                                 );
                                 return;
-                            }
-                            if correction_attempt > 0 {
+                            } else if correction_attempt > 0 {
                                 self.fail_assistant_repair_request(error);
                             } else {
                                 self.fail_assistant_request(error);
@@ -2966,7 +4205,8 @@ fn is_agent_spark_responses_unsupported_error(error: &str) -> bool {
 }
 
 /// Fallback agente sólo-sesión: Spark + Responses API no soportado → deepseek.
-/// Nunca dispara en `Ok` (sólo se llama en la rama `Err`).
+/// Nunca dispara en `Ok` (sólo se llama en la rama `Err`) y nunca ante 429:
+/// la cuota en pausa no se quema probando con otro modelo.
 fn should_fallback_agent_spark_to_deepseek(
     error: &str,
     provider: ProviderProfile,
@@ -2975,10 +4215,12 @@ fn should_fallback_agent_spark_to_deepseek(
     is_agent_spark_responses_unsupported_error(error)
         && provider == ProviderProfile::OpenCodeGo
         && model.contains("muse-spark")
+        && !error.contains("429")
 }
 
 /// Fallback chat (no agente) sólo-sesión: Spark 500/timeout → deepseek.
 /// La preferencia guardada queda intacta; el próximo pedido reintenta spark.
+/// Nunca ante 429: cambiar de modelo no devuelve cuota y duplicaría el gasto.
 fn should_fallback_remote_spark_to_deepseek(
     error: &str,
     provider: ProviderProfile,
@@ -2990,6 +4232,7 @@ fn should_fallback_remote_spark_to_deepseek(
         && current_model.contains("muse-spark")
         && provider == ProviderProfile::OpenCodeGo
         && correction_attempt == 0
+        && !error.contains("429")
 }
 
 /// Sanea errores de adjuntos de crates externos (inglés crudo) a español.
@@ -3002,6 +4245,21 @@ fn attachment_error_message(error: &str) -> String {
     }
 }
 
+/// Mensaje criollo ante un 429 del transporte: cuenta regresiva si el error
+/// trae el sufijo del transporte ("(reintentá en Ns)", clamp 1..120s), minuto
+/// por defecto si no. Sin "429" crudo: eso queda en logs. Puro.
+fn rate_limit_429_user_message(error: &str) -> String {
+    if let Some(start) = error.find("(reintentá en ") {
+        let tail = &error[start + "(reintentá en ".len()..];
+        if let Some(end) = tail.find('s') {
+            if let Ok(secs) = tail[..end].trim().parse::<u64>() {
+                return rate_limit_paused_message(secs);
+            }
+        }
+    }
+    rate_limit_paused_message(RATE_LIMIT_DEFAULT_COOLDOWN_SECS)
+}
+
 fn remote_error_message(error: &str, current_model: &str) -> String {
     eprintln!(
         "grafito: remote_error raw={} model={}",
@@ -3009,6 +4267,10 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     );
     if error.contains("llavero") || error.contains("API key") {
         "No se pudo preparar la consulta remota. Revisá la configuración avanzada.".into()
+    } else if let Some(paused) = grafito_assistant::rate_limit_paused_message_from_error(error) {
+        // Pausa global: el worker ya contó los segundos, se muestra en
+        // criollo con cuenta regresiva (sin 429 crudo).
+        paused
     } else if error.contains("could not be built") {
         "No se pudo armar la consulta: la API key o el endpoint tienen caracteres inválidos. Reingresá la clave en Configuración avanzada (sin espacios ni saltos de línea).".into()
     } else if error.contains("Responses API") {
@@ -3020,8 +4282,9 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     } else if error.contains("429") || error.contains("rate limit") || error.contains("RateLimit") {
         // 429 = cuota por minuto del proveedor, no es tu modelo ni tu clave.
         // Va antes de la rama 404/"model" porque el cuerpo del 429 puede
-        // nombrar al modelo ("Model X rate limited").
-        "Límite de uso del proveedor (429, cuota por minuto). Esperá ~1 minuto y reintentá; no cambies tu modelo ni tu clave.".into()
+        // nombrar al modelo ("Model X rate limited"). Sin código crudo: con
+        // cuenta regresiva si el transporte la trajo, minuto si no.
+        rate_limit_429_user_message(error)
     } else if error.contains("404") || error.contains("model") {
         format!(
             "El modelo '{}' no está disponible: {error}. Revisá Configuración → Modelo.",
@@ -3040,11 +4303,22 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
         }
     } else if error.contains("DNS") || error.contains("connect") || error.contains("network") {
         format!("Error de red: {error}. Revisá tu conexión.")
+    } else if error.contains("body cap") {
+        "La respuesta superó el tope de 256 KiB: pedila por partes (ej: «dame 3 ejemplos»)."
+            .to_string()
+    } else if error.contains("not displayable") {
+        // No es tema de modelo ni de clave: la respuesta llegó con un formato
+        // que no se puede mostrar. Se reintenta o se reformula, sin mandar a
+        // Configuración.
+        "La respuesta llegó con un formato que no se puede mostrar. Reintentá o reformulá el pedido (ej: pedilo por partes)."
+            .to_string()
     } else {
-        let truncated = if error.len() > 120 {
-            format!("{}…", &error[..120])
+        // Corte por chars, nunca por bytes (el mensaje puede traer multibyte).
+        let truncated: String = error.chars().take(120).collect();
+        let truncated = if error.chars().count() > 120 {
+            format!("{truncated}…")
         } else {
-            error.to_string()
+            truncated
         };
         format!("Error: {truncated} — Revisá Configuración → Modelo (actual: {current_model})")
     }
@@ -4280,30 +5554,36 @@ fn read_bounded_attachment(reader: impl Read, max_bytes: usize) -> Result<Vec<u8
 mod tests {
     use super::{
         accepts_model_result, accepts_remote_context, accepts_remote_result,
-        apply_local_assistant_plan, assistant_graph_perspective, attachment_error_message,
-        can_offer_assistant_proposal_correction, classify_local_assistant_response,
-        commit_assistant_graph_preflight, inspect_remote_action_proposals,
+        append_canonical_integral_prose, apply_local_assistant_plan, assistant_graph_perspective,
+        attachment_error_message, can_offer_assistant_proposal_correction,
+        clasifica_pedido_integral, classify_local_assistant_response,
+        commit_assistant_graph_preflight, decide_animacion, inspect_remote_action_proposals,
         inspect_remote_proposals, inspect_remote_proposals_cancellable,
-        is_agent_spark_responses_unsupported_error, preflight_assistant_flower_scene,
-        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
-        preflight_assistant_parameter, preflight_assistant_scene, read_bounded_attachment,
+        is_agent_spark_responses_unsupported_error, is_socratic_repair_error,
+        limpiar_media_si_no_animacion, plantilla_para_pedido, pop_provisional_stream_turn,
+        preflight_assistant_flower_scene, preflight_assistant_graph_command,
+        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
+        preflight_assistant_scene, prosa_integral_explicita, read_bounded_attachment,
         remote_error_message, should_fallback_agent_spark_to_deepseek,
-        should_fallback_remote_spark_to_deepseek, stage_assistant_parameter,
-        validate_assistant_command, verified_remote_proposals, AgentChannelMsg, AssistantAgentJob,
-        AssistantAnimJob, AssistantCommandInvocation, AssistantModelJob,
-        AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
-        AssistantRemoteRoute, AssistantRuntime, LocalAssistantDisposition,
+        should_fallback_remote_spark_to_deepseek, socratic_guard_context,
+        stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
+        wants_exercise_request, AgentChannelMsg, AssistantAgentJob, AssistantAnimJob,
+        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
+        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
+        DecisionAnimacion, GifExportJob, IntegralPedido, LocalAssistantDisposition,
         RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
         AssistantFocus, AssistantOperation, AssistantRepairFailure, AssistantRepairFailureKind,
-        AssistantRepairFeedback, AssistantRequest, ImmutableDocumentContext, ProposedPlan,
-        ProviderProfile,
+        AssistantRepairFeedback, AssistantRequest, ConversationRole, ConversationTurn,
+        ImmutableDocumentContext, ProposedPlan, ProviderProfile,
     };
     use grafito_command::commands::CommandOutcome;
     use grafito_core::{Document, GeoObject};
     use grafito_geometry::ViewTransform;
+    use grafito_pedagogy::scaffold::{extract_concept, is_exploratory_request};
+    use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm};
     use grafito_ui::assistant::{
         AssistantPanelState, AssistantProposal, VerifiedAssistantProposal,
     };
@@ -4710,20 +5990,66 @@ mod tests {
     #[test]
     fn error_429_reports_quota_not_model_or_key() {
         // 429 = cuota por minuto, no modelo ni clave: el mensaje no debe
-        // mandar a reconfigurar nada.
+        // mandar a reconfigurar nada ni mostrar el código crudo.
         let quota = remote_error_message(
             "assistant agent returned HTTP 429: Model muse-spark-1.3-contributor rate limited",
             "muse-spark-1.3-contributor",
         );
-        assert!(quota.contains("429"), "menciona el código: {quota}");
+        assert!(!quota.contains("429"), "sin código crudo: {quota}");
         assert!(
-            quota.contains("Esperá"),
+            quota.contains("minuto") || quota.contains('s'),
             "pide esperar, no reconfigurar: {quota}"
         );
         assert!(
             !quota.contains("Revisá Configuración → Modelo"),
             "no culpa al modelo: {quota}"
         );
+    }
+
+    #[test]
+    fn error_429_with_retry_after_counts_down() {
+        // Con sufijo del transporte se muestra la cuenta regresiva exacta.
+        let quota = remote_error_message(
+            "remote assistant returned HTTP 429: busy (reintentá en 7s)",
+            "muse-spark-1.3-contributor",
+        );
+        assert!(quota.contains('7'), "cuenta regresiva: {quota}");
+        assert!(!quota.contains("429"), "sin código crudo: {quota}");
+    }
+
+    #[test]
+    fn error_rate_limit_marker_maps_to_paused_message() {
+        // El marcador interno de la pausa global sale en criollo.
+        let paused = remote_error_message(
+            &format!("{}:25", grafito_assistant::RATE_LIMIT_PAUSED_MARKER),
+            "deepseek-v4-flash",
+        );
+        assert!(paused.contains("25"), "cuenta regresiva: {paused}");
+        assert!(!paused.contains("429"), "sin código crudo: {paused}");
+    }
+
+    #[test]
+    fn fallbacks_never_fire_on_429_quota_errors() {
+        // Ante 429 no se quema cuota probando con otro modelo: el usuario
+        // espera y reintenta el suyo cuando vence la pausa.
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            "remote assistant returned HTTP 429: busy (reintentá en 7s)",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
+        assert!(!should_fallback_agent_spark_to_deepseek(
+            "assistant agent returned HTTP 429 (reintentá en 3s)",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+        ));
+        // ...pero el fallback normal ante 500/timeout sigue intacto.
+        assert!(should_fallback_remote_spark_to_deepseek(
+            "remote assistant timed out after 30s",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
     }
 
     #[test]
@@ -4877,6 +6203,9 @@ mod tests {
             focus: None,
             cancellation: remote_cancel.clone(),
             receiver: remote_rx,
+            stream_rx: None,
+            stream_text: String::new(),
+            preview_active: false,
         });
         let proposal_cancel = CancellationToken::default();
         let (proposal_tx, proposal_rx) =
@@ -4899,11 +6228,13 @@ mod tests {
         });
         let agent_cancel = grafito_agent::loop_engine::Cancellation::default();
         let (agent_tx, agent_rx) = sync_channel::<AgentChannelMsg>(128);
+        let (_, clarification_rx) = sync_channel::<grafito_ui::assistant::PendingClarification>(4);
         runtime.agent_job = Some(AssistantAgentJob {
             provider: ProviderProfile::OpenCodeGo,
             model: "muse-spark-1.3-contributor".into(),
             cancellation: agent_cancel.clone(),
             receiver: agent_rx,
+            clarification_receiver: clarification_rx,
         });
         let model_cancel = CancellationToken::default();
         let (model_tx, model_rx) = sync_channel::<Result<Vec<String>, String>>(1);
@@ -4915,14 +6246,19 @@ mod tests {
         });
         let (_anim_tx, anim_rx) =
             sync_channel::<Result<grafito_ui::assistant::AssistantMedia, String>>(1);
-        runtime.anim_job = Some(AssistantAnimJob { receiver: anim_rx });
+        let anim_cancel = CancellationToken::default();
+        runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: anim_cancel.clone(),
+            receiver: anim_rx,
+        });
 
         assert!(runtime.cancel_all_assistant_jobs());
         assert!(remote_cancel.is_cancelled());
         assert!(proposal_cancel.is_cancelled());
         assert!(agent_cancel.is_cancelled());
         assert!(model_cancel.is_cancelled());
-        // Anim no tiene token: se dropea el slot de inmediato.
+        // Anim AS4: señala el token como el resto y dropea el slot de inmediato.
+        assert!(anim_cancel.is_cancelled());
         assert!(runtime.anim_job.is_none());
         // Los jobs con token conservan el slot hasta el drain (sin huérfanos).
         assert!(!runtime.remote_request_slot_is_free());
@@ -4959,6 +6295,486 @@ mod tests {
     }
 
     #[test]
+    fn anim_cancel_signals_token_instead_of_only_dropping_receiver() {
+        // AS4 cancel real: descartar señala el token (el hilo lo chequea entre
+        // frames en el closure de progreso). Headless, sin ventana ni render.
+        let mut runtime = AssistantRuntime::default();
+        assert!(!runtime.cancel_anim_job(), "sin job es no-op");
+        let anim_cancel = CancellationToken::default();
+        let (_anim_tx, anim_rx) =
+            sync_channel::<Result<grafito_ui::assistant::AssistantMedia, String>>(1);
+        runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: anim_cancel.clone(),
+            receiver: anim_rx,
+        });
+        assert!(!anim_cancel.is_cancelled());
+        assert!(runtime.cancel_anim_job());
+        assert!(
+            anim_cancel.is_cancelled(),
+            "descartar debe señalar el token"
+        );
+        assert!(runtime.anim_job.is_none());
+        assert!(!runtime.cancel_anim_job(), "doble cancel es no-op");
+    }
+
+    #[test]
+    fn anim_progress_closure_observes_token_between_frames() {
+        // El render nativo no acepta token: el hilo lo chequea en el closure
+        // de progreso. Este test pineado verifica el contrato sin render
+        // pesado: el closure ve el token entre frames.
+        let cancel = CancellationToken::default();
+        let worker = cancel.clone();
+        let mut saw: Vec<(usize, usize)> = Vec::new();
+        let mut on_frame = |done: usize, total: usize| {
+            saw.push((done, total));
+            assert!(
+                !worker.is_cancelled(),
+                "sin cancel el closure no debe ver token"
+            );
+        };
+        for frame in 1..=3 {
+            on_frame(frame, 3);
+        }
+        assert_eq!(saw, vec![(1, 3), (2, 3), (3, 3)]);
+        cancel.cancel();
+        assert!(worker.is_cancelled(), "cancel debe verse entre frames");
+    }
+
+    #[test]
+    fn pedido_con_animacion_instala_media_en_el_turno_con_prosa_humana() {
+        // Pedido-con-animación → media instalada en el turno, sin ventana.
+        // Headless: render clásico tiny (64x48, 48 frames) + transcript.
+        use std::collections::BTreeMap;
+        let pedido = "explica la derivada con animación";
+        assert!(crate::anim_ui::wants_animation_request(pedido));
+        let concepto = crate::anim_ui::animation_concept_from_request(pedido)
+            .expect("con concepto debe validar");
+        let plantilla = crate::anim_native::detect_template_for_concept(&concepto);
+        assert_eq!(plantilla, "derivative-slope");
+        let frames = crate::anim_native::render_anim_with_progress(
+            plantilla,
+            &concepto,
+            64,
+            48,
+            &BTreeMap::new(),
+            &mut |_, _| {},
+        );
+        assert!(!frames.is_empty(), "el nativo debe producir frames");
+        let ctx = egui::Context::default();
+        let mut panel = AssistantPanelState::default();
+        panel.begin_request(pedido.to_string());
+        let base = grafito_ui::assistant::humanize_prose_text("La derivada es la pendiente.");
+        let mut prosa = base;
+        prosa.push_str(
+            "
+
+",
+        );
+        prosa.push_str(crate::anim_ui::animation_reference_sentence());
+        panel.complete_local_request(prosa.clone());
+        let media = grafito_ui::assistant::AssistantMedia {
+            title: format!("{concepto} (nativa)"),
+            frames,
+        };
+        panel.set_media(Some(media), &ctx);
+        // Media instalada para el reproductor del transcript (último turno).
+        assert!(panel.media.is_some(), "media debe vivir en el turno");
+        assert!(!panel.media.as_ref().expect("media").frames.is_empty());
+        let ultimo = panel.conversation.last().expect("turno asistente");
+        assert_eq!(ultimo.role, ConversationRole::Assistant);
+        assert!(
+            ultimo.content.contains("deslizador"),
+            "prosa: {}",
+            ultimo.content
+        );
+        assert!(ultimo.content.contains("reproducir"));
+        for id in ["PlayPause", "Slider", "Button", "Tangent", "Select", "Play"] {
+            assert!(!ultimo.content.contains(id), "prosa sin {id}");
+            assert!(
+                !panel.media.as_ref().expect("media").title.contains(id),
+                "título sin {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn pedido_ambiguo_error_honesto_sin_media_ni_invento() {
+        // Pedido ambiguo → error honesto sin media, jamás inventa frames.
+        let ctx = egui::Context::default();
+        for ambiguo in ["animalo", "con animación", "explica con animación"] {
+            assert!(
+                crate::anim_ui::wants_animation_request(ambiguo),
+                "{ambiguo:?} pide animación"
+            );
+            let err = crate::anim_ui::animation_concept_from_request(ambiguo)
+                .expect_err("ambiguo debe fallar honesto");
+            assert!(
+                err.contains("qué animar") || err.contains("vacío"),
+                "guía útil: {err}"
+            );
+            assert!(err.contains("por ejemplo"), "dice qué pedir: {err}");
+            let mut panel = AssistantPanelState::default();
+            panel.begin_request(ambiguo.to_string());
+            let honesto = grafito_ui::assistant::humanize_prose_text(&err);
+            panel.complete_local_request(honesto.clone());
+            panel.set_media(None, &ctx);
+            assert!(panel.media.is_none(), "sin media rancia en {ambiguo:?}");
+            let ultimo = panel.conversation.last().expect("turno guía");
+            assert!(ultimo.content.contains("por ejemplo"));
+        }
+        // Sin gatillo no es animación (no debe disparar hilo).
+        assert!(!crate::anim_ui::wants_animation_request("derivá x^2"));
+        assert!(crate::anim_ui::animation_concept_from_request("derivá x^2").is_err());
+    }
+
+    #[test]
+    fn integral_tres_ramas_canonica_explicita_invalida() {
+        // 1. Sin función → canónica (se renderiza Y se declara).
+        assert_eq!(
+            clasifica_pedido_integral(
+                "haceme una animacion de una integral (nativa)",
+                "integral-area"
+            ),
+            IntegralPedido::Canonica
+        );
+        // 2. Con función válida → explícita (flujo intacto).
+        assert_eq!(
+            clasifica_pedido_integral(
+                "animacion de la integral de f(x)=x^3 de 0 a 2 con animación",
+                "integral-area"
+            ),
+            IntegralPedido::Explicita
+        );
+        // 3. Con función inválida → error honesto (sin frames ni hilo).
+        match clasifica_pedido_integral(
+            "animacion de la integral de f(x)=foo(x) con p en [0,1] con animación",
+            "integral-area",
+        ) {
+            IntegralPedido::FuncionInvalida(detalle) => {
+                assert!(detalle.contains("foo(x)"), "{detalle}");
+                assert!(detalle.contains("x^2"), "da ejemplo: {detalle}");
+            }
+            otro => panic!("esperaba FuncionInvalida, fue {otro:?}"),
+        }
+        // Fuera de integral-area o sin mención: no aplica (nada cambia).
+        assert_eq!(
+            clasifica_pedido_integral("explica la derivada con animación", "derivative-slope"),
+            IntegralPedido::NoAplica
+        );
+        assert_eq!(
+            clasifica_pedido_integral("explica la derivada con animación", "integral-area"),
+            IntegralPedido::NoAplica
+        );
+        // Probabilidad usa el renderer integral como soporte: no se frena.
+        assert_eq!(
+            clasifica_pedido_integral("explica la probabilidad con animación", "integral-area"),
+            IntegralPedido::NoAplica
+        );
+    }
+
+    #[test]
+    fn integral_canonica_prosa_declara_y_no_duplica() {
+        // La prosa declara la canónica en rioplatense.
+        let mut conversacion = vec![ConversationTurn::assistant("La animación está lista.")];
+        append_canonical_integral_prose(&mut conversacion);
+        let texto = &conversacion.last().expect("turno").content;
+        assert!(texto.contains("x²"), "{texto}");
+        assert!(texto.contains("pedime otra"), "{texto}");
+        // Idempotente: segunda pasada no duplica.
+        append_canonical_integral_prose(&mut conversacion);
+        assert_eq!(
+            conversacion
+                .last()
+                .expect("turno")
+                .content
+                .matches("pedime otra")
+                .count(),
+            1
+        );
+        // Turno de usuario o vacío: no toca nada.
+        let mut usuario = vec![ConversationTurn::user("hola")];
+        append_canonical_integral_prose(&mut usuario);
+        assert_eq!(usuario.last().expect("turno").content, "hola");
+        let mut vacia: Vec<ConversationTurn> = Vec::new();
+        append_canonical_integral_prose(&mut vacia);
+        assert!(vacia.is_empty());
+    }
+
+    #[test]
+    fn screenshot_typo_integrela_es_canonica_con_prosa_que_declara() {
+        // Input EXACTO del screenshot (typos "animacion"/"integrela"): antes
+        // era `universal` + prosa preguntaba Y media mostraba (contradicción).
+        // Ahora es canónica declarada, sin pregunta.
+        let pedido = "hace una animacion de una integrela (nativa)";
+        assert!(
+            crate::anim_ui::wants_animation_request(pedido),
+            "el gatillo 'animacion' debe disparar"
+        );
+        assert!(
+            crate::anim_ui::animation_concept_from_request(pedido).is_ok(),
+            "con 'integrela (nativa)' hay concepto, no es ambiguo"
+        );
+        assert!(
+            grafito_anim::parametric::pedido_menciona_area(pedido),
+            "'integrela' matchea 'integral' por fuzzy"
+        );
+        assert_eq!(plantilla_para_pedido(pedido), "integral-area");
+        assert_eq!(
+            clasifica_pedido_integral(pedido, "integral-area"),
+            IntegralPedido::Canonica
+        );
+        match decide_animacion(pedido) {
+            DecisionAnimacion::RenderCanonico {
+                plantilla,
+                concepto,
+            } => {
+                assert_eq!(plantilla, "integral-area");
+                assert!(concepto.contains("integrela"), "{concepto}");
+            }
+            otra => panic!("el typo debe ser RenderCanonico, fue {otra:?}"),
+        }
+        // La prosa del turno declara la canónica Y referencia la media:
+        // jamás pregunta y muestra a la vez.
+        let prosa = format!(
+            "{}\n\n{}",
+            crate::anim_ui::animation_reference_sentence(),
+            grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
+        );
+        assert!(prosa.contains("deslizador"), "{prosa}");
+        assert!(prosa.contains("x²"), "{prosa}");
+        assert!(prosa.contains("pedime otra"), "{prosa}");
+        assert!(
+            !prosa.contains("¿Qué función")
+                && !prosa.contains("qué función")
+                && !prosa.contains("Qué función"),
+            "la canónica declara, no pregunta: {prosa}"
+        );
+    }
+
+    #[test]
+    fn typos_animacion_integrela_derivadaa_normalizan_y_matchean() {
+        // Normalización sin tildes.
+        assert_eq!(
+            grafito_anim::parametric::normaliza_para_match("animación"),
+            "animacion"
+        );
+        assert_eq!(
+            grafito_anim::parametric::normaliza_para_match("ÁREA"),
+            "area"
+        );
+        // Fuzzy acotado por token.
+        assert!(grafito_anim::parametric::token_matchea_clave(
+            "integrela",
+            "integral"
+        ));
+        assert!(grafito_anim::parametric::token_matchea_clave(
+            "derivadaa",
+            "derivada"
+        ));
+        assert!(grafito_anim::parametric::token_matchea_clave(
+            "animacion",
+            "animacion"
+        ));
+        assert!(grafito_anim::parametric::token_matchea_clave(
+            "integrar", "integral"
+        ));
+        // Cortas no hacen fuzzy ("arena" no es área).
+        assert!(!grafito_anim::parametric::token_matchea_clave(
+            "arena", "area"
+        ));
+        assert!(!grafito_anim::parametric::pedido_menciona_area(
+            "tarea de matemática"
+        ));
+    }
+
+    #[test]
+    fn decision_matriz_explicita_canonica_invalida_media_y_prosa() {
+        // a) Explícita → media SÍ + prosa que nombra la función.
+        let explicita = "animacion de la integral de f(x)=x^3 de 0 a 2 con animación";
+        match decide_animacion(explicita) {
+            DecisionAnimacion::RenderExplicito {
+                plantilla,
+                concepto: _,
+                expr,
+            } => {
+                assert_eq!(plantilla, "integral-area");
+                assert_eq!(expr, "x^3");
+                let prosa = prosa_integral_explicita(&expr, explicita);
+                assert!(prosa.contains("x^3"), "{prosa}");
+                assert!(prosa.contains("deslizador"), "{prosa}");
+                assert!(
+                    !prosa.contains("pedime otra"),
+                    "el marcador es solo canónico: {prosa}"
+                );
+            }
+            otra => panic!("explícita debe renderizar, fue {otra:?}"),
+        }
+        // b) Sin función (incluido typo) → media SÍ + prosa canónica declarada.
+        for sin_funcion in [
+            "haceme una animacion de una integral (nativa)",
+            "hace una animacion de una integrela (nativa)",
+        ] {
+            match decide_animacion(sin_funcion) {
+                DecisionAnimacion::RenderCanonico { plantilla, .. } => {
+                    assert_eq!(plantilla, "integral-area", "{sin_funcion}");
+                }
+                otra => panic!("{sin_funcion:?} debe ser canónica, fue {otra:?}"),
+            }
+        }
+        // c) Inválida → SIN media, solo pregunta/guía.
+        let invalida = "animacion de la integral de f(x)=foo(x) con p en [0,1] con animación";
+        match decide_animacion(invalida) {
+            DecisionAnimacion::PreguntarSinMedia(guia) => {
+                assert!(guia.contains("foo(x)"), "{guia}");
+                assert!(guia.contains("x^2"), "da ejemplo: {guia}");
+            }
+            otra => panic!("inválida no renderiza, fue {otra:?}"),
+        }
+        // Ambiguo local → SIN media.
+        match decide_animacion("explica con animación") {
+            DecisionAnimacion::PreguntarSinMedia(_) => {}
+            otra => panic!("ambiguo no renderiza, fue {otra:?}"),
+        }
+        // No-animación → flujo chat normal.
+        assert_eq!(
+            decide_animacion("derivá x^2"),
+            DecisionAnimacion::NoAnimacion
+        );
+    }
+
+    #[test]
+    fn plantilla_typo_no_cae_a_universal() {
+        // El detector clásico dice `universal` para el typo; el punto único
+        // lo corrige a `integral-area` (evita fallback huérfano).
+        let pedido = "hace una animacion de una integrela (nativa)";
+        assert_eq!(
+            crate::anim_native::detect_template_for_concept(pedido),
+            "universal"
+        );
+        assert_eq!(plantilla_para_pedido(pedido), "integral-area");
+    }
+
+    #[test]
+    fn export_sin_media_falla_honesto_sin_hilo() {
+        // Sin animación: nada se spawnea, la card muestra el motivo y hay aviso.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        app.export_assistant_media(&ctx);
+        assert!(app.assistant_runtime.gif_export_job.is_none());
+        assert!(
+            matches!(
+                app.assistant.media_export_state(),
+                grafito_ui::assistant::MediaExportState::Failed(_)
+            ),
+            "sin frames el error es honesto, jamás mudo"
+        );
+    }
+
+    #[test]
+    fn export_no_duplica_job_en_vuelo() {
+        // Slot ocupado: avisa y no pisa el hilo existente.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        app.assistant_runtime.gif_export_job = Some(GifExportJob {
+            handle: std::thread::spawn(|| Ok(std::path::PathBuf::from("ocupado"))),
+            frame_count: 1,
+        });
+        app.export_assistant_media(&ctx);
+        assert!(
+            app.assistant_runtime.gif_export_job.is_some(),
+            "no pisa el job en vuelo"
+        );
+        // Limpia sin colgar (el hilo ya terminó).
+        let job = app
+            .assistant_runtime
+            .gif_export_job
+            .take()
+            .expect("job en vuelo");
+        let _ = job.handle.join();
+    }
+
+    #[test]
+    fn export_con_frames_corre_en_hilo_y_publica_exito_con_ruta() {
+        // Cableado real: `spawn_gif_export` escribe un GIF válido y el poll
+        // publica `Done` (ruta avisada por el aviso). Limpia su temporal.
+        // El prefijo `grafito_animacion_` solo lo crea este export.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        let frames = vec![egui::ColorImage::new([8, 8], egui::Color32::RED); 3];
+        app.assistant.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "prueba".into(),
+                frames,
+            }),
+            &ctx,
+        );
+        app.export_assistant_media(&ctx);
+        assert!(app.assistant_runtime.gif_export_job.is_some());
+        assert_eq!(
+            *app.assistant.media_export_state(),
+            grafito_ui::assistant::MediaExportState::Exporting
+        );
+        for _ in 0..200 {
+            app.poll_gif_export_job(&ctx);
+            if app.assistant_runtime.gif_export_job.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.assistant_runtime.gif_export_job.is_none(),
+            "el hilo debe terminar"
+        );
+        assert_eq!(
+            *app.assistant.media_export_state(),
+            grafito_ui::assistant::MediaExportState::Done
+        );
+        // El GIF existe y es real; se borra para no ensuciar el temporal.
+        let mut cleaned = 0;
+        let entries = std::fs::read_dir(std::env::temp_dir()).expect("temporal legible");
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let is_ours = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("grafito_animacion_"));
+            if !is_ours {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("GIF exportado legible");
+            assert_eq!(&bytes[0..6], b"GIF89a", "GIF real con cabecera");
+            std::fs::remove_file(&path).expect("limpia su temporal");
+            cleaned += 1;
+        }
+        assert_eq!(cleaned, 1, "un solo GIF de este export");
+    }
+
+    #[test]
+    fn cancel_a_mitad_senala_token_y_descarta_media_rancia() {
+        // Cancel a mitad → token señalado y sin media rancia en el turno.
+        let mut runtime = AssistantRuntime::default();
+        let cancel = CancellationToken::default();
+        let (tx, rx) = sync_channel::<Result<grafito_ui::assistant::AssistantMedia, String>>(1);
+        runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: cancel.clone(),
+            receiver: rx,
+        });
+        assert!(runtime.cancel_anim_job(), "debe haber job");
+        assert!(cancel.is_cancelled(), "descartar señala el token");
+        assert!(runtime.anim_job.is_none());
+        // El hilo en vuelo observa el token entre frames y su envío tardío
+        // (Err cancel) no tiene receiver: se descarta sin publicar.
+        // El slot ya se dropeó, así que el turno queda sin media rancia.
+        drop(tx);
+        let ctx = egui::Context::default();
+        let mut panel = AssistantPanelState::default();
+        panel.set_media(None, &ctx);
+        assert!(panel.media.is_none(), "cancel no deja media rancia");
+        // El closure de progreso del hilo habría visto el token (contrato).
+        assert!(cancel.is_cancelled());
+    }
+
+    #[test]
     fn cancelled_remote_job_remains_nonretryable_until_its_joiner_is_reaped() {
         let mut runtime = AssistantRuntime::default();
         let cancellation = CancellationToken::default();
@@ -4977,6 +6793,9 @@ mod tests {
             focus: None,
             cancellation: cancellation.clone(),
             receiver,
+            stream_rx: None,
+            stream_text: String::new(),
+            preview_active: false,
         });
 
         assert!(runtime.cancel_stale_remote_job(ProviderProfile::DeepSeek, "deepseek-chat"));
@@ -4992,6 +6811,216 @@ mod tests {
         assert_eq!(finished.document_digest, "fnv1a64:request");
         assert!(finished.focus.is_none());
         assert!(runtime.remote_request_slot_is_free());
+    }
+
+    #[test]
+    fn stream_preview_drains_to_provisional_bubble_and_pops_on_finish() {
+        let mut runtime = AssistantRuntime::default();
+        let (result_tx, result_rx) = sync_channel::<Result<RemoteCompletion, String>>(1);
+        let (delta_tx, delta_rx) = sync_channel::<String>(128);
+        let cancel = CancellationToken::default();
+        runtime.remote_job = Some(AssistantRemoteJob {
+            id: 1,
+            provider: ProviderProfile::OpenCodeGo,
+            model: "muse-spark-1.3-contributor".into(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: false,
+            question: "derivá x^2".into(),
+            correction_attempt: 0,
+            repair_target_turn: None,
+            document_revision: 1,
+            document_digest: "d".into(),
+            focus: None,
+            cancellation: cancel.clone(),
+            receiver: result_rx,
+            stream_rx: Some(delta_rx),
+            stream_text: String::new(),
+            preview_active: false,
+        });
+        let mut panel = AssistantPanelState::default();
+        panel
+            .conversation
+            .push(ConversationTurn::user("derivá x^2"));
+        let ctx = egui::Context::default();
+
+        // Sin deltas no hay burbuja provisional.
+        assert!(!runtime.drain_remote_stream_preview(&mut panel, &ctx));
+        assert_eq!(panel.conversation.len(), 1);
+
+        delta_tx.send("Hola ".into()).unwrap();
+        delta_tx.send("mundo".into()).unwrap();
+        assert!(runtime.drain_remote_stream_preview(&mut panel, &ctx));
+        assert_eq!(panel.conversation.len(), 2);
+        let provisional = panel.conversation.last().unwrap();
+        assert_eq!(provisional.role, ConversationRole::Assistant);
+        assert_eq!(provisional.content, "Hola mundo");
+
+        // Más deltas actualizan el mismo turno (no duplican burbujas).
+        delta_tx.send("!".into()).unwrap();
+        assert!(runtime.drain_remote_stream_preview(&mut panel, &ctx));
+        assert_eq!(panel.conversation.len(), 2);
+        assert_eq!(panel.conversation.last().unwrap().content, "Hola mundo!");
+
+        // Al terminar (cancelado), el poll retira el provisional y queda el
+        // turno de usuario, igual que en el path no-streaming.
+        cancel.cancel();
+        result_tx
+            .send(Err("remote assistant request was cancelled".into()))
+            .unwrap();
+        let finished = runtime.take_finished_remote_job().unwrap();
+        assert!(finished.cancelled);
+        assert!(finished.stream_preview_active);
+        pop_provisional_stream_turn(&mut panel);
+        assert_eq!(panel.conversation.len(), 1);
+        assert_eq!(
+            panel.conversation.last().unwrap().role,
+            ConversationRole::User
+        );
+    }
+
+    #[test]
+    fn pop_provisional_stream_turn_never_touches_real_history() {
+        let mut panel = AssistantPanelState::default();
+        // Sin turnos o con último turno de usuario: no-op.
+        pop_provisional_stream_turn(&mut panel);
+        assert!(panel.conversation.is_empty());
+        panel.conversation.push(ConversationTurn::user("hola"));
+        pop_provisional_stream_turn(&mut panel);
+        assert_eq!(panel.conversation.len(), 1);
+    }
+
+    #[test]
+    fn b7_wants_exercise_request_solo_con_verbo_explicito() {
+        // Dispara con verbo de ejercitación explícito…
+        assert!(wants_exercise_request("haceme un ejercicio de derivadas"));
+        assert!(wants_exercise_request("practicamos integrales, che"));
+        assert!(wants_exercise_request("andamiame con límites"));
+        assert!(wants_exercise_request("poneme a prueba con fracciones"));
+        // …y no pisa preguntas ni graficación normal.
+        assert!(!wants_exercise_request("qué es una derivada"));
+        assert!(!wants_exercise_request("graficá x^2"));
+        assert!(!wants_exercise_request("hola"));
+        assert!(!wants_exercise_request(""));
+    }
+
+    #[test]
+    fn socratic_guard_context_seeds_attempts_from_heuristic_answers() {
+        // Fresca: sólo la pregunta actual → attempts=0, tema sanitizado a canónico.
+        // `derivá x^2` extrae `derivada` (verbo→sustantivo), jamás el crudo.
+        let fresh = vec![ConversationTurn::user("derivá x^2")];
+        let guard = socratic_guard_context(8, None, "derivá x^2", &fresh);
+        assert_eq!(guard.fsm.attempts, 0);
+        assert_eq!(guard.fsm.topic, "derivada");
+        assert!(guard.scaffold.question.contains("derivada"));
+        assert!(!guard.scaffold.question.contains("derivá x^2"));
+
+        // Sin tema reconocido → tópico vacío + scaffold fallback (nunca crudo).
+        let raw = "hola haceme ejemplos para probar las capacidades de graficacion";
+        let demo = vec![ConversationTurn::user(raw)];
+        let guard = socratic_guard_context(8, None, raw, &demo);
+        assert_eq!(guard.fsm.attempts, 0);
+        assert_eq!(guard.fsm.topic, "");
+        assert_eq!(
+            guard.scaffold.question,
+            grafito_pedagogy::scaffold::NO_CONCEPT_FALLBACK_QUESTION
+        );
+        assert!(!guard.scaffold.question.contains("hola"));
+
+        // Un intercambio SIN `?` previa → attempts=0 (no es respuesta heurística).
+        let one_exchange = vec![
+            ConversationTurn::user("primera"),
+            ConversationTurn::assistant("re-pregunta"),
+            ConversationTurn::user("segunda"),
+        ];
+        let guard = socratic_guard_context(8, Some("derivada"), "segunda", &one_exchange);
+        assert_eq!(guard.fsm.attempts, 0);
+        assert_eq!(guard.fsm.topic, "derivada");
+
+        // Una respuesta a `?` previa → attempts=1 (sigue bloqueado, <2).
+        let one_answer = vec![
+            ConversationTurn::user("quiero ver derivada"),
+            ConversationTurn::assistant("¿qué forma te imaginás?"),
+            ConversationTurn::user("mi intento"),
+            ConversationTurn::assistant("¿y ahora qué ves?"),
+            ConversationTurn::user("segunda"),
+        ];
+        let guard = socratic_guard_context(8, Some("derivada"), "segunda", &one_answer);
+        assert_eq!(guard.fsm.attempts, 1);
+        assert_eq!(guard.fsm.topic, "derivada");
+
+        // Dos respuestas a `?` → attempts=2 (reveal permitido).
+        let two_answers = vec![
+            ConversationTurn::user("init"),
+            ConversationTurn::assistant("¿primera pregunta?"),
+            ConversationTurn::user("ans1"),
+            ConversationTurn::assistant("¿segunda pregunta?"),
+            ConversationTurn::user("ans2"),
+            ConversationTurn::assistant("¿tercera pregunta?"),
+            ConversationTurn::user("tres"),
+        ];
+        let guard = socratic_guard_context(8, Some("  "), "tres", &two_answers);
+        assert_eq!(guard.fsm.attempts, 2);
+        // Tema en blanco + pregunta sin tema → tópico vacío (fallback, no crudo).
+        assert_eq!(guard.fsm.topic, "");
+    }
+
+    #[test]
+    fn socratic_repair_error_is_detected_by_prefix() {
+        // Diagnóstico interno (solo logs/detección) conserva el prefijo.
+        assert!(is_socratic_repair_error(
+            "GUARD TELLING — REPARACIÓN SOCRÁTICA OBLIGATORIA (attempts=0 <2, ...)"
+        ));
+        assert!(!is_socratic_repair_error(
+            "remote assistant returned HTTP 500: boom"
+        ));
+        assert!(!is_socratic_repair_error(
+            "remote assistant request was cancelled"
+        ));
+        // La voz de estudiante (lo que SÍ va al transcript) jamás lleva el prefijo.
+        let fsm = SocraticFsm::new("derivada");
+        let scaffold =
+            ScaffoldEngine.scaffold("derivada", PedagogicalLevel::from_level_value(8), &[]);
+        let student = fsm.repair_student_message(&scaffold);
+        assert!(!is_socratic_repair_error(&student));
+        assert!(!student.contains("GUARD"), "{student}");
+    }
+
+    #[test]
+    fn socratic_repair_turn_has_no_jargon_or_raw_echo_red_first() {
+        // Regresión P0 red-first con el input real que mostró la directiva interna.
+        // Falla si el turno contiene jerga o eco degenerado del saludo.
+        let raw = "hola haceme ejemplos para probar las capacidades de graficacion";
+        // 1. Es exploratorio y sin tema: el extractor y el scaffold no interpolan crudo.
+        assert!(is_exploratory_request(raw));
+        assert_eq!(extract_concept(raw), None);
+        let scaffold = ScaffoldEngine.scaffold(raw, PedagogicalLevel::from_level_value(8), &[]);
+        assert_eq!(
+            scaffold.question,
+            grafito_pedagogy::scaffold::NO_CONCEPT_FALLBACK_QUESTION
+        );
+        // 2. El guard sanitiza: tópico vacío (fallback), attempts=0 no punitivo.
+        let conversation = vec![ConversationTurn::user(raw)];
+        let guard = socratic_guard_context(8, None, raw, &conversation);
+        assert_eq!(guard.fsm.attempts, 0);
+        assert_eq!(guard.fsm.topic, "");
+        // 3. La voz de Mili (lo único que va al transcript) no tiene jerga ni eco.
+        let fsm = SocraticFsm::new(guard.fsm.topic.clone());
+        let turno = fsm.repair_student_message(&guard.scaffold);
+        for forbidden in [
+            "GUARD",
+            "REPARACIÓN",
+            "REPARACION",
+            "attempts",
+            "can_reveal",
+            "Re-pregunt",
+            "¿Te imaginás hola",
+        ] {
+            assert!(
+                !turno.contains(forbidden),
+                "el turno contiene '{forbidden}': '{turno}'"
+            );
+        }
+        assert!(turno.contains("Antes de mostrarte"), "{turno}");
     }
 
     #[test]
@@ -5647,6 +7676,89 @@ mod tests {
     }
 
     #[test]
+    fn s1_apply_muestra_la_vista_esperada_segun_el_objeto() {
+        // S1 auto-graficar 1-click: apply → vista esperada (2D o 3D según el
+        // objeto; si no se puede determinar, default 2D honesto).
+        use grafito_command::assistant_proposals::{
+            parse_assistant_command, parse_assistant_parameter, AssistantProposal,
+        };
+        let two_d =
+            AssistantProposal::Command(parse_assistant_command("Function[x]").expect("2D válido"));
+        assert_eq!(
+            two_d.expected_view(),
+            grafito_command::assistant_context::AssistantGraphView::TwoD
+        );
+        // Desde 3D, un 2D pide cambio a Geometry2D (el Apply lo abre).
+        assert_eq!(
+            assistant_graph_perspective(two_d.expected_view(), crate::ViewMode::D3),
+            Some(crate::Perspective::Geometry2D)
+        );
+        // Desde 2D, un 2D no pide cambio (ya visible).
+        assert_eq!(
+            assistant_graph_perspective(two_d.expected_view(), crate::ViewMode::D2),
+            None
+        );
+        let three_d = AssistantProposal::Command(
+            parse_assistant_command("Sphere[0, 0, 0, 1]").expect("3D válido"),
+        );
+        assert_eq!(
+            three_d.expected_view(),
+            grafito_command::assistant_context::AssistantGraphView::ThreeD
+        );
+        assert_eq!(
+            assistant_graph_perspective(three_d.expected_view(), crate::ViewMode::D2),
+            Some(crate::Perspective::Geometry3D)
+        );
+        // Parámetro sin objeto → default 2D honesto (no inventa 3D).
+        let param =
+            AssistantProposal::Parameter(parse_assistant_parameter("a = 2.5").expect("parámetro"));
+        assert_eq!(
+            param.expected_view(),
+            grafito_command::assistant_context::AssistantGraphView::TwoD
+        );
+    }
+
+    #[test]
+    fn s2_clarificacion_round_trip_sin_bloquear() {
+        // S2 `ask_user` real vía evento: parse del `args_summary` → pendiente
+        // → respuesta saneada para el loop como `function_call_output`.
+        // Puro y no bloqueante (sin threads, sin Document, sin I/O).
+        let pending = super::parse_agent_ask_user_pending(
+            r#"{"question":"¿qué valor le doy a x?","options":["0","1"]}"#,
+        )
+        .expect("pendiente parseable");
+        assert_eq!(pending.question, "¿qué valor le doy a x?");
+        assert_eq!(pending.options, vec!["0".to_owned(), "1".to_owned()]);
+        // Truncado con `…` igual intenta (honesto, sin inventar).
+        assert!(super::parse_agent_ask_user_pending("hola").is_none());
+        assert!(super::parse_agent_ask_user_pending("").is_none());
+        assert!(super::parse_agent_ask_user_pending(r#"{"question":""}"#).is_none());
+        // La respuesta vuelve al loop como `function_call_output` (Responses)
+        // vía `answer_pending_clarification` (nuevo job, nunca bloquea).
+        let output = grafito_agent::tools::ask_user_answer_function_output(&pending.call_id, "1")
+            .expect("respuesta no vacía");
+        assert_eq!(output["type"], "function_call_output");
+        assert_eq!(output["call_id"], pending.call_id);
+        assert_eq!(output["output"], "1");
+    }
+
+    #[test]
+    fn s3_entrada_rota_da_explicacion_mas_fix() {
+        // S3: fence inválida típica → `vibecoder_explain` + fix sintáctico.
+        let (explained, fix) =
+            grafito_assistant::agent::explain_invalid_proposal("Function[x", "derivada");
+        assert_eq!(
+            explained.kind,
+            grafito_assistant::agent::VibecoderKind::Syntax
+        );
+        assert!(explained.explanation.contains("derivada"));
+        assert_eq!(fix.as_deref(), Some("Function[x]"));
+        // Semántico jamás se reescribe en silencio.
+        let (_, fix) = grafito_assistant::agent::explain_invalid_proposal("Script[Save[]]", "");
+        assert!(fix.is_none());
+    }
+
+    #[test]
     fn flower_scene_is_atomic_drawable_and_fitted_before_commit() {
         let mut document = Document::new();
         document.set_view(ViewTransform::new(800.0, 600.0));
@@ -5829,5 +7941,111 @@ mod tests {
         let bytes = read_bounded_attachment(Cursor::new(vec![7; 5]), 4);
 
         assert!(bytes.is_err());
+    }
+
+    #[test]
+    fn secuencia_tres_turnos_sin_media_rancia_ni_controles() {
+        // Secuencia del reporte: T1 integral (anda) → T2 otra animación
+        // (sin control-chars) → T3 no-animación (sin media pegada).
+        // Replica el orden de Submit (`decide_animacion` + reset T1).
+        fn controles(texto: &str) -> Vec<char> {
+            texto
+                .chars()
+                .filter(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+                .collect()
+        }
+        fn sin_controles(etiqueta: &str, texto: &str) {
+            let malos = controles(texto);
+            for malo in &malos {
+                eprintln!("control en {etiqueta}: U+{:04X}", *malo as u32);
+            }
+            assert!(malos.is_empty(), "{etiqueta} trae controles");
+        }
+        let ctx = egui::Context::default();
+        let mut panel = AssistantPanelState::default();
+        // T1: integral canónica → media SÍ + prosa que la declara.
+        let pedido1 = "haceme una animacion de una integral (nativa)";
+        let d1 = decide_animacion(pedido1);
+        assert!(
+            matches!(d1, DecisionAnimacion::RenderCanonico { .. }),
+            "{d1:?}"
+        );
+        panel.begin_request(pedido1.to_string());
+        let prosa1 = format!(
+            "{}\n\n{}",
+            crate::anim_ui::animation_reference_sentence(),
+            grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
+        );
+        sin_controles("prosa1", &prosa1);
+        let humano1 = grafito_ui::assistant::humanize_prose_text(&prosa1);
+        sin_controles("humano1", &humano1);
+        panel.complete_local_request(humano1);
+        panel.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "Integral — área bajo la curva (nativa)".to_string(),
+                frames: Vec::new(),
+            }),
+            &ctx,
+        );
+        assert!(panel.media.is_some(), "T1 instala la integral");
+        // T2: OTRA animación explícita → local-only, prosa limpia.
+        let pedido2 = "explica la derivada con animación";
+        let d2 = decide_animacion(pedido2);
+        assert!(
+            matches!(d2, DecisionAnimacion::RenderGenerico { .. }),
+            "{d2:?}"
+        );
+        panel.begin_request(pedido2.to_string());
+        let prosa2 = crate::anim_ui::animation_reference_sentence().to_string();
+        sin_controles("prosa2", &prosa2);
+        let humano2 = grafito_ui::assistant::humanize_prose_text(&prosa2);
+        sin_controles("humano2", &humano2);
+        panel.complete_local_request(humano2);
+        for turno in &panel.conversation {
+            sin_controles("historial", &turno.content);
+        }
+        // Sin gatillo en el mensaje actual no hay animación (va a remoto,
+        // jamás inventa media): límite honesto del punto único T1.
+        for implicito in ["y ahora la derivada", "otra", "haceme otra"] {
+            assert!(
+                matches!(decide_animacion(implicito), DecisionAnimacion::NoAnimacion),
+                "{implicito:?} sin gatillo no anima"
+            );
+        }
+        // T3: no-animación → reset T1 limpia la integral pegada.
+        let pedido3 = "¿qué es una derivada?";
+        let d3 = decide_animacion(pedido3);
+        assert!(matches!(d3, DecisionAnimacion::NoAnimacion), "{d3:?}");
+        panel.begin_request(pedido3.to_string());
+        panel.complete_local_request("La derivada es la pendiente.".to_string());
+        limpiar_media_si_no_animacion(&mut panel, &d3, &ctx);
+        assert!(panel.media.is_none(), "T3 no re-muestra la integral");
+        // El reset no toca turnos de animación (Submit ya limpió al spawnear).
+        panel.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "Derivada como pendiente (nativa)".to_string(),
+                frames: Vec::new(),
+            }),
+            &ctx,
+        );
+        limpiar_media_si_no_animacion(&mut panel, &d2, &ctx);
+        assert!(panel.media.is_some(), "el reset solo actúa en NoAnimacion");
+    }
+
+    #[test]
+    fn error_not_displayable_pide_reintento_sin_configuracion() {
+        // Bug A: no es tema de modelo ni de clave → reintentá/reformulá.
+        let mensaje = remote_error_message(
+            "remote assistant response content is not displayable: expected a non-empty text message without control characters",
+            "muse-spark-1.3-contributor",
+        );
+        assert!(
+            !mensaje.contains("Configuración"),
+            "no manda a Configuración: {mensaje}"
+        );
+        assert!(
+            mensaje.contains("Reintentá") || mensaje.contains("reformulá"),
+            "pide reintentar: {mensaje}"
+        );
     }
 }

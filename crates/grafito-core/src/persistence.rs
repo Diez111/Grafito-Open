@@ -1,4 +1,12 @@
 //! Versioned, validated persistence for Grafito documents.
+//!
+//! XDG verificación (APP_AULA): `grafito-app/src/utils.rs:90-197` ya migró
+//! `grafito_config.json` → `$XDG_CONFIG_HOME/grafito/` y `grafito_profile.json` → `$XDG_DATA_HOME/grafito/`
+//! con fallback `$HOME/.config` y migración best-effort del legado. Verificado sin regresión.
+//! Este crate (`persistence.rs`) usa `current_dir()` sólo para checks de sandbox de rutas relativas de
+//! documentos (user files, no config) en `write_atomic` (línea ~454) y `read_document_file` parent fd.
+//! No hay `HOME/.config` ni CWD para config aquí; XDG no aplica a documentos. Se mantiene compat
+//! con `GRAFITO_SANDBOX_ROOT` y `O_NOFOLLOW`.
 
 use crate::error::CoreError;
 use crate::validation::{

@@ -10,7 +10,7 @@
 //! - GPU compute: `domain_coloring_compute` 500×500 = 250k cells en un único
 //!   dispatch wgpu (grafito-render). CPU submit << GPU time ⇒ GPU-bound.
 
-use crate::utils::{load_config, save_config, AppConfig};
+use crate::utils::{load_config, save_config, AppConfig, AppLocale, AutosaveDebouncer};
 use crate::{Perspective, ViewMode};
 use egui::{Key, Pos2};
 use grafito_core::{
@@ -40,35 +40,337 @@ pub(crate) const MAX_UNDO: usize = 50;
 /// estimación `max(object_count*200KiB, json_len, 8KiB)`.
 pub(crate) const MAX_UNDO_BYTES: usize = 50 * 1024 * 1024;
 
+/// Cota del protocolo de construcción: 500 entradas cronológicas máximo.
+/// Tras cada `push` se trunca manteniendo las más recientes (`drain 0..excess`)
+/// para presupuesto O(n) acotado (500) y orden cronológico.
+pub(crate) const MAX_CONSTRUCTION_LOG: usize = 500;
+
 /// Job de guardado en background — evita bloquear UI thread (60fps) en `save_document`.
 /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
-#[allow(dead_code)]
 pub(crate) struct PendingSaveJob {
     pub receiver: Receiver<Result<PathBuf, String>>,
-    pub path: PathBuf,
 }
 /// Job de apertura en background — evita bloquear UI thread en `choose_and_open_document`.
-#[allow(dead_code)]
 pub(crate) struct PendingOpenJob {
     pub receiver: Receiver<Result<(PathBuf, Document), String>>,
 }
 /// Job de export en background — evita bloquear UI thread en `export_with_dialog`.
-#[allow(dead_code)]
 pub(crate) struct PendingExportJob {
+    pub receiver: Receiver<Result<(PathBuf, String), String>>,
+}
+/// Job de importación CSV/TSV en background (lectura ≤2MB en worker).
+pub(crate) struct PendingImportJob {
+    pub receiver: Receiver<Result<crate::panels::LocalXYTable, String>>,
+}
+/// Job genérico de escritura de texto en background (p. ej. export LaTeX del protocolo).
+pub(crate) struct PendingTextWriteJob {
     pub receiver: Receiver<Result<PathBuf, String>>,
-    pub format: crate::export::ExportFormat,
+}
+/// Presupuestos espejo de `grafito-ggb` (sin añadir dependencia para no tocar
+/// `Cargo.toml`): `MAX_GGB_BYTES` 64MiB, `MAX_GGB_XML_BYTES` 10MiB,
+/// `MAX_ELEMS` 5000, `MAX_ZIP_ENTRIES` 4096. Ver
+/// `crates/grafito-ggb/src/lib.rs:12-16`.
+pub(crate) const GGB_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const GGB_MAX_XML_BYTES: u64 = 10 * 1024 * 1024;
+pub(crate) const GGB_MAX_ELEMS: usize = 5000;
+pub(crate) const GGB_MAX_ZIP_ENTRIES: usize = 4096;
+pub(crate) const GGB_XML_NAME: &str = "geogebra.xml";
+/// Cota de expresión espejo de `grafito-ggb::MAX_EXPR_CHARS` (2000) y de
+/// `grafito-core::validation::MAX_EXPR_LENGTH` (2000).
+pub(crate) const GGB_MAX_EXPR_CHARS: usize = 2000;
+
+/// Comando Grafito mapeado desde `.ggb` — espejo de `grafito-ggb::MappedObject`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GgbMappedCommand {
+    pub kind: String,
+    pub command: String,
+}
+
+/// Elemento omitido con razón honesta — espejo de `grafito-ggb::OmittedObject`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GgbOmitted {
+    pub kind: String,
+    pub label: String,
+    pub reason: String,
+}
+
+/// Reporte de importación — espejo de `grafito-ggb::ImportReport` con
+/// `.commands()` y `.summary()`. Nunca fallo silencioso: `omitted` siempre
+/// explica cada salto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GgbImportReport {
+    pub mapped: Vec<GgbMappedCommand>,
+    pub omitted: Vec<GgbOmitted>,
+}
+
+impl GgbImportReport {
+    pub(crate) fn commands(&self) -> Vec<String> {
+        self.mapped.iter().map(|m| m.command.clone()).collect()
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for m in &self.mapped {
+            *counts.entry(m.kind.as_str()).or_insert(0) += 1;
+        }
+        let tipos = counts
+            .iter()
+            .map(|(tipo, n)| format!("{tipo} x{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detalle = if tipos.is_empty() {
+            "sin objetos"
+        } else {
+            &tipos
+        };
+        format!(
+            "ggb importado: {} objetos ({}) + {} omitidos",
+            self.mapped.len(),
+            detalle,
+            self.omitted.len()
+        )
+    }
+
+    /// Detalle honesto de omitidos para el toast (máx. 3 + contador resto).
+    pub(crate) fn omitted_detail(&self) -> String {
+        if self.omitted.is_empty() {
+            return "sin omitidos".to_string();
+        }
+        let primeros = self
+            .omitted
+            .iter()
+            .take(3)
+            .map(|o| {
+                if o.label.is_empty() {
+                    format!("{}: {}", o.kind, o.reason)
+                } else {
+                    format!("{} '{}': {}", o.kind, o.label, o.reason)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if self.omitted.len() > 3 {
+            format!(
+                "{} omitidos: {}… y {} más",
+                self.omitted.len(),
+                primeros,
+                self.omitted.len() - 3
+            )
+        } else {
+            format!("{} omitidos: {primeros}", self.omitted.len())
+        }
+    }
+}
+
+/// Job de importación `.ggb` en background — lectura + parse fuera del UI thread.
+/// Pattern `spawn_profile_save` con `sync_channel(1)` + `request_repaint`.
+pub(crate) struct PendingGgbImportJob {
+    pub receiver: Receiver<Result<GgbImportReport, String>>,
+    pub path: PathBuf,
+}
+
+/// ── A8 Recovery de autosave al arranque ──────────────────────────────────
+/// Gap crítico: el sidecar `.autosave` se escribía (`tick_autosave` en
+/// background) pero nunca se ofrecía recuperar (`load_autosave_candidate` /
+/// `should_offer_autosave` existían en core sin llamadas en app; el modal
+/// solo existía en comentarios de `persistence.rs:661-667`).
+/// Piel pura: todo I/O en background thread (spawn + `request_repaint`);
+/// `Ui::` solo lee `recovery_offer` / `recovery_corrupt` ya cargados.
+pub(crate) struct PendingAutosaveRecoveryJob {
+    pub receiver: Receiver<Result<Option<grafito_core::persistence::AutosaveCandidate>, String>>,
+    pub main_path: PathBuf,
+}
+
+/// Oferta de recuperación ya validada (sidecar estrictamente más nuevo).
+/// Vive en memoria tras el job en background; el modal solo la renderiza.
+pub(crate) struct AutosaveRecoveryOffer {
+    pub main_path: PathBuf,
+    pub sidecar_path: PathBuf,
+    pub document: Document,
+    pub main_modified_epoch: Option<u64>,
+    pub sidecar_modified_epoch: u64,
+    pub show_diff: bool,
+}
+
+/// Sidecar candidato pero corrupto: no se puede recuperar, la UI ofrece
+/// descartarlo. `main_path`/`sidecar_path` para el borrado best-effort.
+pub(crate) struct AutosaveRecoveryCorrupt {
+    pub main_path: PathBuf,
+    pub sidecar_path: PathBuf,
+    pub error: String,
+}
+
+// ── A8 tests recovery (solo región arranque/recovery) ────────────────
+// sidecar-nuevo→ofrece, sidecar-viejo→no ofrece, recuperar restaura.
+// Usan `load_autosave_candidate` (core, ya en background en prod) +
+// `accept_recovery_offer` / `recovery_diff_summary` (app, puros).
+#[cfg(test)]
+mod autosave_recovery_tests {
+    use super::*;
+
+    static NEXT_RECOVERY_TEST_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    fn recovery_temp_path(name: &str) -> PathBuf {
+        let id = NEXT_RECOVERY_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "grafito_recovery_{name}_{}_{}",
+            std::process::id(),
+            id
+        ))
+    }
+
+    fn recovery_doc_with_points(count: usize) -> Document {
+        let mut doc = Document::new();
+        for index in 0..count {
+            doc.add_point(Point2::new(index as f64, 0.0));
+        }
+        doc
+    }
+
+    fn cleanup_recovery_path(main: &Path) {
+        if let Some(sidecar) = grafito_core::persistence::autosave_sidecar_path(main) {
+            let _ = std::fs::remove_file(sidecar);
+        }
+        let _ = std::fs::remove_file(main);
+    }
+
+    #[test]
+    fn startup_file_arg_ignores_flags_y_vacios() {
+        assert_eq!(GrafitoApp::startup_file_arg_from(&[]), None);
+        assert_eq!(
+            GrafitoApp::startup_file_arg_from(&[
+                "--help".to_string(),
+                "--profile".to_string(),
+                String::new(),
+                "-h".to_string(),
+            ]),
+            None
+        );
+        assert_eq!(
+            GrafitoApp::startup_file_arg_from(&["--profile".to_string(), "nota.json".to_string(),]),
+            Some(PathBuf::from("nota.json"))
+        );
+        // NUL nunca es ruta válida.
+        assert_eq!(
+            GrafitoApp::startup_file_arg_from(&["a\0b.json".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn sidecar_nuevo_ofrece_recuperacion() {
+        let main = recovery_temp_path("nuevo");
+        cleanup_recovery_path(&main);
+        let main_doc = recovery_doc_with_points(2);
+        grafito_core::persistence::write_document_atomic(&main_doc, &main).expect("write main");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let sidecar_doc = recovery_doc_with_points(3);
+        let sidecar = grafito_core::persistence::write_autosave_sidecar(&sidecar_doc, &main)
+            .expect("write sidecar");
+        assert!(sidecar.exists());
+
+        let candidate =
+            grafito_core::persistence::load_autosave_candidate(&main).expect("load candidate");
+        let candidate = candidate.expect("sidecar más nuevo debe ofrecerse");
+        assert_eq!(candidate.document.object_count(), 3);
+        assert_eq!(candidate.sidecar_path, sidecar);
+
+        // Nivel app: la oferta alimenta el diff (conteo + fecha).
+        let mut app = super::dummy_grafito_app();
+        app.document = main_doc;
+        app.recovery_offer = Some(AutosaveRecoveryOffer {
+            main_path: candidate.main_path.clone(),
+            sidecar_path: candidate.sidecar_path.clone(),
+            document: candidate.document,
+            main_modified_epoch: candidate.main_modified_epoch,
+            sidecar_modified_epoch: candidate.sidecar_modified_epoch,
+            show_diff: false,
+        });
+        let diff = app.recovery_diff_summary().expect("con oferta hay diff");
+        assert!(diff.contains('3'), "diff muestra autosave: {diff}");
+        assert!(diff.contains('2'), "diff muestra guardado: {diff}");
+
+        cleanup_recovery_path(&main);
+    }
+
+    #[test]
+    fn sidecar_viejo_no_ofrece_recuperacion() {
+        let main = recovery_temp_path("viejo");
+        cleanup_recovery_path(&main);
+        let doc = recovery_doc_with_points(2);
+        grafito_core::persistence::write_document_atomic(&doc, &main).expect("write main");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        grafito_core::persistence::write_autosave_sidecar(&doc, &main).expect("write sidecar");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Reescribir el main lo deja más nuevo (o igual) que el sidecar:
+        // `should_offer` estricto (`>`) ya no ofrece.
+        grafito_core::persistence::write_document_atomic(&doc, &main).expect("rewrite main");
+
+        let stale = grafito_core::persistence::load_autosave_candidate(&main).expect("stale loads");
+        assert!(
+            stale.is_none(),
+            "sidecar igual o más viejo no debe ofrecerse"
+        );
+
+        cleanup_recovery_path(&main);
+    }
+
+    #[test]
+    fn recuperar_restaura_el_documento_del_sidecar() {
+        let main = recovery_temp_path("restaura");
+        cleanup_recovery_path(&main);
+        let main_doc = recovery_doc_with_points(2);
+        grafito_core::persistence::write_document_atomic(&main_doc, &main).expect("write main");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let sidecar_doc = recovery_doc_with_points(5);
+        let sidecar = grafito_core::persistence::write_autosave_sidecar(&sidecar_doc, &main)
+            .expect("write sidecar");
+
+        let candidate = grafito_core::persistence::load_autosave_candidate(&main)
+            .expect("load")
+            .expect("debe haber candidato");
+        assert_eq!(candidate.document.object_count(), 5);
+
+        let mut app = super::dummy_grafito_app();
+        app.document = main_doc;
+        assert_eq!(app.document.object_count(), 2);
+        app.recovery_offer = Some(AutosaveRecoveryOffer {
+            main_path: candidate.main_path.clone(),
+            sidecar_path: candidate.sidecar_path.clone(),
+            document: candidate.document,
+            main_modified_epoch: candidate.main_modified_epoch,
+            sidecar_modified_epoch: candidate.sidecar_modified_epoch,
+            show_diff: false,
+        });
+
+        assert!(app.accept_recovery_offer(), "aceptar debe restaurar");
+        assert_eq!(
+            app.document.object_count(),
+            5,
+            "el documento debe ser el del sidecar"
+        );
+        assert!(app.recovery_offer.is_none(), "la oferta se consume");
+        assert!(
+            !sidecar.exists(),
+            "tras recuperar se borra el sidecar best-effort"
+        );
+
+        cleanup_recovery_path(&main);
+    }
 }
 
 /// Spawns document save in background — evita bloquear UI thread (60fps).
 /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
-#[allow(dead_code)]
+/// Devuelve `None` si el OS rechaza el thread (el caller degrada a `SaveAttempt::Failed`).
 pub(crate) fn spawn_document_save(
     document: Document,
     path: PathBuf,
-    ctx: egui::Context,
-) -> Receiver<Result<PathBuf, String>> {
+    ctx: &egui::Context,
+) -> Option<Receiver<Result<PathBuf, String>>> {
+    let ctx = egui::Context::clone(ctx);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("document-save".into())
         .spawn(move || {
             let res = write_document_to_path(&document, &path)
@@ -76,16 +378,17 @@ pub(crate) fn spawn_document_save(
                 .map_err(|e| e.to_string());
             let _ = tx.send(res);
             ctx.request_repaint();
-        });
-    rx
+        })
+        .ok()?;
+    Some(rx)
 }
 
 /// Spawns document open in background — evita bloquear UI thread.
-#[allow(dead_code)]
 pub(crate) fn spawn_document_open(
     path: PathBuf,
-    ctx: egui::Context,
+    ctx: &egui::Context,
 ) -> Receiver<Result<(PathBuf, Document), String>> {
+    let ctx = egui::Context::clone(ctx);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let _ = std::thread::Builder::new()
         .name("document-open".into())
@@ -100,13 +403,14 @@ pub(crate) fn spawn_document_open(
 }
 
 /// Spawns export en background — evita bloquear UI thread en `export_with_dialog`.
-#[allow(dead_code)]
+/// Envía `(path, summary)` para preservar el UX del path sincrónico en el poll.
 pub(crate) fn spawn_export(
     document: Document,
     path: PathBuf,
     format: crate::export::ExportFormat,
-    ctx: egui::Context,
-) -> Receiver<Result<PathBuf, String>> {
+    ctx: &egui::Context,
+) -> Receiver<Result<(PathBuf, String), String>> {
+    let ctx = egui::Context::clone(ctx);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let _ = std::thread::Builder::new()
         .name("export".into())
@@ -122,7 +426,45 @@ pub(crate) fn spawn_export(
                     crate::export::export_tikz(&document, &path).map_err(|e| e.to_string())
                 }
             };
-            let _ = tx.send(res.map(|_| path.clone()));
+            let _ = tx.send(res.map(|report| (path.clone(), report.summary())));
+            ctx.request_repaint();
+        });
+    rx
+}
+
+/// Spawns importación CSV/TSV en background — lectura ≤2MB fuera del UI thread.
+/// El commit al documento ocurre en `poll_background_jobs` (mismo hilo que el sync).
+pub(crate) fn spawn_csv_import(
+    path: PathBuf,
+    ctx: &egui::Context,
+) -> Receiver<Result<crate::panels::LocalXYTable, String>> {
+    let ctx = egui::Context::clone(ctx);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("csv-import".into())
+        .spawn(move || {
+            let res = crate::panels::load_local_xy_table(&path);
+            let _ = tx.send(res);
+            ctx.request_repaint();
+        });
+    rx
+}
+
+/// Spawns escritura de texto en background (export LaTeX del protocolo).
+pub(crate) fn spawn_text_write(
+    path: PathBuf,
+    text: String,
+    ctx: &egui::Context,
+) -> Receiver<Result<PathBuf, String>> {
+    let ctx = egui::Context::clone(ctx);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("text-write".into())
+        .spawn(move || {
+            let res = crate::export::write_text_atomic(&path, &text)
+                .map(|_| path.clone())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
             ctx.request_repaint();
         });
     rx
@@ -130,6 +472,12 @@ pub(crate) fn spawn_export(
 const TRIG_GRAPH_LABEL: &str = "TrigGraph";
 const TRIG_VALUE_LABEL: &str = "TrigValue";
 const VIEW_SETTLE_DURATION: Duration = Duration::from_millis(150);
+/// Presupuesto del splash (AS3 cold-start): overlay total 1500 ms con
+/// fade-out desde los 1000 ms. Solo cosmético: los gates reales de arranque
+/// viven en `startup_splash_phase` (GPU → escena → plugins) y el documento
+/// CLI llega por `maybe_start_startup_open` en background.
+const SPLASH_TOTAL_MS: u128 = 1500;
+const SPLASH_FADE_START_MS: u128 = 1000;
 const MULTIDIMENSIONAL_MOTION_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 pub(crate) const DEFAULT_3D_ORBIT_RADIANS_PER_SECOND: f32 = 0.3;
 pub(crate) const DEFAULT_4D_ROTATION_RADIANS_PER_SECOND: f64 = 0.55;
@@ -1166,6 +1514,8 @@ pub struct GrafitoApp {
     deferred_file_actions: DeferredFileActions,
     /// Timestamp de inicio de la app (splash screen). None = ya pasó.
     pub splash_start: Option<Instant>,
+    /// One-shot F10-D (cold start instrumentado): log de first_frame una vez.
+    startup_first_frame_logged: bool,
     /// Textura retenida mientras el splash la referencia en sus primitivas egui.
     /// LRU: tamaño 1, se libera con `ctx.forget_image("splash_logo")` al cerrar splash para no retener GPU.
     splash_logo: Option<egui::TextureHandle>,
@@ -1212,7 +1562,22 @@ pub struct GrafitoApp {
     /// `None` = idle; `Some(receiver)` = polling con `try_recv` en `update`.
     pub(crate) pending_save_job: Option<PendingSaveJob>,
     pub(crate) pending_open_job: Option<PendingOpenJob>,
+    /// Archivo pasado por CLI (`grafito doc.json`) pendiente de abrir en
+    /// background (AS3 cold-start): `new()` ya no hace I/O de documentos en el
+    /// hilo UI — guarda la ruta aquí y el primer `update` la abre con
+    /// `spawn_document_open` (`maybe_start_startup_open` + `poll_background_jobs`).
+    /// `None` = sin pendiente (arranque normal con documento vacío).
+    startup_pending_doc: Option<PathBuf>,
     pub(crate) pending_export_job: Option<PendingExportJob>,
+    /// Job de importación `.ggb` en background (F1-1): lectura + parse fuera del
+    /// UI thread, resultado aplicado con undo único vía `process_input`.
+    pub(crate) pending_ggb_import_job: Option<PendingGgbImportJob>,
+    pub(crate) pending_import_job: Option<PendingImportJob>,
+    pub(crate) pending_text_job: Option<PendingTextWriteJob>,
+    /// Acción encadenada tras un guardado async (New/Open con cambios sin guardar).
+    /// `resolve_unsaved_decision` consume `lifecycle.pending_action`, así que la acción
+    /// viaja aquí y `poll_background_jobs` la ejecuta al confirmar el save.
+    pending_chained_action: Option<DocumentAction>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
     /// Caché de texturas de relleno para curvas implícitas. Usa `RwLock`
     /// para permitir mutación desde `draw_implicit_curve_fill` (que recibe
@@ -1306,6 +1671,30 @@ pub struct GrafitoApp {
     /// aplica el mínimo al final del frame (`apply`). Se resetea al inicio de
     /// cada `update`.
     pub(crate) repaint_budget: RepaintBudget,
+    /// Autosave debouncer — tick en `update` (nunca en `Ui::`), escribe sidecar
+    /// en background thread si `should_autosave(now)`.
+    pub(crate) autosave: AutosaveDebouncer,
+    /// Versión del documento vista en el último tick de autosave (para detectar
+    /// mutaciones que no pasaron por `save_snapshot` y marcar dirty fallback).
+    pub(crate) autosave_last_version: u64,
+    /// ── A8 Recovery al arranque ──
+    /// Job en background que llama `load_autosave_candidate` (nunca I/O en `Ui::`).
+    /// `None` = idle; `Some` = polling con `try_recv` en `update`.
+    pub(crate) pending_recovery_job: Option<PendingAutosaveRecoveryJob>,
+    /// Oferta lista para el modal (sidecar más nuevo ya validado). `Ui::` solo lee.
+    pub(crate) recovery_offer: Option<AutosaveRecoveryOffer>,
+    /// Sidecar más nuevo pero corrupto: el modal ofrece descartarlo.
+    pub(crate) recovery_corrupt: Option<AutosaveRecoveryCorrupt>,
+    /// Última ruta ya chequeada en esta sesión (evita re-spawn por frame).
+    /// Se resetea implícitamente al cambiar `current_path` (ver `maybe_start_recovery_check`).
+    pub(crate) recovery_checked_path: Option<PathBuf>,
+    /// Opt-in explícito para Aula/red avanzada (loopback sin red).
+    pub advanced_red_opt_in: bool,
+    /// Idioma de la UI (ES/EN) — O2 i18n: persiste en `AppConfig.locale`,
+    /// se edita desde Ayuda con `locale_selector` (Piel pura, sin I/O en Ui).
+    pub(crate) locale: AppLocale,
+    /// Panel de Aula (F0 sin red) — loopback con ShareCode + QR dibujado con líneas egui.
+    pub classroom: crate::classroom::ClassroomPanel,
 }
 
 pub(crate) const DEFAULT_KEYBOARD_VISIBLE: bool = false;
@@ -1486,6 +1875,43 @@ impl GrafitoApp {
         renderer_is_ready(self.gpu_renderer.as_ref())
     }
 
+    /// Fase honesta del splash (G-E perf, S): 3 gates reales, sin % falso de
+    /// tiempo. El progreso es `done/3`: GPU lista, escena 2D resuelta
+    /// (`Pending` = pendiente; `GpuReady`/`CpuOnly` = resuelta), plugins
+    /// cargados (`plugins_loaded` se setea en el primer poll del update, dentro
+    /// de la ventana del splash). Un documento vacío es válido y no bloquea
+    /// ningún gate; el conteo de objetos solo se muestra, no es gate.
+    fn startup_splash_phase(&self) -> (u32, &'static str) {
+        const TOTAL: u32 = 3;
+        if !self.gpu_renderer_ready() {
+            return (0, "Iniciando GPU…");
+        }
+        if self.gpu_scene_2d_readiness() == crate::canvas::Scene2DReadiness::Pending {
+            return (1, "Preparando escena…");
+        }
+        if !self.plugins_loaded {
+            return (2, "Cargando extensiones…");
+        }
+        (TOTAL, "Listo")
+    }
+
+    /// Fase visible del splash con el pendiente de arranque (AS3).
+    ///
+    /// Pura y testeable: si hay un documento CLI abriéndose en background
+    /// (`startup_pending_doc` o `pending_open_job` sin `current_path` aún),
+    /// el stage es honesto ("Abriendo documento…") con el `done` real de los
+    /// gates; si no, delega en `startup_splash_phase` sin cambios.
+    fn splash_stage(&self) -> (u32, &'static str) {
+        let (done, stage) = self.startup_splash_phase();
+        let opening_startup_doc = self.startup_pending_doc.is_some()
+            || (self.pending_open_job.is_some()
+                && self.document_lifecycle.current_path().is_none());
+        if opening_startup_doc {
+            return (done, "Abriendo documento…");
+        }
+        (done, stage)
+    }
+
     /// Mantiene la proyección ligada al rectángulo real del canvas sin
     /// invalidar el índice espacial ni preparar GPU cuando el tamaño no cambió.
     fn sync_canvas_screen_size(&mut self, canvas_size: egui::Vec2) -> bool {
@@ -1547,6 +1973,8 @@ impl GrafitoApp {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.undo_total_bytes = 0;
+        self.autosave.mark_saved();
+        self.autosave_last_version = self.document.version;
         self.clear_document_bound_transient_state();
         self.document_snapshot = std::sync::Arc::new(self.document.clone());
         self.snapshot_version = self.document.version;
@@ -1602,6 +2030,9 @@ impl GrafitoApp {
         self.tool_state.clear();
     }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // F10-D cold start instrumentado: t0 del constructor; al final de
+        // `new` se loguea la duración + first_frame en el primer `update`.
+        let startup_t0 = Instant::now();
         // Scandinavian: Instala Inter Variable como fuente principal (calm, 500/600)
         {
             let mut fonts = egui::FontDefinitions::default();
@@ -1661,6 +2092,8 @@ impl GrafitoApp {
                 cache_2d: None,
                 cache_3d: None,
                 scene_readiness: scene_readiness.clone(),
+                // Frente B6: slot background de compute 2D (cap 1, inicia libre).
+                gpu_compute_slot: crate::canvas::GpuComputeSlot::default(),
             };
             render_state
                 .renderer
@@ -1677,8 +2110,26 @@ impl GrafitoApp {
             (None, None)
         };
         let gpu_available = gpu_renderer.is_some();
+        // ── A8 arranque: si se pasó un archivo por CLI (`grafito doc.json`),
+        // se abre en background en el primer `update` (`maybe_start_startup_open`)
+        // para no bloquear el primer paint (AS3 cold-start: antes era I/O
+        // sincrónica de hasta 10 MB aquí, en el hilo UI, antes del splash).
+        // I/O en constructor (no en `Ui::`); el sidecar se chequea en background.
         let document = initial_document();
         let document_lifecycle = DocumentLifecycle::new(&document);
+        let mut startup_recent: Option<String> = None;
+        let mut startup_pending_doc: Option<PathBuf> = None;
+        if let Some(startup_path) = Self::startup_file_arg() {
+            if startup_path.is_file() {
+                startup_recent = Some(startup_path.to_string_lossy().into_owned());
+                startup_pending_doc = Some(startup_path);
+            } else {
+                log::warn!(
+                    "startup file {} no existe o no es archivo regular",
+                    startup_path.display()
+                );
+            }
+        }
 
         let config = load_config();
         let dark_mode = config.dark_mode;
@@ -1698,6 +2149,11 @@ impl GrafitoApp {
         let document_snapshot = std::sync::Arc::new(document.clone());
         let profile = crate::utils::load_profile();
         let avatar_draft = profile.avatar.clone();
+        let advanced_red_opt_in = config.advanced_red_opt_in;
+        let locale = config.locale;
+        let mut classroom = crate::classroom::ClassroomPanel::new();
+        classroom.set_opt_in(advanced_red_opt_in);
+        let autosave_last_version = document.version;
 
         // `current_view` es cache derivado de `perspective` — fuente canónica
         // `Perspective::view_mode()` / `Perspective::canvas_mode()`.
@@ -1705,7 +2161,7 @@ impl GrafitoApp {
         let current_view = perspective.view_mode();
         debug_assert_eq!(current_view, ViewMode::D2);
         debug_assert_eq!(perspective.canvas_mode(), crate::CanvasMode::D2);
-        Self {
+        let app = Self {
             document,
             current_tool: Tool::default(),
             previous_tool: Tool::default(),
@@ -1742,6 +2198,7 @@ impl GrafitoApp {
             cas_history: VecDeque::new(),
             sidebar_tab: 0,
             splash_start: Some(Instant::now()),
+            startup_first_frame_logged: false,
             splash_logo: None,
             mora_texture: None,
             mora_texture_load_attempted: false,
@@ -1754,7 +2211,13 @@ impl GrafitoApp {
             whiteboard_left_pinned: false,
             show_whiteboard_assistant: true,
             profile,
-            recent_files: VecDeque::new(),
+            recent_files: startup_recent
+                .map(|recent| {
+                    let mut queue = VecDeque::new();
+                    queue.push_back(recent);
+                    queue
+                })
+                .unwrap_or_default(),
             document_lifecycle,
             deferred_file_actions: DeferredFileActions::default(),
             undo_stack: VecDeque::new(),
@@ -1763,7 +2226,12 @@ impl GrafitoApp {
             show_onboarding: !config.onboarding_completed,
             pending_save_job: None,
             pending_open_job: None,
+            startup_pending_doc,
             pending_export_job: None,
+            pending_ggb_import_job: None,
+            pending_import_job: None,
+            pending_text_job: None,
+            pending_chained_action: None,
             attractor_cache: std::collections::HashMap::new(),
             fill_textures: std::sync::RwLock::new(
                 crate::render_2d::FillTextureCacheStore::default(),
@@ -1825,7 +2293,27 @@ impl GrafitoApp {
             config_name_error: None,
             teaching_ui: crate::teaching_ui::TeachingUiState::default(),
             repaint_budget: RepaintBudget::default(),
-        }
+            autosave: AutosaveDebouncer::new(),
+            autosave_last_version,
+            // ── A8 recovery: arranca sin oferta; el primer `update` lanza el
+            // chequeo en background si `current_path` es `Some` (CLI o apertura).
+            pending_recovery_job: None,
+            recovery_offer: None,
+            recovery_corrupt: None,
+            recovery_checked_path: None,
+            advanced_red_opt_in,
+            locale,
+            classroom,
+        };
+        // F10-D cold start instrumentado (S): duración real del constructor.
+        // El first_frame se loguea en el primer `update` (bloque splash).
+        log::info!(
+            "startup: new() listo en {}ms ({} objetos, gpu={})",
+            startup_t0.elapsed().as_millis(),
+            app.document.object_count(),
+            app.use_gpu,
+        );
+        app
     }
 
     /// Ruta única para que los widgets pidan repintado periódico coalescido (F17).
@@ -1845,7 +2333,555 @@ impl GrafitoApp {
         self.repaint_budget.apply(ctx);
     }
 
+    /// Epoch segundos para autosave (SystemTime -> secs, 0 si falla).
+    pub(crate) fn autosave_now_epoch() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Marca el documento como sucio para autosave (debounce).
+    pub(crate) fn mark_autosave_dirty(&mut self) {
+        let now = Self::autosave_now_epoch();
+        self.autosave.mark_dirty(now);
+    }
+
+    /// Tick de autosave en `update` (nunca en `Ui::`): si `should_autosave(now)`
+    /// escribe sidecar en background thread + `mark_saved()`. Reutiliza patrón
+    /// `spawn_profile_save` (thread Builder + request_repaint), nunca bloquea UI.
+    /// También detecta cambios de `document.version` no capturados por
+    /// `mark_autosave_dirty()` (fallback para mutaciones via free functions).
+    pub(crate) fn tick_autosave(&mut self, ctx: &egui::Context) {
+        // Fallback: si el documento cambió desde el último tick y aún no está dirty,
+        // marcarlo. Esto cubre mutaciones que no pasaron por `save_snapshot`.
+        if self.document.version != self.autosave_last_version && !self.autosave.is_dirty() {
+            self.mark_autosave_dirty();
+        }
+        self.autosave_last_version = self.document.version;
+        let now = Self::autosave_now_epoch();
+        if !self.autosave.should_autosave(now) {
+            return;
+        }
+        let Some(main_path) = self
+            .document_lifecycle
+            .current_path()
+            .map(|p| p.to_path_buf())
+        else {
+            return;
+        };
+        let doc = self.document.clone();
+        let egui_ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("autosave".into())
+            .spawn(move || {
+                if let Err(err) =
+                    grafito_core::persistence::write_autosave_sidecar(&doc, &main_path)
+                {
+                    log::warn!("autosave sidecar failed for {}: {err}", main_path.display());
+                }
+                egui_ctx.request_repaint();
+            });
+        if spawned.is_ok() {
+            self.autosave.mark_saved();
+        } else {
+            log::warn!("autosave: spawn failed");
+        }
+    }
+
+    // ── A8 Recovery al arranque (Piel pura) ──────────────────────────────
+    // El sidecar se escribe en background (`tick_autosave`); aquí se ofrece
+    // recuperar al arranque / al abrir un archivo con sidecar más nuevo.
+    // Todo I/O en background (`spawn_recovery_check` + `poll_recovery_job`);
+    // `draw_recovery_modal` solo lee memoria (cero I/O en `Ui::`).
+
+    /// Núcleo testeable de [`GrafitoApp::startup_file_arg`]: primer arg no-flag.
+    /// Puro, sin I/O, sin pánicos. Ignora flags (`-h`, `--profile`) y vacíos.
+    pub(crate) fn startup_file_arg_from(args: &[String]) -> Option<PathBuf> {
+        for arg in args {
+            if arg.is_empty() || arg.starts_with('-') {
+                continue;
+            }
+            if arg.contains('\0') {
+                continue;
+            }
+            let path = PathBuf::from(arg);
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            return Some(path);
+        }
+        None
+    }
+
+    /// Archivo pasado por CLI (`grafito doc.json`) para el arranque.
+    /// Lee `std::env::args` (sin I/O de archivos); el contenido se carga en `new`.
+    pub(crate) fn startup_file_arg() -> Option<PathBuf> {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        Self::startup_file_arg_from(&args)
+    }
+
+    /// Lanza el chequeo de sidecar en background (nunca bloquea UI).
+    /// Pattern `spawn_profile_save` con `sync_channel(1)` + `request_repaint`.
+    /// Retorna `None` si el spawn falla (el caller loguea y marca chequeado).
+    pub(crate) fn spawn_recovery_check(
+        main_path: PathBuf,
+        ctx: &egui::Context,
+    ) -> Option<PendingAutosaveRecoveryJob> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let egui_ctx = ctx.clone();
+        let path_for_thread = main_path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("autosave-recovery".into())
+            .spawn(move || {
+                let result = grafito_core::persistence::load_autosave_candidate(&path_for_thread)
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(result);
+                egui_ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            log::warn!("recovery: spawn failed for {}", main_path.display());
+            return None;
+        }
+        Some(PendingAutosaveRecoveryJob {
+            receiver: rx,
+            main_path,
+        })
+    }
+
+    /// Arranca la apertura del archivo CLI en background (AS3 cold-start).
+    /// Piel pura: sin I/O, solo spawnea `spawn_document_open` una vez; el
+    /// resultado (éxito o error honesto) llega por `poll_background_jobs`,
+    /// que ya publica el toast "Documento abierto desde…". Si el usuario ya
+    /// abrió algo (hay `current_path` o un job en curso), el pendiente se
+    /// descarta sin ruido.
+    pub(crate) fn maybe_start_startup_open(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.startup_pending_doc.take() else {
+            return;
+        };
+        if self.pending_open_job.is_some() || self.document_lifecycle.current_path().is_some() {
+            return;
+        }
+        self.pending_open_job = Some(PendingOpenJob {
+            receiver: spawn_document_open(path, ctx),
+        });
+        self.notify(
+            "Abriendo documento inicial…",
+            grafito_ui::toast::ToastKind::Info,
+        );
+    }
+
+    /// Arranca el chequeo una vez por ruta (al arranque y al abrir archivos).
+    /// No hace I/O: solo spawnea el job en background. Si la ruta cambió desde
+    /// el último chequeo, descarta oferta/job viejos (el usuario navegó a otro archivo).
+    pub(crate) fn maybe_start_recovery_check(&mut self, ctx: &egui::Context) {
+        let Some(current) = self
+            .document_lifecycle
+            .current_path()
+            .map(|p| p.to_path_buf())
+        else {
+            return;
+        };
+        // Si el usuario cambió de archivo, la oferta/job viejos quedan obsoletos.
+        if let Some(job_path) = self.pending_recovery_job.as_ref().map(|job| &job.main_path) {
+            if *job_path != current {
+                self.pending_recovery_job = None;
+            }
+        }
+        if let Some(offer_path) = self.recovery_offer.as_ref().map(|offer| &offer.main_path) {
+            if *offer_path != current {
+                self.recovery_offer = None;
+            }
+        }
+        if let Some(corrupt_path) = self
+            .recovery_corrupt
+            .as_ref()
+            .map(|corrupt| &corrupt.main_path)
+        {
+            if *corrupt_path != current {
+                self.recovery_corrupt = None;
+            }
+        }
+        if self.pending_recovery_job.is_some()
+            || self.recovery_offer.is_some()
+            || self.recovery_corrupt.is_some()
+        {
+            return;
+        }
+        if self.recovery_checked_path.as_ref() == Some(&current) {
+            return;
+        }
+        match Self::spawn_recovery_check(current.clone(), ctx) {
+            Some(job) => {
+                self.pending_recovery_job = Some(job);
+            }
+            None => {
+                // Spawn falló: marcar chequeado para no reintentar por frame.
+                self.recovery_checked_path = Some(current);
+            }
+        }
+    }
+
+    /// Poll del job en background (nunca I/O, solo `try_recv`).
+    /// `Ok(None)` = sin sidecar o no más nuevo → marcar chequeado, sin modal.
+    /// `Ok(Some)` = oferta lista → modal. `Err` = sidecar más nuevo pero
+    /// corrupto → modal de descarte.
+    pub(crate) fn poll_recovery_job(&mut self) {
+        let Some(job) = self.pending_recovery_job.take() else {
+            return;
+        };
+        match job.receiver.try_recv() {
+            Ok(Ok(None)) => {
+                self.recovery_checked_path = Some(job.main_path);
+            }
+            Ok(Ok(Some(candidate))) => {
+                let offer = AutosaveRecoveryOffer {
+                    main_path: candidate.main_path.clone(),
+                    sidecar_path: candidate.sidecar_path.clone(),
+                    document: candidate.document,
+                    main_modified_epoch: candidate.main_modified_epoch,
+                    sidecar_modified_epoch: candidate.sidecar_modified_epoch,
+                    show_diff: false,
+                };
+                self.recovery_offer = Some(offer);
+                self.recovery_corrupt = None;
+                self.recovery_checked_path = Some(job.main_path);
+            }
+            Ok(Err(err)) => {
+                // Solo mostrar corrupto si hay sidecar del que hablar; si no hay
+                // nombre de archivo no hay nada que descartar.
+                match grafito_core::persistence::autosave_sidecar_path(&job.main_path) {
+                    Some(sidecar) => {
+                        self.recovery_corrupt = Some(AutosaveRecoveryCorrupt {
+                            main_path: job.main_path.clone(),
+                            sidecar_path: sidecar,
+                            error: err,
+                        });
+                        self.recovery_offer = None;
+                        self.recovery_checked_path = Some(job.main_path);
+                    }
+                    None => {
+                        self.recovery_checked_path = Some(job.main_path);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.pending_recovery_job = Some(job);
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.recovery_checked_path = Some(job.main_path);
+            }
+        }
+    }
+
+    /// Resumen puro del diff opcional (conteo objetos + fecha epoch).
+    /// Sin I/O: compara la oferta ya cargada con el documento en memoria.
+    /// Retorna `None` si no hay oferta.
+    pub(crate) fn recovery_diff_summary(&self) -> Option<String> {
+        let offer = self.recovery_offer.as_ref()?;
+        let autosave_objects = offer.document.object_count();
+        let current_objects = self.document.object_count();
+        let main_fecha = offer
+            .main_modified_epoch
+            .map_or("sin guardado".to_string(), |epoch| format!("epoch {epoch}"));
+        Some(format!(
+            "Autosave: {autosave_objects} objetos · epoch {} / Guardado: {current_objects} objetos · {main_fecha}",
+            offer.sidecar_modified_epoch
+        ))
+    }
+
+    /// Acepta la oferta: restaura el sidecar como documento actual.
+    /// Llamar FUERA del closure de `Ui::` (el modal solo setea flags).
+    /// Borrado del sidecar best-effort (ignora `NotFound`); si falla se loguea.
+    /// Retorna `true` si había oferta y se restauró.
+    pub(crate) fn accept_recovery_offer(&mut self) -> bool {
+        let Some(offer) = self.recovery_offer.take() else {
+            return false;
+        };
+        let main_path = offer.main_path.clone();
+        let sidecar_path = offer.sidecar_path.clone();
+        self.replace_document(offer.document, Some(main_path.clone()));
+        self.remember_recent_file(&main_path);
+        self.recovery_corrupt = None;
+        self.recovery_checked_path = Some(main_path.clone());
+        if std::fs::remove_file(&sidecar_path).is_err() {
+            // Best-effort: el sidecar puede no existir (carrera con guardado).
+            // Solo loguear si no es NotFound para no ensuciar el log.
+            if std::fs::metadata(&sidecar_path).is_ok() {
+                log::warn!("recovery: no se pudo borrar {}", sidecar_path.display());
+            }
+        }
+        self.notify(
+            format!("Autosave recuperado desde {}", sidecar_path.display()),
+            grafito_ui::toast::ToastKind::Success,
+        );
+        true
+    }
+
+    /// Descarta la oferta y (si `delete_sidecar`) borra el sidecar en disco.
+    /// `delete_sidecar=false` = posponer (se mantiene el archivo para el próximo arranque).
+    /// Llamar FUERA del closure de `Ui::`. Retorna `true` si había algo que cerrar.
+    pub(crate) fn dismiss_recovery_offer(&mut self, delete_sidecar: bool) -> bool {
+        let mut had_anything = false;
+        if let Some(offer) = self.recovery_offer.take() {
+            had_anything = true;
+            self.recovery_checked_path = Some(offer.main_path.clone());
+            if delete_sidecar {
+                let _ = std::fs::remove_file(&offer.sidecar_path);
+            }
+        }
+        if let Some(corrupt) = self.recovery_corrupt.take() {
+            had_anything = true;
+            self.recovery_checked_path = Some(corrupt.main_path.clone());
+            if delete_sidecar {
+                let _ = std::fs::remove_file(&corrupt.sidecar_path);
+            }
+        }
+        if had_anything {
+            self.notify(
+                "Se sigue con el documento guardado",
+                grafito_ui::toast::ToastKind::Info,
+            );
+        }
+        had_anything
+    }
+
+    /// Modal "Se encontró un autosave más nuevo" — Piel pura, cero I/O en `Ui::`.
+    /// Lee `recovery_offer` / `recovery_corrupt` ya cargados; los clicks solo
+    /// setean flags locales y la acción (accept/dismiss/toggle) ocurre FUERA
+    /// del closure. Botones: [Recuperar autosave] [Seguir con guardado] [Ver diff].
+    pub(crate) fn draw_recovery_modal(&mut self, ctx: &egui::Context) {
+        // Caso corrupto: no hay nada recuperable, solo descartar o seguir.
+        if self.recovery_corrupt.is_some() {
+            self.draw_recovery_corrupt_modal(ctx);
+            return;
+        }
+        if self.recovery_offer.is_none() {
+            return;
+        }
+        let mut do_recover = false;
+        let mut do_keep = false;
+        let mut do_toggle_diff = false;
+        // Copia solo para display dentro del closure (evita borrow prolongado).
+        let (subtitle_text, diff_summary, show_diff) = {
+            let Some(offer) = self.recovery_offer.as_ref() else {
+                return;
+            };
+            let subtitle = format!(
+                "Hay cambios sin guardar más nuevos que {}",
+                offer.main_path.display()
+            );
+            let diff = self.recovery_diff_summary().unwrap_or_default();
+            (subtitle, diff, offer.show_diff)
+        };
+        let mut open = true;
+        let theme = grafito_ui::theme::current_theme(ctx);
+        egui::Window::new("Se encontró un autosave más nuevo")
+            .id(egui::Id::new("autosave_recovery_modal"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::symmetric(
+                        grafito_ui::tokens::SPACE_LG,
+                        grafito_ui::tokens::SPACE_MD,
+                    )),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.set_max_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(&subtitle_text)
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_primary),
+                    );
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                if show_diff {
+                    ui.separator();
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                    ui.label(
+                        egui::RichText::new(&diff_summary)
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_secondary),
+                    );
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                    ui.separator();
+                    ui.add_space(grafito_ui::tokens::SPACE_SM);
+                }
+                ui.horizontal(|ui| {
+                    let total_w = 3.0 * 124.0 + 2.0 * grafito_ui::tokens::SPACE_SM;
+                    let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
+                    ui.add_space(pad);
+                    ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+                    let recover = egui::Button::new(
+                        egui::RichText::new("Recuperar autosave")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.accent)
+                    .stroke(egui::Stroke::NONE);
+                    if ui.add_sized(egui::vec2(124.0, 32.0), recover).clicked() {
+                        do_recover = true;
+                    }
+                    let keep = egui::Button::new(
+                        egui::RichText::new("Seguir con guardado")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_secondary),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator));
+                    if ui.add_sized(egui::vec2(124.0, 32.0), keep).clicked() {
+                        do_keep = true;
+                    }
+                    let diff_label = if show_diff {
+                        "Ocultar diff"
+                    } else {
+                        "Ver diff"
+                    };
+                    let diff_btn = egui::Button::new(
+                        egui::RichText::new(diff_label)
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_secondary),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator));
+                    if ui.add_sized(egui::vec2(124.0, 32.0), diff_btn).clicked() {
+                        do_toggle_diff = true;
+                    }
+                    ui.add_space(pad);
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+            });
+        // ── Acciones FUERA del closure de Ui (aquí sí se permite I/O breve) ──
+        if do_toggle_diff {
+            if let Some(offer) = self.recovery_offer.as_mut() {
+                offer.show_diff = !offer.show_diff;
+            }
+            return;
+        }
+        if do_recover {
+            self.accept_recovery_offer();
+        } else if do_keep {
+            // Seguir con guardado = descartar sidecar, quedarse con el main.
+            self.dismiss_recovery_offer(true);
+        } else if !open {
+            // X = posponer esta sesión (se mantiene el archivo para el próximo arranque).
+            self.dismiss_recovery_offer(false);
+        }
+    }
+
+    /// Modal de sidecar corrupto — Piel pura, cero I/O en `Ui::`.
+    /// Ofrece [Descartar sidecar] (borra) o [Seguir con guardado] (pospone sin borrar).
+    fn draw_recovery_corrupt_modal(&mut self, ctx: &egui::Context) {
+        let mut do_discard = false;
+        let mut do_keep = false;
+        let mut open = true;
+        let message = {
+            let Some(corrupt) = self.recovery_corrupt.as_ref() else {
+                return;
+            };
+            format!(
+                "El autosave de {} está corrupto y no se pudo recuperar: {}",
+                corrupt.main_path.display(),
+                corrupt.error
+            )
+        };
+        let theme = grafito_ui::theme::current_theme(ctx);
+        egui::Window::new("Autosave corrupto")
+            .id(egui::Id::new("autosave_recovery_corrupt_modal"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::symmetric(
+                        grafito_ui::tokens::SPACE_LG,
+                        grafito_ui::tokens::SPACE_MD,
+                    )),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.set_max_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(&message)
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_primary),
+                    );
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_LG);
+                ui.horizontal(|ui| {
+                    let total_w = 2.0 * 124.0 + grafito_ui::tokens::SPACE_SM;
+                    let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
+                    ui.add_space(pad);
+                    ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+                    let discard = egui::Button::new(
+                        egui::RichText::new("Descartar sidecar")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.accent)
+                    .stroke(egui::Stroke::NONE);
+                    if ui.add_sized(egui::vec2(124.0, 32.0), discard).clicked() {
+                        do_discard = true;
+                    }
+                    let keep = egui::Button::new(
+                        egui::RichText::new("Seguir con guardado")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_secondary),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator));
+                    if ui.add_sized(egui::vec2(124.0, 32.0), keep).clicked() {
+                        do_keep = true;
+                    }
+                    ui.add_space(pad);
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+            });
+        if do_discard {
+            self.dismiss_recovery_offer(true);
+        } else if do_keep || !open {
+            // `!open` (X) = posponer esta sesión: se mantiene el archivo.
+            self.dismiss_recovery_offer(false);
+        }
+    }
+
     /// Persiste preferencias de interfaz; las claves del asistente viven sólo en el llavero.
+    /// Idioma actual de la UI para los helpers localizados (toolbar/paleta).
+    pub(crate) fn config_locale(&self) -> grafito_ui::i18n::Locale {
+        self.locale.as_ui_locale()
+    }
+
+    /// Cambia el idioma en vivo y lo persiste (Piel pura: el selector solo
+    /// setea el flag, la escritura ocurre aquí fuera del closure de Ui).
+    pub(crate) fn set_locale(&mut self, locale: grafito_ui::i18n::Locale) {
+        self.locale = AppLocale::from_ui_locale(locale);
+        self.save_app_config();
+    }
+
     pub(crate) fn save_app_config(&self) {
         // Se conservan los toggles de plugins ya persistidos; los cambios de
         // plugins se guardan en su propia ruta en assistant.rs.
@@ -1863,6 +2899,9 @@ impl GrafitoApp {
             onboarding_completed: existing.onboarding_completed,
             enabled_plugins: existing.enabled_plugins,
             disabled_plugins: existing.disabled_plugins,
+            advanced_red_opt_in: self.advanced_red_opt_in,
+            // O2 i18n: el idioma se edita en vivo y persiste aquí.
+            locale: self.locale,
         });
     }
 
@@ -1980,6 +3019,7 @@ impl GrafitoApp {
             snapshot,
             Some(&mut self.undo_total_bytes),
         );
+        self.mark_autosave_dirty();
     }
 
     /// Guarda un único estado previo sólo cuando una interacción de panel
@@ -2116,8 +3156,19 @@ impl GrafitoApp {
         action: DocumentAction,
         ctx: &egui::Context,
     ) {
-        if let SaveAttempt::Saved(saved_action) = self.save_document(mode, ctx) {
-            self.perform_document_action(saved_action.unwrap_or(action), ctx);
+        // Guardado async: la acción encadenada viaja en `pending_chained_action`
+        // y `poll_background_jobs` la ejecuta al confirmar el save. Si el diálogo
+        // se cancela o el spawn falla, la cadena se descarta (igual que antes).
+        match self.save_document(mode, ctx) {
+            SaveAttempt::Saved(saved_action) => {
+                self.perform_document_action(saved_action.unwrap_or(action), ctx);
+            }
+            SaveAttempt::Pending => {
+                self.pending_chained_action = Some(action);
+            }
+            SaveAttempt::Cancelled | SaveAttempt::Failed => {
+                self.pending_chained_action = None;
+            }
         }
     }
 
@@ -2196,14 +3247,15 @@ impl GrafitoApp {
             .collect()
     }
 
-    /// Registra un paso en el protocolo de construcción.
+    /// Registra un paso en el protocolo de construcción. Cota `MAX_CONSTRUCTION_LOG=500`
+    /// — mantiene orden cronológico y trunca las más antiguas (`drain`).
     pub(crate) fn record_construction_step(
         &mut self,
         action: &str,
         inputs: Vec<String>,
         output: &str,
     ) {
-        let n = self.construction_log.len() + 1;
+        let n = self.construction_log.len().saturating_add(1);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
@@ -2216,6 +3268,13 @@ impl GrafitoApp {
             disabled: false,
             timestamp,
         });
+        if self.construction_log.len() > MAX_CONSTRUCTION_LOG {
+            let excess = self
+                .construction_log
+                .len()
+                .saturating_sub(MAX_CONSTRUCTION_LOG);
+            self.construction_log.drain(0..excess);
+        }
     }
 
     /// Registra un paso comparando las etiquetas del documento antes y
@@ -2265,6 +3324,7 @@ impl GrafitoApp {
         .into_iter()
         .next()
         .ok_or_else(|| "Object insertion produced no identifier".to_string())?;
+        self.mark_autosave_dirty();
         let output = self
             .document
             .get_object(id)
@@ -2312,6 +3372,9 @@ impl GrafitoApp {
             &mut self.undo_stack,
             &mut self.redo_stack,
         );
+        if mutated_document {
+            self.mark_autosave_dirty();
+        }
         self.handle_command_outcome(outcome.clone(), time, cmd);
         self.record_step_from_diff(cmd, &before, mutated_document);
         outcome
@@ -2366,6 +3429,9 @@ impl GrafitoApp {
             &mut self.undo_stack,
             &mut self.redo_stack,
         );
+        if mutated_document {
+            self.mark_autosave_dirty();
+        }
         self.handle_command_outcome(outcome.clone(), time, &input_was);
         if clear_submitted_input_on_success(&mut self.input_text, &outcome) {
             self.preview_object = None;
@@ -2426,29 +3492,28 @@ impl GrafitoApp {
             return;
         };
 
-        // P1 I/O background placeholder — pattern spawn_profile_save con sync_channel(1) + request_repaint
-        // TODO(P1): migrar a `spawn_export` + `pending_export_job` + `poll_background_jobs` para 100% no bloqueante.
-        if let Some(ctx) = ctx {
-            let path_clone = path.clone();
-            let ctx_clone = ctx.clone();
-            let doc_clone = self.document.clone();
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let _ = std::thread::Builder::new()
-                .name("export-placeholder".into())
-                .spawn(move || {
-                    let _ = tx.send(Ok::<PathBuf, String>(path_clone.clone()));
-                    ctx_clone.request_repaint();
-                    let _ = doc_clone.estimated_bytes();
-                });
-            let _ = rx.try_recv();
-        }
-
-        let result = match format {
-            crate::export::ExportFormat::Svg => crate::export::export_svg(&self.document, &path),
-            crate::export::ExportFormat::Png => crate::export::export_png(&self.document, &path),
-            crate::export::ExportFormat::Tikz => crate::export::export_tikz(&self.document, &path),
+        // FileController: el diálogo rfd queda en UI thread (modal nativo);
+        // render+write van a worker y el summary se aplica en `poll_background_jobs`.
+        // Sin `ctx` (llamadas fuera del frame) se conserva el path sincrónico legacy.
+        let Some(ctx) = ctx else {
+            let result = match format {
+                crate::export::ExportFormat::Svg => {
+                    crate::export::export_svg(&self.document, &path)
+                }
+                crate::export::ExportFormat::Png => {
+                    crate::export::export_png(&self.document, &path)
+                }
+                crate::export::ExportFormat::Tikz => {
+                    crate::export::export_tikz(&self.document, &path)
+                }
+            };
+            apply_export_outcome(result, &mut self.cas_result, &mut self.toasts, self.ui_time);
+            return;
         };
-        apply_export_outcome(result, &mut self.cas_result, &mut self.toasts, self.ui_time);
+        self.pending_export_job = Some(PendingExportJob {
+            receiver: spawn_export(self.document.clone(), path, format, ctx),
+        });
+        self.notify("Exportando…", grafito_ui::toast::ToastKind::Info);
     }
 
     /// Ejecuta la acción elegida desde la paleta de comandos (Ctrl+K).
@@ -2585,54 +3650,23 @@ impl GrafitoApp {
             return SaveAttempt::Cancelled;
         };
 
-        // P1 I/O background: evita bloquear UI thread (60fps) — pattern `spawn_profile_save` (assistant.rs:41-51)
-        // con `sync_channel(1)` + `request_repaint`. El I/O real (write_document_to_path) se mueve a background
-        // thread y el resultado se polldea en `poll_background_jobs` (update). Para preservar `SaveAttempt::Saved`
-        // y el flujo `DocumentAction` en este turno, se mantiene write sincrónico con TODO de migración completa.
-        // TODO(P1): migrar a `spawn_document_save` + `pending_save_job` + `poll_background_jobs` para 100% no bloqueante.
-        // Minimal impl: spawn placeholder con sync_channel(1) y request_repaint para demostrar pattern.
-        {
-            let doc_clone = self.document.clone();
-            let path_clone = path.clone();
-            let ctx_clone = ctx.clone();
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let _ = std::thread::Builder::new()
-                .name("document-save-placeholder".into())
-                .spawn(move || {
-                    // Placeholder: en futuro mover `write_document_to_path(&doc_clone, &path_clone)` aquí
-                    let _ = tx.send(Ok::<PathBuf, String>(path_clone.clone()));
-                    ctx_clone.request_repaint();
-                    // Keep doc_clone alive to show intent
-                    let _ = doc_clone.estimated_bytes();
-                });
-            let _ = rx.try_recv();
-        }
-
-        let result = write_document_to_path(&self.document, &path);
-        match result {
-            Ok(_) => {
-                let pending_action = self
-                    .document_lifecycle
-                    .record_save_success(path.clone(), &self.document);
-                self.remember_recent_file(&path);
-                self.notify(
-                    format!("Documento guardado en {}", path.display()),
-                    grafito_ui::toast::ToastKind::Success,
-                );
-                SaveAttempt::Saved(pending_action)
-            }
-            Err(error) => {
-                let error = error.to_string();
-                log::error!("Save failed: {error}");
-                self.document_lifecycle.record_save_failure(error.clone());
-                self.cas_result = format!("No se pudo guardar: {error}");
-                self.notify(
-                    format!("Error al guardar: {error}"),
-                    grafito_ui::toast::ToastKind::Error,
-                );
-                SaveAttempt::Failed
-            }
-        }
+        // FileController: el diálogo rfd queda en UI thread (modal nativo);
+        // el write va a worker y el resultado se aplica en `poll_background_jobs`,
+        // que continúa la acción pendiente vía `record_save_success`.
+        let Some(receiver) = spawn_document_save(self.document.clone(), path, ctx) else {
+            let error = "no se pudo lanzar el guardado en background".to_string();
+            log::error!("Save failed: {error}");
+            self.document_lifecycle.record_save_failure(error.clone());
+            self.cas_result = format!("No se pudo guardar: {error}");
+            self.notify(
+                format!("Error al guardar: {error}"),
+                grafito_ui::toast::ToastKind::Error,
+            );
+            return SaveAttempt::Failed;
+        };
+        self.pending_save_job = Some(PendingSaveJob { receiver });
+        self.notify("Guardando documento…", grafito_ui::toast::ToastKind::Info);
+        SaveAttempt::Pending
     }
 
     /// Polls background I/O jobs — save/open/export — y actualiza lifecycle + notifica.
@@ -2646,11 +3680,20 @@ impl GrafitoApp {
                         .document_lifecycle
                         .record_save_success(path.clone(), &self.document);
                     self.remember_recent_file(&path);
+                    self.autosave.mark_saved();
+                    self.autosave_last_version = self.document.version;
+                    if let Some(sidecar) = grafito_core::persistence::autosave_sidecar_path(&path) {
+                        let _ = std::fs::remove_file(sidecar);
+                    }
                     self.notify(
                         format!("Documento guardado en {}", path.display()),
                         grafito_ui::toast::ToastKind::Success,
                     );
-                    if let Some(action) = pending_action {
+                    // Continúa la acción encadenada: primero la del lifecycle (si la
+                    // hubiera), si no la guardada en `save_before_document_action`.
+                    if let Some(action) =
+                        pending_action.or_else(|| self.pending_chained_action.take())
+                    {
                         self.perform_document_action(action, ctx);
                     }
                     ctx.request_repaint();
@@ -2700,22 +3743,123 @@ impl GrafitoApp {
         // Export
         if let Some(job) = self.pending_export_job.take() {
             match job.receiver.try_recv() {
-                Ok(Ok(path)) => {
-                    self.notify(
-                        format!("Exportado a {}", path.display()),
+                // Mismo UX que el path sincrónico (`apply_export_outcome`): el worker
+                // ya calculó el summary, aquí solo se publica.
+                Ok(Ok((_path, summary))) => {
+                    self.cas_result = summary.clone();
+                    self.toasts.push(
+                        wrap_toast_message(&summary, 52),
                         grafito_ui::toast::ToastKind::Success,
+                        self.ui_time,
                     );
                     ctx.request_repaint();
                 }
                 Ok(Err(err)) => {
-                    self.notify(
-                        format!("Error al exportar: {err}"),
+                    self.cas_result = err.clone();
+                    self.toasts.push(
+                        wrap_toast_message(&err, 52),
                         grafito_ui::toast::ToastKind::Error,
+                        self.ui_time,
                     );
                     ctx.request_repaint();
                 }
                 Err(TryRecvError::Empty) => {
                     self.pending_export_job = Some(job);
+                }
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        // Import .ggb (F1-1): Piel pura — I/O + parse ya ocurrieron en background.
+        if let Some(job) = self.pending_ggb_import_job.take() {
+            match job.receiver.try_recv() {
+                Ok(Ok(report)) => {
+                    let path = job.path.clone();
+                    self.apply_ggb_import_report(report, &path);
+                    ctx.request_repaint();
+                }
+                Ok(Err(err)) => {
+                    self.notify(
+                        format!("Error al importar .ggb desde {}: {err}", job.path.display()),
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_ggb_import_job = Some(job);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.notify(
+                        "Importación .ggb cancelada",
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                }
+            }
+        }
+        // Import CSV/TSV: el commit ocurre aquí (mismo hilo que el sync) con
+        // los mismos mensajes; la lectura ≤2MB ya ocurrió en el worker.
+        if let Some(job) = self.pending_import_job.take() {
+            match job.receiver.try_recv() {
+                Ok(Ok(table)) => {
+                    let row_count = table.xs.len();
+                    match crate::panels::commit_local_xy_table(
+                        &mut self.document,
+                        &mut self.undo_stack,
+                        &mut self.redo_stack,
+                        table,
+                    ) {
+                        Ok(data_id) => {
+                            let label = self
+                                .document
+                                .get_object(data_id)
+                                .map(|object| object.label().to_string())
+                                .unwrap_or_else(|| "tabla".to_string());
+                            self.cas_result = format!(
+                                "Tabla local '{label}' importada con {row_count} pares; la ruta no se guardó."
+                            );
+                            self.notify(
+                                self.cas_result.clone(),
+                                grafito_ui::toast::ToastKind::Success,
+                            );
+                        }
+                        Err(error) => {
+                            self.cas_result = format!("No se pudo guardar la tabla local: {error}");
+                            self.notify(
+                                self.cas_result.clone(),
+                                grafito_ui::toast::ToastKind::Error,
+                            );
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(Err(error)) => {
+                    self.cas_result = format!("No se pudo importar la tabla: {error}");
+                    self.notify(self.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_import_job = Some(job);
+                }
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        // Escritura genérica de texto (export LaTeX del protocolo).
+        if let Some(job) = self.pending_text_job.take() {
+            match job.receiver.try_recv() {
+                Ok(Ok(path)) => {
+                    self.cas_result = format!("Protocolo exportado a LaTeX -> {}", path.display());
+                    self.notify(
+                        self.cas_result.clone(),
+                        grafito_ui::toast::ToastKind::Success,
+                    );
+                    ctx.request_repaint();
+                }
+                Ok(Err(error)) => {
+                    self.cas_result = format!("No se pudo exportar el protocolo: {error}");
+                    self.notify(self.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_text_job = Some(job);
                 }
                 Err(TryRecvError::Disconnected) => {}
             }
@@ -2730,41 +3874,102 @@ impl GrafitoApp {
             return;
         };
 
-        // P1 I/O background placeholder — pattern spawn_profile_save con sync_channel(1) + request_repaint
-        // TODO(P1): migrar a `spawn_document_open` + `pending_open_job` + `poll_background_jobs` para 100% no bloqueante.
-        {
-            let path_clone = path.clone();
-            let ctx_clone = ctx.clone();
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let _ = std::thread::Builder::new()
-                .name("document-open-placeholder".into())
-                .spawn(move || {
-                    let _ = tx.send(Ok::<(PathBuf, Document), String>((
-                        path_clone.clone(),
-                        Document::new(),
-                    )));
-                    ctx_clone.request_repaint();
-                });
-            let _ = rx.try_recv();
-        }
+        // FileController: el diálogo rfd queda en UI thread (modal nativo);
+        // la lectura va a worker y el replace se aplica en `poll_background_jobs`.
+        self.pending_open_job = Some(PendingOpenJob {
+            receiver: spawn_document_open(path, ctx),
+        });
+        self.notify("Abriendo documento…", grafito_ui::toast::ToastKind::Info);
+    }
 
-        match load_document_candidate(&path) {
-            Ok(document) => {
-                self.replace_document(document, Some(path.clone()));
-                self.remember_recent_file(&path);
-                self.notify(
-                    format!("Documento abierto desde {}", path.display()),
-                    grafito_ui::toast::ToastKind::Success,
-                );
-            }
-            Err(error) => {
-                log::error!("Load failed: {error}");
-                self.notify(
-                    format!("Error al cargar: {error}"),
-                    grafito_ui::toast::ToastKind::Error,
-                );
+    /// F1-1: Archivo → "Importar GeoGebra (.ggb)…" con filtro `.ggb` (rfd).
+    /// Piel pura: el diálogo `rfd` vive en UI thread pero el `std::fs::read` +
+    /// parse ocurren en background thread `ggb-import` con `sync_channel(1)` +
+    /// `request_repaint`; el resultado se aplica en `poll_background_jobs`.
+    pub(crate) fn choose_and_import_ggb(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("GeoGebra", &["ggb"])
+            .pick_file()
+        else {
+            return;
+        };
+        if self.pending_ggb_import_job.is_some() {
+            self.notify(
+                "Ya hay una importación .ggb en curso",
+                grafito_ui::toast::ToastKind::Info,
+            );
+            return;
+        }
+        let ctx_clone = ctx.clone();
+        let path_clone = path.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let _ = std::thread::Builder::new()
+            .name("ggb-import".into())
+            .spawn(move || {
+                let result = std::fs::read(&path_clone)
+                    .map_err(|e| format!("no se pudo leer {}: {e}", path_clone.display()))
+                    .and_then(|bytes| import_ggb_bytes_local(&bytes));
+                let _ = tx.send(result);
+                ctx_clone.request_repaint();
+            });
+        self.pending_ggb_import_job = Some(PendingGgbImportJob { receiver: rx, path });
+    }
+
+    /// Aplica un reporte `.ggb` comando-por-comando vía `process_input` con un
+    /// único undo (`save_snapshot(before)` sólo si hubo cambio semántico) y
+    /// toast honesto con `summary()` + `omitted_detail()` (nunca silencioso).
+    fn apply_ggb_import_report(&mut self, report: GgbImportReport, source: &Path) {
+        let file_name = source
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| source.display().to_string());
+        if report.mapped.is_empty() {
+            let msg = format!(
+                "{} desde {file_name}: {}",
+                report.summary(),
+                report.omitted_detail()
+            );
+            self.cas_result = msg.clone();
+            self.notify(msg, grafito_ui::toast::ToastKind::Error);
+            return;
+        }
+        let before = self.document.clone();
+        let mut applied: usize = 0;
+        let mut failures: Vec<String> = Vec::new();
+        for cmd in report.commands() {
+            let mut buf = cmd.clone();
+            match crate::commands::process_input(&mut self.document, &mut buf) {
+                grafito_command::commands::CommandOutcome::Ok
+                | grafito_command::commands::CommandOutcome::Message(_) => {
+                    applied = applied.saturating_add(1);
+                }
+                grafito_command::commands::CommandOutcome::Error(err) => {
+                    if failures.len() < 3 {
+                        failures.push(err);
+                    }
+                }
             }
         }
+        if documents_semantically_differ(&before, &self.document) {
+            self.save_snapshot(before);
+        }
+        let mut msg = format!(
+            "{} desde {file_name}: {applied} aplicados. {}",
+            report.summary(),
+            report.omitted_detail()
+        );
+        if !failures.is_empty() {
+            msg.push_str(&format!(" Fallos: {}", failures.join("; ")));
+        }
+        self.cas_result = msg.clone();
+        let kind = if applied == 0 {
+            grafito_ui::toast::ToastKind::Error
+        } else if failures.is_empty() && report.omitted.is_empty() {
+            grafito_ui::toast::ToastKind::Success
+        } else {
+            grafito_ui::toast::ToastKind::Info
+        };
+        self.notify(msg, kind);
     }
 
     fn remember_recent_file(&mut self, path: &Path) {
@@ -3019,6 +4224,13 @@ impl GrafitoApp {
             self.right_drawer_open = true;
             self.compact_geometry_utility_open = true;
         }
+    }
+
+    pub(crate) const AULA_TAB_INDEX: usize = 3;
+    #[allow(dead_code)]
+    pub(crate) const AULA_TAB_LABEL: &'static str = "Aula";
+    pub(crate) fn is_aula_tab_visible(&self) -> bool {
+        self.classroom.should_show_aula_tab()
     }
 
     /// Carga objetos de ejemplo apropiados para la perspectiva dada.
@@ -3587,6 +4799,7 @@ impl GrafitoApp {
                         inputs[2],
                     ) {
                         Ok(()) => {
+                            self.mark_autosave_dirty();
                             let labels: Vec<String> =
                                 inputs.iter().map(|&i| self.label_of(i)).collect();
                             let output = self.new_labels_since(&before).join(", ");
@@ -3628,6 +4841,7 @@ impl GrafitoApp {
                         inputs[1],
                     ) {
                         Ok(()) => {
+                            self.mark_autosave_dirty();
                             let labels: Vec<String> =
                                 inputs.iter().map(|&i| self.label_of(i)).collect();
                             let output = self.new_labels_since(&before).join(", ");
@@ -3667,6 +4881,7 @@ impl GrafitoApp {
                         inputs[2],
                     ) {
                         Ok(()) => {
+                            self.mark_autosave_dirty();
                             let labels: Vec<String> =
                                 inputs.iter().map(|&i| self.label_of(i)).collect();
                             let output = self.new_labels_since(&before).join(", ");
@@ -3698,6 +4913,7 @@ impl GrafitoApp {
                     &points,
                 ) {
                     Ok(()) => {
+                        self.mark_autosave_dirty();
                         let output = self.new_labels_since(&before).join(", ");
                         self.record_construction_step("ConicByFivePoints", labels, &output);
                     }
@@ -3998,7 +5214,18 @@ impl eframe::App for GrafitoApp {
         }
 
         self.handle_native_close_request(ctx);
+        // AS3 cold-start: el archivo CLI se abre en background en el primer
+        // frame (nunca I/O de documentos en `new()`), con splash honesto.
+        self.maybe_start_startup_open(ctx);
         self.poll_background_jobs(ctx);
+        // Aula: sincronizar opt-in (Piel pura, sin I/O) — campo classroom
+        self.classroom.set_opt_in(self.advanced_red_opt_in);
+        // Autosave tick (nunca en Ui::): escribe sidecar en background si debounce vencido
+        self.tick_autosave(ctx);
+        // A8 recovery (nunca I/O en Ui::): chequeo sidecar en background + poll.
+        // Si hay sidecar más nuevo, `draw_recovery_modal` (junto a onboarding) lo ofrece.
+        self.maybe_start_recovery_check(ctx);
+        self.poll_recovery_job();
 
         // Unified repaint scheduler: gather warmup/animating/busy flags.
         let mut needs_repaint = false;
@@ -4342,6 +5569,10 @@ impl eframe::App for GrafitoApp {
                 self.compact_geometry_utility_open,
             );
             if shell.show_left_drawer {
+                // Clamp Aula tab cuando no está habilitada
+                if !self.is_aula_tab_visible() && self.sidebar_tab == Self::AULA_TAB_INDEX {
+                    self.sidebar_tab = 0;
+                }
                 match self.sidebar_tab {
                     0 => match self.perspective {
                         Perspective::Complex => crate::panels::draw_complex_panel(self, ctx),
@@ -4352,8 +5583,51 @@ impl eframe::App for GrafitoApp {
                         _ => crate::tools_panel::draw_tools_panel(self, ctx),
                     },
                     2 => crate::panels::draw_view_panel(self, ctx),
+                    3 if self.is_aula_tab_visible() => {
+                        crate::classroom::draw_classroom_panel(self, ctx)
+                    }
                     _ => crate::panels::draw_empty_panel(self, ctx),
                 }
+            }
+            // Fallback rail para Aula cuando está habilitada pero el rail de ui.rs no expone el tab
+            // (ownership restringido a app.rs). Dibujamos un botón flotante mínimo sobre el rail
+            // si opt-in, para permitir acceso manual sin tocar ui.rs/panels.rs.
+            if self.is_aula_tab_visible() {
+                let aula_active = self.sidebar_tab == Self::AULA_TAB_INDEX;
+                // No I/O en Ui:: salvo background: este botón solo muta estado en memoria.
+                egui::Area::new(egui::Id::new("aula_rail_fallback"))
+                    .anchor(
+                        egui::Align2::LEFT_TOP,
+                        egui::vec2(
+                            grafito_ui::tokens::SPACE_XS,
+                            grafito_ui::tokens::TOP_BAR_HEIGHT * 4.0
+                                + grafito_ui::tokens::SPACE_XL
+                                + grafito_ui::tokens::SPACE_XS,
+                        ),
+                    )
+                    .show(ctx, |ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Aula")
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .strong(),
+                        )
+                        .selected(aula_active)
+                        .rounding(grafito_ui::tokens::RADIUS_SM);
+                        if ui
+                            .add_sized(
+                                egui::vec2(
+                                    grafito_ui::tokens::RAIL_WIDTH - grafito_ui::tokens::SPACE_SM,
+                                    grafito_ui::tokens::SPACE_XL + grafito_ui::tokens::SPACE_XS,
+                                ),
+                                btn,
+                            )
+                            .clicked()
+                        {
+                            self.sidebar_tab = Self::AULA_TAB_INDEX;
+                            self.left_drawer_open = true;
+                            self.compact_drawer_open = true;
+                        }
+                    });
             }
 
             // La barra «Entrada…» inferior se quitó del layout: los comandos
@@ -4384,6 +5658,8 @@ impl eframe::App for GrafitoApp {
                 // Configuración unificada: una sola ventana (Configuración)
                 self.show_mascot_config = false;
             }
+            // La animación vive dentro del turno del chat (transcript con
+            // `AssistantMedia`): sin ventana compañera.
 
             use crate::RightPanelContent;
             if shell.show_right_drawer && !geometry_utility_dock_available {
@@ -4467,7 +5743,7 @@ impl eframe::App for GrafitoApp {
                         // que '[' y ']' se apilen verticalmente en 34px.
                         let zf_btn = egui::Button::new(
                             egui::RichText::new("[]")
-                                .size(12.0)
+                                .size(grafito_ui::tokens::TYPE_SM)
                                 .color(theme.text_primary),
                         )
                         .wrap_mode(egui::TextWrapMode::Extend)
@@ -4654,8 +5930,12 @@ impl eframe::App for GrafitoApp {
                         {
                             #[cfg(feature = "profile")]
                             puffin::profile_scope_if!(canvas_resize_preview, "resize_cpu_grid_3d");
+                            // Clip como en 2D: el grid pinta texto (ejes/ticks) que
+                            // sin clip deja slivers en paneles vecinos.
+                            let mut grid_painter = ui.painter().clone();
+                            grid_painter.set_clip_rect(canvas_rect);
                             self.draw_3d_grid(
-                                ui.painter(),
+                                &grid_painter,
                                 canvas_rect,
                                 w,
                                 h,
@@ -4704,8 +5984,10 @@ impl eframe::App for GrafitoApp {
                         {
                             #[cfg(feature = "profile")]
                             puffin::profile_scope_if!(canvas_resize_preview, "resize_cpu_grid_3d");
+                            let mut grid_painter = ui.painter().clone();
+                            grid_painter.set_clip_rect(canvas_rect);
                             self.draw_3d_grid(
-                                ui.painter(),
+                                &grid_painter,
                                 canvas_rect,
                                 w,
                                 h,
@@ -4767,16 +6049,23 @@ impl eframe::App for GrafitoApp {
         // con el logo, nombre y versión. Se desvanece con un fade-out.
         if let Some(start) = self.splash_start {
             let elapsed = start.elapsed();
-            let total_ms = 1500_u128;
-            let fade_out_start_ms = 1000_u128;
             let elapsed_ms = elapsed.as_millis();
-            if elapsed_ms < total_ms {
+            // F10-D cold start instrumentado: first_frame real una sola vez.
+            if !self.startup_first_frame_logged {
+                self.startup_first_frame_logged = true;
+                log::info!(
+                    "startup: first_frame en {}ms ({} objetos)",
+                    elapsed_ms,
+                    self.document.object_count(),
+                );
+            }
+            if elapsed_ms < SPLASH_TOTAL_MS {
                 let _theme = grafito_ui::theme::current_theme(ctx);
-                let alpha = if elapsed_ms < fade_out_start_ms {
+                let alpha = if elapsed_ms < SPLASH_FADE_START_MS {
                     1.0
                 } else {
-                    let t = (elapsed_ms - fade_out_start_ms) as f32
-                        / (total_ms - fade_out_start_ms) as f32;
+                    let t = (elapsed_ms - SPLASH_FADE_START_MS) as f32
+                        / (SPLASH_TOTAL_MS - SPLASH_FADE_START_MS) as f32;
                     1.0 - t
                 };
                 egui::Area::new(egui::Id::new("splash_overlay"))
@@ -4828,24 +6117,50 @@ impl eframe::App for GrafitoApp {
                                     );
                                 }
                             }
-                            ui.add_space(16.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_LG);
                             ui.label(
                                 egui::RichText::new("Grafito")
                                     .size(36.0)
                                     .strong()
                                     .color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)),
                             );
-                            ui.add_space(4.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
                             ui.label(
                                 egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                     .size(14.0)
                                     .color(egui::Color32::from_white_alpha((180.0 * alpha) as u8)),
                             );
-                            ui.add_space(8.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_SM);
                             ui.label(
                                 egui::RichText::new("Geometría interactiva - Algebra - Calculo")
                                     .size(13.0)
                                     .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
+                            );
+                            // G-E splash progreso real por fases (S): gates reales
+                            // vía `splash_stage` (GPU → escena → plugins, más
+                            // "Abriendo documento…" si el CLI sigue en background),
+                            // barra done/3 honesta, sin % falso de tiempo.
+                            let (done, stage) = self.splash_stage();
+                            let phase = if self.document.object_count() > 0 {
+                                format!(
+                                    "{stage} · {} de 3 · Documento · {} objetos · {}ms",
+                                    done,
+                                    self.document.object_count(),
+                                    elapsed_ms
+                                )
+                            } else {
+                                format!("{stage} · {done} de 3 · {elapsed_ms}ms")
+                            };
+                            ui.label(
+                                egui::RichText::new(phase)
+                                    .size(13.0)
+                                    .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
+                            );
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / 3.0)
+                                    .desired_width(220.0)
+                                    .show_percentage(),
                             );
                         });
                     });
@@ -4862,7 +6177,10 @@ impl eframe::App for GrafitoApp {
         }
 
         // Paleta de comandos (Ctrl+K): ventana flotante de búsqueda rápida.
-        if let Some(name) = self.command_palette.show(ctx) {
+        if let Some(name) = self
+            .command_palette
+            .show_localized(ctx, self.config_locale())
+        {
             self.apply_palette_command(&name, ctx);
         }
 
@@ -4875,6 +6193,9 @@ impl eframe::App for GrafitoApp {
         if self.show_onboarding {
             self.draw_onboarding_window(ctx);
         }
+        // A8 recovery al arranque: modal si el sidecar es más nuevo que el main.
+        // Piel pura (cero I/O en Ui::, el job ya cargó todo en background).
+        self.draw_recovery_modal(ctx);
         // Configuración — ventana única (legado show_mascot_config delega a assistant.settings_open)
         if self.show_mascot_config {
             self.assistant.settings_open = true;
@@ -4915,6 +6236,822 @@ impl eframe::App for GrafitoApp {
     }
 }
 
+// ── F1-1 Importador `.ggb` mínimo (std-only, espejo de `grafito-ggb`) ────────
+// Cablea el import existente sin añadir dependencia (no se toca `Cargo.toml`):
+// presupuestos espejo `GGB_MAX_BYTES` 64MiB / `GGB_MAX_XML_BYTES` 10MiB /
+// `GGB_MAX_ELEMS` 5000 / `GGB_MAX_ZIP_ENTRIES` 4096. Soporta ZIP `Stored`
+// (método 0, el usado por los dorados) y rechaza `Deflated` (método 8) con
+// error honesto que indica usar el crate completo — nunca fallo silencioso.
+// Mapea `point` → `Point[(x, y)]` y `expression type=function` →
+// `Function[...]`; el resto genera `GgbOmitted` con razón.
+
+/// Cota de atributo espejo de `grafito-ggb::MAX_ATTR_BYTES` (8192).
+const GGB_MAX_ATTR_BYTES: usize = 8192;
+
+/// Puerta de entrada pura del import `.ggb` — espejo de
+/// `grafito_ggb::import_ggb_bytes`. Sin I/O: recibe bytes ya leídos en
+/// background thread.
+pub(crate) fn import_ggb_bytes_local(bytes: &[u8]) -> Result<GgbImportReport, String> {
+    let xml = ggb_extract_xml(bytes)?;
+    ggb_parse_report(&xml)
+}
+
+fn ggb_read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let lo = *bytes.get(offset)?;
+    let hi = *bytes.get(offset.checked_add(1)?)?;
+    Some(u16::from_le_bytes([lo, hi]))
+}
+
+fn ggb_read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let b0 = *bytes.get(offset)?;
+    let b1 = *bytes.get(offset.checked_add(1)?)?;
+    let b2 = *bytes.get(offset.checked_add(2)?)?;
+    let b3 = *bytes.get(offset.checked_add(3)?)?;
+    Some(u32::from_le_bytes([b0, b1, b2, b3]))
+}
+
+fn ggb_contains(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+fn ggb_validate_entry_name(name: &str) -> Result<(), String> {
+    if name.starts_with('/') || name.starts_with('\\') {
+        return Err(format!("entrada peligrosa '{name}': ruta absoluta"));
+    }
+    let first = name.as_bytes().first().copied().unwrap_or(0);
+    let second = name.as_bytes().get(1).copied().unwrap_or(0);
+    if first.is_ascii_alphabetic() && second == b':' {
+        return Err(format!("entrada peligrosa '{name}': ruta con unidad"));
+    }
+    let normalized = name.replace('\\', "/");
+    let mut depth: usize = 0;
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    format!("entrada peligrosa '{name}': ruta fuera del archivo (..)")
+                })?;
+            }
+            _ => {
+                depth = depth.saturating_add(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extrae `geogebra.xml` de un contenedor ZIP `Stored` con presupuestos espejo.
+/// Rechaza `Deflated` con mensaje honesto (requiere crate completo).
+fn ggb_extract_xml(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() {
+        return Err("archivo .ggb vacío".to_string());
+    }
+    let total = bytes.len() as u64;
+    if total > GGB_MAX_BYTES {
+        return Err(format!(
+            "archivo .ggb demasiado grande: {total} B (límite {GGB_MAX_BYTES} B)"
+        ));
+    }
+    let mut offset: usize = 0;
+    let mut entries: usize = 0;
+    let mut found: Option<Vec<u8>> = None;
+    while let Some(header_end) = offset.checked_add(30) {
+        if header_end > bytes.len() {
+            break;
+        }
+        let Some(sig) = ggb_read_u32_le(bytes, offset) else {
+            break;
+        };
+        if sig == 0x0605_4b50 || sig == 0x0201_4b50 {
+            break;
+        }
+        if sig != 0x0403_4b50 {
+            if offset == 0 {
+                return Err("ZIP inválido: firma local no encontrada".to_string());
+            }
+            break;
+        }
+        let Some(flags_off) = offset.checked_add(6) else {
+            return Err("ZIP offset desbordado (flags)".to_string());
+        };
+        let Some(method_off) = offset.checked_add(8) else {
+            return Err("ZIP offset desbordado (método)".to_string());
+        };
+        let Some(comp_off) = offset.checked_add(18) else {
+            return Err("ZIP offset desbordado (tamaño)".to_string());
+        };
+        let Some(uncomp_off) = offset.checked_add(22) else {
+            return Err("ZIP offset desbordado (tamaño)".to_string());
+        };
+        let Some(name_len_off) = offset.checked_add(26) else {
+            return Err("ZIP offset desbordado (nombre)".to_string());
+        };
+        let Some(extra_len_off) = offset.checked_add(28) else {
+            return Err("ZIP offset desbordado (extra)".to_string());
+        };
+        let (
+            Some(flags),
+            Some(method),
+            Some(comp_size),
+            Some(uncomp_size),
+            Some(name_len),
+            Some(extra_len),
+        ) = (
+            ggb_read_u16_le(bytes, flags_off),
+            ggb_read_u16_le(bytes, method_off),
+            ggb_read_u32_le(bytes, comp_off),
+            ggb_read_u32_le(bytes, uncomp_off),
+            ggb_read_u16_le(bytes, name_len_off),
+            ggb_read_u16_le(bytes, extra_len_off),
+        )
+        else {
+            return Err("ZIP truncado en cabecera local".to_string());
+        };
+        let name_len_usize = usize::from(name_len);
+        let extra_len_usize = usize::from(extra_len);
+        let comp_usize =
+            usize::try_from(comp_size).map_err(|e| format!("tamaño comprimido inválido: {e}"))?;
+        let Some(name_start) = offset.checked_add(30) else {
+            return Err("ZIP offset desbordado (nombre)".to_string());
+        };
+        let Some(name_end) = name_start.checked_add(name_len_usize) else {
+            return Err("ZIP nombre desbordado".to_string());
+        };
+        let Some(extra_end) = name_end.checked_add(extra_len_usize) else {
+            return Err("ZIP extra desbordado".to_string());
+        };
+        let Some(data_end) = extra_end.checked_add(comp_usize) else {
+            return Err("ZIP datos desbordados".to_string());
+        };
+        if data_end > bytes.len() {
+            return Err("ZIP truncado: datos fuera de rango".to_string());
+        }
+        let Some(name_bytes) = bytes.get(name_start..name_end) else {
+            return Err("ZIP nombre fuera de rango".to_string());
+        };
+        let name =
+            std::str::from_utf8(name_bytes).map_err(|e| format!("ZIP nombre no UTF-8: {e}"))?;
+        ggb_validate_entry_name(name)?;
+        if flags & 0x0001 != 0 {
+            return Err(format!("entrada '{name}': cifrada no soportada"));
+        }
+        if flags & 0x0008 != 0 {
+            return Err(format!(
+                "entrada '{name}': descriptor de datos no soportado en import mínimo"
+            ));
+        }
+        if method != 0 && method != 8 {
+            return Err(format!(
+                "entrada '{name}': método {method} no soportado (solo Stored/Deflated)"
+            ));
+        }
+        if name == GGB_XML_NAME && found.is_none() {
+            if method == 8 {
+                return Err(
+                    "geogebra.xml con compresión deflate no soportada en import mínimo \
+                     (usa el crate grafito-ggb completo) — archivo no importado"
+                        .to_string(),
+                );
+            }
+            if u64::from(uncomp_size) > GGB_MAX_XML_BYTES {
+                return Err(format!(
+                    "geogebra.xml demasiado grande: {} B (límite {GGB_MAX_XML_BYTES} B)",
+                    uncomp_size
+                ));
+            }
+            let Some(data) = bytes.get(extra_end..data_end) else {
+                return Err("geogebra.xml fuera de rango".to_string());
+            };
+            if data.len() as u64 > GGB_MAX_XML_BYTES {
+                return Err(format!(
+                    "geogebra.xml demasiado grande: {} B (límite {GGB_MAX_XML_BYTES} B)",
+                    data.len()
+                ));
+            }
+            if ggb_contains(data, b"<!DOCTYPE") || ggb_contains(data, b"<!ENTITY") {
+                return Err("DOCTYPE/ENTITY rechazado (bomba de entidades)".to_string());
+            }
+            found = Some(data.to_vec());
+        }
+        entries = entries
+            .checked_add(1)
+            .ok_or_else(|| "contador de entradas desbordado".to_string())?;
+        if entries > GGB_MAX_ZIP_ENTRIES {
+            return Err(format!(
+                "demasiadas entradas ZIP: {entries} (límite {GGB_MAX_ZIP_ENTRIES})"
+            ));
+        }
+        offset = data_end;
+    }
+    found.ok_or_else(|| "geogebra.xml faltante en .ggb".to_string())
+}
+
+fn ggb_fmt_num(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".to_string();
+    }
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() || s == "-0" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn ggb_sanitize_label(raw: &str) -> String {
+    let t = raw.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for ch in t.chars() {
+        if ch.is_alphanumeric() || ch == '_' || ch == '\'' {
+            out.push(ch);
+        } else if ch == ' ' || ch == '-' {
+            out.push('_');
+        }
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+/// Extrae `nombre="valor"` (comillas `"` o `'`) de un tag XML sin dependencias.
+fn ggb_attr(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=");
+    let mut from: usize = 0;
+    while let Some(rest) = tag.get(from..) {
+        let rel = rest.find(&needle)?;
+        let eq_end = from.checked_add(rel)?.checked_add(needle.len())?;
+        let after_eq = tag.get(eq_end..)?;
+        let trimmed = after_eq.trim_start();
+        let skipped = after_eq.len().saturating_sub(trimmed.len());
+        let val_start = eq_end.checked_add(skipped)?;
+        let quote = trimmed.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            let next_from = val_start.checked_add(1)?;
+            if next_from >= tag.len() {
+                return None;
+            }
+            from = next_from;
+            continue;
+        }
+        let after_quote = trimmed.get(1..)?;
+        let end = after_quote.find(quote)?;
+        let value = after_quote.get(..end)?;
+        if value.len() > GGB_MAX_ATTR_BYTES {
+            return None;
+        }
+        return Some(value.to_string());
+    }
+    None
+}
+
+/// Parsea `geogebra.xml` a comandos Grafito con presupuestos espejo.
+/// Mapea `point` y `expression type=function`; el resto → omitido honesto.
+fn ggb_parse_report(xml: &[u8]) -> Result<GgbImportReport, String> {
+    let text = std::str::from_utf8(xml).map_err(|e| format!("geogebra.xml no UTF-8: {e}"))?;
+    if text.contains("<!DOCTYPE") || text.contains("<!ENTITY") {
+        return Err("DOCTYPE/ENTITY rechazado (bomba de entidades)".to_string());
+    }
+    let mut report = GgbImportReport {
+        mapped: Vec::new(),
+        omitted: Vec::new(),
+    };
+    let mut count: usize = 0;
+    let push_mapped =
+        |report: &mut GgbImportReport, kind: String, label: String, command: String| {
+            if command.len() > GGB_MAX_EXPR_CHARS {
+                report.omitted.push(GgbOmitted {
+                    kind,
+                    label,
+                    reason: format!("comando excede {GGB_MAX_EXPR_CHARS} caracteres"),
+                });
+                return;
+            }
+            if report.mapped.len() >= GGB_MAX_ELEMS {
+                report.omitted.push(GgbOmitted {
+                    kind,
+                    label,
+                    reason: format!("presupuesto MAX_ELEMS {GGB_MAX_ELEMS} excedido"),
+                });
+                return;
+            }
+            report.mapped.push(GgbMappedCommand { kind, command });
+        };
+
+    // ── <element …> ──────────────────────────────────────────────
+    let mut pos: usize = 0;
+    while let Some(after_pos) = text.get(pos..) {
+        let Some(rel) = after_pos.find("<element") else {
+            break;
+        };
+        let Some(start) = pos.checked_add(rel) else {
+            return Err("offset desbordado al parsear <element>".to_string());
+        };
+        let Some(rest) = text.get(start..) else {
+            break;
+        };
+        let Some(tag_end_rel) = rest.find('>') else {
+            return Err("elemento <element> sin cierre '>'".to_string());
+        };
+        let Some(tag_end) = start.checked_add(tag_end_rel) else {
+            return Err("offset desbordado en <element>".to_string());
+        };
+        let Some(opening_end) = tag_end.checked_add(1) else {
+            return Err("offset desbordado tras <element>".to_string());
+        };
+        let Some(opening) = text.get(start..opening_end) else {
+            return Err("elemento fuera de rango".to_string());
+        };
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| "contador desbordado".to_string())?;
+        if count > GGB_MAX_ELEMS {
+            return Err(format!("límite MAX_ELEMS {GGB_MAX_ELEMS} excedido"));
+        }
+        let tipo_raw = ggb_attr(opening, "type").unwrap_or_default();
+        let label_raw = ggb_attr(opening, "label").unwrap_or_default();
+        let etiqueta = ggb_sanitize_label(&label_raw);
+        let is_self_closing = opening.trim_end().ends_with("/>");
+        let inner: &str = if is_self_closing {
+            ""
+        } else if let Some(content_start) = tag_end.checked_add(1) {
+            if let Some(after) = text.get(content_start..) {
+                if let Some(close_rel) = after.find("</element>") {
+                    if let Some(inner_end) = content_start.checked_add(close_rel) {
+                        text.get(content_start..inner_end).unwrap_or("")
+                    } else {
+                        return Err("offset desbordado en </element>".to_string());
+                    }
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            }
+        } else {
+            return Err("offset desbordado tras <element>".to_string());
+        };
+        let tipo_lc = tipo_raw.trim().to_ascii_lowercase();
+        if tipo_lc == "point" {
+            let mut mapped_done = false;
+            if let Some(coords_rel) = inner.find("<coords") {
+                if let Some(coords_rest) = inner.get(coords_rel..) {
+                    if let Some(coords_end_rel) = coords_rest.find('>') {
+                        if let Some(coords_tag) =
+                            coords_rest.get(..coords_end_rel.saturating_add(1))
+                        {
+                            let x_opt =
+                                ggb_attr(coords_tag, "x").and_then(|s| s.parse::<f64>().ok());
+                            let y_opt =
+                                ggb_attr(coords_tag, "y").and_then(|s| s.parse::<f64>().ok());
+                            if let (Some(x), Some(y)) = (x_opt, y_opt) {
+                                if x.is_finite() && y.is_finite() {
+                                    let cmd =
+                                        format!("Point[({}, {})]", ggb_fmt_num(x), ggb_fmt_num(y));
+                                    push_mapped(
+                                        &mut report,
+                                        "Point".to_string(),
+                                        etiqueta.clone(),
+                                        cmd,
+                                    );
+                                    mapped_done = true;
+                                } else {
+                                    report.omitted.push(GgbOmitted {
+                                        kind: tipo_raw.clone(),
+                                        label: etiqueta.clone(),
+                                        reason: "coordenadas no finitas".to_string(),
+                                    });
+                                    mapped_done = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !mapped_done {
+                let reason = if !inner.contains("<coords") {
+                    "point sin coords".to_string()
+                } else {
+                    "point con coords inválidas".to_string()
+                };
+                report.omitted.push(GgbOmitted {
+                    kind: tipo_raw.clone(),
+                    label: etiqueta.clone(),
+                    reason,
+                });
+            }
+        } else if tipo_lc.contains("3d")
+            || tipo_lc.contains("quadric")
+            || tipo_lc.contains("plane")
+            || tipo_lc.contains("sphere")
+        {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: "3D/quadric omitido en núcleo aula F2".to_string(),
+            });
+        } else if tipo_lc == "conic" || tipo_lc == "conicpart" {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: "cónica no soportada en import mínimo \
+                         (usa crate grafito-ggb completo para F2)"
+                    .to_string(),
+            });
+        } else if tipo_lc == "line" || tipo_lc == "segment" || tipo_lc == "ray" {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: format!(
+                    "{tipo_raw} elemento sin comando — omitido \
+                     (usar comando {tipo_raw} explícito)"
+                ),
+            });
+        } else if tipo_lc == "numeric" {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: "numeric sin slider ni celda — pendiente mapeo variable".to_string(),
+            });
+        } else {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: "tipo no soportado en F2 (omitido honesto)".to_string(),
+            });
+        }
+        if is_self_closing {
+            pos = opening_end;
+        } else if let Some(content_start) = tag_end.checked_add(1) {
+            if let Some(after) = text.get(content_start..) {
+                if let Some(close_rel) = after.find("</element>") {
+                    let close_len = "</element>".len();
+                    if let Some(close_end) = content_start
+                        .checked_add(close_rel)
+                        .and_then(|v| v.checked_add(close_len))
+                    {
+                        pos = close_end;
+                    } else {
+                        return Err("offset desbordado al cerrar </element>".to_string());
+                    }
+                } else {
+                    pos = content_start;
+                }
+            } else {
+                break;
+            }
+        } else {
+            return Err("offset desbordado al avanzar </element>".to_string());
+        }
+        if pos >= text.len() {
+            break;
+        }
+    }
+
+    // ── <command …> → omitido honesto (el import mínimo no resuelve refs) ──
+    let mut cpos: usize = 0;
+    while let Some(after_pos) = text.get(cpos..) {
+        let Some(rel) = after_pos.find("<command") else {
+            break;
+        };
+        let Some(start) = cpos.checked_add(rel) else {
+            return Err("offset desbordado al parsear <command>".to_string());
+        };
+        let Some(rest) = text.get(start..) else {
+            break;
+        };
+        let Some(tag_end_rel) = rest.find('>') else {
+            return Err("comando <command> sin cierre '>'".to_string());
+        };
+        let Some(tag_end) = start.checked_add(tag_end_rel) else {
+            return Err("offset desbordado en <command>".to_string());
+        };
+        let Some(opening_end) = tag_end.checked_add(1) else {
+            return Err("offset desbordado tras <command>".to_string());
+        };
+        let Some(opening) = text.get(start..opening_end) else {
+            return Err("comando fuera de rango".to_string());
+        };
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| "contador desbordado".to_string())?;
+        if count > GGB_MAX_ELEMS {
+            return Err(format!("límite MAX_ELEMS {GGB_MAX_ELEMS} excedido"));
+        }
+        let nombre = ggb_attr(opening, "name").unwrap_or_default();
+        let kind = if nombre.trim().is_empty() {
+            "command".to_string()
+        } else {
+            nombre.clone()
+        };
+        report.omitted.push(GgbOmitted {
+            kind,
+            label: String::new(),
+            reason: "comando omitido en import mínimo \
+                     (usa crate grafito-ggb completo para F2)"
+                .to_string(),
+        });
+        if let Some(content_start) = tag_end.checked_add(1) {
+            if let Some(after) = text.get(content_start..) {
+                if let Some(close_rel) = after.find("</command>") {
+                    let close_len = "</command>".len();
+                    if let Some(close_end) = content_start
+                        .checked_add(close_rel)
+                        .and_then(|v| v.checked_add(close_len))
+                    {
+                        cpos = close_end;
+                    } else {
+                        return Err("offset desbordado al cerrar </command>".to_string());
+                    }
+                } else {
+                    cpos = opening_end;
+                }
+            } else {
+                break;
+            }
+        } else {
+            return Err("offset desbordado al avanzar </command>".to_string());
+        }
+        if cpos >= text.len() {
+            break;
+        }
+    }
+
+    // ── <expression …> → Function si es función, si no omitido honesto ──
+    let mut epos: usize = 0;
+    while let Some(after_pos) = text.get(epos..) {
+        let Some(rel) = after_pos.find("<expression") else {
+            break;
+        };
+        let Some(start) = epos.checked_add(rel) else {
+            return Err("offset desbordado al parsear <expression>".to_string());
+        };
+        let Some(rest) = text.get(start..) else {
+            break;
+        };
+        let Some(tag_end_rel) = rest.find('>') else {
+            return Err("expresión <expression> sin cierre '>'".to_string());
+        };
+        let Some(tag_end) = start.checked_add(tag_end_rel) else {
+            return Err("offset desbordado en <expression>".to_string());
+        };
+        let Some(opening_end) = tag_end.checked_add(1) else {
+            return Err("offset desbordado tras <expression>".to_string());
+        };
+        let Some(opening) = text.get(start..opening_end) else {
+            return Err("expresión fuera de rango".to_string());
+        };
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| "contador desbordado".to_string())?;
+        if count > GGB_MAX_ELEMS {
+            return Err(format!("límite MAX_ELEMS {GGB_MAX_ELEMS} excedido"));
+        }
+        let etiqueta = ggb_sanitize_label(&ggb_attr(opening, "label").unwrap_or_default());
+        let exp = ggb_attr(opening, "exp").unwrap_or_default();
+        let tipo = ggb_attr(opening, "type").unwrap_or_default();
+        let tipo_lc = tipo.trim().to_ascii_lowercase();
+        let es_funcion = tipo_lc == "function"
+            || tipo_lc == "functionnvar"
+            || exp.contains("->")
+            || exp.contains('(');
+        if es_funcion {
+            let exp_trim = exp.trim();
+            if exp_trim.is_empty() {
+                report.omitted.push(GgbOmitted {
+                    kind: "Function".to_string(),
+                    label: etiqueta.clone(),
+                    reason: "expresión vacía".to_string(),
+                });
+            } else if exp_trim.len() > GGB_MAX_EXPR_CHARS {
+                report.omitted.push(GgbOmitted {
+                    kind: "Function".to_string(),
+                    label: etiqueta.clone(),
+                    reason: format!("expresión excede {GGB_MAX_EXPR_CHARS} caracteres"),
+                });
+            } else {
+                let rhs = if exp_trim.contains('=') {
+                    exp_trim
+                        .split_once('=')
+                        .map(|x| x.1)
+                        .unwrap_or(exp_trim)
+                        .trim()
+                        .to_string()
+                } else {
+                    exp_trim.to_string()
+                };
+                if rhs.is_empty() {
+                    report.omitted.push(GgbOmitted {
+                        kind: "Function".to_string(),
+                        label: etiqueta.clone(),
+                        reason: "expresión vacía".to_string(),
+                    });
+                } else {
+                    let cmd = format!("Function[{rhs}]");
+                    push_mapped(&mut report, "Function".to_string(), etiqueta.clone(), cmd);
+                }
+            }
+        } else if !exp.trim().is_empty() {
+            report.omitted.push(GgbOmitted {
+                kind: format!("expression:{}", tipo.clone()),
+                label: etiqueta.clone(),
+                reason: "tipo de expresión no mapeado en F0/F1 (omitido honesto)".to_string(),
+            });
+        }
+        epos = opening_end;
+        if epos >= text.len() {
+            break;
+        }
+    }
+
+    Ok(report)
+}
+
+#[cfg(test)]
+mod ggb_import_local_tests {
+    use super::{import_ggb_bytes_local, GGB_XML_NAME};
+    use crate::commands::process_input;
+
+    fn crc32_ieee(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                if crc & 1 == 1 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        !crc
+    }
+
+    fn zip_store(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        let mut offsets: Vec<u32> = Vec::new();
+        let mut sizes: Vec<(u32, u32)> = Vec::new();
+        for (name, data) in files {
+            offsets.push(u32::try_from(out.len()).unwrap_or(0));
+            let crc = crc32_ieee(data);
+            let size = u32::try_from(data.len()).unwrap_or(0);
+            sizes.push((crc, size));
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            let name_bytes = name.as_bytes();
+            out.extend_from_slice(&(u16::try_from(name_bytes.len()).unwrap_or(0)).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(data);
+        }
+        let cd_start = u32::try_from(out.len()).unwrap_or(0);
+        for (idx, (name, _)) in files.iter().enumerate() {
+            let (crc, size) = sizes[idx];
+            let offset = offsets[idx];
+            out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            let name_bytes = name.as_bytes();
+            out.extend_from_slice(&(u16::try_from(name_bytes.len()).unwrap_or(0)).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(name_bytes);
+        }
+        let cd_size = u32::try_from(out.len())
+            .unwrap_or(0)
+            .saturating_sub(cd_start);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(u16::try_from(files.len()).unwrap_or(0)).to_le_bytes());
+        out.extend_from_slice(&(u16::try_from(files.len()).unwrap_or(0)).to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_start.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    fn ggb_with(xml: &str) -> Vec<u8> {
+        zip_store(&[(GGB_XML_NAME, xml.as_bytes())])
+    }
+
+    fn xml_header() -> String {
+        r#"<?xml version="1.0" encoding="utf-8"?><geogebra format="5.0"><construction>"#.to_string()
+    }
+
+    fn xml_footer() -> String {
+        "</construction></geogebra>".to_string()
+    }
+
+    #[test]
+    fn import_minimo_dos_puntos_mapea_y_reporta_honesto() {
+        let xml = format!(
+            "{}{odef}{}",
+            xml_header(),
+            xml_footer(),
+            odef = r#"<element type="point" label="A"><coords x="1" y="2" z="1" w="1"/></element><element type="point" label="B"><coords x="3" y="4" z="1" w="1"/></element>"#
+        );
+        let bytes = ggb_with(&xml);
+        let rep = import_ggb_bytes_local(&bytes).expect("dorado mínimo debe importar");
+        assert_eq!(rep.mapped.len(), 2);
+        assert!(rep.omitted.is_empty(), "omitidos {:?}", rep.omitted);
+        let cmds = rep.commands();
+        assert_eq!(cmds.len(), 2);
+        assert!(
+            cmds.iter().all(|c| c.starts_with("Point[")),
+            "comandos {cmds:?}"
+        );
+        let summary = rep.summary();
+        assert!(summary.contains("2 objetos"), "resumen {summary}");
+        assert!(summary.contains("Point x2"), "resumen {summary}");
+        assert_eq!(rep.omitted_detail(), "sin omitidos");
+        let mut doc = grafito_core::Document::new();
+        for mut c in cmds {
+            let outcome = process_input(&mut doc, &mut c);
+            assert!(
+                !matches!(outcome, grafito_command::commands::CommandOutcome::Error(_)),
+                "comando debe aplicar"
+            );
+        }
+        assert_eq!(doc.object_count(), 2);
+    }
+
+    #[test]
+    fn tipo_no_soportado_genera_omitido_honesto_no_silencioso() {
+        let xml = format!(
+            "{}<element type=\"point\" label=\"A\"><coords x=\"0\" y=\"0\" z=\"1\" w=\"1\"/></element><element type=\"angle\" label=\"a\"><value val=\"45\"/></element>{}",
+            xml_header(),
+            xml_footer()
+        );
+        let bytes = ggb_with(&xml);
+        let rep = import_ggb_bytes_local(&bytes).expect("debe importar con omitido");
+        assert_eq!(rep.mapped.len(), 1);
+        assert!(!rep.omitted.is_empty(), "esperaba omitido honesto");
+        assert!(rep.omitted.iter().any(|o| o.kind == "angle"));
+        let detail = rep.omitted_detail();
+        assert!(detail.contains("omitidos"), "detalle {detail}");
+        assert!(
+            rep.summary().contains("1 objetos"),
+            "resumen {}",
+            rep.summary()
+        );
+    }
+
+    #[test]
+    fn bytes_vacios_y_sin_xml_fallan_honesto() {
+        let err_vacio = import_ggb_bytes_local(&[]).unwrap_err();
+        assert!(!err_vacio.is_empty(), "error vacío no debe ser silencioso");
+        let sin_xml = zip_store(&[("otro.txt", b"hola")]);
+        let err_faltante = import_ggb_bytes_local(&sin_xml).unwrap_err();
+        assert!(
+            err_faltante.contains("geogebra.xml"),
+            "error {err_faltante}"
+        );
+    }
+
+    #[test]
+    fn deflate_rechazado_honesto_no_silencioso() {
+        let xml = format!(
+            "{}<element type=\"point\" label=\"A\"><coords x=\"0\" y=\"0\" z=\"1\" w=\"1\"/></element>{}",
+            xml_header(),
+            xml_footer()
+        );
+        let mut bytes = ggb_with(&xml);
+        // Parchea método Stored(0) → Deflated(8) en la primera cabecera local (offset 8).
+        if let Some(slot) = bytes.get_mut(8..10) {
+            slot.copy_from_slice(&8u16.to_le_bytes());
+        }
+        let err = import_ggb_bytes_local(&bytes).unwrap_err();
+        assert!(err.contains("deflate"), "debe mencionar deflate, got {err}");
+    }
+}
+
 impl GrafitoApp {
     /// Ventana onboarding 30s Scandinavian — gating `AppConfig::onboarding_completed` (utils.rs:46-48).
     /// 420px, 3 bullets progressive disclosure (5/8/17 grupos), botones [Probar ejemplo][Empezar vacío][No mostrar].
@@ -4944,14 +7081,14 @@ impl GrafitoApp {
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Grafito — pizarra geométrica interactiva")
-                            .size(16.0)
+                            .size(grafito_ui::tokens::TYPE_MD)
                             .strong()
                             .color(theme.text_primary),
                     );
                 });
-                ui.add_space(8.0);
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.label(
                     egui::RichText::new("• Construye con 5 herramientas esenciales — Mover, Punto, Recta, Círculo, Polígono")
                         .size(grafito_ui::tokens::TYPE_XS)
@@ -4967,9 +7104,9 @@ impl GrafitoApp {
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_primary),
                 );
-                ui.add_space(12.0);
+                ui.add_space(grafito_ui::tokens::SPACE_MD);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.horizontal(|ui| {
                     let total_w = 3.0 * 120.0 + 2.0 * 8.0;
                     let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
@@ -4978,7 +7115,7 @@ impl GrafitoApp {
                     if ui
                         .add_sized(
                             egui::vec2(120.0, 32.0),
-                            egui::Button::new(egui::RichText::new("Probar ejemplo").size(12.0))
+                            egui::Button::new(egui::RichText::new("Probar ejemplo").size(grafito_ui::tokens::TYPE_SM))
                                 .rounding(grafito_ui::tokens::RADIUS_MD)
                                 .fill(theme.accent)
                                 .stroke(egui::Stroke::NONE),
@@ -4995,7 +7132,7 @@ impl GrafitoApp {
                     if ui
                         .add_sized(
                             egui::vec2(120.0, 32.0),
-                            egui::Button::new(egui::RichText::new("Empezar vacío").size(12.0))
+                            egui::Button::new(egui::RichText::new("Empezar vacío").size(grafito_ui::tokens::TYPE_SM))
                                 .rounding(grafito_ui::tokens::RADIUS_MD)
                                 .fill(theme.panel_bg)
                                 .stroke(egui::Stroke::new(1.0, theme.separator)),
@@ -5009,7 +7146,7 @@ impl GrafitoApp {
                             egui::vec2(120.0, 32.0),
                             egui::Button::new(
                                 egui::RichText::new("No mostrar")
-                                    .size(12.0)
+                                    .size(grafito_ui::tokens::TYPE_SM)
                                     .color(theme.text_secondary),
                             )
                             .rounding(grafito_ui::tokens::RADIUS_MD)
@@ -5024,7 +7161,7 @@ impl GrafitoApp {
                         save_config(&cfg);
                     }
                 });
-                ui.add_space(4.0);
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
             });
         if !open {
             self.show_onboarding = false;
@@ -5050,7 +7187,7 @@ impl GrafitoApp {
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Grafito")
-                            .size(28.0)
+                            .size(grafito_ui::tokens::TYPE_XXL)
                             .strong()
                             .color(theme.accent),
                     );
@@ -5060,13 +7197,18 @@ impl GrafitoApp {
                             .size(13.0)
                             .color(theme.text_secondary),
                     );
-                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new(format!("Idioma: {}", self.locale.code()))
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_tertiary),
+                    );
+                    ui.add_space(grafito_ui::tokens::SPACE_MD);
                     ui.label(
                         egui::RichText::new(
                             "Calculadora gráfica interactiva para geometría, álgebra, \
                              cálculo, CAS y estadística. Rápida, precisa y simple.",
                         )
-                        .size(12.0)
+                        .size(grafito_ui::tokens::TYPE_SM)
                         .color(theme.text_primary),
                     );
                     ui.add_space(10.0);
@@ -5074,25 +7216,25 @@ impl GrafitoApp {
                     ui.add_space(10.0);
                     ui.label(
                         egui::RichText::new("Creado por Lautaro Agustin Diez")
-                            .size(12.0)
+                            .size(grafito_ui::tokens::TYPE_SM)
                             .strong()
                             .color(theme.text_primary),
                     );
                     ui.label(
                         egui::RichText::new("HECHO EN ARGENTINA")
-                            .size(11.0)
+                            .size(grafito_ui::tokens::TYPE_XS)
                             .color(theme.text_secondary),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_SM);
                     ui.label(
                         egui::RichText::new("Licencia GPL-3.0-or-later · Código abierto")
-                            .size(11.0)
+                            .size(grafito_ui::tokens::TYPE_XS)
                             .color(theme.text_tertiary),
                     );
                 });
                 ui.add_space(14.0);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.vertical_centered(|ui| {
                     if ui
                         .add(
@@ -5306,6 +7448,28 @@ pub fn run_app() -> Result<(), eframe::Error> {
 mod splash_tests {
     use super::*;
 
+    // ── AS3 cold-start: splash honesto + arranque sin I/O en `new()` ──
+    #[test]
+    fn splash_budget_pins_overlay_timing() {
+        // Overlay 1500 ms con fade desde 1000 ms (orden pinneado por los
+        // valores: 1000 < 1500; sin assert relacional: clippy lo ve const).
+        assert_eq!(SPLASH_TOTAL_MS, 1500);
+        assert_eq!(SPLASH_FADE_START_MS, 1000);
+    }
+
+    #[test]
+    fn splash_stage_reports_startup_doc_honestly() {
+        let mut app = dummy_grafito_app();
+        // Sin GPU (dummy) y sin pendiente: gate 0 honesto, sin override.
+        let (done, stage) = app.splash_stage();
+        assert_eq!((done, stage), app.startup_splash_phase());
+        // Con documento CLI pendiente: mismo `done`, stage honesto.
+        app.startup_pending_doc = Some(PathBuf::from("/tmp/inicio.json"));
+        let (done_pending, stage_pending) = app.splash_stage();
+        assert_eq!(done_pending, done);
+        assert_eq!(stage_pending, "Abriendo documento…");
+    }
+
     #[test]
     fn splash_texture_handle_is_retained_and_reused() {
         let ctx = egui::Context::default();
@@ -5427,6 +7591,34 @@ mod canvas_resize_preview_tests {
         assert!(numeric_guard < numeric_ticks);
         assert!(axes[numeric_guard..numeric_ticks].contains("return;"));
     }
+
+    #[test]
+    fn construction_log_caps_at_500_keeping_chronological_order() {
+        let mut app = dummy_grafito_app();
+        for i in 0..MAX_CONSTRUCTION_LOG + 1 {
+            app.record_construction_step(&format!("act{i}"), vec![], &format!("out{i}"));
+        }
+        assert_eq!(app.construction_log.len(), MAX_CONSTRUCTION_LOG);
+        // El más antiguo (act0) fue drenado; el primero ahora es act1
+        assert_eq!(app.construction_log[0].action, "act1");
+        assert_eq!(
+            app.construction_log[MAX_CONSTRUCTION_LOG - 1].action,
+            format!("act{}", MAX_CONSTRUCTION_LOG)
+        );
+        // Agregar otro mantiene cota y orden
+        app.record_construction_step("final", vec![], "F");
+        assert_eq!(app.construction_log.len(), MAX_CONSTRUCTION_LOG);
+        assert_eq!(app.construction_log[0].action, "act2");
+        assert_eq!(
+            app.construction_log[MAX_CONSTRUCTION_LOG - 1].action,
+            "final"
+        );
+    }
+
+    #[test]
+    fn construction_log_constant_is_500() {
+        assert_eq!(MAX_CONSTRUCTION_LOG, 500);
+    }
 }
 
 #[cfg(test)]
@@ -5482,6 +7674,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         document_lifecycle: DocumentLifecycle::new(&document_snapshot),
         deferred_file_actions: DeferredFileActions::default(),
         splash_start: None,
+        startup_first_frame_logged: false,
         splash_logo: None,
         mora_texture: None,
         mora_texture_load_attempted: false,
@@ -5500,7 +7693,12 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         show_onboarding: false,
         pending_save_job: None,
         pending_open_job: None,
+        startup_pending_doc: None,
         pending_export_job: None,
+        pending_ggb_import_job: None,
+        pending_import_job: None,
+        pending_text_job: None,
+        pending_chained_action: None,
         attractor_cache: std::collections::HashMap::new(),
         fill_textures: std::sync::RwLock::new(crate::render_2d::FillTextureCacheStore::default()),
         active_color_picker: None,
@@ -5560,5 +7758,22 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         config_name_error: None,
         teaching_ui: crate::teaching_ui::TeachingUiState::default(),
         repaint_budget: RepaintBudget::default(),
+        autosave: AutosaveDebouncer::new(),
+        autosave_last_version: 0,
+        // A8 recovery (test helper): sin oferta pendiente al crear dummy.
+        pending_recovery_job: None,
+        recovery_offer: None,
+        recovery_corrupt: None,
+        recovery_checked_path: None,
+        advanced_red_opt_in: false,
+        locale: AppLocale::Es,
+        classroom: crate::classroom::ClassroomPanel::new(),
     }
 }
+
+// La animación vive dentro del turno del chat (transcript con `AssistantMedia`,
+// ver `assistant.rs::run_assistant_animation_with` + `sync_assistant_for_frame`):
+// sin ventana compañera. El reproductor del transcript
+// (`grafito-ui/src/assistant.rs::set_media`, `draw_media_card`) es el único
+// destino, con scrub, velocidad y botón Exportar GIF (`GifExportJob`,
+// `export_assistant_media`, `poll_gif_export_job`).

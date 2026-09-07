@@ -5,10 +5,11 @@ use crate::{
     icons::{action_icon_button, Icon},
     theme::current_theme,
     tokens::{
-        RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_2XS, TYPE_BASE, TYPE_LG, TYPE_MD,
-        TYPE_SM, TYPE_XS,
+        HIT_TARGET_MIN, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXL,
+        TYPE_2XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
     },
 };
+use grafito_anim::protocol::Timeline;
 use grafito_assistant_types::{
     AssistantExecutionOrigin, AssistantFocus, AssistantRepairFeedback, AttachmentLimits,
     ConversationRole, ConversationTurn, ImageAttachment, ImmutableDocumentContext, ProposedPlan,
@@ -168,6 +169,85 @@ pub struct VerifiedAssistantProposal {
     pub prerequisite_parameters: Vec<AssistantParameterAssignment>,
 }
 
+/// Tope de la pregunta de aclaración (paridad con `grafito-agent` S2).
+pub const MAX_CLARIFICATION_QUESTION_CHARS: usize = 300;
+/// Tope de opciones como botones (paridad con `grafito-agent` S2).
+pub const MAX_CLARIFICATION_OPTIONS: usize = 4;
+/// Tope por opción (paridad con `grafito-agent` S2).
+pub const MAX_CLARIFICATION_OPTION_CHARS: usize = 64;
+
+/// Aclaración pendiente del agente (S2 `ask_user` real vía evento).
+///
+/// Pura y acotada: `call_id` correlaciona la respuesta con el
+/// `function_call_output` que vuelve al loop; `question` en rioplatense y
+/// `options` (0..=4) se muestran como botones en el turno. Nunca bloquea
+/// threads: el worker termina con el pendiente y la UI lo retoma con un nuevo
+/// job que incluye la respuesta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingClarification {
+    /// Id de correlación con el `function_call` que la originó.
+    pub call_id: String,
+    /// Pregunta corta ya saneada (`1..=300` chars).
+    pub question: String,
+    /// Opciones ya saneadas para botones (`0..=4`, cada una `1..=64`).
+    pub options: Vec<String>,
+}
+
+impl PendingClarification {
+    /// Valida y construye (`Err` si `call_id`/`question` vacíos o largos).
+    pub fn try_new(call_id: &str, question: &str, options: Vec<String>) -> Result<Self, String> {
+        let call_id = call_id.trim();
+        if call_id.is_empty() {
+            return Err("aclaración sin call_id".to_string());
+        }
+        if call_id.chars().count() > MAX_TOOL_NAME_CHARS {
+            return Err(format!("call_id excede {} chars", MAX_TOOL_NAME_CHARS));
+        }
+        let collapsed = question.split_whitespace().collect::<Vec<_>>().join(" ");
+        let question = collapsed.trim();
+        if question.is_empty() {
+            return Err("aclaración sin pregunta".to_string());
+        }
+        if question.chars().count() > MAX_CLARIFICATION_QUESTION_CHARS {
+            return Err(format!(
+                "pregunta excede {MAX_CLARIFICATION_QUESTION_CHARS} chars"
+            ));
+        }
+        let mut clean_options = Vec::new();
+        for option in options {
+            if clean_options.len() >= MAX_CLARIFICATION_OPTIONS {
+                break;
+            }
+            let collapsed = option.split_whitespace().collect::<Vec<_>>().join(" ");
+            let trimmed = collapsed.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let clipped: String = trimmed
+                .chars()
+                .take(MAX_CLARIFICATION_OPTION_CHARS)
+                .collect::<String>()
+                .trim()
+                .to_owned();
+            if clipped.is_empty() {
+                continue;
+            }
+            if clean_options.iter().any(|known: &String| known == &clipped) {
+                continue;
+            }
+            clean_options.push(clipped);
+        }
+        Ok(Self {
+            call_id: call_id.to_owned(),
+            question: question.to_owned(),
+            options: clean_options,
+        })
+    }
+}
+
+/// Límite del nombre de herramienta (paridad con `grafito-agent::schema`).
+const MAX_TOOL_NAME_CHARS: usize = 64;
+
 /// Recursos visuales locales que la aplicación anfitriona prepara para el asistente.
 ///
 /// La textura es opcional para que la interfaz mantenga un fallback seguro si el
@@ -179,9 +259,28 @@ pub struct AssistantVisuals {
 
 /// Cache de bloques parseados de las respuestas del transcript, direccionado
 /// por contenido y acotado. Evita re-parsear los mismos turnos en cada frame.
+///
+/// R1 stream fluido: si el contenido nuevo extiende a uno ya cacheado (el
+/// caso del streaming, donde cada delta agrega texto al final), los bloques
+/// cerrados se congelan y sólo se re-parsea el sufijo desde el inicio del
+/// último bloque. Sin re-parse total no hay saltos de layout ni scroll que
+/// pelea. `parse_count`/`last_reused_blocks` lo hacen testeable headless.
 #[derive(Default, Clone)]
 pub struct AssistantBlocksCache {
-    entries: std::collections::VecDeque<(String, Vec<AssistantMessageBlock>)>,
+    entries: std::collections::VecDeque<CachedBlocks>,
+    /// Invocaciones al parser (cada `blocks` que no pega exacto suma una,
+    /// sea total o de sufijo: el ahorro se mide en `last_reused_blocks`).
+    parse_count: u64,
+    /// Bloques reutilizados sin re-parsear en la última llamada a `blocks`.
+    last_reused_blocks: usize,
+}
+
+/// Entrada del cache: contenido fuente, bloques y línea inicial de cada uno.
+#[derive(Clone)]
+struct CachedBlocks {
+    content: String,
+    blocks: Vec<AssistantMessageBlock>,
+    starts: Vec<usize>,
 }
 
 impl AssistantBlocksCache {
@@ -189,24 +288,111 @@ impl AssistantBlocksCache {
 
     /// Devuelve los bloques de `content`, reutilizando el cache si ya se parseó.
     fn blocks(&mut self, content: &str) -> Vec<AssistantMessageBlock> {
-        if let Some((_, blocks)) = self
+        if let Some(entry) = self
             .entries
             .iter()
-            .find(|(cached, _)| self.same_content(cached, content))
+            .find(|entry| self.same_content(&entry.content, content))
         {
-            return blocks.clone();
+            self.last_reused_blocks = entry.blocks.len();
+            return entry.blocks.clone();
         }
-        let blocks = parse_assistant_blocks(content);
-        self.entries
-            .push_front((content.to_owned(), blocks.clone()));
+        // Reúso de prefijo: el stream agrega al final, los bloques cerrados
+        // (todos menos el último, que puede seguir abierto) se congelan.
+        if let Some(prefix) = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.blocks.is_empty() && Self::is_prefix_extension(&entry.content, content)
+            })
+            .max_by_key(|entry| entry.content.len())
+        {
+            // Si el agregado empieza en línea nueva y el último bloque no es
+            // un párrafo (que podría fusionarse), también está cerrado: se
+            // congela todo y el sufijo son sólo las líneas nuevas. Si no
+            // (continuación de la misma línea o párrafo abierto), se congela
+            // todo menos el último y se re-parsea desde su inicio.
+            let extra = &content[prefix.content.len()..];
+            let last_closed = extra.starts_with('\n')
+                && !matches!(
+                    prefix.blocks.last(),
+                    Some(AssistantMessageBlock::Paragraph(_))
+                );
+            let frozen = if last_closed {
+                prefix.blocks.len()
+            } else {
+                prefix.blocks.len().saturating_sub(1)
+            };
+            let suffix_from = if last_closed {
+                prefix.content.lines().count()
+            } else {
+                prefix.starts.get(frozen).copied().unwrap_or(0)
+            };
+            let suffix_lines = content.lines().count();
+            let suffix_source = if suffix_from < suffix_lines {
+                content
+                    .lines()
+                    .skip(suffix_from)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            self.parse_count += 1;
+            let mut blocks = prefix.blocks[..frozen].to_vec();
+            let mut starts = prefix.starts[..frozen].to_vec();
+            for spanned in parse_assistant_blocks_spanned(&suffix_source) {
+                starts.push(suffix_from + spanned.start_line);
+                blocks.push(spanned.block);
+            }
+            self.last_reused_blocks = frozen;
+            let entry = CachedBlocks {
+                content: content.to_owned(),
+                blocks: blocks.clone(),
+                starts,
+            };
+            self.entries.push_front(entry);
+            while self.entries.len() > Self::MAX_ENTRIES {
+                self.entries.pop_back();
+            }
+            return blocks;
+        }
+        self.parse_count += 1;
+        self.last_reused_blocks = 0;
+        let spanned = parse_assistant_blocks_spanned(content);
+        let starts = spanned.iter().map(|entry| entry.start_line).collect();
+        let blocks: Vec<AssistantMessageBlock> =
+            spanned.into_iter().map(|entry| entry.block).collect();
+        self.entries.push_front(CachedBlocks {
+            content: content.to_owned(),
+            blocks: blocks.clone(),
+            starts,
+        });
         while self.entries.len() > Self::MAX_ENTRIES {
             self.entries.pop_back();
         }
         blocks
     }
 
+    /// Extensión monótona de stream: el nuevo contenido empieza con el viejo
+    /// y agrega algo (sin ediciones en el medio, que piden re-parse total).
+    fn is_prefix_extension(cached: &str, content: &str) -> bool {
+        content.len() > cached.len() && content.starts_with(cached)
+    }
+
     fn same_content(&self, cached: &str, content: &str) -> bool {
         cached == content
+    }
+
+    /// Invocaciones al parser hasta ahora (test headless de reúso).
+    #[cfg(test)]
+    fn parse_count(&self) -> u64 {
+        self.parse_count
+    }
+
+    /// Bloques congelados reutilizados en la última llamada (test headless).
+    #[cfg(test)]
+    fn last_reused_blocks(&self) -> usize {
+        self.last_reused_blocks
     }
 }
 
@@ -215,6 +401,88 @@ impl AssistantBlocksCache {
 pub struct AssistantMedia {
     pub title: String,
     pub frames: Vec<egui::ColorImage>,
+}
+
+/// Fotogramas por segundo base del reproductor de la card (B5).
+///
+/// 12 ≈ `100 / GIF_EXPORT_DELAY_CS` (`8cs` en
+/// `grafito-app/src/anim_native.rs`): lo que se ve es lo que se exporta.
+pub const MEDIA_CARD_BASE_FPS: f32 = 12.0;
+
+/// Alto máximo del preview inline de la card (D2).
+///
+/// Derivado de tokens (`SPACE_XXL * 7 = 280`): evita retratos gigantes sin
+/// literales sueltos. El ancho manda (todo el ancho disponible) y el alto
+/// es `ancho * h/w` clampeado a este tope para no mover el scroll.
+const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
+
+/// Tooltips cortos de la toolbar de la card (D2, ≤60 chars, sin cortes).
+const MEDIA_TIP_SPEED: &str = "Cambia la velocidad: 0.5x, 1x, 2x";
+const MEDIA_TIP_FULLSCREEN: &str = "Ver grande. Esc para cerrar";
+const MEDIA_TIP_EXPORT: &str = "Guarda la animación como GIF";
+const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual";
+const MEDIA_TIP_PLAY: &str = "Retoma donde quedó";
+
+/// Velocidad del reproductor de la card (B5).
+///
+/// Por card (campo en el estado, sin global mutable): cada animación nueva
+/// arranca en `Normal` (ver `set_media`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaPlaybackSpeed {
+    /// Mitad de velocidad.
+    Half,
+    /// Velocidad base (12 fps).
+    #[default]
+    Normal,
+    /// Doble velocidad.
+    Double,
+}
+
+impl MediaPlaybackSpeed {
+    /// Factor sobre `MEDIA_CARD_BASE_FPS` (la app lo usa para el delay del GIF).
+    pub fn rate(self) -> f32 {
+        match self {
+            Self::Half => 0.5,
+            Self::Normal => 1.0,
+            Self::Double => 2.0,
+        }
+    }
+
+    /// Etiqueta visible (sin IDs literales).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Half => "0.5x",
+            Self::Normal => "1x",
+            Self::Double => "2x",
+        }
+    }
+
+    /// Rota media → normal → rápida → media (botón de velocidad).
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Half => Self::Normal,
+            Self::Normal => Self::Double,
+            Self::Double => Self::Half,
+        }
+    }
+}
+
+/// Estado de la exportación a GIF de la card (B5).
+///
+/// Lo actualiza la app desde el hilo de export (`spawn_gif_export`); la UI
+/// solo lo renderiza. Progreso honesto: `Exporting` es indeterminado (el
+/// codificador no reporta %) y nunca inventa porcentaje.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MediaExportState {
+    /// Sin exportación en curso ni resultado previo.
+    #[default]
+    Idle,
+    /// Hilo de export en vuelo (indeterminado, con texto visible).
+    Exporting,
+    /// GIF escrito (la app avisa la ruta con un aviso).
+    Done,
+    /// Falló con motivo en rioplatense (jamás mudo).
+    Failed(String),
 }
 
 /// Fila de actividad de una herramienta del asistente mientras el agente trabaja.
@@ -371,6 +639,33 @@ pub struct AssistantPanelState {
     media_textures: Vec<egui::TextureHandle>,
     /// Guarda si ya se construyeron las texturas de la media actual.
     media_textures_ready: bool,
+    /// Fotograma actual del reproductor en ms acumulados (B5). Avanza con el
+    /// reloj cuando reproduce; se congela en pausa o al arrastrar. Por card:
+    /// vive en el estado, sin global mutable. `Cell` porque la Piel dibuja
+    /// con `&Estado` (el loop del historial ya presta `&state` al turno) y el
+    /// cursor es detalle local de render, no dato a persistir. Se reinicia
+    /// en `set_media`.
+    media_playhead_ms: std::cell::Cell<u64>,
+    /// Último instante visto (`ui.input time`); `None` = reloj sin armar.
+    media_last_tick_s: std::cell::Cell<Option<f64>>,
+    /// Pausado por el usuario o al arrastrar el deslizador. Al soltar QUEDA
+    /// en pausa con estado visible («en pausa» + botón Reproducir): retomar
+    /// es explícito y nunca salta solo. Se reinicia en `set_media`.
+    media_paused: std::cell::Cell<bool>,
+    /// Velocidad por card (media/lenta/rápida); sin global mutable.
+    media_speed: std::cell::Cell<MediaPlaybackSpeed>,
+    /// Último fotograma pintado (D2): gate anti-parpadeo. La textura sólo
+    /// se re-selecciona si el índice cambió; el rect es estable (ancho
+    /// total, aspecto preservado) así el scroll no salta. `Cell` porque la
+    /// Piel dibuja con `&Estado`. Se reinicia en `set_media`.
+    media_last_shown: std::cell::Cell<Option<usize>>,
+    /// Overlay de pantalla completa (D2): `true` = ventana grande con la
+    /// animación + transporte + `Esc` para cerrar. Estado local de la card
+    /// (`Cell`, sin global mutable, sin I/O/spawn). Se reinicia en `set_media`.
+    media_fullscreen: std::cell::Cell<bool>,
+    /// Exportación a GIF de la card (la app la actualiza desde el hilo de
+    /// export; la UI solo la renderiza, cero I/O/spawn en `Ui::`).
+    media_export: MediaExportState,
     /// Confirmación del usuario de que el modelo elegido admite imágenes.
     pub vision_enabled: bool,
     /// Autoriza explícitamente una revisión con el modelo de razonamiento
@@ -405,6 +700,10 @@ pub struct AssistantPanelState {
     pub is_pending: bool,
     /// Consulta local no resuelta que espera una autorización remota explícita.
     pending_remote_authorization: Option<PendingRemoteAuthorization>,
+    /// Aclaración pendiente del agente (`ask_user` S2): pregunta + botones.
+    /// Se muestra en el turno sin bloquear threads; la respuesta vuelve al
+    /// loop como `function_call_output`/mensaje vía un nuevo job.
+    pending_clarification: Option<PendingClarification>,
     /// Plan local tipado que ya superó su vista previa y espera Apply explícito.
     proposed_plan: Option<ProposedPlan>,
     /// Cambios legibles que producirá el plan local pendiente.
@@ -438,6 +737,12 @@ pub struct AssistantPanelState {
     /// Memoria de trabajo episódica (WorkingMemory sincronizada con perfil).
     /// F5 inline: permite al tutor socrático adaptar pistas sin tocar memoria a largo plazo.
     pub working_memory: grafito_profile::WorkingMemory,
+    /// El transcript estaba pegado abajo en el frame anterior (R1).
+    ///
+    /// El stick-to-bottom sólo sigue si el usuario ya estaba abajo: si
+    /// scrolleó arriba a leer, el stream no lo mueve. Se actualiza desde el
+    /// `ScrollAreaOutput` en cada frame; arranca clavado.
+    pub transcript_at_bottom: bool,
 }
 
 impl Default for AssistantPanelState {
@@ -457,6 +762,13 @@ impl Default for AssistantPanelState {
             media: None,
             media_textures: Vec::new(),
             media_textures_ready: false,
+            media_playhead_ms: std::cell::Cell::new(0),
+            media_last_tick_s: std::cell::Cell::new(None),
+            media_paused: std::cell::Cell::new(false),
+            media_speed: std::cell::Cell::new(MediaPlaybackSpeed::default()),
+            media_last_shown: std::cell::Cell::new(None),
+            media_fullscreen: std::cell::Cell::new(false),
+            media_export: MediaExportState::default(),
             anim_progress: false,
             tutor_level: 0,
             tutor_covered: 0,
@@ -485,6 +797,7 @@ impl Default for AssistantPanelState {
             proposal_correction_context: None,
             is_pending: false,
             pending_remote_authorization: None,
+            pending_clarification: None,
             proposed_plan: None,
             proposed_plan_changes: Vec::new(),
             is_cancelling: false,
@@ -501,6 +814,7 @@ impl Default for AssistantPanelState {
             long_memory: grafito_profile::LongTermMemory::default(),
             new_fact_draft: String::new(),
             working_memory: grafito_profile::WorkingMemory::default(),
+            transcript_at_bottom: true,
         }
     }
 }
@@ -554,6 +868,7 @@ impl AssistantPanelState {
         self.clear_proposal_correction();
         self.cancel_remote_authorization();
         self.clear_proposed_plan();
+        self.clear_pending_clarification();
         self.error = None;
     }
 
@@ -600,6 +915,50 @@ impl AssistantPanelState {
     pub fn cancel_remote_authorization(&mut self) {
         self.clear_remote_authorization();
         self.image_upload_consent = false;
+    }
+
+    /// Conserva una aclaración del agente (`ask_user` S2) hasta que el usuario
+    /// elija una opción o la descarte. No toca `is_pending`: el worker ya
+    /// terminó y la respuesta vuelve como nuevo job (nunca bloquea threads).
+    pub fn stage_clarification(&mut self, pending: PendingClarification) {
+        self.pending_clarification = Some(pending);
+        self.error = None;
+    }
+
+    /// Devuelve si hay una aclaración esperando respuesta del usuario.
+    pub fn has_pending_clarification(&self) -> bool {
+        self.pending_clarification.is_some()
+    }
+
+    /// Vista de la aclaración pendiente (pregunta + botones).
+    pub fn pending_clarification(&self) -> Option<&PendingClarification> {
+        self.pending_clarification.as_ref()
+    }
+
+    /// Consume la aclaración al responder (la respuesta vuelve al loop como
+    /// `function_call_output`/mensaje vía un nuevo job en la app).
+    pub fn take_clarification_answer(&mut self, call_id: &str, answer: &str) -> Option<String> {
+        let pending = self.pending_clarification.take()?;
+        if pending.call_id != call_id {
+            return None;
+        }
+        let collapsed = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = collapsed.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let clipped: String = trimmed
+            .chars()
+            .take(MAX_CLARIFICATION_QUESTION_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_owned();
+        (!clipped.is_empty()).then_some(clipped)
+    }
+
+    /// Descarta la aclaración sin responder (el turno visible queda intacto).
+    pub fn clear_pending_clarification(&mut self) {
+        self.pending_clarification = None;
     }
 
     /// Conserva un plan local ya previsualizado para que el usuario lo aplique.
@@ -911,11 +1270,51 @@ impl AssistantPanelState {
         self.agent_activity.clear();
         self.agent_ledger = None;
     }
+}
 
+/// Fila de actividad como etiqueta única con wrap (panel 300px, sin `horizontal`).
+///
+/// Pura: `"• {texto}"` en `TYPE_XS` con `wrap()` en el render. Sin I/O ni `unwrap`.
+pub fn format_activity_row(text: &str) -> String {
+    format!("• {}", text.trim())
+}
+
+/// Ayuda del proveedor compatible: sin jerga de endpoint ni env var.
+///
+/// Pura: redirige a Ajustes → Asistente. Sin I/O ni `unwrap`.
+pub fn custom_provider_help_text() -> &'static str {
+    "Usá OpenCode, Muse Spark u otro proxy OpenAI-compatible. Configurá la dirección y la clave en Ajustes → Asistente."
+}
+
+/// Resumen corto de modelos: plegable + tooltip, se elige solo el verificado.
+///
+/// Pura, sin I/O ni `unwrap`.
+pub fn verified_models_summary_text() -> &'static str {
+    "Modelos verificados de OpenCode Go. Se elige solo el modelo verificado."
+}
+
+/// Detalle de modelos verificados (dentro del plegable, no crudo en ayuda).
+///
+/// Pura, sin I/O ni `unwrap`.
+pub fn verified_models_detail_text() -> &'static str {
+    "deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor, fusion (+ 17 más por descubrimiento)."
+}
+
+impl AssistantPanelState {
     /// Establece la animación a reproducir y prepara sus texturas de frames.
     pub fn set_media(&mut self, media: Option<AssistantMedia>, ctx: &egui::Context) {
         self.media = media;
         self.media_textures_ready = false;
+        // Card nueva = reproductor fresco (B5): playhead en 0, reloj sin
+        // armar, reproduciendo a velocidad base y sin resultado de export
+        // rancio de la animación anterior.
+        self.media_playhead_ms.set(0);
+        self.media_last_tick_s.set(None);
+        self.media_paused.set(false);
+        self.media_speed.set(MediaPlaybackSpeed::default());
+        self.media_last_shown.set(None);
+        self.media_fullscreen.set(false);
+        self.media_export = MediaExportState::default();
         if let Some(media) = &self.media {
             self.media_textures = media
                 .frames
@@ -938,6 +1337,75 @@ impl AssistantPanelState {
     /// texturas de frames listas (para el dibujado del reproductor).
     pub(crate) fn media_textures(&self) -> (&[egui::TextureHandle], bool) {
         (&self.media_textures, self.media_textures_ready)
+    }
+
+    /// Factor de velocidad actual del reproductor (lo usa la app para el
+    /// delay del GIF exportado). Puro, sin I/O.
+    pub fn media_playback_rate(&self) -> f32 {
+        self.media_speed.get().rate()
+    }
+
+    /// Estado de exportación para la app (hilo de export).
+    pub fn media_export_state(&self) -> &MediaExportState {
+        &self.media_export
+    }
+
+    /// Actualiza el estado de exportación (solo la app, desde el poll del
+    /// hilo de export; la UI nunca lo toca).
+    pub fn set_media_export(&mut self, state: MediaExportState) {
+        self.media_export = state;
+    }
+
+    /// Avanza el reloj del reproductor y devuelve el índice a mostrar (B5).
+    ///
+    /// - Sin frames o sin texturas listas: arma el reloj y devuelve `None`.
+    /// - En pausa: congela el playhead (actualiza el reloj para retomar sin
+    ///   salto) y devuelve el índice actual.
+    /// - Reproduciendo: suma `dt * rate` con `dt` capado a 250 ms
+    ///   (volver de segundo plano no salta) y loopea el playhead.
+    ///
+    /// El índice sale de `media_frame_at` (`Timeline::sample` + round +
+    /// clamp). Puro estado UI, sin I/O ni spawn. Toma `&self`: el cursor vive
+    /// en `Cell` (detalle local de render, ver campos).
+    pub(crate) fn advance_media_playhead(
+        &self,
+        now_s: f64,
+        frame_count: usize,
+        textures_ready: bool,
+    ) -> Option<usize> {
+        if frame_count == 0 || !textures_ready {
+            self.media_last_tick_s.set(Some(now_s));
+            return None;
+        }
+        let timeline = media_scrub_timeline(frame_count, MEDIA_CARD_BASE_FPS)?;
+        let duration_ms = timeline.duration_ms;
+        let last = self.media_last_tick_s.replace(Some(now_s));
+        if self.media_paused.get() {
+            return Some(media_frame_at(
+                &timeline,
+                self.media_playhead_ms.get(),
+                frame_count,
+            ));
+        }
+        if let Some(previous_s) = last {
+            let dt_s = (now_s - previous_s).clamp(0.0, 0.25);
+            if dt_s.is_finite() && dt_s > 0.0 {
+                // El playhead va en ms de timeline (tiempo real a 1x): los fps
+                // ya viven en la duración, acá solo pesan dt y velocidad.
+                let step_ms = dt_s * f64::from(self.media_speed.get().rate()) * 1000.0;
+                if step_ms.is_finite() && step_ms > 0.0 {
+                    let step_ms = step_ms.min(u64::MAX as f64) as u64;
+                    self.media_playhead_ms.set(
+                        self.media_playhead_ms.get().saturating_add(step_ms) % duration_ms.max(1),
+                    );
+                }
+            }
+        }
+        Some(media_frame_at(
+            &timeline,
+            self.media_playhead_ms.get(),
+            frame_count,
+        ))
     }
 
     /// Muestra el turno enviado antes de que el proveedor responda.
@@ -1183,6 +1651,7 @@ impl AssistantPanelState {
         self.clear_proposal_correction();
         self.cancel_remote_authorization();
         self.clear_proposed_plan();
+        self.clear_pending_clarification();
     }
 
     fn clear_proposal_correction(&mut self) {
@@ -1307,43 +1776,135 @@ fn should_draw_empty_state(state: &AssistantPanelState) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AssistantMessageBlock {
-    Heading { level: usize, text: String },
+    Heading {
+        level: usize,
+        text: String,
+    },
     Bullet(String),
+    Ordered {
+        number: u32,
+        text: String,
+    },
+    /// Cita `> …`: se pela el marcador y el resto lleva inline-formatting
+    /// igual que un párrafo (R1: sin `>` ni `**` visibles).
+    Quote(String),
     Paragraph(String),
-    Code { language: String, text: String },
+    Code {
+        language: String,
+        text: String,
+    },
     Table(Vec<Vec<String>>),
     DisplayMath(String),
 }
 
+/// Altura mínima reservada para filas de botones del transcript (bug clip).
+/// `hit_target_size` garantiza el piso WCAG 2.5.8 (24 px) con tokens existentes.
+fn transcript_button_row_min_height() -> f32 {
+    crate::tokens::hit_target_size(28.0)
+}
+
+/// Ancho estable del transcript (R1): el texto nunca agranda el panel.
+///
+/// Todo texto del transcript envuelve al ancho disponible ya fijado
+/// (`auto_shrink` sin agrandar + `wrap` + columnas acotadas); este saneo cubre
+/// los anchos degenerados del primer layout (cero/negativo/NaN) con el mínimo
+/// del panel. Puro, sin pánico.
+fn stable_transcript_width(available_width: f32) -> f32 {
+    if available_width.is_finite() && available_width > 0.0 {
+        available_width
+    } else {
+        ASSISTANT_PANEL_MIN_WIDTH
+    }
+}
+
+/// Tolerancia para considerar que el transcript está abajo del todo (px).
+/// Base 4 × 2: menos que una línea, más que el jitter de layout.
+const TRANSCRIPT_BOTTOM_TOLERANCE: f32 = 8.0;
+
+/// Decide si el transcript está pegado abajo desde la geometría del scroll.
+///
+/// Puro (`offset + viewport >= contenido − tolerancia`): si el contenido entra
+/// sin scroll, también cuenta como abajo (no hay a dónde subir). Sin pánico:
+/// anchos degenerados caen a `true` (arranque clavado, sin salto inicial).
+fn transcript_is_at_bottom(offset_y: f32, viewport_h: f32, content_h: f32) -> bool {
+    if !offset_y.is_finite() || !viewport_h.is_finite() || !content_h.is_finite() {
+        return true;
+    }
+    offset_y + viewport_h >= content_h - TRANSCRIPT_BOTTOM_TOLERANCE
+}
+
+/// Decide si el scroll del transcript sigue al contenido nuevo (R1).
+///
+/// Stick-to-bottom SÓLO si el usuario ya estaba abajo: si scrolleó arriba a
+/// leer, el stream no lo mueve. Sin chip flotante de "↓ nuevo" por decisión
+/// explícita: un `Area` superpuesto rompería el hover (regla existente del
+/// panel) y el stick de egui ya re-engancha al volver abajo. Puro.
+fn transcript_stick_to_bottom(user_at_bottom: bool) -> bool {
+    user_at_bottom
+}
+
+/// Tamaño mínimo legible de la card de animación (bug tiny).
+/// Derivado de tokens existentes, sin literales nuevos fuera de escala base 4.
+fn assistant_media_min_side() -> f32 {
+    HIT_TARGET_MIN * 5.0
+}
+
+/// Bloque con su línea inicial (0-based sobre `content.lines()`).
+///
+/// Cada inicio de bloque es un estado fresco del parser (el párrafo se vacía
+/// antes de cada push), así que re-parsear desde el `start_line` del último
+/// bloque reproduce la cola: es la base del reúso de prefijo en streaming.
+struct SpannedBlock {
+    block: AssistantMessageBlock,
+    start_line: usize,
+}
+
+/// Parsea el transcript a bloques (atajo testeable sobre la versión con spans).
+#[cfg(test)]
 fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
+    parse_assistant_blocks_spanned(content)
+        .into_iter()
+        .map(|entry| entry.block)
+        .collect()
+}
+
+fn parse_assistant_blocks_spanned(content: &str) -> Vec<SpannedBlock> {
     let lines = content.lines().collect::<Vec<_>>();
     let mut blocks = Vec::new();
     let mut paragraph = Vec::new();
+    let mut paragraph_start: Option<usize> = None;
     let mut index = 0;
 
     while index < lines.len() {
         let line = lines[index];
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
             index += 1;
             continue;
         }
+        let block_start = index;
 
         if let Some(language) = trimmed.strip_prefix("```") {
             if let Some(end) = lines[index + 1..]
                 .iter()
                 .position(|candidate| candidate.trim_start().starts_with("```"))
             {
-                flush_assistant_paragraph(&mut blocks, &mut paragraph);
+                flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
                 let end = index + end + 1;
-                blocks.push(AssistantMessageBlock::Code {
-                    language: language.trim().to_ascii_lowercase(),
-                    text: lines[index + 1..end].join("\n"),
+                blocks.push(SpannedBlock {
+                    block: AssistantMessageBlock::Code {
+                        language: language.trim().to_ascii_lowercase(),
+                        text: lines[index + 1..end].join("\n"),
+                    },
+                    start_line: block_start,
                 });
                 index = end + 1;
                 continue;
             }
+            // Cerca sin cerrar (texto parcial/truncado): cae al párrafo como
+            // texto plano (contrato `rich_assistant_blocks_keep_malformed…`).
+            // Sin pánico ni corte UTF-8: `lines`/`join` conservan boundaries.
         }
 
         if let Some(closing_delimiter) = match trimmed {
@@ -1358,8 +1919,11 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
                 let end = index + end + 1;
                 let math = lines[index + 1..end].join("\n");
                 if !math.trim().is_empty() {
-                    flush_assistant_paragraph(&mut blocks, &mut paragraph);
-                    blocks.push(AssistantMessageBlock::DisplayMath(math.trim().into()));
+                    flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+                    blocks.push(SpannedBlock {
+                        block: AssistantMessageBlock::DisplayMath(math.trim().into()),
+                        start_line: block_start,
+                    });
                     index = end + 1;
                     continue;
                 }
@@ -1377,15 +1941,18 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
                     .filter(|value| !value.trim().is_empty())
             })
         {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            blocks.push(AssistantMessageBlock::DisplayMath(math.trim().into()));
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::DisplayMath(math.trim().into()),
+                start_line: block_start,
+            });
             index += 1;
             continue;
         }
 
         // HTML tabla <table>...</table> — para el caso del usuario que escupió HTML
         if trimmed.to_ascii_lowercase().starts_with("<table") {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
             let mut end = index;
             while end < lines.len() && !lines[end].to_ascii_lowercase().contains("</table>") {
                 end += 1;
@@ -1396,10 +1963,16 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
             let html = lines[index..end.min(lines.len())].join("\n");
             if let Some(rows) = parse_html_table(&html) {
                 if !rows.is_empty() {
-                    blocks.push(AssistantMessageBlock::Table(rows));
+                    blocks.push(SpannedBlock {
+                        block: AssistantMessageBlock::Table(rows),
+                        start_line: block_start,
+                    });
                 }
             } else {
                 // Fallback: tratar como párrafo si no se pudo parsear
+                if paragraph_start.is_none() {
+                    paragraph_start = Some(block_start);
+                }
                 paragraph.push(html);
             }
             index = end;
@@ -1412,7 +1985,7 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
                 parse_markdown_table_row(lines[index + 1].trim()),
             ) {
                 if markdown_table_separator(&separator, header.len()) {
-                    flush_assistant_paragraph(&mut blocks, &mut paragraph);
+                    flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
                     let mut rows = vec![header];
                     index += 2;
                     while index < lines.len() {
@@ -1425,7 +1998,10 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
                         rows.push(row);
                         index += 1;
                     }
-                    blocks.push(AssistantMessageBlock::Table(rows));
+                    blocks.push(SpannedBlock {
+                        block: AssistantMessageBlock::Table(rows),
+                        start_line: block_start,
+                    });
                     continue;
                 }
             }
@@ -1437,11 +2013,28 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
             .count();
         if (1..=3).contains(&heading_level) && trimmed.as_bytes().get(heading_level) == Some(&b' ')
         {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            blocks.push(AssistantMessageBlock::Heading {
-                level: heading_level,
-                text: trimmed[heading_level + 1..].trim().into(),
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::Heading {
+                    level: heading_level,
+                    text: trimmed[heading_level + 1..].trim().into(),
+                },
+                start_line: block_start,
             });
+            index += 1;
+            continue;
+        }
+
+        // Cita `> …`: se pela el marcador y el resto lleva inline-formatting.
+        // Un `>` solo actúa como separador en blanco (nunca muestra `>` crudo).
+        if trimmed.starts_with('>') {
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            if let Some(quoted) = strip_quote_markers(trimmed) {
+                blocks.push(SpannedBlock {
+                    block: AssistantMessageBlock::Quote(quoted.into()),
+                    start_line: block_start,
+                });
+            }
             index += 1;
             continue;
         }
@@ -1451,17 +2044,118 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
             .or_else(|| trimmed.strip_prefix("* "))
             .or_else(|| trimmed.strip_prefix("+ "))
         {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            blocks.push(AssistantMessageBlock::Bullet(bullet.trim().into()));
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::Bullet(bullet.trim().into()),
+                start_line: block_start,
+            });
             index += 1;
             continue;
         }
 
+        // Ordenado, tolerando énfasis envolvente (`**1. Título**` del modelo).
+        // Se intenta directo primero para conservar el formato interno del ítem.
+        if let Some((number, item)) = parse_ordered_list_item(trimmed)
+            .or_else(|| parse_ordered_list_item(strip_wrapping_emphasis(trimmed)))
+        {
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::Ordered { number, text: item },
+                start_line: block_start,
+            });
+            index += 1;
+            continue;
+        }
+
+        if paragraph_start.is_none() {
+            paragraph_start = Some(block_start);
+        }
         paragraph.push(trimmed.to_owned());
         index += 1;
     }
-    flush_assistant_paragraph(&mut blocks, &mut paragraph);
+    flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
     blocks
+}
+
+/// Pela los marcadores de cita al inicio de línea (`>`, `>>`, `> >`).
+///
+/// Puro, sin pánico: sólo `strip_prefix`/`trim_start`. `None` si no queda
+/// texto (un `>` solo es separador, no contenido).
+fn strip_quote_markers(trimmed: &str) -> Option<&str> {
+    let mut rest = trimmed;
+    let mut found = false;
+    while let Some(after) = rest.strip_prefix('>') {
+        found = true;
+        rest = after.trim_start();
+    }
+    if found && !rest.is_empty() {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+/// Quita una capa de énfasis envolvente (`**x**`, `__x__`) si abre y cierra.
+///
+/// Para que `**1. Título**` se reconozca como ítem ordenado en vez de caer a
+/// párrafo con asteriscos visibles. Puro, sin pánico.
+fn strip_wrapping_emphasis(text: &str) -> &str {
+    for (open, close) in [("**", "**"), ("__", "__")] {
+        if let Some(inner) = text
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+        {
+            if !inner.is_empty() {
+                return inner;
+            }
+        }
+    }
+    text
+}
+
+/// Detecta cerca de código sin cerrar (``` sin su cierre posterior).
+///
+/// Pura: alterna por cada línea que abre con ```; impar = parcial.
+/// Sin pánico: sólo `lines`/`trim_start`, sin índices ni `unwrap`.
+pub fn has_unclosed_code_fence(content: &str) -> bool {
+    let mut open = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            open = !open;
+        }
+    }
+    open
+}
+
+/// Ítem de lista numerada (`1. …`, `2) …`) como bloque propio.
+///
+/// Sin esto, "1. Arrastrá… 2. Usá… 3. Activá…" colapsaba en un único
+/// párrafo. Puro, sin pánico: sólo ASCII antes del texto, boundaries
+/// UTF-8 conservados vía `get`. Exige espacio tras el separador para no
+/// tragarse decimales (`3.14` → `None`).
+fn parse_ordered_list_item(trimmed: &str) -> Option<(u32, String)> {
+    let bytes = trimmed.as_bytes();
+    let mut digit_end = 0;
+    while digit_end < bytes.len() && bytes[digit_end].is_ascii_digit() {
+        digit_end += 1;
+    }
+    if digit_end == 0 || digit_end > 9 {
+        return None;
+    }
+    let separator = bytes.get(digit_end).copied()?;
+    if separator != b'.' && separator != b')' {
+        return None;
+    }
+    let rest = trimmed.get(digit_end + 1..)?;
+    if !(rest.starts_with(' ') || rest.starts_with('\t')) {
+        return None;
+    }
+    let number: u32 = trimmed.get(..digit_end)?.parse().ok()?;
+    let item = rest.trim();
+    if item.is_empty() {
+        return None;
+    }
+    Some((number, item.to_owned()))
 }
 
 fn is_bare_display_math(text: &str) -> bool {
@@ -1495,35 +2189,280 @@ fn is_bare_display_math(text: &str) -> bool {
     false
 }
 
-fn flush_assistant_paragraph(blocks: &mut Vec<AssistantMessageBlock>, paragraph: &mut Vec<String>) {
-    if !paragraph.is_empty() {
-        let text = paragraph.join(" ");
-        if is_bare_display_math(&text) {
-            // Promover a DisplayMath para estructura y separación (fracciones apiladas, no inline plano)
-            // Extraer solo la parte matemática desde el primer \
-            let trimmed = text.trim();
-            let math_source = if let Some(start) = trimmed.find('\\') {
-                // Si hay texto previo no-matemático ("El resultado es \frac..."), mantener como párrafo
-                // pero si el texto previo es corto (<30 chars) y el resto es math largo, promover solo math
-                let before = trimmed[..start].trim();
-                let candidate = trimmed[start..].trim();
-                if before.is_empty() || (before.len() < 30 && candidate.len() > before.len()) {
-                    candidate.to_string()
-                } else {
-                    // No promover, dejar como párrafo (bare math será manejado inline)
-                    blocks.push(AssistantMessageBlock::Paragraph(text));
-                    paragraph.clear();
-                    return;
-                }
-            } else {
-                trimmed.to_string()
-            };
-            blocks.push(AssistantMessageBlock::DisplayMath(math_source));
-        } else {
-            blocks.push(AssistantMessageBlock::Paragraph(text));
-        }
-        paragraph.clear();
+fn flush_assistant_paragraph(
+    blocks: &mut Vec<SpannedBlock>,
+    paragraph: &mut Vec<String>,
+    paragraph_start: &mut Option<usize>,
+) {
+    if paragraph.is_empty() {
+        *paragraph_start = None;
+        return;
     }
+    let start_line = paragraph_start.take().unwrap_or(0);
+    let text = paragraph.join(" ");
+    if is_bare_display_math(&text) {
+        // Promover a DisplayMath para estructura y separación (fracciones apiladas, no inline plano)
+        // Extraer solo la parte matemática desde el primer \
+        let trimmed = text.trim();
+        let math_source = if let Some(start) = trimmed.find('\\') {
+            // Si hay texto previo no-matemático ("El resultado es \frac..."), mantener como párrafo
+            // pero si el texto previo es corto (<30 chars) y el resto es math largo, promover solo math
+            let before = trimmed[..start].trim();
+            let candidate = trimmed[start..].trim();
+            if before.is_empty() || (before.len() < 30 && candidate.len() > before.len()) {
+                candidate.to_string()
+            } else {
+                // No promover, dejar como párrafo (bare math será manejado inline)
+                blocks.push(SpannedBlock {
+                    block: AssistantMessageBlock::Paragraph(text),
+                    start_line,
+                });
+                paragraph.clear();
+                return;
+            }
+        } else {
+            trimmed.to_string()
+        };
+        blocks.push(SpannedBlock {
+            block: AssistantMessageBlock::DisplayMath(math_source),
+            start_line,
+        });
+    } else {
+        blocks.push(SpannedBlock {
+            block: AssistantMessageBlock::Paragraph(text),
+            start_line,
+        });
+    }
+    paragraph.clear();
+}
+
+/// Nombre humano en español para un identificador literal de control.
+///
+/// El modelo a veces escribe nombres técnicos en la prosa (`PlayPause`).
+/// Esta tabla sólo contiene controles que existen de verdad (`Tool::name`,
+/// `Icon::Play`/`Pause`): `PlayPause` no existe como control, así que su
+/// texto dice cómo llegar (la animación del chat se reproduce sola).
+/// Puro (`&str -> Option`), sin I/O.
+pub fn humanize_control_name(id: &str) -> Option<&'static str> {
+    match id {
+        "PlayPause" => Some("reproducción — la animación del chat se reproduce sola, sin botón"),
+        "Play" => Some("reproducir"),
+        "Pause" => Some("pausar"),
+        "Slider" => Some("deslizador"),
+        "Button" => Some("botón"),
+        "Eraser" => Some("borrador"),
+        "Pencil" => Some("lápiz"),
+        "Select" => Some("selección"),
+        "Tangent" => Some("tangente"),
+        "Perpendicular" => Some("perpendicular"),
+        "Parallel" => Some("paralela"),
+        "Midpoint" => Some("punto medio"),
+        "Distance" => Some("distancia"),
+        "Angle" => Some("ángulo"),
+        "Area" => Some("área"),
+        "Function" => Some("función"),
+        "Polygon" => Some("polígono"),
+        "Circle" => Some("círculo"),
+        "Line" => Some("recta"),
+        "Point" => Some("punto"),
+        "Vector" => Some("vector"),
+        "Segment" => Some("segmento"),
+        "Ray" => Some("semirrecta"),
+        _ => None,
+    }
+}
+
+/// Reemplaza identificadores literales de controles en prosa por su nombre
+/// humano. Orden longest-first (`PlayPause` antes que `Play`/`Pause`) y
+/// reemplazos en minúsculas para no re-matchear. Puro, conserva UTF-8.
+/// Además absorbe el sufijo GeoGebra `Id[param]` (ej. `Button[a]`): el
+/// modelo a veces filtra `Button` dejando `[a]` suelto ("sin botón[a]");
+/// la prosa final jamás tiene corchetes (D2): queda "sin botón".
+pub fn humanize_prose_text(text: &str) -> String {
+    const KNOWN_IDS: &[&str] = &[
+        "PlayPause",
+        "Perpendicular",
+        "Parallel",
+        "Midpoint",
+        "Distance",
+        "Tangent",
+        "Slider",
+        "Button",
+        "Eraser",
+        "Pencil",
+        "Select",
+        "Angle",
+        "Function",
+        "Polygon",
+        "Circle",
+        "Segment",
+        "Vector",
+        "Pause",
+        "Area",
+        "Line",
+        "Point",
+        "Play",
+        "Ray",
+    ];
+    let mut out = text.to_owned();
+    for id in KNOWN_IDS {
+        if out.contains(id) {
+            if let Some(human) = humanize_control_name(id) {
+                out = replace_control_with_optional_param(&out, id, human);
+            }
+        }
+    }
+    // N2: el modelo generaliza la sintaxis `Id[param]` del system prompt a la
+    // palabra ya humana (`botón[a]` en vez de `Button[a]`): el pase D2 no la
+    // ve porque busca `Button` exacto. Este barre la variante humana en
+    // cualquier caja, con/sin tilde, y absorbe `[param]`.
+    out = replace_human_button_params(&out);
+    out
+}
+
+/// N2: reemplaza `botón`/`boton`/`button` en cualquier caja seguidos de un
+/// opcional `[param]` por `botón`, sin dejar corchetes.
+///
+/// Cubre lo que el pase D2 (`Button` exacto) no ve: el modelo escribe la
+/// palabra ya humana con sufijo GeoGebra (`botón[a]`, `BOTÓN[A]`, `boton[a]`).
+/// Frontera honesta: si tras la raíz viene letra (`botones`) no toca nada.
+/// Puro, UTF-8 seguro (chars, jamás índices byte), sin `unwrap`.
+fn replace_human_button_params(text: &str) -> String {
+    const MAX_PARAM_LEN: usize = 64;
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(stem) = match_button_stem(&chars[i..]) {
+            let mut j = i + stem;
+            if chars.get(j) == Some(&'[') {
+                let mut k = j + 1;
+                let mut seen = 0;
+                while k < chars.len() && chars[k] != ']' && seen <= MAX_PARAM_LEN {
+                    k += 1;
+                    seen += 1;
+                }
+                if k < chars.len() && chars[k] == ']' {
+                    j = k + 1;
+                }
+            }
+            out.push_str("botón");
+            i = j;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Raíz `boton`/`botón`/`button` case-insensitive (ASCII + Ó/ó) al inicio del
+/// slice. Devuelve chars consumidos o `None`. Exige frontera no-letra detrás
+/// para no romper `botones`. Pura, sin `unwrap`.
+fn match_button_stem(chunk: &[char]) -> Option<usize> {
+    let lower_at =
+        |pos: usize| -> Option<char> { chunk.get(pos).and_then(|c| c.to_lowercase().next()) };
+    let is_boton = lower_at(0) == Some('b')
+        && lower_at(1) == Some('o')
+        && lower_at(2) == Some('t')
+        && matches!(
+            (lower_at(3), lower_at(4)),
+            (Some('o'), Some('n')) | (Some('ó'), Some('n'))
+        );
+    let is_button = lower_at(0) == Some('b')
+        && lower_at(1) == Some('u')
+        && lower_at(2) == Some('t')
+        && lower_at(3) == Some('t')
+        && lower_at(4) == Some('o')
+        && lower_at(5) == Some('n');
+    let stem = if is_boton {
+        5
+    } else if is_button {
+        6
+    } else {
+        return None;
+    };
+    let boundary_ok = chunk.get(stem).is_none_or(|c| !c.is_alphabetic());
+    boundary_ok.then_some(stem)
+}
+
+/// Reemplaza `id` y `id[lo que sea]` por `human` sin dejar corchetes.
+///
+/// Recorre por bytes con fronteras char (nunca corta scalars): si tras el
+/// `id` viene `[`, absorbe hasta el `]` de cierre (acotado a 64 chars para
+/// no comerse párrafos si falta el cierre). Pura, sin panic ni `unwrap`.
+fn replace_control_with_optional_param(haystack: &str, id: &str, human: &str) -> String {
+    const MAX_PARAM_LEN: usize = 64;
+    let mut out = String::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(pos) = rest.find(id) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + id.len()..];
+        if let Some(stripped) = after.strip_prefix('[') {
+            // Busca `]` de cierre en los próximos 64 chars (límite honesto).
+            let window_len: usize = stripped
+                .char_indices()
+                .take_while(|(offset, _)| *offset <= MAX_PARAM_LEN)
+                .last()
+                .map(|(offset, ch)| offset + ch.len_utf8())
+                .unwrap_or(0);
+            let window = &stripped[..window_len.min(stripped.len())];
+            if let Some(close) = window.find(']') {
+                out.push_str(human);
+                rest = &stripped[close + 1..];
+                continue;
+            }
+            // Sin cierre: deja el `[` como texto y sigue (jamás panic).
+        }
+        out.push_str(human);
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Tamaño del preview inline de la card (D2, puro y testeable).
+///
+/// Todo el ancho disponible, aspecto preservado (`alto = ancho * h/w`),
+/// alto clampeado a `max_h` (tokens). Sin upscale >1.0 para no pixelar
+/// texturas chicas y sin re-reservar por frame: el llamador usa el tamaño
+/// del primer frame para que el bloque sea estable entre fotogramas.
+pub fn media_preview_size(frame_w: f32, frame_h: f32, avail_w: f32, max_h: f32) -> (f32, f32) {
+    let fw = if frame_w.is_finite() && frame_w > 0.0 {
+        frame_w
+    } else {
+        1.0
+    };
+    let fh = if frame_h.is_finite() && frame_h > 0.0 {
+        frame_h
+    } else {
+        1.0
+    };
+    let avail = if avail_w.is_finite() && avail_w > 0.0 {
+        avail_w
+    } else {
+        80.0
+    };
+    let cap = if max_h.is_finite() && max_h > 0.0 {
+        max_h
+    } else {
+        MEDIA_CARD_MAX_PREVIEW_H
+    };
+    let scale = (avail / fw).min(1.0);
+    let mut w = (fw * scale).ceil();
+    let mut h = (fh * scale).ceil();
+    if h > cap {
+        let down = cap / h;
+        w = (w * down).ceil();
+        h = cap;
+    }
+    if w < 1.0 {
+        w = 1.0;
+    }
+    if h < 1.0 {
+        h = 1.0;
+    }
+    (w, h)
 }
 
 fn parse_markdown_table_row(line: &str) -> Option<Vec<String>> {
@@ -1678,6 +2617,12 @@ pub enum AssistantUiAction {
     AgentModeChanged(bool),
     /// Generar una animación del objeto/expresión y reproducirla en el chat.
     RunAnimation,
+    /// Exportar la animación visible en la card a GIF (B5).
+    ///
+    /// Piel pura: la card emite la intención; la app la ejecuta en el hilo
+    /// de export existente (`spawn_gif_export`) y publica progreso/error en
+    /// `MediaExportState`. Sin I/O ni spawn en `Ui::`.
+    ExportMedia,
     /// Preguntarle al tutor qué estudiar a continuación.
     AskNextTopic,
     /// Feedback del usuario: la última explicación le sirvió.
@@ -1690,6 +2635,9 @@ pub enum AssistantUiAction {
     OpenMascotConfig,
     /// Explícame paso a paso — inicia enseñanza interactiva con burbujas, gráfica y pizarra.
     ExplainStepwise(String),
+    /// B7 — Pedir un ejercicio del tema (botón «Andamiar» / CTA de vacío).
+    /// La app lo genera en background y muestra la tarjeta con corrección.
+    RequestExercise { topic: String },
     /// Aplicar comando raw grafito directamente (fallback cuando no hay preflight)
     ApplyRawCommand(String),
     /// Guardar cambios de avatar y nombre de perfil (unificado).
@@ -1698,6 +2646,21 @@ pub enum AssistantUiAction {
     LiveSaveAvatar,
     /// Restablecer avatar al valor por defecto (borrador local).
     ResetAvatar,
+    /// Aclaración pedida por el agente (`ask_user` S2): la tool devolvió el
+    /// evento pendiente y la UI lo muestra como botones en el turno.
+    /// La app la estagia vía `stage_clarification`; esta variante existe para
+    /// tests/contrato y nunca se emite desde el dibujado (los botones emiten
+    /// `AnswerClarification`).
+    AskClarification {
+        question: String,
+        options: Vec<String>,
+    },
+    /// Respuesta del usuario a la aclaración pendiente (1 click en un botón).
+    /// La app la vuelve al loop como `function_call_output`/mensaje en un
+    /// nuevo job de background; nunca bloquea threads.
+    AnswerClarification { call_id: String, answer: String },
+    /// Descartar la aclaración sin responder (el turno visible queda intacto).
+    DismissClarification,
 }
 
 /// Dibuja el asistente como parte permanente del shell, antes del canvas.
@@ -3151,16 +4114,27 @@ fn draw_assistant_settings_contents(
     if provider == ProviderProfile::CustomOpenAiCompatible {
         ui.add_space(SPACE_SM);
         ui.label(
-            egui::RichText::new("Usá OpenCode, Muse Spark u otro proxy OpenAI-compatible. Configurá endpoint https://.../v1 y clave GRAFITO_ASSISTANT_CUSTOM_*_API_KEY.")
+            egui::RichText::new(custom_provider_help_text())
                 .color(theme.text_tertiary)
                 .size(TYPE_XS),
         );
         ui.label(
-            egui::RichText::new("Modelos OpenCode Go verificados: deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor, fusion (+ 17 más por descubrimiento). Spark usa la API de respuestas; el modo agente con herramientas reintenta con DeepSeek sin cambiar tu modelo.")
+            egui::RichText::new(verified_models_summary_text())
                 .color(theme.text_tertiary)
                 .size(TYPE_XS)
                 .weak(),
-        );
+        )
+        .on_hover_text("Spark usa la API de respuestas; el modo agente con herramientas reintenta con DeepSeek sin cambiar tu modelo.");
+        egui::CollapsingHeader::new("Ver modelos verificados")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(verified_models_detail_text())
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS)
+                        .weak(),
+                );
+            });
     }
     if provider != state.provider {
         state.select_provider(provider);
@@ -3632,10 +4606,14 @@ fn draw_panel_contents(
             );
         });
 
-    egui::ScrollArea::vertical()
+    // R1 stick-to-bottom condicional: sólo sigue abajo si el usuario ya
+    // estaba abajo (egui además desengancha solo al scrollear arriba y
+    // re-engancha al volver). Sin chip flotante por decisión explícita.
+    let stick = transcript_stick_to_bottom(state.transcript_at_bottom);
+    let scroll_output = egui::ScrollArea::vertical()
         .id_salt("grafito_assistant_conversation")
         .auto_shrink([false, true])
-        .stick_to_bottom(true)
+        .stick_to_bottom(stick)
         .show(ui, |ui| {
             if let Some(error) = state.error.clone() {
                 egui::Frame::none()
@@ -3644,11 +4622,17 @@ fn draw_panel_contents(
                     .rounding(crate::tokens::RADIUS_MD)
                     .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
-                        ui.label(
+                        let err_resp = ui.label(
                             egui::RichText::new(error)
                                 .color(theme.danger)
                                 .size(crate::tokens::TYPE_XS),
                         );
+                        // A11Y live-region: etiqueta la respuesta existente
+                        // (sin widgets nuevos: un `Area` flotante rompería el
+                        // hover en egui 0.29). Fuente única: assistant_live_text.
+                        if let Some(live) = assistant_live_text(state) {
+                            crate::toolbar::tag_live_region(&err_resp, live);
+                        }
                         if state.proposal_correction_available
                             && ui.small_button("Pedir una corrección").clicked()
                         {
@@ -3670,8 +4654,18 @@ fn draw_panel_contents(
                 );
                 ui.add_space(SPACE_SM);
             }
+            if state.has_pending_clarification() {
+                retain_first_assistant_action(
+                    &mut action,
+                    draw_pending_clarification_card(ui, state),
+                );
+                ui.add_space(SPACE_SM);
+            }
             if should_draw_empty_state(state) {
-                draw_assistant_empty_state(ui, state, visuals);
+                retain_first_assistant_action(
+                    &mut action,
+                    draw_assistant_empty_state(ui, state, visuals),
+                );
             } else {
                 let reveal_clip = {
                     let last_content = state
@@ -3754,15 +4748,21 @@ fn draw_panel_contents(
             if should_draw_empty_state(state) {
                 if state.anim_progress {
                     draw_animation_progress(ui, state, visuals);
-                } else if let Some(media) = &state.media {
-                    draw_media_card(ui, media, state);
+                } else if state.media.is_some() {
+                    retain_first_assistant_action(&mut action, draw_media_card(ui, state));
                 }
             }
         });
+    state.transcript_at_bottom = transcript_is_at_bottom(
+        scroll_output.state.offset.y,
+        scroll_output.inner_rect.height(),
+        scroll_output.content_size.y,
+    );
     action
 }
 
 /// Tarjeta en vivo mientras se genera la animación (progreso sin fricción).
+/// Con tamaño mínimo legible y label de estado (`generando`).
 fn draw_animation_progress(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -3777,19 +4777,29 @@ fn draw_animation_progress(
         .rounding(RADIUS_MD)
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(assistant_media_min_side());
             ui.horizontal(|ui| {
                 let pulse = ((time * 3.0).sin() + 1.0) * 0.5;
                 let color = theme.accent.gamma_multiply(0.45 + 0.55 * pulse as f32);
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 5.0, color);
-                ui.add_space(4.0);
+                ui.add_space(SPACE_XS);
                 ui.add(egui::Label::new(
                     egui::RichText::new("Generando animación…")
-                        .color(theme.text_secondary)
-                        .size(TYPE_SM),
+                        .color(theme.text_primary)
+                        .size(TYPE_SM)
+                        .strong(),
                 ));
             });
+            ui.add_space(SPACE_XS);
+            ui.label(
+                egui::RichText::new("Estado: generando")
+                    .color(theme.text_tertiary)
+                    .size(TYPE_XS)
+                    .weak(),
+            );
         });
     // F17: subsumido por el scheduler de app.rs (16ms) mientras is_pending.
     ui.ctx()
@@ -3797,45 +4807,283 @@ fn draw_animation_progress(
     let _ = state;
 }
 
-/// Reproductor de animación (GIF-like) en el chat.
-fn draw_media_card(ui: &mut egui::Ui, media: &AssistantMedia, state: &AssistantPanelState) {
+/// Duración del loop para `frame_count` fotogramas a `fps` (B5).
+///
+/// En ms, mínimo 1 si hay frames; 0 si no hay nada que recorrer. `fps` no
+/// finita o ≤ 0 cae a `MEDIA_CARD_BASE_FPS`. Pura, sin panic.
+pub fn media_loop_duration_ms(frame_count: usize, fps: f32) -> u64 {
+    if frame_count == 0 {
+        return 0;
+    }
+    let fps = if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        MEDIA_CARD_BASE_FPS
+    };
+    let ms = (frame_count as f32 / fps * 1000.0).round();
+    if !ms.is_finite() {
+        return 1;
+    }
+    (ms as u64).clamp(1, grafito_anim::protocol::MAX_TIMELINE_DURATION_MS)
+}
+
+/// Timeline de scrub para `frame_count` fotogramas (B5).
+///
+/// Dos keys lineales `0 → 0.0` y `duración → N-1`: el deslizador mapea
+/// fracción → `t_ms` y `Timeline::sample` interpola el valor. `None` si no
+/// hay frames. Pura, sin panic.
+pub fn media_scrub_timeline(frame_count: usize, fps: f32) -> Option<Timeline> {
+    if frame_count == 0 {
+        return None;
+    }
+    let duration_ms = media_loop_duration_ms(frame_count, fps);
+    let last = frame_count.saturating_sub(1) as f32;
+    Some(Timeline {
+        duration_ms,
+        keyframes: vec![
+            grafito_anim::protocol::Keyframe {
+                t_ms: 0,
+                value: 0.0,
+            },
+            grafito_anim::protocol::Keyframe {
+                t_ms: duration_ms,
+                value: last,
+            },
+        ],
+    })
+}
+
+/// Índice a mostrar en `t_ms` vía `Timeline::sample` (B5).
+///
+/// Lerp + round + clamp a `0..N`: slider→frame sin saltos ni panic.
+/// Timeline vacío o `frame_count == 0` → 0. Pura.
+pub fn media_frame_at(timeline: &Timeline, t_ms: u64, frame_count: usize) -> usize {
+    if frame_count == 0 {
+        return 0;
+    }
+    let value = timeline.sample(t_ms);
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.round() as usize).min(frame_count.saturating_sub(1))
+}
+
+/// Textos del contador de la card (N2): compacto `42/48` para la toolbar +
+/// largo `Fotograma 42 de 48` para hover/accesibilidad del deslizador.
+///
+/// UN solo contador visible: el largo jamás se dibuja como etiqueta suelta
+/// (era el duplicado del screenshot). Puro, sin `unwrap`.
+pub fn media_counter_text(index: usize, frame_count: usize) -> (String, String) {
+    if frame_count == 0 {
+        return ("0/0".to_owned(), "Sin fotogramas".to_owned());
+    }
+    let shown = index.saturating_add(1).min(frame_count);
+    let shown = shown.max(1);
+    (
+        format!("{shown}/{frame_count}"),
+        format!("Fotograma {shown} de {frame_count}"),
+    )
+}
+
+/// N2 (nota N1): la etiqueta del contador se suprime con gracia bajo ~160px
+/// de ancho disponible: el deslizador sigue (posición vía hover) pero no se
+/// dibuja texto que se truncaría. Piso legible `TYPE_XS` en el render. Pura.
+pub fn media_show_counter_label(avail_w: f32) -> bool {
+    avail_w.is_finite() && avail_w >= 160.0
+}
+
+/// Tamaño del preview en el overlay (N2): llena `min(ancho, alto-disponible)`
+/// respetando aspecto. A diferencia de la card inline SÍ permite upscale:
+/// "ver grande" lo pide y el usuario lo abrió a propósito. Puro, sin `unwrap`.
+pub fn media_overlay_preview_size(
+    frame_w: f32,
+    frame_h: f32,
+    avail_w: f32,
+    avail_h: f32,
+) -> (f32, f32) {
+    let fw = if frame_w.is_finite() && frame_w > 0.0 {
+        frame_w
+    } else {
+        1.0
+    };
+    let fh = if frame_h.is_finite() && frame_h > 0.0 {
+        frame_h
+    } else {
+        1.0
+    };
+    let aw = if avail_w.is_finite() && avail_w > 0.0 {
+        avail_w
+    } else {
+        80.0
+    };
+    let ah = if avail_h.is_finite() && avail_h > 0.0 {
+        avail_h
+    } else {
+        200.0
+    };
+    let scale = (aw / fw).min(ah / fh);
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let w = (fw * scale).ceil().max(1.0);
+    let h = (fh * scale).ceil().max(1.0);
+    (w, h)
+}
+
+/// Tamaño de la ventana overlay de la animación (N2, puro y testeable).
+///
+/// Centrada, hasta 86%×82% de pantalla, clampeada a `480..900 × 420..720`:
+/// el preview ocupa el resto (ver `media_preview_size`) y la toolbar una
+/// sola fila abajo. Sin columnas vacías. Pura, sin `unwrap`.
+pub fn media_overlay_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
+    let w = if screen_w.is_finite() && screen_w > 0.0 {
+        screen_w * 0.86
+    } else {
+        480.0
+    };
+    let h = if screen_h.is_finite() && screen_h > 0.0 {
+        screen_h * 0.82
+    } else {
+        420.0
+    };
+    (w.clamp(480.0, 900.0), h.clamp(420.0, 720.0))
+}
+
+/// Reproductor de animación (GIF-like) en el chat (B5).
+///
+/// - Autoplay a 12 fps (`MEDIA_CARD_BASE_FPS`); al arrastrar el deslizador
+///   se pausa y QUEDA en pausa con estado visible («en pausa» + botón
+///   Reproducir): retomar es explícito y nunca salta solo.
+/// - Deslizador mapea fracción → `t_ms` → `media_frame_at`
+///   (`Timeline::sample` + round + clamp).
+/// - Estado siempre visible: «Fotograma N de M» + reproduciendo/en pausa.
+/// - Velocidad por card (0.5x/1x/2x, botón que rota); la app la usa para el
+///   delay del GIF.
+/// - Botón Exportar emite `AssistantUiAction::ExportMedia` (la app ejecuta
+///   en el hilo existente; cero I/O/spawn en `Ui::`). Deshabilitado con
+///   motivo si no hay frames; progreso/error vía `MediaExportState`, jamás
+///   mudo. Prosa sin IDs literales.
+fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
-    let (textures, ready) = state.media_textures();
-    if ready && !textures.is_empty() {
-        let time = ui.input(|input| input.time);
-        let fps = 12.0;
-        let index = ((time * fps) as usize) % textures.len();
+    let now_s = ui.input(|input| input.time);
+    // Snapshot barato sin retener borrows (los controles piden `&mut` y la
+    // pintura solo necesita el handle clonado).
+    let (title, frame_count) = state.media.as_ref().map_or_else(
+        || (String::new(), 0),
+        |media| (media.title.clone(), media.frames.len()),
+    );
+    let index = state.advance_media_playhead(
+        now_s,
+        frame_count,
+        state.media_textures().1 && !state.media_textures().0.is_empty(),
+    );
+    let mut action = None;
+    let Some(index) = index else {
         egui::Frame::none()
             .fill(theme.input_bg)
             .stroke(egui::Stroke::new(1.0, theme.separator))
             .rounding(RADIUS_MD)
             .inner_margin(egui::Margin::same(SPACE_SM))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.set_min_height(assistant_media_min_side());
                 ui.label(
                     egui::RichText::new("Animación")
-                        .color(theme.accent)
+                        .color(theme.text_primary)
                         .size(TYPE_SM)
                         .strong(),
                 );
-                if !media.title.is_empty() {
-                    ui.label(
-                        egui::RichText::new(&media.title)
-                            .color(theme.text_secondary)
-                            .size(TYPE_XS),
-                    );
-                }
                 ui.add_space(SPACE_XS);
-                let texture = &textures[index];
-                let size = texture.size_vec2();
+                ui.label(
+                    egui::RichText::new("Preparando animación…")
+                        .color(theme.text_secondary)
+                        .size(TYPE_SM),
+                );
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new("Estado: generando")
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS)
+                        .weak(),
+                );
+            });
+        return action;
+    };
+    // Handle clonado (barato): la pintura no retiene borrow del estado y los
+    // controles de abajo usan `&mut` sin pelear con el borrow checker.
+    // D2: tamaño de referencia = primer frame (estable entre fotogramas).
+    let (first_w, first_h) = state
+        .media_textures()
+        .0
+        .first()
+        .map(|t| (t.size_vec2().x, t.size_vec2().y))
+        .unwrap_or((1.0, 1.0));
+    let texture = state.media_textures().0.get(index).cloned();
+    // D2 gate anti-parpadeo: las texturas se suben una sola vez en
+    // `set_media`; acá sólo se re-selecciona el handle si el índice cambió.
+    // El rect es estable (misma reserva siempre) así el scroll no salta.
+    state.media_last_shown.set(Some(index));
+    let duration_ms = media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS);
+    let paused = state.media_paused.get();
+    let speed_label = state.media_speed.get().label();
+    // N2: UN solo contador (el compacto vive en la toolbar); el largo solo
+    // va al hover del deslizador, jamás como etiqueta suelta duplicada.
+    let (counter_compact, counter_long) = media_counter_text(index, frame_count);
+    let export_line: Option<(String, egui::Color32)> = match &state.media_export {
+        MediaExportState::Idle => None,
+        MediaExportState::Exporting => Some(("Exportando…".to_owned(), theme.text_secondary)),
+        MediaExportState::Done => Some(("Se exportó la animación.".to_owned(), theme.success)),
+        MediaExportState::Failed(reason) => {
+            Some((format!("No se pudo exportar: {reason}"), theme.warning))
+        }
+    };
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(RADIUS_MD)
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.set_min_height(transcript_button_row_min_height());
+                ui.label(
+                    egui::RichText::new("Animación")
+                        .color(theme.text_primary)
+                        .size(TYPE_SM)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (status, color) = if paused {
+                        ("en pausa", theme.text_tertiary)
+                    } else {
+                        ("reproduciendo", theme.success)
+                    };
+                    ui.label(
+                        egui::RichText::new(status)
+                            .color(color)
+                            .size(TYPE_XS)
+                            .strong(),
+                    );
+                });
+            });
+            if !title.is_empty() {
+                ui.label(
+                    egui::RichText::new(&title)
+                        .color(theme.text_primary)
+                        .size(TYPE_SM),
+                );
+            }
+            ui.add_space(SPACE_XS);
+            if let Some(texture) = &texture {
+                // D2: todo el ancho disponible, aspecto preservado
+                // (`alto = ancho * h/w`), misma reserva siempre (ref = primer
+                // frame) para no mover el scroll entre fotogramas.
                 let max_w = ui.available_width().max(80.0);
-                // Evita altura enorme al pedo con retratos o texturas gigantes:
-                // clampear tanto ancho como alto, sin upscale >1.0 y con max_h 280.
-                let max_h = 280.0_f32.min(ui.available_height().max(80.0));
-                let scale_w = (max_w / size.x.max(1.0)).clamp(0.25, 1.0);
-                let scale_h = (max_h / size.y.max(1.0)).clamp(0.25, 1.0);
-                let scale = scale_w.min(scale_h);
-                let display = egui::vec2(size.x * scale, size.y * scale).ceil();
-                // Usar allocate_exact_size para que ScrollArea mida correcto, no cursor hack
+                let (dw, dh) =
+                    media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
+                let display = egui::vec2(dw, dh);
                 let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
                 ui.painter().image(
                     texture.id(),
@@ -3843,17 +5091,269 @@ fn draw_media_card(ui: &mut egui::Ui, media: &AssistantMedia, state: &AssistantP
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
+            } else {
+                ui.label(
+                    egui::RichText::new("Fotograma no disponible.")
+                        .color(theme.warning)
+                        .size(TYPE_SM),
+                );
+            }
+            ui.add_space(SPACE_XS);
+            // N2: UNA sola barra (el deslizador) + UN solo contador (el de la
+            // toolbar). El texto largo vive solo en el hover: nada duplicado.
+            if frame_count > 1 && duration_ms > 0 {
+                let mut fraction =
+                    (state.media_playhead_ms.get().min(duration_ms) as f32) / (duration_ms as f32);
+                fraction = fraction.clamp(0.0, 1.0);
+                let response = ui
+                    .add(
+                        egui::Slider::new(&mut fraction, 0.0..=1.0)
+                            .text("Recorrer fotogramas")
+                            .show_value(false),
+                    )
+                    .on_hover_text(&counter_long);
+                if response.dragged() || response.changed() {
+                    // Se pausa al arrastrar y queda en pausa con estado
+                    // visible (decisión B5 documentada arriba).
+                    let t_ms = (fraction.clamp(0.0, 1.0) * (duration_ms as f32)).round() as u64;
+                    state.media_playhead_ms.set(t_ms.min(duration_ms));
+                    state.media_paused.set(true);
+                }
+            }
+            ui.add_space(SPACE_XS);
+            // D2 toolbar compacta con wrap por tokens: todo abre algo o
+            // explica (nada mudo). Contador integrado en la misma fila.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                let toggle_label = if state.media_paused.get() {
+                    "▶ Reproducir"
+                } else {
+                    "⏸ Pausar"
+                };
+                if ui
+                    .small_button(toggle_label)
+                    .on_hover_text(if state.media_paused.get() {
+                        MEDIA_TIP_PLAY
+                    } else {
+                        MEDIA_TIP_PAUSE
+                    })
+                    .clicked()
+                {
+                    state.media_paused.set(!state.media_paused.get());
+                }
+                if ui
+                    .small_button(format!("{speed_label} ▾"))
+                    .on_hover_text(MEDIA_TIP_SPEED)
+                    .clicked()
+                {
+                    state.media_speed.set(state.media_speed.get().cycle());
+                }
+                if ui
+                    .small_button("⛶ Pantalla completa")
+                    .on_hover_text(MEDIA_TIP_FULLSCREEN)
+                    .clicked()
+                {
+                    state.media_fullscreen.set(true);
+                }
+                // N2: mismo tamaño que el resto (`.small()`): el `Button`
+                // grande empujaba este último control fuera del panel ~340px
+                // y quedaba cortado en el borde. Con wrap por tokens jamás
+                // queda medio afuera: baja de fila antes de cortarse.
+                let exporting = matches!(state.media_export, MediaExportState::Exporting);
+                let export_response = ui.add_enabled(
+                    frame_count > 0 && !exporting,
+                    egui::Button::new("Exportar").small(),
+                );
+                if export_response.clicked() {
+                    action = Some(AssistantUiAction::ExportMedia);
+                }
+                if frame_count == 0 {
+                    export_response
+                        .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+                } else if exporting {
+                    export_response.on_disabled_hover_text("Ya se está exportando…");
+                } else {
+                    export_response.on_hover_text(MEDIA_TIP_EXPORT);
+                }
+                // N2: contador único integrado; bajo ~160px se suprime con
+                // gracia (nota N1) en vez de truncarse.
+                if media_show_counter_label(ui.available_width()) {
+                    ui.label(
+                        egui::RichText::new(&counter_compact)
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS)
+                            .strong(),
+                    );
+                }
             });
-        // F17: playback media card — wake source local (no cubierto por is_pending).
+            if let Some((text, color)) = &export_line {
+                ui.add_space(SPACE_XS);
+                ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
+            }
+        });
+    // N2 overlay rediseñado: preview CENTRADO que ocupa el espacio (respeta
+    // aspecto con `media_overlay_preview_size`: `min(ancho, alto-disponible)`)
+    // + UNA toolbar abajo con [Play/Pausa][deslizador+contador][1x][Exportar]
+    // [Cerrar(Esc)]. Sin columnas vacías, sin contadores duplicados.
+    // Patrón `egui::Window` existente (ver `draw_assistant_settings_window`);
+    // sin I/O ni spawn, sólo renderiza `&Estado`.
+    if state.media_fullscreen.get() {
+        let mut open = true;
+        let mut close_requested = false;
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close_requested = true;
+        }
+        let screen = ui.ctx().screen_rect();
+        let (win_w, win_h) = media_overlay_window_size(screen.width(), screen.height());
+        egui::Window::new("Animación")
+            .id(egui::Id::new("assistant_media_fullscreen"))
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .constrain(true)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(win_w)
+            .default_height(win_h)
+            .frame(
+                egui::Frame::window(&ui.ctx().style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
+                    .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG)),
+            )
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(ui.available_width());
+                if !title.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new(&title)
+                                .color(theme.text_primary)
+                                .size(TYPE_SM)
+                                .strong(),
+                        );
+                    });
+                    ui.add_space(SPACE_XS);
+                }
+                if let Some(texture) = state.media_textures().0.get(index).cloned() {
+                    let size = texture.size_vec2();
+                    // Reserva honesta para título + toolbar (todo tokens): lo
+                    // que queda es para el preview, centrado.
+                    let reserve = SPACE_XXL * 3.0 + SPACE_LG + SPACE_SM;
+                    let max_h = (ui.available_height() - reserve)
+                        .clamp(200.0, screen.height())
+                        .max(200.0);
+                    let max_w = ui.available_width().max(80.0);
+                    let (dw, dh) = media_overlay_preview_size(size.x, size.y, max_w, max_h);
+                    ui.vertical_centered(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(dw, dh), egui::Sense::hover());
+                        ui.painter().image(
+                            texture.id(),
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    });
+                } else {
+                    ui.label(
+                        egui::RichText::new("Fotograma no disponible.")
+                            .color(theme.warning)
+                            .size(TYPE_SM),
+                    );
+                }
+                ui.add_space(SPACE_SM);
+                // UNA sola toolbar (wrap por tokens: baja de fila, jamás se
+                // corta a la mitad): deslizador + contador juntos.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                    let toggle_label = if state.media_paused.get() {
+                        "▶ Reproducir"
+                    } else {
+                        "⏸ Pausar"
+                    };
+                    if ui
+                        .small_button(toggle_label)
+                        .on_hover_text(if state.media_paused.get() {
+                            MEDIA_TIP_PLAY
+                        } else {
+                            MEDIA_TIP_PAUSE
+                        })
+                        .clicked()
+                    {
+                        state.media_paused.set(!state.media_paused.get());
+                    }
+                    if frame_count > 1 && duration_ms > 0 {
+                        let mut fraction = (state.media_playhead_ms.get().min(duration_ms) as f32)
+                            / (duration_ms as f32);
+                        fraction = fraction.clamp(0.0, 1.0);
+                        let slider_w = ui.available_width().max(80.0);
+                        let response = ui
+                            .add_sized(
+                                egui::vec2(slider_w, ui.spacing().interact_size.y),
+                                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
+                            )
+                            .on_hover_text(&counter_long);
+                        if response.dragged() || response.changed() {
+                            let t_ms =
+                                (fraction.clamp(0.0, 1.0) * (duration_ms as f32)).round() as u64;
+                            state.media_playhead_ms.set(t_ms.min(duration_ms));
+                            state.media_paused.set(true);
+                        }
+                    }
+                    // Contador único junto al deslizador; bajo ~160px se
+                    // suprime con gracia (nota N1) en vez de truncarse.
+                    if media_show_counter_label(ui.available_width()) {
+                        ui.label(
+                            egui::RichText::new(&counter_compact)
+                                .color(theme.text_secondary)
+                                .size(TYPE_XS)
+                                .strong(),
+                        );
+                    }
+                    if ui
+                        .small_button(format!("{speed_label} ▾"))
+                        .on_hover_text(MEDIA_TIP_SPEED)
+                        .clicked()
+                    {
+                        state.media_speed.set(state.media_speed.get().cycle());
+                    }
+                    let exporting = matches!(state.media_export, MediaExportState::Exporting);
+                    let export_response = ui.add_enabled(
+                        frame_count > 0 && !exporting,
+                        egui::Button::new("Exportar").small(),
+                    );
+                    if export_response.clicked() {
+                        action = Some(AssistantUiAction::ExportMedia);
+                    }
+                    if frame_count == 0 {
+                        export_response
+                            .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+                    } else if exporting {
+                        export_response.on_disabled_hover_text("Ya se está exportando…");
+                    } else {
+                        export_response.on_hover_text(MEDIA_TIP_EXPORT);
+                    }
+                    if ui
+                        .small_button("Cerrar (Esc)")
+                        .on_hover_text("Cierra esta vista grande")
+                        .clicked()
+                    {
+                        close_requested = true;
+                    }
+                });
+            });
+        if !open || close_requested {
+            state.media_fullscreen.set(false);
+        }
+    }
+    // F17: playback media card — wake source local (no cubierto por is_pending).
+    // Solo cuando reproduce: en pausa la card es estática (las interacciones
+    // repintan solas) y no se quema CPU.
+    if !state.media_paused.get() {
         ui.ctx()
             .request_repaint_after(MEDIA_PLAYBACK_REPAINT_INTERVAL);
-    } else {
-        ui.label(
-            egui::RichText::new("Preparando animación…")
-                .color(theme.text_tertiary)
-                .size(TYPE_XS),
-        );
     }
+    action
 }
 
 fn retain_first_assistant_action(
@@ -3948,6 +5448,67 @@ fn draw_remote_authorization_card(
                 }
                 if ui.small_button("Seguir localmente").clicked() {
                     action = Some(AssistantUiAction::CancelRemoteAuthorization);
+                }
+            });
+        });
+    action
+}
+
+/// Tarjeta de aclaración pendiente (S2 `ask_user` real vía evento).
+///
+/// Piel pura: muestra la pregunta + botones (0..=4 opciones) en el turno.
+/// Cada botón emite `AnswerClarification{call_id, answer}`; "Responder en el
+/// chat" descarta para escribir a mano. Sin I/O ni spawn (el 1 click vuelve
+/// al loop como `function_call_output` vía un nuevo job en la app).
+fn draw_pending_clarification_card(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+) -> Option<AssistantUiAction> {
+    let pending = state.pending_clarification()?;
+    let theme = current_theme(ui.ctx());
+    let call_id = pending.call_id.clone();
+    let question = pending.question.clone();
+    let options = pending.options.clone();
+    let mut action = None;
+    egui::Frame::none()
+        .fill(theme.accent_muted)
+        .stroke(egui::Stroke::new(1.0, theme.accent))
+        .rounding(RADIUS_MD)
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                egui::RichText::new("Necesito una aclaración")
+                    .color(theme.accent_strong)
+                    .size(TYPE_SM)
+                    .strong(),
+            );
+            ui.add_space(SPACE_XS);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(question)
+                        .color(theme.text_primary)
+                        .size(TYPE_SM),
+                )
+                .wrap(),
+            );
+            ui.add_space(SPACE_SM);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                for option in &options {
+                    if ui.small_button(option).clicked() {
+                        action = Some(AssistantUiAction::AnswerClarification {
+                            call_id: call_id.clone(),
+                            answer: option.clone(),
+                        });
+                    }
+                }
+                if ui
+                    .small_button("Responder en el chat")
+                    .on_hover_text("Descartar y escribir la respuesta a mano")
+                    .clicked()
+                {
+                    action = Some(AssistantUiAction::DismissClarification);
                 }
             });
         });
@@ -4152,11 +5713,19 @@ fn draw_assistant_empty_state(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
     _visuals: AssistantVisuals,
-) {
+) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let assistant_name = state.avatar.assistant_name_or_default();
     let time = ui.input(|i| i.time);
     let hover_pos = ui.input(|i| i.pointer.hover_pos());
+    // B7 — CTA de vacío: si ya hay borrador se usa como tema, si no el
+    // tema por defecto (siempre resuelve a un ejercicio real).
+    let tema_cta = if state.problem.trim().is_empty() {
+        ANDAMIAR_DEFAULT_TOPIC.to_string()
+    } else {
+        state.problem.trim().chars().take(60).collect()
+    };
+    let mut action = None;
     // Minimalista — avatar protagonista, texto escaso, centrado
     let avail = ui.available_height();
     // Centrar verticalmente el bloque completo
@@ -4206,7 +5775,17 @@ fn draw_assistant_empty_state(
                 .size(crate::tokens::TYPE_SM)
                 .weak(),
         );
+        ui.add_space(crate::tokens::SPACE_SM);
+        // B7 — entrada al ciclo de ejercicio sin conversación previa.
+        if ui
+            .button("Andamiar: practicá con un ejercicio")
+            .on_hover_text("Genero un ejercicio y lo corregimos juntos")
+            .clicked()
+        {
+            action = Some(AssistantUiAction::RequestExercise { topic: tema_cta });
+        }
     });
+    action
 }
 
 fn draw_assistant_header(
@@ -4363,7 +5942,8 @@ fn draw_assistant_composer(
     // Composer Scandinavian: input limpio hairline 10%, radio 12, sin outer_margin oscuro
     // F5 quiet: TextEdit::multiline con wrap (default egui) y altura fija 44px
     // (28px y 1 línea cuando colapsa en paneles angostos o bajos) — no requiere ScrollArea envolvente.
-    egui::Frame::none()
+    let mut editor_had_focus = false;
+    let composer_frame = egui::Frame::none()
         .fill(theme.input_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
         .rounding(crate::tokens::RADIUS_MD)
@@ -4391,6 +5971,20 @@ fn draw_assistant_composer(
                     ui.input(|input| input.modifiers.shift),
                     state.can_submit(),
                 );
+                editor_had_focus = editor.has_focus();
+                // A11Y: Esc descarta lo persistente — turno en curso → Cancelar
+                // (acción pura, el app decide); si no, suelta el foco y
+                // conserva el borrador.
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    if state.is_pending && !state.is_cancelling {
+                        action = Some(AssistantUiAction::Cancel);
+                        // A11Y live-region sobre la respuesta existente (patrón toolbar::tag_live_region).
+                        crate::toolbar::tag_live_region(&editor, escape_live_text(true));
+                    } else {
+                        editor.surrender_focus();
+                        crate::toolbar::tag_live_region(&editor, escape_live_text(false));
+                    }
+                }
                 ui.add_space(crate::tokens::SPACE_XS);
                 ui.horizontal(|ui| {
                     // Adjuntar con estilo ghost macOS
@@ -4489,7 +6083,7 @@ fn draw_assistant_composer(
                     });
                     if state.is_pending {
                         ui.add_space(crate::tokens::SPACE_XS);
-                        ui.add(
+                        let pending_resp = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(
                                     "Estoy pensando… esperá que termine para mandar otra pregunta.",
@@ -4499,6 +6093,10 @@ fn draw_assistant_composer(
                             )
                             .wrap(),
                         );
+                        // A11Y live-region sobre la respuesta existente.
+                        if let Some(live) = assistant_live_text(state) {
+                            crate::toolbar::tag_live_region(&pending_resp, live);
+                        }
                     } else if over_budget {
                         ui.add_space(crate::tokens::SPACE_XS);
                         ui.add(
@@ -4515,6 +6113,11 @@ fn draw_assistant_composer(
                 });
             });
         });
+    // A11Y: foco visible en el composer (anillo 2px del tema) cuando el
+    // editor tiene el foco. El orden Tab lo da egui por orden de creación.
+    if editor_had_focus {
+        theme.paint_focus_ring(ui.painter(), composer_frame.response.rect);
+    }
 
     if !state.attachments.is_empty() {
         ui.add_space(SPACE_XS);
@@ -4620,6 +6223,35 @@ fn conversation_turn_appearance(
     }
 }
 
+/// Motivo por el que "Explícame paso a paso" queda deshabilitado, si aplica.
+///
+/// Puro (`&Estado -> Option`): `None` = habilitado. El render nunca es mudo:
+/// con `Some` muestra botón deshabilitado + tooltip + texto con este motivo.
+fn stepwise_disabled_reason(
+    blocks: &[AssistantMessageBlock],
+    content: &str,
+) -> Option<&'static str> {
+    if should_show_stepwise(blocks, content) {
+        return None;
+    }
+    Some("Se habilita en explicaciones con matemática, tabla, código o desarrollo largo")
+}
+
+/// B7 — Tema por defecto de «Andamiar» cuando el turno viene vacío.
+/// Existe en el currículum (`am1-der`), así que siempre resuelve a un
+/// ejercicio real en vez de caer en error.
+pub const ANDAMIAR_DEFAULT_TOPIC: &str = "derivada";
+
+/// B7 — Tema para «Andamiar» desde un turno: primera línea acotada a 60
+/// (mismo recorte que el botón paso a paso). Puro, testeable.
+pub fn andamiar_topic_for_content(content: &str) -> String {
+    let primera = content.lines().next().unwrap_or("").trim();
+    if primera.is_empty() {
+        return ANDAMIAR_DEFAULT_TOPIC.to_string();
+    }
+    primera.chars().take(60).collect()
+}
+
 /// Decide si una respuesta merece el botón "Explícame paso a paso".
 /// Solo para contenido complejo: headings, math, tablas o cuerpo largo.
 fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool {
@@ -4653,6 +6285,19 @@ fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool
     if is_teaching_topic && has_math {
         return true;
     }
+    // R1: explicación con marcha (pasos/proceso a aplicar) + matemática
+    // habilita aunque sea corta y sin bloques ricos: es justo el caso de una
+    // explicación real ("En 4D Grafito hace una proyección por CPU…").
+    // Saludos vacíos ("hola") no mencionan ni marcha ni matemática.
+    if mentions_step_march(&lower)
+        && (has_math
+            || has_code
+            || mentions_math_text(&lower)
+            || blocks.len() >= 2
+            || content.chars().count() > 200)
+    {
+        return true;
+    }
     // Muy estricto para el resto: solo para explicaciones largas y estructuradas. Evita botón en respuestas puntuales 3D/4D
     let signals = has_heading as u8
         + has_math as u8
@@ -4660,6 +6305,99 @@ fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool
         + (blocks.len() >= 4) as u8
         + (long as u8);
     signals >= 3
+}
+
+/// Menciona una marcha a seguir (pasos, proceso, orden de aplicación).
+///
+/// Puro, minúsculas ya normalizadas por el llamador. Acotado a pie a
+/// expresiones de procedimiento para no habilitar en saludos o preguntas
+/// sueltas sin desarrollo.
+fn mentions_step_march(lower: &str) -> bool {
+    [
+        "paso a paso",
+        "paso ",
+        "pasos",
+        "proceso",
+        "procedimiento",
+        "primero",
+        "después",
+        "despues",
+        "luego",
+        "elegí",
+        "elegis",
+        "elegi ",
+        "aplicarla",
+        "aplicalo",
+        "aplicalas",
+        "seguí",
+        "seguis",
+        "seguí ",
+        "arrastrá",
+        "arrastra",
+        "activá",
+        "activa ",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+}
+
+/// Menciona matemática en prosa (sin necesidad de bloque rico).
+///
+/// Cubre dimensiones/siglas del dominio (`4d`, `cpu`, `proyección`) y
+/// vocabulario matemático más símbolos sueltos. Puro.
+fn mentions_math_text(lower: &str) -> bool {
+    const CUES: &[&str] = &[
+        "proyecci",
+        "4d",
+        "3d",
+        "2d",
+        "cpu",
+        "matriz",
+        "vector",
+        "funci",
+        "deriv",
+        "integr",
+        "taylor",
+        "pitág",
+        "pitag",
+        "límite",
+        "limite",
+        "gráf",
+        "graf",
+        "fórm",
+        "formul",
+        "cálc",
+        "calc",
+        "ecuaci",
+        "geometr",
+        "dimensi",
+        "matemá",
+        "matema",
+        "trigonom",
+        "seno",
+        "coseno",
+        "tangente",
+        "pendiente",
+        "raíz",
+        "raiz",
+        "fracci",
+        "polinom",
+        "cociente",
+        "teorema",
+        "demostra",
+        "ejercicio",
+        "resolv",
+        "esfera",
+        "cubo",
+        "cono",
+        "cilindro",
+    ];
+    if CUES.iter().any(|cue| lower.contains(cue)) {
+        return true;
+    }
+    ["√", "∫", "∑", "≈", "⇒", "→", "∞", "≠", "≤", "≥", "±"]
+        .iter()
+        .any(|symbol| lower.contains(symbol))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4746,17 +6484,20 @@ fn draw_conversation_turn(
                 if state.anim_progress {
                     ui.add_space(SPACE_SM);
                     draw_animation_progress(ui, state, visuals);
-                } else if let Some(media) = &state.media {
+                } else if state.media.is_some() {
                     ui.add_space(SPACE_SM);
-                    draw_media_card(ui, media, state);
+                    retain_first_assistant_action(&mut action, draw_media_card(ui, state));
                 }
             }
-            // Paso a paso solo si el contenido es complejo — no en respuestas puntuales
+            // Paso a paso: siempre visible, nunca mudo. Si el contenido no es
+            // complejo, el botón queda deshabilitado con su motivo (tooltip +
+            // texto) en vez de desaparecer sin explicación.
             let blocks_for_gate = cache.blocks(&turn.content);
-            if should_show_stepwise(&blocks_for_gate, &turn.content) {
-                ui.add_space(SPACE_SM);
-                // Botón ghost Scandinavian integrado, full-width dentro del flujo
-                let btn = egui::Button::new(
+            let stepwise_reason = stepwise_disabled_reason(&blocks_for_gate, &turn.content);
+            ui.add_space(SPACE_SM);
+            // Botón ghost Scandinavian integrado, full-width dentro del flujo
+            let stepwise_btn = || {
+                egui::Button::new(
                     egui::RichText::new("Explícame paso a paso")
                         .color(theme.accent)
                         .size(TYPE_XS)
@@ -4764,23 +6505,62 @@ fn draw_conversation_turn(
                 )
                 .rounding(crate::tokens::RADIUS_MD)
                 .fill(theme.accent.gamma_multiply(0.08))
-                .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)));
-                // Ocupa todo el ancho disponible, no clamp — aprovecha espacio
-                if ui
-                    .add_sized(egui::vec2(ui.available_width(), 28.0), btn)
-                    .on_hover_text("Abre enseñanza interactiva con pizarra y gráfica")
-                    .clicked()
-                {
-                    let topic = turn
-                        .content
-                        .lines()
-                        .next()
-                        .unwrap_or("concepto")
-                        .chars()
-                        .take(60)
-                        .collect::<String>();
-                    action = Some(AssistantUiAction::ExplainStepwise(topic));
-                }
+                .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)))
+            };
+            // Ocupa todo el ancho disponible, no clamp — aprovecha espacio
+            if let Some(reason) = stepwise_reason {
+                ui.add_enabled_ui(false, |ui| {
+                    ui.add_sized(egui::vec2(ui.available_width(), 28.0), stepwise_btn())
+                        .on_disabled_hover_text(reason);
+                });
+                ui.add_space(SPACE_XS);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(reason)
+                            .color(theme.text_tertiary)
+                            .size(TYPE_2XS)
+                            .weak(),
+                    )
+                    .wrap(),
+                );
+            } else if ui
+                .add_sized(egui::vec2(ui.available_width(), 28.0), stepwise_btn())
+                .on_hover_text("Abre enseñanza interactiva con pizarra y gráfica")
+                .clicked()
+            {
+                let topic = turn
+                    .content
+                    .lines()
+                    .next()
+                    .unwrap_or("concepto")
+                    .chars()
+                    .take(60)
+                    .collect::<String>();
+                action = Some(AssistantUiAction::ExplainStepwise(topic));
+            }
+            // B7 — Andamiar: siempre habilitado, nunca mudo. Genera un
+            // ejercicio del tema en background y muestra la tarjeta con
+            // corrección + próximo paso.
+            ui.add_space(SPACE_XS);
+            let andamiar_btn = || {
+                egui::Button::new(
+                    egui::RichText::new("Andamiar")
+                        .color(theme.accent)
+                        .size(TYPE_XS)
+                        .strong(),
+                )
+                .rounding(crate::tokens::RADIUS_MD)
+                .fill(theme.accent.gamma_multiply(0.08))
+                .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)))
+            };
+            if ui
+                .add_sized(egui::vec2(ui.available_width(), 28.0), andamiar_btn())
+                .on_hover_text("Genero un ejercicio del tema y lo corregimos juntos")
+                .clicked()
+            {
+                action = Some(AssistantUiAction::RequestExercise {
+                    topic: andamiar_topic_for_content(&turn.content),
+                });
             }
         });
     ui.add_space(crate::tokens::SPACE_MD);
@@ -4852,7 +6632,7 @@ fn draw_pending_indicator(
                                 .size(TYPE_XS)
                                 .strong(),
                         );
-                        ui.add_space(4.0);
+                        ui.add_space(SPACE_XS);
                         ui.label(
                             egui::RichText::new(ledger)
                                 .color(theme.text_primary)
@@ -4878,16 +6658,16 @@ fn draw_pending_indicator(
                             .size(TYPE_XS)
                             .strong(),
                         );
-                        ui.add_space(2.0);
+                        ui.add_space(SPACE_XS * 0.5);
                         for row in state.agent_activity.iter() {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("•").color(theme.accent));
-                                ui.label(
-                                    egui::RichText::new(&row.text)
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format_activity_row(&row.text))
                                         .color(theme.text_secondary)
                                         .size(TYPE_XS),
-                                );
-                            });
+                                )
+                                .wrap(),
+                            );
                         }
                     });
                 ui.ctx().request_repaint();
@@ -4904,6 +6684,20 @@ fn draw_assistant_response(
     cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
+    // Cerca sin cerrar: avisar arriba sin cambiar el parseo a párrafo
+    // (contrato `rich_assistant_blocks_keep_malformed_syntax_as_plain_text`).
+    if has_unclosed_code_fence(content) {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Respuesta parcial…")
+                    .color(theme.text_tertiary)
+                    .size(TYPE_XS)
+                    .weak(),
+            )
+            .wrap(),
+        );
+        ui.add_space(SPACE_XS);
+    }
     let blocks = cache.blocks(content);
     let mut action = None;
     let mut code_block_index = 0;
@@ -4935,20 +6729,51 @@ fn draw_assistant_response(
                     2 => TYPE_MD,
                     _ => TYPE_SM,
                 };
-                ui.label(
-                    egui::RichText::new(text)
-                        .color(theme.text_primary)
-                        .size(size)
-                        .strong(),
-                );
+                // R1: el inline aplica DENTRO del encabezado (`## **T**`
+                // no muestra asteriscos) con wrap fijo al ancho del panel.
+                draw_inline_text_sized(ui, &humanize_prose_text(text), size, theme.text_primary);
+            }
+            AssistantMessageBlock::Quote(text) => {
+                // R1: cita sin `>` ni `**` visibles; hairline lateral sage.
+                let quote = humanize_prose_text(text);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    ui.add_space(SPACE_XS);
+                    let inner = ui.vertical(|ui| {
+                        draw_inline_text(ui, &quote);
+                    });
+                    let rect = inner.response.rect;
+                    let bar = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x - SPACE_SM + 2.0, rect.min.y + 2.0),
+                        egui::pos2(
+                            rect.min.x - SPACE_SM + 4.0,
+                            (rect.max.y - 2.0).max(rect.min.y),
+                        ),
+                    );
+                    ui.painter()
+                        .rect_filled(bar, 1.0, theme.accent.gamma_multiply(0.45));
+                });
             }
             AssistantMessageBlock::Bullet(text) => {
                 ui.horizontal_top(|ui| {
                     ui.label(egui::RichText::new("-").color(theme.accent));
-                    draw_inline_text(ui, text);
+                    draw_inline_text(ui, &humanize_prose_text(text));
                 });
             }
-            AssistantMessageBlock::Paragraph(text) => draw_inline_text(ui, text),
+            AssistantMessageBlock::Ordered { number, text } => {
+                ui.horizontal_top(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{number}."))
+                            .color(theme.accent)
+                            .size(TYPE_SM)
+                            .strong(),
+                    );
+                    draw_inline_text(ui, &humanize_prose_text(text));
+                });
+            }
+            AssistantMessageBlock::Paragraph(text) => {
+                draw_inline_text(ui, &humanize_prose_text(text));
+            }
             AssistantMessageBlock::DisplayMath(math) => {
                 egui::Frame::none()
                     .fill(theme.panel_bg)
@@ -4988,6 +6813,10 @@ fn draw_assistant_response(
                         let is_grafito_code =
                             code_lang == "grafito" || code_lang == "grafito-scene";
                         ui.horizontal(|ui| {
+                            // Reserva anti-clip: la cabecera vive dentro del
+                            // ScrollArea del transcript; sin altura mínima los
+                            // botones quedaban cortados al pegar al borde.
+                            ui.set_min_height(transcript_button_row_min_height());
                             if !language.is_empty() {
                                 ui.add(
                                     egui::Label::new(
@@ -5106,8 +6935,10 @@ fn draw_assistant_response(
                                     }
                                     // Secundarios siempre visibles sin scroll horizontal:
                                     // copiar, rechazar (oculta local) y detalle colapsable.
+                                    // Reserva anti-clip dentro del ScrollArea (ver cabecera).
                                     ui.add_space(SPACE_XS);
                                     ui.horizontal_wrapped(|ui| {
+                                        ui.set_min_height(transcript_button_row_min_height());
                                         ui.spacing_mut().item_spacing =
                                             egui::vec2(SPACE_SM, SPACE_XS);
                                         if ui
@@ -5223,8 +7054,10 @@ fn draw_assistant_response(
                                         ),
                                     );
                                     // Aun si fue rechazada, ofrecer Aplicar raw para forzar ejecución
+                                    // Reserva anti-clip dentro del ScrollArea (ver cabecera).
                                     ui.add_space(SPACE_XS);
                                     ui.horizontal_wrapped(|ui| {
+                                        ui.set_min_height(transcript_button_row_min_height());
                                         ui.spacing_mut().item_spacing =
                                             egui::vec2(SPACE_SM, SPACE_XS);
                                         if ui
@@ -5512,20 +7345,28 @@ fn rejected_proposal_action(
 }
 
 /// Texto corto de detalle para la propuesta (botón Detalle de la tarjeta).
+///
+/// S1: incluye la vista esperada (`Vista 2D`/`Vista 3D`) para que el Apply de
+/// 1 click anticipe qué se va a mostrar y encuadrar.
 fn proposal_detail_text(verified: &VerifiedAssistantProposal) -> String {
+    let view = verified.proposal.expected_view_label();
     let base = match &verified.proposal {
         AssistantProposal::Command(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                "Comando comprobado listo para aplicar al documento."
+                format!("Comando comprobado listo para aplicar al documento. Vista {view}.")
             } else {
-                "Comando comprobado con sus parámetros necesarios."
+                format!("Comando comprobado con sus parámetros necesarios. Vista {view}.")
             }
         }
-        AssistantProposal::Scene(_) => "Escena 3D comprobada; se aplica de forma atómica.",
-        AssistantProposal::Parameter(_) => "Parámetro comprobado listo para aplicar.",
+        AssistantProposal::Scene(_) => {
+            "Escena 3D comprobada; se aplica de forma atómica. Vista 3D.".to_string()
+        }
+        AssistantProposal::Parameter(_) => {
+            "Parámetro comprobado listo para aplicar. Vista 2D.".to_string()
+        }
     };
     if verified.prerequisite_parameters.is_empty() {
-        base.to_string()
+        base
     } else {
         format!(
             "{base} Parámetros: {}.",
@@ -5537,6 +7378,12 @@ fn proposal_detail_text(verified: &VerifiedAssistantProposal) -> String {
                 .join(", ")
         )
     }
+}
+
+/// Etiqueta de vista para la tarjeta verificada (S1, pura y honesta).
+#[must_use]
+pub fn verified_proposal_view_label(verified: &VerifiedAssistantProposal) -> &'static str {
+    verified.proposal.expected_view_label()
 }
 
 fn draw_verified_assistant_proposal(
@@ -5582,22 +7429,24 @@ fn draw_verified_assistant_proposal(
             });
     }
 
+    // S1: la descripción anticipa la vista que el Apply va a mostrar/encuadrar.
+    let view = verified.proposal.expected_view_label();
     let description = match &verified.proposal {
         AssistantProposal::Command(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                "Aplicar el comando comprobado al documento de Grafito"
+                format!("Aplicar el comando comprobado y mostrar vista {view}")
             } else {
-                "Aplicar el comando comprobado con sus parámetros necesarios"
+                format!("Aplicar el comando comprobado con sus parámetros y mostrar vista {view}")
             }
         }
         AssistantProposal::Scene(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                "Aplicar escena 3D verificada al documento de Grafito"
+                "Aplicar escena 3D verificada y mostrar vista 3D".to_string()
             } else {
-                "Aplicar escena 3D verificada con sus parámetros necesarios"
+                "Aplicar escena 3D verificada con sus parámetros y mostrar vista 3D".to_string()
             }
         }
-        AssistantProposal::Parameter(_) => "Aplicar parámetro verificado al documento de Grafito",
+        AssistantProposal::Parameter(_) => "Aplicar parámetro verificado (vista 2D)".to_string(),
     };
     let mut action = None;
     let status = match &verified.proposal {
@@ -5730,6 +7579,12 @@ fn draw_markdown_table(
     block_index: usize,
 ) {
     let theme = current_theme(ui.ctx());
+    // Ancho estable (R1): se captura ANTES del ScrollArea horizontal, adentro
+    // el ancho disponible es infinito y el Grid mediría para agrandar. Cada
+    // columna se acota a su parte del panel: el texto envuelve, el panel no.
+    let panel_w = stable_transcript_width(ui.available_width());
+    let columns = rows.first().map(Vec::len).unwrap_or(1).max(1);
+    let max_col = ((panel_w - SPACE_XS * 2.0) / columns as f32).max(44.0);
     egui::Frame::none()
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -5747,18 +7602,29 @@ fn draw_markdown_table(
                     )))
                     .striped(true)
                     .min_col_width(44.0)
+                    .max_col_width(max_col)
+                    .num_columns(columns)
                     .show(ui, |ui| {
                         for (row_index, row) in rows.iter().enumerate() {
                             for cell in row {
-                                let text = egui::RichText::new(cell)
-                                    .color(theme.text_primary)
-                                    .size(TYPE_SM);
+                                // R1: inline DENTRO de la celda (`**x**`, código
+                                // y matemática no filtran jerga) con wrap.
+                                let plain = humanize_prose_text(cell);
                                 if row_index == 0 {
-                                    ui.label(text.strong());
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(inline_plain_text(&plain))
+                                                .color(theme.text_primary)
+                                                .size(TYPE_SM)
+                                                .strong(),
+                                        )
+                                        .wrap(),
+                                    );
                                 } else {
-                                    ui.label(text);
+                                    draw_inline_text_sized(ui, &plain, TYPE_SM, theme.text_primary);
                                 }
                             }
+                            ui.end_row();
                         }
                     });
                 });
@@ -6314,9 +8180,16 @@ fn find_bare_math_fragment(text: &str) -> Option<(usize, usize, String)> {
         if let Some(pos) = text.find(trig) {
             // Intentar extraer desde pos hasta el final o hasta doble espacio/punto que no sea math
             // Probar longitudes decrecientes hasta que MathParser::parse tenga éxito
-            // Limitar a 300 chars para no parsear texto normal largo
-            let max_len = (text.len() - pos).min(400);
-            let slice = &text[pos..pos + max_len];
+            // Limitar a 400 bytes para no parsear texto normal largo.
+            // Corte SIEMPRE en boundary UTF-8 (el parcial truncado del
+            // stream puede traer multibyte en cualquier punto).
+            let mut max_len = (text.len() - pos).min(400);
+            while max_len > 0 && !text.is_char_boundary(pos + max_len) {
+                max_len -= 1;
+            }
+            let Some(slice) = text.get(pos..pos + max_len) else {
+                continue;
+            };
             // Buscar el prefijo más largo parseable que termine en espacio, ), , o fin
             for end in (trig.len()..=slice.len()).rev() {
                 // Solo probar cortes en boundaries de char y en whitespaces/puntuación
@@ -6371,71 +8244,96 @@ fn find_bare_math_fragment(text: &str) -> Option<(usize, usize, String)> {
     best_start.map(|s| (s, best_end, best_plain))
 }
 
-fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
-    let theme = current_theme(ui.ctx());
-    let normal = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color: theme.text_primary,
-        ..Default::default()
-    };
-    let bold = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color: theme.text_primary,
-        italics: false,
-        ..Default::default()
-    };
-    let code = egui::TextFormat {
-        font_id: egui::FontId::monospace(TYPE_SM),
-        color: theme.accent,
-        background: theme.accent_muted,
-        ..Default::default()
-    };
-    let math = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color: theme.accent_strong,
-        ..Default::default()
-    };
+/// Formatos ya resueltos para un `LayoutJob` inline.
+struct InlineFormats {
+    normal: egui::TextFormat,
+    bold: egui::TextFormat,
+    code: egui::TextFormat,
+    math: egui::TextFormat,
+}
+
+/// Quita marcadores inline a medio cerrar sin mostrar jerga (`**` sueltos).
+///
+/// Contrato malformado→legible (R1, stream parcial): `**`, `__`, backticks,
+/// `$$`, `\[`, `\(` sin cierre se pelan y queda el texto. Un `$` solo se
+/// conserva (puede ser moneda) y un `*` inicial huérfano (`*uno` del modelo)
+/// se pela sólo si no tiene pareja en el tramo.
+fn strip_unclosed_inline_markers(segment: &str) -> String {
+    let mut out = segment
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .replace("$$", "")
+        .replace(r"\[", "")
+        .replace(r"\(", "")
+        .replace(r"\]", "")
+        .replace(r"\)", "");
+    if out.starts_with('*') && out.chars().filter(|c| *c == '*').count() == 1 {
+        out = out[1..].to_string();
+    }
+    out
+}
+
+/// Construye el `LayoutJob` con inline-formatting sin tocar `Ui`.
+///
+/// Único punto de formato para párrafos, ítems, citas, encabezados y celdas:
+/// el inline aplica DENTRO de todo bloque de texto (R1). Puro salvo los
+/// formatos ya resueltos que recibe.
+fn inline_layout_job(text: &str, formats: &InlineFormats) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let mut remaining = text;
     while !remaining.is_empty() {
         let markers = [
-            ("**", "**", &bold),
-            ("`", "`", &code),
-            ("$$", "$$", &math),
-            (r"\[", r"\]", &math),
-            ("$", "$", &math),
-            (r"\(", r"\)", &math),
+            ("**", "**"),
+            ("__", "__"),
+            ("`", "`"),
+            ("$$", "$$"),
+            (r"\[", r"\]"),
+            ("$", "$"),
+            (r"\(", r"\)"),
         ];
         let next = markers
             .iter()
-            .filter_map(|(start, end, format)| {
+            .filter_map(|(start, end)| {
                 remaining
                     .find(start)
-                    .map(|position| (position, *start, *end, *format))
+                    .map(|position| (position, *start, *end))
             })
-            .min_by_key(|(position, _, _, _)| *position);
-        if let Some((position, start, end, format)) = next {
+            .min_by_key(|(position, _, _)| *position);
+        if let Some((position, start, end)) = next {
+            let format = if start == "**" || start == "__" {
+                &formats.bold
+            } else if start == "`" {
+                &formats.code
+            } else {
+                &formats.math
+            };
             if position > 0 {
                 // Antes del marker, verificar si hay bare math en el prefijo
                 let prefix = &remaining[..position];
                 if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(prefix) {
                     if b_s > 0 {
-                        job.append(&prefix[..b_s], 0.0, normal.clone());
+                        job.append(&prefix[..b_s], 0.0, formats.normal.clone());
                     }
-                    job.append(&b_plain, 0.0, math.clone());
+                    job.append(&b_plain, 0.0, formats.math.clone());
                     let after_bare = &prefix[b_e..];
                     if !after_bare.is_empty() {
-                        job.append(after_bare, 0.0, normal.clone());
+                        job.append(after_bare, 0.0, formats.normal.clone());
                     }
                     // No consumir el marker aún, re-evaluar desde el marker
                     remaining = &remaining[position..];
                     continue;
                 }
-                job.append(&remaining[..position], 0.0, normal.clone());
+                job.append(&remaining[..position], 0.0, formats.normal.clone());
             }
             let after_start = &remaining[position + start.len()..];
             let Some(end_position) = after_start.find(end) else {
-                job.append(&remaining[position..], 0.0, normal.clone());
+                // Sin cierre (típico stream parcial): texto plano sin jerga.
+                job.append(
+                    &strip_unclosed_inline_markers(&remaining[position..]),
+                    0.0,
+                    formats.normal.clone(),
+                );
                 break;
             };
             let source_end = position + start.len() + end_position + end.len();
@@ -6451,9 +8349,9 @@ fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
         // Sin markers $...$, buscar bare math
         if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(remaining) {
             if b_s > 0 {
-                job.append(&remaining[..b_s], 0.0, normal.clone());
+                job.append(&remaining[..b_s], 0.0, formats.normal.clone());
             }
-            job.append(&b_plain, 0.0, math.clone());
+            job.append(&b_plain, 0.0, formats.math.clone());
             // Si hay texto después del bare fragment, también como normal
             let after = &remaining[b_e..];
             if !after.trim().is_empty() {
@@ -6462,112 +8360,138 @@ fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
                 remaining = after;
                 // Si el after no contiene más bare math, append como normal y break
                 if find_bare_math_fragment(remaining).is_none() {
-                    job.append(remaining, 0.0, normal.clone());
+                    job.append(
+                        &strip_unclosed_inline_markers(remaining),
+                        0.0,
+                        formats.normal.clone(),
+                    );
                     break;
                 }
                 continue;
             }
             break;
         }
-        job.append(remaining, 0.0, normal.clone());
+        job.append(
+            &strip_unclosed_inline_markers(remaining),
+            0.0,
+            formats.normal.clone(),
+        );
         break;
     }
+    job
+}
+
+/// Texto plano legible de un tramo con inline-formatting (para tests y gates).
+///
+/// Pela `**`/`__`/backticks cerrados o sueltos y conserva el interior: lo que
+/// se afirma acá es lo que el render ya no muestra como jerga. Puro.
+fn inline_plain_text(text: &str) -> String {
+    let mut out = text.to_string();
+    for (open, close) in [("**", "**"), ("__", "__"), ("`", "`")] {
+        loop {
+            let Some(start) = out.find(open) else {
+                break;
+            };
+            let after = start + open.len();
+            if let Some(rel) = out[after..].find(close) {
+                let end = after + rel;
+                let inner = out[after..end].to_string();
+                out = format!("{}{}{}", &out[..start], inner, &out[end + close.len()..]);
+            } else {
+                break;
+            }
+        }
+    }
+    strip_unclosed_inline_markers(&out)
+}
+
+fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
+    let theme = current_theme(ui.ctx());
+    let formats = InlineFormats {
+        normal: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color: theme.text_primary,
+            ..Default::default()
+        },
+        bold: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color: theme.text_primary,
+            italics: false,
+            ..Default::default()
+        },
+        code: egui::TextFormat {
+            font_id: egui::FontId::monospace(TYPE_SM),
+            color: theme.accent,
+            background: theme.accent_muted,
+            ..Default::default()
+        },
+        math: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color: theme.accent_strong,
+            ..Default::default()
+        },
+    };
+    let job = inline_layout_job(text, &formats);
+    ui.add(egui::Label::new(job).wrap().selectable(true));
+}
+
+/// Inline con tamaño y color propios (encabezados y celdas de tabla).
+///
+/// Misma gramática que `draw_inline_text`: el formato aplica DENTRO de todo
+/// bloque (R1). El énfasis del encabezado lo da el tamaño (TYPE_LG/MD/SM),
+/// sin jerga de marcadores visible.
+fn draw_inline_text_sized(ui: &mut egui::Ui, text: &str, size: f32, color: egui::Color32) {
+    let theme = current_theme(ui.ctx());
+    let normal = egui::TextFormat {
+        font_id: egui::FontId::proportional(size),
+        color,
+        ..Default::default()
+    };
+    let formats = InlineFormats {
+        normal: normal.clone(),
+        bold: normal.clone(),
+        code: egui::TextFormat {
+            font_id: egui::FontId::monospace(size),
+            color: theme.accent,
+            background: theme.accent_muted,
+            ..Default::default()
+        },
+        math: egui::TextFormat {
+            font_id: egui::FontId::proportional(size),
+            color: theme.accent_strong,
+            ..Default::default()
+        },
+    };
+    let job = inline_layout_job(text, &formats);
     ui.add(egui::Label::new(job).wrap().selectable(true));
 }
 
 fn draw_inline_text_with_color(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     let theme = current_theme(ui.ctx());
-    let normal = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color,
-        ..Default::default()
+    let formats = InlineFormats {
+        normal: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color,
+            ..Default::default()
+        },
+        bold: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color,
+            ..Default::default()
+        },
+        code: egui::TextFormat {
+            font_id: egui::FontId::monospace(TYPE_SM),
+            color: theme.accent,
+            background: theme.accent_muted,
+            ..Default::default()
+        },
+        math: egui::TextFormat {
+            font_id: egui::FontId::proportional(TYPE_BASE),
+            color: theme.accent_strong,
+            ..Default::default()
+        },
     };
-    let bold = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color,
-        ..Default::default()
-    };
-    let code = egui::TextFormat {
-        font_id: egui::FontId::monospace(TYPE_SM),
-        color: theme.accent,
-        background: theme.accent_muted,
-        ..Default::default()
-    };
-    let math = egui::TextFormat {
-        font_id: egui::FontId::proportional(TYPE_BASE),
-        color: theme.accent_strong,
-        ..Default::default()
-    };
-    let mut job = egui::text::LayoutJob::default();
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        let markers = [
-            ("**", "**", &bold),
-            ("`", "`", &code),
-            ("$$", "$$", &math),
-            (r"\[", r"\]", &math),
-            ("$", "$", &math),
-            (r"\(", r"\)", &math),
-        ];
-        let next = markers
-            .iter()
-            .filter_map(|(start, end, format)| {
-                remaining
-                    .find(start)
-                    .map(|position| (position, *start, *end, *format))
-            })
-            .min_by_key(|(position, _, _, _)| *position);
-        if let Some((position, start, end, format)) = next {
-            if position > 0 {
-                let prefix = &remaining[..position];
-                if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(prefix) {
-                    if b_s > 0 {
-                        job.append(&prefix[..b_s], 0.0, normal.clone());
-                    }
-                    job.append(&b_plain, 0.0, math.clone());
-                    let after_bare = &prefix[b_e..];
-                    if !after_bare.is_empty() {
-                        job.append(after_bare, 0.0, normal.clone());
-                    }
-                    remaining = &remaining[position..];
-                    continue;
-                }
-                job.append(&remaining[..position], 0.0, normal.clone());
-            }
-            let after_start = &remaining[position + start.len()..];
-            let Some(end_position) = after_start.find(end) else {
-                job.append(&remaining[position..], 0.0, normal.clone());
-                break;
-            };
-            let source_end = position + start.len() + end_position + end.len();
-            let inline = if matches!(start, "$$" | "$" | r"\[" | r"\(") {
-                inline_math_text(&remaining[position..source_end])
-            } else {
-                after_start[..end_position].to_owned()
-            };
-            job.append(&inline, 0.0, format.clone());
-            remaining = &after_start[end_position + end.len()..];
-            continue;
-        }
-        if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(remaining) {
-            if b_s > 0 {
-                job.append(&remaining[..b_s], 0.0, normal.clone());
-            }
-            job.append(&b_plain, 0.0, math.clone());
-            let after = &remaining[b_e..];
-            if !after.trim().is_empty() {
-                remaining = after;
-                if find_bare_math_fragment(remaining).is_none() {
-                    job.append(remaining, 0.0, normal.clone());
-                    break;
-                }
-                continue;
-            }
-            break;
-        }
-        job.append(remaining, 0.0, normal.clone());
-        break;
-    }
+    let job = inline_layout_job(text, &formats);
     ui.add(egui::Label::new(job).wrap().selectable(true));
 }
 
@@ -6637,6 +8561,30 @@ fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 5] {
     }
 }
 
+/// Texto polite para la live-region del lector. Puro (`&Estado`): error >
+/// turno en curso > silencio. Sin I/O ni spawn.
+pub fn assistant_live_text(state: &AssistantPanelState) -> Option<String> {
+    if let Some(error) = state.error.as_ref() {
+        return Some(format!("Asistente: error. {error}"));
+    }
+    if state.is_pending {
+        return Some("Asistente pensando, esperá que termine.".to_owned());
+    }
+    None
+}
+
+/// Texto corto para anunciar Esc en el composer (live-region, render puro).
+///
+/// Puro (`&bool`): si había turno en curso se está cancelando, si no se
+/// pausó la edición y el borrador queda. Sin I/O ni spawn.
+pub fn escape_live_text(was_pending: bool) -> String {
+    if was_pending {
+        "Cancelando…".to_owned()
+    } else {
+        "Edición pausada. Borrador conservado.".to_owned()
+    }
+}
+
 fn should_submit_on_enter(
     editor_has_focus: bool,
     enter_pressed: bool,
@@ -6688,6 +8636,24 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn b7_andamiar_topic_primera_linea_acotada_con_fallback() {
+        assert_eq!(
+            andamiar_topic_for_content("La derivada de x^2\nmás texto largo"),
+            "La derivada de x^2"
+        );
+        assert_eq!(andamiar_topic_for_content(""), ANDAMIAR_DEFAULT_TOPIC);
+        assert_eq!(
+            andamiar_topic_for_content("   \n  "),
+            ANDAMIAR_DEFAULT_TOPIC
+        );
+        let largo = "a".repeat(200);
+        assert_eq!(andamiar_topic_for_content(&largo).chars().count(), 60);
+        // El fallback siempre resuelve a un LO real del currículum.
+        let los = grafito_pedagogy::Curriculum::find_for_concept(ANDAMIAR_DEFAULT_TOPIC);
+        assert!(los.iter().any(|lo| lo.id == "am1-der"));
     }
 
     #[test]
@@ -6761,7 +8727,7 @@ mod tests {
 
         let empty = context.run(input(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                draw_assistant_empty_state(ui, &mut state, visuals);
+                let _ = draw_assistant_empty_state(ui, &mut state, visuals);
             });
         });
         // Minimalista: empty state sin avatar, no requiere textura.
@@ -7143,6 +9109,60 @@ mod tests {
     }
 
     #[test]
+    fn assistant_live_text_prioritizes_error_over_pending() {
+        let idle = AssistantPanelState::default();
+        assert!(assistant_live_text(&idle).is_none());
+        let pending = AssistantPanelState {
+            is_pending: true,
+            ..Default::default()
+        };
+        let announced = assistant_live_text(&pending).expect("pending anuncia");
+        assert!(announced.contains("pensando"));
+        let mut failed = AssistantPanelState {
+            is_pending: true,
+            ..Default::default()
+        };
+        failed.error = Some("corte de red".to_owned());
+        let announced = assistant_live_text(&failed).expect("error anuncia");
+        assert!(announced.contains("corte de red"));
+    }
+
+    #[test]
+    fn escape_in_composer_cancels_the_running_turn() {
+        let ctx = egui::Context::default();
+        let mut state = AssistantPanelState {
+            is_pending: true,
+            ..Default::default()
+        };
+        let action = {
+            let mut action = None;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 600.0),
+                    )),
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::default(),
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        action = draw_assistant_composer(ui, &mut state, false);
+                    });
+                },
+            );
+            action
+        };
+        assert!(matches!(action, Some(AssistantUiAction::Cancel)));
+    }
+
+    #[test]
     fn model_choices_merge_catalog_discovery_and_current_selection_without_duplicates() {
         let mut state = AssistantPanelState {
             model: "modelo-conservado".into(),
@@ -7401,6 +9421,58 @@ mod tests {
     }
 
     #[test]
+    fn b3_activity_row_is_single_wrapped_label() {
+        // B3.1: fila única "• texto" en TYPE_XS con wrap, sin horizontal (panel 300px).
+        assert_eq!(format_activity_row("  trabajo  "), "• trabajo");
+        assert!(format_activity_row("x").starts_with("• "));
+    }
+
+    #[test]
+    fn b3_custom_provider_help_has_no_jargon() {
+        // B3.2: sin endpoint crudo ni env var, deriva a Ajustes → Asistente.
+        let help = custom_provider_help_text();
+        assert!(help.contains("Configurá la dirección y la clave en Ajustes → Asistente"));
+        assert!(!help.contains("https://"));
+        assert!(!help.contains("GRAFITO_ASSISTANT_CUSTOM"));
+    }
+
+    #[test]
+    fn b3_activity_spacing_uses_tokens() {
+        // B3.3: literales 4.0/2.0 → SPACE_XS y mitad (tokens base 4).
+        assert_eq!(crate::tokens::SPACE_XS, 4.0);
+        assert_eq!(crate::tokens::SPACE_XS * 0.5, 2.0);
+    }
+
+    #[test]
+    fn b3_verified_models_summary_chooses_verified() {
+        // B3.4: resumen corto + plegable, se elige solo el verificado.
+        assert!(verified_models_summary_text().contains("Se elige solo el modelo verificado"));
+        assert!(!verified_models_summary_text().contains("deepseek-v4-flash"));
+        assert!(verified_models_detail_text().contains("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn b3_escape_announces_short_live_state() {
+        // B3.5: Esc etiqueta live-region con estado corto (patrón toolbar::tag_live_region).
+        assert_eq!(escape_live_text(true), "Cancelando…");
+        let paused = escape_live_text(false);
+        assert!(paused.contains("Borrador"), "era {paused}");
+    }
+
+    #[test]
+    fn b3_unclosed_fence_warns_but_keeps_paragraph_contract() {
+        // B3.6: cerca sin cerrar avisa "Respuesta parcial…" sin romper el
+        // contrato malformado → párrafo (sin Code).
+        assert!(has_unclosed_code_fence("```grafito\nFunction[x]\nsegundo"));
+        assert!(!has_unclosed_code_fence("```grafito\nFunction[x]\n```"));
+        assert!(!has_unclosed_code_fence("texto plano"));
+        let blocks = parse_assistant_blocks("```grafito\nFunction[x]\nsegundo comando");
+        assert!(!blocks
+            .iter()
+            .any(|block| matches!(block, AssistantMessageBlock::Code { .. })));
+    }
+
+    #[test]
     fn rich_assistant_blocks_support_standard_multiline_math_and_outerless_tables() {
         let blocks = parse_assistant_blocks(
             "x | f(x)\n--- | ---\n0 | 1\n\n$$\n\\frac{x^2}{2}\n$$\n\n\\[\nx^2 + y^2 = 1\n\\]",
@@ -7553,6 +9625,94 @@ mod tests {
         state.clear_agent_progress();
         assert!(state.agent_activity.is_empty());
         assert!(state.agent_ledger.is_none());
+    }
+
+    // ── B5: scrub + velocidad + export de la card (puros, sin ctx) ──────
+    #[test]
+    fn media_scrub_timeline_mapea_slider_a_frame_via_sample() {
+        // 48 frames a 12 fps → 4000 ms; sample en los extremos da 0 y N-1.
+        let timeline =
+            media_scrub_timeline(48, MEDIA_CARD_BASE_FPS).expect("con frames hay timeline");
+        assert_eq!(timeline.duration_ms, 4_000);
+        assert_eq!(media_frame_at(&timeline, 0, 48), 0);
+        assert_eq!(media_frame_at(&timeline, 4_000, 48), 47);
+        // Mitad del loop → mitad de los frames (lerp lineal + round).
+        assert_eq!(media_frame_at(&timeline, 2_000, 48), 24);
+        // Fuera de rango clampea, jamás panic.
+        assert_eq!(media_frame_at(&timeline, 99_999, 48), 47);
+        // Sin frames no hay timeline ni índice.
+        assert!(media_scrub_timeline(0, MEDIA_CARD_BASE_FPS).is_none());
+        assert_eq!(media_frame_at(&timeline, 0, 0), 0);
+        assert_eq!(media_loop_duration_ms(0, MEDIA_CARD_BASE_FPS), 0);
+        // fps inválido cae a la base sin panic.
+        assert_eq!(
+            media_loop_duration_ms(12, 0.0),
+            media_loop_duration_ms(12, MEDIA_CARD_BASE_FPS)
+        );
+        assert_eq!(
+            media_loop_duration_ms(12, f32::NAN),
+            media_loop_duration_ms(12, MEDIA_CARD_BASE_FPS)
+        );
+    }
+
+    #[test]
+    fn media_playback_speed_rota_y_reporta_factor() {
+        assert_eq!(MediaPlaybackSpeed::default(), MediaPlaybackSpeed::Normal);
+        assert_eq!(MediaPlaybackSpeed::Half.rate(), 0.5);
+        assert_eq!(MediaPlaybackSpeed::Normal.rate(), 1.0);
+        assert_eq!(MediaPlaybackSpeed::Double.rate(), 2.0);
+        assert_eq!(MediaPlaybackSpeed::Half.label(), "0.5x");
+        assert_eq!(MediaPlaybackSpeed::Normal.label(), "1x");
+        assert_eq!(MediaPlaybackSpeed::Double.label(), "2x");
+        assert_eq!(MediaPlaybackSpeed::Half.cycle(), MediaPlaybackSpeed::Normal);
+        assert_eq!(
+            MediaPlaybackSpeed::Normal.cycle(),
+            MediaPlaybackSpeed::Double
+        );
+        assert_eq!(MediaPlaybackSpeed::Double.cycle(), MediaPlaybackSpeed::Half);
+    }
+
+    #[test]
+    fn media_playhead_avanza_con_reloj_y_se_congela_en_pausa() {
+        let state = AssistantPanelState::default();
+        // Sin texturas listas no hay índice, pero el reloj se arma.
+        assert!(state.advance_media_playhead(10.0, 12, false).is_none());
+        // Con todo listo arranca en el frame 0.
+        assert_eq!(state.advance_media_playhead(10.0, 12, true), Some(0));
+        // 0.1 s a 1x → 100 ms de timeline → frame 1 (12 frames en 1000 ms).
+        assert_eq!(state.advance_media_playhead(10.1, 12, true), Some(1));
+        // En pausa se congela aunque pase el tiempo (y retoma sin salto:
+        // el reloj se sigue actualizando).
+        state.media_paused.set(true);
+        assert_eq!(state.advance_media_playhead(11.0, 12, true), Some(1));
+        state.media_paused.set(false);
+        assert_eq!(state.advance_media_playhead(11.0, 12, true), Some(1));
+        // Velocidad doble avanza el doble: 0.1 s → 200 ms → frame 3.
+        state.media_speed.set(MediaPlaybackSpeed::Double);
+        assert_eq!(state.advance_media_playhead(11.1, 12, true), Some(3));
+        // Salto de segundo plano (dt > 250 ms) se capa: no recorre todo.
+        let before = state
+            .advance_media_playhead(99.0, 12, true)
+            .expect("índice");
+        assert!(before < 12, "capa el salto, fue {before}");
+    }
+
+    #[test]
+    fn media_export_state_arranca_ocioso_y_set_media_lo_reinicia() {
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        assert_eq!(*state.media_export_state(), MediaExportState::Idle);
+        state.set_media_export(MediaExportState::Failed("corte".into()));
+        let media = AssistantMedia {
+            title: "prueba".into(),
+            frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
+        };
+        state.set_media(Some(media), &context);
+        // Card nueva: playhead en 0, reproduciendo, velocidad base, export ocioso.
+        assert_eq!(*state.media_export_state(), MediaExportState::Idle);
+        assert!(!state.media_paused.get());
+        assert_eq!(state.media_playback_rate(), 1.0);
+        assert_eq!(state.advance_media_playhead(1.0, 1, true), Some(0));
     }
 
     #[test]
@@ -8107,6 +10267,68 @@ mod tests {
     }
 
     #[test]
+    fn s1_card_anticipa_la_vista_que_el_apply_va_a_mostrar() {
+        // S1: la card verificada ya tiene Apply; ahora anticipa 2D/3D.
+        let two_d = VerifiedAssistantProposal {
+            candidate_index: 0,
+            proposal: command_proposal("Function[x]"),
+            prerequisite_parameters: Vec::new(),
+        };
+        assert_eq!(verified_proposal_view_label(&two_d), "2D");
+        assert!(proposal_detail_text(&two_d).contains("Vista 2D"));
+        let three_d = VerifiedAssistantProposal {
+            candidate_index: 1,
+            proposal: command_proposal("Sphere[0, 0, 0, 1]"),
+            prerequisite_parameters: Vec::new(),
+        };
+        assert_eq!(verified_proposal_view_label(&three_d), "3D");
+        assert!(proposal_detail_text(&three_d).contains("Vista 3D"));
+    }
+
+    #[test]
+    fn s2_aclaracion_pendiente_round_trip_sin_bloquear() {
+        // S2: stage → botones en el turno → respuesta vuelve como output.
+        let mut state = AssistantPanelState::default();
+        assert!(!state.has_pending_clarification());
+        let pending = PendingClarification::try_new(
+            "call-1",
+            "¿qué valor le doy a x?",
+            vec!["0".to_owned(), "1".to_owned()],
+        )
+        .expect("pendiente válido");
+        state.stage_clarification(pending);
+        assert!(state.has_pending_clarification());
+        assert_eq!(
+            state.pending_clarification().expect("pregunta").question,
+            "¿qué valor le doy a x?"
+        );
+        // 1 click en "1" → respuesta saneada para el loop.
+        let answer = state
+            .take_clarification_answer("call-1", "1")
+            .expect("respuesta");
+        assert_eq!(answer, "1");
+        assert!(!state.has_pending_clarification());
+        // call_id distinto o respuesta vacía no consumen nada útil.
+        state.stage_clarification(
+            PendingClarification::try_new("c2", "¿x?", Vec::new()).expect("pendiente"),
+        );
+        assert!(state.take_clarification_answer("otra", "1").is_none());
+        state.stage_clarification(
+            PendingClarification::try_new("c3", "¿x?", Vec::new()).expect("pendiente"),
+        );
+        assert!(state.take_clarification_answer("c3", "   ").is_none());
+        // Sanea topes sin pánico: pregunta vacía/call_id vacío fallan honesto.
+        assert!(PendingClarification::try_new("", "¿x?", Vec::new()).is_err());
+        assert!(PendingClarification::try_new("c", "   ", Vec::new()).is_err());
+        // Contrato UiAction::AskClarification existe (staging vía método).
+        let staged = AssistantUiAction::AskClarification {
+            question: "¿x?".to_owned(),
+            options: Vec::new(),
+        };
+        assert!(matches!(staged, AssistantUiAction::AskClarification { .. }));
+    }
+
+    #[test]
     fn narrow_composer_and_proposal_cards_render_without_panicking() {
         let context = egui::Context::default();
         let mut state = AssistantPanelState {
@@ -8165,5 +10387,687 @@ mod tests {
                 });
             },
         );
+    }
+
+    // ── AS1 Piel del asistente: bugs del screenshot ──
+
+    #[test]
+    fn ordered_list_items_split_into_own_blocks() {
+        // Bug 2: "1. Arrastrá… 2. Usá… 3. Activá…" salía en un párrafo.
+        let blocks = parse_assistant_blocks(
+            "1. Arrastrá el punto\n2. Usá el deslizador\n3. Activá la traza",
+        );
+        assert_eq!(blocks.len(), 3, "los bloques eran {blocks:?}");
+        assert!(matches!(
+            blocks[0],
+            AssistantMessageBlock::Ordered { number: 1, .. }
+        ));
+        assert!(matches!(
+            blocks[1],
+            AssistantMessageBlock::Ordered { number: 2, .. }
+        ));
+        assert!(matches!(
+            blocks[2],
+            AssistantMessageBlock::Ordered { number: 3, .. }
+        ));
+        // Variante con paréntesis también parte.
+        let paren = parse_assistant_blocks("1) Primero\n2) Después");
+        assert_eq!(paren.len(), 2);
+    }
+
+    #[test]
+    fn ordered_list_ignores_decimals() {
+        // "3.14" no es un ítem de lista.
+        assert_eq!(parse_ordered_list_item("3.14 es pi"), None);
+        assert_eq!(parse_ordered_list_item("sin número"), None);
+        assert_eq!(parse_ordered_list_item("1.sin espacio"), None);
+        assert_eq!(parse_ordered_list_item("1. "), None);
+        let (number, text) = parse_ordered_list_item("12. Doceavo paso").expect("debe parsear");
+        assert_eq!(number, 12);
+        assert_eq!(text, "Doceavo paso");
+    }
+
+    #[test]
+    fn humanize_control_name_maps_existing_controls() {
+        // Bug 3: el modelo escribe `PlayPause` en la prosa.
+        assert_eq!(
+            humanize_control_name("PlayPause"),
+            Some("reproducción — la animación del chat se reproduce sola, sin botón")
+        );
+        assert_eq!(humanize_control_name("Slider"), Some("deslizador"));
+        assert_eq!(humanize_control_name("NoExiste"), None);
+    }
+
+    #[test]
+    fn humanize_prose_text_replaces_ids_without_breaking_utf8() {
+        // Ejemplo del screenshot: prosa con id crudo + tildes/emoji.
+        let human = humanize_prose_text("Usá el control de reproducción PlayPause ⏯️ para ver");
+        assert!(!human.contains("PlayPause"), "quedó crudo: {human}");
+        assert!(human.contains("reproducción"), "falta humano: {human}");
+        assert!(human.contains("⏯️"), "se rompió multibyte: {human}");
+        // Ids encadenados: longest-first, sin re-matcheo.
+        let both = humanize_prose_text("PlayPause y Play");
+        assert!(!both.contains("PlayPause"));
+        assert!(both.contains("reproducir"));
+    }
+
+    #[test]
+    fn humanize_prose_text_absorbe_parametro_sin_dejar_corchetes() {
+        // D2 bug del screenshot: "sin botón[a] sobre esa variable".
+        let human = humanize_prose_text("sin Button[a] sobre esa variable");
+        assert_eq!(human, "sin botón sobre esa variable", "prosa rota: {human}");
+        assert!(!human.contains('['), "quedó corchete: {human}");
+        assert!(!human.contains(']'), "quedó corchete: {human}");
+        assert!(!human.contains("Button"), "quedó crudo: {human}");
+        // Otros controles con parámetro GeoGebra también se absorben.
+        let play = humanize_prose_text("tocá PlayPause[a] para ver");
+        assert!(!play.contains('['), "quedó corchete: {play}");
+        assert!(!play.contains("PlayPause"), "quedó crudo: {play}");
+        let slider = humanize_prose_text("mové Slider[p, 0, 1] suave");
+        assert!(!slider.contains('['), "quedó corchete: {slider}");
+        assert!(slider.contains("deslizador"), "falta humano: {slider}");
+        // Sin cierre: jamás panic, jamás corchete inventado de más.
+        let broken = humanize_prose_text("sin Button[a sobre esa variable");
+        assert!(!broken.contains("Button"), "quedó crudo: {broken}");
+    }
+
+    #[test]
+    fn humanize_boton_humano_con_parametro_en_cualquier_caja() {
+        // N2: el instalado D2 cubría `Button[a]` pero el modelo escribe la
+        // palabra ya humana (`botón[a]`): seguía visible en la prosa.
+        for raw in [
+            "sin botón[a] sobre esa variable",
+            "sin Button[a] sobre esa variable",
+            "sin boton[a] sobre esa variable",
+            "sin BOTÓN[A] sobre esa variable",
+            "sin button[A] sobre esa variable",
+            "sin Boton[a] sobre esa variable",
+        ] {
+            let human = humanize_prose_text(raw);
+            assert_eq!(
+                human, "sin botón sobre esa variable",
+                "prosa rota: {raw} → {human}"
+            );
+            assert!(!human.contains('['), "quedó corchete: {human}");
+            assert!(!human.contains(']'), "quedó corchete: {human}");
+        }
+        // Sin parámetro también se normaliza la caja a `botón`.
+        assert_eq!(
+            humanize_prose_text("tocá Button para ver"),
+            "tocá botón para ver"
+        );
+        // Frontera honesta: el plural `botones` no se toca.
+        let plural = humanize_prose_text("hay 2 o 3 botones para elegir");
+        assert!(plural.contains("botones"), "rompió el plural: {plural}");
+        // Sin cierre: jamás panic.
+        let broken = humanize_prose_text("sin botón[a sobre esa variable");
+        assert!(broken.contains("botón"), "perdió la palabra: {broken}");
+    }
+
+    #[test]
+    fn media_preview_size_usa_todo_el_ancho_y_preserva_aspecto() {
+        // D2: ancho total, alto = ancho * h/w, clampeado a max_h.
+        let (w, h) = media_preview_size(400.0, 200.0, 340.0, 280.0);
+        assert_eq!((w, h), (340.0, 170.0), "debe usar todo el ancho");
+        // Retrato gigante: el alto se clampa sin cambiar el ancho de reserva
+        // más que por el downscale proporcional.
+        let (w2, h2) = media_preview_size(200.0, 800.0, 340.0, 280.0);
+        assert!(h2 <= 280.0, "alto sin clampear: {h2}");
+        assert!(w2 <= 340.0, "ancho desbordado: {w2}");
+        // Sin upscale: textura chica no se pixela.
+        let (w3, h3) = media_preview_size(100.0, 50.0, 340.0, 280.0);
+        assert_eq!((w3, h3), (100.0, 50.0), "no debe agrandar: {w3}x{h3}");
+        // Estable entre frames: mismo ref da misma reserva siempre.
+        let a = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
+        let b = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
+        assert_eq!(a, b, "la reserva debe ser estable");
+    }
+
+    #[test]
+    fn media_counter_un_solo_texto_compacto_y_largo() {
+        // N2: UN solo contador visible (compacto en toolbar); el largo solo
+        // va al hover del deslizador.
+        let (compact, long) = media_counter_text(41, 48);
+        assert_eq!(compact, "42/48");
+        assert_eq!(long, "Fotograma 42 de 48");
+        let (first_c, first_l) = media_counter_text(0, 1);
+        assert_eq!(
+            (first_c.as_str(), first_l.as_str()),
+            ("1/1", "Fotograma 1 de 1")
+        );
+        // Vacío: jamás panic, jamás "1 de 0".
+        let (empty_c, _) = media_counter_text(0, 0);
+        assert_eq!(empty_c, "0/0");
+    }
+
+    #[test]
+    fn media_toolbar_cabe_en_panel_300_y_520_y_calla_bajo_160() {
+        // N2 bug 2: panel 300..520 (ASSISTANT_PANEL_MIN/MAX_WIDTH) muestra el
+        // contador; bug 5 (nota N1): bajo ~160px se suprime con gracia en vez
+        // de truncarse. Con wrap por tokens ningún control queda medio afuera.
+        assert!(media_show_counter_label(300.0));
+        assert!(media_show_counter_label(520.0));
+        assert!(media_show_counter_label(340.0));
+        assert!(!media_show_counter_label(159.9));
+        assert!(!media_show_counter_label(80.0));
+        assert!(!media_show_counter_label(f32::NAN));
+        assert!(!media_show_counter_label(f32::INFINITY));
+    }
+
+    #[test]
+    fn media_overlay_ocupa_el_espacio_centrado() {
+        // N2 bug 3: overlay centrado 86%×82% clampeado; preview llena
+        // min(ancho, alto) respetando aspecto.
+        let (w, h) = media_overlay_window_size(800.0, 600.0);
+        assert!((w - 800.0 * 0.86).abs() < 0.01, "ancho: {w}");
+        assert!((h - 600.0 * 0.82).abs() < 0.01, "alto: {h}");
+        // Pantalla chica: pisos 480×420; gigante: techos 900×720.
+        assert_eq!(media_overlay_window_size(400.0, 300.0), (480.0, 420.0));
+        assert_eq!(media_overlay_window_size(4000.0, 3000.0), (900.0, 720.0));
+        assert_eq!(
+            media_overlay_window_size(f32::NAN, f32::NAN),
+            (480.0, 420.0)
+        );
+        // Preview overlay: ocupa min(ancho, alto), respeta aspecto.
+        let (pw, ph) = media_overlay_preview_size(400.0, 200.0, 800.0, 500.0);
+        assert_eq!((pw, ph), (800.0, 400.0), "debe llenar el ancho: {pw}x{ph}");
+        let (qw, qh) = media_overlay_preview_size(200.0, 800.0, 800.0, 500.0);
+        assert_eq!((qw, qh), (125.0, 500.0), "retrato manda el alto: {qw}x{qh}");
+        // Cuadrado chico en overlay grande: upscale permitido (ver grande).
+        let (sw, sh) = media_overlay_preview_size(64.0, 64.0, 800.0, 500.0);
+        assert_eq!((sw, sh), (500.0, 500.0), "overlay agranda: {sw}x{sh}");
+    }
+
+    #[test]
+    fn media_toolbar_tooltips_cortos_y_fullscreen_arranca_cerrado() {
+        // D2: tooltips ≤60 chars para que no se corten en panel ~340px.
+        for tip in [
+            MEDIA_TIP_SPEED,
+            MEDIA_TIP_FULLSCREEN,
+            MEDIA_TIP_EXPORT,
+            MEDIA_TIP_PAUSE,
+            MEDIA_TIP_PLAY,
+        ] {
+            assert!(tip.chars().count() <= 60, "tooltip largo: {tip}");
+            assert!(!tip.is_empty(), "tooltip mudo");
+        }
+        // Estado nuevo vive en la card (Cell), arranca cerrado y limpio.
+        let state = AssistantPanelState::default();
+        assert!(!state.media_fullscreen.get());
+        assert_eq!(state.media_last_shown.get(), None);
+    }
+
+    #[test]
+    fn stepwise_reason_is_never_silent() {
+        // Bug 4: deshabilitado sin explicación → motivo; complejo → None.
+        let short = parse_assistant_blocks("Sí, es correcto.");
+        assert!(stepwise_disabled_reason(&short, "Sí, es correcto.").is_some());
+        let complex = parse_assistant_blocks(
+            "# Derivada\n\n$$\\frac{d}{dx} x^2$$\n\n```grafito\nFunction[x^2]\n```\n\nTexto largo de cierre con desarrollo suficiente para superar el umbral de longitud mínima exigida por el gate de contenido complejo del asistente matemático.",
+        );
+        assert_eq!(stepwise_disabled_reason(&complex, "x"), None);
+    }
+
+    #[test]
+    fn truncated_renderer_degrades_gracefully() {
+        // Bug 6: cercas sin cerrar, tabla a medio partir, bold sin cerrar.
+        // Jamás pánico, jamás corte a mitad de scalar UTF-8. La cerca sin
+        // cerrar queda como texto plano (contrato existente), no como Code.
+        let unclosed = parse_assistant_blocks("```grafito\nFunction[sin(x)]\nDerivá la función");
+        assert!(
+            !unclosed
+                .iter()
+                .any(|block| matches!(block, AssistantMessageBlock::Code { .. })),
+            "cerca sin cerrar debe ser texto plano: {unclosed:?}"
+        );
+        assert!(unclosed.iter().any(|block| matches!(
+            block,
+            AssistantMessageBlock::Paragraph(text) if text.contains("Function")
+        )));
+        let half_table = parse_assistant_blocks("| a | b |\n| dato sin separador");
+        assert!(!half_table.is_empty());
+        assert!(!half_table
+            .iter()
+            .any(|block| matches!(block, AssistantMessageBlock::Table(_))));
+        let unclosed_bold = parse_assistant_blocks("Esto es **negrita sin cerrar");
+        assert_eq!(unclosed_bold.len(), 1);
+        // Corte a mitad de scalar multibyte: trim_turn es char-based.
+        let emoji = "⏯️🎨".repeat(10);
+        let cut = trim_turn(format!("{emoji} cola larga"));
+        assert!(cut.is_char_boundary(cut.len()));
+        for scalar in ["⏯", "é", "ñ", "ü"] {
+            let text = format!("prefijo {scalar} sufijo **sin cerrar");
+            let blocks = parse_assistant_blocks(&text);
+            assert!(!blocks.is_empty(), "pánico con {scalar}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn transcript_button_rows_and_media_meet_token_floors() {
+        // Bug 1: reserva anti-clip con piso WCAG. Bug 5: mínimo legible.
+        assert!(transcript_button_row_min_height() >= HIT_TARGET_MIN);
+        assert_eq!(
+            transcript_button_row_min_height(),
+            crate::tokens::hit_target_size(28.0)
+        );
+        assert!(assistant_media_min_side() >= HIT_TARGET_MIN);
+        assert_eq!(assistant_media_min_side() % 4.0, 0.0);
+    }
+
+    // ── R1 rediseño del render del transcript ──
+
+    /// Extrae los textos legibles de un bloque (sólo tests).
+    fn block_texts(block: &AssistantMessageBlock) -> Vec<&str> {
+        match block {
+            AssistantMessageBlock::Heading { text, .. }
+            | AssistantMessageBlock::Bullet(text)
+            | AssistantMessageBlock::Ordered { text, .. }
+            | AssistantMessageBlock::Quote(text)
+            | AssistantMessageBlock::Paragraph(text)
+            | AssistantMessageBlock::DisplayMath(text) => vec![text],
+            AssistantMessageBlock::Code { language, text } => vec![language, text],
+            AssistantMessageBlock::Table(rows) => {
+                rows.iter().flatten().map(String::as_str).collect()
+            }
+        }
+    }
+
+    #[test]
+    fn r1_inline_markers_never_leak_in_lists_quotes_headings_tables() {
+        // Bug R1.1: `**1. T…` literal. El inline aplica DENTRO de ítems,
+        // bullets, citas, encabezados y celdas; lo a medio cerrar (stream
+        // parcial) degrada a texto plano sin `**`/backticks sueltos.
+        // El código cercado queda crudo a propósito: ahí `**` es contenido.
+        let cases = [
+            "**1. Título**",
+            "1. **Negrita al inicio**",
+            "1. `código al inicio`",
+            "1. **sin cerrar en ítem",
+            "- **Negrita en bullet**",
+            "- `código en bullet`",
+            "> **Cita con negrita**",
+            "> cita simple",
+            "## **Encabezado con negrita**",
+            "# Título `con código`",
+            "| col | col |\n| --- | --- |\n| **celda** | `code` |",
+            "**sin cerrar",
+            "*uno",
+            "__doble__",
+            "__sin cerrar",
+        ];
+        for src in cases {
+            let blocks = parse_assistant_blocks(src);
+            assert!(!blocks.is_empty(), "vacío para {src:?}");
+            for block in &blocks {
+                if matches!(block, AssistantMessageBlock::Code { .. }) {
+                    continue;
+                }
+                for text in block_texts(block) {
+                    let plain = inline_plain_text(&humanize_prose_text(text));
+                    assert!(!plain.contains("**"), "jerga `**` en {src:?} → {plain:?}");
+                    assert!(
+                        !plain.contains('`'),
+                        "jerga backtick en {src:?} → {plain:?}"
+                    );
+                    assert!(!plain.contains("__"), "jerga `__` en {src:?} → {plain:?}");
+                }
+                if let AssistantMessageBlock::Quote(text) = block {
+                    assert!(
+                        !text.trim_start().starts_with('>'),
+                        "`>` filtrado en {src:?}"
+                    );
+                }
+            }
+        }
+        // `>` solo actúa como separador en blanco: cero bloques, sin `>` crudo.
+        assert!(parse_assistant_blocks(">").is_empty());
+        // `**1. Título**` es ítem ordenado, no párrafo con asteriscos.
+        let wrapped = parse_assistant_blocks("**1. Título**");
+        assert!(
+            matches!(
+                &wrapped[..],
+                [AssistantMessageBlock::Ordered { number: 1, text }]
+                if text == "Título"
+            ),
+            "era {wrapped:?}"
+        );
+        // `> **x` pela la cita y conserva el interior para el inline.
+        let quote = parse_assistant_blocks("> **Cita**");
+        assert!(
+            matches!(
+                &quote[..],
+                [AssistantMessageBlock::Quote(text)] if text == "**Cita**"
+            ),
+            "era {quote:?}"
+        );
+        // Cerrados conservan el interior, sueltos se pelan sin jerga.
+        assert_eq!(inline_plain_text("**1. Título**"), "1. Título");
+        assert_eq!(inline_plain_text("1. **x**"), "1. x");
+        assert_eq!(inline_plain_text("**sin cerrar"), "sin cerrar");
+        assert_eq!(inline_plain_text("*uno"), "uno");
+        assert_eq!(inline_plain_text("__doble__"), "doble");
+        // `$` solo se conserva (puede ser moneda), no es marcador a pelar.
+        assert!(inline_plain_text("cuesta $5").contains('$'));
+    }
+
+    #[test]
+    fn r1_stepwise_enables_on_real_math_explanation_but_not_greetings() {
+        // Bug R1.2: "Explícame paso a paso" deshabilitado en explicación real.
+        let content = "Vamos con calma, paso a paso. En 4D Grafito hace una proyección por CPU a 3D/2D, vos elegís si aplicarla:";
+        let blocks = parse_assistant_blocks(content);
+        assert_eq!(
+            stepwise_disabled_reason(&blocks, content),
+            None,
+            "marcha + matemática debe habilitar"
+        );
+        // Negativo: saludos vacíos siguen disabled con motivo (nunca mudo).
+        let hola = parse_assistant_blocks("hola");
+        assert!(stepwise_disabled_reason(&hola, "hola").is_some());
+        let empty: Vec<AssistantMessageBlock> = Vec::new();
+        assert!(stepwise_disabled_reason(&empty, "").is_some());
+    }
+
+    #[test]
+    fn r1_streaming_cache_reuses_stable_prefix() {
+        // Bug R1.3a: cada delta re-paresaba todo. El prefijo cerrado se
+        // congela y sólo se parsea el sufijo desde el último bloque estable.
+        let mut cache = AssistantBlocksCache::default();
+        let first = "1. Arrastrá el punto\n2. Usá el deslizador";
+        let frozen = cache.blocks(first);
+        assert_eq!(frozen.len(), 2);
+        let extended = "1. Arrastrá el punto\n2. Usá el deslizador\n3. Activá la traza";
+        let calls = cache.parse_count();
+        let grown = cache.blocks(extended);
+        assert_eq!(grown.len(), 3, "era {grown:?}");
+        assert_eq!(grown[..2], frozen[..], "el prefijo se congela idéntico");
+        assert_eq!(cache.last_reused_blocks(), 2);
+        assert_eq!(cache.parse_count(), calls + 1, "un solo parse de sufijo");
+        // Mismo contenido pega exacto sin parsear de nuevo.
+        let calls = cache.parse_count();
+        let same = cache.blocks(extended);
+        assert_eq!(same, grown);
+        assert_eq!(cache.parse_count(), calls);
+        // Extensión en la misma línea también queda correcta.
+        let _ = cache.blocks("Hola");
+        let longer = cache.blocks("Hola mundo");
+        assert!(
+            matches!(
+                &longer[..],
+                [AssistantMessageBlock::Paragraph(text)] if text.contains("mundo")
+            ),
+            "era {longer:?}"
+        );
+        // Edición en el medio (no prefijo) re-parsea total pero correcto.
+        let edited = cache.blocks("1. Arrastrá el punto\n2. Otro paso\n3. Activá la traza");
+        assert_eq!(edited.len(), 3);
+    }
+
+    #[test]
+    fn r1_scroll_pins_only_when_user_was_at_bottom() {
+        // Bug R1.3b: stick-to-bottom sólo si ya estaba abajo.
+        assert!(transcript_is_at_bottom(90.0, 10.0, 100.0));
+        assert!(transcript_is_at_bottom(0.0, 600.0, 100.0));
+        assert!(!transcript_is_at_bottom(0.0, 100.0, 500.0));
+        assert!(!transcript_is_at_bottom(10.0, 100.0, 500.0));
+        assert!(transcript_is_at_bottom(f32::NAN, 100.0, 500.0));
+        assert!(transcript_stick_to_bottom(true));
+        assert!(!transcript_stick_to_bottom(false));
+    }
+
+    #[test]
+    fn r1_transcript_width_is_stable_and_sanitized() {
+        // Bug R1.3c: el texto nunca cambia el ancho del panel.
+        assert_eq!(stable_transcript_width(400.0), 400.0);
+        assert_eq!(stable_transcript_width(300.0), 300.0);
+        assert_eq!(stable_transcript_width(0.0), ASSISTANT_PANEL_MIN_WIDTH);
+        assert_eq!(stable_transcript_width(-5.0), ASSISTANT_PANEL_MIN_WIDTH);
+        assert_eq!(stable_transcript_width(f32::NAN), ASSISTANT_PANEL_MIN_WIDTH);
+        assert_eq!(
+            stable_transcript_width(f32::INFINITY),
+            ASSISTANT_PANEL_MIN_WIDTH
+        );
+    }
+
+    #[test]
+    fn r1_adversarial_transcript_renders_within_panel_width() {
+        // Bug R1.3c headless con egui: encabezado/cita/ítems/tabla con
+        // marcadores + cerca sin cerrar no ensanchan el panel (wrap fijo).
+        // El token irrompible sólo exige no-pánico: egui envuelve por palabra.
+        const ADVERSARIAL: &str = "## **Título con negrita**\n\n> **Cita con negrita**\n\n1. **Ítem ordenado con negrita**\n2. `código en ítem` con texto normal\n\n| col | col |\n| --- | --- |\n| **celda** | `code` |\n\n```grafito\nFunction[sin(x)]\n```\n\n**sin cerrar en stream parcial";
+        for width in [300.0, 520.0] {
+            let context = egui::Context::default();
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let available = ui.available_width();
+                        let verified: Vec<VerifiedAssistantProposal> = Vec::new();
+                        let applied: Vec<VerifiedAssistantProposal> = Vec::new();
+                        let indices: Vec<usize> = Vec::new();
+                        let proposal_state = AssistantProposalRenderState {
+                            verified_proposals: &verified,
+                            applied_proposals: &applied,
+                            preflight_candidate_count: 0,
+                            proposal_code_block_indices: &indices,
+                            proposal_results_available: false,
+                            correction_available: false,
+                        };
+                        let mut cache = AssistantBlocksCache::default();
+                        let _ = draw_assistant_response(
+                            ui,
+                            ADVERSARIAL,
+                            proposal_state,
+                            None,
+                            0,
+                            &mut cache,
+                        );
+                        let used = ui.min_rect().width();
+                        assert!(
+                            used <= available + 1.0,
+                            "ancho {used} > disponible {available} en panel {width}"
+                        );
+                    });
+                },
+            );
+        }
+        // Token irrompible: no-pánico (el panel lo contiene el padre).
+        let context = egui::Context::default();
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let verified: Vec<VerifiedAssistantProposal> = Vec::new();
+                    let applied: Vec<VerifiedAssistantProposal> = Vec::new();
+                    let indices: Vec<usize> = Vec::new();
+                    let proposal_state = AssistantProposalRenderState {
+                        verified_proposals: &verified,
+                        applied_proposals: &applied,
+                        preflight_candidate_count: 0,
+                        proposal_code_block_indices: &indices,
+                        proposal_results_available: false,
+                        correction_available: false,
+                    };
+                    let mut cache = AssistantBlocksCache::default();
+                    let _ = draw_assistant_response(
+                        ui,
+                        "supercalifragilisticoespialidoso".repeat(8).as_str(),
+                        proposal_state,
+                        None,
+                        0,
+                        &mut cache,
+                    );
+                });
+            },
+        );
+    }
+}
+
+// ── F10 hostile fuzz (solo tests, sin tocar prod) ─────────────────────────
+// Markdown hostil del chat (el crash fue tras 2 animaciones con prosa del
+// modelo). RAW sin catch/should_panic para ver el pánico crudo con backtrace.
+#[cfg(test)]
+mod hostile_crash_f10 {
+    use super::*;
+
+    #[test]
+    fn hostile_fences_sin_cerrar_x100() {
+        // 100 cercas abiertas sin cierre
+        let mut s = String::new();
+        for i in 0..100 {
+            s.push_str("```rust\n");
+            s.push_str(&format!("codigo {i}\n"));
+        }
+        let _ = has_unclosed_code_fence(&s);
+        let _ = parse_assistant_blocks(&s);
+        // 100 cercas abiertas+cerradas alternadas + cola sin cerrar
+        let mut s2 = String::new();
+        for i in 0..100 {
+            s2.push_str("```\n");
+            s2.push_str(&format!("bloque {i}\n"));
+            s2.push_str("```\n");
+        }
+        s2.push_str("```\ncola sin cerrar\n");
+        let _ = has_unclosed_code_fence(&s2);
+        let _ = parse_assistant_blocks(&s2);
+        // Cerca con lenguaje gigante + contenido gigante
+        let big_fence = format!("```{}\n{}\n```", "x".repeat(5000), "y".repeat(50_000));
+        let _ = parse_assistant_blocks(&big_fence);
+        let unclosed_big = format!("```\n{}", "z".repeat(100_000));
+        let _ = has_unclosed_code_fence(&unclosed_big);
+        let _ = parse_assistant_blocks(&unclosed_big);
+    }
+
+    #[test]
+    fn hostile_tablas_rotas() {
+        let casos: Vec<String> = vec![
+            "| a | b\n| --- |\n| 1 |".to_string(),
+            "| a | b |\n| --- |\n| 1 | 2 | 3 | 4 |".to_string(),
+            "||||||||||".to_string(),
+            "| |\n| --- |\n| |".to_string(),
+            "| a |\nno-separador\n| b |".to_string(),
+            "| a | b |\n| -- | -- |\n| 1 |".to_string(),
+            "| a | ".repeat(5000),
+            "| --- ".repeat(2000),
+            "<table><tr><td>hola".to_string(),
+            "<table>".repeat(100),
+            "<table><tr><td>".repeat(1000),
+            "<TABLE><TR><TD>mayús</TD></TR></TABLE>".to_string(),
+        ];
+        for tbl in &casos {
+            let _ = parse_assistant_blocks(tbl);
+            let _ = parse_markdown_table_row(tbl);
+            let _ = parse_html_table(tbl);
+        }
+        // Separador con columnas degeneradas
+        let _ = markdown_table_separator(&[], 0);
+        let _ = markdown_table_separator(&["---".to_string()], 1);
+        let _ = markdown_table_separator(&["---".to_string()], 2);
+        let _ = markdown_table_separator(&[":::".to_string()], 1);
+        let cells_10k: Vec<String> = (0..10_000).map(|i| format!("c{i}")).collect();
+        let _ = markdown_table_separator(&cells_10k, 10_000);
+        let _ = markdown_table_separator(&cells_10k, 3);
+    }
+
+    #[test]
+    fn hostile_asteriscos_10k() {
+        let stars = "**".repeat(10_000); // 20k chars
+        let _ = parse_assistant_blocks(&stars);
+        let _ = has_unclosed_code_fence(&stars);
+        let _ = humanize_prose_text(&stars);
+        let bold_chain = "**bold**".repeat(2000);
+        let _ = parse_assistant_blocks(&bold_chain);
+        // Énfasis envolvente roto
+        let casos: Vec<String> = vec![
+            "**".to_string(),
+            "****".to_string(),
+            "**a".to_string(),
+            "a**".to_string(),
+            "__".to_string(),
+            "____".to_string(),
+            "**".repeat(500),
+        ];
+        for e in &casos {
+            let _ = parse_assistant_blocks(e);
+            let _ = strip_wrapping_emphasis(e);
+        }
+    }
+
+    #[test]
+    fn hostile_emojis_multibyte() {
+        let emojis = "\u{1F600}".repeat(5000);
+        let _ = parse_assistant_blocks(&emojis);
+        let _ = has_unclosed_code_fence(&emojis);
+        let _ = humanize_prose_text(&emojis);
+        let mixed = format!(
+            "**{}** | {} | ```\n{}\n",
+            "\u{1F600}".repeat(100),
+            "\u{e9}".repeat(500),
+            emojis
+        );
+        let _ = parse_assistant_blocks(&mixed);
+        // Combinantes + ZWJ + banderas (graphemes multi-codepoint)
+        let casos: Vec<String> = vec![
+            "e\u{301}".repeat(1000),
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".repeat(500),
+            "\u{200B}".repeat(5000),
+            "a\u{0308}\u{0301}\u{0327}".repeat(1000),
+        ];
+        for s in &casos {
+            let _ = parse_assistant_blocks(s);
+            let _ = humanize_prose_text(s);
+        }
+    }
+
+    #[test]
+    fn hostile_listas_citas_math() {
+        let casos: Vec<String> = vec![
+            "1. ".repeat(2000),
+            "> ".repeat(2000),
+            "#".repeat(5000),
+            "$$".repeat(2000),
+            "\\[".repeat(1000),
+            "$$$$".to_string(),
+            "\\[\\]".to_string(),
+            "$$x^2$$ ".repeat(2000),
+            "# t ".repeat(1000),
+            "9999999999. item gigante".to_string(),
+            ">".to_string(),
+            ">>".to_string(),
+            "> > > >".to_string(),
+        ];
+        for s in &casos {
+            let _ = parse_assistant_blocks(s);
+        }
+        // Ordenados con número gigante (u32::MAX-ish vía string)
+        let _ = parse_ordered_list_item("99999999999999999999. texto");
+        let _ = parse_ordered_list_item("4294967295. texto");
+        let _ = parse_ordered_list_item("1. ");
+        let _ = parse_ordered_list_item("");
+    }
+
+    #[test]
+    fn hostile_trim_y_humanize_gigantes() {
+        let big = "á".repeat(100_000);
+        let _ = trim_turn(big);
+        let big2 = "x".repeat(200_000);
+        let _ = humanize_prose_text(&big2);
+        let _ = humanize_prose_text("");
+        let _ = humanize_prose_text("   ");
+        let _ = has_unclosed_code_fence("");
+        let empty: Vec<super::AssistantMessageBlock> = vec![];
+        let _ = empty.len();
     }
 }

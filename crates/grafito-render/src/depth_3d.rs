@@ -4,7 +4,8 @@
 //! only world-to-camera transform applied by this path.
 
 use grafito_core::{
-    Document, GeoObject, RegularPolychoron4DObj, RegularPolytopeNDObj, RenderQuality, Surface3DObj,
+    Document, GeoObject, Prism3DObj, Quadric3DObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
+    RenderQuality, Surface3DObj,
 };
 use grafito_geometry::{
     curve_3d_segment_is_continuous, rotate_nd_in_plane, Camera3D, Color, NdPerspectiveProjection,
@@ -23,6 +24,8 @@ pub const MAX_WORLD_MESH_ATTRACTORS: usize = 8;
 pub const MAX_WORLD_MESH_ATTRACTOR_STEPS: usize = 16_000;
 /// Maximum CPU sample/evaluation units consumed while building one world mesh.
 pub const MAX_WORLD_MESH_WORK_UNITS: usize = 65_536;
+/// Segmentos wireframe del elipsoide paramétrico de una cuádrica (3 círculos × 32).
+const QUADRIC_WIRE_SEGMENTS: usize = 96;
 
 const POLYCHORON_TOPOLOGY_CACHE_SLOTS: usize = 6;
 const GENERIC_POLYTOPE_DIMENSION_SLOTS: usize =
@@ -434,6 +437,20 @@ pub fn world_mesh_output_usage_for_quality(
             (0, 0, attractor.steps.min(MAX_WORLD_MESH_ATTRACTOR_STEPS))
         }
         GeoObject::VectorField3D(field) => (0, 0, crate::vector_field_3d_sample_count(field)?),
+        GeoObject::Prism3D(prism) => {
+            let base_len = prism
+                .base_vertices
+                .len()
+                .clamp(3, crate::MAX_PRISM_BASE_VERTICES);
+            let triangles = crate::prism_solid_triangle_count(base_len);
+            let (opaque, wire) =
+                solid_stream_triangles(triangles, prism.fill_color.map(|fill| fill.a));
+            (opaque, wire, crate::prism_wire_segment_count(base_len))
+        }
+        GeoObject::Quadric3D(_) => {
+            // Elipsoide wireframe paramétrico: 3 círculos × 32 segmentos.
+            (0, 0, QUADRIC_WIRE_SEGMENTS)
+        }
         _ => return None,
     };
     WorldMeshStreamUsage::from_primitives(opaque_triangles, wire_triangles, wire_segments)
@@ -707,6 +724,13 @@ fn world_mesh_scene_fits_limits(document: &Document) -> bool {
                 };
                 units
             }
+            GeoObject::Prism3D(prism) => crate::prism_work_units(
+                prism
+                    .base_vertices
+                    .len()
+                    .clamp(3, crate::MAX_PRISM_BASE_VERTICES),
+            ),
+            GeoObject::Quadric3D(_) => QUADRIC_WIRE_SEGMENTS + 1,
             _ => continue,
         };
         if !work_budget.reserve(work_units) {
@@ -1793,6 +1817,123 @@ fn append_sphere(
     }
 }
 
+fn append_prism(mesh: &mut WorldMesh, camera: &Camera3D, prism: &Prism3DObj, screen_h: f32) {
+    let base = crate::prism_base_vertices(prism);
+    if base.len() < 3 {
+        return;
+    }
+    let top = crate::prism_top_vertices(prism);
+    if let Some(fill) = prism.fill_color {
+        // Base y tapa: abanico desde el primer vértice (válido para bases
+        // convexas; las bases no convexas se aproximan, igual que el path CPU).
+        for index in 1..base.len().saturating_sub(1) {
+            append_solid_triangle(mesh, base[0], base[index], base[index + 1], fill);
+            append_solid_triangle(mesh, top[0], top[index], top[index + 1], fill);
+        }
+        // Laterales: cada cara es un paralelogramo (dos triángulos).
+        for index in 0..base.len() {
+            let next = (index + 1) % base.len();
+            append_solid_triangle(mesh, base[index], base[next], top[next], fill);
+            append_solid_triangle(mesh, base[index], top[next], top[index], fill);
+        }
+    }
+    for index in 0..base.len() {
+        let next = (index + 1) % base.len();
+        append_wire_line(
+            mesh,
+            camera,
+            base[index],
+            base[next],
+            prism.width,
+            prism.color,
+            screen_h,
+        );
+        append_wire_line(
+            mesh,
+            camera,
+            top[index],
+            top[next],
+            prism.width,
+            prism.color,
+            screen_h,
+        );
+        append_wire_line(
+            mesh,
+            camera,
+            base[index],
+            top[index],
+            prism.width,
+            prism.color,
+            screen_h,
+        );
+    }
+}
+
+fn append_ellipsoid_wire(
+    mesh: &mut WorldMesh,
+    camera: &Camera3D,
+    center: Point3D,
+    radii: glam::Vec3,
+    width: f32,
+    color: Color,
+    screen_h: f32,
+) {
+    if !(point_is_renderable(center)
+        && radii.is_finite()
+        && radii.x > 0.0
+        && radii.y > 0.0
+        && radii.z > 0.0)
+    {
+        return;
+    }
+    let center_vec = center.to_vec3();
+    for (u, v) in [
+        (glam::Vec3::X, glam::Vec3::Y),
+        (glam::Vec3::X, glam::Vec3::Z),
+        (glam::Vec3::Y, glam::Vec3::Z),
+    ] {
+        let points: Vec<glam::Vec3> = (0..=32)
+            .map(|index| {
+                let angle = std::f32::consts::TAU * index as f32 / 32.0;
+                let direction = u * angle.cos() + v * angle.sin();
+                center_vec
+                    + glam::Vec3::new(
+                        direction.x * radii.x,
+                        direction.y * radii.y,
+                        direction.z * radii.z,
+                    )
+            })
+            .collect();
+        for segment in points.windows(2) {
+            append_wire_line(
+                mesh,
+                camera,
+                Point3D::from_vec3(segment[0]),
+                Point3D::from_vec3(segment[1]),
+                width,
+                color,
+                screen_h,
+            );
+        }
+    }
+}
+
+fn append_quadric(mesh: &mut WorldMesh, camera: &Camera3D, quadric: &Quadric3DObj, screen_h: f32) {
+    // Paso intermedio honesto: elipsoide wireframe paramétrico derivado de la
+    // cuádrica. TODO(full-quadric): clasificación general y términos cruzados.
+    let ellipsoid = crate::quadric_ellipsoid_params(quadric)
+        .unwrap_or_else(crate::QuadricEllipsoid::placeholder);
+    append_ellipsoid_wire(
+        mesh,
+        camera,
+        ellipsoid.center,
+        ellipsoid.radii,
+        quadric.width,
+        quadric.color,
+        screen_h,
+    );
+}
+
 fn append_curve(
     mesh: &mut WorldMesh,
     camera: &Camera3D,
@@ -2113,9 +2254,124 @@ pub fn build_world_mesh(
                     append_wire_line(&mut mesh, camera, start, end, 1.5, field.color, screen_h);
                 }
             }
+            GeoObject::Prism3D(prism) => {
+                let base_len = prism
+                    .base_vertices
+                    .len()
+                    .clamp(3, crate::MAX_PRISM_BASE_VERTICES);
+                let work_units = crate::prism_work_units(base_len);
+                if !work_budget.reserve(work_units) {
+                    mesh.complete = false;
+                    continue;
+                }
+                append_prism(&mut mesh, camera, prism, screen_h);
+            }
+            GeoObject::Quadric3D(quadric) => {
+                if !work_budget.reserve(QUADRIC_WIRE_SEGMENTS + 1) {
+                    mesh.complete = false;
+                    continue;
+                }
+                append_quadric(&mut mesh, camera, quadric, screen_h);
+            }
             _ => {}
         }
     }
     sort_non_depth_writing_triangles(&mut mesh, camera);
     mesh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grafito_core::{GeoObject, Prism3DObj, Quadric3DObj};
+    use grafito_geometry::Point3D;
+
+    fn test_camera() -> Camera3D {
+        let mut camera = Camera3D::new(4.0 / 3.0);
+        camera.theta = 0.0;
+        camera.phi = 0.0;
+        camera.distance = 10.0;
+        camera.target = glam::Vec3::ZERO;
+        camera
+    }
+
+    fn prism_fixture() -> GeoObject {
+        GeoObject::Prism3D(Prism3DObj::new(
+            vec![
+                Point3D::new(-1.0, -1.0, 0.0),
+                Point3D::new(1.0, -1.0, 0.0),
+                Point3D::new(1.0, 1.0, 0.0),
+                Point3D::new(-1.0, 1.0, 0.0),
+            ],
+            Point3D::new(0.0, 0.0, 2.0),
+        ))
+    }
+
+    #[test]
+    fn prism_mesh_generates_solid_and_wire_streams() {
+        let mut document = Document::new();
+        document
+            .try_add_object(prism_fixture())
+            .expect("prism fixture");
+        let mesh = build_world_mesh(&document, &test_camera(), 800.0, 600.0);
+
+        assert!(mesh.is_complete());
+        // 4 vértices de base: 2 abanicos (base+tapa) + 8 laterales = 12 triángulos
+        // translúcidos → 36 vértices wire; 12 aristas → 48 vértices wire.
+        assert_eq!(mesh.wire_vertices.len(), 36 + 48);
+        assert_eq!(mesh.wire_indices.len(), 36 + 72);
+        assert!(mesh.opaque_vertices.is_empty());
+        mesh.validate().expect("prism mesh validates");
+    }
+
+    #[test]
+    fn quadric_mesh_generates_ellipsoid_wire() {
+        let mut document = Document::new();
+        document
+            .try_add_object(GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+                1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+            ])))
+            .expect("quadric fixture");
+        let mesh = build_world_mesh(&document, &test_camera(), 800.0, 600.0);
+
+        assert!(mesh.is_complete());
+        // 3 círculos × 32 segmentos × 4 vértices = 384 vértices wire.
+        assert_eq!(mesh.wire_vertices.len(), 384);
+        assert_eq!(mesh.wire_indices.len(), 576);
+        mesh.validate().expect("quadric mesh validates");
+    }
+
+    #[test]
+    fn quadric_usage_estimate_matches_wire_segments() {
+        let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        let usage = world_mesh_output_usage(&quadric).expect("quadric usage");
+        // 96 segmentos × 4 vértices / 6 índices.
+        assert_eq!(usage.wire_vertices, 384);
+        assert_eq!(usage.wire_indices, 576);
+    }
+
+    #[test]
+    fn prism_usage_estimate_scales_with_base_vertices() {
+        let prism = prism_fixture();
+        let usage = world_mesh_output_usage(&prism).expect("prism usage");
+        // 4 vértices de base → 12 triángulos translúcidos + 12 aristas.
+        assert_eq!(usage.wire_vertices, 12 * 3 + 12 * 4);
+        assert_eq!(usage.wire_indices, 12 * 3 + 12 * 6);
+    }
+
+    #[test]
+    fn prism_base_vertices_are_clamped_to_budget() {
+        let mut base = Vec::new();
+        for index in 0..200 {
+            let angle = std::f64::consts::TAU * index as f64 / 200.0;
+            base.push(Point3D::new(angle.cos(), angle.sin(), 0.0));
+        }
+        let prism = Prism3DObj::new(base, Point3D::new(0.0, 0.0, 1.0));
+        assert_eq!(
+            crate::prism_base_vertices(&prism).len(),
+            crate::MAX_PRISM_BASE_VERTICES
+        );
+    }
 }

@@ -8,12 +8,18 @@
 //! una animación profesional en <2s con fallback garantizado.
 
 pub mod engine;
+pub mod parametric;
 pub mod protocol;
 
 pub use engine::{
     run_job, AnimEngine, EngineConfig, JobEvent, CANCEL_GRACE, DEFAULT_IDLE_TIMEOUT_SECS,
     DEFAULT_JOB_TIMEOUT_SECS, DEFAULT_LINE_CAP_BYTES, MAX_IDLE_TIMEOUT_SECS, MAX_JOB_TIMEOUT_SECS,
     MAX_LINE_CAP_BYTES, MIN_IDLE_TIMEOUT_SECS, MIN_JOB_TIMEOUT_SECS, MIN_LINE_CAP_BYTES,
+};
+pub use parametric::{
+    infer_parametric_anim, parametric_hint, FrameCount, ParamName, ParametricAnim, ParametricError,
+    ParametricKind, PARAMETRIC_DEFAULT_FRAMES, PARAMETRIC_EVAL_MAX_DEPTH, PARAMETRIC_MAX_BYTES,
+    PARAMETRIC_MAX_EXPR_CHARS, PARAMETRIC_MAX_FRAMES,
 };
 pub use protocol::{
     downcast, kinds, localize_worker_error, normalize_concept, request_for_concept,

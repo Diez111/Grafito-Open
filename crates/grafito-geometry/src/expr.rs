@@ -502,6 +502,70 @@ fn replace_standalone_var(expr: &str, var: &str, value: f64) -> String {
 const MAX_SUM_PRODUCT_TERMS: usize = 2_000;
 const MAX_EXPANDED_EXPR_LEN: usize = 50_000;
 
+/// Largo máximo de expresión aceptada por `evaluate` y los paths batch/compilados.
+///
+/// Espeja el `MAX_EXPR_LENGTH` 2000 de `function_sampling`/`implicit_curve`.
+/// F10-FIX (SIGABRT en producción): `evaluate` con ~16KB (`"x+".repeat(8000)`)
+/// desbordaba la pila (workers de 2MB) dentro de `evalexpr::build_operator_tree`
+/// —un stack overflow aborta el proceso y `catch_unwind` no lo atrapa.
+pub const MAX_EXPR_LENGTH: usize = 2000;
+
+/// Profundidad máxima de paréntesis anidados aceptada antes de parsear.
+///
+/// Espeja `MAX_AST_DEPTH` 256 de `ast`: lo más profundo daría `Err` en
+/// `parse_ast` de todos modos; se rechaza acá para no depender del slow-path
+/// `evalexpr` (recursivo) con entradas que `parse_ast` ya descartó.
+pub const MAX_EXPR_NESTING: usize = 256;
+
+/// Racha máxima de operadores ASCII encadenados (`+-*/^` seguidos) aceptada
+/// antes de parsear. Ninguna expresión legítima la roza; una racha kilométrica
+/// sólo aparece en payloads hostiles o corruptos.
+pub const MAX_EXPR_OPERATOR_RUN: usize = 256;
+
+/// Guarda de presupuesto F10-FIX: `Ok` si la expresión puede evaluarse sin
+/// riesgo de stack overflow, `Err` honesto en caso contrario.
+///
+/// Recorrido O(n) sin alloc y sin recursión sobre bytes (los delimitadores
+/// son ASCII, así que el escaneo por bytes nunca parte un scalar UTF-8).
+/// Llamar ANTES de `parse_ast`/`preprocess_expr`/`build_operator_tree`.
+fn check_expr_budget(expr: &str) -> Result<(), String> {
+    if expr.len() > MAX_EXPR_LENGTH {
+        return Err(format!(
+            "Expression exceeds maximum {MAX_EXPR_LENGTH} bytes (got {})",
+            expr.len()
+        ));
+    }
+    let mut depth: usize = 0;
+    let mut op_run: usize = 0;
+    for byte in expr.bytes() {
+        match byte {
+            b'(' => {
+                depth += 1;
+                op_run = 0;
+                if depth > MAX_EXPR_NESTING {
+                    return Err(format!(
+                        "Expression exceeds maximum nesting depth {MAX_EXPR_NESTING}"
+                    ));
+                }
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                op_run = 0;
+            }
+            b'+' | b'-' | b'*' | b'/' | b'^' => {
+                op_run += 1;
+                if op_run > MAX_EXPR_OPERATOR_RUN {
+                    return Err(format!(
+                        "Expression exceeds maximum chained operators {MAX_EXPR_OPERATOR_RUN}"
+                    ));
+                }
+            }
+            _ => op_run = 0,
+        }
+    }
+    Ok(())
+}
+
 fn find_standalone_sum_product(expr: &str) -> Option<(usize, usize, bool)> {
     let patterns: &[(&str, bool)] = &[("sum(", false), ("product(", true), ("prod(", true)];
     for (byte_offset, _) in expr.char_indices() {
@@ -904,6 +968,9 @@ thread_local! {
 /// parametric samples). The first call compiles and caches the expression;
 /// subsequent calls skip tokenisation/parsing/pre-processing.
 pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
+    // F10-FIX: la guarda va antes del cache para no envenenarlo con claves hostiles
+    // y antes de `CompiledExpr::new` (cuyo slow-path `evalexpr` es el que overflowea).
+    check_expr_budget(expr)?;
     if crate::precision::is_high_precision_mode() {
         return evaluate(expr, vars);
     }
@@ -929,6 +996,9 @@ pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String
 
 /// Evaluate a mathematical expression string with given variable values.
 pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
+    // F10-FIX (SIGABRT): rechazar ANTES de `build_operator_tree` (~evalexpr,
+    // recursivo). Un stack overflow aborta el proceso; `catch_unwind` no lo atrapa.
+    check_expr_budget(expr)?;
     crate::ast::validate_numeric_literals(expr)?;
     let expr = preprocess_expr(expr);
 
@@ -1024,12 +1094,68 @@ pub fn eval_function_with_vars(
     })
 }
 
+/// Umbral F10-D (perf medido): batches cuyo `size_hint` inferior queda debajo
+/// se evalúan escalares para no pagar el spawn de rayon (~10µs). Probe
+/// N=4000 `sin(x)+x^2-cos(2x)`: 267µs seq → 146µs par8 (1.83x).
+const RAYON_BATCH_THRESHOLD: usize = 1024;
+
+/// Evalúa un AST ya sustituido/simplificado sobre un Vec, en paralelo.
+/// `collect` preserva el orden → resultado idéntico al loop escalar.
+fn eval_prepared_1d_par(ast: &crate::ast::Expr, var_name: &str, xs: Vec<f64>) -> Vec<Option<f64>> {
+    use rayon::prelude::*;
+    let chunk = (xs.len() / rayon::current_num_threads().max(1)).max(64);
+    xs.par_chunks(chunk)
+        .map(|c| {
+            c.iter()
+                .map(|&x| {
+                    let res = ast.eval_at(var_name, x);
+                    if res.is_nan() {
+                        None
+                    } else {
+                        Some(res)
+                    }
+                })
+                .collect::<Vec<Option<f64>>>()
+        })
+        .collect::<Vec<Vec<Option<f64>>>>()
+        .concat()
+}
+
+/// Variante 2D del batch paralelo (domain coloring, implícitas, superficies).
+fn eval_prepared_2d_par(
+    ast: &crate::ast::Expr,
+    var1_name: &str,
+    var2_name: &str,
+    pts: Vec<(f64, f64)>,
+) -> Vec<Option<f64>> {
+    use rayon::prelude::*;
+    let chunk = (pts.len() / rayon::current_num_threads().max(1)).max(64);
+    pts.par_chunks(chunk)
+        .map(|c| {
+            c.iter()
+                .map(|&(v1, v2)| {
+                    let res = ast.eval_2d(var1_name, v1, var2_name, v2);
+                    if res.is_nan() {
+                        None
+                    } else {
+                        Some(res)
+                    }
+                })
+                .collect::<Vec<Option<f64>>>()
+        })
+        .collect::<Vec<Vec<Option<f64>>>>()
+        .concat()
+}
+
 pub fn eval_batch_1d(
     expr: &str,
     var_name: &str,
     xs: impl Iterator<Item = f64> + Clone,
     vars: &std::collections::HashMap<String, f64>,
 ) -> Result<Vec<Option<f64>>, String> {
+    // F10-FIX: este path tiene su propio slow-path `build_operator_tree`
+    // (ver abajo); la guarda va a la entrada, antes de `preprocess_expr`.
+    check_expr_budget(expr)?;
     let expr_clean = expr.trim();
     if expr_clean.starts_with("deriv(") && expr_clean.ends_with(')') {
         let inner = &expr_clean[6..expr_clean.len() - 1];
@@ -1078,6 +1204,9 @@ pub fn eval_batch_1d(
     // FAST PATH: try to parse with our custom AST
     if let Ok(mut ast) = crate::ast::parse_ast(&expr_clean) {
         ast = ast.substitute_vars(vars, &[var_name]).simplify();
+        if xs.size_hint().0 >= RAYON_BATCH_THRESHOLD {
+            return Ok(eval_prepared_1d_par(&ast, var_name, xs.collect()));
+        }
         let mut results = Vec::new();
         for x in xs {
             let res = ast.eval_at(var_name, x);
@@ -1125,6 +1254,8 @@ pub fn eval_batch_2d(
     points: impl Iterator<Item = (f64, f64)>,
     vars: &std::collections::HashMap<String, f64>,
 ) -> Result<Vec<Option<f64>>, String> {
+    // F10-FIX: idem `eval_batch_1d` (slow-path `build_operator_tree` propio).
+    check_expr_budget(expr)?;
     let expr_clean = expr.trim();
     let expr_clean = preprocess_expr(expr_clean);
 
@@ -1157,6 +1288,14 @@ pub fn eval_batch_2d(
         ast = ast
             .substitute_vars(vars, &[var1_name, var2_name])
             .simplify();
+        if points.size_hint().0 >= RAYON_BATCH_THRESHOLD {
+            return Ok(eval_prepared_2d_par(
+                &ast,
+                var1_name,
+                var2_name,
+                points.collect(),
+            ));
+        }
         let mut results = Vec::new();
         for (v1, v2) in points {
             let res = ast.eval_2d(var1_name, v1, var2_name, v2);
@@ -1671,6 +1810,8 @@ impl CompiledExpr {
         expr: &str,
         constants: &std::collections::HashMap<String, f64>,
     ) -> Result<Self, String> {
+        // F10-FIX: slow-path `build_operator_tree` propio (ver abajo).
+        check_expr_budget(expr)?;
         crate::ast::validate_numeric_literals(expr)?;
         let expr_clean = preprocess_expr(expr);
 
@@ -2237,6 +2378,46 @@ pub fn eval_integral_batch(
 mod tests {
     use super::*;
     #[test]
+    fn batch_par_sobre_umbral_coincide_con_escalar_punto_a_punto() {
+        // F10-D: el path rayon (>=1024) debe dar bit a bit lo mismo que el
+        // evaluador puntual. N=1500 cruza RAYON_BATCH_THRESHOLD.
+        let vars = HashMap::new();
+        let n = RAYON_BATCH_THRESHOLD + 476;
+        let xs: Vec<f64> = (0..n)
+            .map(|i| -10.0 + 20.0 * (i as f64) / (n as f64))
+            .collect();
+        let got = eval_batch_1d("sin(x) + x^2 - cos(2*x)", "x", xs.iter().copied(), &vars)
+            .expect("batch");
+        assert_eq!(got.len(), n);
+        for (i, &x) in xs.iter().enumerate() {
+            let expected = evaluate("sin(x) + x^2 - cos(2*x)", &[("x".to_string(), x)]).ok();
+            assert_eq!(got[i], expected, "mismatch en x={x}");
+        }
+    }
+    #[test]
+    fn batch_2d_par_sobre_umbral_coincide_con_punto_a_punto() {
+        let vars = HashMap::new();
+        let n = RAYON_BATCH_THRESHOLD + 100;
+        let pts: Vec<(f64, f64)> = (0..n)
+            .map(|i| (i as f64 * 0.01, (i as f64 * 0.02).sin()))
+            .collect();
+        let got =
+            eval_batch_2d("x^2 + y^2", "x", "y", pts.iter().copied(), &vars).expect("batch2d");
+        assert_eq!(got.len(), n);
+        for (i, &(x, y)) in pts.iter().enumerate() {
+            let expected =
+                evaluate("x^2 + y^2", &[("x".to_string(), x), ("y".to_string(), y)]).ok();
+            assert_eq!(got[i], expected, "mismatch en ({x},{y})");
+        }
+    }
+    #[test]
+    fn batch_chico_bajo_umbral_sigue_escalar_y_correcto() {
+        // N=10 < umbral: path escalar intacto, mismo resultado.
+        let vars = HashMap::new();
+        let got = eval_batch_1d("x^2", "x", [1.0, 2.0, 3.0].into_iter(), &vars).expect("batch");
+        assert_eq!(got, vec![Some(1.0), Some(4.0), Some(9.0)]);
+    }
+    #[test]
     fn test_eval_syntax() {
         println!("sin(1.0): {:?}", eval_function("sin(1.0)", 1.0));
         println!("math::sin(1.0): {:?}", eval_function("math::sin(1.0)", 1.0));
@@ -2417,5 +2598,207 @@ mod tests {
             crate::ast::parse_ast("clamp(0, 2, 1)").unwrap().simplify()
         })
         .is_ok());
+    }
+}
+
+// ── F10 hostile fuzz (solo tests, sin tocar prod) ─────────────────────────
+// RAW sin catch/should_panic: el harness muestra el pánico crudo con backtrace.
+#[cfg(test)]
+mod hostile_crash_f10 {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn hostile_expr_vacia_operadores_unicode() {
+        let empty_vars: Vec<(String, f64)> = vec![];
+        // Vacío / blancos: Err, no panic
+        assert!(evaluate("", &empty_vars).is_err());
+        assert!(evaluate("   ", &empty_vars).is_err());
+        assert!(evaluate("\n\t ", &empty_vars).is_err());
+        // Solo operadores / parens sueltos
+        for expr in [
+            "+", "++", "***", "///", "(((", ")))", "(()", "()(", "+-*/^", "==", "!=",
+        ] {
+            let _ = evaluate(expr, &empty_vars);
+            let _ = evaluate_cached(expr, &empty_vars);
+            let _ = validate(expr);
+            let vars = HashMap::new();
+            let _ = prepare_function_ast(expr, &vars, &[]);
+        }
+        // Unicode partido / emojis multi-byte: jamás panic
+        for expr in [
+            "x + \u{1F600}",
+            "\u{e9}",
+            "\u{e9}\u{e9}\u{e9}",
+            "😀😀😀",
+            "x² + y²",
+            "sin(é)",
+            "x\u{0301}",
+            "\u{200B}",
+        ] {
+            let _ = evaluate(expr, &[("x".to_string(), 1.0)]);
+            let _ = evaluate_cached(expr, &[("x".to_string(), 1.0)]);
+            let _ = validate(expr);
+            let vars = HashMap::new();
+            let _ = prepare_function_ast(expr, &vars, &["x"]);
+        }
+    }
+
+    #[test]
+    fn hostile_parens_10k() {
+        // NOTA F10-FIX: 10k parens daban SIGABRT por stack overflow (los
+        // `hostile_stack_overflow_*` de abajo lo cubren ya como `Err` verde).
+        // Acá versión media (1k parens + 300 mid) que corre en la suite.
+        let deep = format!("{}x{}", "(".repeat(1_000), ")".repeat(1_000));
+        let vars: Vec<(String, f64)> = vec![("x".to_string(), 1.0)];
+        let _ = evaluate(&deep, &vars);
+        let _ = evaluate_cached(&deep, &vars);
+        let _ = validate(&deep);
+        let map = HashMap::new();
+        let _ = prepare_function_ast(&deep, &map, &["x"]);
+        let _ = crate::ast::parse_ast(&deep);
+        // Profundidad media 300 (sobre MAX_AST_DEPTH 256 pero bajo tokens): debe dar Err
+        let mid = format!("{}x{}", "(".repeat(300), ")".repeat(300));
+        let _ = evaluate(&mid, &vars);
+        let _ = crate::ast::parse_ast(&mid);
+    }
+
+    #[test]
+    fn hostile_strings_200kb() {
+        // Versión media (5k "x+" = 10KB, 5k parens): la original de 100k
+        // "x+" (200KB) y 50k parens daban SIGABRT (cubiertas por
+        // `hostile_stack_overflow_*` como `Err`). 5k corre sin voltear la suite.
+        let big_x = "x+".repeat(5_000); // 10KB
+        let vars: Vec<(String, f64)> = vec![("x".to_string(), 1.0)];
+        let _ = evaluate(&big_x, &vars);
+        let _ = evaluate_cached(&big_x, &vars);
+        let _ = validate(&big_x);
+        let map = HashMap::new();
+        let _ = prepare_function_ast(&big_x, &map, &["x"]);
+        let big_paren = format!("{}1{}", "(".repeat(5_000), ")".repeat(5_000));
+        let _ = evaluate(&big_paren, &[]);
+        let _ = crate::ast::parse_ast(&big_paren);
+        let big_emoji = "\u{1F600}".repeat(5_000);
+        let _ = evaluate(&big_emoji, &[]);
+        let _ = validate(&big_emoji);
+    }
+
+    // ── F10-FIX: ya no abortan (la guarda de presupuesto rechaza con `Err`
+    // honesto antes de `build_operator_tree`). Tests verdes normales: el solo
+    // hecho de completarse prueba que no hay SIGABRT.
+    #[test]
+    fn hostile_stack_overflow_xplus_8k() {
+        // 16KB: antes umbral de overflow (7k ok, 8k abortaba en workers 2MB).
+        let s = "x+".repeat(8_000);
+        let vars = vec![("x".to_string(), 1.0)];
+        assert!(evaluate(&s, &vars).is_err());
+        assert!(evaluate_cached(&s, &vars).is_err());
+    }
+
+    #[test]
+    fn hostile_stack_overflow_paren_8k() {
+        let s = format!("{}1{}", "(".repeat(8_000), ")".repeat(8_000));
+        assert!(evaluate(&s, &[]).is_err());
+    }
+
+    #[test]
+    fn hostile_stack_overflow_paren_10k_x() {
+        let s = format!("{}x{}", "(".repeat(10_000), ")".repeat(10_000));
+        let vars = vec![("x".to_string(), 1.0)];
+        assert!(evaluate(&s, &vars).is_err());
+    }
+
+    #[test]
+    fn hostile_budget_guards_below_byte_cap() {
+        // Bajo el cap de 2000 bytes pero sobre nesting/rachas: también `Err`.
+        // 900 parens = 1801 bytes (<2000) con profundidad 900 (>256).
+        let deep = format!("{}1{}", "(".repeat(900), ")".repeat(900));
+        assert!(deep.len() < MAX_EXPR_LENGTH);
+        assert!(evaluate(&deep, &[]).is_err());
+        // Racha de 300 '+' (<2000 bytes) → `Err` por racha, no por largo.
+        let chained = "+".repeat(300);
+        assert!(chained.len() < MAX_EXPR_LENGTH);
+        assert!(evaluate(&chained, &[]).is_err());
+        // Límite: 1000 términos `1+1+…` (1999 bytes) sigue evaluando honesto.
+        let boundary = vec!["1"; 1000].join("+");
+        assert_eq!(boundary.len(), 1999);
+        assert_eq!(evaluate(&boundary, &[]), Ok(1000.0));
+    }
+
+    #[test]
+    fn hostile_batch_y_compiled_rechazan_16k() {
+        // Los slow-paths propios de batch/compilado también tienen guarda.
+        use std::collections::HashMap as Map;
+        let big = "x+".repeat(8_000);
+        let vars = Map::new();
+        assert!(eval_batch_1d(&big, "x", vec![1.0].into_iter(), &vars).is_err());
+        assert!(eval_function_batch(&big, vec![1.0].into_iter(), &vars).is_err());
+        assert!(CompiledExpr::new(&big, &vars).is_err());
+    }
+
+    #[test]
+    fn hostile_cas_rangos_degenerados() {
+        let map = HashMap::new();
+        // solve_expression con rangos degenerados / NaN / inf
+        for (a, b) in [
+            (0.0, 0.0),
+            (f64::NAN, 1.0),
+            (0.0, f64::NAN),
+            (f64::NAN, f64::NAN),
+            (f64::INFINITY, 1.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::INFINITY),
+        ] {
+            let _ = crate::cas::solve_expression("x^2", 1.0, &map, a, b);
+            let _ = crate::cas::solve_expression("", 0.0, &map, a, b);
+            let _ = crate::cas::solve_expression("+++", 0.0, &map, a, b);
+        }
+        // solve con expr hostil y rango sano
+        for expr in [
+            "",
+            "   ",
+            "+++",
+            "***",
+            "(((",
+            "\u{1F600}",
+            &"(".repeat(10_000),
+        ] {
+            let _ = crate::cas::solve_expression(expr, 0.0, &map, -10.0, 10.0);
+        }
+        // gruntz / laurent / buchberger hostiles
+        let _ = crate::cas::gruntz_limit("", "x", 0.0);
+        let _ = crate::cas::gruntz_limit("+++", "x", 0.0);
+        let _ = crate::cas::gruntz_limit(&"(".repeat(10_000), "x", 0.0);
+        let _ = crate::cas::gruntz_limit("x^2", "", 0.0);
+        let _ = crate::cas::gruntz_limit("x^2", "x", f64::NAN);
+        let _ = crate::cas::gruntz_limit("x^2", "x", f64::INFINITY);
+        let _ = crate::cas::gruntz_limit_infinite("x^2", "x", true);
+        let _ = crate::cas::gruntz_limit_infinite("", "x", false);
+        let _ = crate::cas::laurent_residue("1/x", "x", 0.0, 4);
+        let _ = crate::cas::laurent_residue("", "x", 0.0, 4);
+        let _ = crate::cas::laurent_residue("+++", "", f64::NAN, usize::MAX);
+        let _ = crate::cas::laurent_principal_part("1/x", "x", 0.0, 4);
+        let _ = crate::cas::laurent_principal_part("", "", f64::NAN, usize::MAX);
+        let _ = crate::cas::buchberger_basis(&["x^2".to_string()], &["x".to_string()]);
+        let _ = crate::cas::buchberger_basis(&["".to_string()], &["".to_string()]);
+        let _: Result<_, _> =
+            crate::cas::buchberger_basis(&["+++ ".to_string()], &["\u{1F600}".to_string()]);
+    }
+
+    #[test]
+    fn hostile_eval_batch_y_compiled() {
+        let vars = HashMap::new();
+        // batches con x NaN/inf
+        let xs = vec![0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0];
+        let _ = eval_batch_1d("x^2", "x", xs.clone().into_iter(), &vars);
+        let _ = eval_batch_1d("", "x", xs.clone().into_iter(), &vars);
+        let _ = eval_batch_1d("+++", "x", xs.clone().into_iter(), &vars);
+        let _ = eval_function_batch("x^2", xs.clone().into_iter(), &vars);
+        let _ = eval_function_batch("", xs.into_iter(), &vars);
+        // compiled con expr hostil
+        let _ = evaluate_compiled("", &[]);
+        let _ = evaluate_compiled("+++", &[]);
+        let _ = evaluate_compiled(&"(".repeat(10_000), &[]);
     }
 }

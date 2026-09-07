@@ -307,13 +307,13 @@ pub fn mascot_picker_ui(
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Nombre")
-                .size(11.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(theme.text_secondary),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{}/{}", cfg.name.chars().count(), MAX_NAME))
-                    .size(9.0)
+                    .size(crate::tokens::TYPE_XS)
                     .color(theme.text_tertiary),
             );
         });
@@ -336,23 +336,24 @@ pub fn mascot_picker_ui(
         cfg.name = cfg.sanitized_name();
     }
 
-    ui.add_space(8.0);
+    ui.add_space(crate::tokens::SPACE_SM);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(crate::tokens::SPACE_SM);
 
     // Especie
     ui.label(
         egui::RichText::new("Especie")
-            .size(11.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_secondary),
     );
-    ui.add_space(4.0);
+    ui.add_space(crate::tokens::SPACE_XS);
     ui.horizontal(|ui| {
         for sp in MascotSpecies::all() {
             let is_sel = cfg.species == *sp;
-            let btn = egui::Button::new(egui::RichText::new(sp.label()).size(11.0))
-                .selected(is_sel)
-                .rounding(crate::tokens::RADIUS_PILL);
+            let btn =
+                egui::Button::new(egui::RichText::new(sp.label()).size(crate::tokens::TYPE_XS))
+                    .selected(is_sel)
+                    .rounding(crate::tokens::RADIUS_PILL);
             if ui.add(btn).clicked() {
                 cfg.species = *sp;
                 // dna deriva de especie + nombre para variación
@@ -363,19 +364,19 @@ pub fn mascot_picker_ui(
     });
     ui.label(
         egui::RichText::new(cfg.species.description())
-            .size(9.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_tertiary),
     );
 
-    ui.add_space(8.0);
+    ui.add_space(crate::tokens::SPACE_SM);
 
     // Personalidad
     ui.label(
         egui::RichText::new("Personalidad")
-            .size(11.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_secondary),
     );
-    ui.add_space(4.0);
+    ui.add_space(crate::tokens::SPACE_XS);
     egui::ComboBox::from_id_salt("mascot_personality")
         .selected_text(cfg.personality.label())
         .width(ui.available_width())
@@ -390,25 +391,26 @@ pub fn mascot_picker_ui(
         });
     ui.label(
         egui::RichText::new(cfg.personality.description())
-            .size(9.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_tertiary),
     );
 
-    ui.add_space(8.0);
+    ui.add_space(crate::tokens::SPACE_SM);
 
     // Casa
     ui.label(
         egui::RichText::new("Casa")
-            .size(11.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_secondary),
     );
-    ui.add_space(4.0);
+    ui.add_space(crate::tokens::SPACE_XS);
     ui.horizontal_wrapped(|ui| {
         for house in HouseTheme::all() {
             let is_sel = cfg.house_theme == *house;
-            let btn = egui::Button::new(egui::RichText::new(house.label()).size(11.0))
-                .selected(is_sel)
-                .rounding(crate::tokens::RADIUS_PILL);
+            let btn =
+                egui::Button::new(egui::RichText::new(house.label()).size(crate::tokens::TYPE_XS))
+                    .selected(is_sel)
+                    .rounding(crate::tokens::RADIUS_PILL);
             if ui.add(btn).clicked() {
                 cfg.house_theme = *house;
                 changed = true;
@@ -417,13 +419,13 @@ pub fn mascot_picker_ui(
     });
     ui.label(
         egui::RichText::new(cfg.house_theme.description())
-            .size(9.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_tertiary),
     );
 
-    ui.add_space(8.0);
+    ui.add_space(crate::tokens::SPACE_SM);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(crate::tokens::SPACE_SM);
 
     // Ropa por niveles
     ui.label(
@@ -431,17 +433,17 @@ pub fn mascot_picker_ui(
             "Ropa — Tier {:?} (nivel {})",
             cfg.evolution_stage, level
         ))
-        .size(11.0)
+        .size(crate::tokens::TYPE_XS)
         .color(theme.text_secondary),
     );
-    ui.add_space(4.0);
+    ui.add_space(crate::tokens::SPACE_XS);
     // Desbloquear automáticamente por nivel
     cfg.wardrobe.unlock_for_level(level);
     let available = outfits_for_level(level);
     if available.is_empty() {
         ui.label(
             egui::RichText::new("Sin prendas desbloqueadas aún.")
-                .size(9.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(theme.text_tertiary),
         );
     } else {
@@ -454,8 +456,9 @@ pub fn mascot_picker_ui(
             } else {
                 outfit.name.clone()
             };
-            let mut btn = egui::Button::new(egui::RichText::new(label).size(10.0))
-                .rounding(crate::tokens::RADIUS_PILL);
+            let mut btn =
+                egui::Button::new(egui::RichText::new(label).size(crate::tokens::TYPE_XS))
+                    .rounding(crate::tokens::RADIUS_PILL);
             if !owned {
                 btn = btn.fill(theme.button_bg.gamma_multiply(0.5));
             }
@@ -473,33 +476,33 @@ pub fn mascot_picker_ui(
                 changed = true;
             }
         }
-        ui.add_space(4.0);
+        ui.add_space(crate::tokens::SPACE_XS);
         ui.label(
             egui::RichText::new("Tocá una prenda para equiparla/desequiparla. Una por capa.")
-                .size(9.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(theme.text_tertiary),
         );
     }
 
-    ui.add_space(8.0);
+    ui.add_space(crate::tokens::SPACE_SM);
 
     // Stats breves (hambre/felicidad)
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!("Hambre {}", cfg.hunger))
-                .size(9.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(theme.text_tertiary),
         );
-        ui.add_space(8.0);
+        ui.add_space(crate::tokens::SPACE_SM);
         ui.label(
             egui::RichText::new(format!("Felicidad {}", cfg.happiness))
-                .size(9.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(theme.text_tertiary),
         );
-        ui.add_space(8.0);
+        ui.add_space(crate::tokens::SPACE_SM);
         ui.label(
             egui::RichText::new(format!("Coins {}", cfg.coins))
-                .size(9.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(theme.text_tertiary),
         );
     });
@@ -522,7 +525,7 @@ pub fn wardrobe_picker_ui(
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Vestimenta")
-                .size(11.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(theme.text_secondary),
         );
     });
@@ -540,7 +543,8 @@ pub fn wardrobe_picker_ui(
                 outfit.name.clone()
             };
             let mut btn =
-                egui::Button::new(egui::RichText::new(label).size(10.0)).rounding(RADIUS_LG);
+                egui::Button::new(egui::RichText::new(label).size(crate::tokens::TYPE_XS))
+                    .rounding(RADIUS_LG);
             if equipped {
                 btn = btn
                     .fill(theme.accent.gamma_multiply(0.18))
@@ -601,7 +605,7 @@ pub fn wardrobe_picker_ui(
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new("Overlay vectorial, trazo 1.5")
-                    .size(9.0)
+                    .size(crate::tokens::TYPE_XS)
                     .color(theme.text_tertiary),
             );
         });
@@ -619,11 +623,11 @@ pub fn personality_picker_ui(
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Personalidad")
-                .size(11.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(theme.text_secondary),
         );
     });
-    ui.add_space(4.0);
+    ui.add_space(crate::tokens::SPACE_XS);
     egui::ComboBox::from_id_salt("pou_personality_picker")
         .selected_text(cfg.personality.label())
         .width(ui.available_width())
@@ -1145,6 +1149,25 @@ pub fn paint_mascot_room(
 }
 
 /// Habitáculo Pou: pared, piso, ventana + cama + stats hambre/felicidad muy visibles. Scandinavian shell, contenido playful.
+/// Texto polite del estado de Pou para la live-region del lector.
+/// Puro (`&Estado`): hambre/felicidad/ánimo, sin I/O ni spawn.
+pub fn pou_room_live_text(state: &MascotRoomState) -> String {
+    let mood = match MascotMood::from_u8(state.mood) {
+        MascotMood::Happy => "contento",
+        MascotMood::Sleepy => "somnoliento",
+        MascotMood::Hungry => "hambriento",
+        MascotMood::Annoyed => "molesto",
+        MascotMood::Excited => "emocionado",
+        MascotMood::Idle => "tranquilo",
+    };
+    format!(
+        "Pou {}: hambre {:.0}%, felicidad {:.0}%.",
+        mood,
+        state.hunger.clamp(0.0, 100.0),
+        state.happiness.clamp(0.0, 100.0)
+    )
+}
+
 pub fn draw_mascot_room(ctx: &egui::Context, state: &mut MascotRoomState) -> Option<Action> {
     use crate::tokens::{
         RADIUS_LG, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_SM, TYPE_XS,
@@ -1230,6 +1253,25 @@ pub fn draw_mascot_room(ctx: &egui::Context, state: &mut MascotRoomState) -> Opt
             if room_resp.clicked() {
                 action = Some(MascotRoomAction::Poke);
             }
+            // A11Y: foco visible (anillo 2px) + Enter/Espacio = poke (paridad
+            // con clic); Esc suelta el foco. El lector recibe el estado vía
+            // live-text en `widget_info` (render puro, sin I/O).
+            if room_resp.has_focus() {
+                theme.paint_focus_ring(ui.painter(), room_rect);
+            }
+            if room_resp.has_focus()
+                && ui.input(|input| {
+                    input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+                })
+            {
+                action = Some(MascotRoomAction::Poke);
+            }
+            if room_resp.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                room_resp.surrender_focus();
+            }
+            room_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, pou_room_live_text(state))
+            });
             room_resp.on_hover_text("Toca a Pou — ¡reacciona!");
             ui.add_space(SPACE_MD);
             // Stats muy visibles — barras gruesas 10px con valor dentro y colores semánticos
@@ -1469,7 +1511,7 @@ pub fn avatar_picker_ui(
 
     ui.label(
         egui::RichText::new("Nombre a mostrar")
-            .size(11.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_secondary),
     );
     let mut display = cfg.display_name.clone();
@@ -1486,7 +1528,7 @@ pub fn avatar_picker_ui(
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new("Semilla del avatar (para variación)")
-            .size(11.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_secondary),
     );
     let mut seed = cfg.seed.clone();
@@ -1504,7 +1546,7 @@ pub fn avatar_picker_ui(
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new("Acento")
-            .size(11.0)
+            .size(crate::tokens::TYPE_XS)
             .color(theme.text_secondary),
     );
     ui.horizontal_wrapped(|ui| {
@@ -1512,11 +1554,15 @@ pub fn avatar_picker_ui(
             let (name, rgb, _) = AvatarConfig::accent_palette(preset);
             let is_sel = cfg.accent_preset == preset;
             let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-            let btn = egui::Button::new(egui::RichText::new(name).size(10.0).color(if is_sel {
-                Color32::WHITE
-            } else {
-                theme.text_primary
-            }))
+            let btn = egui::Button::new(
+                egui::RichText::new(name)
+                    .size(crate::tokens::TYPE_XS)
+                    .color(if is_sel {
+                        Color32::WHITE
+                    } else {
+                        theme.text_primary
+                    }),
+            )
             .fill(if is_sel {
                 col
             } else {
@@ -1545,5 +1591,19 @@ mod tests {
         // No llamamos a painter real porque requiere ctx; solo test de tipos.
         assert_eq!(MascotMood::Idle as u8, 0);
         let _ = rect;
+    }
+
+    #[test]
+    fn room_live_text_reports_status_in_spanish() {
+        let state = MascotRoomState {
+            hunger: 80.0,
+            happiness: 60.0,
+            mood: MascotMood::Hungry as u8,
+            ..Default::default()
+        };
+        let text = pou_room_live_text(&state);
+        assert!(text.contains("hambriento"), "{text}");
+        assert!(text.contains("80%"), "{text}");
+        assert!(text.contains("60%"), "{text}");
     }
 }

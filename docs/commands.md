@@ -115,7 +115,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `LimitBelow[expr, variable, punto]`: Estima un límite lateral por la izquierda (x→a⁻). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_inferior`, `limite_izquierdo`.
 - `ParametricDerivative[x(t), y(t), variable]`: Deriva paramétrica dy/dx = (dy/dt)/(dx/dt) simbólicamente. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ParametricDerivative[x(t), y(t)]`. Alias: `derivada_parametrica`, `derivadaParametrica`.
 - `Asymptote[expr]`: Calcula asíntota oblicua y = m·x + b con m = lim f/x, b = lim f−m·x. Mutacion: solo consulta. Riesgo: medio. Formas alternativas: `Asymptote[expr, variable]`. Alias: `asintota`, `asíntota`.
-- `GroebnerDegRevLex[polinomios]`: Base de Groebner (stub: no implementado, use Eliminate). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`. Alias: `groebner`, `groebnerbasis`, `groebnerlex`, `groebner_basis`.
+- `GroebnerDegRevLex[polinomios]`: Base de Groebner degrevlex: exacta para 2 polinomios lineales en 2 variables; con mas de 2x2 devuelve error honesto, usa Eliminate. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`. Alias: `groebner`, `groebnerbasis`, `groebnerlex`, `groebner_basis`.
 - `Factor[expr, variable]`: Factoriza polinomios equivalentes. Mutacion: solo consulta. Riesgo: bajo. Alias: `factorizar`.
 - `Expand[expr]`: Expande productos y potencias algebraicas. Mutacion: solo consulta. Riesgo: bajo. Alias: `expandir`.
 - `Simplify[expr]`: Simplifica una expresion mediante reglas seguras. Mutacion: solo consulta. Riesgo: bajo. Alias: `simplificar`.
@@ -257,7 +257,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Extrude[polygon_label, height]`: Extruye un poligono a un solido. Mutacion: crea objetos. Riesgo: alto.
 - `VectorField3D[u, v, w]`: Crea un campo vectorial 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `vectorfield`.
 - `Prism[poligono, altura]`: Crea un prisma extruyendo un polígono base por un vector (altura en Z o dx,dy,dz). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Prism[poligono, dx, dy, dz]`. Alias: `prisma`.
-- `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (stub: informa disponibilidad). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Net[poliedro, escala]`. Alias: `desarrollo`, `desplegado`, `unwrap`.
+- `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (diseno L + stub honesto: devuelve error explicativo, ver Tasks.md F10.W5). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Net[poliedro, escala]`. Alias: `desarrollo`, `desplegado`, `unwrap`.
 - `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `cuadrica`, `cuádrica`.
 - `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
 ## Crear
@@ -309,6 +309,25 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Dinámica
 
 - `Slider[variable, min, max, paso, modo]`: Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Slider[variable, min, max, paso]`. Alias: `Deslizador`.
+- `Rastro[objeto]`: Activa/desactiva el rastro de un objeto: al arrastrarlo deja una estela con fade. Rastro[etiqueta] alterna; Rastro[etiqueta, true|false] fija el estado. (Trace con matriz sigue siendo traza matricial.) Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `Rastro[objeto, estado]`. Alias: `Estela`.
+- `Button[rotulo, guion]`: Crea un botón (action object sobre texto) con guion del subset GGBScript; el click lo ejecuta la UI. Mutacion: crea objetos. Riesgo: bajo. Alias: `Boton`.
+- `Checkbox[rotulo, variable]`: Crea un checkbox ligado a una variable (1 activado, 0 desactivado). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Checkbox[rotulo, variable, inicial]`. Alias: `Casilla`.
+- `InputBox[rotulo, variable]`: Crea una caja de entrada ligada a una variable numérica. Mutacion: crea objetos. Riesgo: bajo. Alias: `CajaEntrada`.
+- `TextField[rotulo, variable]`: Crea un campo de texto ligado a una variable (variante de InputBox). Mutacion: crea objetos. Riesgo: bajo. Alias: `CampoTexto`.
+- `Show[objeto]`: Hace visibles de uno a cuatro objetos por etiqueta. Mutacion: transforma objetos. Riesgo: bajo. Alias: `Mostrar`.
+- `Hide[objeto]`: Oculta de uno a cuatro objetos por etiqueta. Mutacion: transforma objetos. Riesgo: bajo. Alias: `Ocultar`.
+- `ZoomIn[]`: Acerca la vista 2D (factor 1.25 por defecto, máximo 4 por invocación). Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `ZoomIn[factor]`. Alias: `Acercar`.
+- `ZoomOut[]`: Aleja la vista 2D (factor 1.25 por defecto, máximo 4 por invocación). Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `ZoomOut[factor]`. Alias: `Alejar`.
+- `PlayPause[]`: Alterna la animación de una variable o de todas si no se indica. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `PlayPause[variable]`. Alias: `AlternarAnimacion`.
+- `If[condicion, guion_si]`: Ejecuta un guion del subset si la condición numérica es cierta, con rama opcional. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `If[condicion, guion_si, guion_no]`. Alias: `Si`.
+- `Repeat[n, guion]`: Repite un guion del subset de 1 a 1000 veces con presupuesto total de 1000 pasos. Mutacion: transforma objetos. Riesgo: medio. Alias: `Repetir`.
+- `DefineTool[nombre, pasos]`: Define una custom tool desde una secuencia y devuelve su JSON .ggt versionado. Mutacion: solo consulta. Riesgo: bajo. Alias: `DefinirHerramienta`.
+- `LoadTool[json]`: Valida un JSON .ggt (versión, nombre, cotas, allowlist) y lo describe sin ejecutar. Mutacion: solo consulta. Riesgo: bajo. Alias: `CargarHerramienta`.
+- `Execute[guion]`: No soportado: usa If/Repeat con pasos del subset o pulsa un Button. Mutacion: solo consulta. Riesgo: bajo. Alias: `Ejecutar`.
+- `StartAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StartAnimation[variable]`. Alias: `IniciarAnimacion`.
+- `StopAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StopAnimation[variable]`. Alias: `DetenerAnimacion`.
+- `Delete[objeto]`: No soportado: usa Erase[etiqueta] o EraseAll[]. Mutacion: solo consulta. Riesgo: bajo. Alias: `Eliminar`, `Borrar`.
+- `Rename[objeto, nuevo_nombre]`: No soportado: Grafito aún no renombra objetos por comando; edita la etiqueta en la UI. Mutacion: solo consulta. Riesgo: bajo. Alias: `Renombrar`.
 ## Análisis
 
 - `TangentAt[expr, x0]`: Recta tangente a y=f(x) en x0: TangentAt[expr, x0] crea una recta por (x0,f(x0)) con pendiente f'(x0). Mutacion: crea objetos. Riesgo: bajo. Alias: `TangenteEn`.

@@ -6,17 +6,18 @@
 //!
 //! F5 Scandinavian quiet 2026-08-21:
 //! - Ink secondary 64% → `text_secondary` DARK #A3A3A3 (163/255 ≈64%) para overlay calm sin competir con primary.
-//! - Ink tertiary 44% → `text_tertiary` DARK #737373 (115/255 ≈45%) para hints discretos.
+//! - Tertiary AA → `text_tertiary` DARK #8C8C8C / LIGHT #747474 (piso WCAG 1.4.3 4.5:1, ver tests).
 //! - Border 10% → `separator.gamma_multiply(0.10)` usado en hairlines de composer/toolbar.
 //! - Hover 5% → `separator.gamma_multiply(0.05)` / `hover_overlay` sutil (LIGHT #EBEDEA 5% blend) — verificado, no cambiar.
 //!
-//! LIGHT secondary/tertiary más oscuros por contraste sobre #FAFAF9, pero mantienen ratio calm.
+//! LIGHT secondary/tertiary más oscuros por contraste AA 4.5 sobre #FAFAF9, pero mantienen jerarquía calm.
 
 use crate::tokens::{
-    ANIM_MICRO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_MD, RADIUS_XL, SHADOW_ALPHA,
-    SHADOW_POPUP_BLUR, SHADOW_POPUP_OFFSET_Y, SHADOW_WINDOW_BLUR, SHADOW_WINDOW_OFFSET_Y, SPACE_LG,
-    SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X,
-    SPACING_MINIMAL_Y, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XL, TYPE_XS, TYPE_XXL,
+    ANIM_MICRO, FOCUS_RING_OFFSET, FOCUS_RING_WIDTH, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG,
+    RADIUS_MD, RADIUS_SM, RADIUS_XL, SHADOW_ALPHA, SHADOW_POPUP_BLUR, SHADOW_POPUP_OFFSET_Y,
+    SHADOW_WINDOW_BLUR, SHADOW_WINDOW_OFFSET_Y, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
+    SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TEXT_GAMMA_FLOOR,
+    TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XL, TYPE_XS, TYPE_XXL,
 };
 use egui::{Color32, Context};
 
@@ -60,7 +61,7 @@ pub struct Theme {
     // ── Texto ── Scandinavian quiet F5: secondary 64% ink, tertiary 44% ink (dark values #A3/#73; light ajustado por contraste)
     pub text_primary: Color32,
     pub text_secondary: Color32, // 64% ink — secondary calm
-    pub text_tertiary: Color32,  // 44% ink — tertiary hint
+    pub text_tertiary: Color32,  // tertiary AA 4.5 — hints legibles (piso, no bajar)
     pub text_label: Color32,
 
     // ── Acentos y estados ──
@@ -169,6 +170,38 @@ impl Theme {
             .stroke(self.hairline_stroke())
             .fill(self.panel_bg)
             .inner_margin(egui::Margin::same(SPACE_MD))
+    }
+
+    /// Stroke del anillo de foco visible — 2 px en `selection_outline`
+    /// (WCAG 2.4.13 foco ≥ 2 px + WCAG 1.4.11 contraste no-texto ≥ 3:1).
+    /// Puro render, sin I/O.
+    pub fn focus_ring_stroke(&self) -> egui::Stroke {
+        egui::Stroke::new(FOCUS_RING_WIDTH, self.selection_outline)
+    }
+
+    /// Rect expandido del anillo de foco (offset 2 px por lado, fuera del widget).
+    pub fn focus_ring_rect(rect: egui::Rect) -> egui::Rect {
+        rect.expand(FOCUS_RING_OFFSET)
+    }
+
+    /// Pinta el anillo de foco sobre el rect de un widget. Puro render, sin I/O.
+    pub fn paint_focus_ring(&self, painter: &egui::Painter, rect: egui::Rect) {
+        painter.rect_stroke(
+            Self::focus_ring_rect(rect),
+            egui::Rounding::same(RADIUS_SM),
+            self.focus_ring_stroke(),
+        );
+    }
+
+    /// Clamp de atenuación gamma para texto al piso 0.85 (WCAG 1.4.3 AA).
+    /// Todo `gamma_multiply` sobre texto debe pasar por aquí.
+    pub fn clamp_text_gamma(gamma: f32) -> f32 {
+        gamma.clamp(TEXT_GAMMA_FLOOR, 1.0)
+    }
+
+    /// Texto atenuado sin violar el piso gamma 0.85.
+    pub fn dimmed_text(base: Color32, gamma: f32) -> Color32 {
+        base.gamma_multiply(Self::clamp_text_gamma(gamma))
     }
 
     pub fn apply(&self, ctx: &Context) {
@@ -317,8 +350,8 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
 
     text_primary: Color32::from_rgb(0xFA, 0xFA, 0xF9),
     text_secondary: Color32::from_rgb(0xA3, 0xA3, 0xA3),
-    text_tertiary: Color32::from_rgb(0x73, 0x73, 0x73),
-    text_label: Color32::from_rgb(0x73, 0x73, 0x73),
+    text_tertiary: Color32::from_rgb(0x8C, 0x8C, 0x8C),
+    text_label: Color32::from_rgb(0x8C, 0x8C, 0x8C),
 
     accent: Color32::from_rgb(92, 107, 96),
     accent_muted: Color32::from_rgb(58, 65, 60),
@@ -397,8 +430,8 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
 
     text_primary: Color32::from_rgb(0x1A, 0x1A, 0x1A),
     text_secondary: Color32::from_rgb(0x6C, 0x6C, 0x6C),
-    text_tertiary: Color32::from_rgb(0x9A, 0x9A, 0x9A),
-    text_label: Color32::from_rgb(0x9A, 0x9A, 0x9A),
+    text_tertiary: Color32::from_rgb(0x74, 0x74, 0x74),
+    text_label: Color32::from_rgb(0x74, 0x74, 0x74),
 
     accent: Color32::from_rgb(0x6B, 0x7A, 0x6F),
     accent_muted: Color32::from_rgb(0xEB, 0xED, 0xEA),
@@ -667,5 +700,61 @@ mod tests {
         let chrome = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
         assert!(!chrome.contains("from_rgba_unmultiplied"));
         assert!(!chrome.contains("from_rgba_premultiplied"));
+    }
+
+    #[test]
+    fn focus_ring_is_visible_and_contrasted() {
+        use crate::tokens::{FOCUS_RING_MIN_CONTRAST, FOCUS_RING_OFFSET, FOCUS_RING_WIDTH};
+        for theme in [&*DARK, &*LIGHT] {
+            let stroke = theme.focus_ring_stroke();
+            assert_eq!(stroke.width, FOCUS_RING_WIDTH);
+            assert!(
+                contrast_ratio(stroke.color, theme.panel_bg) >= f64::from(FOCUS_RING_MIN_CONTRAST),
+                "focus ring contrast is {}",
+                contrast_ratio(stroke.color, theme.panel_bg),
+            );
+        }
+        // El rect expandido deja OFFSET por lado.
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(10.0, 10.0));
+        let expanded = Theme::focus_ring_rect(rect);
+        assert_eq!(expanded.width(), 10.0 + 2.0 * FOCUS_RING_OFFSET);
+        assert_eq!(expanded.height(), 10.0 + 2.0 * FOCUS_RING_OFFSET);
+    }
+
+    #[test]
+    fn tertiary_text_passes_aa_on_chrome() {
+        // WCAG 1.4.3: texto normal ≥ 4.5:1 contra panel y toolbar.
+        for theme in [&*DARK, &*LIGHT] {
+            assert!(
+                contrast_ratio(theme.text_tertiary, theme.panel_bg) >= 4.5,
+                "tertiary/panel contrast is {}",
+                contrast_ratio(theme.text_tertiary, theme.panel_bg),
+            );
+            assert!(
+                contrast_ratio(theme.text_tertiary, theme.toolbar_bg) >= 4.5,
+                "tertiary/toolbar contrast is {}",
+                contrast_ratio(theme.text_tertiary, theme.toolbar_bg),
+            );
+            assert!(
+                contrast_ratio(theme.text_label, theme.panel_bg) >= 4.5,
+                "label/panel contrast is {}",
+                contrast_ratio(theme.text_label, theme.panel_bg),
+            );
+        }
+    }
+
+    #[test]
+    fn dimmed_text_never_breaks_gamma_floor() {
+        assert_eq!(Theme::clamp_text_gamma(0.5), TEXT_GAMMA_FLOOR);
+        assert_eq!(Theme::clamp_text_gamma(0.85), TEXT_GAMMA_FLOOR);
+        assert_eq!(Theme::clamp_text_gamma(0.95), 0.95);
+        assert_eq!(Theme::clamp_text_gamma(1.5), 1.0);
+        // `dimmed_text` con gamma bajo el piso equivale al piso.
+        let base = Color32::from_rgb(200, 200, 200);
+        assert_eq!(
+            Theme::dimmed_text(base, 0.5),
+            base.gamma_multiply(TEXT_GAMMA_FLOOR)
+        );
+        assert_eq!(Theme::dimmed_text(base, 1.0), base);
     }
 }

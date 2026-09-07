@@ -225,22 +225,523 @@ pub struct CasWorksheetEntry {
     pub status: CasWorksheetStatus,
 }
 
-/// The main document containing all geometric objects.
-// Migración P0 HashMap→BTreeMap: `objects` es BTreeMap para determinismo total
-// en serialización y hashing. `variables`/`variable_meta`/`live_sequences`/
-// `variables_assumptions`/`spreadsheet_coordinate_points` mantienen HashMap:
-// intento 2026-09-03 de migrar `variables:BTreeMap + variable_meta:BTreeMap +
-// live_sequences:BTreeMap + variables_assumptions:BTreeMap` rompe
-// `cargo check -p grafito-command` con 484 errores E0308 (mismatched types
-// BTreeMap vs HashMap en parse_numeric_arg/prepare_function_ast/etc.). Como
-// 484 > umbral 10, se revierte (BUILD gate). Determinismo se garantiza vía
-// `semantic_document_baseline` (BTreeMap sort en `to_value`) y
-// `ValidatedDocument`. Deuda P1: migrar requiere abstraer firmas
-// `&HashMap<String,f64>` → genérico `&BTreeMap`/`&dyn Map` o alias
-// `type VarMap = BTreeMap<...>` en 484 call-sites de grafito-command +
-// grafito-geometry param sampling.
+/// ── Libro de pizarra persistente (región whiteboard) ─────────────────────
+/// La pizarra pasó de una sola hoja (`Document.whiteboard`) a un libro de
+/// hasta `MAX_WHITEBOARD_PAGES` hojas. Formato persistido (JSON del documento):
+///
+/// ```json
+/// {
+///   "whiteboard": { "elements": [...] },
+///   "whiteboard_pages": [
+///     { "title": "Hoja 1", "doc": { "elements": [...] },
+///       "pan": [0.0, 0.0], "zoom": 1.0 }
+///   ],
+///   "whiteboard_current": 0
+/// }
+/// ```
+///
+/// Migración (sin pérdida, sin panic):
+/// - JSON viejo sin `whiteboard_pages` (o vacío) →
+///   `ensure_whiteboard_book_migrated` crea un `Vec` de una hoja ("Hoja 1")
+///   con el contenido legado de `whiteboard`.
+/// - JSON nuevo → se usa `whiteboard_pages` tal cual; `whiteboard` queda como
+///   espejo de la hoja actual para que el export SVG existente y
+///   `ValidatedDocument` sigan funcionando sin cambios.
+/// - La carga acota en deserialización (`deserialize_whiteboard_pages_capped`):
+///   32 hojas, 500 elementos/hoja, 4096 puntos/trazo, 2000 caracteres/texto,
+///   título a 64 caracteres, pan/zoom finitos (zoom 1e-6..=1e6).
+///
+/// Cotas (alineadas con `validation.rs` y `whiteboard_ui.rs`):
+/// `MAX_WHITEBOARD_PAGES = 32`, `MAX_WHITEBOARD_ELEMENTS_PER_PAGE = 500`,
+/// `MAX_WHITEBOARD_POINTS_PER_STROKE = 4096`, `MAX_WHITEBOARD_TEXT_CHARS = 2000`.
+pub const MAX_WHITEBOARD_PAGES: usize = 32;
+/// Máximo de elementos por hoja persistida (igual que `validation.rs:497`).
+pub const MAX_WHITEBOARD_ELEMENTS_PER_PAGE: usize = 500;
+/// Máximo de puntos por trazo persistido (igual que `whiteboard_ui.rs`).
+pub const MAX_WHITEBOARD_POINTS_PER_STROKE: usize = 4096;
+/// Máximo de caracteres por texto persistido (igual que `whiteboard_ui.rs`).
+pub const MAX_WHITEBOARD_TEXT_CHARS: usize = 2000;
+/// Título de hoja más largo persistido (se trunca por caracteres, sin panic).
+pub const MAX_WHITEBOARD_PAGE_TITLE_CHARS: usize = 64;
+/// Zoom persistido mínimo válido (igual que `ZOOM_WB_MIN` de `grafito-ui`).
+pub const WHITEBOARD_PAGE_ZOOM_MIN: f64 = 1e-6;
+/// Zoom persistido máximo válido (igual que `ZOOM_WB_MAX` de `grafito-ui`).
+pub const WHITEBOARD_PAGE_ZOOM_MAX: f64 = 1e6;
+/// Tamaño de texto usado al sanear un tamaño no finito o no positivo.
+const WHITEBOARD_FALLBACK_TEXT_SIZE: f64 = 14.0;
+/// Grosor de trazo usado al sanear un grosor no finito o no positivo.
+const WHITEBOARD_FALLBACK_STROKE_WIDTH: f64 = 2.0;
+
+fn default_whiteboard_zoom() -> f64 {
+    1.0
+}
+
+/// Una hoja del libro de pizarra tal como se persiste en el documento.
+/// `pan`/`zoom` restauran la vista de la hoja; `title` se muestra en la UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhiteboardPageData {
+    /// Título de la hoja ("Hoja N"); vacío se sanea a "Hoja".
+    #[serde(default)]
+    pub title: String,
+    /// Contenido de la hoja (`selected` no persiste por `#[serde(skip)]`).
+    #[serde(default)]
+    pub doc: grafito_whiteboard::WhiteboardDoc,
+    /// Desplazamiento de vista en píxeles; componentes no finitas → 0.0.
+    #[serde(default)]
+    pub pan: (f64, f64),
+    /// Zoom de vista; no finito o no positivo → 1.0, acotado a 1e-6..=1e6.
+    #[serde(default = "default_whiteboard_zoom")]
+    pub zoom: f64,
+}
+
+impl WhiteboardPageData {
+    /// Hoja vacía con título dado (pan/zoom por defecto, título truncado).
+    pub fn blank(title: &str) -> Self {
+        Self {
+            title: truncate_title_chars(title),
+            doc: grafito_whiteboard::WhiteboardDoc::new(),
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+        }
+    }
+}
+
+/// Trunca un título a `MAX_WHITEBOARD_PAGE_TITLE_CHARS` por caracteres
+/// (nunca parte un `char` Unicode); vacío/blanco → "Hoja".
+fn truncate_title_chars(title: &str) -> String {
+    let trimmed = title.trim();
+    let base = if trimmed.is_empty() { "Hoja" } else { trimmed };
+    if base.chars().count() > MAX_WHITEBOARD_PAGE_TITLE_CHARS {
+        base.chars().take(MAX_WHITEBOARD_PAGE_TITLE_CHARS).collect()
+    } else {
+        base.to_string()
+    }
+}
+
+/// Sanea un elemento para persistencia acotada (sin panic, sin rechazar):
+/// trazo a 4096 puntos y grosor finito positivo; texto a 2000 caracteres y
+/// tamaño finito positivo; el resto se conserva (la validación fail-closed de
+/// `ValidatedDocument` sigue cubriendo la finitud de coordenadas).
+fn sanitize_whiteboard_element(
+    element: &grafito_whiteboard::WhiteboardElement,
+) -> grafito_whiteboard::WhiteboardElement {
+    use grafito_whiteboard::WhiteboardElement as El;
+    match element {
+        El::Stroke {
+            points,
+            color,
+            width,
+        } => {
+            let mut kept = points.clone();
+            kept.truncate(MAX_WHITEBOARD_POINTS_PER_STROKE);
+            let safe_width = if width.is_finite() && *width > 0.0 {
+                *width
+            } else {
+                WHITEBOARD_FALLBACK_STROKE_WIDTH
+            };
+            El::Stroke {
+                points: kept,
+                color: *color,
+                width: safe_width,
+            }
+        }
+        El::Text { at, text, size } => {
+            let kept = if text.chars().count() > MAX_WHITEBOARD_TEXT_CHARS {
+                text.chars().take(MAX_WHITEBOARD_TEXT_CHARS).collect()
+            } else {
+                text.clone()
+            };
+            let safe_size = if size.is_finite() && *size > 0.0 {
+                *size
+            } else {
+                WHITEBOARD_FALLBACK_TEXT_SIZE
+            };
+            El::Text {
+                at: *at,
+                text: kept,
+                size: safe_size,
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// Sanea una hoja para persistencia acotada: título, pan/zoom y contenido.
+fn sanitize_whiteboard_page(page: WhiteboardPageData) -> WhiteboardPageData {
+    let pan = (
+        if page.pan.0.is_finite() {
+            page.pan.0
+        } else {
+            0.0
+        },
+        if page.pan.1.is_finite() {
+            page.pan.1
+        } else {
+            0.0
+        },
+    );
+    let zoom = if !page.zoom.is_finite() || page.zoom <= 0.0 {
+        1.0
+    } else {
+        page.zoom
+            .clamp(WHITEBOARD_PAGE_ZOOM_MIN, WHITEBOARD_PAGE_ZOOM_MAX)
+    };
+    let mut doc = grafito_whiteboard::WhiteboardDoc::new();
+    for element in page
+        .doc
+        .elements()
+        .iter()
+        .take(MAX_WHITEBOARD_ELEMENTS_PER_PAGE)
+    {
+        doc.add(sanitize_whiteboard_element(element));
+    }
+    WhiteboardPageData {
+        title: truncate_title_chars(&page.title),
+        doc,
+        pan,
+        zoom,
+    }
+}
+
+/// Deserializador acotado de `whiteboard_pages`: capa páginas a 32 y sanea
+/// cada hoja para que la carga nunca supere los presupuestos de memoria ni
+/// rompa `ValidatedDocument`. JSON viejo sin el campo → `Vec` vacío y la
+/// migración (`ensure_whiteboard_book_migrated`) lo rellena desde `whiteboard`.
+/// Tolerante por hoja: una hoja corrupta (p. ej. `null` donde iba un `f64`,
+/// que es como `serde_json` serializa NaN/Inf) se omite sin tumbar el libro.
+/// Nota: el formato de persistencia del documento es JSON en todas las rutas
+/// de guardado/carga (`serde_json`), por eso se usa `serde_json::Value` aquí.
+fn deserialize_whiteboard_pages_capped<'de, D>(
+    deserializer: D,
+) -> Result<Vec<WhiteboardPageData>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<serde_json::Value>::deserialize(deserializer).unwrap_or_default();
+    let mut pages = Vec::new();
+    for value in values.into_iter().take(MAX_WHITEBOARD_PAGES) {
+        if let Ok(page) = serde_json::from_value::<WhiteboardPageData>(value) {
+            pages.push(sanitize_whiteboard_page(page));
+        }
+    }
+    Ok(pages)
+}
+
+impl Document {
+    /// Número efectivo de hojas (legado sin `whiteboard_pages` cuenta como 1).
+    pub fn whiteboard_book_len(&self) -> usize {
+        if self.whiteboard_pages.is_empty() {
+            1
+        } else {
+            self.whiteboard_pages.len()
+        }
+    }
+
+    /// Índice actual acotado al libro efectivo (legado → 0, sin panic).
+    pub fn whiteboard_book_current(&self) -> usize {
+        let len = self.whiteboard_book_len();
+        if self.whiteboard_pages.is_empty() {
+            0
+        } else {
+            self.whiteboard_current.min(len - 1)
+        }
+    }
+
+    /// Migración sin pérdida: si no hay `whiteboard_pages` (JSON viejo), crea
+    /// el `Vec` con la hoja legada de `whiteboard`; si ya hay libro, lo sanea
+    /// y acota el índice. Al salir, `whiteboard` es espejo de la hoja actual.
+    pub fn ensure_whiteboard_book_migrated(&mut self) {
+        if self.whiteboard_pages.is_empty() {
+            self.whiteboard_pages = vec![WhiteboardPageData {
+                title: "Hoja 1".to_string(),
+                doc: self.whiteboard.clone(),
+                pan: (0.0, 0.0),
+                zoom: 1.0,
+            }];
+            self.whiteboard_current = 0;
+        } else {
+            if self.whiteboard_pages.len() > MAX_WHITEBOARD_PAGES {
+                self.whiteboard_pages.truncate(MAX_WHITEBOARD_PAGES);
+            }
+            let current = self.whiteboard_current.min(self.whiteboard_pages.len() - 1);
+            self.whiteboard_current = current;
+        }
+        self.sync_whiteboard_mirror_from_book();
+    }
+
+    /// Copia `whiteboard_pages[current].doc` a `whiteboard` (espejo para el
+    /// export SVG existente y `ValidatedDocument`); sin libro no hace nada.
+    pub fn sync_whiteboard_mirror_from_book(&mut self) {
+        if self.whiteboard_pages.is_empty() {
+            return;
+        }
+        let current = self.whiteboard_current.min(self.whiteboard_pages.len() - 1);
+        self.whiteboard_current = current;
+        if let Some(page) = self.whiteboard_pages.get(current) {
+            self.whiteboard = page.doc.clone();
+        }
+    }
+
+    /// Libro efectivo para UI/export: páginas persistidas, o el `Vec` migrado
+    /// de una hoja si el documento es legado. No muta.
+    pub fn whiteboard_export_pages(&self) -> (Vec<WhiteboardPageData>, usize) {
+        if self.whiteboard_pages.is_empty() {
+            (
+                vec![WhiteboardPageData {
+                    title: "Hoja 1".to_string(),
+                    doc: self.whiteboard.clone(),
+                    pan: (0.0, 0.0),
+                    zoom: 1.0,
+                }],
+                0,
+            )
+        } else {
+            let current = self.whiteboard_current.min(self.whiteboard_pages.len() - 1);
+            (self.whiteboard_pages.clone(), current)
+        }
+    }
+
+    /// Guarda el libro completo: rechaza en español libro vacío o con más de
+    /// 32 hojas (sin panic); sanea hojas, acota el índice, sincroniza el
+    /// espejo `whiteboard`, sube versión e invalida cachés.
+    pub fn set_whiteboard_book(
+        &mut self,
+        pages: Vec<WhiteboardPageData>,
+        current: usize,
+    ) -> Result<(), String> {
+        if pages.is_empty() {
+            return Err("El libro de pizarra necesita al menos una hoja".to_string());
+        }
+        if pages.len() > MAX_WHITEBOARD_PAGES {
+            return Err(format!(
+                "La pizarra alcanzó el máximo de {MAX_WHITEBOARD_PAGES} hojas"
+            ));
+        }
+        self.whiteboard_pages = pages.into_iter().map(sanitize_whiteboard_page).collect();
+        let current = current.min(self.whiteboard_pages.len() - 1);
+        self.whiteboard_current = current;
+        self.sync_whiteboard_mirror_from_book();
+        self.bump_version();
+        self.invalidate_all_caches();
+        Ok(())
+    }
+}
+
+/// ── Export SVG del libro (región whiteboard) ─────────────────────────────
+/// Proyección pura (sin I/O ni `spawn`) del libro persistido a un SVG por
+/// hoja: el libro se guarda en `Document.whiteboard_pages` y aquí se vuelve
+/// archivo(s) `.svg` (uno por hoja, con su título). Complementa al export
+/// existente de la hoja actual en `grafito-app/src/export.rs`, que sigue
+/// leyendo el espejo `Document.whiteboard` sin cambios. Calcula `viewBox`
+/// desde los elementos con margen de 20 unidades (hoja vacía: el tamaño
+/// pedido), omite elementos no finitos y escapa el XML. Lados 64..=4096.
+const WHITEBOARD_SVG_MIN_SIDE: u32 = 64;
+const WHITEBOARD_SVG_MAX_SIDE: u32 = 4096;
+
+fn clamp_svg_side(value: u32) -> u32 {
+    value.clamp(WHITEBOARD_SVG_MIN_SIDE, WHITEBOARD_SVG_MAX_SIDE)
+}
+
+/// Escapa texto para el XML del SVG (omite caracteres de control).
+fn escape_svg_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ if c.is_control() => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Número con 2 decimales para atributos SVG ("0" si no es finito).
+fn svg_num(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.2}")
+    } else {
+        "0".to_string()
+    }
+}
+
+fn svg_color(rgb: (u8, u8, u8)) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb.0, rgb.1, rgb.2)
+}
+
+/// Dibuja un elemento como fragmento SVG (omite no finitos; sin panic).
+fn push_whiteboard_element_svg(out: &mut String, element: &grafito_whiteboard::WhiteboardElement) {
+    use grafito_whiteboard::WhiteboardElement as El;
+    match element {
+        El::Stroke {
+            points,
+            color,
+            width,
+        } => {
+            let safe_width = if width.is_finite() && *width > 0.0 {
+                *width
+            } else {
+                WHITEBOARD_FALLBACK_STROKE_WIDTH
+            };
+            let mut pts = String::new();
+            for (x, y) in points {
+                if x.is_finite() && y.is_finite() {
+                    pts.push_str(&format!("{},{} ", svg_num(*x), svg_num(*y)));
+                }
+            }
+            if pts.trim().is_empty() {
+                return;
+            }
+            out.push_str(&format!(
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+                pts.trim_end(),
+                svg_color(*color),
+                svg_num(safe_width)
+            ));
+        }
+        El::Rectangle { min, max, .. } => {
+            if !min.0.is_finite() || !min.1.is_finite() || !max.0.is_finite() || !max.1.is_finite()
+            {
+                return;
+            }
+            out.push_str(&format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"none\" stroke=\"#1A1A1A\" stroke-width=\"1.8\"/>",
+                svg_num(min.0.min(max.0)),
+                svg_num(min.1.min(max.1)),
+                svg_num((max.0 - min.0).abs()),
+                svg_num((max.1 - min.1).abs())
+            ));
+        }
+        El::Ellipse { center, rx, ry } => {
+            if !center.0.is_finite() || !center.1.is_finite() || !rx.is_finite() || !ry.is_finite()
+            {
+                return;
+            }
+            out.push_str(&format!(
+                "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" fill=\"none\" stroke=\"#1A1A1A\" stroke-width=\"1.8\"/>",
+                svg_num(center.0),
+                svg_num(center.1),
+                svg_num(rx.abs()),
+                svg_num(ry.abs())
+            ));
+        }
+        El::Arrow { from, to } => {
+            if !from.0.is_finite() || !from.1.is_finite() || !to.0.is_finite() || !to.1.is_finite()
+            {
+                return;
+            }
+            out.push_str(&format!(
+                "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#1A1A1A\" stroke-width=\"1.8\"/>",
+                svg_num(from.0),
+                svg_num(from.1),
+                svg_num(to.0),
+                svg_num(to.1)
+            ));
+            let (right, left) = grafito_whiteboard::arrow_tip(*from, *to, 0.55);
+            for wing in [right, left] {
+                if wing.0.is_finite() && wing.1.is_finite() {
+                    out.push_str(&format!(
+                        "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#1A1A1A\" stroke-width=\"1.8\"/>",
+                        svg_num(wing.0),
+                        svg_num(wing.1),
+                        svg_num(to.0),
+                        svg_num(to.1)
+                    ));
+                }
+            }
+        }
+        El::Text { at, text, size } => {
+            if text.is_empty()
+                || !at.0.is_finite()
+                || !at.1.is_finite()
+                || !size.is_finite()
+                || *size <= 0.0
+            {
+                return;
+            }
+            out.push_str(&format!(
+                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-family=\"monospace\" fill=\"#1A1A1A\">{}</text>",
+                svg_num(at.0),
+                svg_num(at.1),
+                svg_num(*size),
+                escape_svg_text(text)
+            ));
+        }
+    }
+}
+
+/// Exporta páginas del libro a un SVG por hoja (título, svg). Pura, sin I/O.
+pub fn whiteboard_pages_to_svg(
+    pages: &[WhiteboardPageData],
+    width: u32,
+    height: u32,
+) -> Vec<(String, String)> {
+    let (width, height) = (clamp_svg_side(width), clamp_svg_side(height));
+    pages
+        .iter()
+        .map(|page| {
+            let mut min = (f64::INFINITY, f64::INFINITY);
+            let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+            let mut has_finite = false;
+            for element in page.doc.elements() {
+                if let Some((a, b)) = element.bounds() {
+                    if a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite() {
+                        min.0 = min.0.min(a.0.min(b.0));
+                        min.1 = min.1.min(a.1.min(b.1));
+                        max.0 = max.0.max(a.0.max(b.0));
+                        max.1 = max.1.max(a.1.max(b.1));
+                        has_finite = true;
+                    }
+                }
+            }
+            let (vx, vy, vw, vh) = if has_finite {
+                (
+                    min.0 - 20.0,
+                    min.1 - 20.0,
+                    (max.0 - min.0 + 40.0).max(1.0),
+                    (max.1 - min.1 + 40.0).max(1.0),
+                )
+            } else {
+                (0.0, 0.0, f64::from(width), f64::from(height))
+            };
+            let mut svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"{} {} {} {}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#FAFAF9\"/>",
+                svg_num(vx),
+                svg_num(vy),
+                svg_num(vw),
+                svg_num(vh),
+                svg_num(vx),
+                svg_num(vy),
+                svg_num(vw),
+                svg_num(vh)
+            );
+            for element in page.doc.elements() {
+                push_whiteboard_element_svg(&mut svg, element);
+            }
+            svg.push_str("</svg>");
+            (page.title.clone(), svg)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
+    /// The main document containing all geometric objects.
+    // Migración P0 HashMap→BTreeMap: `objects` es BTreeMap para determinismo total
+    // en serialización y hashing. `variables`/`variable_meta`/`live_sequences`/
+    // `variables_assumptions`/`spreadsheet_coordinate_points` mantienen HashMap:
+    // intento 2026-09-03 de migrar `variables:BTreeMap + variable_meta:BTreeMap +
+    // live_sequences:BTreeMap + variables_assumptions:BTreeMap` rompe
+    // `cargo check -p grafito-command` con 484 errores E0308 (mismatched types
+    // BTreeMap vs HashMap en parse_numeric_arg/prepare_function_ast/etc.). Como
+    // 484 > umbral 10, se revierte (BUILD gate). Determinismo se garantiza vía
+    // `semantic_document_baseline` (BTreeMap sort en `to_value`) y
+    // `ValidatedDocument`. Deuda P1: migrar requiere abstraer firmas
+    // `&HashMap<String,f64>` → genérico `&BTreeMap`/`&dyn Map` o alias
+    // `type VarMap = BTreeMap<...>` en 484 call-sites de grafito-command +
+    // grafito-geometry param sampling.
     objects: BTreeMap<ObjectId, GeoObject>,
     view: ViewTransform,
     #[serde(skip)]
@@ -277,6 +778,15 @@ pub struct Document {
     /// acotada: se serializa en el documento y aparece en Mora/pizarra.
     #[serde(default)]
     pub whiteboard: grafito_whiteboard::WhiteboardDoc,
+    /// Libro completo de pizarra (hojas 1..=32 con título, vista y contenido).
+    /// Vacío = documento legado: se migra desde `whiteboard` sin pérdida vía
+    /// `ensure_whiteboard_book_migrated`; `whiteboard` es el espejo de la hoja
+    /// actual para el export SVG existente y `ValidatedDocument`.
+    #[serde(default, deserialize_with = "deserialize_whiteboard_pages_capped")]
+    pub whiteboard_pages: Vec<WhiteboardPageData>,
+    /// Índice de la hoja actual en `whiteboard_pages` (acotado al leer).
+    #[serde(default)]
+    pub whiteboard_current: usize,
     #[serde(skip)]
     pub render_quality: crate::RenderQuality,
     #[serde(skip)]
@@ -288,6 +798,65 @@ pub struct Document {
     /// Secuencias vivas: DataTable backing con recálculo automático al cambiar variables.
     #[serde(default)]
     pub live_sequences: HashMap<ObjectId, LiveSequenceBinding>,
+    /// Rastro por objeto (GeoGebra "trace"): ids con estela activada. Persiste
+    /// (`#[serde(default)]` = migración automática desde JSON viejo); el
+    /// contenido de la estela (`trails`) es efímero y nunca se serializa.
+    #[serde(default)]
+    trace_enabled: BTreeMap<ObjectId, bool>,
+    /// Muestras de la estela por objeto (efímeras, fuera de `PartialEq`/hash).
+    #[serde(skip)]
+    trails: BTreeMap<ObjectId, TrailBuffer>,
+}
+
+/// Máximo de muestras por estela de rastro (512 pts × 16 B ≈ 8 KiB/objeto).
+pub const MAX_TRAIL_POINTS: usize = 512;
+
+/// Buffer FIFO de muestras 2D para el rastro de un objeto.
+///
+/// Efímero: filtra `NaN`/`Inf` al empujar, evicciona el más antiguo al superar
+/// [`MAX_TRAIL_POINTS`]. El renderer lo dibuja con fade `(i+1)/len`.
+#[derive(Debug, Clone, Default)]
+pub struct TrailBuffer {
+    points: Vec<Point2>,
+}
+
+impl TrailBuffer {
+    /// Buffer vacío.
+    pub fn new() -> Self {
+        Self { points: Vec::new() }
+    }
+
+    /// Empuja una muestra; ignora no-finitos. Retorna `true` si se guardó.
+    pub fn push(&mut self, p: Point2) -> bool {
+        if !p.x.is_finite() || !p.y.is_finite() {
+            return false;
+        }
+        if self.points.len() >= MAX_TRAIL_POINTS {
+            self.points.remove(0);
+        }
+        self.points.push(p);
+        true
+    }
+
+    /// Vacía el buffer.
+    pub fn clear(&mut self) {
+        self.points.clear();
+    }
+
+    /// Número de muestras.
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    /// ¿Vacío?
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// Copia ordenada (más antigua primero) para el renderer.
+    pub fn as_vec(&self) -> Vec<Point2> {
+        self.points.clone()
+    }
 }
 
 impl Default for Document {
@@ -310,11 +879,15 @@ impl Default for Document {
             complex_base_symbol: "z".to_string(),
             constraints: ConstraintGraph::new(),
             whiteboard: grafito_whiteboard::WhiteboardDoc::default(),
+            whiteboard_pages: Vec::new(),
+            whiteboard_current: 0,
             render_quality: crate::RenderQuality::default(),
             last_solution: HashMap::new(),
             version: 0,
             cached_vars_list: std::sync::Arc::new(std::sync::Mutex::new(None)),
             live_sequences: HashMap::new(),
+            trace_enabled: BTreeMap::new(),
+            trails: BTreeMap::new(),
         }
     }
 }
@@ -799,6 +1372,8 @@ impl Document {
         let orphaned = self.constraints.remove_object(id);
         self.spatial_dirty = true;
         self.selection.retain(|&s| s != id);
+        self.trace_enabled.remove(&id);
+        self.trails.remove(&id);
         self.spreadsheet_coordinate_points
             .retain(|_, point_id| *point_id != id);
         self.live_sequences.remove(&id);
@@ -2700,6 +3275,57 @@ impl Document {
 
     pub fn is_selected(&self, id: ObjectId) -> bool {
         self.selection.contains(&id)
+    }
+
+    /// ¿Tiene el objeto el rastro activado? (`Rastro[etiqueta]`).
+    pub fn is_trace(&self, id: ObjectId) -> bool {
+        self.trace_enabled.get(&id).copied().unwrap_or(false)
+    }
+
+    /// Activa/desactiva el rastro. Desactivar purga la estela residual.
+    /// Retorna `false` si el objeto no existe (sin mutar nada).
+    /// Hace `bump_version` para invalidar cachés de render.
+    pub fn set_trace(&mut self, id: ObjectId, trace: bool) -> bool {
+        if !self.objects.contains_key(&id) {
+            return false;
+        }
+        if trace {
+            self.trace_enabled.insert(id, true);
+        } else {
+            self.trace_enabled.remove(&id);
+            self.trails.remove(&id);
+        }
+        self.bump_version();
+        true
+    }
+
+    /// Empuja una muestra a la estela. Solo guarda si el rastro está activo;
+    /// filtra no-finitos y evicciona FIFO en [`MAX_TRAIL_POINTS`].
+    pub fn push_trail_sample(&mut self, id: ObjectId, p: Point2) -> bool {
+        if !self.is_trace(id) {
+            return false;
+        }
+        let trail = self.trails.entry(id).or_default();
+        trail.push(p)
+    }
+
+    /// Purga la estela sin desactivar el rastro.
+    pub fn clear_trail(&mut self, id: ObjectId) {
+        if let Some(trail) = self.trails.get_mut(&id) {
+            trail.clear();
+        }
+    }
+
+    /// Muestras ordenadas (más antigua primero) para el renderer. Vacío si
+    /// el rastro está apagado o hay <1 muestra.
+    pub fn trail_points(&self, id: ObjectId) -> Vec<Point2> {
+        if !self.is_trace(id) {
+            return Vec::new();
+        }
+        self.trails
+            .get(&id)
+            .map(TrailBuffer::as_vec)
+            .unwrap_or_default()
     }
 
     /// Find object near a screen point (in world coordinates).
@@ -5548,5 +6174,296 @@ mod tests {
         } else {
             panic!("expected midpoint point after move");
         }
+    }
+
+    #[test]
+    fn whiteboard_book_roundtrip_32_pages() {
+        let mut doc = Document::new();
+        let mut pages = Vec::new();
+        for index in 0..MAX_WHITEBOARD_PAGES {
+            let mut page = WhiteboardPageData::blank(&format!("Hoja {}", index + 1));
+            page.doc.add(grafito_whiteboard::WhiteboardElement::Text {
+                at: (index as f64, 0.0),
+                text: format!("contenido {index}"),
+                size: 14.0,
+            });
+            page.pan = (index as f64, -(index as f64));
+            page.zoom = 1.0 + index as f64 * 0.01;
+            pages.push(page);
+        }
+        doc.set_whiteboard_book(pages, MAX_WHITEBOARD_PAGES - 1)
+            .expect("libro válido de 32 hojas");
+        assert_eq!(doc.whiteboard_book_len(), MAX_WHITEBOARD_PAGES);
+        assert_eq!(doc.whiteboard_book_current(), MAX_WHITEBOARD_PAGES - 1);
+        // El espejo sigue a la hoja actual (export/validación intactos).
+        assert_eq!(doc.whiteboard.len(), 1);
+        let json = serde_json::to_string(&doc).expect("serializa");
+        let loaded: Document = serde_json::from_str(&json).expect("deserializa");
+        assert_eq!(loaded.whiteboard_pages.len(), MAX_WHITEBOARD_PAGES);
+        assert_eq!(loaded.whiteboard_current, MAX_WHITEBOARD_PAGES - 1);
+        assert_eq!(loaded.whiteboard.len(), 1);
+        match &loaded.whiteboard_pages[MAX_WHITEBOARD_PAGES - 1]
+            .doc
+            .elements()[0]
+        {
+            grafito_whiteboard::WhiteboardElement::Text { text, .. } => {
+                assert_eq!(text, "contenido 31");
+            }
+            other => panic!("hoja 32 inesperada: {other:?}"),
+        }
+        assert!((loaded.whiteboard_pages[5].pan.0 - 5.0).abs() < 1e-12);
+        assert!((loaded.whiteboard_pages[5].zoom - 1.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn whiteboard_book_migrates_legacy_single_page_json() {
+        let mut doc = Document::new();
+        doc.whiteboard
+            .add(grafito_whiteboard::WhiteboardElement::Text {
+                at: (1.0, 2.0),
+                text: "legado".to_string(),
+                size: 14.0,
+            });
+        // Simula JSON viejo: con `whiteboard` pero sin libro ni índice.
+        let mut value = serde_json::to_value(&doc).expect("a valor JSON");
+        let object = value.as_object_mut().expect("objeto JSON");
+        object.remove("whiteboard_pages");
+        object.remove("whiteboard_current");
+        let mut loaded: Document = serde_json::from_value(value).expect("carga legado");
+        assert!(loaded.whiteboard_pages.is_empty());
+        assert_eq!(loaded.whiteboard.len(), 1);
+        loaded.ensure_whiteboard_book_migrated();
+        assert_eq!(loaded.whiteboard_pages.len(), 1);
+        assert_eq!(loaded.whiteboard_current, 0);
+        assert_eq!(loaded.whiteboard_book_len(), 1);
+        assert_eq!(loaded.whiteboard.len(), 1);
+        // Roundtrip: el nuevo formato persiste el Vec y se reutiliza tal cual.
+        let json = serde_json::to_string(&loaded).expect("serializa migrado");
+        assert!(json.contains("whiteboard_pages"));
+        let reloaded: Document = serde_json::from_str(&json).expect("deserializa migrado");
+        assert_eq!(reloaded.whiteboard_pages.len(), 1);
+        assert_eq!(reloaded.whiteboard.len(), 1);
+        match &reloaded.whiteboard_pages[0].doc.elements()[0] {
+            grafito_whiteboard::WhiteboardElement::Text { text, .. } => {
+                assert_eq!(text, "legado");
+            }
+            other => panic!("hoja migrada inesperada: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whiteboard_book_deserialize_caps_pages_and_elements() {
+        // Libro sobredimensionado a mano (40 hojas × (1 trazo largo + 600
+        // rectángulos) + título largo + zoom absurdo): la carga lo acota sin
+        // panic ni error. Nota: NaN/Inf no sobreviven a JSON (`serde_json`
+        // los escribe como `null`), así que aquí van valores finitos fuera
+        // de cota; los no finitos se sanean en memoria vía
+        // `set_whiteboard_book` / `ensure_whiteboard_book_migrated`.
+        let mut doc = Document::new();
+        let mut pages = Vec::new();
+        for index in 0..MAX_WHITEBOARD_PAGES + 8 {
+            let mut page = WhiteboardPageData {
+                title: format!("Hoja {index} {}", "t".repeat(100)),
+                doc: grafito_whiteboard::WhiteboardDoc::new(),
+                pan: (1e300, 1.0),
+                zoom: 1e300,
+            };
+            page.doc.add(grafito_whiteboard::WhiteboardElement::Stroke {
+                points: vec![(0.0, 0.0); MAX_WHITEBOARD_POINTS_PER_STROKE + 100],
+                color: (0, 0, 0),
+                width: 2.0,
+            });
+            for _ in 0..MAX_WHITEBOARD_ELEMENTS_PER_PAGE + 100 {
+                page.doc
+                    .add(grafito_whiteboard::WhiteboardElement::Rectangle {
+                        min: (0.0, 0.0),
+                        max: (1.0, 1.0),
+                        fill: None,
+                    });
+            }
+            pages.push(page);
+        }
+        // Asignación directa (sin `set_whiteboard_book`, que rechazaría):
+        // simula JSON externo fuera de cotas.
+        doc.whiteboard_pages = pages;
+        doc.whiteboard_current = 999;
+        let value = serde_json::to_value(&doc).expect("a valor JSON");
+        let loaded: Document = serde_json::from_value(value).expect("carga acotada");
+        assert_eq!(loaded.whiteboard_pages.len(), MAX_WHITEBOARD_PAGES);
+        assert!(
+            loaded
+                .whiteboard_pages
+                .iter()
+                .all(|page| page.doc.len() <= MAX_WHITEBOARD_ELEMENTS_PER_PAGE),
+            "cada hoja queda en ≤500 elementos"
+        );
+        assert!(
+            loaded.whiteboard_pages[0].title.chars().count() <= MAX_WHITEBOARD_PAGE_TITLE_CHARS,
+            "título truncado a 64 caracteres"
+        );
+        // El trazo largo (primer elemento) se capa a 4096 puntos.
+        match &loaded.whiteboard_pages[0].doc.elements()[0] {
+            grafito_whiteboard::WhiteboardElement::Stroke { points, .. } => {
+                assert_eq!(points.len(), MAX_WHITEBOARD_POINTS_PER_STROKE);
+            }
+            other => panic!("trazo esperado, fue: {other:?}"),
+        }
+        // Zoom absurdo pero finito se recorta a 1e6.
+        assert!((loaded.whiteboard_pages[0].zoom - WHITEBOARD_PAGE_ZOOM_MAX).abs() < 1e-6);
+        // `whiteboard_current` absurdo se recorta al rango válido al migrar.
+        let mut migrated = loaded;
+        migrated.ensure_whiteboard_book_migrated();
+        assert_eq!(migrated.whiteboard_current, MAX_WHITEBOARD_PAGES - 1);
+    }
+
+    #[test]
+    fn whiteboard_book_deserialize_skips_corrupt_page_keeps_book() {
+        // Una hoja corrupta (`null` donde iba contenido, como deja un NaN
+        // serializado) se omite sin tumbar el libro ni fallar la carga.
+        let mut doc = Document::new();
+        doc.set_whiteboard_book(
+            vec![
+                WhiteboardPageData::blank("Hoja 1"),
+                WhiteboardPageData::blank("Hoja 2"),
+            ],
+            1,
+        )
+        .expect("libro válido");
+        let mut value = serde_json::to_value(&doc).expect("a valor JSON");
+        let pages = value
+            .get_mut("whiteboard_pages")
+            .expect("libro serializado")
+            .as_array_mut()
+            .expect("arreglo de hojas");
+        pages.insert(
+            0,
+            serde_json::json!({"title": null, "doc": null, "pan": null, "zoom": null}),
+        );
+        let loaded: Document = serde_json::from_value(value).expect("carga tolerante");
+        assert_eq!(loaded.whiteboard_pages.len(), 2);
+        assert_eq!(loaded.whiteboard_pages[0].title, "Hoja 1");
+        assert_eq!(loaded.whiteboard_pages[1].title, "Hoja 2");
+    }
+
+    #[test]
+    fn whiteboard_pages_to_svg_renders_one_file_per_page() {
+        let mut first = WhiteboardPageData::blank("Hoja 1");
+        first
+            .doc
+            .add(grafito_whiteboard::WhiteboardElement::Rectangle {
+                min: (0.0, 0.0),
+                max: (10.0, 5.0),
+                fill: None,
+            });
+        let mut second = WhiteboardPageData::blank("Hoja 2");
+        second.doc.add(grafito_whiteboard::WhiteboardElement::Text {
+            at: (1.0, 2.0),
+            text: "a<b>&c".to_string(),
+            size: 14.0,
+        });
+        let pages = whiteboard_pages_to_svg(&[first, second], 800, 600);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].0, "Hoja 1");
+        assert!(pages[0].1.contains("<svg") && pages[0].1.contains("<rect"));
+        // Texto con XML se escapa y los lados se acotan a 64..=4096.
+        assert!(pages[1].1.contains("a&lt;b&gt;&amp;c"));
+        let clamped = whiteboard_pages_to_svg(&[WhiteboardPageData::blank("H")], 10_000, 10);
+        assert!(clamped[0].1.contains("width=\"4096\""));
+        assert!(clamped[0].1.contains("height=\"64\""));
+    }
+
+    #[test]
+    fn whiteboard_book_rejects_empty_and_oversized_on_write() {
+        let mut doc = Document::new();
+        let error = doc
+            .set_whiteboard_book(Vec::new(), 0)
+            .expect_err("libro vacío debe rechazarse");
+        assert!(error.contains("al menos una hoja"), "fue: {error}");
+        let pages: Vec<WhiteboardPageData> = (0..MAX_WHITEBOARD_PAGES + 1)
+            .map(|index| WhiteboardPageData::blank(&format!("H{index}")))
+            .collect();
+        let error = doc
+            .set_whiteboard_book(pages, 0)
+            .expect_err("33 hojas deben rechazarse");
+        assert!(error.contains("32"), "fue: {error}");
+        assert!(doc.whiteboard_pages.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    use crate::PointObj;
+
+    fn point_doc(label: &str, x: f64, y: f64) -> (Document, ObjectId) {
+        let mut doc = Document::new();
+        let id = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(x, y)).with_label(label),
+            ))
+            .expect("punto");
+        (doc, id)
+    }
+
+    #[test]
+    fn trace_toggle_persists_and_clears_trail() {
+        let (mut doc, id) = point_doc("A", 1.0, 2.0);
+        assert!(!doc.is_trace(id));
+        assert!(doc.set_trace(id, true));
+        assert!(doc.is_trace(id));
+        assert!(doc.push_trail_sample(id, Point2::new(1.0, 2.0)));
+        assert_eq!(doc.trail_points(id).len(), 1);
+        assert!(doc.set_trace(id, false));
+        assert!(!doc.is_trace(id));
+        assert!(doc.trail_points(id).is_empty());
+    }
+
+    #[test]
+    fn trace_rejects_unknown_and_filters_nonfinite() {
+        let (mut doc, id) = point_doc("A", 0.0, 0.0);
+        assert!(!doc.set_trace(ObjectId::new(), true));
+        assert!(!doc.push_trail_sample(id, Point2::new(0.0, 0.0)));
+        assert!(!doc.push_trail_sample(id, Point2::new(f64::NAN, f64::INFINITY)));
+        assert!(doc.trail_points(id).is_empty());
+    }
+
+    #[test]
+    fn trail_fifo_caps_at_512_and_survives_serde() {
+        let (mut doc, id) = point_doc("A", 0.0, 0.0);
+        assert!(doc.set_trace(id, true));
+        for i in 0..(MAX_TRAIL_POINTS + 10) {
+            let x = i as f64;
+            assert!(doc.push_trail_sample(id, Point2::new(x, 0.0)));
+        }
+        let pts = doc.trail_points(id);
+        assert_eq!(pts.len(), MAX_TRAIL_POINTS);
+        assert!((pts[0].x - 10.0).abs() < 1e-12);
+        let json = serde_json::to_string(&doc).expect("serializa");
+        assert!(json.contains("trace_enabled"));
+        assert!(!json.contains("\"trails\""));
+        let back: Document = serde_json::from_str(&json).expect("deserializa");
+        assert!(back.is_trace(id));
+        assert!(back.trail_points(id).is_empty());
+    }
+
+    #[test]
+    fn trace_entries_dropped_with_object() {
+        let (mut doc, id) = point_doc("A", 0.0, 0.0);
+        assert!(doc.set_trace(id, true));
+        assert!(doc.push_trail_sample(id, Point2::new(0.0, 0.0)));
+        assert!(doc.remove_object(id).is_some());
+        assert!(!doc.is_trace(id));
+        assert!(doc.trail_points(id).is_empty());
+    }
+
+    #[test]
+    fn trail_buffer_unit() {
+        let mut buf = TrailBuffer::new();
+        assert!(buf.is_empty());
+        assert!(!buf.push(Point2::new(f64::NAN, 0.0)));
+        assert!(buf.push(Point2::new(1.0, 2.0)));
+        assert_eq!(buf.len(), 1);
+        buf.clear();
+        assert!(buf.is_empty());
     }
 }

@@ -1,14 +1,14 @@
-use egui::{Color32, Rect, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use glam::{DVec3, Vec3};
 use grafito_core::{
     ChangeSet, Cone3DObj, Cube3DObj, Cylinder3DObj, Document, GeoObject, Line3DObj,
-    MoebiusStripObj, ObjectId, ParametricCurve3DObj, Plane3DObj, Point3DObj, Pyramid3DObj,
-    RegularPolychoron4DObj, RegularPolytopeNDObj, Segment3DObj, Sphere3DObj, Surface3DObj,
-    Torus3DObj, VectorField3DObj,
+    MoebiusStripObj, ObjectId, ParametricCurve3DObj, Plane3DObj, Point3DObj, Prism3DObj,
+    Pyramid3DObj, RegularPolychoron4DObj, RegularPolytopeNDObj, Segment3DObj, Sphere3DObj,
+    Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField3DObj,
 };
 use grafito_geometry::{
-    curve_3d_segment_is_continuous, Aabb3D, Camera3D, Point3D, Ray3D, RegularPolychoron,
-    RegularPolytopeFamily,
+    curve_3d_segment_is_continuous, ray_mesh_hit, Aabb3D, Camera3D, Point3D, PolyhedronNet, Ray3D,
+    RegularPolychoron, RegularPolytopeFamily, GB_GEOM_EPS,
 };
 use grafito_render::depth_3d::{
     project_regular_polychoron, project_regular_polytope_nd, ProjectedRegularPolytope,
@@ -536,6 +536,26 @@ pub(crate) fn fallback_object_bounds_with_typed_four_d_phase(
             Point3D::new(field.x_min, field.y_min, field.z_min),
             Point3D::new(field.x_max, field.y_max, field.z_max),
         ),
+        GeoObject::Prism3D(prism) => {
+            let base = grafito_render::prism_base_vertices(prism);
+            let top = grafito_render::prism_top_vertices(prism);
+            Aabb3D::from_points(base.iter().copied().chain(top))
+        }
+        GeoObject::Quadric3D(quadric) => {
+            // Elipsoide derivado de la cuádrica (paso intermedio honesto).
+            let ellipsoid = grafito_render::quadric_ellipsoid_params(quadric)
+                .unwrap_or_else(grafito_render::QuadricEllipsoid::placeholder);
+            let center = ellipsoid.center.to_dvec3();
+            let radii = DVec3::new(
+                ellipsoid.radii.x as f64,
+                ellipsoid.radii.y as f64,
+                ellipsoid.radii.z as f64,
+            );
+            Aabb3D::new(
+                Point3D::from_dvec3(center - radii),
+                Point3D::from_dvec3(center + radii),
+            )
+        }
         _ => None,
     }
 }
@@ -605,18 +625,130 @@ fn object_ray_hit(
                 .then_some(distance)
                 .map(PickHit::exact)
         }
-        _ => {
-            let bounds = match typed_four_d_phase {
-                Some(phase) => {
-                    fallback_object_bounds_with_typed_four_d_phase(object, variables, Some(phase))
-                }
-                None => fallback_object_bounds(object, variables),
-            };
-            bounds
-                .and_then(|bounds| fallback_bounds_hit(bounds, camera, ray, canvas_height))
-                .map(PickHit::coarse)
+        // G-B: picking exacto contra malla con tolerancia GB_GEOM_EPS; si la
+        // malla no aplica o el rayo la falla, cae al grueso conservador.
+        GeoObject::Pyramid3D(pyramid) => mesh_or_coarse_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+            pyramid_pick_mesh(pyramid),
+        ),
+        GeoObject::Tetrahedron3D(tetrahedron) => mesh_or_coarse_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+            tetra_pick_mesh(tetrahedron),
+        ),
+        GeoObject::Prism3D(prism) => mesh_or_coarse_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+            prism_pick_mesh(prism),
+        ),
+        GeoObject::Cone3D(cone) => mesh_or_coarse_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+            cone_pick_mesh(cone),
+        ),
+        GeoObject::Cylinder3D(cylinder) => mesh_or_coarse_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+            cylinder_pick_mesh(cylinder),
+        ),
+        GeoObject::Torus3D(torus) => mesh_or_coarse_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+            torus_pick_mesh(torus),
+        ),
+        GeoObject::MoebiusStrip(strip) => mesh_or_coarse_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+            moebius_pick_mesh(strip),
+        ),
+        _ => coarse_object_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+        ),
+    }
+}
+
+/// Picking grueso histórico por caja envolvente (conservador, nunca falla de más).
+fn coarse_object_hit(
+    object: &GeoObject,
+    variables: &std::collections::HashMap<String, f64>,
+    camera: &Camera3D,
+    ray: &Ray3D,
+    canvas_height: f32,
+    typed_four_d_phase: Option<f64>,
+) -> Option<PickHit> {
+    let bounds = match typed_four_d_phase {
+        Some(phase) => {
+            fallback_object_bounds_with_typed_four_d_phase(object, variables, Some(phase))
+        }
+        None => fallback_object_bounds(object, variables),
+    };
+    bounds
+        .and_then(|bounds| fallback_bounds_hit(bounds, camera, ray, canvas_height))
+        .map(PickHit::coarse)
+}
+
+/// Intenta picking exacto contra la malla y cae al grueso conservador.
+///
+/// El exacto gana por confianza (`PickConfidence::ExactGeometry`); si el rayo
+/// no toca la malla pero sí la caja, se conserva el grueso para no perder
+/// selección histórica por proximidad.
+#[allow(clippy::too_many_arguments)]
+fn mesh_or_coarse_hit(
+    object: &GeoObject,
+    variables: &std::collections::HashMap<String, f64>,
+    camera: &Camera3D,
+    ray: &Ray3D,
+    canvas_height: f32,
+    typed_four_d_phase: Option<f64>,
+    mesh: Option<(Vec<Point3D>, Vec<[usize; 3]>)>,
+) -> Option<PickHit> {
+    if let Some((vertices, triangles)) = mesh {
+        if let Some(distance) = ray_mesh_hit(ray, &vertices, &triangles, GB_GEOM_EPS) {
+            return Some(PickHit::exact(distance));
         }
     }
+    coarse_object_hit(
+        object,
+        variables,
+        camera,
+        ray,
+        canvas_height,
+        typed_four_d_phase,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -862,6 +994,34 @@ pub(crate) fn projected_tetrahedron_faces(
         .collect::<Vec<_>>();
     faces.sort_by(|left, right| right.0.total_cmp(&left.0));
     faces
+}
+
+/// Normal de una cara triangular (producto cruz), o `None` si es degenerada.
+fn face_normal(a: Point3D, b: Point3D, c: Point3D) -> Option<Vec3> {
+    let normal = (b.to_vec3() - a.to_vec3())
+        .cross(c.to_vec3() - a.to_vec3())
+        .normalize_or_zero();
+    (normal.is_finite() && normal.length_squared() > 1.0e-12).then_some(normal)
+}
+
+/// Proyecta una cara 3D a puntos de pantalla; `None` si algún vértice queda
+/// fuera del frustum (la cara no debe dibujarse parcialmente).
+fn projected_face_points(
+    camera: &Camera3D,
+    points: &[Point3D],
+    screen_w: f32,
+    screen_h: f32,
+    origin: Pos2,
+) -> Option<Vec<Pos2>> {
+    let projected: Vec<Pos2> = points
+        .iter()
+        .filter_map(|point| {
+            camera
+                .project(point, screen_w, screen_h)
+                .map(|(x, y)| origin + Vec2::new(x, y))
+        })
+        .collect();
+    (projected.len() == points.len()).then_some(projected)
 }
 
 pub(crate) fn projected_point_position(
@@ -1411,7 +1571,7 @@ impl GrafitoApp {
         } else {
             Color32::from_gray(80)
         };
-        let font = egui::FontId::proportional(11.0);
+        let font = egui::FontId::proportional(grafito_ui::tokens::TYPE_XS);
         let tick_stroke = Stroke::new(1.0, text_color);
 
         // Numbers on X Axis (Z=0, Y=0)
@@ -1696,6 +1856,17 @@ impl GrafitoApp {
                     (v.y_min + v.y_max) as f32 * 0.5,
                     (v.z_min + v.z_max) as f32 * 0.5,
                 ),
+                GeoObject::Prism3D(prism) => {
+                    let base = grafito_render::prism_base_vertices(prism);
+                    let base_center = base
+                        .iter()
+                        .fold(Vec3::ZERO, |sum, point| sum + point.to_vec3())
+                        / base.len().max(1) as f32;
+                    base_center + prism.direction.to_vec3() * 0.5
+                }
+                GeoObject::Quadric3D(quadric) => grafito_render::quadric_ellipsoid_params(quadric)
+                    .map(|ellipsoid| ellipsoid.center.to_vec3())
+                    .unwrap_or(Vec3::ZERO),
                 _ => continue, // Skip non-3D objects
             };
 
@@ -1723,7 +1894,7 @@ impl GrafitoApp {
                                 pos + Vec2::new(6.0, -6.0),
                                 egui::Align2::LEFT_BOTTOM,
                                 &p.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -1744,7 +1915,7 @@ impl GrafitoApp {
                                 origin + Vec2::new(mid, mid_y - 8.0),
                                 egui::Align2::CENTER_BOTTOM,
                                 &l.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -1792,7 +1963,7 @@ impl GrafitoApp {
                                     origin + Vec2::new(pt.0, pt.1 - 8.0),
                                     egui::Align2::CENTER_BOTTOM,
                                     &p.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -1821,7 +1992,7 @@ impl GrafitoApp {
                                         + Vec2::new((pa.0 + pb.0) * 0.5, (pa.1 + pb.1) * 0.5 - 8.0),
                                     egui::Align2::CENTER_BOTTOM,
                                     &l.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -1878,7 +2049,7 @@ impl GrafitoApp {
                                 origin + Vec2::new(pt.0, pt.1),
                                 egui::Align2::CENTER_BOTTOM,
                                 &s.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -1941,7 +2112,7 @@ impl GrafitoApp {
                                 origin + Vec2::new(pt.0, pt.1),
                                 egui::Align2::CENTER_BOTTOM,
                                 &cube.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -1989,7 +2160,7 @@ impl GrafitoApp {
                                 origin + Vec2::new(point.0, point.1 - 8.0),
                                 egui::Align2::CENTER_BOTTOM,
                                 &tetrahedron.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -2056,7 +2227,7 @@ impl GrafitoApp {
                                 origin + Vec2::new(pt.0, pt.1 + 14.0),
                                 egui::Align2::CENTER_TOP,
                                 &py.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -2132,7 +2303,7 @@ impl GrafitoApp {
                                 origin + Vec2::new(pt.0, pt.1 + 14.0),
                                 egui::Align2::CENTER_TOP,
                                 &cone.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -2247,7 +2418,7 @@ impl GrafitoApp {
                                 origin + Vec2::new(pt.0, pt.1),
                                 egui::Align2::CENTER_BOTTOM,
                                 &cyl.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -2574,7 +2745,7 @@ impl GrafitoApp {
                                     origin + Vec2::new(pt.0, pt.1),
                                     egui::Align2::CENTER_BOTTOM,
                                     &surf.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -2810,7 +2981,7 @@ impl GrafitoApp {
                                     origin + Vec2::new(pt.0, pt.1 - 10.0),
                                     egui::Align2::CENTER_BOTTOM,
                                     &att.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -2878,7 +3049,7 @@ impl GrafitoApp {
                                     origin + Vec2::new(point.0, point.1 - 10.0),
                                     egui::Align2::CENTER_BOTTOM,
                                     &polychoron.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -2926,7 +3097,7 @@ impl GrafitoApp {
                                     origin + Vec2::new(point.0, point.1 - 10.0),
                                     egui::Align2::CENTER_BOTTOM,
                                     &polytope.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -3007,7 +3178,7 @@ impl GrafitoApp {
                                         origin + Vec2::new(pt.0, pt.1 - 10.0),
                                         egui::Align2::CENTER_BOTTOM,
                                         &hs.label,
-                                        egui::FontId::proportional(12.0),
+                                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                         label_color,
                                     );
                                 }
@@ -3121,10 +3292,652 @@ impl GrafitoApp {
                         }
                     }
                 }
+                GeoObject::Prism3D(prism) => {
+                    let base = grafito_render::prism_base_vertices(prism);
+                    if base.len() >= 3 {
+                        let top = grafito_render::prism_top_vertices(prism);
+                        let light_dir = Vec3::new(0.5, 1.0, 0.3).normalize();
+
+                        // Caras translúcidas (base, tapa y laterales).
+                        if !overlay_only {
+                            if let Some(fill) = prism.fill_color {
+                                let fill32 = to_color32(fill);
+                                // Base y tapa: abanico desde el primer vértice
+                                // (válido para bases convexas; las no convexas
+                                // se aproximan, igual que el path GPU).
+                                for index in 1..base.len().saturating_sub(1) {
+                                    for face in [
+                                        [base[0], base[index], base[index + 1]],
+                                        [top[0], top[index], top[index + 1]],
+                                    ] {
+                                        if let Some(points) =
+                                            projected_face_points(&self.camera, &face, w, h, origin)
+                                        {
+                                            painter.add(egui::Shape::convex_polygon(
+                                                points,
+                                                fill32,
+                                                Stroke::NONE,
+                                            ));
+                                        }
+                                    }
+                                }
+                                // Laterales: cada cara es un paralelogramo.
+                                for index in 0..base.len() {
+                                    let next = (index + 1) % base.len();
+                                    if let Some(points) = projected_face_points(
+                                        &self.camera,
+                                        &[base[index], base[next], top[next], top[index]],
+                                        w,
+                                        h,
+                                        origin,
+                                    ) {
+                                        painter.add(egui::Shape::convex_polygon(
+                                            points,
+                                            fill32,
+                                            Stroke::NONE,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Aristas con iluminación por cara.
+                        let base_normal = face_normal(base[0], base[1], base[2]).unwrap_or(Vec3::Y);
+                        let top_normal = face_normal(top[0], top[1], top[2]).unwrap_or(Vec3::Y);
+                        let vertical_normal = (base_normal + top_normal).normalize_or_zero();
+                        for index in 0..base.len() {
+                            let next = (index + 1) % base.len();
+                            for (a, b, normal) in [
+                                (base[index], base[next], base_normal),
+                                (top[index], top[next], top_normal),
+                                (base[index], top[index], vertical_normal),
+                            ] {
+                                if let (Some(pa), Some(pb)) =
+                                    (self.camera.project(&a, w, h), self.camera.project(&b, w, h))
+                                {
+                                    let lit = grafito_render::calculate_lighting(
+                                        prism.color,
+                                        normal,
+                                        light_dir,
+                                    );
+                                    let stroke = Stroke::new(prism.width, to_color32(lit));
+                                    if !overlay_only {
+                                        painter.line_segment(
+                                            [
+                                                origin + Vec2::new(pa.0, pa.1),
+                                                origin + Vec2::new(pb.0, pb.1),
+                                            ],
+                                            stroke,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if !prism.label.is_empty() {
+                            let top_center = top
+                                .iter()
+                                .fold(Vec3::ZERO, |sum, point| sum + point.to_vec3())
+                                / top.len().max(1) as f32;
+                            if let Some(pt) =
+                                self.camera.project(&Point3D::from_vec3(top_center), w, h)
+                            {
+                                painter.text(
+                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &prism.label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
+                        }
+                    }
+                }
+                GeoObject::Quadric3D(quadric) => {
+                    // Paso intermedio honesto: elipsoide wireframe paramétrico.
+                    // TODO(full-quadric): clasificación general y términos cruzados.
+                    let ellipsoid = grafito_render::quadric_ellipsoid_params(quadric)
+                        .unwrap_or_else(grafito_render::QuadricEllipsoid::placeholder);
+                    let center = ellipsoid.center.to_vec3();
+                    let radii = ellipsoid.radii;
+                    let light_dir = Vec3::new(0.5, 1.0, 0.3).normalize();
+                    for (u, v) in [(Vec3::X, Vec3::Y), (Vec3::X, Vec3::Z), (Vec3::Y, Vec3::Z)] {
+                        let normal = u.cross(v).normalize_or_zero();
+                        let mut prev: Option<(f32, f32)> = None;
+                        for index in 0..=32 {
+                            let angle = std::f32::consts::TAU * index as f32 / 32.0;
+                            let direction = u * angle.cos() + v * angle.sin();
+                            let point = Point3D::from_vec3(
+                                center
+                                    + Vec3::new(
+                                        direction.x * radii.x,
+                                        direction.y * radii.y,
+                                        direction.z * radii.z,
+                                    ),
+                            );
+                            if let Some(projected) = self.camera.project(&point, w, h) {
+                                if let Some(prev) = prev {
+                                    let lit = grafito_render::calculate_lighting(
+                                        quadric.color,
+                                        normal,
+                                        light_dir,
+                                    );
+                                    let stroke = Stroke::new(quadric.width, to_color32(lit));
+                                    if !overlay_only {
+                                        painter.line_segment(
+                                            [
+                                                origin + Vec2::new(prev.0, prev.1),
+                                                origin + Vec2::new(projected.0, projected.1),
+                                            ],
+                                            stroke,
+                                        );
+                                    }
+                                }
+                                prev = Some(projected);
+                            } else {
+                                prev = None;
+                            }
+                        }
+                    }
+                    if !quadric.label.is_empty() {
+                        if let Some(pt) = self.camera.project(&ellipsoid.center, w, h) {
+                            painter.text(
+                                origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                &quadric.label,
+                                egui::FontId::proportional(12.0),
+                                label_color,
+                            );
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// Paridad GeoGebra 3D del frente G-B: picking exacto y overlays.
+///
+/// Los builders devuelven `(vértices, triángulos)` acotados para
+/// `ray_mesh_hit` con tolerancia [`GB_GEOM_EPS`]. Poliedros (pirámide,
+/// tetraedro, prisma) son exactos; cono/cilindro/toro/moebius usan la MISMA
+/// parametrización facetada que el dibujo CPU (24×12 toro, 32×8 moebius,
+/// 24 radial cono/cilindro), así que el picking es exacto contra lo dibujado.
+/// Tapas del prisma por abanico: exactas con base planar convexa. Todo
+/// devuelve `None` ante entradas no finitas o degeneradas (cae al grueso).
+/// Segmentos radiales de la faceta de picking (cono/cilindro).
+pub(crate) const GB_PICK_RADIAL_SEGMENTS: usize = 24;
+/// Resolución tubular del toro de picking (igual que el dibujo CPU 24×12).
+pub(crate) const GB_PICK_TORUS_TUBULAR: usize = 12;
+/// Resolución del moebius de picking (igual que el dibujo CPU 32×8).
+pub(crate) const GB_PICK_MOEBIUS_U: usize = 32;
+/// Subdivisión transversal del moebius de picking.
+pub(crate) const GB_PICK_MOEBIUS_V: usize = 8;
+/// Vértices base máximos de un prisma pickeable (4n−4 tris « 250k).
+pub(crate) const GB_PICK_MAX_PRISM_BASE: usize = 4_096;
+/// Triángulos máximos para dibujar aristas CPU (mallas densas van al GPU).
+#[allow(dead_code)] // G-B: wiring overlay de malla en canvas 3D (P2).
+pub(crate) const GB_MAX_CPU_MESH_EDGES: usize = 4_096;
+
+fn gb_finite_point(point: Point3D) -> Option<Point3D> {
+    point.is_finite().then_some(point)
+}
+
+fn gb_positive_finite(value: f64) -> Option<f64> {
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
+/// Base ortonormal `(u, v)` perpendicular al eje; `None` si degenera.
+fn gb_orthonormal_basis(axis: DVec3) -> Option<(DVec3, DVec3)> {
+    if !axis.is_finite() || axis.length_squared() <= 1.0e-24 {
+        return None;
+    }
+    let direction = axis.normalize_or_zero();
+    let helper = if direction.x.abs() < 0.9 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let first = direction.cross(helper).normalize_or_zero();
+    let second = direction.cross(first);
+    if !first.is_finite()
+        || !second.is_finite()
+        || first.length_squared() <= 0.5
+        || second.length_squared() <= 0.5
+    {
+        return None;
+    }
+    Some((first, second))
+}
+
+/// Anillo de `segments` puntos: centro + `u`·r·cos + `v`·r·sin.
+fn gb_ring(
+    vertices: &mut Vec<Point3D>,
+    center: DVec3,
+    basis_u: DVec3,
+    basis_v: DVec3,
+    radius: f64,
+    segments: usize,
+) -> Option<Vec<usize>> {
+    if segments < 3 || !radius.is_finite() || radius <= 0.0 {
+        return None;
+    }
+    let base = vertices.len();
+    for segment in 0..segments {
+        let angle = segment as f64 * std::f64::consts::TAU / segments as f64;
+        let point = center + (basis_u * angle.cos() + basis_v * angle.sin()) * radius;
+        if !point.is_finite() {
+            return None;
+        }
+        vertices.push(Point3D::from_dvec3(point));
+    }
+    Some((base..base + segments).collect())
+}
+
+/// Malla exacta de la pirámide cuadrada (base XZ + ápice): 6 triángulos.
+pub(crate) fn pyramid_pick_mesh(pyramid: &Pyramid3DObj) -> Option<(Vec<Point3D>, Vec<[usize; 3]>)> {
+    gb_positive_finite(pyramid.base_size)?;
+    let base_center = gb_finite_point(pyramid.base_center)?;
+    let apex = gb_finite_point(pyramid.apex)?;
+    if base_center.distance(&apex) <= 1.0e-12 {
+        return None;
+    }
+    let geometry = grafito_geometry::Pyramid3D::new(base_center, apex, pyramid.base_size);
+    let base = geometry.base_vertices();
+    if base.iter().any(|point| !point.is_finite()) {
+        return None;
+    }
+    let mut vertices = base.to_vec();
+    vertices.push(apex);
+    let triangles = vec![
+        [0, 1, 2],
+        [0, 2, 3],
+        [0, 1, 4],
+        [1, 2, 4],
+        [2, 3, 4],
+        [3, 0, 4],
+    ];
+    Some((vertices, triangles))
+}
+
+/// Malla exacta del tetraedro (vértices + caras con winding exterior).
+pub(crate) fn tetra_pick_mesh(
+    tetrahedron: &Tetrahedron3DObj,
+) -> Option<(Vec<Point3D>, Vec<[usize; 3]>)> {
+    gb_positive_finite(tetrahedron.edge_length)?;
+    let center = gb_finite_point(tetrahedron.center)?;
+    let geometry = grafito_geometry::Tetrahedron3D::new(center, tetrahedron.edge_length);
+    if !geometry.is_renderable() {
+        return None;
+    }
+    Some((geometry.vertices().to_vec(), geometry.faces().to_vec()))
+}
+
+/// Malla del prisma (laterales exactos + tapas en abanico, exactas con base
+/// planar convexa; la dirección nula o la base inválida dan `None`).
+pub(crate) fn prism_pick_mesh(prism: &Prism3DObj) -> Option<(Vec<Point3D>, Vec<[usize; 3]>)> {
+    let count = prism.base_vertices.len();
+    if !(3..=GB_PICK_MAX_PRISM_BASE).contains(&count) {
+        return None;
+    }
+    if prism.base_vertices.iter().any(|point| !point.is_finite()) || !prism.direction.is_finite() {
+        return None;
+    }
+    let offset = prism.direction.to_dvec3();
+    if !offset.is_finite() || offset.length_squared() <= 1.0e-24 {
+        return None;
+    }
+    let mut vertices = Vec::with_capacity(2 * count);
+    for point in &prism.base_vertices {
+        vertices.push(*point);
+    }
+    for point in &prism.base_vertices {
+        let top = point.to_dvec3() + offset;
+        if !top.is_finite() {
+            return None;
+        }
+        vertices.push(Point3D::from_dvec3(top));
+    }
+    let mut triangles = Vec::with_capacity(4 * count - 4);
+    for side in 0..count {
+        let next = (side + 1) % count;
+        triangles.push([side, next, next + count]);
+        triangles.push([side, next + count, side + count]);
+    }
+    for fan in 1..count - 1 {
+        triangles.push([0, fan + 1, fan]);
+        triangles.push([count, count + fan, count + fan + 1]);
+    }
+    Some((vertices, triangles))
+}
+
+/// Malla facetada del cono con la parametrización del dibujo (eje base→ápice).
+pub(crate) fn cone_pick_mesh(cone: &Cone3DObj) -> Option<(Vec<Point3D>, Vec<[usize; 3]>)> {
+    let radius = gb_positive_finite(cone.radius)?;
+    let base = gb_finite_point(cone.base_center)?;
+    let apex = gb_finite_point(cone.apex)?;
+    let axis = apex.to_dvec3() - base.to_dvec3();
+    let (basis_u, basis_v) = gb_orthonormal_basis(axis)?;
+    let mut vertices = Vec::with_capacity(GB_PICK_RADIAL_SEGMENTS + 2);
+    vertices.push(base);
+    let ring = gb_ring(
+        &mut vertices,
+        base.to_dvec3(),
+        basis_u,
+        basis_v,
+        radius,
+        GB_PICK_RADIAL_SEGMENTS,
+    )?;
+    vertices.push(apex);
+    let apex_index = vertices.len() - 1;
+    let mut triangles = Vec::with_capacity(2 * GB_PICK_RADIAL_SEGMENTS);
+    for side in 0..GB_PICK_RADIAL_SEGMENTS {
+        let next = ring[(side + 1) % GB_PICK_RADIAL_SEGMENTS];
+        triangles.push([apex_index, ring[side], next]);
+        triangles.push([0, next, ring[side]]);
+    }
+    Some((vertices, triangles))
+}
+
+/// Malla facetada del cilindro con la parametrización del dibujo (eje base→tapa).
+pub(crate) fn cylinder_pick_mesh(
+    cylinder: &Cylinder3DObj,
+) -> Option<(Vec<Point3D>, Vec<[usize; 3]>)> {
+    let radius = gb_positive_finite(cylinder.radius)?;
+    let base = gb_finite_point(cylinder.base_center)?;
+    let top = gb_finite_point(cylinder.top_center)?;
+    let axis = top.to_dvec3() - base.to_dvec3();
+    let (basis_u, basis_v) = gb_orthonormal_basis(axis)?;
+    let mut vertices = Vec::with_capacity(2 * GB_PICK_RADIAL_SEGMENTS + 2);
+    vertices.push(base);
+    let lower = gb_ring(
+        &mut vertices,
+        base.to_dvec3(),
+        basis_u,
+        basis_v,
+        radius,
+        GB_PICK_RADIAL_SEGMENTS,
+    )?;
+    vertices.push(top);
+    let top_index = vertices.len() - 1;
+    let upper = gb_ring(
+        &mut vertices,
+        top.to_dvec3(),
+        basis_u,
+        basis_v,
+        radius,
+        GB_PICK_RADIAL_SEGMENTS,
+    )?;
+    let mut triangles = Vec::with_capacity(4 * GB_PICK_RADIAL_SEGMENTS);
+    for side in 0..GB_PICK_RADIAL_SEGMENTS {
+        let next = (side + 1) % GB_PICK_RADIAL_SEGMENTS;
+        triangles.push([lower[side], lower[next], upper[next]]);
+        triangles.push([lower[side], upper[next], upper[side]]);
+        triangles.push([0, lower[next], lower[side]]);
+        triangles.push([top_index, upper[side], upper[next]]);
+    }
+    Some((vertices, triangles))
+}
+
+/// Malla del toro con la fórmula del dibujo CPU (eje Y, 24×12 con wrap).
+pub(crate) fn torus_pick_mesh(torus: &Torus3DObj) -> Option<(Vec<Point3D>, Vec<[usize; 3]>)> {
+    let center = gb_finite_point(torus.center)?;
+    if !torus.r_major.is_finite() || !torus.r_minor.is_finite() {
+        return None;
+    }
+    let (major, minor) = (torus.r_major, torus.r_minor);
+    let steps_u = GB_PICK_RADIAL_SEGMENTS;
+    let steps_v = GB_PICK_TORUS_TUBULAR;
+    let mut vertices = Vec::with_capacity(steps_u * steps_v);
+    for side_u in 0..steps_u {
+        let angle_u = side_u as f64 * std::f64::consts::TAU / steps_u as f64;
+        for side_v in 0..steps_v {
+            let angle_v = side_v as f64 * std::f64::consts::TAU / steps_v as f64;
+            let point = Point3D::new(
+                center.x + (major + minor * angle_v.cos()) * angle_u.cos(),
+                center.y + minor * angle_v.sin(),
+                center.z + (major + minor * angle_v.cos()) * angle_u.sin(),
+            );
+            if !point.is_finite() {
+                return None;
+            }
+            vertices.push(point);
+        }
+    }
+    let index = |side_u: usize, side_v: usize| (side_u % steps_u) * steps_v + (side_v % steps_v);
+    let mut triangles = Vec::with_capacity(2 * steps_u * steps_v);
+    for side_u in 0..steps_u {
+        for side_v in 0..steps_v {
+            let a = index(side_u, side_v);
+            let b = index(side_u + 1, side_v);
+            let c = index(side_u + 1, side_v + 1);
+            let d = index(side_u, side_v + 1);
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+        }
+    }
+    Some((vertices, triangles))
+}
+
+/// Malla del moebius con la fórmula del dibujo CPU (32×8, cobertura total).
+pub(crate) fn moebius_pick_mesh(
+    strip: &MoebiusStripObj,
+) -> Option<(Vec<Point3D>, Vec<[usize; 3]>)> {
+    let center = gb_finite_point(strip.center)?;
+    if !strip.radius.is_finite() || strip.radius <= 0.0 || !strip.width_r.is_finite() {
+        return None;
+    }
+    if strip.width_r.abs() <= 1.0e-12 {
+        return None;
+    }
+    let (major, width) = (strip.radius, strip.width_r);
+    let steps_u = GB_PICK_MOEBIUS_U;
+    let steps_v = GB_PICK_MOEBIUS_V;
+    let mut vertices = Vec::with_capacity((steps_u + 1) * (steps_v + 1));
+    for side_u in 0..=steps_u {
+        let angle_u = side_u as f64 * std::f64::consts::TAU / steps_u as f64;
+        for side_v in 0..=steps_v {
+            let across = -width / 2.0 + width * side_v as f64 / steps_v as f64;
+            let point = Point3D::new(
+                center.x + (major + across * (angle_u / 2.0).cos()) * angle_u.cos(),
+                center.y + across * (angle_u / 2.0).sin(),
+                center.z + (major + across * (angle_u / 2.0).cos()) * angle_u.sin(),
+            );
+            if !point.is_finite() {
+                return None;
+            }
+            vertices.push(point);
+        }
+    }
+    let row = steps_v + 1;
+    let mut triangles = Vec::with_capacity(2 * steps_u * steps_v);
+    for side_u in 0..steps_u {
+        for side_v in 0..steps_v {
+            let a = side_u * row + side_v;
+            let b = (side_u + 1) * row + side_v;
+            let c = (side_u + 1) * row + side_v + 1;
+            let d = side_u * row + side_v + 1;
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+        }
+    }
+    Some((vertices, triangles))
+}
+
+/// Proyecta una sección poligonal 3D a píxeles relativos al canvas.
+///
+/// `None` si hay menos de 3 puntos, alguno no proyecta (detrás de cámara) o
+/// el canvas es degenerado. Estricto a propósito: la sección se dibuja entera.
+#[allow(dead_code)] // G-B: wiring overlay de sección en canvas 3D (P2).
+pub(crate) fn section_screen_polyline(
+    points: &[Point3D],
+    camera: &Camera3D,
+    canvas_w: f32,
+    canvas_h: f32,
+) -> Option<Vec<Pos2>> {
+    if points.len() < 3 {
+        return None;
+    }
+    let mut pixels = Vec::with_capacity(points.len());
+    for point in points {
+        let (x, y) = camera.project(point, canvas_w, canvas_h)?;
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        pixels.push(Pos2::new(x, y));
+    }
+    Some(pixels)
+}
+
+/// Proyecta los paneles 2D de un net a píxeles egui (eje Y hacia arriba).
+///
+/// `None` si el net está vacío o la escala es inválida.
+#[allow(dead_code)] // G-B: wiring overlay de net en canvas 3D (P2).
+pub(crate) fn net_screen_panels(
+    net: &PolyhedronNet,
+    pixels_per_unit: f32,
+    center: Pos2,
+) -> Option<Vec<Vec<Pos2>>> {
+    if net.panels().is_empty() || !pixels_per_unit.is_finite() || pixels_per_unit <= 0.0 {
+        return None;
+    }
+    let mut panels = Vec::with_capacity(net.panels().len());
+    for panel in net.panels() {
+        let mut pixels = Vec::with_capacity(panel.points.len());
+        for point in &panel.points {
+            let x = center.x + point[0] as f32 * pixels_per_unit;
+            let y = center.y - point[1] as f32 * pixels_per_unit;
+            if !x.is_finite() || !y.is_finite() {
+                return None;
+            }
+            pixels.push(Pos2::new(x, y));
+        }
+        panels.push(pixels);
+    }
+    Some(panels)
+}
+
+/// Aristas únicas de una malla proyectadas a segmentos 2D (wireframe CPU).
+///
+/// `None` si la malla está vacía, excede [`GB_MAX_CPU_MESH_EDGES`] triángulos
+/// (esas van al GPU) o ninguna arista proyecta. Las aristas con un extremo
+/// detrás de cámara se omiten honestamente.
+#[allow(dead_code)] // G-B: wiring overlay de malla en canvas 3D (P2).
+pub(crate) fn mesh_screen_edges(
+    vertices: &[Point3D],
+    triangles: &[[usize; 3]],
+    camera: &Camera3D,
+    canvas_w: f32,
+    canvas_h: f32,
+) -> Option<Vec<(Pos2, Pos2)>> {
+    if triangles.is_empty() || triangles.len() > GB_MAX_CPU_MESH_EDGES {
+        return None;
+    }
+    let mut edges = std::collections::BTreeSet::new();
+    for triangle in triangles {
+        for side in 0..3 {
+            let first = triangle[side];
+            let second = triangle[(side + 1) % 3];
+            if first >= vertices.len() || second >= vertices.len() || first == second {
+                continue;
+            }
+            edges.insert((first.min(second), first.max(second)));
+        }
+    }
+    let mut segments = Vec::with_capacity(edges.len());
+    for (first, second) in edges {
+        let (Some(a), Some(b)) = (
+            camera.project(&vertices[first], canvas_w, canvas_h),
+            camera.project(&vertices[second], canvas_w, canvas_h),
+        ) else {
+            continue;
+        };
+        if !a.0.is_finite() || !a.1.is_finite() || !b.0.is_finite() || !b.1.is_finite() {
+            continue;
+        }
+        segments.push((Pos2::new(a.0, a.1), Pos2::new(b.0, b.1)));
+    }
+    (!segments.is_empty()).then_some(segments)
+}
+
+/// Paridad GeoGebra 3D del frente F10-C: medidas exactas y vistas ortográficas.
+///
+/// El cálculo vive en el cerebro puro (`grafito_core::symbolic::solids`);
+/// este módulo solo formatea para la piel y proyecta a píxeles egui.
+/// Vista del canvas 3D: perspectiva orbital u ortográfica (alzado/planta/perfil).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // F10-C: wiring selector de vista en canvas 3D (P2).
+pub(crate) enum OrthoProjection {
+    /// Perspectiva con cámara orbital (defecto GeoGebra).
+    #[default]
+    Perspective,
+    /// Alzado: plano XY.
+    Front,
+    /// Planta: plano XZ.
+    Top,
+    /// Perfil: plano YZ.
+    Side,
+}
+
+impl OrthoProjection {
+    /// Nombre estable para UI y comandos.
+    #[allow(dead_code)] // F10-C: wiring selector de vista en canvas 3D (P2).
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Perspective => "perspectiva",
+            Self::Front => "alzado",
+            Self::Top => "planta",
+            Self::Side => "perfil",
+        }
+    }
+
+    /// Indica si la vista es ortográfica (sin fuga de perspectiva).
+    #[allow(dead_code)] // F10-C: wiring selector de vista en canvas 3D (P2).
+    pub(crate) const fn is_orthographic(self) -> bool {
+        !matches!(self, Self::Perspective)
+    }
+}
+
+/// Proyecta un punto del mundo a píxeles egui bajo vista ortográfica con
+/// escala `pixels_per_unit` y centro de canvas. `None` si no es finito.
+#[allow(dead_code)] // F10-C: wiring selector de vista en canvas 3D (P2).
+pub(crate) fn project_point_ortho(
+    point: Point3D,
+    view: OrthoProjection,
+    pixels_per_unit: f32,
+    center: Pos2,
+) -> Option<Pos2> {
+    if !pixels_per_unit.is_finite() || pixels_per_unit <= 0.0 {
+        return None;
+    }
+    let (x, y) = match view {
+        OrthoProjection::Front => (point.x, point.y),
+        OrthoProjection::Top => (point.x, point.z),
+        OrthoProjection::Side => (point.y, point.z),
+        OrthoProjection::Perspective => return None,
+    };
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let pixels = (x * f64::from(pixels_per_unit)) as f32;
+    let vertical = (y * f64::from(pixels_per_unit)) as f32;
+    if !pixels.is_finite() || !vertical.is_finite() {
+        return None;
+    }
+    Some(Pos2::new(center.x + pixels, center.y - vertical))
+}
+
+/// Etiqueta de medida exacta `V=… A=…` o `None` si el sólido no tiene
+/// forma cerrada (cuádrica, superficies: ver `solid_measure_status`).
+#[allow(dead_code)] // F10-C: wiring etiqueta de medida en inspector 3D (P2).
+pub(crate) fn solid_measure_text(object: &GeoObject) -> Option<String> {
+    let volume = grafito_core::symbolic::solid_volume(object)?;
+    let area = grafito_core::symbolic::solid_area(object)?;
+    if !volume.is_finite() || !area.is_finite() {
+        return None;
+    }
+    Some(format!("V={volume:.4} A={area:.4}"))
 }
 
 #[cfg(test)]
@@ -3168,5 +3981,446 @@ mod gpu_overlay_tests {
         assert_eq!(motion_preview_sample_stride(512, true), 1);
         assert_eq!(motion_preview_sample_stride(4_096, true), 4);
         assert_eq!(motion_preview_sample_stride(4_096, false), 1);
+    }
+
+    fn test_camera() -> Camera3D {
+        let mut camera = Camera3D::new(4.0 / 3.0);
+        camera.theta = 0.0;
+        camera.phi = 0.0;
+        camera.distance = 10.0;
+        camera.target = glam::Vec3::ZERO;
+        camera
+    }
+
+    #[test]
+    fn prism_fallback_bounds_cover_base_and_top() {
+        use grafito_core::{GeoObject, Prism3DObj};
+        use grafito_geometry::Point3D;
+
+        let prism = GeoObject::Prism3D(Prism3DObj::new(
+            vec![
+                Point3D::new(-1.0, -1.0, 0.0),
+                Point3D::new(1.0, -1.0, 0.0),
+                Point3D::new(1.0, 1.0, 0.0),
+                Point3D::new(-1.0, 1.0, 0.0),
+            ],
+            Point3D::new(0.0, 0.0, 2.0),
+        ));
+        let bounds = fallback_object_bounds(&prism, &std::collections::HashMap::new())
+            .expect("prism fallback bounds");
+
+        assert!(bounds.min.x <= -1.0 && bounds.max.x >= 1.0);
+        assert!(bounds.min.y <= -1.0 && bounds.max.y >= 1.0);
+        assert!(bounds.min.z <= 0.0 && bounds.max.z >= 2.0);
+    }
+
+    #[test]
+    fn quadric_ellipsoid_bounds_match_radii() {
+        use grafito_core::{GeoObject, Quadric3DObj};
+
+        // x²/4 + y²/9 + z²/16 = 1 → radios (2, 3, 4).
+        let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            0.25,
+            1.0 / 9.0,
+            1.0 / 16.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+        ]));
+        let bounds = fallback_object_bounds(&quadric, &std::collections::HashMap::new())
+            .expect("quadric fallback bounds");
+
+        assert!((bounds.min.x + 2.0).abs() < 1.0e-6 && (bounds.max.x - 2.0).abs() < 1.0e-6);
+        assert!((bounds.min.y + 3.0).abs() < 1.0e-6 && (bounds.max.y - 3.0).abs() < 1.0e-6);
+        assert!((bounds.min.z + 4.0).abs() < 1.0e-6 && (bounds.max.z - 4.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn picker_hits_prism_and_quadric_via_fallback_bounds() {
+        use grafito_core::{GeoObject, Prism3DObj, Quadric3DObj};
+        use grafito_geometry::Point3D;
+
+        let camera = test_camera();
+        let pointer = egui::vec2(400.0, 300.0);
+        let canvas_size = egui::vec2(800.0, 600.0);
+
+        let mut prism_doc = grafito_core::Document::new();
+        let prism_id = prism_doc
+            .try_add_object(GeoObject::Prism3D(Prism3DObj::new(
+                vec![
+                    Point3D::new(-1.0, -1.0, 0.0),
+                    Point3D::new(1.0, -1.0, 0.0),
+                    Point3D::new(1.0, 1.0, 0.0),
+                    Point3D::new(-1.0, 1.0, 0.0),
+                ],
+                Point3D::new(0.0, 0.0, 2.0),
+            )))
+            .expect("prism fixture");
+        assert_eq!(
+            pick_3d_object(&prism_doc, &camera, pointer, canvas_size),
+            Some(prism_id),
+            "prism must be pickable through its fallback AABB"
+        );
+
+        let mut quadric_doc = grafito_core::Document::new();
+        let quadric_id = quadric_doc
+            .try_add_object(GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+                1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+            ])))
+            .expect("quadric fixture");
+        assert_eq!(
+            pick_3d_object(&quadric_doc, &camera, pointer, canvas_size),
+            Some(quadric_id),
+            "quadric must be pickable through its ellipsoid AABB"
+        );
+    }
+
+    #[test]
+    fn quadric_ellipsoid_params_rejects_non_ellipsoid() {
+        use grafito_core::Quadric3DObj;
+
+        // Hiperboloide x² + y² - z² = 1: c < 0 → no es elipsoide real.
+        let hyperbolic =
+            Quadric3DObj::from_coeffs([1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]);
+        assert!(grafito_render::quadric_ellipsoid_params(&hyperbolic).is_none());
+
+        // Elipsoide desplazado: (x-1)²/4 + y² + z² = 1 → centro (1, 0, 0).
+        let shifted =
+            Quadric3DObj::from_coeffs([0.25, 1.0, 1.0, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, -0.75]);
+        let ellipsoid =
+            grafito_render::quadric_ellipsoid_params(&shifted).expect("shifted ellipsoid");
+        assert!((ellipsoid.center.x - 1.0).abs() < 1.0e-9);
+        assert!((ellipsoid.radii.x - 2.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn ortho_projection_names_and_axes() {
+        assert_eq!(OrthoProjection::Front.name(), "alzado");
+        assert_eq!(OrthoProjection::Top.name(), "planta");
+        assert_eq!(OrthoProjection::Side.name(), "perfil");
+        assert!(!OrthoProjection::Perspective.is_orthographic());
+        assert!(OrthoProjection::Top.is_orthographic());
+
+        let center = egui::pos2(400.0, 300.0);
+        let point = grafito_geometry::Point3D::new(1.0, 2.0, 3.0);
+        let front =
+            project_point_ortho(point, OrthoProjection::Front, 50.0, center).expect("alzado");
+        assert_eq!(front, egui::pos2(450.0, 200.0));
+        let top = project_point_ortho(point, OrthoProjection::Top, 50.0, center).expect("planta");
+        assert_eq!(top, egui::pos2(450.0, 150.0));
+        let side = project_point_ortho(point, OrthoProjection::Side, 50.0, center).expect("perfil");
+        assert_eq!(side, egui::pos2(500.0, 150.0));
+        assert_eq!(
+            project_point_ortho(point, OrthoProjection::Perspective, 50.0, center),
+            None
+        );
+        assert_eq!(
+            project_point_ortho(point, OrthoProjection::Front, 0.0, center),
+            None
+        );
+    }
+
+    #[test]
+    fn solid_measure_text_is_exact_or_honest_none() {
+        use grafito_core::{GeoObject, Quadric3DObj, Sphere3DObj};
+
+        let sphere = GeoObject::Sphere3D(Sphere3DObj::new(
+            grafito_geometry::Point3D::new(0.0, 0.0, 0.0),
+            1.0,
+        ));
+        let text = solid_measure_text(&sphere).expect("esfera mide exacto");
+        assert!(text.starts_with("V=") && text.contains(" A="));
+
+        let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        assert_eq!(solid_measure_text(&quadric), None);
+    }
+}
+
+#[cfg(test)]
+mod gb_pick_tests {
+    use super::*;
+
+    fn gb_test_camera() -> Camera3D {
+        let mut camera = Camera3D::new(4.0 / 3.0);
+        camera.theta = 0.0;
+        camera.phi = 0.0;
+        camera.distance = 10.0;
+        camera.target = glam::Vec3::ZERO;
+        camera
+    }
+
+    fn gb_ray(origin: Point3D, direction: Point3D) -> Ray3D {
+        Ray3D::new(origin, direction, 0.0, 100.0).expect("rayo de test")
+    }
+
+    fn gb_hit(object: &GeoObject, ray: &Ray3D) -> Option<PickHit> {
+        let variables = std::collections::HashMap::new();
+        object_ray_hit(object, &variables, &gb_test_camera(), ray, 600.0, None)
+    }
+
+    #[test]
+    fn pyramid_center_ray_is_exact_and_corner_falls_back_to_coarse() {
+        let object = GeoObject::Pyramid3D(Pyramid3DObj::new(
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(0.0, 3.0, 0.0),
+            2.0,
+        ));
+        let center = gb_hit(
+            &object,
+            &gb_ray(Point3D::new(10.0, 1.5, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("centro");
+        assert_eq!(center.confidence, PickConfidence::ExactGeometry);
+        assert!((center.distance - 9.5).abs() < 1e-9, "{}", center.distance);
+        // Esquina de la AABB fuera de la malla: conserva el grueso histórico.
+        let corner = gb_hit(
+            &object,
+            &gb_ray(Point3D::new(10.0, 2.9, 0.9), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("esquina gruesa");
+        assert_eq!(corner.confidence, PickConfidence::CoarseBounds);
+    }
+
+    #[test]
+    fn tetra_prism_cone_cylinder_hit_exact_meshes() {
+        let tetra =
+            GeoObject::Tetrahedron3D(Tetrahedron3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0));
+        let hit = gb_hit(
+            &tetra,
+            &gb_ray(Point3D::new(10.0, 0.3, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("tetra");
+        assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
+
+        let prism = GeoObject::Prism3D(Prism3DObj::new(
+            vec![
+                Point3D::new(-1.0, -1.0, -1.0),
+                Point3D::new(1.0, -1.0, -1.0),
+                Point3D::new(1.0, 1.0, -1.0),
+                Point3D::new(-1.0, 1.0, -1.0),
+            ],
+            Point3D::new(0.0, 0.0, 2.0),
+        ));
+        let hit = gb_hit(
+            &prism,
+            &gb_ray(Point3D::new(10.0, 0.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("prisma");
+        assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
+        assert!((hit.distance - 9.0).abs() < 1e-9, "{}", hit.distance);
+
+        let cone = GeoObject::Cone3D(Cone3DObj::new(
+            Point3D::new(0.0, -2.0, 0.0),
+            Point3D::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        let hit = gb_hit(
+            &cone,
+            &gb_ray(Point3D::new(10.0, 0.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("cono");
+        assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
+
+        let cylinder = GeoObject::Cylinder3D(Cylinder3DObj::new(
+            Point3D::new(0.0, -2.0, 0.0),
+            Point3D::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        let hit = gb_hit(
+            &cylinder,
+            &gb_ray(Point3D::new(10.0, 0.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("cilindro");
+        assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
+        assert!((hit.distance - 9.0).abs() < 1e-9, "{}", hit.distance);
+    }
+
+    #[test]
+    fn torus_and_moebius_hit_drawn_surface() {
+        let torus = GeoObject::Torus3D(Torus3DObj::new(Point3D::new(0.0, 0.0, 0.0), 1.5, 0.4));
+        let (vertices, triangles) = torus_pick_mesh(match &torus {
+            GeoObject::Torus3D(torus) => torus,
+            _ => unreachable!("toro"),
+        })
+        .expect("malla toro");
+        assert_eq!(
+            vertices.len(),
+            GB_PICK_RADIAL_SEGMENTS * GB_PICK_TORUS_TUBULAR
+        );
+        assert_eq!(
+            triangles.len(),
+            2 * GB_PICK_RADIAL_SEGMENTS * GB_PICK_TORUS_TUBULAR
+        );
+        let hit = gb_hit(
+            &torus,
+            &gb_ray(Point3D::new(1.5, 5.0, 0.0), Point3D::new(0.0, -1.0, 0.0)),
+        )
+        .expect("toro");
+        assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
+        assert!((hit.distance - 4.6).abs() < 0.05, "{}", hit.distance);
+
+        let strip =
+            GeoObject::MoebiusStrip(MoebiusStripObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0, 0.5));
+        let (vertices, triangles) = moebius_pick_mesh(match &strip {
+            GeoObject::MoebiusStrip(strip) => strip,
+            _ => unreachable!("moebius"),
+        })
+        .expect("malla moebius");
+        assert_eq!(
+            vertices.len(),
+            (GB_PICK_MOEBIUS_U + 1) * (GB_PICK_MOEBIUS_V + 1)
+        );
+        assert_eq!(triangles.len(), 2 * GB_PICK_MOEBIUS_U * GB_PICK_MOEBIUS_V);
+        let hit = gb_hit(
+            &strip,
+            &gb_ray(Point3D::new(2.0, 5.0, 0.0), Point3D::new(0.0, -1.0, 0.0)),
+        )
+        .expect("moebius");
+        assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
+        assert!((hit.distance - 5.0).abs() < 1e-9, "{}", hit.distance);
+    }
+
+    #[test]
+    fn exact_mesh_outranks_nearer_coarse_in_pick() {
+        // Cámara test en (10,0,0): el rayo central viaja por el eje X.
+        let camera = gb_test_camera();
+        let pointer = egui::vec2(400.0, 300.0);
+        let canvas = egui::vec2(800.0, 600.0);
+        let mut document = Document::new();
+        // Esfera cuádrica r=0.5 en (5,0,0): grueso cercano (t≈4.5).
+        document
+            .try_add_object(GeoObject::Quadric3D(
+                grafito_core::Quadric3DObj::from_coeffs([
+                    1.0, 1.0, 1.0, 0.0, 0.0, 0.0, -10.0, 0.0, 0.0, 24.75,
+                ]),
+            ))
+            .expect("cuádrica");
+        // Prisma que envuelve el eje X detrás: exacto lejano (t=9).
+        let prism_id = document
+            .try_add_object(GeoObject::Prism3D(Prism3DObj::new(
+                vec![
+                    Point3D::new(-1.0, -1.0, -2.0),
+                    Point3D::new(1.0, -1.0, -2.0),
+                    Point3D::new(1.0, 1.0, -2.0),
+                    Point3D::new(-1.0, 1.0, -2.0),
+                ],
+                Point3D::new(0.0, 0.0, 4.0),
+            )))
+            .expect("prisma");
+        assert_eq!(
+            pick_3d_object(&document, &camera, pointer, canvas),
+            Some(prism_id),
+            "el exacto gana al grueso aunque esté más lejos"
+        );
+        // Sin el prisma, la cuádrica gruesa sigue pickeable (sin regresión).
+        let mut solo = Document::new();
+        let only_id = solo
+            .try_add_object(GeoObject::Quadric3D(
+                grafito_core::Quadric3DObj::from_coeffs([
+                    1.0, 1.0, 1.0, 0.0, 0.0, 0.0, -10.0, 0.0, 0.0, 24.75,
+                ]),
+            ))
+            .expect("cuádrica");
+        assert_eq!(
+            pick_3d_object(&solo, &camera, pointer, canvas),
+            Some(only_id)
+        );
+    }
+
+    #[test]
+    fn degenerate_solids_do_not_panic_and_keep_coarse_policy() {
+        // Pirámide con base inválida: sin malla, pero el grueso histórico decide.
+        let flat = GeoObject::Pyramid3D(Pyramid3DObj::new(
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(0.0, 3.0, 0.0),
+            -2.0,
+        ));
+        assert_eq!(
+            pyramid_pick_mesh(match &flat {
+                GeoObject::Pyramid3D(pyramid) => pyramid,
+                _ => unreachable!("pirámide"),
+            }),
+            None
+        );
+        // Cono con eje degenerado: sin malla, pero la caja punto+radio sigue
+        // válida y el grueso conservador la pickea (sin pánico, sin regresión).
+        let degenerate = GeoObject::Cone3D(Cone3DObj::new(
+            Point3D::new(1.0, 1.0, 1.0),
+            Point3D::new(1.0, 1.0, 1.0),
+            1.0,
+        ));
+        assert_eq!(
+            cone_pick_mesh(match &degenerate {
+                GeoObject::Cone3D(cone) => cone,
+                _ => unreachable!("cono"),
+            }),
+            None
+        );
+        let hit = gb_hit(
+            &degenerate,
+            &gb_ray(Point3D::new(10.0, 1.0, 1.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("grueso conservador");
+        assert_eq!(hit.confidence, PickConfidence::CoarseBounds);
+        // Prisma sin base o sin dirección: sin malla, sin pánico.
+        let empty = GeoObject::Prism3D(Prism3DObj::new(Vec::new(), Point3D::new(0.0, 0.0, 1.0)));
+        assert_eq!(
+            prism_pick_mesh(match &empty {
+                GeoObject::Prism3D(prism) => prism,
+                _ => unreachable!("prisma"),
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn section_net_and_wireframe_overlays_project() {
+        let camera = gb_test_camera();
+        let square = vec![
+            Point3D::new(-1.0, -1.0, 0.0),
+            Point3D::new(1.0, -1.0, 0.0),
+            Point3D::new(1.0, 1.0, 0.0),
+            Point3D::new(-1.0, 1.0, 0.0),
+        ];
+        let pixels = section_screen_polyline(&square, &camera, 800.0, 600.0).expect("sección");
+        assert_eq!(pixels.len(), 4);
+        assert!(pixels.iter().all(|point| point.is_finite()));
+        assert_eq!(
+            section_screen_polyline(&square[..2], &camera, 800.0, 600.0),
+            None
+        );
+        let nan_square = vec![
+            Point3D::new(f64::NAN, 0.0, 0.0),
+            Point3D::new(1.0, 1.0, 0.0),
+            Point3D::new(0.0, 1.0, 0.0),
+        ];
+        assert_eq!(
+            section_screen_polyline(&nan_square, &camera, 800.0, 600.0),
+            None
+        );
+
+        let net = grafito_geometry::cube_net(1.0).expect("net");
+        let panels = net_screen_panels(&net, 50.0, egui::pos2(400.0, 300.0)).expect("paneles");
+        assert_eq!(panels.len(), net.panels().len());
+        assert!(panels.iter().all(|panel| panel.len() == 4));
+        assert_eq!(net_screen_panels(&net, 0.0, egui::pos2(400.0, 300.0)), None);
+
+        let (vertices, triangles) =
+            tetra_pick_mesh(&Tetrahedron3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0))
+                .expect("tetra");
+        let edges =
+            mesh_screen_edges(&vertices, &triangles, &camera, 800.0, 600.0).expect("aristas");
+        assert_eq!(edges.len(), 6);
+        let dense = vec![[0_usize, 1, 2]; GB_MAX_CPU_MESH_EDGES + 1];
+        assert_eq!(
+            mesh_screen_edges(&vertices, &dense, &camera, 800.0, 600.0),
+            None
+        );
     }
 }

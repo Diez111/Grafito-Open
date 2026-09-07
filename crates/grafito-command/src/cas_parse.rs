@@ -406,7 +406,17 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
     if let Some(open) = text.find('[') {
         let mut depth = 0usize;
         let mut close = None;
+        // Las comillas dobles protegen literales: un `]` dentro de `"..."`
+        // (rótulos, guiones) no cierra el comando.
+        let mut in_string = false;
         for (offset, ch) in text[open..].char_indices() {
+            if ch == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
             match ch {
                 '[' => depth += 1,
                 ']' => {
@@ -751,7 +761,16 @@ pub fn split_args(s: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut depth = 0;
     let mut start = 0;
+    // Comas dentro de `"..."` no separan (rótulos con coma, JSON de LoadTool).
+    let mut in_string = false;
     for (i, ch) in s.char_indices() {
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
         match ch {
             '(' | '{' | '[' => depth += 1,
             ')' | '}' | ']' => depth -= 1,

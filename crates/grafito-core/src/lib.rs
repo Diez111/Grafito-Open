@@ -37,6 +37,7 @@ pub mod parametric_sampling;
 pub mod pencil;
 pub mod persistence;
 pub mod spatial;
+pub mod symbolic;
 pub mod validation;
 pub mod vector_field_sampling;
 

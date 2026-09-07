@@ -116,7 +116,7 @@ fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.horizontal_centered(|ui| {
                 ui.label(
                     egui::RichText::new("Teclado")
-                        .size(11.0)
+                        .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_secondary),
                 );
                 for (label, insertion) in [
@@ -203,7 +203,10 @@ pub(crate) fn draw_math_keyboard(
                                 .inner_margin(egui::Margin::symmetric(8.0, 3.0))
                                 .show(ui, |ui| {
                                     ui.label(
-                                        egui::RichText::new(*lbl).size(12.0).color(c).strong(),
+                                        egui::RichText::new(*lbl)
+                                            .size(grafito_ui::tokens::TYPE_SM)
+                                            .color(c)
+                                            .strong(),
                                     );
                                 })
                                 .response;
@@ -215,7 +218,7 @@ pub(crate) fn draw_math_keyboard(
                             if response.clicked() {
                                 app.keyboard_tab = i;
                             }
-                            ui.add_space(4.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
                         }
                         if app.keyboard_expanded
                             && action_icon_button(
@@ -447,7 +450,7 @@ pub(crate) fn draw_math_keyboard(
                             }
                         }
                     });
-                    ui.add_space(12.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_MD);
                 });
             });
         });

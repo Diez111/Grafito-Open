@@ -36,6 +36,21 @@ impl LineKind {
     }
 }
 
+/// Scale-aware geometric epsilon.
+///
+/// Returns a tolerance proportional to `scale` (a characteristic length of
+/// the problem: coordinate magnitude, segment length, viewport extent).
+/// Non-finite or non-positive scales fall back to `1e-12`. The result is
+/// clamped to `[1e-15, 1e-6]` so it never vanishes into rounding noise nor
+/// grows into sloppiness.
+pub fn geom_eps(scale: f64) -> f64 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return 1e-12;
+    }
+    let eps = scale.max(1.0) * 64.0 * f64::EPSILON;
+    eps.clamp(1e-15, 1e-6)
+}
+
 /// Perpendicular distance from `p` to the infinite line through `a` and `b`.
 pub fn distance_point_to_line(p: Point2, a: Point2, b: Point2) -> f64 {
     let dx = b.x - a.x;
@@ -269,5 +284,16 @@ mod tests {
         let b = Point2::new(2.0, 0.0);
         assert!((line_param_at_point(Point2::new(3.0, 0.0), a, b) - 1.5).abs() < 1e-10);
         assert!((line_param_at_point(Point2::new(1.0, 2.0), a, b) - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn geom_eps_scales_with_magnitude() {
+        let base = geom_eps(1.0);
+        assert!((1e-15..=1e-6).contains(&base), "clamped, got {base}");
+        assert!(geom_eps(1000.0) > base, "must grow with scale");
+        assert!(geom_eps(0.0).is_finite());
+        assert!(geom_eps(f64::NAN).is_finite());
+        assert!(geom_eps(f64::INFINITY).is_finite());
+        assert!(geom_eps(-5.0).is_finite());
     }
 }

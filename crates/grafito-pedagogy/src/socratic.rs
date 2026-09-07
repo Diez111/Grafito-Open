@@ -5,6 +5,8 @@
 //! - Éxito requiere al menos 1 intento (`attempts >= 1`).
 //! - Máximo 3 intentos, luego `Summarize` (`TooManyAttempts`).
 
+use crate::level::PedagogicalLevel;
+use crate::scaffold::{Scaffold, ScaffoldEngine, Turn};
 use serde::{Deserialize, Serialize};
 
 /// Estado del diálogo socrático.
@@ -48,6 +50,39 @@ pub struct SocraticFsm {
     pub history: Vec<String>,
 }
 
+/// Reparación socrática tipada para uso interno (jamás se publica cruda al chat).
+///
+/// El poll la convierte a voz de Mili vía [`SocraticRepair::to_student_voice`],
+/// sin `GUARD`/`attempts`/`estado`/`Re-preguntá`. Pura y determinista.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SocraticRepair {
+    /// Pregunta heurística ya sanitizada (del scaffold, jamás texto crudo del usuario).
+    pub pregunta_humana: String,
+    /// Pista concreta del scaffold (acotada a 400 chars en construcción).
+    pub pista: String,
+}
+
+impl SocraticRepair {
+    /// Voz de Mili para el transcript: sin jerga interna.
+    ///
+    /// Garantiza que el turno NO contenga `GUARD`, `REPARACIÓN`, `attempts`,
+    /// `can_reveal`, `Re-preguntá` ni interpolaciones degeneradas como
+    /// `¿Te imaginás hola`. Pura y determinista, sin `unwrap`.
+    pub fn to_student_voice(&self) -> String {
+        if self.pista.trim().is_empty() {
+            format!(
+                "Antes de mostrarte la solución, ¿qué forma te imaginás? {} Contame qué probaste y lo vemos juntos.",
+                self.pregunta_humana
+            )
+        } else {
+            format!(
+                "Antes de mostrarte la solución, ¿qué forma te imaginás? {} Pista: {}",
+                self.pregunta_humana, self.pista
+            )
+        }
+    }
+}
+
 impl SocraticFsm {
     /// Crea un FSM en estado `Review` para el tema dado.
     pub fn new(topic: impl Into<String>) -> Self {
@@ -62,6 +97,12 @@ impl SocraticFsm {
     }
 
     /// ¿Se puede revelar la respuesta directa? (`attempts >= 2`)
+    ///
+    /// `attempts` cuenta respuestas a pregunta heurística previa, no turnos
+    /// totales. Primer turno sin pregunta previa ⇒ 0 y no punitivo: el guard de
+    /// sesión se bypassea (es demo, no evaluación; ver `is_exploratory_request`
+    /// y `session_socratic_guard`). Documentado para evitar el falso `0` punitivo
+    /// del conteo viejo (`prior_user_turns-1`).
     pub fn can_reveal_answer(&self) -> bool {
         self.attempts >= 2
     }
@@ -202,6 +243,207 @@ impl SocraticFsm {
     /// Indica si está en `Done`.
     pub fn is_done(&self) -> bool {
         matches!(self.state, SocraticState::Done)
+    }
+
+    // ── Socratic helpers deterministas y vinculantes ──────────────────────
+
+    /// Etiqueta estable del estado para prompt.
+    pub fn state_label(&self) -> &'static str {
+        match &self.state {
+            SocraticState::Review { .. } => "Review",
+            SocraticState::HeuristicQ { .. } => "HeuristicQ",
+            SocraticState::AwaitStudent { .. } => "AwaitStudent",
+            SocraticState::Rectify { .. } => "Rectify",
+            SocraticState::Summarize => "Summarize",
+            SocraticState::Done => "Done",
+        }
+    }
+
+    /// Heurística determinista: ¿el texto del LLM contiene marcadores de solución directa?
+    ///
+    /// Lista acotada sin regex: frases explícitas de revelado (`solución es`,
+    /// `respuesta es`, `resultado es`, `solución:`, `respuesta:`, `resultado:`,
+    /// `la solución`, `la respuesta`). A propósito NO incluye `x =`/`y =` sueltos:
+    /// cualquier ejemplo heurístico (`probá con x=1`) disparaba el guard y el
+    /// primer turno siempre daba `attempts=0` punitivo. El telling real se
+    /// señala con framing explícito, no con una ecuación aislada.
+    pub fn contains_solution_marker(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        lower.contains("solución es")
+            || lower.contains("solucion es")
+            || lower.contains("respuesta es")
+            || lower.contains("resultado es")
+            || lower.contains("solución:")
+            || lower.contains("solucion:")
+            || lower.contains("respuesta:")
+            || lower.contains("resultado:")
+            || lower.contains("la solución")
+            || lower.contains("la solucion")
+            || lower.contains("la respuesta")
+    }
+
+    /// ¿Es telling? `true` si `!can_reveal && contains_solution_marker`.
+    pub fn is_telling(&self, response_text: &str) -> bool {
+        !self.can_reveal_answer() && Self::contains_solution_marker(response_text)
+    }
+
+    /// Guarda telling para uso remoto: `TellingTooEarly` si es telling con `attempts<2`.
+    pub fn check_telling_guard(&self, response_text: &str) -> Result<(), GuardError> {
+        if self.is_telling(response_text) {
+            Err(GuardError::TellingTooEarly)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Diagnóstico interno cuando se viola el guard (SOLO logs/eventos, JAMÁS al transcript).
+    ///
+    /// Incluye la pregunta BKT/scaffold exacta y el contador attempts para
+    /// detección (`is_socratic_repair_error`) y trazabilidad. El chat debe usar
+    /// [`SocraticFsm::repair_student_message`] (voz de Mili, sin jerga).
+    /// Publicar este string vía `complete_request` fue el bug P0 (directiva
+    /// `GUARD TELLING` visible + interpolación degenerada).
+    pub fn repair_prompt_for_telling(&self, scaffold: &Scaffold) -> String {
+        let hint = scaffold
+            .hint
+            .as_deref()
+            .unwrap_or("Intentá con un ejemplo concreto (x=1, x=2).");
+        let q: String = scaffold.question.chars().take(400).collect();
+        let h: String = hint.chars().take(400).collect();
+        format!(
+            "GUARD TELLING — REPARACIÓN SOCRÁTICA OBLIGATORIA (attempts={} <2, can_reveal=false, estado={}): No reveles la solución directa. Re-preguntá EXACTAMENTE con: '{}' + pista '{}'. Forzá un nuevo intento del estudiante.",
+            self.attempts,
+            self.state_label(),
+            q,
+            h
+        )
+    }
+
+    /// Enforce interno: si es telling devuelve `Err(diagnóstico)` para logs/detección, si no `Ok(text)`.
+    ///
+    /// El `Err` conserva la jerga `GUARD TELLING` SOLO para `is_socratic_repair_error`
+    /// y logs. El poll NUNCA lo publica: lo convierte vía
+    /// [`SocraticFsm::repair_student_message`] a voz de Mili.
+    pub fn enforce_telling_guard(
+        &self,
+        response_text: &str,
+        scaffold: &Scaffold,
+    ) -> Result<String, String> {
+        if self.is_telling(response_text) {
+            Err(self.repair_prompt_for_telling(scaffold))
+        } else {
+            Ok(response_text.to_owned())
+        }
+    }
+
+    /// Reparación tipada interna (pregunta sanitizada + pista), sin jerga en campos.
+    ///
+    /// Pura y determinista, acotada a 400 chars por campo, sin `unwrap`.
+    /// El transcript usa [`SocraticRepair::to_student_voice`], jamás el diagnóstico.
+    pub fn repair_for_telling(&self, scaffold: &Scaffold) -> SocraticRepair {
+        let hint = scaffold
+            .hint
+            .as_deref()
+            .unwrap_or("Probá con un ejemplo concreto (x=1, x=2).");
+        let pregunta_humana: String = scaffold.question.chars().take(400).collect();
+        let pista: String = hint.chars().take(400).collect();
+        let pregunta_humana = if pregunta_humana.trim().is_empty() {
+            crate::scaffold::NO_CONCEPT_FALLBACK_QUESTION.to_owned()
+        } else {
+            pregunta_humana
+        };
+        SocraticRepair {
+            pregunta_humana,
+            pista,
+        }
+    }
+
+    /// Mensaje para el estudiante (voz de Mili, sin jerga) — lo que SÍ va al transcript.
+    ///
+    /// Puro y determinista. Garantiza ausencia de `GUARD`, `REPARACIÓN`,
+    /// `attempts`, `can_reveal`, `Re-preguntá` e interpolaciones degeneradas.
+    pub fn repair_student_message(&self, scaffold: &Scaffold) -> String {
+        self.repair_for_telling(scaffold).to_student_voice()
+    }
+
+    /// Genera scaffold determinista desde `topic` y `level`, usando el historial del FSM
+    /// convertido a `Turn`s (role="history").
+    pub fn current_scaffold(&self, engine: &ScaffoldEngine, level: PedagogicalLevel) -> Scaffold {
+        let history: Vec<Turn> = self
+            .history
+            .iter()
+            .map(|h| Turn {
+                role: "history".into(),
+                content: h.clone(),
+            })
+            .collect();
+        engine.scaffold(&self.topic, level, &history)
+    }
+
+    /// Segmento vinculante determinista para inyectar al system prompt.
+    ///
+    /// Combina estado FSM + attempts + can_reveal + scaffold (pregunta BKT actual + pista misconception + historial).
+    /// Truncado y acotado (<1800 chars), 100% puro y testeable.
+    pub fn socratic_system_segment(&self, scaffold: &Scaffold) -> String {
+        const MAX_TOPIC_CHARS: usize = 120;
+        const MAX_HISTORY_CHARS: usize = 180;
+        const MAX_HISTORY_ITEMS: usize = 4;
+        let topic: String = self.topic.chars().take(MAX_TOPIC_CHARS).collect();
+        let mut out = String::new();
+        out.push_str("[SOCRATIC FSM — VINCULANTE]\n");
+        out.push_str(&format!(
+            "Estado: {} | Topic: {} | Attempts: {} | CanReveal: {}\n",
+            self.state_label(),
+            topic,
+            self.attempts,
+            self.can_reveal_answer()
+        ));
+        out.push_str(
+            "Regla VINCULANTE: NO revelar solución directa si attempts<2 (TellingTooEarly). ",
+        );
+        out.push_str(
+            "Si el LLM intenta telling con attempts<2, el guard remoto fuerza re-pregunta.\n",
+        );
+        // Scaffold inyectado (current_question + pista)
+        let hist_turns: Vec<Turn> = self
+            .history
+            .iter()
+            .map(|h| Turn {
+                role: "history".into(),
+                content: h.clone(),
+            })
+            .collect();
+        let seg = scaffold.system_prompt_segment(&hist_turns);
+        out.push_str(&seg);
+        out.push('\n');
+        // Historial FSM crudo acotado
+        out.push_str(&format!(
+            "Historial FSM ({} entradas, muestra {}): ",
+            self.history.len(),
+            MAX_HISTORY_ITEMS.min(self.history.len())
+        ));
+        if self.history.is_empty() {
+            out.push_str("(vacío)");
+        } else {
+            for (idx, h) in self.history.iter().take(MAX_HISTORY_ITEMS).enumerate() {
+                let snippet: String = h.chars().take(MAX_HISTORY_CHARS).collect();
+                let clean = snippet.replace('\n', " ");
+                out.push_str(&format!("[{idx}:{clean}] "));
+            }
+        }
+        out.push('\n');
+        out.push_str("Instrucción FINAL VINCULANTE: El system prompt es orden, no sugerencia. Seguí exactamente este FSM y scaffold. Telling_rate <5% obligatorio.");
+        out
+    }
+
+    /// Atajo que genera scaffold vía engine y devuelve el segmento completo.
+    pub fn socratic_system_segment_with_engine(
+        &self,
+        engine: &ScaffoldEngine,
+        level: PedagogicalLevel,
+    ) -> String {
+        let sc = self.current_scaffold(engine, level);
+        self.socratic_system_segment(&sc)
     }
 }
 
@@ -422,5 +664,171 @@ mod tests {
             !fsm.history.iter().any(|h| h.contains("telling")),
             "el historial no debe registrar tells directos"
         );
+    }
+
+    #[test]
+    fn contains_solution_marker_is_deterministic() {
+        // Framing explícito sí es telling.
+        assert!(SocraticFsm::contains_solution_marker(
+            "La solución es x = 4"
+        ));
+        assert!(SocraticFsm::contains_solution_marker("Respuesta es 42"));
+        assert!(SocraticFsm::contains_solution_marker(
+            "La respuesta es x = 2"
+        ));
+        // Ecuación suelta SIN framing NO es telling (era el falso positivo P0:
+        // cualquier `x =` disparaba el guard en primer turno con attempts=0).
+        assert!(!SocraticFsm::contains_solution_marker("x = 2.5"));
+        assert!(!SocraticFsm::contains_solution_marker(
+            "¿Cómo lo pensaste? Intentá con x=1"
+        ));
+        assert!(!SocraticFsm::contains_solution_marker(
+            "Explicalo con tus palabras"
+        ));
+    }
+
+    #[test]
+    fn is_telling_respects_can_reveal() {
+        let mut fsm = SocraticFsm::new("derivada");
+        assert!(fsm.is_telling("la solución es x = 4"));
+        assert_eq!(
+            fsm.check_telling_guard("la solución es x = 4").unwrap_err(),
+            GuardError::TellingTooEarly
+        );
+        fsm.record_attempt(None);
+        fsm.record_attempt(None);
+        assert!(!fsm.is_telling("la solución es x = 4"));
+        assert!(fsm.check_telling_guard("la solución es x = 4").is_ok());
+        // sin marcador nunca es telling
+        assert!(!fsm.is_telling("¿Qué observás en la pendiente?"));
+    }
+
+    #[test]
+    fn repair_prompt_for_telling_is_deterministic() {
+        let fsm = SocraticFsm::new("fracciones");
+        let scaffold = crate::scaffold::Scaffold {
+            question: "¿Qué representa fracciones en el gráfico?".into(),
+            hint: Some("Pista concreta: probá con x=1".into()),
+            explanation: "Exp".into(),
+        };
+        // Diagnóstico interno (SOLO logs/eventos): conserva jerga para detección.
+        let r1 = fsm.repair_prompt_for_telling(&scaffold);
+        let r2 = fsm.repair_prompt_for_telling(&scaffold);
+        assert_eq!(r1, r2);
+        assert!(r1.contains("GUARD TELLING"));
+        assert!(r1.contains("attempts=0"));
+        assert!(r1.contains("¿Qué representa"));
+        // Transcript (voz de Mili): SIN jerga, jamás al chat.
+        let student = fsm.repair_student_message(&scaffold);
+        assert_eq!(
+            student,
+            fsm.repair_student_message(&scaffold),
+            "determinista"
+        );
+        assert!(!student.contains("GUARD"), "{student}");
+        assert!(
+            !student.contains("REPARACIÓN") && !student.contains("REPARACION"),
+            "{student}"
+        );
+        assert!(!student.contains("attempts"), "{student}");
+        assert!(!student.contains("can_reveal"), "{student}");
+        assert!(!student.contains("Re-pregunt"), "{student}");
+        assert!(student.contains("Antes de mostrarte"), "{student}");
+        assert!(student.contains("¿Qué representa"), "{student}");
+    }
+
+    #[test]
+    fn enforce_telling_guard_forces_repreguntar() {
+        let fsm = SocraticFsm::new("integral");
+        let scaffold = crate::scaffold::Scaffold {
+            question: "¿Qué representa integral?".into(),
+            hint: None,
+            explanation: "área".into(),
+        };
+        let telling = "La solución es x = 5";
+        // Interno: diagnóstico con jerga (solo logs/detección).
+        let err = fsm.enforce_telling_guard(telling, &scaffold).unwrap_err();
+        assert!(err.contains("REPARACIÓN SOCRÁTICA") || err.contains("GUARD TELLING"));
+        assert!(err.contains("¿Qué representa integral?"));
+        // Transcript: voz humana sin jerga.
+        let student = fsm.repair_student_message(&scaffold);
+        assert!(!student.contains("GUARD"), "{student}");
+        assert!(
+            !student.contains("REPARACIÓN") && !student.contains("REPARACION"),
+            "{student}"
+        );
+        assert!(!student.contains("attempts"), "{student}");
+        assert!(!student.contains("can_reveal"), "{student}");
+        assert!(student.contains("Antes de mostrarte"), "{student}");
+        // con attempts>=2 pasa
+        let mut fsm2 = SocraticFsm::new("integral");
+        fsm2.record_attempt(None);
+        fsm2.record_attempt(None);
+        assert!(fsm2.enforce_telling_guard(telling, &scaffold).is_ok());
+    }
+
+    #[test]
+    fn socratic_repair_student_voice_has_no_jargon_or_raw_echo() {
+        // Regresión P0: el input real que mostró la directiva interna.
+        let raw = "hola haceme ejemplos para probar las capacidades de graficacion";
+        // El extractor no reconoce tema → None → scaffold cae al fallback.
+        assert_eq!(crate::scaffold::extract_concept(raw), None);
+        assert!(crate::scaffold::is_exploratory_request(raw));
+        let engine = crate::scaffold::ScaffoldEngine;
+        let sc = engine.scaffold(raw, crate::level::PedagogicalLevel::Secondary, &[]);
+        assert_eq!(sc.question, crate::scaffold::NO_CONCEPT_FALLBACK_QUESTION);
+        assert!(!sc.question.contains("hola"), "{}", sc.question);
+        let fsm = SocraticFsm::new("");
+        let student = fsm.repair_student_message(&sc);
+        for forbidden in [
+            "GUARD",
+            "REPARACIÓN",
+            "REPARACION",
+            "attempts",
+            "can_reveal",
+            "Re-pregunt",
+            "¿Te imaginás hola",
+        ] {
+            assert!(
+                !student.contains(forbidden),
+                "jerga '{forbidden}' en '{student}'"
+            );
+        }
+        assert!(student.contains("Antes de mostrarte"), "{student}");
+    }
+
+    #[test]
+    fn socratic_system_segment_is_deterministic_and_binding() {
+        use crate::level::PedagogicalLevel;
+        use crate::scaffold::ScaffoldEngine;
+        let mut fsm = SocraticFsm::new("derivada");
+        fsm.record_attempt(Some("sign".into()));
+        let engine = ScaffoldEngine;
+        let scaffold = engine.scaffold("derivada", PedagogicalLevel::Secondary, &[]);
+        let seg1 = fsm.socratic_system_segment(&scaffold);
+        let seg2 = fsm.socratic_system_segment(&scaffold);
+        assert_eq!(seg1, seg2);
+        assert!(seg1.contains("VINCULANTE"));
+        assert!(seg1.contains("Estado:"));
+        assert!(seg1.contains("Attempts: 1"));
+        assert!(seg1.contains("CanReveal: false"));
+        assert!(seg1.contains("Pregunta BKT actual"));
+        assert!(seg1.contains("Pista scaffold"));
+        assert!(seg1.contains("Historial FSM"));
+        assert!(seg1.contains("misconception: sign"));
+        assert!(seg1.chars().count() < 3000);
+    }
+
+    #[test]
+    fn socratic_segment_with_engine_is_deterministic() {
+        use crate::level::PedagogicalLevel;
+        use crate::scaffold::ScaffoldEngine;
+        let fsm = SocraticFsm::new("taylor");
+        let engine = ScaffoldEngine;
+        let seg1 = fsm.socratic_system_segment_with_engine(&engine, PedagogicalLevel::Secondary);
+        let seg2 = fsm.socratic_system_segment_with_engine(&engine, PedagogicalLevel::Secondary);
+        assert_eq!(seg1, seg2);
+        assert!(seg1.contains("taylor"));
+        assert!(seg1.contains("VINCULANTE"));
     }
 }

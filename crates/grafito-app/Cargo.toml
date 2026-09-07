@@ -53,7 +53,10 @@ serde.workspace = true
 rayon.workspace = true
 num-complex.workspace = true
 rfd.workspace = true
-keyring.workspace = true
+keyring = { workspace = true, optional = true }
+# F10-S: QR real escaneable del código de sala (qrcode 0.14 core, sin features
+# de imagen/svg; sólo `QrCode::new` + `to_colors` para la grid egui).
+qrcode = { workspace = true }
 
 # This maintained profiler pair establishes the workspace Rust 1.92 minimum.
 puffin = { version = "=0.19.1", optional = true }
@@ -66,6 +69,12 @@ windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage
 libc = "0.2"
 
 [features]
+# E3: `assistant-net` (default ON) cablea `keyring` + `grafito-assistant/assistant-net`.
+# `--no-default-features` compila sin red ni llavero: credenciales con stub
+# honesto (`assistant_credentials`) y transporte con stub `NoNetwork`
+# (`grafito-assistant`). Ahorro estimado: ~2.5-3.5 MiB (~8-9% de 37.4 MiB).
+default = ["assistant-net"]
+assistant-net = ["dep:keyring", "grafito-assistant/assistant-net"]
 profile = ["puffin", "puffin_http", "eframe/puffin"]
 
 [build-dependencies]

@@ -2020,6 +2020,7 @@ dependencies = [
  "pollster",
  "puffin",
  "puffin_http",
+ "qrcode",
  "rayon",
  "rfd",
  "serde",
@@ -2054,6 +2055,15 @@ dependencies = [
 name = "grafito-assistant-types"
 version = "1.0.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "grafito-classroom"
+version = "1.0.0"
+dependencies = [
+ "grafito-profile",
  "serde",
  "serde_json",
 ]
@@ -2124,6 +2134,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafito-ggb"
+version = "1.0.0"
+dependencies = [
+ "quick-xml 0.42.0",
+ "zip",
+]
+
+[[package]]
 name = "grafito-pedagogy"
 version = "1.0.0"
 dependencies = [
@@ -2179,6 +2197,7 @@ name = "grafito-ui"
 version = "1.0.0"
 dependencies = [
  "egui",
+ "grafito-anim",
  "grafito-assistant-types",
  "grafito-command",
  "grafito-core",
@@ -3845,6 +3864,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3865,6 +3890,15 @@ name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
 ]
@@ -5110,6 +5144,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6349,6 +6389,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "typed-path",
+ "zopfli",
+]
+
+[[package]]
 name = "zlib-rs"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6359,6 +6413,18 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zopfli"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f05cd8797d63865425ff89b5c4a48804f35ba0ce8d125800027ad6017d2b5249"
+dependencies = [
+ "bumpalo",
+ "crc32fast",
+ "log",
+ "simd-adler32",
+]
 
 [[package]]
 name = "zune-core"

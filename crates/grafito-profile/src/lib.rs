@@ -4,16 +4,22 @@
 //! el progreso. Crate de capa hoja: sin egui, testable headless, persistible.
 
 pub mod bkt;
+pub mod elo;
 pub mod exam;
 pub mod long_memory;
 pub mod mascot;
 pub mod scheduler;
+pub mod stubs;
 pub mod working_memory;
 
 // Re-exportar tipos de avatar/mascota en la raíz
 pub use bkt::{
-    bkt_params_for_branch, bkt_params_for_lo, bkt_params_for_lo_opt, bkt_update, is_known_lo,
-    BktParams, BktState, ALL_LO_IDS, BKT_DEFAULT_PARAMS,
+    bkt_params_for_branch, bkt_params_for_lo, bkt_params_for_lo_opt, bkt_posterior, bkt_update,
+    is_known_lo, mastery_from_bkt, BktParams, BktState, ALL_LO_IDS, BKT_DEFAULT_PARAMS,
+};
+pub use elo::{
+    elo_expected, elo_update, EloRating, EloState, ELO_DEFAULT_K, ELO_DEFAULT_RATING, ELO_MAX_K,
+    ELO_MAX_RATING, ELO_MIN_K, ELO_MIN_RATING, ELO_SCALE,
 };
 pub use long_memory::{Fact, LongTermMemory, Preferences};
 pub use mascot::{
@@ -22,7 +28,8 @@ pub use mascot::{
     OutfitLayer, OutfitTier, Personality, ShopItem, Wardrobe, MAX_DISPLAY_NAME, MAX_NAME,
 };
 pub use scheduler::{
-    is_due, next_interval, review_schedule_for, schedule_next_review, ReviewSchedule,
+    fsrs_init, fsrs_next_interval_secs, fsrs_schedule_next_review, fsrs_update, is_due,
+    next_interval, review_schedule_for, schedule_next_review, FsrsState, ReviewSchedule,
     SchedulerError, DAY_SECS, MAX_BOX_LEVEL,
 };
 pub use working_memory::WorkingMemory;
@@ -69,6 +76,27 @@ pub struct BranchState {
     /// Probabilidad latente BKT P(sabe) para esta rama.
     #[serde(default = "default_bkt_p_known")]
     pub bkt_p_known: f64,
+}
+
+impl BranchState {
+    /// Mastery honesto derivado del posterior BKT (`bkt_p_known`).
+    ///
+    /// El campo legacy `mastery` (EMA) se conserva por compatibilidad con la
+    /// UI y los tests existentes; este método expone la señal bayesiana real
+    /// que el dashboard/aula debe mostrar (`avg_posterior_mastery`). NaN-safe.
+    #[must_use]
+    pub fn posterior_mastery(&self) -> f64 {
+        if !self.bkt_p_known.is_finite() {
+            return 0.0;
+        }
+        self.bkt_p_known.clamp(0.0, 1.0)
+    }
+
+    /// ¿Dominio latente BKT supera el umbral? (default 0.8, igual que EMA).
+    #[must_use]
+    pub fn is_bkt_mastered(&self, threshold: f64) -> bool {
+        self.posterior_mastery() >= threshold.clamp(0.0, 1.0)
+    }
 }
 
 /// Tipo de evento de aprendizaje registrado.
@@ -406,6 +434,80 @@ impl StudentProfile {
     /// Puro y determinista dado `now`: sin I/O, sin reloj interno.
     pub fn recommend_due_first(&self, now: u64) -> Vec<&BranchState> {
         self.recommend_next_with_scheduler(now)
+    }
+
+    /// Mastery medio posterior BKT del perfil (`0..=1`, NaN-safe).
+    ///
+    /// Media de `BranchState::posterior_mastery` sobre ramas con dato finito;
+    /// `0.3` si no hay ramas (igual que `default_bkt_p_known`). Es la señal
+    /// que el dashboard del aula muestra como `avg_mastery` vía
+    /// `LearnerSnapshot::from_student_profile`. No toca el campo legacy
+    /// `mastery` (EMA).
+    #[must_use]
+    pub fn avg_posterior_mastery(&self) -> f64 {
+        let mut sum = 0.0_f64;
+        let mut valid = 0_usize;
+        for branch in &self.branches {
+            let value = branch.posterior_mastery();
+            if value.is_finite() {
+                sum += value;
+                valid = valid.saturating_add(1);
+            }
+        }
+        if valid == 0 {
+            return 0.3;
+        }
+        (sum / valid as f64).clamp(0.0, 1.0)
+    }
+
+    /// Recomendación intercalada (interleaving): evita bloques del mismo tema.
+    ///
+    /// Parte de [`Self::recommend_next_with_scheduler`] (vencidas primero) y
+    /// reordena por round-robin de tópico (prefijo antes de `'-'`, ej.
+    /// `am1` en `am1-der`; sin `'-'` el id completo es el tópico). Así
+    /// `am1-der, am1-lim, sec-vect` se vuelve `am1-der, sec-vect, am1-lim`:
+    /// mezcla sin perder la prioridad due (los vencidos siguen antes que los
+    /// futuros dentro de cada tópico porque el orden de entrada ya es due-first
+    /// y los grupos preservan ese orden). Puro, determinista, sin I/O.
+    /// Cap implícito: retorna a lo sumo todas las pendientes (`<=128` ramas).
+    pub fn recommend_interleaved(&self, now: u64) -> Vec<&BranchState> {
+        let ranked = self.recommend_next_with_scheduler(now);
+        if ranked.len() <= 2 {
+            return ranked;
+        }
+        // Agrupa por tópico preservando el orden due-first dentro de cada grupo.
+        let mut groups: Vec<(String, Vec<&BranchState>)> = Vec::new();
+        for branch in ranked {
+            let topic = branch
+                .id
+                .split_once('-')
+                .map_or_else(|| branch.id.clone(), |(prefix, _)| prefix.to_string());
+            match groups.iter_mut().find(|(key, _)| *key == topic) {
+                Some((_, items)) => items.push(branch),
+                None => groups.push((topic, vec![branch])),
+            }
+        }
+        if groups.len() <= 1 {
+            let single = groups.pop().map_or_else(Vec::new, |(_, items)| items);
+            return single;
+        }
+        // Round-robin por tópico (orden de primera aparición).
+        let mut out = Vec::with_capacity(groups.iter().map(|(_, items)| items.len()).sum());
+        let mut index = 0_usize;
+        loop {
+            let mut advanced = false;
+            for (_, items) in groups.iter_mut() {
+                if let Some(branch) = items.get(index) {
+                    out.push(*branch);
+                    advanced = true;
+                }
+            }
+            if !advanced {
+                break;
+            }
+            index = index.saturating_add(1);
+        }
+        out
     }
 
     /// Schedules actuales por rama (para UI/debug).
@@ -954,5 +1056,87 @@ mod tests {
             second_interval > first_interval,
             "interval debe crecer con box_level: {first_interval} vs {second_interval}"
         );
+    }
+
+    #[test]
+    fn posterior_mastery_tracks_bkt_and_avg_is_real() {
+        let empty = StudentProfile::new("Vacio");
+        assert!((empty.avg_posterior_mastery() - 0.3).abs() < 1e-9);
+        let mut p = StudentProfile::new("Post");
+        p.record_outcome("algebra", "Álgebra", 1, true);
+        let branch = &p.branches[0];
+        assert!((branch.posterior_mastery() - branch.bkt_p_known).abs() < 1e-9);
+        assert!((p.avg_posterior_mastery() - branch.bkt_p_known).abs() < 1e-9);
+        assert!(!branch.is_bkt_mastered(0.99));
+        // Tras muchos aciertos el posterior supera 0.8.
+        for i in 2..12 {
+            p.record_outcome("algebra", "Álgebra", i, true);
+        }
+        assert!(p.branches[0].is_bkt_mastered(0.8));
+        assert!(p.avg_posterior_mastery() >= 0.8);
+        // mastery_from_bkt coincide con posterior en f32.
+        assert!(
+            (mastery_from_bkt(p.branches[0].bkt_p_known) - p.branches[0].bkt_p_known as f32).abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn recommend_interleaved_alternates_topics_without_losing_due() {
+        let mut p = StudentProfile::new("Inter");
+        p.record_outcome("am1-der", "Derivadas", 0, false);
+        p.record_outcome("am1-lim", "Límites", 0, false);
+        p.record_outcome("sec-vect", "Vectores", 0, false);
+        for branch in &mut p.branches {
+            // Todas vencidas en now=100, mismo vencimiento relativo.
+            branch.next_review_epoch = Some(10);
+            branch.covered = false;
+        }
+        // Fijar mastery para orden due-first determinista: am1-der más débil.
+        for branch in &mut p.branches {
+            if branch.id == "am1-der" {
+                branch.mastery = 0.1;
+                branch.bkt_p_known = 0.2;
+            } else if branch.id == "am1-lim" {
+                branch.mastery = 0.2;
+                branch.bkt_p_known = 0.3;
+            } else {
+                branch.mastery = 0.3;
+                branch.bkt_p_known = 0.4;
+            }
+        }
+        let interleaved = p.recommend_interleaved(100);
+        assert_eq!(interleaved.len(), 3);
+        // Debe alternar tópicos: no dos am1 seguidos al inicio.
+        let topics: Vec<String> = interleaved
+            .iter()
+            .map(|b| {
+                b.id.split_once('-')
+                    .map_or_else(|| b.id.clone(), |(prefix, _)| prefix.to_string())
+            })
+            .collect();
+        assert_ne!(topics[0], topics[1], "interleaving alterna: {topics:?}");
+        // Contiene las 3 (sin perder vencidas).
+        assert!(topics.contains(&"am1".to_string()));
+        assert!(topics.contains(&"sec".to_string()));
+    }
+
+    #[test]
+    fn recommend_interleaved_single_topic_keeps_order() {
+        let mut p = StudentProfile::new("Single");
+        p.record_outcome("am1-der", "Derivadas", 0, false);
+        p.record_outcome("am1-lim", "Límites", 0, false);
+        let now = 100;
+        let base: Vec<String> = p
+            .recommend_next_with_scheduler(now)
+            .iter()
+            .map(|b| b.id.clone())
+            .collect();
+        let inter: Vec<String> = p
+            .recommend_interleaved(now)
+            .iter()
+            .map(|b| b.id.clone())
+            .collect();
+        assert_eq!(base, inter);
     }
 }

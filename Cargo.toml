@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Pruebas de humo de release a nivel workspace para Grafito"
 
 [workspace]
-members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-pedagogy", "crates/grafito-plugins", "crates/grafito-profile", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex"]
+members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-pedagogy", "crates/grafito-plugins", "crates/grafito-profile", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex", "crates/grafito-ggb", "crates/grafito-classroom"]
 resolver = "2"
 
 [workspace.package]
@@ -32,7 +32,7 @@ grafito-command = { path = "crates/grafito-command" }
 grafito-geometry = { path = "crates/grafito-geometry" }
 grafito-render = { path = "crates/grafito-render" }
 grafito-ui = { path = "crates/grafito-ui" }
-grafito-assistant = { path = "crates/grafito-assistant" }
+grafito-assistant = { path = "crates/grafito-assistant", default-features = false }
 grafito-assistant-types = { path = "crates/grafito-assistant-types" }
 grafito-whiteboard = { path = "crates/grafito-whiteboard" }
 
@@ -82,6 +82,9 @@ toml = "0.8"
 gif = "0.13"
 log = "0.4"
 env_logger = "0.11"
+# F10: QR real escaneable (MSRV 1.67) + PDF vectorial (MSRV 1.88 via lopdf).
+qrcode = { version = "0.14", default-features = false }
+printpdf = "0.12"
 # RUSTSEC-2026-0190 is fixed in 1.0.103; pin the minimum safe release.
 anyhow = "=1.0.103"
 rfd = "0.14"
@@ -96,6 +99,7 @@ keyring = { version = "3.6.2", default-features = false, features = ["apple-nati
 opt-level = 3
 lto = "thin"
 strip = true
+codegen-units = 1
 
 [profile.dev]
 opt-level = 1
@@ -109,3 +113,13 @@ uninlined_format_args = "allow"
 unwrap_used = "deny"
 expect_used = "warn"
 chunks_exact_to_as_chunks = "allow"
+
+[features]
+# E3 completado (oleada S): `assistant-net` (default ON) es el interruptor de
+# red. Gates reales en `crates/grafito-app/Cargo.toml` (`dep:keyring` +
+# `grafito-assistant/assistant-net`) y `crates/grafito-assistant/Cargo.toml`
+# (`dep:reqwest`) con stubs honestos sin red. Este marcador raíz queda como
+# no-op del paquete `grafito-release-tests` (sin dependencias que reenviar).
+# Ahorro estimado con `--no-default-features`: ~2.5-3.5 MiB (~8-9% de 37.4 MiB).
+default = ["assistant-net"]
+assistant-net = []

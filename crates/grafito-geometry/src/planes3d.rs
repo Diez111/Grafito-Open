@@ -423,6 +423,234 @@ fn c1_norm(a: (f64, f64, f64)) -> f64 {
     (a.0 * a.0 + a.1 * a.1 + a.2 * a.2).sqrt()
 }
 
+// ── G-B: sección plano-poliedro (IntersectPath/Plane honesto) ──
+//
+// Corta un poliedro (vértices + caras poligonales) con un plano y devuelve
+// la sección como polígono ordenado. Todo con tolerancia `eps` explícita y
+// `Result`/`Option`: sin plano degenerado, sin caras degeneradas y sin
+// reserva sin cota (aristas únicas dedupadas antes de cortar).
+
+/// Sección de un plano con un poliedro.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanePolyhedronSection {
+    /// El plano no toca al poliedro (o solo lo roza en un punto/vértice).
+    Empty,
+    /// Polígono de corte ordenado angularmente en el plano (3+ puntos).
+    Polygon { points: Vec<Point3D> },
+    /// Una cara yace contenida en el plano: se devuelve tal cual (orden de entrada).
+    CoplanarFace {
+        face_index: usize,
+        points: Vec<Point3D>,
+    },
+}
+
+/// Error honesto de la sección plano-poliedro.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaneSectionError {
+    /// El plano tiene normal nula o no finita.
+    DegeneratePlane,
+    /// La tolerancia no es finita y positiva.
+    InvalidTolerance { eps: f64 },
+    /// Algún vértice no es finito.
+    NonFiniteVertex { index: usize },
+    /// Alguna cara referencia un vértice inexistente o tiene menos de 3 vértices.
+    InvalidFace { face_index: usize },
+}
+
+impl std::fmt::Display for PlaneSectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DegeneratePlane => formatter.write_str("el plano de corte es degenerado"),
+            Self::InvalidTolerance { eps } => {
+                write!(
+                    formatter,
+                    "la tolerancia debe ser finita y positiva, era {eps}"
+                )
+            }
+            Self::NonFiniteVertex { index } => {
+                write!(formatter, "el vértice {index} no es finito")
+            }
+            Self::InvalidFace { face_index } => {
+                write!(formatter, "la cara {face_index} es inválida")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlaneSectionError {}
+
+fn gb_section_inputs_are_valid(
+    vertices: &[Point3D],
+    faces: &[Vec<usize>],
+    plane: Plane3D,
+    eps: f64,
+) -> Result<Plane3D, PlaneSectionError> {
+    if !eps.is_finite() || eps <= 0.0 {
+        return Err(PlaneSectionError::InvalidTolerance { eps });
+    }
+    let normal_norm = (plane.a * plane.a + plane.b * plane.b + plane.c * plane.c).sqrt();
+    if !normal_norm.is_finite() || normal_norm <= eps {
+        return Err(PlaneSectionError::DegeneratePlane);
+    }
+    for (index, vertex) in vertices.iter().enumerate() {
+        if !vertex.is_finite() {
+            return Err(PlaneSectionError::NonFiniteVertex { index });
+        }
+    }
+    for (face_index, face) in faces.iter().enumerate() {
+        if face.len() < 3 || face.iter().any(|&index| index >= vertices.len()) {
+            return Err(PlaneSectionError::InvalidFace { face_index });
+        }
+    }
+    Ok(plane.normalized())
+}
+
+/// Intersecta el plano con el poliedro (`vertices` + `faces` como índices).
+///
+/// Por cada arista única: extremos sobre el plano (`|d| ≤ eps`) se conservan;
+/// cruces estrictos se interpolan. Los puntos se deduplican (`eps`) y ordenan
+/// angularmente en el plano. Si una cara yace en el plano → `CoplanarFace`.
+pub fn intersect_plane_polyhedron(
+    vertices: &[Point3D],
+    faces: &[Vec<usize>],
+    plane: Plane3D,
+    eps: f64,
+) -> Result<PlanePolyhedronSection, PlaneSectionError> {
+    let plane = gb_section_inputs_are_valid(vertices, faces, plane, eps)?;
+    let distances: Vec<f64> = vertices
+        .iter()
+        .map(|vertex| plane.a * vertex.x + plane.b * vertex.y + plane.c * vertex.z + plane.d)
+        .collect();
+    // Cara coplanar: todos sus vértices sobre el plano → sección honesta directa.
+    for (face_index, face) in faces.iter().enumerate() {
+        let on_plane = face.iter().all(|&index| {
+            distances
+                .get(index)
+                .is_some_and(|distance| distance.abs() <= eps)
+        });
+        if on_plane {
+            let points: Vec<Point3D> = face.iter().map(|&index| vertices[index]).collect();
+            return Ok(PlanePolyhedronSection::CoplanarFace { face_index, points });
+        }
+    }
+    // Aristas únicas del poliedro (dedupadas antes de cortar: cota implícita).
+    let mut edges = std::collections::BTreeSet::new();
+    for face in faces {
+        for side in 0..face.len() {
+            let first = face[side];
+            let second = face[(side + 1) % face.len()];
+            edges.insert((first.min(second), first.max(second)));
+        }
+    }
+    let mut raw: Vec<Point3D> = Vec::new();
+    for (first, second) in edges {
+        let Some((&distance_a, &distance_b)) = distances.get(first).zip(distances.get(second))
+        else {
+            continue;
+        };
+        let on_a = distance_a.abs() <= eps;
+        let on_b = distance_b.abs() <= eps;
+        if on_a && on_b {
+            continue;
+        }
+        if on_a {
+            raw.push(vertices[first]);
+        } else if on_b {
+            raw.push(vertices[second]);
+        } else if distance_a.signum() != distance_b.signum() {
+            let ratio = distance_a / (distance_a - distance_b);
+            if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+                continue;
+            }
+            let a = vertices[first];
+            let b = vertices[second];
+            let point = Point3D::new(
+                a.x + (b.x - a.x) * ratio,
+                a.y + (b.y - a.y) * ratio,
+                a.z + (b.z - a.z) * ratio,
+            );
+            if point.is_finite() {
+                raw.push(point);
+            }
+        }
+    }
+    // Deduplicación por tolerancia.
+    let mut unique: Vec<Point3D> = Vec::with_capacity(raw.len());
+    for point in raw {
+        if unique
+            .iter()
+            .all(|kept: &Point3D| kept.distance(&point) > eps)
+        {
+            unique.push(point);
+        }
+    }
+    if unique.len() < 3 {
+        return Ok(PlanePolyhedronSection::Empty);
+    }
+    // Orden angular en el plano alrededor del centroide.
+    let mut centroid = Point3D::new(0.0, 0.0, 0.0);
+    for point in &unique {
+        centroid.x += point.x;
+        centroid.y += point.y;
+        centroid.z += point.z;
+    }
+    let count = unique.len() as f64;
+    centroid.x /= count;
+    centroid.y /= count;
+    centroid.z /= count;
+    let normal = (plane.a, plane.b, plane.c);
+    let helper: (f64, f64, f64) = if normal.0.abs() < 0.9 {
+        (1.0, 0.0, 0.0)
+    } else {
+        (0.0, 1.0, 0.0)
+    };
+    let tangent = cross3(normal, helper);
+    if dot3(tangent, tangent) <= eps * eps {
+        return Ok(PlanePolyhedronSection::Empty);
+    }
+    let bitangent = cross3(normal, tangent);
+    let mut by_angle: Vec<(f64, Point3D)> = Vec::with_capacity(unique.len());
+    for point in unique {
+        let radial = sub3(point_to_tuple(point), point_to_tuple(centroid));
+        let angle = dot3(radial, bitangent).atan2(dot3(radial, tangent));
+        if !angle.is_finite() {
+            return Ok(PlanePolyhedronSection::Empty);
+        }
+        by_angle.push((angle, point));
+    }
+    by_angle.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Ok(PlanePolyhedronSection::Polygon {
+        points: by_angle.into_iter().map(|(_, point)| point).collect(),
+    })
+}
+
+/// Perímetro de una sección poligonal; `None` si no es finito.
+pub fn section_perimeter(points: &[Point3D]) -> Option<f64> {
+    if points.len() < 3 {
+        return None;
+    }
+    let mut total = 0.0_f64;
+    for side in 0..points.len() {
+        total += points[side].distance(&points[(side + 1) % points.len()]);
+    }
+    total.is_finite().then_some(total)
+}
+
+/// Área de una sección poligonal plana por abanico desde el vértice 0; `None` si no es finita.
+pub fn section_area(points: &[Point3D]) -> Option<f64> {
+    if points.len() < 3 {
+        return None;
+    }
+    let origin = points[0].to_dvec3();
+    let mut total = 0.0_f64;
+    for side in 1..points.len() - 1 {
+        let edge_a = points[side].to_dvec3() - origin;
+        let edge_b = points[side + 1].to_dvec3() - origin;
+        total += edge_a.cross(edge_b).length() * 0.5;
+    }
+    total.is_finite().then_some(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +861,135 @@ mod tests {
             }
             other => panic!("expected plane, got {other:?}"),
         }
+    }
+
+    fn unit_cube() -> (Vec<Point3D>, Vec<Vec<usize>>) {
+        let vertices = vec![
+            Point3D::new(-1.0, -1.0, -1.0),
+            Point3D::new(1.0, -1.0, -1.0),
+            Point3D::new(1.0, 1.0, -1.0),
+            Point3D::new(-1.0, 1.0, -1.0),
+            Point3D::new(-1.0, -1.0, 1.0),
+            Point3D::new(1.0, -1.0, 1.0),
+            Point3D::new(1.0, 1.0, 1.0),
+            Point3D::new(-1.0, 1.0, 1.0),
+        ];
+        let faces = vec![
+            vec![0, 1, 2, 3],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![2, 3, 7, 6],
+            vec![0, 3, 7, 4],
+            vec![1, 2, 6, 5],
+        ];
+        (vertices, faces)
+    }
+
+    #[test]
+    fn section_midplane_of_cube_is_unit_square() {
+        let (vertices, faces) = unit_cube();
+        let plane = Plane3D::from_equation(0.0, 0.0, 1.0, 0.0);
+        match intersect_plane_polyhedron(&vertices, &faces, plane, 1e-9).expect("corte") {
+            PlanePolyhedronSection::Polygon { points } => {
+                assert_eq!(points.len(), 4, "{points:?}");
+                let area = section_area(&points).expect("área");
+                assert!((area - 4.0).abs() < 1e-9, "{area}");
+                let perimeter = section_perimeter(&points).expect("perímetro");
+                assert!((perimeter - 8.0).abs() < 1e-9, "{perimeter}");
+                assert!(points.iter().all(|point| point.z.abs() < 1e-9));
+            }
+            other => panic!("expected polygon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn section_diagonal_of_cube_is_regular_hexagon() {
+        let (vertices, faces) = unit_cube();
+        // Plano x + y + z = 0 por el centro: hexágono regular de lado √2.
+        let plane = Plane3D::from_equation(1.0, 1.0, 1.0, 0.0);
+        match intersect_plane_polyhedron(&vertices, &faces, plane, 1e-9).expect("corte") {
+            PlanePolyhedronSection::Polygon { points } => {
+                assert_eq!(points.len(), 6, "{points:?}");
+                let mut sides: Vec<f64> = (0..6)
+                    .map(|side| points[side].distance(&points[(side + 1) % 6]))
+                    .collect();
+                sides.sort_by(|a, b| a.total_cmp(b));
+                assert!((sides[0] - 2.0_f64.sqrt()).abs() < 1e-9, "{sides:?}");
+                assert!((sides[5] - sides[0]).abs() < 1e-9, "{sides:?}");
+            }
+            other => panic!("expected hexagon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn section_miss_and_coplanar_face_are_honest() {
+        let (vertices, faces) = unit_cube();
+        let far = Plane3D::from_equation(0.0, 0.0, 1.0, -5.0);
+        assert_eq!(
+            intersect_plane_polyhedron(&vertices, &faces, far, 1e-9).expect("corte"),
+            PlanePolyhedronSection::Empty
+        );
+        let face_plane = Plane3D::from_equation(0.0, 0.0, 1.0, -1.0);
+        match intersect_plane_polyhedron(&vertices, &faces, face_plane, 1e-9).expect("corte") {
+            PlanePolyhedronSection::CoplanarFace { face_index, points } => {
+                assert_eq!(face_index, 1);
+                assert_eq!(points.len(), 4);
+            }
+            other => panic!("expected coplanar face, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn section_through_pyramid_apex_is_triangle() {
+        // Pirámide cuadrada: base z=0 de (-1,-1)..(1,1), ápice (0,0,2).
+        let vertices = vec![
+            Point3D::new(-1.0, -1.0, 0.0),
+            Point3D::new(1.0, -1.0, 0.0),
+            Point3D::new(1.0, 1.0, 0.0),
+            Point3D::new(-1.0, 1.0, 0.0),
+            Point3D::new(0.0, 0.0, 2.0),
+        ];
+        let faces = vec![
+            vec![0, 1, 2, 3],
+            vec![0, 1, 4],
+            vec![1, 2, 4],
+            vec![2, 3, 4],
+            vec![3, 0, 4],
+        ];
+        // Plano y=0 por el ápice y el centro de la base: triángulo base 2, altura 2.
+        let plane = Plane3D::from_equation(0.0, 1.0, 0.0, 0.0);
+        match intersect_plane_polyhedron(&vertices, &faces, plane, 1e-9).expect("corte") {
+            PlanePolyhedronSection::Polygon { points } => {
+                assert_eq!(points.len(), 3, "{points:?}");
+                let area = section_area(&points).expect("área");
+                assert!((area - 2.0).abs() < 1e-9, "{area}");
+            }
+            other => panic!("expected triangle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn section_rejects_degenerate_inputs() {
+        let (vertices, faces) = unit_cube();
+        let plane = Plane3D::from_equation(0.0, 0.0, 0.0, 1.0);
+        assert_eq!(
+            intersect_plane_polyhedron(&vertices, &faces, plane, 1e-9),
+            Err(PlaneSectionError::DegeneratePlane)
+        );
+        let good = Plane3D::from_equation(0.0, 0.0, 1.0, 0.0);
+        assert_eq!(
+            intersect_plane_polyhedron(&vertices, &faces, good, -1.0),
+            Err(PlaneSectionError::InvalidTolerance { eps: -1.0 })
+        );
+        assert_eq!(
+            intersect_plane_polyhedron(&vertices, &[vec![0, 99, 1]], good, 1e-9),
+            Err(PlaneSectionError::InvalidFace { face_index: 0 })
+        );
+        let mut bad_vertices = vertices.clone();
+        bad_vertices[0] = Point3D::new(f64::NAN, 0.0, 0.0);
+        assert_eq!(
+            intersect_plane_polyhedron(&bad_vertices, &faces, good, 1e-9),
+            Err(PlaneSectionError::NonFiniteVertex { index: 0 })
+        );
     }
 }

@@ -134,6 +134,90 @@ pub fn review_schedule_for(
     }
 }
 
+// ── FSRS-lite (M, honesto y acotado) ────────────────────────────────────────
+/// FSRS-lite simplificado (NO es FSRS-4.5 completo).
+///
+/// `stability` (días) y `difficulty` (1..=10) por rama. Espacia con memoria
+/// de dificultad además de la caja Leitner. Puro, determinista, sin I/O.
+///
+/// - `grade`: 1 = olvido total, 2 = difícil, 3 = bien, 4 = fácil.
+/// - `stability` init 1.0 día, cap 1/4..=365 días; `difficulty` init 5.0.
+/// - Intervalo = `stability` días (redondeado, mín 1 día, máx 365).
+/// - La caja Leitner sigue siendo la señal principal en `record_outcome`;
+///   FSRS-lite es opt-in para la UI.
+///
+/// Estabilidad/dificultad FSRS-lite por rama.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FsrsState {
+    /// Estabilidad en días (1/4..=365).
+    pub stability_days: f64,
+    /// Dificultad 1..=10 (10 = muy difícil).
+    pub difficulty: f64,
+}
+
+/// Estado inicial FSRS-lite (1 día, dificultad media 5).
+#[must_use]
+pub fn fsrs_init() -> FsrsState {
+    FsrsState {
+        stability_days: 1.0,
+        difficulty: 5.0,
+    }
+}
+
+/// Actualiza FSRS-lite con una calificación `1..=4`.
+///
+/// - Dificultad: `D' = clamp(D - 0.5*(grade-3), 1, 10)` (fácil baja D).
+/// - Estabilidad: `grade=4 → S*2.5`, `3 → S*1.8`, `2 → S*0.8`, `1 → 1.0`
+///   (olvido: reinicia), modulado por `(11-D')/10` en aciertos.
+///
+/// Retorna `Err` si `grade` fuera de `1..=4` (sin pánicos).
+pub fn fsrs_update(state: FsrsState, grade: u8) -> Result<FsrsState, SchedulerError> {
+    if !(1..=4).contains(&grade) {
+        return Err(SchedulerError::InvalidMastery(format!(
+            "grade {grade} fuera de 1..=4"
+        )));
+    }
+    let difficulty = if state.difficulty.is_finite() {
+        state.difficulty.clamp(1.0, 10.0)
+    } else {
+        5.0
+    };
+    let stability = if state.stability_days.is_finite() {
+        state.stability_days.clamp(0.25, 365.0)
+    } else {
+        1.0
+    };
+    let next_difficulty = (difficulty - 0.5 * f64::from(grade as i8 - 3)).clamp(1.0, 10.0);
+    let next_stability = match grade {
+        4 => stability * 2.5 * (11.0 - next_difficulty) / 10.0,
+        3 => stability * 1.8 * (11.0 - next_difficulty) / 10.0,
+        2 => stability * 0.8,
+        _ => 1.0,
+    };
+    Ok(FsrsState {
+        stability_days: next_stability.clamp(0.25, 365.0),
+        difficulty: next_difficulty,
+    })
+}
+
+/// Intervalo FSRS-lite en segundos (`stability` días → secs, cap 365 días).
+#[must_use]
+pub fn fsrs_next_interval_secs(state: FsrsState) -> u64 {
+    let days = if state.stability_days.is_finite() {
+        state.stability_days.clamp(0.25, 365.0)
+    } else {
+        1.0
+    };
+    let secs = days * DAY_SECS as f64;
+    (secs.round() as u64).clamp(DAY_SECS, 365 * DAY_SECS)
+}
+
+/// Epoch del próximo repaso FSRS-lite (`now + intervalo`, saturante).
+#[must_use]
+pub fn fsrs_schedule_next_review(now: u64, state: FsrsState) -> u64 {
+    now.saturating_add(fsrs_next_interval_secs(state))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +307,38 @@ mod tests {
         assert!(c > 0);
         let d = next_interval(3, 2.0);
         assert!(d > 0);
+    }
+
+    #[test]
+    fn fsrs_easy_grows_stability_and_forget_resets() {
+        let init = fsrs_init();
+        assert_eq!(init.stability_days, 1.0);
+        let easy = fsrs_update(init, 4).expect("grade válido");
+        assert!(easy.stability_days > init.stability_days);
+        assert!(easy.difficulty < init.difficulty);
+        let good = fsrs_update(init, 3).expect("grade válido");
+        assert!(good.stability_days > init.stability_days);
+        assert!(good.stability_days < easy.stability_days);
+        let hard = fsrs_update(init, 2).expect("grade válido");
+        assert!(hard.stability_days < init.stability_days);
+        let forgot = fsrs_update(easy, 1).expect("grade válido");
+        assert_eq!(forgot.stability_days, 1.0);
+    }
+
+    #[test]
+    fn fsrs_rejects_invalid_grade_and_caps_interval() {
+        assert!(fsrs_update(fsrs_init(), 0).is_err());
+        assert!(fsrs_update(fsrs_init(), 5).is_err());
+        let mut state = fsrs_init();
+        for _ in 0..20 {
+            state = fsrs_update(state, 4).expect("grade válido");
+        }
+        assert!(state.stability_days <= 365.0);
+        let secs = fsrs_next_interval_secs(state);
+        assert!(secs >= DAY_SECS);
+        assert!(secs <= 365 * DAY_SECS);
+        assert_eq!(fsrs_schedule_next_review(1_000, state), 1_000 + secs);
+        // Saturante sin overflow.
+        assert_eq!(fsrs_schedule_next_review(u64::MAX - 10, state), u64::MAX);
     }
 }

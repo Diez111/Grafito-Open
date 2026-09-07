@@ -27,6 +27,7 @@ Connection: close
 
 #[test]
 fn agent_loop_evaluates_a_tool_and_converges_over_a_mock_provider() {
+    grafito_assistant::clear_rate_limit_for_tests();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
 
@@ -115,6 +116,7 @@ fn agent_loop_evaluates_a_tool_and_converges_over_a_mock_provider() {
 
 #[test]
 fn cancelled_agent_worker_exits_before_contacting_the_provider() {
+    grafito_assistant::clear_rate_limit_for_tests();
     let cancellation = Cancellation::default();
     cancellation.cancel();
 

@@ -6,6 +6,7 @@ use egui::{pos2, vec2, Color32, Painter, Rect, Shape, Stroke, Ui};
 use std::f32::consts::TAU;
 
 use crate::animation::interpolate_color;
+use crate::i18n::{group_label, tool_label, Locale};
 use crate::icons::{draw_icon, Icon};
 use crate::theme::current_theme;
 use crate::tokens::{BREAKPOINT_COMPACT, RADIUS_MD};
@@ -39,11 +40,14 @@ const GROUP_LINE: &[ToolEntry] = &[
     (Tool::Ray, "Semirrecta", ""),
     (Tool::Vector, "Vector", ""),
     (Tool::Perpendicular, "Perpendicular", ""),
+    (Tool::Parallel, "Paralela", ""),
 ];
 
 const GROUP_CIRCLE: &[ToolEntry] = &[
     (Tool::Circle, "Circulo centro-punto", "F4"),
     (Tool::Tangent, "Tangente", ""),
+    (Tool::Arc, "Arco 3 puntos", ""),
+    (Tool::Sector, "Sector circular", ""),
 ];
 
 const GROUP_POLYGON: &[ToolEntry] = &[
@@ -230,6 +234,36 @@ impl ToolGroupId {
     }
 }
 
+impl ToolGroupId {
+    /// Slug estable del grupo (`"move"`, …, `"dynamics"`) para [`group_label`].
+    pub const fn slug(self) -> &'static str {
+        match self {
+            ToolGroupId::Move => "move",
+            ToolGroupId::Point => "point",
+            ToolGroupId::Line => "line",
+            ToolGroupId::Circle => "circle",
+            ToolGroupId::Polygon => "polygon",
+            ToolGroupId::Pencil => "pencil",
+            ToolGroupId::Eraser => "eraser",
+            ToolGroupId::Conic => "conic",
+            ToolGroupId::Curve => "curve",
+            ToolGroupId::Measure => "measure",
+            ToolGroupId::Analysis => "analysis",
+            ToolGroupId::Constraint => "constraint",
+            ToolGroupId::Boolean => "boolean",
+            ToolGroupId::ThreeD => "threed",
+            ToolGroupId::FourD => "fourd",
+            ToolGroupId::Advanced => "advanced",
+            ToolGroupId::Dynamics => "dynamics",
+        }
+    }
+
+    /// Etiqueta del grupo en el idioma pedido. ES idéntica a [`ToolGroupId::label`].
+    pub fn label_localized(self, locale: Locale) -> &'static str {
+        group_label(self.slug(), locale)
+    }
+}
+
 /// Todos los grupos en el orden clásico de la toolbar (sin `ThreeD`).
 pub const ALL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Move,
@@ -351,6 +385,226 @@ pub fn filter_groups_by_pedagogical_level(
     level: grafito_pedagogy::PedagogicalLevel,
 ) -> Vec<ToolGroupId> {
     filter_groups_by_level(groups, level.level_value())
+}
+
+/// Slug estable de cada [`Tool`] para [`tool_label`] (76 variantes).
+///
+/// El `match` es exhaustivo a propósito (sin comodín): añadir una variante a
+/// [`Tool`] rompe la compilación hasta darle su slug en el catálogo i18n.
+pub fn tool_slug(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Select => "select",
+        Tool::Point => "point",
+        Tool::Midpoint => "midpoint",
+        Tool::Line => "line",
+        Tool::Segment => "segment",
+        Tool::Ray => "ray",
+        Tool::Vector => "vector",
+        Tool::Perpendicular => "perpendicular",
+        Tool::Parallel => "parallel",
+        Tool::Circle => "circle",
+        Tool::Tangent => "tangent",
+        Tool::Arc => "arc",
+        Tool::Sector => "sector",
+        Tool::Polygon => "polygon",
+        Tool::RegularPolygon => "regular_polygon",
+        Tool::Pencil => "pencil",
+        Tool::Eraser => "eraser",
+        Tool::EllipseByFoci => "ellipse_foci",
+        Tool::ParabolaByFocusDirectrix => "parabola_focus",
+        Tool::HyperbolaByFoci => "hyperbola_foci",
+        Tool::ConicByFivePoints => "conic_five",
+        Tool::Function => "function",
+        Tool::ParametricCurve2D => "param2d",
+        Tool::PolarCurve => "polar",
+        Tool::ImplicitCurve => "implicit",
+        Tool::VectorField2D => "field2d",
+        Tool::Locus => "locus",
+        Tool::Distance => "distance",
+        Tool::Angle => "angle",
+        Tool::Area => "area",
+        Tool::Slope => "slope",
+        Tool::Root => "root",
+        Tool::Extremum => "extremum",
+        Tool::Inflection => "inflection",
+        Tool::YIntercept => "yintercept",
+        Tool::XIntercept => "xintercept",
+        Tool::Intersect => "intersect",
+        Tool::Analyze => "analyze",
+        Tool::Coincident => "coincident",
+        Tool::DistanceConstraint => "dist_constraint",
+        Tool::AngleConstraint => "angle_constraint",
+        Tool::Horizontal => "horizontal",
+        Tool::Vertical => "vertical",
+        Tool::EqualLength => "equal_length",
+        Tool::Symmetry => "symmetry",
+        Tool::PolygonUnion => "union",
+        Tool::PolygonIntersection => "intersection",
+        Tool::PolygonDifference => "difference",
+        Tool::PolygonXor => "xor",
+        Tool::Point3D => "point3d",
+        Tool::Segment3D => "segment3d",
+        Tool::Line3D => "line3d",
+        Tool::Plane3D => "plane3d",
+        Tool::Sphere3D => "sphere3d",
+        Tool::Cube3D => "cube3d",
+        Tool::Cylinder3D => "cylinder3d",
+        Tool::Cone3D => "cone3d",
+        Tool::Torus3D => "torus3d",
+        Tool::MoebiusStrip => "moebius",
+        Tool::Surface3D => "surface3d",
+        Tool::ParametricCurve3D => "curve3d",
+        Tool::VectorField3D => "field3d",
+        Tool::HyperSurface4D => "hypersurface4d",
+        Tool::Tesseract4D => "tesseract4d",
+        Tool::Hypercube5D => "hypercube5d",
+        Tool::Fractal => "fractal",
+        Tool::Histogram => "histogram",
+        Tool::ScatterPlot => "scatter",
+        Tool::DomainColoring => "domain_coloring",
+        Tool::HeatMap => "heatmap",
+        Tool::ComplexGrid => "complex_grid",
+        Tool::Slider => "slider",
+        Tool::Button => "button",
+        Tool::Image => "image",
+        Tool::TrigAnimation => "trig_animation",
+        Tool::Attractor => "attractor3d",
+    }
+}
+
+/// Las 76 variantes de [`Tool`] en orden estable: prueba que cada una tiene
+/// slug y etiqueta ES/EN no vacía (ver test `all_76_tools_resolve_both_locales`).
+pub const ALL_TOOLS: &[Tool; 76] = &[
+    Tool::Select,
+    Tool::Point,
+    Tool::Midpoint,
+    Tool::Line,
+    Tool::Segment,
+    Tool::Ray,
+    Tool::Vector,
+    Tool::Perpendicular,
+    Tool::Parallel,
+    Tool::Circle,
+    Tool::Tangent,
+    Tool::Arc,
+    Tool::Sector,
+    Tool::Polygon,
+    Tool::RegularPolygon,
+    Tool::Pencil,
+    Tool::Eraser,
+    Tool::EllipseByFoci,
+    Tool::ParabolaByFocusDirectrix,
+    Tool::HyperbolaByFoci,
+    Tool::ConicByFivePoints,
+    Tool::Function,
+    Tool::ParametricCurve2D,
+    Tool::PolarCurve,
+    Tool::ImplicitCurve,
+    Tool::VectorField2D,
+    Tool::Locus,
+    Tool::Distance,
+    Tool::Angle,
+    Tool::Area,
+    Tool::Slope,
+    Tool::Root,
+    Tool::Extremum,
+    Tool::Inflection,
+    Tool::YIntercept,
+    Tool::XIntercept,
+    Tool::Intersect,
+    Tool::Analyze,
+    Tool::Coincident,
+    Tool::DistanceConstraint,
+    Tool::AngleConstraint,
+    Tool::Horizontal,
+    Tool::Vertical,
+    Tool::EqualLength,
+    Tool::Symmetry,
+    Tool::PolygonUnion,
+    Tool::PolygonIntersection,
+    Tool::PolygonDifference,
+    Tool::PolygonXor,
+    Tool::Point3D,
+    Tool::Segment3D,
+    Tool::Line3D,
+    Tool::Plane3D,
+    Tool::Sphere3D,
+    Tool::Cube3D,
+    Tool::Cylinder3D,
+    Tool::Cone3D,
+    Tool::Torus3D,
+    Tool::MoebiusStrip,
+    Tool::Surface3D,
+    Tool::ParametricCurve3D,
+    Tool::VectorField3D,
+    Tool::HyperSurface4D,
+    Tool::Tesseract4D,
+    Tool::Hypercube5D,
+    Tool::Fractal,
+    Tool::Histogram,
+    Tool::ScatterPlot,
+    Tool::DomainColoring,
+    Tool::HeatMap,
+    Tool::ComplexGrid,
+    Tool::Slider,
+    Tool::Button,
+    Tool::Image,
+    Tool::TrigAnimation,
+    Tool::Attractor,
+];
+
+/// Nombre visible de una herramienta en el idioma pedido.
+///
+/// ES idéntico a la etiqueta estática de `GROUP_*`; si un slug no resolviera
+/// (no ocurre: ver test), se conserva la etiqueta estática como fallback
+/// visible en lugar de mostrar vacío.
+fn entry_display_name(tool: Tool, fallback: &'static str, locale: Locale) -> &'static str {
+    let labeled = tool_label(tool_slug(tool), locale);
+    if labeled.is_empty() {
+        fallback
+    } else {
+        labeled
+    }
+}
+
+// ── A11Y resto (F10-B): foco visible + live-region, render puro sin I/O ──
+
+/// Live-region polite para lectores de pantalla, sin widgets nuevos.
+///
+/// Etiqueta una respuesta YA existente (`WidgetInfo` → backend AccessKit).
+/// No crea `Area`s ni reservas: se verificó que un `Area` flotante rompe el
+/// hover/clic de `ui.interact` en egui 0.29 (tests de toasts). Render puro,
+/// sin I/O ni spawn. Límite honesto: egui 0.29 no expone rol ARIA-live; esto
+/// es lo mejor disponible sin subir egui (P2).
+pub fn tag_live_region(response: &egui::Response, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    response.widget_info(move || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text.clone())
+    });
+}
+
+/// Texto polite de la herramienta actual. Puro: deriva de `Tool`, sin I/O.
+pub fn toolbar_live_text(current: Tool, locale: Locale) -> String {
+    let name = tool_label(tool_slug(current), locale);
+    let name = if name.is_empty() {
+        tool_slug(current)
+    } else {
+        name
+    };
+    match locale {
+        Locale::Es => format!("Herramienta: {name}"),
+        Locale::En => format!("Tool: {name}"),
+    }
+}
+
+/// Enter/Espacio activan el control enfocado por teclado (paridad con clic).
+fn key_activates_focused(ui: &Ui, response: &egui::Response) -> bool {
+    response.has_focus()
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+        })
 }
 
 // ── Vector icon drawing functions ──
@@ -750,8 +1004,9 @@ pub const fn icon_for_tool(tool: Tool) -> IconFn {
         Tool::VectorField2D | Tool::VectorField3D => icon_vector,
         Tool::Locus => icon_curve,
         Tool::Midpoint => icon_midpoint,
-        Tool::Perpendicular => icon_perpendicular,
+        Tool::Perpendicular | Tool::Parallel => icon_perpendicular,
         Tool::Tangent => icon_tangent,
+        Tool::Arc | Tool::Sector => icon_circle,
         Tool::Distance | Tool::Angle | Tool::Area | Tool::Slope => icon_measure,
         Tool::Root
         | Tool::Extremum
@@ -806,14 +1061,43 @@ pub fn draw_tool_icon(painter: &Painter, rect: Rect, tool: Tool, color: Color32)
 /// Equivalente a [`toolbar_filtered`] con [`ALL_GROUPS`] y, opcionalmente,
 /// `ToolGroupId::ThreeD`.
 pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> egui::Response {
+    toolbar_localized(ui, current_tool, is_3d, Locale::Es)
+}
+
+/// Toolbar clásica con etiquetas en el idioma pedido (ver [`toolbar`]).
+/// ES idéntico al actual; EN traduce grupos y herramientas vía catálogo i18n.
+pub fn toolbar_localized(
+    ui: &mut Ui,
+    current_tool: &mut Tool,
+    is_3d: bool,
+    locale: Locale,
+) -> egui::Response {
     if is_3d {
         let mut groups: Vec<ToolGroupId> = ALL_GROUPS.to_vec();
         groups.push(ToolGroupId::ThreeD);
         groups.push(ToolGroupId::FourD);
-        toolbar_filtered(ui, current_tool, &groups)
+        toolbar_filtered_localized(ui, current_tool, &groups, locale)
     } else {
-        toolbar_filtered(ui, current_tool, ALL_GROUPS)
+        toolbar_filtered_localized(ui, current_tool, ALL_GROUPS, locale)
     }
+}
+
+/// Selector compacto de idioma ES/EN para la barra de herramientas.
+///
+/// Piel pura: muta `locale` en memoria, sin I/O ni spawn. La persistencia vive
+/// en `AppConfig::locale` (grafito-app/src/utils.rs): tras el cambio, el caller
+/// guarda la config (ver `save_app_config`). Códigos de idioma, no texto
+/// traducible: no necesita claves del catálogo.
+pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
+    ui.horizontal(|ui| {
+        let _ = ui
+            .selectable_value(locale, Locale::Es, "ES")
+            .on_hover_text("Idioma · Language: Español");
+        let _ = ui
+            .selectable_value(locale, Locale::En, "EN")
+            .on_hover_text("Idioma · Language: English");
+    })
+    .response
 }
 
 pub fn toolbar_uses_overflow(viewport_width: f32) -> bool {
@@ -851,57 +1135,82 @@ pub fn toolbar_filtered(
     current_tool: &mut Tool,
     groups: &[ToolGroupId],
 ) -> egui::Response {
+    toolbar_filtered_localized(ui, current_tool, groups, Locale::Es)
+}
+
+/// Toolbar filtrada con etiquetas en el idioma pedido (ver [`toolbar_filtered`]).
+/// ES idéntico al actual; EN traduce grupos y herramientas vía catálogo i18n.
+pub fn toolbar_filtered_localized(
+    ui: &mut Ui,
+    current_tool: &mut Tool,
+    groups: &[ToolGroupId],
+    locale: Locale,
+) -> egui::Response {
     let theme = current_theme(ui.ctx());
 
-    egui::Frame::none()
+    let frame = egui::Frame::none()
         .fill(theme.toolbar_bg)
         .inner_margin(egui::Margin::symmetric(4.0, TOOLBAR_VERTICAL_PADDING))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
             ui.set_height(TOOLBAR_BUTTON_SIZE);
             if toolbar_uses_overflow(ui.ctx().screen_rect().width()) {
-                compact_toolbar(ui, current_tool, groups);
+                compact_toolbar(ui, current_tool, groups, locale);
             } else {
                 ui.horizontal(|ui| {
                     for &gid in groups {
                         let (_, tools) = gid.def();
-                        tool_group(ui, current_tool, tools);
+                        tool_group(ui, current_tool, tools, locale);
                     }
                 });
             }
-        })
-        .response
+        });
+    // A11Y live-region: anuncia la herramienta vigente etiquetando el frame
+    // (respuesta existente, sin widgets nuevos). Lee `current_tool` tras el
+    // frame: si cambió en este mismo frame, se anuncia la nueva.
+    tag_live_region(&frame.response, toolbar_live_text(*current_tool, locale));
+    frame.response
 }
 
 /// Toolbar inline para top bar Scandinavian single-bar — sin `Frame` duplicado.
 /// Comparte el `Frame` del `TopBottomPanel` padre; solo coloca los grupos.
 pub fn toolbar_inline(ui: &mut Ui, current_tool: &mut Tool, groups: &[ToolGroupId]) {
+    toolbar_inline_localized(ui, current_tool, groups, Locale::Es)
+}
+
+/// Toolbar inline con etiquetas en el idioma pedido (ver [`toolbar_inline`]).
+pub fn toolbar_inline_localized(
+    ui: &mut Ui,
+    current_tool: &mut Tool,
+    groups: &[ToolGroupId],
+    locale: Locale,
+) {
     ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
     if toolbar_uses_overflow(ui.ctx().screen_rect().width()) {
-        compact_toolbar(ui, current_tool, groups);
+        compact_toolbar(ui, current_tool, groups, locale);
     } else {
         ui.horizontal(|ui| {
             for &gid in groups {
                 let (_, tools) = gid.def();
-                tool_group(ui, current_tool, tools);
+                tool_group(ui, current_tool, tools, locale);
             }
         });
     }
 }
 
-fn compact_toolbar(ui: &mut Ui, current: &mut Tool, groups: &[ToolGroupId]) {
+fn compact_toolbar(ui: &mut Ui, current: &mut Tool, groups: &[ToolGroupId], locale: Locale) {
     let inline_groups = compact_toolbar_inline_groups(*current, groups);
     ui.horizontal(|ui| {
         for group in inline_groups.into_iter().flatten() {
             let (_, tools) = group.def();
-            tool_group(ui, current, tools);
+            tool_group(ui, current, tools, locale);
         }
         if groups
             .iter()
             .copied()
             .any(|group| !inline_groups.contains(&Some(group)))
         {
-            compact_toolbar_overflow(ui, current, groups, inline_groups);
+            compact_toolbar_overflow(ui, current, groups, inline_groups, locale);
         }
     });
 }
@@ -911,6 +1220,7 @@ fn compact_toolbar_overflow(
     current: &mut Tool,
     groups: &[ToolGroupId],
     inline_groups: [Option<ToolGroupId>; 2],
+    locale: Locale,
 ) {
     let theme = current_theme(ui.ctx());
     let popup_id = ui.make_persistent_id("compact_toolbar_overflow");
@@ -920,6 +1230,11 @@ fn compact_toolbar_overflow(
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Más herramientas")
     });
     let response = response.on_hover_text("Más herramientas");
+    // A11Y: foco visible + Enter/Espacio abren el menú (paridad con clic).
+    if response.has_focus() {
+        theme.paint_focus_ring(ui.painter(), rect);
+    }
+    let key_activate = key_activates_focused(ui, &response);
     let progress = ui.ctx().animate_bool(
         ui.id().with("compact_toolbar_overflow_state"),
         response.hovered(),
@@ -940,10 +1255,18 @@ fn compact_toolbar_overflow(
         interpolate_color(theme.text_secondary, theme.text_primary, progress),
     );
 
-    if response.clicked() {
+    if response.clicked() || key_activate {
         ui.memory_mut(|memory| memory.toggle_popup(popup_id));
     }
-    show_compact_toolbar_overflow(ui, popup_id, &response, current, groups, inline_groups);
+    show_compact_toolbar_overflow(
+        ui,
+        popup_id,
+        &response,
+        current,
+        groups,
+        inline_groups,
+        locale,
+    );
 }
 
 fn show_compact_toolbar_overflow(
@@ -953,6 +1276,7 @@ fn show_compact_toolbar_overflow(
     current: &mut Tool,
     groups: &[ToolGroupId],
     inline_groups: [Option<ToolGroupId>; 2],
+    locale: Locale,
 ) {
     if !ui.memory(|memory| memory.is_popup_open(popup_id)) {
         return;
@@ -980,17 +1304,18 @@ fn show_compact_toolbar_overflow(
                                 continue;
                             }
                             let (_, tools) = group.def();
-                            ui.collapsing(ToolGroupId::label(group), |ui| {
+                            ui.collapsing(group.label_localized(locale), |ui| {
                                 for (tool, name, key) in tools {
+                                    let display = entry_display_name(*tool, name, locale);
                                     let selected = *current == *tool;
                                     let response = ui.add_sized(
                                         [menu_width - 12.0, TOOL_MENU_ITEM_HEIGHT],
-                                        egui::Button::new(*name)
+                                        egui::Button::new(display)
                                             .selected(selected)
                                             .truncate()
                                             .shortcut_text(*key),
                                     );
-                                    if response.on_hover_text(*name).clicked() {
+                                    if response.on_hover_text(display).clicked() {
                                         selected_tool = Some(*tool);
                                     }
                                 }
@@ -1011,7 +1336,12 @@ fn show_compact_toolbar_overflow(
     }
 }
 
-fn tool_group(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry]) -> egui::Response {
+fn tool_group(
+    ui: &mut Ui,
+    current: &mut Tool,
+    tools: &[ToolEntry],
+    locale: Locale,
+) -> egui::Response {
     let theme = current_theme(ui.ctx());
     let is_active = if *current == Tool::Select {
         std::ptr::eq(tools.as_ptr(), GROUP_MOVE.as_ptr())
@@ -1022,13 +1352,19 @@ fn tool_group(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry]) -> egui::Res
         .iter()
         .find(|(t, _, _)| *t == *current)
         .unwrap_or(&tools[0]);
-    let label = active_tool.1;
+    let label = entry_display_name(active_tool.0, active_tool.1, locale);
     let popup_id = ui.make_persistent_id(("tool_group_menu", tools.as_ptr() as usize));
 
     let size = egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let resp = resp.on_hover_text(label);
+    // A11Y: foco visible (anillo 2px del tema) + Enter/Espacio = clic.
+    // El orden Tab lo da egui por orden de creación (orden de `groups`, 5/8/17).
+    if resp.has_focus() {
+        theme.paint_focus_ring(ui.painter(), rect);
+    }
+    let key_activate = key_activates_focused(ui, &resp);
 
     let state_progress = ui.ctx().animate_bool(
         ui.id()
@@ -1074,7 +1410,7 @@ fn tool_group(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry]) -> egui::Res
         draw_group_menu_indicator(ui.painter(), rect, theme.text_tertiary);
     }
 
-    if resp.clicked() {
+    if resp.clicked() || key_activate {
         if tools.len() > 1 {
             ui.memory_mut(|memory| memory.toggle_popup(popup_id));
         } else if let Some((tool, _, _)) = tools.first() {
@@ -1086,7 +1422,7 @@ fn tool_group(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry]) -> egui::Res
         }
     }
     if tools.len() > 1 {
-        show_tool_group_menu(ui, popup_id, &resp, current, tools);
+        show_tool_group_menu(ui, popup_id, &resp, current, tools, locale);
     }
     resp
 }
@@ -1097,6 +1433,7 @@ fn show_tool_group_menu(
     button: &egui::Response,
     current: &mut Tool,
     tools: &[ToolEntry],
+    locale: Locale,
 ) {
     if !ui.memory(|memory| memory.is_popup_open(popup_id)) {
         return;
@@ -1109,7 +1446,7 @@ fn show_tool_group_menu(
         .default_width(tool_menu_width(ui.ctx().screen_rect().width()))
         .constrain_to(ui.ctx().screen_rect())
         .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| tool_menu(ui, current, tools));
+            egui::Frame::popup(ui.style()).show(ui, |ui| tool_menu(ui, current, tools, locale));
         });
 
     let clicked_outside = button.clicked_elsewhere() && response.response.clicked_elsewhere();
@@ -1138,7 +1475,7 @@ fn draw_group_menu_indicator(painter: &Painter, rect: Rect, color: Color32) {
     );
 }
 
-fn tool_menu(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry]) {
+fn tool_menu(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry], locale: Locale) {
     let menu_width = tool_menu_width(ui.ctx().screen_rect().width());
     let menu_max_height = tool_menu_max_height(ui.ctx().screen_rect().height());
     ui.set_min_width(menu_width);
@@ -1149,11 +1486,12 @@ fn tool_menu(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry]) {
         .max_height(menu_max_height)
         .show(ui, |ui| {
             for (tool, name, key) in tools {
+                let display = entry_display_name(*tool, name, locale);
                 let response = ui.add_sized(
                     [menu_width, TOOL_MENU_ITEM_HEIGHT],
-                    egui::Button::new(*name).truncate().shortcut_text(*key),
+                    egui::Button::new(display).truncate().shortcut_text(*key),
                 );
-                if response.on_hover_text(*name).clicked() {
+                if response.on_hover_text(display).clicked() {
                     *current = *tool;
                     ui.memory_mut(|memory| memory.close_popup());
                 }
@@ -1293,7 +1631,7 @@ mod tests {
                             ToolGroupId::Circle,
                         ] {
                             let (_, tools) = group.def();
-                            rects.push(tool_group(ui, &mut current, tools).rect);
+                            rects.push(tool_group(ui, &mut current, tools, Locale::Es).rect);
                         }
                     });
                 });
@@ -1398,5 +1736,133 @@ mod tests {
         // University (level 15) passes all
         let uni = filter_groups_by_level(&perspective, 15);
         assert_eq!(uni, perspective.to_vec());
+    }
+
+    #[test]
+    fn all_76_tools_resolve_non_empty_labels_in_both_locales() {
+        use crate::i18n::{tool_label, Locale};
+        assert_eq!(ALL_TOOLS.len(), 76, "Tool debe seguir en 76 variantes");
+        // Sin duplicados (cada variante una sola vez).
+        let mut names: Vec<&str> = ALL_TOOLS.iter().map(Tool::name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 76);
+        for tool in ALL_TOOLS {
+            let slug = tool_slug(*tool);
+            assert!(!slug.is_empty(), "sin slug para {:?}", tool);
+            assert!(
+                !tool_label(slug, Locale::Es).is_empty(),
+                "sin etiqueta ES para {slug}"
+            );
+            assert!(
+                !tool_label(slug, Locale::En).is_empty(),
+                "sin etiqueta EN para {slug}"
+            );
+        }
+        // Las 6 incorporadas en O2 resuelven (eran el delta 70 -> 76).
+        for slug in [
+            "parallel",
+            "arc",
+            "sector",
+            "button",
+            "image",
+            "trig_animation",
+        ] {
+            assert!(!tool_label(slug, Locale::Es).is_empty(), "slug {slug}");
+            assert!(!tool_label(slug, Locale::En).is_empty(), "slug {slug}");
+        }
+    }
+
+    #[test]
+    fn spanish_toolbar_matches_current_static_tables_exactly() {
+        use crate::i18n::Locale;
+        // Migración neutra: ES vía catálogo == literales GROUP_* actuales.
+        for &group in UNIVERSITY_TOOL_GROUPS {
+            assert_eq!(group.label_localized(Locale::Es), group.label());
+            let (_, tools) = group.def();
+            for (tool, static_label, _) in tools {
+                assert_eq!(
+                    entry_display_name(*tool, static_label, Locale::Es),
+                    *static_label,
+                    "ES cambió para {:?}",
+                    tool
+                );
+            }
+        }
+        // EN traduce de verdad (al menos un grupo y una herramienta difieren).
+        assert_ne!(
+            ToolGroupId::Point.label_localized(crate::i18n::Locale::En),
+            ToolGroupId::Point.label()
+        );
+        assert_ne!(
+            entry_display_name(Tool::Point, "Punto", crate::i18n::Locale::En),
+            "Punto"
+        );
+    }
+
+    #[test]
+    fn localized_toolbars_render_in_english_without_panic() {
+        use crate::i18n::Locale;
+        let ctx = egui::Context::default();
+        let mut current = Tool::Select;
+        let mut locale = Locale::En;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1_280.0, 160.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    toolbar_filtered_localized(
+                        ui,
+                        &mut current,
+                        UNIVERSITY_TOOL_GROUPS,
+                        Locale::En,
+                    );
+                    toolbar_inline_localized(ui, &mut current, UNIVERSITY_TOOL_GROUPS, Locale::En);
+                    locale_selector(ui, &mut locale);
+                });
+            },
+        );
+        assert_eq!(current, Tool::Select);
+        assert_eq!(locale, Locale::En);
+    }
+
+    #[test]
+    fn toolbar_live_text_names_the_current_tool() {
+        use crate::i18n::Locale;
+        let es = toolbar_live_text(Tool::Line, Locale::Es);
+        assert!(es.starts_with("Herramienta: "), "{es}");
+        assert!(es.len() > "Herramienta: ".len());
+        let en = toolbar_live_text(Tool::Line, Locale::En);
+        assert!(en.starts_with("Tool: "), "{en}");
+        // Cambiar de herramienta cambia el anuncio (el lector anuncia el cambio).
+        assert_ne!(
+            toolbar_live_text(Tool::Line, Locale::Es),
+            toolbar_live_text(Tool::Circle, Locale::Es)
+        );
+    }
+
+    #[test]
+    fn live_region_tags_without_new_widgets() {
+        use crate::i18n::Locale;
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1_280.0, 160.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // Vacío: no etiqueta (sin nodo fantasma).
+                    let (_, noop) = ui.allocate_exact_size(egui::Vec2::ZERO, egui::Sense::hover());
+                    tag_live_region(&noop, String::new());
+                    // Con texto: etiqueta la respuesta existente.
+                    let (_, tagged) =
+                        ui.allocate_exact_size(egui::Vec2::ZERO, egui::Sense::hover());
+                    tag_live_region(&tagged, toolbar_live_text(Tool::Line, Locale::Es));
+                });
+            },
+        );
     }
 }

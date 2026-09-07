@@ -1945,16 +1945,191 @@ fn grafito_docs_tool(call: &ToolCall) -> ToolResult {
     ToolResult::text(&call.id, true, catalog)
 }
 
-fn ask_user_tool(call: &ToolCall) -> ToolResult {
-    let Some(question) = string_arg(call, "question") else {
-        return err_result(&call.id, ToolError::FaltaCampo { campo: "question" });
+/// Tope de la pregunta de aclaración (UI legible, sin truncar el presupuesto).
+pub const MAX_ASK_USER_QUESTION_CHARS: usize = 300;
+/// Tope de opciones ofrecidas como botones (1-click, sin scroll).
+pub const MAX_ASK_USER_OPTIONS: usize = 4;
+/// Tope por opción (etiqueta de botón legible).
+pub const MAX_ASK_USER_OPTION_CHARS: usize = 64;
+
+/// Pedido de aclaración puro: pregunta + opciones para botones (sin Document, sin I/O).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskUserRequest {
+    /// Pregunta corta en español rioplatense (`1..=300` chars).
+    pub question: String,
+    /// Opciones para botones (`0..=4`, cada una `1..=64` chars).
+    pub options: Vec<String>,
+}
+
+impl AskUserRequest {
+    /// Vista de la pregunta (ya saneada).
+    #[must_use]
+    pub fn question(&self) -> &str {
+        &self.question
+    }
+
+    /// Vista de las opciones (ya saneadas).
+    #[must_use]
+    pub fn options(&self) -> &[String] {
+        &self.options
+    }
+}
+
+/// Sanea una pregunta: trim + colapso de espacios, `1..=300` chars.
+///
+/// Pura y acotada; `None` si vacía.
+fn sanitize_ask_user_question(raw: &str) -> Option<String> {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let clipped: String = trimmed.chars().take(MAX_ASK_USER_QUESTION_CHARS).collect();
+    let clipped = clipped.trim().to_owned();
+    (!clipped.is_empty()).then_some(clipped)
+}
+
+/// Sanea opciones: trim, sin vacías, `1..=64` chars cada una, tope 4.
+///
+/// Pura y determinista; nunca falla (vacío → sin opciones).
+fn sanitize_ask_user_options(value: Option<&Value>) -> Vec<String> {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return Vec::new();
     };
-    let _ = question;
-    ToolResult::text(
-        &call.id,
-        false,
-        "ask_user requiere una respuesta explícita del usuario en el chat de Grafito; repítela como pregunta de aclaración en lugar de ejecutarla en silencio (E_CONSENTIMIENTO)".to_string(),
-    )
+    let mut out = Vec::new();
+    for item in array {
+        if out.len() >= MAX_ASK_USER_OPTIONS {
+            break;
+        }
+        let Some(text) = item.as_str() else {
+            continue;
+        };
+        let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = collapsed.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let clipped: String = trimmed
+            .chars()
+            .take(MAX_ASK_USER_OPTION_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_owned();
+        if clipped.is_empty() {
+            continue;
+        }
+        if out.iter().any(|known: &String| known == &clipped) {
+            continue;
+        }
+        out.push(clipped);
+    }
+    out
+}
+
+/// Parsea un pedido `ask_user` (pregunta obligatoria, opciones opcionales).
+///
+/// Puro; `Err` solo si falta `question` (el resto se sanea sin fallar).
+pub fn parse_ask_user_request(call: &ToolCall) -> Result<AskUserRequest, ToolError> {
+    let raw = call
+        .arguments
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // `string_arg` ya exige no-vacío y ≤2000 bytes; acá se revalida en chars.
+    if raw.trim().is_empty() {
+        return Err(ToolError::FaltaCampo { campo: "question" });
+    }
+    if raw.len() > MAX_ARG_BYTES {
+        return Err(ToolError::PresupuestoExcedido(format!(
+            "el argumento 'question' excede el límite de {MAX_ARG_BYTES} bytes (E_PRESUPUESTO)"
+        )));
+    }
+    let Some(question) = sanitize_ask_user_question(raw) else {
+        return Err(ToolError::FaltaCampo { campo: "question" });
+    };
+    let options = sanitize_ask_user_options(call.arguments.get("options"));
+    Ok(AskUserRequest { question, options })
+}
+
+/// Serializa el pendiente estructurado que la UI muestra como botones.
+///
+/// Incluye `needs_user:true` como marcador estable + `message` en español con
+/// la jerga histórica (`respuesta explícita`/`aclaración`) para compatibilidad
+/// con el contrato anterior (`ok=false`, repetir en chat si no hay UI).
+/// Puro y acotado (pregunta ≤300 + 4×64 + overhead < 2048).
+#[must_use]
+pub fn format_ask_user_pending(request: &AskUserRequest) -> String {
+    let payload = json!({
+        "needs_user": true,
+        "question": request.question,
+        "options": request.options,
+        "message": "ask_user requiere una respuesta explícita del usuario en el chat de Grafito; repítela como pregunta de aclaración en lugar de ejecutarla en silencio (E_CONSENTIMIENTO) / ask_user requires an explicit user answer in the Grafito chat; repeat it as a clarifying question instead of running silently",
+    });
+    payload.to_string()
+}
+
+/// Parsea un pendiente `ask_user` desde el contenido de un `ToolResult`.
+///
+/// Puro; `None` si no es el marcador `needs_user:true` o si la forma es inválida.
+#[must_use]
+pub fn parse_ask_user_pending(content: &str) -> Option<AskUserRequest> {
+    let value: Value = serde_json::from_str(content).ok()?;
+    let object = value.as_object()?;
+    if object.get("needs_user").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let question = object.get("question").and_then(Value::as_str)?;
+    let question = sanitize_ask_user_question(question)?;
+    let options = sanitize_ask_user_options(object.get("options"));
+    Some(AskUserRequest { question, options })
+}
+
+/// Construye el `function_call_output` (Responses API) con la respuesta del usuario.
+///
+/// Puro y acotado (respuesta ≤300 chars); la respuesta vacía se rechaza con `None`.
+#[must_use]
+pub fn ask_user_answer_function_output(call_id: &str, answer: &str) -> Option<Value> {
+    let collapsed = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let clipped: String = trimmed
+        .chars()
+        .take(MAX_ASK_USER_QUESTION_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    if clipped.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": clipped,
+    }))
+}
+
+/// Construye el mensaje `tool` (Chat Completions) con la respuesta del usuario.
+///
+/// Puro y acotado; `None` si la respuesta está vacía.
+#[must_use]
+pub fn ask_user_answer_tool_message(call_id: &str, answer: &str) -> Option<Value> {
+    let output = ask_user_answer_function_output(call_id, answer)?;
+    let content = output.get("output").and_then(Value::as_str)?.to_owned();
+    Some(json!({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": content,
+    }))
+}
+
+fn ask_user_tool(call: &ToolCall) -> ToolResult {
+    let request = match parse_ask_user_request(call) {
+        Ok(request) => request,
+        Err(error) => return err_result(&call.id, error),
+    };
+    ToolResult::text(&call.id, false, format_ask_user_pending(&request))
 }
 
 // ── Tools pedagógicas ───────────────────────────────────────────────────────
@@ -2349,11 +2524,12 @@ pub fn grafito_docs_schema() -> ToolSchema {
 pub fn ask_user_schema() -> ToolSchema {
     ToolSchema::new(
         "ask_user",
-        "Hace una única pregunta corta de aclaración matemática al usuario cuando falta un valor obligatorio.",
+        "Hace una única pregunta corta de aclaración matemática al usuario cuando falta un valor obligatorio. La UI la muestra como botones; nunca se ejecuta en silencio.",
         json!({
             "type": "object",
             "properties": {
-                "question": {"type": "string", "description": "Pregunta de aclaración para el usuario"}
+                "question": {"type": "string", "description": "Pregunta de aclaración para el usuario"},
+                "options": {"type": "array", "description": "Opciones cortas para botones (0-4, cada una 1-64 chars)", "items": {"type": "string"}}
             },
             "required": ["question"]
         }),
@@ -2604,6 +2780,55 @@ mod tests {
             "{}",
             r.content
         );
+    }
+
+    #[test]
+    fn ask_user_pending_round_trip_con_opciones() {
+        // Tool → pendiente estructurado → parse → respuesta → function_call_output.
+        // Nunca bloquea: todo puro y acotado.
+        let r = safe_dispatch(
+            "ask_user",
+            json!({"question": "¿qué valor le doy a x?", "options": ["0", "1", "otra"]}),
+        );
+        assert!(!r.ok, "ask_user nunca ejecuta en silencio: {}", r.content);
+        let pending = parse_ask_user_pending(&r.content).expect("pendiente parseable");
+        assert_eq!(pending.question(), "¿qué valor le doy a x?");
+        assert_eq!(
+            pending.options(),
+            &["0".to_owned(), "1".to_owned(), "otra".to_owned()]
+        );
+        // La respuesta del usuario vuelve al loop como function_call_output.
+        let output = ask_user_answer_function_output(&r.call_id, "1").expect("respuesta no vacía");
+        assert_eq!(output["type"], "function_call_output");
+        assert_eq!(output["call_id"], r.call_id);
+        assert_eq!(output["output"], "1");
+        let tool_msg = ask_user_answer_tool_message(&r.call_id, "1").expect("mensaje tool");
+        assert_eq!(tool_msg["role"], "tool");
+        assert_eq!(tool_msg["tool_call_id"], r.call_id);
+        assert_eq!(tool_msg["content"], "1");
+    }
+
+    #[test]
+    fn ask_user_sanea_y_acota_sin_bloquear() {
+        // Sin opciones → pendiente válido con lista vacía (default honesto).
+        let r = safe_dispatch("ask_user", json!({"question": "  ¿cuánto vale x?  "}));
+        let pending = parse_ask_user_pending(&r.content).expect("pendiente");
+        assert_eq!(pending.question(), "¿cuánto vale x?");
+        assert!(pending.options().is_empty());
+        // Opciones vacías/duplicadas/largas se sanean; tope 4.
+        let r = safe_dispatch(
+            "ask_user",
+            json!({"question": "¿x?", "options": ["", "  ", "a", "a", "b", "c", "d", "e"]}),
+        );
+        let pending = parse_ask_user_pending(&r.content).expect("pendiente");
+        assert_eq!(pending.options().len(), MAX_ASK_USER_OPTIONS);
+        assert_eq!(pending.options()[0], "a");
+        // No-pendiente nunca parsea (texto libre o sin marcador).
+        assert!(parse_ask_user_pending("hola").is_none());
+        assert!(parse_ask_user_pending(r#"{"needs_user":false,"question":"¿x?"}"#).is_none());
+        // Respuesta vacía no produce salida (no se inventa contenido).
+        assert!(ask_user_answer_function_output("c1", "   ").is_none());
+        assert!(ask_user_answer_tool_message("c1", "").is_none());
     }
 
     // — scaffold —

@@ -8,6 +8,13 @@ use egui::epaint::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
 use grafito_core::{Document, GeoObject, ObjectId, RenderQuality};
 use grafito_geometry::Camera3D;
+use grafito_render::function_compute::{
+    resolve_function_job, FunctionDispatchOutcome, PendingFunctionJob,
+};
+use grafito_render::gpu_readback::MAX_GPU_READBACK_JOBS_IN_FLIGHT;
+use grafito_render::implicit_compute::{
+    advance_implicit_job, ImplicitDispatchOutcome, ImplicitResolveStep, PendingImplicitJob,
+};
 use grafito_render::{DepthRenderTarget, Renderer, Vertex3D};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -108,6 +115,190 @@ pub struct GpuCanvasResources {
     pub cache_2d: Option<Cache2DKey>,
     pub cache_3d: Option<Cache3DKey>,
     pub scene_readiness: GpuSceneReadiness,
+    /// Slot background de compute 2D (frente B6, cap 1): el dispatch retorna
+    /// sin esperar y el resolve llega en frames posteriores. Mientras hay job
+    /// en vuelo el frame pinta el último-frame-válido (fallback CPU) y el
+    /// readiness queda `Pending` ("calculando…" observable).
+    pub gpu_compute_slot: GpuComputeSlot,
+}
+
+/// Job GPU en vuelo: un dispatch de función o de implícita. El slot admite
+/// como máximo [`MAX_GPU_READBACK_JOBS_IN_FLIGHT`] (1): si llega otro, el
+/// viejo se aborta (`unmap` idempotente) y se descarta por generación.
+/// Nunca hay cola infinita.
+#[derive(Debug)]
+pub(crate) enum PendingGpuComputeJob {
+    Function {
+        object_id: ObjectId,
+        job: PendingFunctionJob,
+    },
+    Implicit {
+        object_id: ObjectId,
+        job: PendingImplicitJob,
+    },
+}
+
+/// Slot cap-1 para jobs GPU en vuelo con descarte del viejo por generación.
+/// Genérico sobre el job para testear la máquina sin GPU (`J = mock` en
+/// tests); en producción `J = PendingGpuComputeJob`.
+#[derive(Debug)]
+pub struct GpuComputeSlot<J = PendingGpuComputeJob> {
+    pending: Option<(u64, J)>,
+    next_generation: u64,
+}
+
+/// `Default` manual sin bound `J: Default`: el slot inicia libre sea cual
+/// sea el job (el `derive` exigiría `PendingGpuComputeJob: Default`).
+impl<J> Default for GpuComputeSlot<J> {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            next_generation: 0,
+        }
+    }
+}
+
+impl<J> GpuComputeSlot<J> {
+    /// Ocupa el slot. Si había otro job en vuelo, lo retorna para que el
+    /// llamante lo aborte (nunca se encola: cap 1 por presupuesto).
+    pub(crate) fn submit(&mut self, job: J) -> Option<J> {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.pending
+            .replace((generation, job))
+            .map(|(_, evicted)| evicted)
+    }
+
+    /// Extrae el job en vuelo (el avance lo consume y devuelve `NotReady` o
+    /// `Done`; en el primer caso se re-encola con [`Self::requeue`]).
+    pub(crate) fn take(&mut self) -> Option<(u64, J)> {
+        self.pending.take()
+    }
+
+    /// Re-encola un job aún en vuelo. El slot debe estar libre (el take y el
+    /// avance son secuenciales en el mismo prepare, sin reentrancia); si se
+    /// ocupó entretanto se reporta y el llamante debe abortar el job.
+    pub(crate) fn requeue(&mut self, generation: u64, job: J) -> Option<J> {
+        if self.pending.is_none() {
+            self.pending = Some((generation, job));
+            None
+        } else {
+            log::error!("GpuComputeSlot ocupado en requeue; se descarta el job re-encolado");
+            Some(job)
+        }
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Estado "calculando…" para futuro wiring UI (panels fuera de este
+    /// frente): `true` mientras hay un readback GPU en vuelo para la escena.
+    /// Nunca es un spinner infinito: el timeout del waiter (250 ms) lo
+    /// convierte en fallback CPU, garantizado.
+    #[allow(dead_code)] // B6-Next: badge "calculando…" en panels (prohibido en este frente)
+    pub fn is_computing(&self) -> bool {
+        self.is_pending()
+    }
+}
+
+/// El slot es cap-1 por presupuesto; si el presupuesto cambia, este frente
+/// (take/requeue/drain) debe revisarse. Fijado en compilación.
+const _: () = assert!(MAX_GPU_READBACK_JOBS_IN_FLIGHT == 1);
+
+/// Aborta un job desalojado u obsoleto: `unmap` idempotente del buffer
+/// implicado para no dejar el pipeline inutilizado. Requiere el compute del
+/// mismo pipeline que hizo el dispatch.
+fn abort_pending_job(renderer: &Renderer, evicted: PendingGpuComputeJob) {
+    match evicted {
+        PendingGpuComputeJob::Function { .. } => {
+            if let Some(compute) = renderer.function_compute.as_ref() {
+                compute.abort_eval();
+            } else {
+                log::warn!("GpuComputeSlot: sin function pipeline para abortar job desalojado");
+            }
+        }
+        PendingGpuComputeJob::Implicit { .. } => {
+            if let Some(compute) = renderer.implicit_compute.as_ref() {
+                compute.abort_eval();
+            } else {
+                log::warn!("GpuComputeSlot: sin implicit pipeline para abortar job desalojado");
+            }
+        }
+    }
+}
+
+/// Drena el slot background al inicio del prepare (frente B6, non-blocking).
+///
+/// - Sin job en vuelo: no hace nada.
+/// - Job vigente y listo: popula el cache del objeto (el build posterior hará
+///   hit) y libera el slot.
+/// - Job vigente y aún en vuelo: lo re-encola; el llamante debe saltar el
+///   dispatch nuevo y pintar el último-frame-válido (fallback CPU).
+/// - Job obsoleto (objeto borrado, tipo cambiado o key distinta): `unmap` +
+///   descarte honesto sin escribir.
+///
+/// Nunca espera a la GPU: el llamante debe haber hecho el
+/// `device.poll(Maintain::Poll)` no-bloqueante del frame antes de llamar.
+fn drain_gpu_compute_slot(resources: &mut GpuCanvasResources, document: &Document) {
+    let Some((generation, pending)) = resources.gpu_compute_slot.take() else {
+        return;
+    };
+    let Ok(renderer_lock) = resources.renderer.read() else {
+        log::warn!("Renderer lock poisoned drenando GpuComputeSlot; se descarta el job");
+        return;
+    };
+    let Some(renderer) = renderer_lock.as_ref() else {
+        return;
+    };
+    match pending {
+        PendingGpuComputeJob::Function { object_id, job } => {
+            let (Some(compute), Some(obj)) = (
+                renderer.function_compute.as_ref(),
+                document.get_object(object_id),
+            ) else {
+                if let Some(compute) = renderer.function_compute.as_ref() {
+                    compute.abort_eval();
+                }
+                return;
+            };
+            let GeoObject::Function(fun) = obj else {
+                compute.abort_eval();
+                return;
+            };
+            // `resolve_function_job` re-chequea la key: si el objeto cambió,
+            // no escribe y retorna false (descarte honesto). Terminal: no se
+            // re-encola (el resolve de función es de una sola fase).
+            let _ = resolve_function_job(compute, fun, &document.variables, job);
+        }
+        PendingGpuComputeJob::Implicit { object_id, job } => {
+            let (Some(compute), Some(obj)) = (
+                renderer.implicit_compute.as_ref(),
+                document.get_object(object_id),
+            ) else {
+                if let Some(compute) = renderer.implicit_compute.as_ref() {
+                    compute.abort_eval();
+                }
+                return;
+            };
+            let GeoObject::ImplicitCurve(ic) = obj else {
+                compute.abort_eval();
+                return;
+            };
+            match advance_implicit_job(compute, ic, &document.variables, job) {
+                ImplicitResolveStep::Done(_) => {}
+                ImplicitResolveStep::NotReady(boxed) => {
+                    let requeue = PendingGpuComputeJob::Implicit {
+                        object_id,
+                        job: *boxed,
+                    };
+                    if let Some(orphan) = resources.gpu_compute_slot.requeue(generation, requeue) {
+                        abort_pending_job(renderer, orphan);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub struct PersistentBuffers {
@@ -330,37 +521,38 @@ const GPU_3D_CURVE_STEPS: usize = 4_000;
 const GPU_3D_MAX_ATTRACTORS: usize = 8;
 const GPU_3D_MAX_ATTRACTOR_STEPS: usize = 16_000;
 const GPU_2D_CURVE_STEPS: usize = 4_000;
-// All current compute APIs synchronously map their readback buffers: each
-// pipeline (`implicit_compute`, `parametric_compute`, `function_compute`,
-// `vector_compute`, ...) performs a bounded synchronous readback via
-// `sync_readback_with_timeout` in `grafito-render/src/lib.rs`.
+// Frente B6: `implicit_compute` y `function_compute` ya NO bloquean el hilo
+// de prepare: usan dispatch sin espera + slot background (`GpuComputeSlot`,
+// cap 1) con resolve en frames posteriores (ver `gpu_readback.rs`). El resto
+// (`parametric_compute`, `vector_compute`, ...) mantiene el readback síncrono
+// acotado vía `sync_readback_with_timeout` en `grafito-render/src/lib.rs`.
 //
 // Mitigación Wait→Poll: el readback NO usa `device.poll(Maintain::Wait)`
 // bloqueante; usa `Maintain::Poll` (no bloqueante) en un bucle con timeout de
-// 250 ms (`SYNC_GPU_READBACK_TIMEOUT`), de modo que una GPU colgada no puede
-// congelar el hilo de prepare de egui indefinidamente. Aun así, el readback
-// síncrono bloquea el hilo hasta el deadline, por lo que se acota a UN intento
-// por frame.
+// 250 ms (`SYNC_GPU_READBACK_TIMEOUT` = `GPU_READBACK_TIMEOUT`, origen único),
+// de modo que una GPU colgada no puede congelar el hilo de prepare de egui
+// indefinidamente. Aun así, el readback síncrono bloquea el hilo hasta el
+// deadline, por lo que se acota a UN intento por frame.
 //
 // Verificado: `take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)` en prepare() 2D
 // y 3D garantiza 1 readback síncrono como máximo por frame: los callbacks 2D
 // (`CanvasCallback`) y 3D (`Canvas3DCallback`) son mutuamente excluyentes
 // (match `ViewMode::D2`/`ViewMode::D3` en app.rs), por lo que el `.take(1)` de
 // cada rama acota el readback global a 1 por frame.
-// TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando el
-// hilo de prepare de egui (ver también los TODO P1 en `grafito-render/src/*_compute.rs`).
+// TODO P1 (B6-Next): migrar `parametric`/`vector`/`complex`/`domain`/`fill`
+// al patrón `dispatch_*` + slot (ver `function_compute`/`implicit_compute`).
+// Sin waiter thread a propósito: en wgpu 22 `Device` no es `Clone`, así que
+// la espera se distribuye en frames (poll no-bloqueante por frame).
 const MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE: usize = 1;
 
 /// Helper de readback asíncrono sin `device.poll(Wait)` bloqueante.
 /// Mitigación Wait→Poll ya activa: `grafito-render::sync_readback_with_timeout`
 /// usa `device.poll(Maintain::Poll)` (no bloqueante) en bucle con timeout de
 /// 250 ms, por lo que una GPU colgada no congela el hilo de prepare.
-/// TODO P1 async batch: reemplazar el `take(1)` + `maybe_compute_*` sincrónicos
-/// por un `GpuComputeBatch` que acumule encoders, haga un único `queue.submit`
-/// y resuelva los `map_async` con `device.poll(Maintain::Poll)` + `await`
-/// fuera del hilo de `prepare` (vía `spawn_blocking`/`pollster`).
-/// Mientras tanto el frame se limita a `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE`
-/// intentos sincrónicos (ver `CanvasCallback::prepare` y `Canvas3DCallback::prepare`).
+/// Frente B6: Implicit/Function ya resuelven vía slot background
+/// (`GpuComputeSlot` + `drain_gpu_compute_slot`); el resto sigue limitado a
+/// `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` intentos sincrónicos
+/// (ver `CanvasCallback::prepare` y `Canvas3DCallback::prepare`).
 #[allow(dead_code)]
 fn gpu_async_readback_todo_note() {
     // Placeholder para el batch asíncrono futuro; no hace `device.poll(Wait)`.
@@ -628,6 +820,14 @@ impl CallbackTrait for CanvasCallback {
             return vec![];
         }
 
+        // Frente B6: un poll no-bloqueante por frame dispara los callbacks
+        // `map_async` pendientes sin esperar a la GPU (µs), y el drain avanza
+        // el slot background (resolve non-blocking o re-encola). El hilo UI
+        // nunca bloquea: mientras el job sigue en vuelo se pinta el
+        // último-frame-válido por la ruta CPU.
+        device.poll(wgpu::Maintain::Poll);
+        drain_gpu_compute_slot(resources, &self.document);
+
         if resources.buffers_2d.as_ref().is_some_and(|buffers| {
             completed_2d_buffer_matches_scene(buffers.completed_key.as_ref(), &current_key)
         }) && resources.cache_2d.as_ref() == Some(&current_key)
@@ -637,6 +837,12 @@ impl CallbackTrait for CanvasCallback {
             return vec![];
         }
         resources.scene_readiness.clear_2d();
+
+        // Frente B6: con un job background en vuelo no se encola más trabajo
+        // GPU (cap 1): este frame construye el fallback CPU
+        // (último-frame-válido, sin flicker negro) y el readiness queda
+        // Pending ("calculando…" observable vía `is_computing`).
+        let gpu_busy = resources.gpu_compute_slot.is_pending();
 
         let (vertices, indices, object_ranges) = {
             let Ok(renderer_lock) = resources.renderer.write() else {
@@ -657,8 +863,11 @@ impl CallbackTrait for CanvasCallback {
                 self.document.object_count()
             );
 
-            // GPU computing for objects using a single-pass objects_iter
-            {
+            // GPU computing for objects using a single-pass objects_iter.
+            // Con job en vuelo se salta el dispatch (cap 1); Implicit/Function
+            // usan dispatch sin espera (slot background) y el resto mantiene
+            // el path síncrono acotado a 1 intento por frame.
+            if !gpu_busy {
                 #[cfg(feature = "profile")]
                 puffin::profile_scope!("gpu_compute_single_pass");
                 let implicit_comp = renderer.implicit_compute.as_ref();
@@ -689,7 +898,9 @@ impl CallbackTrait for CanvasCallback {
                     match obj {
                         grafito_core::GeoObject::ImplicitCurve(ic) => {
                             if let Some(compute) = implicit_comp {
-                                let _ = grafito_render::implicit_compute::maybe_compute_on_gpu(
+                                // Frente B6: dispatch sin espera; el resolve
+                                // llega en un frame posterior vía el slot.
+                                match grafito_render::implicit_compute::dispatch_implicit_on_gpu(
                                     compute,
                                     device,
                                     queue,
@@ -697,7 +908,20 @@ impl CallbackTrait for CanvasCallback {
                                     &view,
                                     &self.document.variables,
                                     self.document.render_quality,
-                                );
+                                ) {
+                                    ImplicitDispatchOutcome::Dispatched(boxed) => {
+                                        if let Some(evicted) = resources.gpu_compute_slot.submit(
+                                            PendingGpuComputeJob::Implicit {
+                                                object_id: id,
+                                                job: *boxed,
+                                            },
+                                        ) {
+                                            abort_pending_job(renderer, evicted);
+                                        }
+                                    }
+                                    ImplicitDispatchOutcome::Cached
+                                    | ImplicitDispatchOutcome::Unsupported => {}
+                                }
                             }
                         }
                         grafito_core::GeoObject::Function(fun) => {
@@ -711,16 +935,27 @@ impl CallbackTrait for CanvasCallback {
                                     fun.domain_max.unwrap_or(world_br.x),
                                 );
                                 let domain = (min_x, max_x);
-                                let _ =
-                                    grafito_render::function_compute::maybe_compute_function_on_gpu(
-                                        compute,
-                                        device,
-                                        queue,
-                                        fun,
-                                        domain,
-                                        function_grid_size,
-                                        &self.document.variables,
-                                    );
+                                // Frente B6: dispatch sin espera; el resolve
+                                // llega en un frame posterior vía el slot.
+                                match grafito_render::function_compute::dispatch_function_on_gpu(
+                                    compute,
+                                    device,
+                                    queue,
+                                    fun,
+                                    domain,
+                                    function_grid_size,
+                                    &self.document.variables,
+                                ) {
+                                    FunctionDispatchOutcome::Dispatched(job) => {
+                                        if let Some(evicted) = resources.gpu_compute_slot.submit(
+                                            PendingGpuComputeJob::Function { object_id: id, job },
+                                        ) {
+                                            abort_pending_job(renderer, evicted);
+                                        }
+                                    }
+                                    FunctionDispatchOutcome::Cached
+                                    | FunctionDispatchOutcome::Unsupported => {}
+                                }
                             }
                         }
                         grafito_core::GeoObject::ParametricCurve2D(pc) => {
@@ -805,13 +1040,16 @@ impl CallbackTrait for CanvasCallback {
         };
 
         if vertices.is_empty() {
-            resources.cache_2d = Some(current_key.clone());
-            if let Some(buffers) = &mut resources.buffers_2d {
-                buffers.index_count = 0;
-                buffers.object_ranges.clear();
-                buffers.completed_key = Some(current_key.clone());
+            // Frente B6: con job en vuelo no se autoriza la escena (ver abajo).
+            if !resources.gpu_compute_slot.is_pending() {
+                resources.cache_2d = Some(current_key.clone());
+                if let Some(buffers) = &mut resources.buffers_2d {
+                    buffers.index_count = 0;
+                    buffers.object_ranges.clear();
+                    buffers.completed_key = Some(current_key.clone());
+                }
+                resources.scene_readiness.mark_2d(current_key);
             }
-            resources.scene_readiness.mark_2d(current_key);
             return vec![];
         }
 
@@ -896,6 +1134,14 @@ impl CallbackTrait for CanvasCallback {
         queue.write_buffer(&buffers.index_buffer, 0, index_data);
         buffers.index_count = index_count;
         buffers.object_ranges = object_ranges;
+        // Frente B6: mientras hay un job background en vuelo, la escena queda
+        // Pending ("calculando…"): no se setea `completed_key`/`cache_2d` ni
+        // se marca `GpuReady`, así el frame pinta el último-frame-válido por
+        // la ruta CPU (sin flicker negro) y el cache-hit con pendiente es
+        // inalcanzable por construcción. El timeout (250 ms) libera el slot.
+        if resources.gpu_compute_slot.is_pending() {
+            return vec![encoder.finish()];
+        }
         buffers.completed_key = Some(current_key.clone());
 
         resources.cache_2d = Some(current_key.clone());
@@ -1306,7 +1552,8 @@ impl CallbackTrait for Canvas3DCallback {
 mod tests {
     use super::{
         callback_can_paint_2d, callback_can_paint_3d, plan_2d_scene, BaseRenderer2D, Cache2DKey,
-        Cache3DKey, GpuSceneReadiness, Persistent3DBuffers, Scene2DReadiness, Scene3DReadiness,
+        Cache3DKey, GpuComputeSlot, GpuSceneReadiness, Persistent3DBuffers, Scene2DReadiness,
+        Scene3DReadiness,
     };
     use grafito_core::{
         GeoObject, ObjectId, ParametricCurve2DObj, ParametricCurve3DObj, RegularPolychoron4DObj,
@@ -1784,5 +2031,53 @@ mod tests {
         assert_eq!(w, super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
         assert!((h as f64 / w as f64 - 2160.0 / 15360.0).abs() < 0.01);
         assert!(h >= 1);
+    }
+
+    /// El slot inicia libre: sin job en vuelo no hay estado "calculando…".
+    #[test]
+    fn gpu_compute_slot_starts_free_without_computing() {
+        let slot = GpuComputeSlot::<u32>::default();
+        assert!(!slot.is_pending());
+        assert!(!slot.is_computing());
+    }
+
+    /// Cap 1: el segundo submit desaloja al viejo (nunca cola infinita) y el
+    /// desalojado se retorna para abortar (`unmap` idempotente).
+    #[test]
+    fn gpu_compute_slot_caps_one_job_and_evicts_oldest() {
+        let mut slot = GpuComputeSlot::default();
+        assert!(slot.submit(10_u32).is_none());
+        assert!(slot.is_pending());
+        assert!(slot.is_computing());
+        assert_eq!(slot.submit(20_u32), Some(10_u32));
+        assert_eq!(slot.take(), Some((1, 20_u32)));
+        assert!(!slot.is_pending());
+        assert!(!slot.is_computing());
+    }
+
+    /// Ciclo take → avance → requeue conserva la generación; el take libera
+    /// el slot y el requeue lo vuelve a ocupar (sin reentrancia en prepare).
+    #[test]
+    fn gpu_compute_slot_take_requeue_cycle_keeps_generation() {
+        let mut slot = GpuComputeSlot::default();
+        assert!(slot.submit(7_u32).is_none());
+        let Some((generation, job)) = slot.take() else {
+            panic!("slot must hold the submitted job");
+        };
+        assert_eq!(generation, 0);
+        assert!(!slot.is_pending());
+        assert!(slot.requeue(generation, job).is_none());
+        assert!(slot.is_pending());
+        assert_eq!(slot.take(), Some((0, 7_u32)));
+    }
+
+    /// Re-encolar con el slot ocupado devuelve el job (no se pierde en
+    /// silencio): el llamante debe abortarlo.
+    #[test]
+    fn gpu_compute_slot_requeue_into_occupied_slot_returns_job() {
+        let mut slot = GpuComputeSlot::default();
+        slot.submit(1_u32);
+        assert_eq!(slot.requeue(99, 2_u32), Some(2_u32));
+        assert_eq!(slot.take(), Some((0, 1_u32)));
     }
 }

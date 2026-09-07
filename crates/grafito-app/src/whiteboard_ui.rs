@@ -3,6 +3,12 @@
 //! `grafito_whiteboard`, sincronizada en ambas direcciones con
 //! `Document.whiteboard` (editar marca el documento sucio con snapshot undo;
 //! abrir/nuevo/undo/redo recarga la sesión).
+//!
+//! Libro de 32 hojas: `WhiteboardBook` vive en memoria y persiste completo en
+//! `Document.whiteboard_pages` (+ índice `whiteboard_current`) vía
+//! `push_whiteboard_book_and_store`; `Document.whiteboard` queda como espejo
+//! de la hoja actual para el export SVG existente. JSON viejo sin libro se
+//! migra en memoria a una hoja ("Hoja 1") sin pérdida.
 
 use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Stroke};
 use grafito_core::{ChangeSet, Document};
@@ -93,6 +99,45 @@ pub fn validate_whiteboard_element(
 /// Compara pizarras por elementos (`WhiteboardDoc` no implementa `PartialEq`).
 pub fn whiteboard_docs_equal(first: &WhiteboardDoc, second: &WhiteboardDoc) -> bool {
     first.elements() == second.elements()
+}
+
+/// Umbral de aviso suave: la hoja llega al 90% (450 de 500 elementos).
+pub const WHITEBOARD_FILL_WARN_ELEMENTS: usize = 450;
+/// Umbral de aviso fuerte: la hoja llega al 96% (480 de 500 elementos).
+pub const WHITEBOARD_FILL_ALMOST_FULL_ELEMENTS: usize = 480;
+
+/// Aviso de llenado en español según elementos de la hoja (`None` con cupo).
+/// 450..480 suave, 480..500 casi llena; el tope 500 lo rechaza `try_add`.
+pub fn whiteboard_fill_warning(element_count: usize) -> Option<String> {
+    if element_count >= MAX_WHITEBOARD_ELEMENTS_PER_PAGE {
+        Some(format!(
+            "La hoja está llena ({element_count} de {MAX_WHITEBOARD_ELEMENTS_PER_PAGE}); creá otra hoja o borrá algo"
+        ))
+    } else if element_count >= WHITEBOARD_FILL_ALMOST_FULL_ELEMENTS {
+        Some(format!(
+            "La hoja está casi llena ({element_count} de {MAX_WHITEBOARD_ELEMENTS_PER_PAGE}); conviene crear otra hoja"
+        ))
+    } else if element_count >= WHITEBOARD_FILL_WARN_ELEMENTS {
+        Some(format!(
+            "La hoja tiene {element_count} de {MAX_WHITEBOARD_ELEMENTS_PER_PAGE} elementos"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Aviso solo al cruzar un umbral (450/480) para no spamear toasts:
+/// `None` si el tramo `[before, after)` no cruza ningún umbral.
+fn crossed_fill_warning(before: usize, after: usize) -> Option<String> {
+    for threshold in [
+        WHITEBOARD_FILL_WARN_ELEMENTS,
+        WHITEBOARD_FILL_ALMOST_FULL_ELEMENTS,
+    ] {
+        if before < threshold && after >= threshold {
+            return whiteboard_fill_warning(after);
+        }
+    }
+    None
 }
 
 /// Página individual de la pizarra (una “hoja” tipo Notepad).
@@ -199,14 +244,77 @@ impl WhiteboardBook {
 
     pub fn load_to_session(&self, session: &mut WhiteboardSession) {
         if let Some(page) = self.current() {
-            session.doc = page.doc.clone();
+            session.replace_doc(page.doc.clone());
             session.pan = page.pan;
             session.zoom = page.zoom;
-            session.active_text = None;
-            session.interaction = WhiteboardInteraction::Idle;
-            session.pencil_points.clear();
-            session.marquee = None;
         }
+    }
+}
+
+/// Paridad de cotas con `grafito-core` (rompe compilación si divergen).
+const _WHITEBOARD_BOOK_PAGES_PARITY: () =
+    assert!(MAX_WHITEBOARD_PAGES == grafito_core::MAX_WHITEBOARD_PAGES);
+const _WHITEBOARD_BOOK_ELEMENTS_PARITY: () =
+    assert!(MAX_WHITEBOARD_ELEMENTS_PER_PAGE == grafito_core::MAX_WHITEBOARD_ELEMENTS_PER_PAGE);
+
+/// Siguiente id de hoja tras los títulos "Hoja N" (sin panic).
+fn next_id_after_titles(pages: &[WhiteboardPage]) -> usize {
+    let mut max_seen = 0usize;
+    for page in pages {
+        if let Some(rest) = page.title.strip_prefix("Hoja ") {
+            if let Ok(number) = rest.trim().parse::<usize>() {
+                if number > max_seen {
+                    max_seen = number;
+                }
+            }
+        }
+    }
+    max_seen
+        .saturating_add(1)
+        .max(pages.len().saturating_add(1))
+        .max(1)
+}
+
+impl WhiteboardBook {
+    /// Foto persistible del libro para `Document::set_whiteboard_book`.
+    /// Pura (sin I/O): clona títulos, vistas y contenido de cada hoja.
+    pub fn to_persisted(&self) -> Vec<grafito_core::WhiteboardPageData> {
+        self.pages
+            .iter()
+            .map(|page| grafito_core::WhiteboardPageData {
+                title: page.title.clone(),
+                doc: page.doc.clone(),
+                pan: page.pan,
+                zoom: page.zoom,
+            })
+            .collect()
+    }
+
+    /// Reconstruye el libro desde páginas persistidas (vacío → 1 hoja).
+    /// Acota a 32 hojas y recorta el índice al rango válido, sin panic.
+    pub fn from_persisted(pages: &[grafito_core::WhiteboardPageData], current: usize) -> Self {
+        if pages.is_empty() {
+            return Self::default();
+        }
+        let mut book = Self {
+            pages: Vec::new(),
+            current: 0,
+            next_id: 1,
+        };
+        for page in pages.iter().take(MAX_WHITEBOARD_PAGES) {
+            book.pages.push(WhiteboardPage {
+                title: page.title.clone(),
+                doc: page.doc.clone(),
+                pan: page.pan,
+                zoom: page.zoom,
+            });
+        }
+        if book.pages.is_empty() {
+            return Self::default();
+        }
+        book.next_id = next_id_after_titles(&book.pages);
+        book.current = current.min(book.pages.len() - 1);
+        book
     }
 }
 
@@ -226,6 +334,8 @@ pub struct WhiteboardSession {
     pub show_palette: bool,
     /// Último rechazo de cota en español (se muestra como toast y se limpia).
     pub last_error: Option<String>,
+    /// Último aviso de llenado 450/480 en español (toast informativo, edge-triggered).
+    pub last_warning: Option<String>,
 }
 
 impl Default for WhiteboardSession {
@@ -246,6 +356,7 @@ impl Default for WhiteboardSession {
             pen_width: 2.0,
             show_palette: false,
             last_error: None,
+            last_warning: None,
         }
     }
 }
@@ -307,8 +418,12 @@ impl WhiteboardSession {
     pub fn try_add(&mut self, element: WhiteboardElement) -> Result<(), String> {
         match validate_whiteboard_element(&element, self.doc.len()) {
             Ok(()) => {
+                let before = self.doc.len();
                 self.doc.add(element);
                 self.last_error = None;
+                let after = self.doc.len();
+                // Aviso 450/480 solo al cruzar el umbral (sin spam de toasts).
+                self.last_warning = crossed_fill_warning(before, after);
                 Ok(())
             }
             Err(message) => {
@@ -942,33 +1057,37 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     }
 }
 
-/// Carga `Document.whiteboard` en la sesión y la hoja actual del libro.
-/// Se usa al abrir la pizarra, tras abrir/crear documento y tras undo/redo.
-pub fn load_whiteboard_into_session(
-    session: &mut WhiteboardSession,
-    book: &mut WhiteboardBook,
-    document: &Document,
-) {
-    let replacement = document.whiteboard.clone();
-    if let Some(page) = book.current_mut() {
-        page.doc = replacement.clone();
+/// Compara libros persistidos por contenido (título, vista y elementos).
+fn whiteboard_pages_equal(
+    first: &[grafito_core::WhiteboardPageData],
+    second: &[grafito_core::WhiteboardPageData],
+) -> bool {
+    if first.len() != second.len() {
+        return false;
     }
-    session.replace_doc(replacement);
+    first.iter().zip(second.iter()).all(|(a, b)| {
+        a.title == b.title
+            && a.pan == b.pan
+            && a.zoom == b.zoom
+            && whiteboard_docs_equal(&a.doc, &b.doc)
+    })
 }
 
-/// Guarda la sesión en `Document.whiteboard` con snapshot undo previo.
-/// Marca el documento sucio vía baseline semántico (la pizarra se serializa
-/// en el documento). Devuelve `true` si hubo cambios que volcar.
-pub fn push_whiteboard_undo_and_store(
-    session_doc: &WhiteboardDoc,
-    document: &mut Document,
+/// El libro en memoria coincide con lo persistido (páginas e índice actual).
+fn whiteboard_book_matches_document(book: &WhiteboardBook, document: &Document) -> bool {
+    let (persisted, current) = document.whiteboard_export_pages();
+    book.current == current && whiteboard_pages_equal(&book.to_persisted(), &persisted)
+}
+
+/// Snapshot undo con evicción acotada (`MAX_UNDO` / `MAX_UNDO_BYTES`);
+/// helper compartido por la ruta legada y la del libro (un solo snapshot
+/// por gesto). Sin panic: las pilas vacías cortan los bucles.
+fn snapshot_whiteboard_undo(
+    document: &Document,
     undo_stack: &mut VecDeque<Document>,
     redo_stack: &mut VecDeque<ChangeSet>,
     undo_total_bytes: &mut usize,
-) -> bool {
-    if whiteboard_docs_equal(session_doc, &document.whiteboard) {
-        return false;
-    }
+) {
     let snapshot = document.clone();
     let bytes = snapshot.estimated_bytes();
     undo_stack.push_back(snapshot);
@@ -988,10 +1107,94 @@ pub fn push_whiteboard_undo_and_store(
             break;
         }
     }
+}
+
+/// Carga el libro completo en memoria y la hoja actual en la sesión.
+/// Si el documento es legado (solo `Document.whiteboard`), migra en memoria
+/// a un libro de una hoja sin pérdida; el volcado posterior lo persiste.
+pub fn load_book_from_document(
+    session: &mut WhiteboardSession,
+    book: &mut WhiteboardBook,
+    document: &Document,
+) {
+    let (pages, current) = document.whiteboard_export_pages();
+    *book = WhiteboardBook::from_persisted(&pages, current);
+    book.load_to_session(session);
+}
+
+/// Carga `Document.whiteboard` en la sesión y la hoja actual del libro.
+/// Se usa al abrir la pizarra, tras abrir/crear documento y tras undo/redo.
+/// (Compat: delega en `load_book_from_document`, que trae el libro completo.)
+pub fn load_whiteboard_into_session(
+    session: &mut WhiteboardSession,
+    book: &mut WhiteboardBook,
+    document: &Document,
+) {
+    load_book_from_document(session, book, document);
+}
+
+/// Guarda la sesión en `Document.whiteboard` con snapshot undo previo.
+/// Marca el documento sucio vía baseline semántico (la pizarra se serializa
+/// en el documento). Devuelve `true` si hubo cambios que volcar.
+/// (Compat: la ruta principal `push_whiteboard_book_and_store` la reutiliza
+/// para el espejo de la hoja actual con un único snapshot por gesto.)
+pub fn push_whiteboard_undo_and_store(
+    session_doc: &WhiteboardDoc,
+    document: &mut Document,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
+    undo_total_bytes: &mut usize,
+) -> bool {
+    if whiteboard_docs_equal(session_doc, &document.whiteboard) {
+        return false;
+    }
+    snapshot_whiteboard_undo(document, undo_stack, redo_stack, undo_total_bytes);
     document.whiteboard = session_doc.clone();
     document.bump_version();
     document.invalidate_all_caches();
     true
+}
+
+/// Guarda el libro completo (hojas 1..=32 + índice actual) en `Document`
+/// con un único snapshot undo. Sincroniza la sesión a la hoja actual,
+/// compara con lo persistido y escribe vía `set_whiteboard_book` (que
+/// actualiza el espejo `whiteboard` para el export SVG existente).
+/// Devuelve `true` si hubo cambios que volcar.
+pub fn push_whiteboard_book_and_store(
+    book: &mut WhiteboardBook,
+    session: &WhiteboardSession,
+    document: &mut Document,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
+    undo_total_bytes: &mut usize,
+) -> bool {
+    book.save_current_from_session(session);
+    let pages = book.to_persisted();
+    let (persisted, persisted_current) = document.whiteboard_export_pages();
+    if book.current == persisted_current
+        && whiteboard_pages_equal(&pages, &persisted)
+        && !document.whiteboard_pages.is_empty()
+    {
+        return false;
+    }
+    // Un solo snapshot por gesto: la ruta legada lo toma si cambió la hoja
+    // actual; si solo cambió el índice (o es migración de legado), se toma aquí.
+    let current_doc = book
+        .current()
+        .map(|page| page.doc.clone())
+        .unwrap_or_default();
+    if !push_whiteboard_undo_and_store(
+        &current_doc,
+        document,
+        undo_stack,
+        redo_stack,
+        undo_total_bytes,
+    ) {
+        snapshot_whiteboard_undo(document, undo_stack, redo_stack, undo_total_bytes);
+    }
+    // `set_whiteboard_book` solo rechaza libro vacío o >32 hojas, imposible
+    // aquí (el libro siempre tiene 1..=32); si fallara, no hay panic.
+    document.set_whiteboard_book(pages, book.current).is_ok()
 }
 
 /// Recarga la sesión desde el documento si difieren (apertura, undo externo).
@@ -1002,29 +1205,40 @@ pub fn sync_whiteboard_from_document(app: &mut crate::GrafitoApp) {
     load_whiteboard_into_session(&mut app.whiteboard, &mut app.whiteboard_book, &app.document);
 }
 
-/// Vuelca la sesión al documento si cambió respecto a `before` (foto tomada
-/// antes del input del frame). Hace snapshot undo y actualiza el libro.
+/// Vuelca sesión y libro al documento si algo cambió (edición del frame,
+/// cambio de hoja o migración de legado pendiente). Hace un único snapshot
+/// undo y deja el libro en memoria sincronizado.
 pub fn commit_whiteboard_to_document(
     app: &mut crate::GrafitoApp,
     before: &[WhiteboardElement],
 ) -> bool {
-    if app.whiteboard.doc.elements() == before {
+    let session_changed = app.whiteboard.doc.elements() != before;
+    // Sincroniza la sesión a la hoja actual antes de comparar el libro.
+    let cur = app.whiteboard.clone();
+    app.whiteboard_book.save_current_from_session(&cur);
+    // Legado con contenido (o varias hojas) aún sin `Vec`: hay que migrarlo
+    // a disco aunque el espejo ya coincida.
+    let needs_migration_write = app.document.whiteboard_pages.is_empty()
+        && (app.whiteboard_book.len() > 1 || !app.whiteboard.doc.is_empty());
+    if !session_changed
+        && !needs_migration_write
+        && whiteboard_book_matches_document(&app.whiteboard_book, &app.document)
+    {
         return false;
     }
-    let session_doc = app.whiteboard.doc.clone();
-    let committed = push_whiteboard_undo_and_store(
-        &session_doc,
+    push_whiteboard_book_and_store(
+        &mut app.whiteboard_book,
+        &app.whiteboard,
         &mut app.document,
         &mut app.undo_stack,
         &mut app.redo_stack,
         &mut app.undo_total_bytes,
-    );
-    if committed {
-        let cur = app.whiteboard.clone();
-        app.whiteboard_book.save_current_from_session(&cur);
-    }
-    committed
+    )
 }
+
+// Export SVG del libro: ver `grafito_core::whiteboard_pages_to_svg` (proyección
+// pura del libro persistido, un `.svg` por hoja). El export existente de la
+// hoja actual sigue en `export.rs` leyendo el espejo `Document.whiteboard`.
 
 /// Undo/redo con la pizarra abierta: `update()` hace early-return en este modo
 /// y los atajos globales no llegan; se restauran sesión y libro desde el
@@ -1467,6 +1681,9 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
     if let Some(message) = app.whiteboard.last_error.take() {
         app.notify(message, grafito_ui::toast::ToastKind::Error);
     }
+    if let Some(warning) = app.whiteboard.last_warning.take() {
+        app.notify(warning, grafito_ui::toast::ToastKind::Info);
+    }
     let busy = ctx.input(|input| input.pointer.any_down());
     // F17: la pizarra hace early-return en `GrafitoApp::update`, así que el
     // scheduler unificado no corre en este modo; este es su scheduler local,
@@ -1632,5 +1849,319 @@ mod tests {
         load_whiteboard_into_session(&mut session, &mut book, &document);
         assert!(session.doc.is_empty());
         assert!(whiteboard_docs_equal(&session.doc, &document.whiteboard));
+    }
+
+    #[test]
+    fn whiteboard_fill_warning_fires_at_450_and_480_in_spanish() {
+        assert!(whiteboard_fill_warning(0).is_none());
+        assert!(whiteboard_fill_warning(449).is_none());
+        let soft = whiteboard_fill_warning(450).expect("aviso a 450");
+        assert!(
+            soft.contains("450") && soft.contains("500"),
+            "el aviso cita el conteo en español, fue: {soft}"
+        );
+        let strong = whiteboard_fill_warning(480).expect("aviso a 480");
+        assert!(strong.contains("casi llena"), "fue: {strong}");
+        let full = whiteboard_fill_warning(500).expect("aviso a 500");
+        assert!(full.contains("llena"), "fue: {full}");
+    }
+
+    #[test]
+    fn whiteboard_try_add_warns_only_on_threshold_crossing() {
+        let mut session = WhiteboardSession::default();
+        for _ in 0..449 {
+            session.try_add(test_rectangle()).expect("cupo disponible");
+            assert!(session.last_warning.is_none());
+        }
+        session.try_add(test_rectangle()).expect("elemento 450");
+        assert_eq!(session.doc.len(), 450);
+        let warning = session.last_warning.clone().expect("aviso al cruzar 450");
+        assert!(warning.contains("450"), "fue: {warning}");
+        // Añadir sin cruzar umbral no reavisa (evita spam de toasts).
+        session.try_add(test_rectangle()).expect("elemento 451");
+        assert!(session.last_warning.is_none());
+        // Al cruzar 480 vuelve a avisar en español.
+        for _ in 451..480 {
+            session.try_add(test_rectangle()).expect("cupo disponible");
+        }
+        assert_eq!(session.doc.len(), 480);
+        let warning = session.last_warning.clone().expect("aviso al cruzar 480");
+        assert!(warning.contains("casi llena"), "fue: {warning}");
+    }
+
+    #[test]
+    fn whiteboard_book_roundtrips_32_pages_through_document() {
+        use std::collections::VecDeque;
+
+        let mut book = WhiteboardBook::default();
+        book.current_mut()
+            .expect("hoja 1 disponible")
+            .doc
+            .add(test_rectangle());
+        for index in 2..=MAX_WHITEBOARD_PAGES {
+            let page = book.try_create_page().expect("cupo de hojas");
+            book.switch_to(page);
+            book.current_mut()
+                .expect("hoja disponible")
+                .doc
+                .add(WhiteboardElement::Text {
+                    at: (index as f64, 0.0),
+                    text: format!("hoja {index}"),
+                    size: 14.0,
+                });
+        }
+        assert_eq!(book.len(), MAX_WHITEBOARD_PAGES);
+        assert_eq!(book.current, MAX_WHITEBOARD_PAGES - 1);
+
+        let session = WhiteboardSession {
+            doc: book.current().expect("actual").doc.clone(),
+            ..WhiteboardSession::default()
+        };
+        let mut document = grafito_core::Document::new();
+        let mut undo: VecDeque<grafito_core::Document> = VecDeque::new();
+        let mut redo: VecDeque<grafito_core::ChangeSet> = VecDeque::new();
+        let mut undo_bytes = 0usize;
+        assert!(push_whiteboard_book_and_store(
+            &mut book,
+            &session,
+            &mut document,
+            &mut undo,
+            &mut redo,
+            &mut undo_bytes
+        ));
+        assert_eq!(document.whiteboard_pages.len(), MAX_WHITEBOARD_PAGES);
+        assert_eq!(document.whiteboard_current, MAX_WHITEBOARD_PAGES - 1);
+        // El espejo sigue a la hoja actual (export/validación intactos).
+        assert_eq!(document.whiteboard.len(), 1);
+        // Sin cambios no hay nuevo snapshot.
+        assert!(!push_whiteboard_book_and_store(
+            &mut book,
+            &session,
+            &mut document,
+            &mut undo,
+            &mut redo,
+            &mut undo_bytes
+        ));
+        assert_eq!(undo.len(), 1);
+        // Roundtrip JSON: las 32 hojas sobreviven a guardar/cargar.
+        let json = serde_json::to_string(&document).expect("serializa libro");
+        let loaded: grafito_core::Document =
+            serde_json::from_str(&json).expect("deserializa libro");
+        assert_eq!(loaded.whiteboard_pages.len(), MAX_WHITEBOARD_PAGES);
+        assert_eq!(loaded.whiteboard_current, MAX_WHITEBOARD_PAGES - 1);
+        let mut book2 = WhiteboardBook::default();
+        let mut session2 = WhiteboardSession::default();
+        load_book_from_document(&mut session2, &mut book2, &loaded);
+        assert_eq!(book2.len(), MAX_WHITEBOARD_PAGES);
+        assert_eq!(book2.current, MAX_WHITEBOARD_PAGES - 1);
+        assert_eq!(session2.doc.len(), 1);
+        match &session2.doc.elements()[0] {
+            WhiteboardElement::Text { text, .. } => assert_eq!(text, "hoja 32"),
+            other => panic!("hoja 32 inesperada: {other:?}"),
+        }
+        // Hoja 1 intacta con su rectángulo y su título.
+        assert_eq!(book2.pages[0].title, "Hoja 1");
+        assert_eq!(book2.pages[0].doc.len(), 1);
+    }
+
+    #[test]
+    fn whiteboard_book_migrates_legacy_document_without_loss() {
+        use std::collections::VecDeque;
+
+        let mut document = grafito_core::Document::new();
+        document.whiteboard.add(test_rectangle());
+        assert!(document.whiteboard_pages.is_empty());
+        // Abrir: migra en memoria a 1 hoja sin perder el contenido.
+        let mut book = WhiteboardBook::default();
+        let mut session = WhiteboardSession::default();
+        load_book_from_document(&mut session, &mut book, &document);
+        assert_eq!(book.len(), 1);
+        assert_eq!(session.doc.len(), 1);
+        assert!(whiteboard_docs_equal(&session.doc, &document.whiteboard));
+        // Guardar: persiste el Vec de 1 hoja (ya no se pierde nada).
+        let mut undo: VecDeque<grafito_core::Document> = VecDeque::new();
+        let mut redo: VecDeque<grafito_core::ChangeSet> = VecDeque::new();
+        let mut undo_bytes = 0usize;
+        assert!(push_whiteboard_book_and_store(
+            &mut book,
+            &session,
+            &mut document,
+            &mut undo,
+            &mut redo,
+            &mut undo_bytes
+        ));
+        assert_eq!(document.whiteboard_pages.len(), 1);
+        assert_eq!(document.whiteboard.len(), 1);
+    }
+
+    #[test]
+    fn whiteboard_book_survives_real_save_path_without_losing_pages_2_to_32() {
+        use std::collections::VecDeque;
+
+        // Libro completo de 32 hojas con contenido, título y vista distintos.
+        let mut book = WhiteboardBook::default();
+        book.current_mut()
+            .expect("hoja 1 disponible")
+            .doc
+            .add(test_rectangle());
+        for index in 2..=MAX_WHITEBOARD_PAGES {
+            let page = book.try_create_page().expect("cupo de hojas");
+            book.switch_to(page);
+            let current = book.current_mut().expect("hoja disponible");
+            current.doc.add(WhiteboardElement::Text {
+                at: (index as f64, 0.0),
+                text: format!("hoja {index}"),
+                size: 14.0,
+            });
+            current.pan = (index as f64, -(index as f64));
+            current.zoom = 1.0 + index as f64 * 0.01;
+        }
+        assert_eq!(book.len(), MAX_WHITEBOARD_PAGES);
+
+        let session = WhiteboardSession {
+            doc: book.current().expect("actual").doc.clone(),
+            ..WhiteboardSession::default()
+        };
+        let mut document = grafito_core::Document::new();
+        let mut undo: VecDeque<grafito_core::Document> = VecDeque::new();
+        let mut redo: VecDeque<grafito_core::ChangeSet> = VecDeque::new();
+        let mut undo_bytes = 0usize;
+        assert!(push_whiteboard_book_and_store(
+            &mut book,
+            &session,
+            &mut document,
+            &mut undo,
+            &mut redo,
+            &mut undo_bytes
+        ));
+
+        // Ruta real de guardado (envelope + ValidatedDocument, igual que
+        // `write_document_atomic` en lifecycle.rs:271): el bug original
+        // perdía las hojas 2..=32 porque solo persistía el espejo.
+        let json =
+            grafito_core::serialize_document(&document).expect("el libro de 32 hojas debe guardar");
+        assert!(json.contains("whiteboard_pages"));
+        let loaded =
+            grafito_core::deserialize_document(&json).expect("el libro de 32 hojas debe cargar");
+        assert_eq!(loaded.whiteboard_pages.len(), MAX_WHITEBOARD_PAGES);
+        assert_eq!(loaded.whiteboard_current, MAX_WHITEBOARD_PAGES - 1);
+        match &loaded.whiteboard_pages[1].doc.elements()[0] {
+            WhiteboardElement::Text { text, .. } => assert_eq!(text, "hoja 2"),
+            other => panic!("hoja 2 inesperada: {other:?}"),
+        }
+        match &loaded.whiteboard_pages[MAX_WHITEBOARD_PAGES - 1]
+            .doc
+            .elements()[0]
+        {
+            WhiteboardElement::Text { text, .. } => assert_eq!(text, "hoja 32"),
+            other => panic!("hoja 32 inesperada: {other:?}"),
+        }
+        // Vista de una hoja intermedia intacta (hoja 6 → índice 5).
+        assert!((loaded.whiteboard_pages[5].pan.0 - 6.0).abs() < 1e-12);
+        assert!((loaded.whiteboard_pages[5].zoom - 1.06).abs() < 1e-12);
+        // El espejo sigue a la hoja actual (export/validación intactos).
+        assert_eq!(loaded.whiteboard.len(), 1);
+        // Recarga en memoria: el libro vuelve completo a la sesión.
+        let mut book2 = WhiteboardBook::default();
+        let mut session2 = WhiteboardSession::default();
+        load_book_from_document(&mut session2, &mut book2, &loaded);
+        assert_eq!(book2.len(), MAX_WHITEBOARD_PAGES);
+        assert_eq!(book2.current, MAX_WHITEBOARD_PAGES - 1);
+        assert_eq!(book2.pages[0].title, "Hoja 1");
+        assert_eq!(book2.pages[0].doc.len(), 1);
+    }
+
+    #[test]
+    fn whiteboard_legacy_json_migrates_through_real_load_path() {
+        use std::collections::VecDeque;
+
+        // JSON viejo: `whiteboard` con contenido pero sin libro ni índice
+        // (como guardaban las versiones de una sola hoja).
+        let mut legacy = grafito_core::Document::new();
+        legacy.whiteboard.add(test_rectangle());
+        let mut value = serde_json::to_value(&legacy).expect("a valor JSON");
+        let object = value.as_object_mut().expect("objeto JSON");
+        object.remove("whiteboard_pages");
+        object.remove("whiteboard_current");
+        let raw = serde_json::to_string(&value).expect("json legado");
+        let loaded = grafito_core::deserialize_document(&raw).expect("carga legado");
+        assert!(loaded.whiteboard_pages.is_empty());
+        assert_eq!(loaded.whiteboard.len(), 1);
+        // La UI migra en memoria sin pérdida y al guardar persiste 1 hoja.
+        let mut book = WhiteboardBook::default();
+        let mut session = WhiteboardSession::default();
+        load_book_from_document(&mut session, &mut book, &loaded);
+        assert_eq!(book.len(), 1);
+        assert_eq!(session.doc.len(), 1);
+        let mut document = loaded;
+        let mut undo: VecDeque<grafito_core::Document> = VecDeque::new();
+        let mut redo: VecDeque<grafito_core::ChangeSet> = VecDeque::new();
+        let mut undo_bytes = 0usize;
+        assert!(push_whiteboard_book_and_store(
+            &mut book,
+            &session,
+            &mut document,
+            &mut undo,
+            &mut redo,
+            &mut undo_bytes
+        ));
+        let json = grafito_core::serialize_document(&document).expect("el migrado debe guardar");
+        let reloaded = grafito_core::deserialize_document(&json).expect("carga migrado");
+        assert_eq!(reloaded.whiteboard_pages.len(), 1);
+        assert_eq!(reloaded.whiteboard_pages[0].title, "Hoja 1");
+        assert_eq!(reloaded.whiteboard.len(), 1);
+    }
+
+    #[test]
+    fn whiteboard_load_truncates_text_over_2000_chars_without_splitting_unicode() {
+        // Cota 2000 caracteres en la ruta de carga: texto multibyte largo
+        // (bypassa `try_add` vía asignación directa, como un JSON externo)
+        // se trunca por `char` sin partir Unicode.
+        let mut document = grafito_core::Document::new();
+        let mut page = grafito_core::WhiteboardPageData::blank("Hoja 1");
+        page.doc.add(WhiteboardElement::Text {
+            at: (0.0, 0.0),
+            text: "ñ".repeat(MAX_WHITEBOARD_TEXT_CHARS + 500),
+            size: 14.0,
+        });
+        document.whiteboard_pages = vec![page];
+        let value = serde_json::to_value(&document).expect("a valor JSON");
+        let loaded: grafito_core::Document = serde_json::from_value(value).expect("carga acotada");
+        match &loaded.whiteboard_pages[0].doc.elements()[0] {
+            WhiteboardElement::Text { text, .. } => {
+                assert_eq!(text.chars().count(), MAX_WHITEBOARD_TEXT_CHARS);
+            }
+            other => panic!("texto esperado, fue: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whiteboard_book_svg_exports_one_file_per_page() {
+        let mut book = WhiteboardBook::default();
+        book.current_mut()
+            .expect("hoja disponible")
+            .doc
+            .add(test_rectangle());
+        let pages = grafito_core::whiteboard_pages_to_svg(&book.to_persisted(), 800, 600);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].0, "Hoja 1");
+        assert!(
+            pages[0].1.contains("<svg") && pages[0].1.contains("<rect"),
+            "svg inesperado: {}",
+            pages[0].1
+        );
+        // Texto con XML se escapa y los lados se acotan a 64..=4096.
+        book.current_mut()
+            .expect("hoja disponible")
+            .doc
+            .add(WhiteboardElement::Text {
+                at: (0.0, 0.0),
+                text: "a<b>&c".to_string(),
+                size: 14.0,
+            });
+        let pages = grafito_core::whiteboard_pages_to_svg(&book.to_persisted(), 10_000, 10);
+        assert!(pages[0].1.contains("a&lt;b&gt;&amp;c"));
+        assert!(pages[0].1.contains("width=\"4096\""));
+        assert!(pages[0].1.contains("height=\"64\""));
     }
 }

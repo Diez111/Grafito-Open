@@ -23,13 +23,18 @@ pub mod assistant;
 pub mod avatar;
 pub mod color_picker;
 pub mod command_palette;
+pub mod i18n;
 pub mod icons;
+pub mod keypad;
 pub mod pou;
+pub mod projector;
 pub mod teaching;
 pub mod theme;
 pub mod toast;
 pub mod tokens;
 pub mod toolbar;
+pub mod tour;
+pub mod trace;
 pub mod udl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,6 +85,8 @@ pub enum Tool {
     PolarCurve,
     ImplicitCurve,
     VectorField2D,
+    Arc,
+    Sector,
     // Construction tools
     Segment,
     Ray,
@@ -87,6 +94,7 @@ pub enum Tool {
     RegularPolygon,
     Tangent,
     Perpendicular,
+    Parallel,
     Locus,
     Midpoint,
     // Measurement tools
@@ -165,12 +173,15 @@ impl Tool {
             Tool::PolarCurve => "PolarCurve",
             Tool::ImplicitCurve => "ImplicitCurve",
             Tool::VectorField2D => "VectorField2D",
+            Tool::Arc => "Arc",
+            Tool::Sector => "Sector",
             Tool::Segment => "Segment",
             Tool::Ray => "Ray",
             Tool::Vector => "Vector",
             Tool::RegularPolygon => "RegularPolygon",
             Tool::Tangent => "Tangent",
             Tool::Perpendicular => "Perpendicular",
+            Tool::Parallel => "Parallel",
             Tool::Locus => "Locus",
             Tool::Midpoint => "Midpoint",
             Tool::Distance => "Distance",
@@ -241,12 +252,15 @@ impl Tool {
             | Tool::PolarCurve
             | Tool::ImplicitCurve
             | Tool::VectorField2D
+            | Tool::Arc
+            | Tool::Sector
             | Tool::Segment
             | Tool::Ray
             | Tool::Vector
             | Tool::RegularPolygon
             | Tool::Tangent
             | Tool::Perpendicular
+            | Tool::Parallel
             | Tool::Locus
             | Tool::Midpoint
             | Tool::Distance

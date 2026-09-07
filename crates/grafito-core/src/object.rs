@@ -4073,6 +4073,265 @@ impl TransformedObj {
     }
 }
 
+// ── D3: Ecuación canónica editable del Inspector (aditivo, puro, acotado) ──
+// Frente D3: el Inspector muestra la ecuación y deja editarla.
+// D1 (`panels.rs:inspector_equation_text`, display-only, prohibido tocar)
+// sigue mostrando; este getter vive en el cerebro para que el pipeline
+// (`grafito-command::inspector_equation`) haga round-trip
+// objeto→texto→parse→mismo objeto sin UI.
+// Puro y testeable headless. `None` honesto si no hay ecuación o si el
+// texto superaría `MAX_EXPR_LENGTH` (2000). Jamás pánico, jamás `unwrap`.
+
+/// Formatea un `f64` finito para ecuación canónica. `-0.0` → `"0"`.
+/// `None` si no es finito (el llamador devuelve `None` honesto).
+fn d3_fmt_num(value: f64) -> Option<String> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value == 0.0 {
+        return Some("0".to_string());
+    }
+    Some(value.to_string())
+}
+
+fn d3_non_empty_trimmed(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn d3_check_budget(text: String) -> Option<String> {
+    if text.len() > crate::validation::MAX_EXPR_LENGTH {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn d3_format_point(x: f64, y: f64) -> Option<String> {
+    let xs = d3_fmt_num(x)?;
+    let ys = d3_fmt_num(y)?;
+    d3_check_budget(format!("({xs}, {ys})"))
+}
+
+/// Coeficientes `ax + by = c` de la recta por `start`–`end`.
+/// `a = dy`, `b = -dx`, `c = a*sx + b*sy`. `None` si no finitos.
+fn d3_line_coeffs(
+    start: grafito_geometry::Point2,
+    end: grafito_geometry::Point2,
+) -> Option<(f64, f64, f64)> {
+    let a = end.y - start.y;
+    let b = start.x - end.x;
+    let c = a * start.x + b * start.y;
+    if !a.is_finite() || !b.is_finite() || !c.is_finite() {
+        return None;
+    }
+    Some((a, b, c))
+}
+
+/// Ecuación `ax + by = c` con signo legible (`1x - 2y = 3`, no `1x + -2y`).
+fn d3_format_line_equation(a: f64, b: f64, c: f64) -> Option<String> {
+    let a_s = d3_fmt_num(a)?;
+    let c_s = d3_fmt_num(c)?;
+    let b_abs_s = d3_fmt_num(b.abs())?;
+    let text = if b < 0.0 {
+        format!("{a_s}x - {b_abs_s}y = {c_s}")
+    } else {
+        let b_s = d3_fmt_num(b)?;
+        format!("{a_s}x + {b_s}y = {c_s}")
+    };
+    d3_check_budget(text)
+}
+
+/// `(x - h)^2 + (y - k)^2 = R` con signo legible. `R = r*r`.
+fn d3_format_circle(center: grafito_geometry::Point2, radius: f64) -> Option<String> {
+    if !radius.is_finite() || radius <= 0.0 {
+        return None;
+    }
+    let r2 = radius * radius;
+    if !r2.is_finite() {
+        return None;
+    }
+    let r2_s = d3_fmt_num(r2)?;
+    let px = if center.x < 0.0 {
+        let v = d3_fmt_num(-center.x)?;
+        format!("(x + {v})")
+    } else {
+        let v = d3_fmt_num(center.x)?;
+        format!("(x - {v})")
+    };
+    let py = if center.y < 0.0 {
+        let v = d3_fmt_num(-center.y)?;
+        format!("(y + {v})")
+    } else {
+        let v = d3_fmt_num(center.y)?;
+        format!("(y - {v})")
+    };
+    d3_check_budget(format!("{px}^2 + {py}^2 = {r2_s}"))
+}
+
+fn d3_escape_text_content(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+impl GeoObject {
+    /// Ecuación canónica editable por tipo (frente D3).
+    ///
+    /// Cubre: función `y = …`, paramétrica 2D/3D `(x, y[, z])`, implícita
+    /// `lhs op rhs` (ASCII `= < > <= >=`; sin operador → `F = 0` al parsear),
+    /// recta `ax+by=c` (segmento/semirrecta agregan extremos `[...]`),
+    /// círculo `(x-h)^2+(y-k)^2=R`, cónicas estructuradas
+    /// (`elipse`/`parabola`/`hiperbola` con centro/vértice y ejes),
+    /// punto `(x, y)`, polígono `[(x1,y1), …]`, texto `"…" @ (x, y)`,
+    /// polar `r = …` y superficie `z = …` / `(x,y,z)` / `|…|`.
+    /// Resto → `None` honesto. `None` también si el texto superaría
+    /// `MAX_EXPR_LENGTH` (2000) o hay coordenadas no finitas.
+    pub fn canonical_equation_text(&self) -> Option<String> {
+        match self {
+            GeoObject::Function(f) => {
+                let expr = d3_non_empty_trimmed(&f.expr)?;
+                d3_check_budget(format!("y = {expr}"))
+            }
+            GeoObject::ParametricCurve2D(c) => {
+                let (x, y) = (c.expr_x.trim(), c.expr_y.trim());
+                if x.is_empty() && y.is_empty() {
+                    return None;
+                }
+                d3_check_budget(format!("({x}, {y})"))
+            }
+            GeoObject::ParametricCurve3D(c) => {
+                let (x, y, z) = (c.expr_x.trim(), c.expr_y.trim(), c.expr_z.trim());
+                if x.is_empty() && y.is_empty() && z.is_empty() {
+                    return None;
+                }
+                d3_check_budget(format!("({x}, {y}, {z})"))
+            }
+            GeoObject::ImplicitCurve(c) => {
+                let (lhs, rhs) = (c.expr_lhs.trim(), c.expr_rhs.trim());
+                if lhs.is_empty() && rhs.is_empty() {
+                    return None;
+                }
+                if lhs.is_empty() {
+                    return d3_check_budget(rhs.to_string());
+                }
+                if rhs.is_empty() {
+                    return d3_check_budget(lhs.to_string());
+                }
+                let op = match c.operator {
+                    RelationOperator::Eq => "=",
+                    RelationOperator::Less => "<",
+                    RelationOperator::Greater => ">",
+                    RelationOperator::LessEq => "<=",
+                    RelationOperator::GreaterEq => ">=",
+                };
+                d3_check_budget(format!("{lhs} {op} {rhs}"))
+            }
+            GeoObject::Line(l) => {
+                let (a, b, c) = d3_line_coeffs(l.start, l.end)?;
+                let eq = d3_format_line_equation(a, b, c)?;
+                match l.kind {
+                    grafito_geometry::LineKind::Line => Some(eq),
+                    grafito_geometry::LineKind::Segment => {
+                        let p1 = d3_format_point(l.start.x, l.start.y)?;
+                        let p2 = d3_format_point(l.end.x, l.end.y)?;
+                        d3_check_budget(format!("{eq} [{p1} - {p2}]"))
+                    }
+                    grafito_geometry::LineKind::Ray => {
+                        let p1 = d3_format_point(l.start.x, l.start.y)?;
+                        let p2 = d3_format_point(l.end.x, l.end.y)?;
+                        d3_check_budget(format!("{eq} [{p1} -> {p2}]"))
+                    }
+                }
+            }
+            GeoObject::Circle(c) => d3_format_circle(c.center, c.radius),
+            GeoObject::Ellipse(e) => {
+                let h = d3_fmt_num(e.center.x)?;
+                let k = d3_fmt_num(e.center.y)?;
+                let rx = d3_fmt_num(e.rx)?;
+                let ry = d3_fmt_num(e.ry)?;
+                let rot = d3_fmt_num(e.angle)?;
+                d3_check_budget(format!(
+                    "elipse centro=({h}, {k}) rx={rx} ry={ry} rot={rot}"
+                ))
+            }
+            GeoObject::Parabola(p) => {
+                let h = d3_fmt_num(p.vertex.x)?;
+                let k = d3_fmt_num(p.vertex.y)?;
+                let pv = d3_fmt_num(p.p)?;
+                let rot = d3_fmt_num(p.angle)?;
+                let vert = if p.vertical { "true" } else { "false" };
+                d3_check_budget(format!(
+                    "parabola vertice=({h}, {k}) p={pv} vertical={vert} rot={rot}"
+                ))
+            }
+            GeoObject::Hyperbola(hy) => {
+                let h = d3_fmt_num(hy.center.x)?;
+                let k = d3_fmt_num(hy.center.y)?;
+                let a = d3_fmt_num(hy.a)?;
+                let b = d3_fmt_num(hy.b)?;
+                let rot = d3_fmt_num(hy.angle)?;
+                let horiz = if hy.horizontal { "true" } else { "false" };
+                d3_check_budget(format!(
+                    "hiperbola centro=({h}, {k}) a={a} b={b} horizontal={horiz} rot={rot}"
+                ))
+            }
+            GeoObject::Point(p) => d3_format_point(p.position.x, p.position.y),
+            GeoObject::Polygon(poly) => {
+                if poly.vertices.is_empty() {
+                    return None;
+                }
+                // Acota trabajo: 128 vértices ya superan el presupuesto típico.
+                if poly.vertices.len() > 128 {
+                    return None;
+                }
+                let mut out = String::from("[");
+                for (i, v) in poly.vertices.iter().enumerate() {
+                    let xs = d3_fmt_num(v.x)?;
+                    let ys = d3_fmt_num(v.y)?;
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&format!("({xs}, {ys})"));
+                    if out.len() > crate::validation::MAX_EXPR_LENGTH {
+                        return None;
+                    }
+                }
+                out.push(']');
+                d3_check_budget(out)
+            }
+            GeoObject::Text(t) => {
+                let pos_x = d3_fmt_num(t.position.x)?;
+                let pos_y = d3_fmt_num(t.position.y)?;
+                let escaped = d3_escape_text_content(t.content.trim());
+                d3_check_budget(format!("\"{escaped}\" @ ({pos_x}, {pos_y})"))
+            }
+            GeoObject::PolarCurve(c) => {
+                let expr = d3_non_empty_trimmed(&c.expr_r)?;
+                d3_check_budget(format!("r = {expr}"))
+            }
+            GeoObject::Surface3D(s) => {
+                if s.is_parametric {
+                    let (x, y, z) = (s.expr_x.trim(), s.expr_y.trim(), s.expr_z.trim());
+                    if x.is_empty() && y.is_empty() && z.is_empty() {
+                        return None;
+                    }
+                    d3_check_budget(format!("({x}, {y}, {z})"))
+                } else if s.is_complex {
+                    let expr = d3_non_empty_trimmed(&s.expr)?;
+                    d3_check_budget(format!("|{expr}|"))
+                } else {
+                    let expr = d3_non_empty_trimmed(&s.expr)?;
+                    d3_check_budget(format!("z = {expr}"))
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

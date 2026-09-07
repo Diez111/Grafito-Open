@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+grafito-anim.workspace = true
 grafito-core.workspace = true
 grafito-geometry.workspace = true
 grafito-command.workspace = true

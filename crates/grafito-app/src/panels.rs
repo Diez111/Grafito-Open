@@ -1,7 +1,12 @@
 //! Paneles laterales removibles e inspectores (CAS, vista, estadística, propiedades).
 
+use crate::export::{
+    clipboard_png_honest, datatable_csv_text, sanitize_export_stem, spawn_csv_export,
+    spawn_pdf_export,
+};
 use crate::GrafitoApp;
 use egui::Color32;
+use grafito_core::symbolic::{clipboard_svg, LayerTable, MAX_LAYERS};
 use grafito_core::{
     CasWorksheetStatus, ChangeSet, DataTableObj, Document, GeoObject, ObjectId,
     RegularPolytopeNDObj, ScatterPlotObj,
@@ -20,6 +25,32 @@ use std::io::Read;
 use std::path::Path;
 
 const MAX_LOCAL_DATA_IMPORT_BYTES: usize = 2_000_000;
+
+/// Estado del panel Capas (oleada M): `LayerTable` del core + capa elegida
+/// para asignar. Vive en la memoria temporal de egui (sin I/O, sin campos
+/// nuevos en `GrafitoApp`); las ids de documentos cerrados se podan al
+/// dibujar vía [`LayerTable::prune_missing`].
+#[derive(Debug, Clone, Default)]
+struct LayerPanelState {
+    table: LayerTable,
+    selected_layer: u32,
+}
+
+/// Botón pill centrado de ancho completo para la sección Exportación
+/// (mismo estilo que el histórico "Exportar SVG").
+fn export_pill_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let theme = current_theme(ui.ctx());
+    let btn = egui::Button::new(
+        egui::RichText::new(label)
+            .size(TYPE_SM)
+            .strong()
+            .color(theme.keyboard_enter_text),
+    )
+    .fill(theme.keyboard_enter_bg)
+    .stroke(egui::Stroke::NONE)
+    .rounding(RADIUS_PILL);
+    ui.add_sized([ui.available_width(), ZOOM_ICON_HIT], btn)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LocalXYTable {
@@ -180,10 +211,9 @@ fn parse_local_xy_values(row: &[String]) -> Result<(f64, f64), String> {
     Ok((x, y))
 }
 
-fn load_local_xy_table(path: &Path) -> Result<LocalXYTable, String> {
-    // TODO: mover a background thread con std::thread::spawn + ctx.request_repaint()
-    // para no bloquear UI en archivos cercanos a 2MB. Lectura limitada a
-    // MAX_LOCAL_DATA_IMPORT_BYTES (2MB) via take() y sin unwrap/panic.
+pub(crate) fn load_local_xy_table(path: &Path) -> Result<LocalXYTable, String> {
+    // La lectura vive en worker (`spawn_csv_import`); esta función es pura I/O
+    // acotada: symlink_metadata + O_NOFOLLOW, take() 2MB, sin unwrap/panic.
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("No se pudo inspeccionar el archivo: {error}"))?;
     if !metadata.file_type().is_file() {
@@ -238,7 +268,7 @@ fn open_local_data_file(path: &Path) -> Result<File, String> {
     }
 }
 
-fn commit_local_xy_table(
+pub(crate) fn commit_local_xy_table(
     document: &mut Document,
     undo_stack: &mut VecDeque<Document>,
     redo_stack: &mut VecDeque<ChangeSet>,
@@ -264,50 +294,19 @@ fn commit_local_xy_table(
     Ok(data_id)
 }
 
-fn import_local_xy_table(app: &mut GrafitoApp) {
-    // TODO: mover a background thread (std::thread::spawn + canal + poll con ctx.request_repaint())
-    // ideal para UI 60fps; por ahora lectura limitada a 2MB sin panic.
+fn import_local_xy_table(app: &mut GrafitoApp, ctx: &egui::Context) {
+    // FileController: el diálogo rfd queda en UI thread (modal nativo);
+    // la lectura ≤2MB va a worker y el commit se aplica en `poll_background_jobs`.
     let Some(path) = rfd::FileDialog::new()
         .add_filter("Datos CSV o TSV", &["csv", "tsv", "txt"])
         .pick_file()
     else {
         return;
     };
-    let table = match load_local_xy_table(&path) {
-        Ok(table) => table,
-        Err(error) => {
-            app.cas_result = format!("No se pudo importar la tabla: {error}");
-            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
-            return;
-        }
-    };
-
-    let row_count = table.xs.len();
-    match commit_local_xy_table(
-        &mut app.document,
-        &mut app.undo_stack,
-        &mut app.redo_stack,
-        table,
-    ) {
-        Ok(data_id) => {
-            let label = app
-                .document
-                .get_object(data_id)
-                .map(|object| object.label().to_string())
-                .unwrap_or_else(|| "tabla".to_string());
-            app.cas_result = format!(
-                "Tabla local '{label}' importada con {row_count} pares; la ruta no se guardó."
-            );
-            app.notify(
-                app.cas_result.clone(),
-                grafito_ui::toast::ToastKind::Success,
-            );
-        }
-        Err(error) => {
-            app.cas_result = format!("No se pudo guardar la tabla local: {error}");
-            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
-        }
-    }
+    app.pending_import_job = Some(crate::app::PendingImportJob {
+        receiver: crate::app::spawn_csv_import(path, ctx),
+    });
+    app.cas_result = "Importando tabla local…".to_string();
 }
 
 #[cfg(test)]
@@ -639,47 +638,246 @@ fn draw_right_drawer_header(ui: &mut egui::Ui, app: &mut GrafitoApp, title: &str
     });
 }
 
-fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, visible: bool) {
+/// Ecuación/fórmula display-only del objeto para el Inspector (frente D1).
+/// Pura y testeable headless. D3 alimenta el campo de EDICIÓN; este getter
+/// solo expone lo que el objeto YA trae para mostrarlo en grande.
+/// `None` → placeholder honesto, jamás el nombre del tipo en grande.
+pub(crate) fn inspector_equation_text(obj: &GeoObject) -> Option<String> {
+    fn non_empty(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+    match obj {
+        GeoObject::Function(f) => non_empty(&f.expr).map(|expr| format!("y = {expr}")),
+        GeoObject::ImplicitCurve(c) => {
+            let lhs = c.expr_lhs.trim();
+            let rhs = c.expr_rhs.trim();
+            let op = match c.operator {
+                grafito_core::RelationOperator::Eq => "=",
+                grafito_core::RelationOperator::Less => "<",
+                grafito_core::RelationOperator::Greater => ">",
+                grafito_core::RelationOperator::LessEq => "≤",
+                grafito_core::RelationOperator::GreaterEq => "≥",
+            };
+            match (lhs.is_empty(), rhs.is_empty()) {
+                (true, true) => None,
+                (true, false) => Some(rhs.to_string()),
+                (false, true) => Some(lhs.to_string()),
+                (false, false) => Some(format!("{lhs} {op} {rhs}")),
+            }
+        }
+        GeoObject::ParametricCurve2D(c) => {
+            let (x, y) = (c.expr_x.trim(), c.expr_y.trim());
+            if x.is_empty() && y.is_empty() {
+                None
+            } else {
+                Some(format!("({x}, {y})"))
+            }
+        }
+        GeoObject::ParametricCurve3D(c) => {
+            let (x, y, z) = (c.expr_x.trim(), c.expr_y.trim(), c.expr_z.trim());
+            if x.is_empty() && y.is_empty() && z.is_empty() {
+                None
+            } else {
+                Some(format!("({x}, {y}, {z})"))
+            }
+        }
+        GeoObject::PolarCurve(c) => non_empty(&c.expr_r).map(|expr| format!("r = {expr}")),
+        GeoObject::Surface3D(s) => {
+            if s.is_parametric {
+                let (x, y, z) = (s.expr_x.trim(), s.expr_y.trim(), s.expr_z.trim());
+                if x.is_empty() && y.is_empty() && z.is_empty() {
+                    None
+                } else {
+                    Some(format!("({x}, {y}, {z})"))
+                }
+            } else if s.is_complex {
+                non_empty(&s.expr).map(|expr| format!("|{expr}|"))
+            } else {
+                non_empty(&s.expr).map(|expr| format!("z = {expr}"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Caption terciario del tipo de objeto, en español rioplatense.
+/// El nombre muerto (`Surface3D`, …) nunca va en grande: solo acá,
+/// en `TYPE_XS`. Puro y testeable headless.
+pub(crate) fn inspector_type_caption(obj: &GeoObject) -> &'static str {
+    match obj {
+        GeoObject::Point(_) => "punto",
+        GeoObject::Line(_) => "recta",
+        GeoObject::Circle(_) => "círculo",
+        GeoObject::Polygon(_) => "polígono",
+        GeoObject::Pencil(p) if p.is_dynamic_locus() => "lugar geométrico",
+        GeoObject::Pencil(_) => "trazo",
+        GeoObject::Function(_) => "función",
+        GeoObject::Text(_) => "texto",
+        GeoObject::Ellipse(_) => "elipse",
+        GeoObject::Parabola(_) => "parábola",
+        GeoObject::Hyperbola(_) => "hipérbola",
+        GeoObject::Arc(_) => "arco",
+        GeoObject::Sector(_) => "sector",
+        GeoObject::BezierCurve(_) => "curva Bézier",
+        GeoObject::Spline(_) => "spline",
+        GeoObject::Point3D(_) => "punto 3D",
+        GeoObject::Segment3D(_) => "segmento 3D",
+        GeoObject::Plane3D(_) => "plano 3D",
+        GeoObject::Line3D(_) => "recta 3D",
+        GeoObject::Sphere3D(_) => "esfera 3D",
+        GeoObject::Cube3D(_) => "cubo 3D",
+        GeoObject::Tetrahedron3D(_) => "tetraedro 3D",
+        GeoObject::Pyramid3D(_) => "pirámide 3D",
+        GeoObject::Cone3D(_) => "cono 3D",
+        GeoObject::Cylinder3D(_) => "cilindro 3D",
+        GeoObject::Torus3D(_) => "toro 3D",
+        GeoObject::MoebiusStrip(_) => "cinta de Möbius",
+        GeoObject::Surface3D(s) if s.is_complex => "superficie compleja 3D",
+        GeoObject::Surface3D(_) => "superficie 3D",
+        GeoObject::Prism3D(_) => "prisma 3D",
+        GeoObject::Quadric3D(_) => "cuádrica 3D",
+        GeoObject::ParametricCurve2D(_) => "curva paramétrica 2D",
+        GeoObject::ParametricCurve3D(_) => "curva paramétrica 3D",
+        GeoObject::PolarCurve(_) => "curva polar",
+        GeoObject::ImplicitCurve(_) => "curva implícita",
+        GeoObject::VectorField2D(_) => "campo vectorial 2D",
+        GeoObject::ComplexGrid(_) => "grilla compleja",
+        GeoObject::ComplexMapping(_) => "mapeo complejo",
+        GeoObject::ComplexIntegral(_) => "integral compleja",
+        GeoObject::Attractor3D(_) => "atractor 3D",
+        GeoObject::Fractal2D(_) => "fractal 2D",
+        GeoObject::RegularPolychoron4D(_) => "polícoro regular 4D",
+        GeoObject::RegularPolytopeND(_) => "politopo regular N-D",
+        GeoObject::HyperSurface4D(_) => "hiperficie 4D",
+        GeoObject::VectorField3D(_) => "campo vectorial 3D",
+        GeoObject::Histogram(_) => "histograma",
+        GeoObject::ScatterPlot(_) => "dispersión",
+        GeoObject::BoxPlot(_) => "diagrama de caja",
+        GeoObject::RegressionLine(_) => "recta de regresión",
+        GeoObject::DataTable(_) => "tabla de datos",
+        GeoObject::PhasePortrait(_) => "retrato de fase",
+        GeoObject::Transformed(_) => "objeto transformado",
+        // `GeoObject` es non-exhaustive: variantes futuras caen al nombre
+        // honesto en inglés hasta tener caption en español.
+        &_ => obj.name(),
+    }
+}
+
+/// Texto de la fila de etiqueta del Inspector. Nunca devuelve una letra
+/// suelta: la etiqueta cruda (p. ej. `S`, autolabel de `Surface3D` según
+/// `document.rs:1193-1202` — primera letra del nombre del tipo) se presenta
+/// con prefijo `Etiqueta: ` para que no parezca texto truncado.
+/// `None` si no hay etiqueta que mostrar. Puro y testeable headless.
+pub(crate) fn inspector_label_text(label: &str) -> Option<String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("Etiqueta: {trimmed}"))
+    }
+}
+
+/// Tooltip honesto de la card de identidad: texto completo sin truncar.
+/// `headline` es la ecuación en grande (o el caption si no hay ecuación).
+pub(crate) fn inspector_identity_tooltip(headline: &str, label: &str, visible: bool) -> String {
+    let state = if visible { "Visible" } else { "Oculto" };
+    match inspector_label_text(label) {
+        Some(labeled) => format!("{headline} · {labeled} · {state}"),
+        None => format!("{headline} · {state}"),
+    }
+}
+
+fn draw_inspector_identity(ui: &mut egui::Ui, obj: &GeoObject) {
     let theme = current_theme(ui.ctx());
+    let visible = obj.is_visible();
+    let label = obj.label().to_string();
+    let caption = inspector_type_caption(obj);
+    // Titular: ecuación en grande; sin ecuación, placeholder honesto.
+    // El nombre del tipo vive solo como caption terciario.
+    let headline = inspector_equation_text(obj).unwrap_or_else(|| caption.to_string());
+    let equation_shown = inspector_equation_text(obj).is_some();
     egui::Frame::none()
         .fill(theme.input_bg)
         .stroke(egui::Stroke::NONE)
         .rounding(egui::Rounding::same(RADIUS_LG))
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Identidad del objeto")
-                    .color(theme.text_tertiary)
-                    .size(TYPE_SM)
-                    .strong(),
-            );
-            ui.add_space(SPACE_XS);
+            ui.set_min_width(ui.available_width());
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            // Título + badge en la misma fila: el badge va a la derecha
+            // del título, nunca flotando.
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(object_name)
-                        .color(theme.text_primary)
-                        .size(TYPE_BASE)
-                        .strong(),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Ecuación")
+                            .color(theme.text_tertiary)
+                            .size(TYPE_SM)
+                            .strong(),
+                    )
+                    .truncate(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(if visible { "Visible" } else { "Oculto" })
-                            .color(if visible {
-                                theme.success
-                            } else {
-                                theme.text_tertiary
-                            })
-                            .size(TYPE_SM),
-                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(if visible { "Visible" } else { "Oculto" })
+                                .color(if visible {
+                                    theme.success
+                                } else {
+                                    theme.text_tertiary
+                                })
+                                .size(TYPE_SM),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(inspector_identity_tooltip(&headline, &label, visible));
                 });
             });
-            if !label.is_empty() {
-                ui.label(
-                    egui::RichText::new(label)
-                        .color(theme.text_secondary)
-                        .size(TYPE_SM),
-                );
+            ui.add_space(SPACE_XS);
+            let tooltip = inspector_identity_tooltip(&headline, &label, visible);
+            if equation_shown {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&headline)
+                            .color(theme.text_primary)
+                            .size(TYPE_MD)
+                            .monospace(),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tooltip.as_str());
+            } else {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Ecuación no disponible para este tipo")
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tooltip.as_str());
             }
+            ui.add_space(SPACE_XS);
+            if let Some(labeled) = inspector_label_text(&label) {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(labeled)
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tooltip.as_str());
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(caption)
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS),
+                )
+                .truncate(),
+            )
+            .on_hover_text(tooltip.as_str());
         });
 }
 
@@ -1196,6 +1394,23 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
 
+    // Estado Capas (oleada M): vive en temp egui; se poda y escribe de vuelta
+    // alrededor del frame. Solo lectura del documento fuera de los handlers.
+    let layer_panel_id = egui::Id::new("grafito_layer_panel_state");
+    let mut layer_state: LayerPanelState = ctx
+        .data_mut(|data| data.get_temp::<LayerPanelState>(layer_panel_id))
+        .unwrap_or_default();
+    layer_state.table.prune_missing(&app.document);
+    let selection: Option<(ObjectId, String, u32)> = app.selected_object.and_then(|id| {
+        app.document.get_object(id).map(|object| {
+            (
+                id,
+                object.label().to_string(),
+                layer_state.table.layer_of(id),
+            )
+        })
+    });
+
     egui::SidePanel::left("view_panel")
         .show_separator_line(false)
         .default_width(PANEL_LEFT_DEFAULT)
@@ -1326,33 +1541,445 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             );
                             ui.add_space(CARD_SPACING);
 
-                            // Exportación — vectorial pill centered
+                            // Capas — orden + visibilidad (oleada M, API F10-C).
+                            // Piel pura: lee &Estado, muta documento con snapshot
+                            // de undo; el diálogo/trabajo pesado no aplica aquí
+                            // (solo toggles y assigns en memoria).
+                            draw_inspector_section(
+                                ui,
+                                "Capas",
+                                "Ordená objetos en capas 0..=255 y alterná su visibilidad conjunta.",
+                                |ui| {
+                                    let used = layer_state.table.used_layers(&app.document);
+                                    if used.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Sin objetos: todo lo nuevo entra en la capa 0.",
+                                            )
+                                            .size(TYPE_XS)
+                                            .color(current_theme(ui.ctx()).text_secondary),
+                                        );
+                                    }
+                                    for (layer, count) in used {
+                                        let visible = layer_state.table.is_layer_visible(
+                                            &app.document,
+                                            layer,
+                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "Capa {layer} · {count} obj"
+                                                ))
+                                                .size(TYPE_SM),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    let action =
+                                                        if visible { "Ocultar" } else { "Mostrar" };
+                                                    if ui
+                                                        .small_button(action)
+                                                        .on_hover_text(format!(
+                                                            "Cambia la visibilidad de los {count} objetos de la capa {layer} (con deshacer)"
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        let mut snap =
+                                                            crate::app::DeferredPanelSnapshot::new(
+                                                                app.undo_stack.len(),
+                                                            );
+                                                        snap.capture(&app.document);
+                                                        let touched = layer_state
+                                                            .table
+                                                            .set_layer_visible(
+                                                                &mut app.document,
+                                                                layer,
+                                                                !visible,
+                                                            );
+                                                        if touched > 0 {
+                                                            app.cas_result = format!(
+                                                                "Capa {layer} {} ({touched} obj)",
+                                                                if visible {
+                                                                    "oculta"
+                                                                } else {
+                                                                    "visible"
+                                                                }
+                                                            );
+                                                        }
+                                                        snap.save_if_semantically_changed(
+                                                            &mut app.document,
+                                                            &mut app.undo_stack,
+                                                            &mut app.redo_stack,
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    }
+                                    ui.add_space(SPACE_XS);
+                                    let selection_text = selection
+                                        .as_ref()
+                                        .map(|(_, label, layer)| {
+                                            let name = if label.is_empty() {
+                                                "<sin etiqueta>"
+                                            } else {
+                                                label
+                                            };
+                                            format!("Selección: {name} (capa {layer})")
+                                        })
+                                        .unwrap_or_else(|| {
+                                            "Sin selección: elegí un objeto en el lienzo."
+                                                .to_string()
+                                        });
+                                    ui.label(
+                                        egui::RichText::new(selection_text)
+                                            .size(TYPE_XS)
+                                            .color(current_theme(ui.ctx()).text_secondary),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("Asignar a capa:").size(TYPE_SM),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(
+                                                &mut layer_state.selected_layer,
+                                            )
+                                            .range(0..=MAX_LAYERS)
+                                            .speed(1),
+                                        );
+                                        if ui
+                                            .add_enabled(
+                                                selection.is_some(),
+                                                egui::Button::new(
+                                                    egui::RichText::new("Asignar").size(TYPE_SM),
+                                                ),
+                                            )
+                                            .on_hover_text(
+                                                "Mueve el objeto seleccionado a la capa elegida",
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some((id, label, _)) = selection.as_ref() {
+                                                match layer_state
+                                                    .table
+                                                    .assign(*id, layer_state.selected_layer)
+                                                {
+                                                    Ok(()) => {
+                                                        let name = if label.is_empty() {
+                                                            "<sin etiqueta>"
+                                                        } else {
+                                                            label
+                                                        };
+                                                        app.cas_result = format!(
+                                                            "'{name}' → capa {}",
+                                                            layer_state.selected_layer
+                                                        );
+                                                    }
+                                                    Err(error) => {
+                                                        app.cas_result = format!(
+                                                            "No se pudo asignar: {error}"
+                                                        );
+                                                        app.notify(
+                                                            app.cas_result.clone(),
+                                                            grafito_ui::toast::ToastKind::Error,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                },
+                            );
+                            ui.add_space(CARD_SPACING);
+
+                            // Exportación — vectorial pill centered + oleada M:
+                            // PNG/TikZ/PDF/CSV y portapapeles. Piel pura: el
+                            // diálogo rfd queda en UI thread (modal nativo);
+                            // render+write van a workers y el summary se aplica
+                            // en `poll_background_jobs`.
                             draw_inspector_section(
                                 ui,
                                 "Exportación",
-                                "Generá un archivo vectorial del lienzo actual.",
+                                "Generá un archivo del lienzo actual o copialo al portapapeles.",
                                 |ui| {
-                                    let theme = current_theme(ui.ctx());
-                                    let btn = egui::Button::new(
-                                        egui::RichText::new("Exportar SVG")
-                                            .size(TYPE_SM)
-                                            .strong()
-                                            .color(theme.keyboard_enter_text),
-                                    )
-                                    .fill(theme.keyboard_enter_bg)
-                                    .stroke(egui::Stroke::NONE)
-                                    .rounding(RADIUS_PILL);
-                                    if ui
-                                        .add_sized([ui.available_width(), ZOOM_ICON_HIT], btn)
+                                    for format in [
+                                        crate::export::ExportFormat::Svg,
+                                        crate::export::ExportFormat::Png,
+                                        crate::export::ExportFormat::Tikz,
+                                    ] {
+                                        if export_pill_button(
+                                            ui,
+                                            &format!("Exportar {}", format.display_name()),
+                                        )
                                         .clicked()
-                                    {
-                                        app.export_with_dialog(crate::export::ExportFormat::Svg, None);
+                                        {
+                                            app.export_with_dialog(format, Some(ui.ctx()));
+                                        }
                                     }
+                                    if export_pill_button(ui, "Exportar PDF").on_hover_text(
+                                        "Interino de 1 página: conteo + etiquetas (vectorial con printpdf pendiente del lead)",
+                                    ).clicked()
+                                    {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("PDF", &["pdf"])
+                                            .set_file_name("grafito_export.pdf")
+                                            .save_file()
+                                        {
+                                            app.pending_export_job = Some(
+                                                crate::app::PendingExportJob {
+                                                    receiver: spawn_pdf_export(
+                                                        app.document.clone(),
+                                                        path,
+                                                        ui.ctx(),
+                                                    ),
+                                                },
+                                            );
+                                            app.notify(
+                                                "Exportando PDF…",
+                                                grafito_ui::toast::ToastKind::Info,
+                                            );
+                                        }
+                                    }
+                                    let tables: Vec<(ObjectId, String, usize)> = app
+                                        .document
+                                        .objects_iter_sorted()
+                                        .filter_map(|(id, object)| match object {
+                                            GeoObject::DataTable(table) => Some((
+                                                *id,
+                                                table.label.clone(),
+                                                table.xs.len(),
+                                            )),
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !tables.is_empty() {
+                                        ui.add_space(SPACE_XS);
+                                        ui.label(
+                                            egui::RichText::new("Tablas (CSV RFC 4180)")
+                                                .size(TYPE_XS)
+                                                .color(
+                                                    current_theme(ui.ctx()).text_secondary,
+                                                ),
+                                        );
+                                    }
+                                    for (id, label, rows) in tables {
+                                        ui.horizontal(|ui| {
+                                            let name = if label.is_empty() {
+                                                "<sin etiqueta>"
+                                            } else {
+                                                &label
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{name} · {rows} filas"
+                                                ))
+                                                .size(TYPE_SM),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if ui
+                                                        .small_button("CSV")
+                                                        .on_hover_text(
+                                                            "Descarga honesta: escribe el CSV real o informa el error",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        match datatable_csv_text(&app.document, id)
+                                                        {
+                                                            Ok((table_label, csv)) => {
+                                                                let stem = sanitize_export_stem(
+                                                                    &table_label,
+                                                                );
+                                                                if let Some(path) =
+                                                                    rfd::FileDialog::new()
+                                                                        .add_filter(
+                                                                            "CSV",
+                                                                            &["csv"],
+                                                                        )
+                                                                        .set_file_name(format!(
+                                                                            "{stem}.csv"
+                                                                        ))
+                                                                        .save_file()
+                                                                {
+                                                                    app.pending_export_job = Some(
+                                                                        crate::app::PendingExportJob {
+                                                                            receiver:
+                                                                                spawn_csv_export(
+                                                                                    csv,
+                                                                                    table_label,
+                                                                                    path,
+                                                                                    ui.ctx(),
+                                                                                ),
+                                                                        },
+                                                                    );
+                                                                    app.notify(
+                                                                        "Exportando CSV…",
+                                                                        grafito_ui::toast::ToastKind::Info,
+                                                                    );
+                                                                }
+                                                            }
+                                                            Err(error) => {
+                                                                app.cas_result = error.clone();
+                                                                app.notify(
+                                                                    error,
+                                                                    grafito_ui::toast::ToastKind::Error,
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    }
+                                    ui.add_space(SPACE_XS);
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .small_button("Copiar SVG")
+                                            .on_hover_text(
+                                                "Copia el SVG real del lienzo al portapapeles",
+                                            )
+                                            .clicked()
+                                        {
+                                            match clipboard_svg(&app.document) {
+                                                Ok(svg) => {
+                                                    let bytes = svg.len();
+                                                    ui.ctx().output_mut(|out| {
+                                                        out.copied_text = svg;
+                                                    });
+                                                    app.cas_result = format!(
+                                                        "SVG copiado al portapapeles ({bytes} bytes)"
+                                                    );
+                                                    app.notify(
+                                                        app.cas_result.clone(),
+                                                        grafito_ui::toast::ToastKind::Success,
+                                                    );
+                                                }
+                                                Err(error) => {
+                                                    app.cas_result = format!(
+                                                        "No se pudo copiar SVG: {error}"
+                                                    );
+                                                    app.notify(
+                                                        app.cas_result.clone(),
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        if ui
+                                            .small_button("Copiar PNG")
+                                            .on_hover_text(
+                                                "Pendiente honesto: exige raster con image/tiny-skia (fuera del frente F10-C); usa Copiar SVG",
+                                            )
+                                            .clicked()
+                                        {
+                                            match clipboard_png_honest() {
+                                                Ok(_) => {
+                                                    app.cas_result =
+                                                        "PNG listo pero sin portapapeles en esta build; usa Copiar SVG"
+                                                            .to_string();
+                                                    app.notify(
+                                                        app.cas_result.clone(),
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                                Err(error) => {
+                                                    app.cas_result = error.to_string();
+                                                    app.notify(
+                                                        app.cas_result.clone(),
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
+                                    // Texto (G-C): MathML / TikZ-eje / HTML puros al portapapeles.
+                                    // Piel pura: builders sin I/O + egui output (igual que Copiar SVG);
+                                    // el guardado a archivo queda para P2 (cableado menú en app.rs/ui.rs).
+                                    ui.add_space(SPACE_XS);
+                                    ui.horizontal(|ui| {
+                                        for (label, tip, build) in [
+                                            (
+                                                "MathML",
+                                                "Copia las funciones y puntos como MathML al portapapeles",
+                                                crate::export::document_to_mathml as fn(
+                                                    &Document,
+                                                )
+                                                    -> Result<String, String>,
+                                            ),
+                                            (
+                                                "TikZ-eje",
+                                                "Copia un entorno pgfplots axis con tus funciones al portapapeles",
+                                                crate::export::document_to_tikz_axis as fn(
+                                                    &Document,
+                                                )
+                                                    -> Result<String, String>,
+                                            ),
+                                            (
+                                                "HTML",
+                                                "Copia una página autónoma con el SVG del lienzo al portapapeles",
+                                                crate::export::document_to_html as fn(
+                                                    &Document,
+                                                )
+                                                    -> Result<String, String>,
+                                            ),
+                                        ] {
+                                            if ui.small_button(label).on_hover_text(tip).clicked() {
+                                                match build(&app.document) {
+                                                    Ok(text) => {
+                                                        let bytes = text.len();
+                                                        ui.ctx().output_mut(|out| {
+                                                            out.copied_text = text;
+                                                        });
+                                                        app.cas_result = format!(
+                                                            "{label} copiado al portapapeles ({bytes} bytes)"
+                                                        );
+                                                        app.notify(
+                                                            app.cas_result.clone(),
+                                                            grafito_ui::toast::ToastKind::Success,
+                                                        );
+                                                    }
+                                                    Err(error) => {
+                                                        app.cas_result = error;
+                                                        app.notify(
+                                                            app.cas_result.clone(),
+                                                            grafito_ui::toast::ToastKind::Error,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                },
+                            );
+                            ui.add_space(CARD_SPACING);
+
+                            // Datos — hoja viva en lectura (G-C): tablas del documento.
+                            draw_inspector_section(
+                                ui,
+                                "Datos",
+                                "Hoja viva en lectura: valores de las tablas del documento.",
+                                |ui| {
+                                    draw_spreadsheet_section(ui, app);
+                                },
+                            );
+                            ui.add_space(CARD_SPACING);
+
+                            // Probabilidad — Normal/Binomial/Poisson (G-C).
+                            draw_inspector_section(
+                                ui,
+                                "Probabilidad",
+                                "Densidad y acumulada honestas en f64.",
+                                |ui| {
+                                    draw_probability_section(ui, ctx);
                                 },
                             );
                         });
                 });
         });
+
+    // Escribe de vuelta el estado Capas (asigns del frame).
+    ctx.data_mut(|data| data.insert_temp(layer_panel_id, layer_state));
 }
 
 /// Panel derecho: controles de la animación trigonométrica.
@@ -1412,7 +2039,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                                 "El punto rojo recorre el círculo unitario; el punto violeta muestra su imagen por la transformación compleja activa.",
                             )
                             .color(txt_dim)
-                            .size(10.5),
+                            .size(grafito_ui::tokens::TYPE_XS),
                         );
                         ui.add_space(SPACE_SM);
                     }
@@ -1464,6 +2091,8 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                         if speed_changed {
                             ctx.request_repaint();
                         }
+                        // Prompt auto (G-C): palabras o números → velocidad honesta.
+                        draw_trig_speed_prompt(ui, app);
                     });
 
                     ui.horizontal_wrapped(|ui| {
@@ -1522,8 +2151,8 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                     ui.add_space(6.0);
                     egui::Frame::none()
                         .fill(current_theme(ctx).input_bg)
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::same(8.0))
+                        .rounding(egui::Rounding::same(grafito_ui::tokens::RADIUS_SM))
+                        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new(value_text).color(accent).size(TYPE_SM).strong());
                             ui.label(
@@ -1537,7 +2166,13 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                             ui.label(
                                 egui::RichText::new(GrafitoApp::trig_identity(app.trig_function))
                                     .color(txt_dim)
-                                    .size(10.5),
+                                    .size(grafito_ui::tokens::TYPE_XS),
+                            );
+                            // Lectura de traza (G-C): el punto vivo bajo el "puntero" animado.
+                            grafito_ui::trace::draw_trace_readout(
+                                ui,
+                                grafito_ui::trace::trace_from_hover(cos_t, sin_t, spec.name)
+                                    .as_ref(),
                             );
                         });
 
@@ -1549,7 +2184,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                                 cos_t, sin_t, t
                             ))
                             .color(hdr_col)
-                            .size(10.5),
+                            .size(grafito_ui::tokens::TYPE_XS),
                         );
                     }
 
@@ -1632,7 +2267,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new("Estadística")
                             .color(accent)
-                            .size(15.0)
+                            .size(grafito_ui::tokens::TYPE_BASE)
                             .strong(),
                     );
                     ui.add_space(SPACE_SM);
@@ -1793,7 +2428,10 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             egui::Sense::hover(),
                         );
                         if ui.is_rect_visible(hist_rect) {
-                            let painter = ui.painter();
+                            // Clip explícito: los conteos y min/max se pintan
+                            // a mano y sin esto dejan slivers en docks
+                            // angostos (misma clase que la tira del drawer).
+                            let painter = ui.painter().with_clip_rect(hist_rect);
                             let plot = hist_rect.shrink2(egui::vec2(2.0, 2.0));
                             // Plot area interna
                             let plot_top = plot.min.y;
@@ -1823,7 +2461,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         egui::pos2(bar.center().x, bar.min.y - 6.0),
                                         egui::Align2::CENTER_BOTTOM,
                                         c.to_string(),
-                                        egui::FontId::proportional(9.0),
+                                        egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                                         txt_dim,
                                     );
                                 }
@@ -1833,14 +2471,14 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 egui::pos2(plot.min.x, plot_bot + 2.0),
                                 egui::Align2::LEFT_TOP,
                                 format_statistic(summary.minimum),
-                                egui::FontId::proportional(9.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                                 txt_dim,
                             );
                             painter.text(
                                 egui::pos2(plot.max.x, plot_bot + 2.0),
                                 egui::Align2::RIGHT_TOP,
                                 format_statistic(summary.maximum),
-                                egui::FontId::proportional(9.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                                 txt_dim,
                             );
                         }
@@ -1870,7 +2508,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.label(
                 egui::RichText::new("Números Complejos")
                     .color(accent)
-                    .size(15.0)
+                    .size(grafito_ui::tokens::TYPE_BASE)
                     .strong(),
             );
             ui.add_space(SPACE_SM);
@@ -2049,7 +2687,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.label(
                 egui::RichText::new("Dinámica y Atractores")
                     .color(accent)
-                    .size(15.0)
+                    .size(grafito_ui::tokens::TYPE_BASE)
                     .strong(),
             );
             ui.add_space(SPACE_SM);
@@ -2155,6 +2793,12 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                 .id_salt("right_properties_scroll")
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    // Wrap honesto: sin esto, las filas de texto del Inspector
+                    // (p. ej. la ecuación en `TYPE_MD`) se clipan en el borde
+                    // del dock y dejan slivers de 1-2px. Las filas
+                    // horizontales de controles (DragValue/Slider) no se ven
+                    // afectadas.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     let Some(id) = app.selected_object else {
                         draw_inspector_empty_state(ui);
                         return;
@@ -2163,10 +2807,102 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                         ui.label(egui::RichText::new("Objeto inexistente.").color(txt_dim));
                         return;
                     };
-                    let object_name = edited_object.name().to_string();
-                    let object_label = edited_object.label().to_string();
-                    let object_visible = edited_object.is_visible();
-                    draw_inspector_identity(ui, &object_name, &object_label, object_visible);
+                    draw_inspector_identity(ui, &edited_object);
+                    ui.add_space(SPACE_XS);
+                    // D1-bis: editor de ecuación (pipeline D3). El display vive
+                    // en `draw_inspector_identity`; acá el campo editable con
+                    // validación en vivo y commit atómico + undo. El borrador
+                    // vive en memoria temporal egui (sobrevive frames, no se
+                    // persiste) claveado por objeto.
+                    {
+                        use crate::inspector_edit as ieq;
+                        if let Some(live_now) = app.document.get_object(id).cloned() {
+                            if ieq::is_editable(&live_now) {
+                                let eq_key = egui::Id::new(("inspector_equation", id));
+                                let mut eq_state: ieq::InspectorEditState = ui
+                                    .ctx()
+                                    .memory(|mem| mem.data.get_temp(eq_key))
+                                    .unwrap_or_else(|| {
+                                        ieq::begin_edit(&live_now).unwrap_or(
+                                            ieq::InspectorEditState {
+                                                draft: String::new(),
+                                                error: None,
+                                                editing: false,
+                                            },
+                                        )
+                                    });
+                                // Sin edición en curso, re-sincroniza con la
+                                // canónica (cambios desde Álgebra u otros).
+                                if !eq_state.editing {
+                                    if let Some(fresh) = ieq::begin_edit(&live_now) {
+                                        eq_state = fresh;
+                                    }
+                                }
+                                ui.label(
+                                    egui::RichText::new("Ecuación (editable)")
+                                        .color(txt_dim)
+                                        .size(TYPE_XS),
+                                );
+                                let mut draft = eq_state.draft.clone();
+                                let eq_resp = ui.add(
+                                    egui::TextEdit::singleline(&mut draft)
+                                        .hint_text(ieq::hint_for(&live_now))
+                                        .desired_width(f32::INFINITY),
+                                );
+                                if eq_resp.changed() {
+                                    ieq::update_draft(&mut eq_state, &draft);
+                                    ieq::revalidate_state(&mut eq_state, &live_now);
+                                }
+                                if let Some(err) = eq_state.error.clone() {
+                                    ui.label(
+                                        egui::RichText::new(err)
+                                            .color(current_theme(ui.ctx()).danger)
+                                            .size(TYPE_XS),
+                                    );
+                                }
+                                let canonical_now = live_now
+                                    .canonical_equation_text()
+                                    .unwrap_or_default();
+                                let can_apply = eq_state.error.is_none()
+                                    && eq_state.draft != canonical_now;
+                                let apply_clicked = ui
+                                    .add_enabled(
+                                        can_apply,
+                                        egui::Button::new("Aplicar ecuación"),
+                                    )
+                                    .clicked();
+                                let enter_pressed = eq_resp.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if apply_clicked || enter_pressed {
+                                    match ieq::commit_draft_with_previous(
+                                        &mut app.document,
+                                        id,
+                                        &eq_state.draft,
+                                    ) {
+                                        Ok(Some(before)) => {
+                                            snapshot.capture_successful_replacement(before);
+                                            if let Some(updated) =
+                                                app.document.get_object(id).cloned()
+                                            {
+                                                ieq::cancel_edit(&mut eq_state, &updated);
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(message) => {
+                                            eq_state.error = Some(message.clone());
+                                            app.notify(
+                                                message,
+                                                grafito_ui::toast::ToastKind::Error,
+                                            );
+                                        }
+                                    }
+                                }
+                                ui.ctx().memory_mut(|mem| {
+                                    mem.data.insert_temp(eq_key, eq_state);
+                                });
+                            }
+                        }
+                    }
                     ui.add_space(SPACE_MD);
                     let mut changed = false;
 
@@ -2607,13 +3343,24 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                             });
                     });
                 }
-                other => {
-                    ui.label(format!("Tipo: {}", other.name()));
+                _ => {
+                    // Display-only: la ecuación ya va en grande en la card de
+                    // identidad. Sin nombre muerto ni texto que no sirve.
+                    // D3 agrega el campo de edición; este dock no edita.
+                    ui.add_space(SPACE_XS);
+                    ui.separator();
+                    ui.add_space(SPACE_SM);
                     ui.label(
-                        egui::RichText::new("Propiedades dedicadas en panel de Álgebra.")
+                        egui::RichText::new("Sin controles dedicados en este dock.")
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                    );
+                    ui.label(
+                        egui::RichText::new("Editá este objeto desde el panel de Álgebra.")
                             .color(txt_dim)
                             .size(TYPE_XS),
                     );
+                    ui.add_space(SPACE_MD);
                 }
                     }
                     match apply_object_panel_edit_with_previous(&mut app.document, id, changed, move |object| {
@@ -2728,15 +3475,15 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                     egui::Frame::none()
                         .fill(theme.input_bg)
                         .rounding(egui::Rounding::same(6.0))
-                        .inner_margin(egui::Margin::same(8.0))
+                        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("Colores y Magnitud:").strong().color(hdr_col).size(TYPE_XS));
-                                ui.label(egui::RichText::new("- Tono: Fase o angulo arg(f(z)).\n- Brillo: Magnitud |f(z)|. Negro = Raiz (0), Blanco = Polo (inf).").color(txt_dim).size(10.5));
+                                ui.label(egui::RichText::new("- Tono: Fase o angulo arg(f(z)).\n- Brillo: Magnitud |f(z)|. Negro = Raiz (0), Blanco = Polo (inf).").color(txt_dim).size(grafito_ui::tokens::TYPE_XS));
 
                                 ui.add_space(6.0);
                                 ui.label(egui::RichText::new("Derivabilidad y Wirtinger:").strong().color(hdr_col).size(TYPE_XS));
-                                ui.label(egui::RichText::new("- Al graficar deriv_z_conj(f), f(z) es holomorfa solo en zonas negras (donde d/dzbar = 0, Cauchy-Riemann).\n- Las zonas coloreadas representan donde NO es derivable.").color(txt_dim).size(10.5));
+                                ui.label(egui::RichText::new("- Al graficar deriv_z_conj(f), f(z) es holomorfa solo en zonas negras (donde d/dzbar = 0, Cauchy-Riemann).\n- Las zonas coloreadas representan donde NO es derivable.").color(txt_dim).size(grafito_ui::tokens::TYPE_XS));
                             });
                         });
                 });
@@ -3049,7 +3796,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                                         ui.label(
                                             egui::RichText::new("Se muestran los primeros 24 valores.")
                                                 .color(theme.text_tertiary)
-                                                .size(10.0),
+                                                .size(grafito_ui::tokens::TYPE_XS),
                                         );
                                     }
                                 },
@@ -3073,7 +3820,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                     ui.add_space(6.0);
 
                     if ui.button("Importar CSV/TSV...").clicked() {
-                        import_local_xy_table(app);
+                        import_local_xy_table(app, ctx);
                     }
 
                     for (label, template) in [
@@ -3216,27 +3963,20 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui.button("Exportar LaTeX").clicked() {
+                            // FileController: el diálogo rfd queda en UI thread (modal
+                            // nativo); el write va a worker y se notifica en el poll.
                             let latex = construction_log_to_latex(&app.construction_log);
                             if let Some(path) =
                                 rfd::FileDialog::new().add_filter("TeX", &["tex"]).save_file()
                             {
-                                if let Err(e) = crate::export::write_text_atomic(&path, &latex) {
-                                    app.cas_result =
-                                        format!("No se pudo exportar el protocolo: {e}");
-                                    app.notify(
-                                        format!("Error LaTeX: {}", e),
-                                        grafito_ui::toast::ToastKind::Error,
-                                    );
-                                } else {
-                                    app.cas_result = format!(
-                                        "Protocolo exportado a LaTeX -> {}",
-                                        path.display()
-                                    );
-                                    app.notify(
-                                        app.cas_result.clone(),
-                                        grafito_ui::toast::ToastKind::Success,
-                                    );
-                                }
+                                app.pending_text_job = Some(crate::app::PendingTextWriteJob {
+                                    receiver: crate::app::spawn_text_write(
+                                        path,
+                                        latex,
+                                        ctx,
+                                    ),
+                                });
+                                app.cas_result = "Exportando protocolo a LaTeX…".to_string();
                             }
                         }
                         if ui.button("Limpiar").clicked() {
@@ -3304,7 +4044,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                                                     ui.label(
                                                         egui::RichText::new("(deshabilitado)")
                                                             .color(txt_dim)
-                                                            .size(10.0),
+                                                            .size(grafito_ui::tokens::TYPE_XS),
                                                     );
                                                 }
                                             });
@@ -3407,5 +4147,714 @@ mod domain_coloring_mutation_tests {
             1.5,
         ));
         assert_eq!(document.version, revision + 1);
+    }
+}
+
+#[cfg(test)]
+mod layer_panel_tests {
+    use super::LayerPanelState;
+    use grafito_core::Document;
+
+    #[test]
+    fn layer_panel_state_defaults_empty_on_layer_zero() {
+        let state = LayerPanelState::default();
+        assert_eq!(state.selected_layer, 0);
+        let document = Document::new();
+        assert_eq!(state.table.used_layers(&document), vec![]);
+        assert!(state.table.is_layer_visible(&document, 0));
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Frente G-C · Piel vs GeoGebra UI (2026-09-05) — ADITIVO
+// ══════════════════════════════════════════════════════════════════════════
+// Sliders Play + prompt auto, spreadsheet viva (lectura) y panel de
+// probabilidad (Normal/Binomial/Poisson con PDF/CDF honestos en f64).
+//
+// Reglas del frente: `fn render(&Estado) -> Frame` — estado efímero en
+// `ctx.data` (cero campos nuevos en `GrafitoApp`), cero I/O/spawn en Ui::
+// (los botones mutan estado en memoria o copian al portapapeles vía egui
+// output, como el «Copiar SVG» existente), tokens TYPE/SPACE/RADIUS,
+// Scandinavian 5/8/17, sin botones mudos. Cableado en paneles existentes
+// y alcanzables (vista / trig) para que nada quede colgado.
+
+/// Cota de `n` en Binomial: CDF suma `n` términos por frame.
+const MAX_BINOMIAL_N: u64 = 2_000;
+/// Cota de `λ` en Poisson: `exp(-λ)` subfluye igual, pero el loop es O(k).
+const MAX_POISSON_LAMBDA: f64 = 1_000_000.0;
+/// Cota de `k` en Poisson.
+const MAX_POISSON_K: u64 = 100_000;
+/// Filas por tabla en la hoja viva (lectura): el resto se avisa.
+const MAX_SPREADSHEET_ROWS: usize = 50;
+/// Tablas visibles en la hoja viva: el resto se avisa.
+const MAX_SPREADSHEET_TABLES: usize = 8;
+
+/// `ln Γ(x)` por Lanczos (g=7): base de Binomial/Poisson sin dependencias.
+fn ln_gamma(value: f64) -> f64 {
+    const COEFFS: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if value < 0.5 {
+        // Reflexión: Γ(1-x)Γ(x) = π/sin(πx).
+        return (std::f64::consts::PI / (std::f64::consts::PI * value).sin()).ln()
+            - ln_gamma(1.0 - value);
+    }
+    let value = value - 1.0;
+    let mut sum = COEFFS[0];
+    for (index, coeff) in COEFFS.iter().enumerate().skip(1) {
+        sum += coeff / (value + index as f64);
+    }
+    let tmp = value + 7.5;
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (value + 0.5) * tmp.ln() - tmp + sum.ln()
+}
+
+/// `erf(x)` por Abramowitz & Stegun 7.1.26 (|ε| ≤ 1.5e-7). Sin dependencias.
+fn erf_approx(value: f64) -> f64 {
+    let sign = if value < 0.0 { -1.0 } else { 1.0 };
+    let x = value.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let poly = ((((1.061_405_429 * t - 1.453_152_027) * t + 1.421_413_741) * t - 0.284_496_736)
+        * t
+        + 0.254_829_592)
+        * t;
+    sign * (1.0 - poly * (-x * x).exp())
+}
+
+fn check_probability_point(value: f64, what: &str) -> Result<f64, String> {
+    if !value.is_finite() {
+        return Err(format!("{what} debe ser un número finito"));
+    }
+    Ok(value)
+}
+
+/// Densidad Normal(μ, σ) en x. `Err` honesto si σ ≤ 0 o hay no-finitos.
+pub(crate) fn normal_pdf(x: f64, mu: f64, sigma: f64) -> Result<f64, String> {
+    let (x, mu, sigma) = (
+        check_probability_point(x, "x")?,
+        check_probability_point(mu, "μ")?,
+        check_probability_point(sigma, "σ")?,
+    );
+    if sigma <= 0.0 {
+        return Err("σ debe ser mayor que 0".to_string());
+    }
+    let z = (x - mu) / sigma;
+    Ok((-0.5 * z * z).exp() / (sigma * (2.0 * std::f64::consts::PI).sqrt()))
+}
+
+/// Acumulada Normal(μ, σ) en x: P(X ≤ x).
+pub(crate) fn normal_cdf(x: f64, mu: f64, sigma: f64) -> Result<f64, String> {
+    let (x, mu, sigma) = (
+        check_probability_point(x, "x")?,
+        check_probability_point(mu, "μ")?,
+        check_probability_point(sigma, "σ")?,
+    );
+    if sigma <= 0.0 {
+        return Err("σ debe ser mayor que 0".to_string());
+    }
+    let root2 = std::f64::consts::SQRT_2;
+    Ok(0.5 * (1.0 + erf_approx((x - mu) / (sigma * root2))))
+}
+
+/// Masa Binomial(n, p) en k: P(X = k). Vía log-dominio (sin overflow).
+pub(crate) fn binomial_pmf(k: u64, n: u64, p: f64) -> Result<f64, String> {
+    if !p.is_finite() {
+        return Err("p debe ser un número finito".to_string());
+    }
+    if !(0.0..=1.0).contains(&p) {
+        return Err("p debe estar entre 0 y 1".to_string());
+    }
+    if n > MAX_BINOMIAL_N {
+        return Err(format!("n ≤ {} en este panel (cota de UI)", MAX_BINOMIAL_N));
+    }
+    if k > n {
+        return Err("k no puede superar a n".to_string());
+    }
+    if p == 0.0 {
+        return Ok(if k == 0 { 1.0 } else { 0.0 });
+    }
+    if p == 1.0 {
+        return Ok(if k == n { 1.0 } else { 0.0 });
+    }
+    let log_pmf =
+        ln_gamma(n as f64 + 1.0) - ln_gamma(k as f64 + 1.0) - ln_gamma((n - k) as f64 + 1.0)
+            + k as f64 * p.ln()
+            + (n - k) as f64 * (1.0 - p).ln();
+    Ok(log_pmf.exp())
+}
+
+/// Acumulada Binomial(n, p) en k: P(X ≤ k). Suma honesta de `k+1` términos.
+pub(crate) fn binomial_cdf(k: u64, n: u64, p: f64) -> Result<f64, String> {
+    if k > n {
+        return Err("k no puede superar a n".to_string());
+    }
+    let mut acc = 0.0;
+    for term in 0..=k {
+        acc += binomial_pmf(term, n, p)?;
+    }
+    Ok(acc.min(1.0))
+}
+
+/// Masa Poisson(λ) en k: P(X = k). Vía log-dominio (sin overflow de k!).
+pub(crate) fn poisson_pmf(k: u64, lambda: f64) -> Result<f64, String> {
+    if !lambda.is_finite() {
+        return Err("λ debe ser un número finito".to_string());
+    }
+    if lambda <= 0.0 {
+        return Err("λ debe ser mayor que 0".to_string());
+    }
+    if lambda > MAX_POISSON_LAMBDA {
+        return Err(format!(
+            "λ ≤ {} en este panel (cota de UI)",
+            MAX_POISSON_LAMBDA
+        ));
+    }
+    if k > MAX_POISSON_K {
+        return Err(format!("k ≤ {} en este panel (cota de UI)", MAX_POISSON_K));
+    }
+    if k == 0 {
+        return Ok((-lambda).exp());
+    }
+    let log_pmf = -lambda + k as f64 * lambda.ln() - ln_gamma(k as f64 + 1.0);
+    Ok(log_pmf.exp())
+}
+
+/// Acumulada Poisson(λ) en k: P(X ≤ k).
+pub(crate) fn poisson_cdf(k: u64, lambda: f64) -> Result<f64, String> {
+    let mut acc = 0.0;
+    for term in 0..=k.min(MAX_POISSON_K) {
+        acc += poisson_pmf(term, lambda)?;
+    }
+    Ok(acc.min(1.0))
+}
+
+/// Prompt auto de velocidad para sliders Play. Acepta:
+/// número («1.5»), palabra («lento/medio/rápido») o «N vueltas en S s».
+/// Todo lo demás es `Err` honesto (nunca se inventa una velocidad).
+pub(crate) fn parse_slider_prompt(input: &str) -> Result<f64, String> {
+    let text = input.trim().to_lowercase();
+    if text.is_empty() {
+        return Err("Escribí una velocidad: 1.5, «medio» o «2 vueltas en 10 s»".to_string());
+    }
+    if let Ok(value) = text.replace(',', ".").parse::<f64>() {
+        if !value.is_finite() {
+            return Err("La velocidad debe ser finita".to_string());
+        }
+        if value.abs() > 6.0 {
+            return Err("La velocidad vive en ±6 rad/s (mové el slider si querés más)".to_string());
+        }
+        return Ok(value);
+    }
+    match text.as_str() {
+        "lento" | "lenta" | "slow" => return Ok(0.2),
+        "medio" | "media" | "normal" => return Ok(0.5),
+        "rapido" | "rápido" | "rapida" | "rápida" | "fast" => return Ok(2.0),
+        _ => {}
+    }
+    // «N vueltas en S s»: números con punto o coma decimal.
+    let numbers: Vec<f64> = text
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == ',' || c == '-'))
+        .filter(|token| !token.is_empty())
+        .filter_map(|token| token.replace(',', ".").parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .collect();
+    if (text.contains("vuelta") || text.contains("lap") || text.contains("giro"))
+        && numbers.len() >= 2
+    {
+        let (turns, seconds) = (numbers[0], numbers[1]);
+        if seconds <= 0.0 {
+            return Err("Los segundos deben ser mayores que 0".to_string());
+        }
+        let speed = turns * 2.0 * std::f64::consts::PI / seconds;
+        if speed > 6.0 {
+            return Err(format!(
+                "Eso da {speed:.2} rad/s: más de 6 rad/s no se sigue a ojo (bajá vueltas o subí segundos)"
+            ));
+        }
+        return Ok(speed);
+    }
+    Err("No entendí: probá 1.5, «medio» o «2 vueltas en 10 s»".to_string())
+}
+
+/// Estado efímero del panel de probabilidad (vive en `ctx.data`, sin I/O).
+#[derive(Debug, Clone)]
+struct ProbabilityPanelState {
+    dist: u8,
+    mu: f64,
+    sigma: f64,
+    x: f64,
+    n: f64,
+    p: f64,
+    k: f64,
+    lambda: f64,
+}
+
+impl Default for ProbabilityPanelState {
+    fn default() -> Self {
+        Self {
+            dist: 0,
+            mu: 0.0,
+            sigma: 1.0,
+            x: 0.0,
+            n: 10.0,
+            p: 0.5,
+            k: 5.0,
+            lambda: 3.0,
+        }
+    }
+}
+
+/// Estado efímero del prompt auto (texto + último error honesto).
+#[derive(Debug, Clone, Default)]
+struct TrigPromptState {
+    text: String,
+    error: Option<String>,
+}
+
+/// Sección Probabilidad: Normal / Binomial / Poisson con PDF/CDF honestos.
+/// Llamada desde el panel Vista (alcanzable) — sin botones mudos: el
+/// selector cambia la distribución y cada parámetro recalcula en vivo.
+pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
+    let id = egui::Id::new("gc_probability_state");
+    let mut state: ProbabilityPanelState = ctx
+        .data_mut(|data| data.get_temp::<ProbabilityPanelState>(id))
+        .unwrap_or_default();
+    let (_is_dark, accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+
+    ui.label(
+        egui::RichText::new("Probabilidad")
+            .color(hdr_col)
+            .size(TYPE_SM)
+            .strong(),
+    );
+    ui.horizontal(|ui| {
+        for (index, name, tip) in [
+            (0u8, "Normal", "Gaussiana μ, σ: densidad y acumulada"),
+            (1u8, "Binomial", "n ensayos, p éxito: P(X = k) y P(X ≤ k)"),
+            (2u8, "Poisson", "Tasa λ: P(X = k) y P(X ≤ k)"),
+        ] {
+            let selected = state.dist == index;
+            if ui
+                .selectable_label(selected, name)
+                .on_hover_text(tip)
+                .clicked()
+            {
+                state.dist = index;
+                ctx.request_repaint();
+            }
+        }
+    });
+    ui.add_space(SPACE_XS);
+
+    // Parámetros por distribución (sliders acotados + lectura honesta).
+    match state.dist {
+        0 => {
+            ui.add(egui::Slider::new(&mut state.mu, -10.0..=10.0).text("μ media"));
+            ui.add(egui::Slider::new(&mut state.sigma, 0.1..=5.0).text("σ desvío"));
+            ui.add(egui::Slider::new(&mut state.x, -10.0..=10.0).text("x punto"));
+        }
+        1 => {
+            ui.add(egui::Slider::new(&mut state.n, 1.0..=MAX_BINOMIAL_N as f64).text("n ensayos"));
+            ui.add(egui::Slider::new(&mut state.p, 0.0..=1.0).text("p éxito"));
+            ui.add(egui::Slider::new(&mut state.k, 0.0..=MAX_BINOMIAL_N as f64).text("k éxitos"));
+        }
+        _ => {
+            ui.add(
+                egui::Slider::new(&mut state.lambda, 0.1..=20.0)
+                    .logarithmic(true)
+                    .text("λ tasa"),
+            );
+            ui.add(egui::Slider::new(&mut state.k, 0.0..=50.0).text("k eventos"));
+        }
+    }
+    ui.add_space(SPACE_XS);
+
+    let result: Result<(f64, f64, String), String> = (|| {
+        Ok(match state.dist {
+            0 => {
+                let (pdf, cdf) = (
+                    normal_pdf(state.x, state.mu, state.sigma)?,
+                    normal_cdf(state.x, state.mu, state.sigma)?,
+                );
+                (pdf, cdf, format!("f({})", format_statistic(state.x)))
+            }
+            1 => {
+                let (n, k) = (
+                    state.n.round() as u64,
+                    state.k.round().min(state.n.round()) as u64,
+                );
+                let (pmf, cdf) = (binomial_pmf(k, n, state.p)?, binomial_cdf(k, n, state.p)?);
+                (pmf, cdf, format!("P(X = {k}) · n = {n}"))
+            }
+            _ => {
+                let k = state.k.round().max(0.0) as u64;
+                let (pmf, cdf) = (poisson_pmf(k, state.lambda)?, poisson_cdf(k, state.lambda)?);
+                (
+                    pmf,
+                    cdf,
+                    format!("P(X = {k}) · λ = {}", format_statistic(state.lambda)),
+                )
+            }
+        })
+    })();
+    match result {
+        Ok((pdf, cdf, detail)) => {
+            egui::Grid::new("gc_prob_grid")
+                .num_columns(2)
+                .striped(true)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Caso").color(txt_dim).size(TYPE_SM));
+                    ui.label(
+                        egui::RichText::new(detail)
+                            .color(txt_col)
+                            .size(TYPE_SM)
+                            .strong(),
+                    );
+                    ui.end_row();
+                    ui.label(
+                        egui::RichText::new(if state.dist == 0 {
+                            "Densidad"
+                        } else {
+                            "Puntual"
+                        })
+                        .color(txt_dim)
+                        .size(TYPE_SM),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{pdf:.6}"))
+                            .color(accent)
+                            .size(TYPE_SM)
+                            .strong(),
+                    );
+                    ui.end_row();
+                    ui.label(
+                        egui::RichText::new("Acumulada")
+                            .color(txt_dim)
+                            .size(TYPE_SM),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{cdf:.6}"))
+                            .color(accent)
+                            .size(TYPE_SM)
+                            .strong(),
+                    );
+                    ui.end_row();
+                });
+            ui.label(
+                egui::RichText::new("f64 exacto; colas extremas pueden subfluir a 0.")
+                    .color(txt_dim)
+                    .size(TYPE_XS),
+            );
+        }
+        Err(error) => {
+            ui.label(
+                egui::RichText::new(error)
+                    .color(current_theme(ctx).danger)
+                    .size(TYPE_XS),
+            );
+        }
+    }
+    ctx.data_mut(|data| data.insert_temp(id, state));
+}
+
+/// Fila de la hoja viva: una tabla del documento con sus columnas clonadas
+/// (lectura puntual por frame; la edición es P2).
+struct SheetTable {
+    id: ObjectId,
+    label: String,
+    x_name: String,
+    y_name: String,
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+}
+
+/// Sección Datos: hoja viva en LECTURA sobre los `DataTable` del documento.
+/// Sin edición (honesto: la edición es P2); el vacío explica cómo crear una
+/// y el botón de ejemplo inserta de verdad (nunca mudo).
+pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
+    let ctx = ui.ctx().clone();
+    let (_is_dark, _accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(&ctx);
+    ui.label(
+        egui::RichText::new("Datos · hoja viva (lectura)")
+            .color(hdr_col)
+            .size(TYPE_SM)
+            .strong(),
+    );
+
+    let tables: Vec<SheetTable> = app
+        .document
+        .objects_iter_sorted()
+        .filter_map(|(id, object)| match object {
+            GeoObject::DataTable(table) => Some(SheetTable {
+                id: *id,
+                label: table.label.clone(),
+                x_name: table.x_name.clone(),
+                y_name: table.y_name.clone(),
+                xs: table.xs.clone(),
+                ys: table.ys.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+
+    if tables.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "No hay tablas. Creá una con DataTable[{1,2,3}, {2,4,6}] en la entrada.",
+            )
+            .color(txt_dim)
+            .size(TYPE_XS),
+        );
+        if ui
+            .small_button("Cargar ejemplo")
+            .on_hover_text("Inserta una tabla de ejemplo (x: 0..4, y: x²) al documento")
+            .clicked()
+        {
+            let example = GeoObject::DataTable(
+                DataTableObj::new(
+                    "x",
+                    "y",
+                    vec![0.0, 1.0, 2.0, 3.0, 4.0],
+                    vec![0.0, 1.0, 4.0, 9.0, 16.0],
+                )
+                .with_label("ejemplo"),
+            );
+            match app.document.try_add_object(example) {
+                Ok(_) => {
+                    app.cas_result = "Tabla «ejemplo» cargada".to_string();
+                    app.notify(
+                        app.cas_result.clone(),
+                        grafito_ui::toast::ToastKind::Success,
+                    );
+                }
+                Err(error) => {
+                    app.cas_result = format!("No se pudo cargar el ejemplo: {error}");
+                    app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+                }
+            }
+        }
+        return;
+    }
+
+    let hidden_tables = tables.len().saturating_sub(MAX_SPREADSHEET_TABLES);
+    for table in tables.into_iter().take(MAX_SPREADSHEET_TABLES) {
+        let SheetTable {
+            id,
+            label,
+            x_name,
+            y_name,
+            xs,
+            ys,
+        } = table;
+        let _ = id;
+        let title = if label.is_empty() {
+            "<sin etiqueta>".to_string()
+        } else {
+            label
+        };
+        ui.label(
+            egui::RichText::new(format!("{title} · {} filas", xs.len().min(ys.len())))
+                .color(txt_col)
+                .size(TYPE_XS)
+                .strong(),
+        );
+        let rows = xs.len().min(ys.len());
+        let shown = rows.min(MAX_SPREADSHEET_ROWS);
+        egui::Grid::new(format!("gc_sheet_{title}"))
+            .num_columns(3)
+            .striped(true)
+            .spacing([8.0, 2.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("#").color(txt_dim).size(TYPE_XS));
+                ui.label(egui::RichText::new(x_name).color(txt_dim).size(TYPE_XS));
+                ui.label(egui::RichText::new(y_name).color(txt_dim).size(TYPE_XS));
+                ui.end_row();
+                for row in 0..shown {
+                    ui.label(
+                        egui::RichText::new(format!("{}", row + 1))
+                            .color(txt_dim)
+                            .size(TYPE_XS),
+                    );
+                    ui.label(
+                        egui::RichText::new(format_statistic(xs[row]))
+                            .color(txt_col)
+                            .size(TYPE_XS),
+                    );
+                    ui.label(
+                        egui::RichText::new(format_statistic(ys[row]))
+                            .color(txt_col)
+                            .size(TYPE_XS),
+                    );
+                    ui.end_row();
+                }
+            });
+        if rows > shown {
+            ui.label(
+                egui::RichText::new(format!(
+                    "…y {} filas más (vista acotada a {MAX_SPREADSHEET_ROWS})",
+                    rows - shown
+                ))
+                .color(txt_dim)
+                .size(TYPE_XS),
+            );
+        }
+        ui.add_space(SPACE_XS);
+    }
+    if hidden_tables > 0 {
+        ui.label(
+            egui::RichText::new(format!(
+                "…y {hidden_tables} tablas más (vista acotada a {MAX_SPREADSHEET_TABLES})"
+            ))
+            .color(txt_dim)
+            .size(TYPE_XS),
+        );
+    }
+    ui.label(
+        egui::RichText::new("Solo lectura: la edición de celdas llega en P2.")
+            .color(txt_dim)
+            .size(TYPE_XS),
+    );
+}
+
+/// Prompt auto de velocidad: texto libre → `trig_speed` honesto.
+/// Llamado desde el panel trig (alcanzable); Aplicar parsea o explica.
+pub(crate) fn draw_trig_speed_prompt(ui: &mut egui::Ui, app: &mut GrafitoApp) {
+    let ctx = ui.ctx().clone();
+    let id = egui::Id::new("gc_trig_prompt_state");
+    let mut prompt: TrigPromptState = ctx
+        .data_mut(|data| data.get_temp::<TrigPromptState>(id))
+        .unwrap_or_default();
+    let (_is_dark, _accent, _fill, _sep, _txt_col, txt_dim, _hdr_col) = panel_theme_local(&ctx);
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Auto").color(txt_dim).size(TYPE_XS));
+        // Ancho acotado inferior: en pantallas mínimas el disponible puede
+        // achicarse y egui exige desired_size ≥ 0.
+        let field_w = (ui.available_width() - 76.0).max(80.0);
+        let resp = ui.add_sized(
+            [field_w, TYPE_SM + SPACE_SM],
+            egui::TextEdit::singleline(&mut prompt.text)
+                .hint_text("1.5 · medio · 2 vueltas en 10 s"),
+        );
+        let enter_pressed =
+            resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        resp.on_hover_text("Pedí una velocidad con palabras o números y pulsa Aplicar");
+        if ui
+            .add_sized(
+                [68.0, TYPE_SM + SPACE_SM],
+                egui::Button::new(egui::RichText::new("Aplicar").size(TYPE_SM)),
+            )
+            .on_hover_text("Convierte el pedido en velocidad del slider")
+            .clicked()
+            || enter_pressed
+        {
+            match parse_slider_prompt(&prompt.text) {
+                Ok(speed) => {
+                    app.trig_speed = speed;
+                    prompt.error = None;
+                    ctx.request_repaint();
+                }
+                Err(error) => prompt.error = Some(error),
+            }
+        }
+    });
+    if let Some(error) = &prompt.error {
+        ui.label(
+            egui::RichText::new(error)
+                .color(current_theme(&ctx).danger)
+                .size(TYPE_XS),
+        );
+    }
+    ctx.data_mut(|data| data.insert_temp(id, prompt));
+}
+
+#[cfg(test)]
+mod gc_piel_tests {
+    use super::{
+        binomial_cdf, binomial_pmf, normal_cdf, normal_pdf, parse_slider_prompt, poisson_cdf,
+        poisson_pmf, MAX_BINOMIAL_N,
+    };
+
+    #[test]
+    fn normal_standard_values_are_honest() {
+        let pdf = normal_pdf(0.0, 0.0, 1.0).expect("normal válida");
+        assert!(
+            (pdf - 0.398_942_280_401_432_7).abs() < 1e-6,
+            "pdf(0) = {pdf}"
+        );
+        let cdf = normal_cdf(0.0, 0.0, 1.0).expect("normal válida");
+        assert!((cdf - 0.5).abs() < 1e-6, "cdf(0) = {cdf}");
+        let tail = normal_cdf(1.959_963_984_540_054, 0.0, 1.0).expect("cola 97.5%");
+        assert!((tail - 0.975).abs() < 1e-3, "cola = {tail}");
+    }
+
+    #[test]
+    fn normal_rejects_bad_sigma_and_non_finite() {
+        assert!(normal_pdf(0.0, 0.0, 0.0).is_err());
+        assert!(normal_pdf(0.0, 0.0, -1.0).is_err());
+        assert!(normal_cdf(f64::NAN, 0.0, 1.0).is_err());
+        assert!(normal_cdf(0.0, 0.0, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn binomial_fair_coin_matches_textbook() {
+        // n=10, p=0.5, k=5 → 252/1024.
+        let pmf = binomial_pmf(5, 10, 0.5).expect("binomial válida");
+        assert!((pmf - 0.246_093_75).abs() < 1e-9, "pmf = {pmf}");
+        let cdf = binomial_cdf(5, 10, 0.5).expect("cdf válida");
+        assert!((cdf - 0.623_046_875).abs() < 1e-9, "cdf = {cdf}");
+        assert_eq!(binomial_pmf(0, 5, 0.0).expect("p=0"), 1.0);
+        assert_eq!(binomial_pmf(1, 5, 0.0).expect("p=0"), 0.0);
+        assert_eq!(binomial_pmf(5, 5, 1.0).expect("p=1"), 1.0);
+    }
+
+    #[test]
+    fn binomial_rejects_out_of_bounds() {
+        assert!(binomial_pmf(6, 5, 0.5).is_err());
+        assert!(binomial_pmf(1, 5, 1.5).is_err());
+        assert!(binomial_pmf(1, MAX_BINOMIAL_N + 1, 0.5).is_err());
+        assert!(binomial_cdf(6, 5, 0.5).is_err());
+    }
+
+    #[test]
+    fn poisson_matches_textbook() {
+        // λ=3, k=2 → 9/(2e³) ≈ 0.2240.
+        let pmf = poisson_pmf(2, 3.0).expect("poisson válida");
+        assert!((pmf - 0.224_041_807_655_387_75).abs() < 1e-9, "pmf = {pmf}");
+        let cdf = poisson_cdf(2, 3.0).expect("cdf válida");
+        assert!((cdf - 0.423_190_081_126_843_53).abs() < 1e-9, "cdf = {cdf}");
+        assert!((poisson_pmf(0, 1.0).expect("k=0") - 0.367_879_441_171_442_33).abs() < 1e-9);
+    }
+
+    #[test]
+    fn poisson_rejects_bad_lambda_and_caps() {
+        assert!(poisson_pmf(1, 0.0).is_err());
+        assert!(poisson_pmf(1, -2.0).is_err());
+        assert!(poisson_pmf(1, f64::NAN).is_err());
+        assert!(poisson_pmf(1, 1e9).is_err());
+    }
+
+    #[test]
+    fn slider_prompt_parses_numbers_words_and_turns() {
+        assert_eq!(parse_slider_prompt("1.5").expect("número"), 1.5);
+        assert_eq!(parse_slider_prompt("medio").expect("palabra"), 0.5);
+        assert_eq!(parse_slider_prompt("RÁPIDO").expect("mayúscula"), 2.0);
+        let turns = parse_slider_prompt("2 vueltas en 10 s").expect("vueltas");
+        assert!(
+            (turns - 1.256_637_061_435_917_2).abs() < 1e-9,
+            "velocidad = {turns}"
+        );
+        assert!(parse_slider_prompt("").is_err());
+        assert!(parse_slider_prompt("100").is_err());
+        assert!(parse_slider_prompt("verde").is_err());
+        assert!(parse_slider_prompt("100 vueltas en 1 s").is_err());
     }
 }

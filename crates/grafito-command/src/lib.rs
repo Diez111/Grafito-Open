@@ -29,7 +29,9 @@ pub mod cas_analysis;
 pub mod cas_parse;
 pub mod command_registry;
 pub mod commands;
+pub mod ggbscript;
 pub mod helpers;
+pub mod inspector_equation;
 
 pub use commands::{parse_point_str, parse_preview, process_cas_worksheet_cell, process_input};
 

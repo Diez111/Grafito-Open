@@ -45,3 +45,38 @@
 - [x] F6.3 app.rs: Ctrl+T tema (:4259-4267) + Ctrl+P/E (:4268-4278) + F8/F9 (:4135-4144) — cero fantasmas; onboarding gating `!onboarding_completed` (:1763, :4922-5033, utils.rs:46-48), botón [No mostrar]
 - [x] F6.4 Responsive: rail 60px Medium/Wide (ui.rs:549-552), drawer clamp 292..440 (tokens.rs:207-210, panels.rs:2125-2132), panel izq 180+45% (panels.rs:1201-1206); paleta footer "N de M" es (command_palette.rs:394-403)
 - [x] F6.5 README.md/README.en.md Controles corregidos (Shift+L/K/J = X/Y/ambos, F8/F9, Ctrl+T/P/E); tabla doc→código §13 en architecture.md
+
+## F9 — 20 agentes 2026-09-05 — DONE (rama f9-completion)
+- [x] F9.1 W1 perf + W2 correctness + W3 paridad + W4 interop/i18n/calidad (20 agentes, ownership disjunto)
+- [x] F9.2 Cierres lead: Perpendicular/input+dispatcher, Rastro (registry+dispatch+docs), Parallel/Arc/Sector + polygon_n, trace stack Document+render+tests
+- [x] F9.3 Docs sync real: 232 comandos únicos, 193 visibles + 14 UI = 207 paleta, 76 Tools, 18 crates
+- [x] F9.4 Gates: fmt/clippy -D warnings 0, suites lib+tests verdes (skip 1 Vulkan lavapipe pre-existente)
+
+## F10 — Plan total 2026-09-05 — EN CURSO (rama f10-plan-total, pusheada a origin)
+- [x] F10.0 Merge f9-completion→main (blindaje) + rama f10 + deps qrcode/printpdf (MSRV ok)
+- [x] F10.W1: GGB-WIRE + CAS-WIRE (Steps) + I18N-WIRE (locale vivo) + ANIM-REVIVE + PRISM-RENDER
+- [x] F10.W2 parcial: CAS-rational (Hermite/Fu) + dispatcher arms + ROBUST-SPADE + recovery modal
+- [ ] F10.W2 resto: DECIDER + LINECONIC (abortados/perdidos por reset, rehacer abajo)
+- [ ] F10.W3: STATEM-AULA + AULA-UI-QR + TELEMETRY + JUDGE + MASTERY
+- [ ] F10.W4: LAYERS + TABLE-REG + ACTIONS + PDF-CSV + TOOLTIPS-SLIDERS
+- [ ] F10.W5: motor resto (Gruntz/Risch/EDO) + 3D resto (Net/volumen/ortho/F(x,y,z)) + P2P iroh + CRDT
+- [ ] F10.W6: CI honesto + perf (rayon/SIMD/R-tree) + egui upgrade + E3 keyring + i18n resto
+
+### LO QUE FALTA (verificado claims-vs-código 2026-09-05)
+**Perdido por resets, rehacer:**
+- [ ] DECIDER: Asymptotic Decider casos 5/10 marching squares + enum BreakKind {Pole,Jump,RemovableHole,DomainEdge} (implicit_curve.rs + function_sampling.rs)
+- [ ] LINECONIC: geom_eps(scale) real + intersección recta-cónica exacta + cónica-cónica stub honesto (intersections.rs + lines.rs)
+- [ ] A11Y resto: keyboard/orden foco en toolbar/paneles, live-region lector, Esc descarta persistentes (assistant.rs/ui.rs/pou.rs fuera de tokens/)
+- [ ] E3/G18: keyring/reqwest opcionales tras assistant-net (revertido; requiere gates cfg en credentials + request_remote*)
+
+**Nunca empezado (fases F2-F6 del plan):**
+- [ ] CAS: Gruntz límites simbólicos (L), Risch completo (L, solo Risch-Norman parcial), EDO simbólicas 1er orden (M), Laurent/residuos (M), Groebner real (L, hoy stub 2×2)
+- [ ] 3D: Net real (M), intersección plano-poliedro (M), volumen/área 3D (S), vistas ortográficas (S), F(x,y,z)=0 marching cubes (L), picking exacto resto, icosa/dodecaedro, revolución lathe
+- [ ] Aula/P2P: statem Idle→Lobby→Live→Closed (M), ClassroomTransport + Loopback (M), unirse-con-código + roster + manos (M), QR real qrcode crate (S), iroh P2P (L), CRDT pizarra UUID+LWW (M), dashboard←StudentProfile real (M)
+- [ ] IA: telemetría por turno (S), juez LLM telling calibrado (M), contrato revise>block + over-blocking ≤5% (M), FSM durable serde (M), mastery por BKT posterior (S), scheduler FSRS-lite + interleaving (M), calibración EM N≥200 (M), Elo on-the-fly (M), costos visibles + cascada (S-M), sesiones cifradas (M-L), offline-first cola (L), errores vibecoder 2-3 botones (M), OCR local (L)
+- [ ] Paridad: capas (S), tabla viva + regresión ~ (M), action objects Button/Checkbox/InputBox + GGBScript (M), PDF real printpdf (M), Bar/Pie (S), probability panel (M), spreadsheet view (M), MathML export (M), custom tools .ggt (M), streamlines RK4 (L), TikZ axis pgfplots (S), usvg import (M), CSV RFC4180 (S), clipboard SVG/PNG (S-M), HTML export (M)
+- [ ] Profesionalismo: sliders Play+prompt auto (M), trace hover readout (M), tooltips ricos + MRU paleta (S), skeleton+% progreso (S), keypad matemático (M), preview LaTeX vivo (M), onboarding tour (S), sonificación/Braille (L), projectorMode (M)
+- [ ] Perf medido: rayon build_geometry (M), caché world-space (L), R-tree culling (M), alloc reuse (S-M), bind groups (M), SIMD batch eval (L), wgpu-profiler (S), egui 0.29→0.31+ (M-L), splash progreso real (S), cold start instrumentado (S)
+- [ ] CI honesto: bench-regression real con critcmp (M, quitar || true), mutation gate 80% (M), fuzz anim_wire contra producción (M), fuzz smoke en PR (M), doc-tests ejecutables (S-M), GPU fail-closed local (S), coverage sin fallback ruidoso (S)
+- [ ] i18n resto: onboarding+cheat+toasts+menús (~280 claves, M), format_number cableado (M), resto 7335 strings por oleadas, fluent diferido (>500 claves)
+- [ ] Varios: whiteboard validación por hoja en validate_document (S), examen lockdown policy (decisión), pick 3D exacto resto, journal/ledger Plans.md F9 (S), CHANGELOG 1.2.35 (M), WORKSPACE Next (S), dropear 3 stashes (tras backup branch), .jspace sync

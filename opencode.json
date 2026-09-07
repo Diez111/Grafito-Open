@@ -1,60 +1,100 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode-go/muse-spark-1.2-contributor",
-  "small_model": "opencode-go/deepseek-v4-flash",
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "small_model": "opencode-go/muse-spark-1.3-contributor",
+  "subagent_depth": 2,
   "compaction": {
     "auto": true,
     "prune": true,
     "reserved": 12000
   },
+  "formatter": true,
+  "lsp": true,
+  "plugin": ["opencode-mem"],
   "watcher": {
-    "ignore": [
-      "target/**",
-      "node_modules/**",
-      ".git/**",
-      "dist/**",
-      "packaging/deb/**"
-    ]
+    "ignore": ["target/**", "node_modules/**", ".git/**", "dist/**", "packaging/deb/**", "*.log"]
   },
-  "permission": "allow",
-  "instructions": [
-    "AGENTS.md",
-    "docs/architecture.md",
-    ".jspace/WORKSPACE.md"
-  ],
+  "permission": {
+    "*": "allow",
+    "skill": {
+      "*": "allow",
+      "swiftui-*": "deny",
+      "threejs-*": "deny",
+      "three-*": "deny",
+      "azure-*": "deny",
+      "angular-*": "deny"
+    }
+  },
+  "instructions": ["AGENTS.md", "docs/architecture.md", ".jspace/WORKSPACE.md", "docs/SKILLS-CATALOG.md", "MEMORY.md"],
   "agent": {
     "plan": {
       "description": "Planificador barato: arch, budgets, DAG",
       "mode": "primary",
-      "model": "opencode-go/deepseek-v4-flash",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.1,
       "permission": "allow"
     },
     "build": {
       "description": "Constructor principal Rust",
       "mode": "primary",
-      "model": "opencode-go/muse-spark-1.2-contributor",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.2,
       "permission": "allow"
     },
     "cerebro-audit": {
       "description": "Auditor cerebro puro Rust: core/geometry/command sin egui/wgpu, invariants type-safety",
       "mode": "subagent",
-      "model": "opencode-go/muse-spark-1.2-contributor",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.1,
       "permission": "allow"
     },
     "piel-ui": {
       "description": "Especialista egui/wgpu Piel: render &Estado sin I/O, tokens, performance",
       "mode": "subagent",
-      "model": "opencode-go/muse-spark-1.2-contributor",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.2
     },
     "perf-profiler": {
       "description": "Profiler Rust: puffin, rayon, wgpu, lyon, spade. Mide antes de optimizar",
       "mode": "subagent",
-      "model": "opencode-go/deepseek-v4-flash",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.15
+    }
+  },
+  "mcp": {
+    "filesystem": {
+      "type": "local",
+      "command": ["/home/diez/.bun/bin/bun", "x", "-y", "@modelcontextprotocol/server-filesystem", "."],
+      "enabled": true,
+      "timeout": 30000
+    },
+    "git": {
+      "type": "local",
+      "command": ["/home/diez/.local/bin/uvx", "mcp-server-git", "--repository", "."],
+      "enabled": true,
+      "timeout": 30000
+    },
+    "fetch": {
+      "type": "local",
+      "command": ["/home/diez/.local/bin/uvx", "mcp-server-fetch"],
+      "enabled": true,
+      "timeout": 30000
+    },
+    "memory": {
+      "type": "local",
+      "command": ["/home/diez/.bun/bin/bun", "x", "-y", "@modelcontextprotocol/server-memory"],
+      "enabled": true,
+      "timeout": 30000
+    },
+    "sequential-thinking": {
+      "type": "local",
+      "command": ["/home/diez/.bun/bin/bun", "x", "-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "enabled": true,
+      "timeout": 30000
+    },
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp"
     }
   },
   "provider": {
