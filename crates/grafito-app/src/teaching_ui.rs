@@ -4,7 +4,12 @@
 //! controles para avanzar. Usa `grafito-whiteboard` para dibujo y
 //! `manim_orchestrator` para animaciones 3b1b (con fallback nativo).
 
+use crate::anim_ui::{RetentionQueue, TEXTURE_GRACE_FRAMES};
 use crate::manim_orchestrator::{ManimOrchestrator, OrchestratorState};
+
+// La gracia cubre el submit GPU en vuelo (N≥2); verificado a compile-time
+// (clippy `assertions_on_constants` prohíbe re-chequear la const en runtime).
+const _: () = assert!(TEXTURE_GRACE_FRAMES >= 2);
 use crate::whiteboard_ui::WhiteboardSession;
 use egui::{Color32, Stroke};
 use grafito_pedagogy::{
@@ -36,6 +41,14 @@ pub struct TeachingUiState {
     pub anim_frames: Option<Vec<egui::ColorImage>>,
     /// Texturas cacheadas de `anim_frames` (creadas lazily con `ctx.load_texture`).
     pub anim_textures: Vec<egui::TextureHandle>,
+    /// Sets viejos retirados con gracia diferida (fix `Queue::submit`
+    /// `egui_texid_Managed(N) has been destroyed`).
+    ///
+    /// `ensure_textures` / `clear_*` mueven acá el set anterior en vez de
+    /// dropearlo: el submit GPU en vuelo puede referenciarlo. Se libera
+    /// tras `TEXTURE_GRACE_FRAMES` frames dibujados (ver
+    /// `crate::anim_ui::RetentionQueue`). Estado estable: 1 set viejo.
+    retired_anim_textures: RetentionQueue<egui::TextureHandle>,
     /// Panel de ejercicio B7 (pedir→generar→responder→próximo). Vacío por defecto.
     pub ejercicio: PanelEjercicio,
     cached_hash: u64,
@@ -53,6 +66,7 @@ impl Default for TeachingUiState {
             opened_at: None,
             anim_frames: None,
             anim_textures: Vec::new(),
+            retired_anim_textures: RetentionQueue::new(),
             ejercicio: PanelEjercicio::default(),
             cached_hash: 0,
             cached_len: 0,
@@ -1401,12 +1415,15 @@ impl TeachingUiState {
     }
 
     fn ensure_textures(&mut self, ctx: &egui::Context) {
+        // NOTA: `ctx.forget_image(uri)` NO libera texturas de `load_texture`
+        // (solo cachés de loaders por URI); la destrucción real es el drop
+        // del último `TextureHandle`. Por eso acá nunca se dropea en el
+        // mismo frame: el set viejo se retira con gracia (ver
+        // `reap_retired_anim_textures`, un tick por frame dibujado).
         let Some(frames) = &self.anim_frames else {
             if !self.anim_textures.is_empty() {
-                for idx in 0..self.anim_textures.len() {
-                    ctx.forget_image(&format!("teaching_anim_{idx}"));
-                }
-                self.anim_textures.clear();
+                let old = std::mem::take(&mut self.anim_textures);
+                self.retired_anim_textures.retire_all(old);
                 self.cached_hash = 0;
                 self.cached_len = 0;
             }
@@ -1414,10 +1431,8 @@ impl TeachingUiState {
         };
         if frames.is_empty() {
             if !self.anim_textures.is_empty() {
-                for idx in 0..self.anim_textures.len() {
-                    ctx.forget_image(&format!("teaching_anim_{idx}"));
-                }
-                self.anim_textures.clear();
+                let old = std::mem::take(&mut self.anim_textures);
+                self.retired_anim_textures.retire_all(old);
                 self.cached_hash = 0;
                 self.cached_len = 0;
             }
@@ -1428,10 +1443,8 @@ impl TeachingUiState {
         if self.anim_textures.len() == len && self.cached_hash == hash && self.cached_len == len {
             return;
         }
-        for idx in 0..self.anim_textures.len() {
-            ctx.forget_image(&format!("teaching_anim_{idx}"));
-        }
-        self.anim_textures.clear();
+        let old = std::mem::take(&mut self.anim_textures);
+        self.retired_anim_textures.retire_all(old);
         self.anim_textures = frames
             .iter()
             .enumerate()
@@ -1447,30 +1460,34 @@ impl TeachingUiState {
         self.cached_len = len;
     }
 
+    /// Avanza un frame de gracia y libera los sets expirados. Un tick = un
+    /// frame dibujado; se llama una vez por frame desde
+    /// `draw_teaching_overlay` (también sin sesión, para no retener de más).
+    fn reap_retired_anim_textures(&mut self) {
+        let _ = self.retired_anim_textures.tick();
+    }
+
     pub fn clear(&mut self) {
-        self.anim_textures.clear();
+        let old = std::mem::take(&mut self.anim_textures);
+        self.retired_anim_textures.retire_all(old);
         self.cached_hash = 0;
         self.cached_len = 0;
         self.anim_frames = None;
     }
 
-    pub fn clear_with_ctx(&mut self, ctx: &egui::Context) {
-        for idx in 0..self.anim_textures.len() {
-            ctx.forget_image(&format!("teaching_anim_{idx}"));
-        }
-        self.anim_textures.clear();
+    pub fn clear_with_ctx(&mut self, _ctx: &egui::Context) {
+        // `_ctx`: `forget_image` es no-op para texturas managed; la
+        // liberación real es el drop diferido vía la cola de retiro.
+        let old = std::mem::take(&mut self.anim_textures);
+        self.retired_anim_textures.retire_all(old);
         self.cached_hash = 0;
         self.cached_len = 0;
         self.anim_frames = None;
     }
 
-    fn clear_anim_textures_only(&mut self, ctx: Option<&egui::Context>) {
-        if let Some(ctx) = ctx {
-            for idx in 0..self.anim_textures.len() {
-                ctx.forget_image(&format!("teaching_anim_{idx}"));
-            }
-        }
-        self.anim_textures.clear();
+    fn clear_anim_textures_only(&mut self, _ctx: Option<&egui::Context>) {
+        let old = std::mem::take(&mut self.anim_textures);
+        self.retired_anim_textures.retire_all(old);
         self.cached_hash = 0;
         self.cached_len = 0;
     }
@@ -1565,6 +1582,9 @@ pub fn draw_teaching_overlay(
     ctx: &egui::Context,
     budget: &mut crate::app::RepaintBudget,
 ) -> bool {
+    // Tick de gracia SIEMPRE (haya o no sesión): libera sets viejos tras N
+    // frames dibujados, nunca en el frame del reemplazo (submit en vuelo).
+    state.reap_retired_anim_textures();
     if state.session.is_none() {
         return false;
     }
@@ -1842,6 +1862,7 @@ pub fn draw_teaching_overlay(
                             ui.add_space(grafito_ui::tokens::SPACE_SM);
                             let time = ui.input(|i| i.time);
                             let idx = ((time * 12.0) as usize) % anim_textures.len();
+                            debug_assert!(idx < anim_textures.len());
                             let tex = &anim_textures[idx];
                             let max_w = ui
                                 .available_width()
@@ -2015,13 +2036,10 @@ pub fn draw_teaching_overlay(
             });
         });
     if should_advance {
-        // Avance con ctx para forget_image correcto.
-        let cached_before = state.cached_len;
+        // `advance` ya retiró con gracia (sin ctx: el drop real ocurre en
+        // los ticks); `forget_image` sería no-op para managed. Sin drop
+        // post-draw en este frame: el submit en vuelo sigue intacto.
         let ok = state.advance();
-        // advance limpió sin ctx; ahora olvidar los URIs previos que quedaron huérfanos.
-        for idx in 0..cached_before {
-            ctx.forget_image(&format!("teaching_anim_{idx}"));
-        }
         let _ = ok;
     }
     if should_close {
@@ -2043,6 +2061,67 @@ mod tests {
             .first()
             .map(|s| s.whiteboard_hint.clone())
             .unwrap_or_default()
+    }
+
+    fn frame_solido(color: egui::Color32) -> egui::ColorImage {
+        egui::ColorImage::new([4, 4], color)
+    }
+
+    #[test]
+    fn ensure_reemplazo_retira_con_gracia_submit_en_vuelo() {
+        // Regresión `egui_texid_Managed(N) has been destroyed`: instalar la
+        // 2ª animación no destruye las texturas de la 1ª en el mismo frame.
+        let ctx = egui::Context::default();
+        let mut estado = TeachingUiState {
+            anim_frames: Some(vec![frame_solido(egui::Color32::RED)]),
+            ..Default::default()
+        };
+        estado.ensure_textures(&ctx);
+        assert_eq!(estado.anim_textures.len(), 1);
+        assert_eq!(estado.retired_anim_textures.pending(), 0);
+        // 2ª animación (derivada tras integral): el set viejo se retira.
+        estado.anim_frames = Some(vec![frame_solido(egui::Color32::BLUE)]);
+        estado.ensure_textures(&ctx);
+        assert_eq!(estado.anim_textures.len(), 1);
+        assert_eq!(
+            estado.retired_anim_textures.pending(),
+            1,
+            "set viejo retenido, no destruido con submit en vuelo"
+        );
+        for _ in 0..TEXTURE_GRACE_FRAMES.saturating_sub(1) {
+            estado.reap_retired_anim_textures();
+            assert_eq!(
+                estado.retired_anim_textures.pending(),
+                1,
+                "en-vuelo intacto durante la gracia"
+            );
+        }
+        estado.reap_retired_anim_textures();
+        assert_eq!(estado.retired_anim_textures.pending(), 0);
+        assert_eq!(estado.anim_textures.len(), 1, "el set nuevo intacto");
+    }
+
+    #[test]
+    fn clear_retira_y_avance_no_dropea_post_draw() {
+        // `clear` / `advance` retiran (no dropean): el draw ya emitido en
+        // este frame sigue referenciando texturas válidas hasta la gracia.
+        let ctx = egui::Context::default();
+        let mut estado = TeachingUiState {
+            anim_frames: Some(vec![
+                frame_solido(egui::Color32::WHITE),
+                frame_solido(egui::Color32::WHITE),
+            ]),
+            ..Default::default()
+        };
+        estado.ensure_textures(&ctx);
+        assert_eq!(estado.anim_textures.len(), 2);
+        estado.clear_anim_textures_only(None);
+        assert!(estado.anim_textures.is_empty());
+        assert_eq!(estado.retired_anim_textures.pending(), 2);
+        for _ in 0..TEXTURE_GRACE_FRAMES {
+            estado.reap_retired_anim_textures();
+        }
+        assert_eq!(estado.retired_anim_textures.pending(), 0);
     }
 
     #[test]

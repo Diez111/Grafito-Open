@@ -11,6 +11,12 @@
   "formatter": true,
   "lsp": true,
   "plugin": ["opencode-mem"],
+  "server": {
+    "port": 4096,
+    "hostname": "0.0.0.0",
+    "mdns": true,
+    "mdnsDomain": "opencode.local"
+  },
   "watcher": {
     "ignore": ["target/**", "node_modules/**", ".git/**", "dist/**", "packaging/deb/**", "*.log"]
   },

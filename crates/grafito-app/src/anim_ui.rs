@@ -160,6 +160,104 @@ pub fn animation_reference_sentence() -> &'static str {
     "La animación está lista abajo: mové el deslizador para recorrer los fotogramas y usá reproducir o pausar para controlarla."
 }
 
+// ── Retención diferida de texturas egui (fix use-after-free wgpu) ───────────
+// El render GPU va un frame atrás: destruir una textura gestionada por egui
+// (`TextureHandle` drop → `TexturesDelta::free` → `renderer.free_texture` →
+// `wgpu::Texture::destroy`) en el mismo frame en que deja de usarse corre el
+// riesgo de que un submit en vuelo todavía la referencie. El síntoma real es
+// `Validation Error — Texture with 'egui_texid_Managed(N)' label has been
+// destroyed` en `Queue::submit` al instalar la 2ª animación (la 1ª ok).
+//
+// Protocolo: ninguna textura se destruye en el mismo frame en que deja de
+// usarse. Al reemplazar/evictar, el handle viejo se `retire`a a esta cola y
+// se libera recién tras `TEXTURE_GRACE_FRAMES` ticks (un tick = un frame
+// dibujado). `tick` devuelve los items listos para dropear; el caller los
+// deja caer fuera de la cola. Puro, sin egui, sin I/O: headless-testeable.
+// Los wirings con `TextureHandle` (`teaching_ui::ensure_textures`,
+// `render_2d::FillTextureCacheStore`, `grafito-ui assistant::set_media` que
+// replica esta máquina porque la Piel no puede depender de la app) siguen
+// este mismo protocolo; ver sus tests de ciclo de vida.
+//
+// Presupuesto: la retención suma como máximo los sets retirados aún en
+// gracia (estado estable: 1 set viejo; ráfagas transitorias acotadas por el
+// OOM ya existente de cada caché). N≥2 por diseño, no por suerte.
+
+/// Frames de gracia antes de liberar una textura retirada.
+///
+/// 3 = 1 frame de submit en vuelo + 1 de margen + 1 de redondeo de
+/// `request_repaint`. Nunca bajar de 2.
+pub const TEXTURE_GRACE_FRAMES: u32 = 3;
+
+const _: () = assert!(TEXTURE_GRACE_FRAMES >= 2);
+
+#[derive(Debug)]
+struct RetentionEntry<T> {
+    item: T,
+    frames_left: u32,
+}
+
+/// Cola de retiro con gracia por frames para handles de textura.
+///
+/// Genérica para no depender de egui acá: el caller instancia con
+/// `egui::TextureHandle` y dropea lo que `tick` devuelve.
+#[derive(Debug, Default)]
+pub struct RetentionQueue<T> {
+    entries: Vec<RetentionEntry<T>>,
+}
+
+impl<T> RetentionQueue<T> {
+    /// Cola vacía.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Retira un handle: no se libera hasta `TEXTURE_GRACE_FRAMES` ticks.
+    pub fn retire(&mut self, item: T) {
+        self.entries.push(RetentionEntry {
+            item,
+            frames_left: TEXTURE_GRACE_FRAMES,
+        });
+    }
+
+    /// Retira un lote completo (p. ej. el set de frames de una animación).
+    pub fn retire_all(&mut self, items: Vec<T>) {
+        for item in items {
+            self.retire(item);
+        }
+    }
+
+    /// Avanza un frame y devuelve los items cuya gracia expiró (el caller
+    /// los dropea: ahí recién se destruye la textura GPU).
+    pub fn tick(&mut self) -> Vec<T> {
+        for entry in &mut self.entries {
+            entry.frames_left = entry.frames_left.saturating_sub(1);
+        }
+        let mut ready = Vec::new();
+        let mut still_pending = Vec::new();
+        for entry in self.entries.drain(..) {
+            if entry.frames_left == 0 {
+                ready.push(entry.item);
+            } else {
+                still_pending.push(entry);
+            }
+        }
+        self.entries = still_pending;
+        ready
+    }
+
+    /// Cuántos handles siguen retenidos (aún no liberables).
+    pub fn pending(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Verdadero si no hay nada retenido.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +337,73 @@ mod tests {
         for id in IDS_PROHIBIDOS {
             assert!(!frase.contains(id), "frase no debe traer {id}");
         }
+    }
+
+    #[test]
+    fn retencion_gracia_minima_documentada() {
+        // N≥2 verificado a compile-time (`const _: () = assert!(...)`
+        // arriba: clippy `assertions_on_constants` prohíbe re-chequear la
+        // const en runtime). Acá se pinnea el valor para que un cambio
+        // silencioso falle fuerte.
+        assert_eq!(TEXTURE_GRACE_FRAMES, 3);
+    }
+
+    #[test]
+    fn retencion_no_libera_hasta_gracia_instalar_b_con_a_en_vuelo() {
+        // Ciclo de vida del crash: media A instalada → media B la reemplaza
+        // → submit en vuelo todavía referencia A → A no se destruye hasta
+        // la gracia.
+        let mut cola = RetentionQueue::new();
+        cola.retire(10_u64);
+        assert_eq!(cola.pending(), 1);
+        // 1er y 2do frame: A sigue viva aunque B ya esté instalada.
+        assert!(cola.tick().is_empty(), "frame 1: A retenida");
+        assert_eq!(cola.pending(), 1);
+        assert!(cola.tick().is_empty(), "frame 2: A retenida");
+        assert_eq!(cola.pending(), 1);
+        // 3er frame: gracia expirada, recién ahí se libera.
+        let listos = cola.tick();
+        assert_eq!(listos, vec![10_u64]);
+        assert!(cola.is_empty());
+    }
+
+    #[test]
+    fn retencion_prune_bajo_presion_no_toca_en_vuelo() {
+        // Evicción LRU bajo presión: se retiran 8 y llegan 2 más antes de
+        // que expire la gracia; nada se libera antes de tiempo y el orden
+        // de liberación respeta el orden de retiro.
+        let mut cola = RetentionQueue::new();
+        for id in 0_u64..8 {
+            cola.retire(id);
+        }
+        assert!(cola.tick().is_empty());
+        cola.retire(8_u64);
+        cola.retire(9_u64);
+        assert_eq!(cola.pending(), 10);
+        assert!(cola.tick().is_empty(), "en-vuelo intacto en frame 2");
+        let listos = cola.tick();
+        let mut ordenados = listos.clone();
+        ordenados.sort_unstable();
+        assert_eq!(ordenados, (0_u64..8).collect::<Vec<_>>());
+        assert_eq!(cola.pending(), 2, "los 2 tardíos siguen en gracia");
+        let ultimos = cola.tick();
+        let mut ultimos_ordenados = ultimos.clone();
+        ultimos_ordenados.sort_unstable();
+        assert_eq!(ultimos_ordenados, vec![8_u64, 9_u64]);
+        assert!(cola.is_empty());
+    }
+
+    #[test]
+    fn retencion_lote_completo_y_cola_vacia() {
+        let mut cola: RetentionQueue<u64> = RetentionQueue::new();
+        assert!(cola.is_empty());
+        assert!(cola.tick().is_empty());
+        cola.retire_all(vec![1_u64, 2_u64, 3_u64]);
+        assert_eq!(cola.pending(), 3);
+        let _ = cola.tick();
+        let _ = cola.tick();
+        let listos = cola.tick();
+        assert_eq!(listos.len(), 3);
+        assert!(cola.is_empty());
     }
 }

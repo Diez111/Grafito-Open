@@ -1,3 +1,4 @@
+use crate::anim_ui::{RetentionQueue, TEXTURE_GRACE_FRAMES};
 use crate::GrafitoApp;
 use egui::{Color32, Pos2, Rect, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
@@ -14,6 +15,10 @@ use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+
+// La gracia cubre el submit GPU en vuelo (N≥2); verificado a compile-time
+// (clippy `assertions_on_constants` prohíbe re-chequear la const en runtime).
+const _: () = assert!(TEXTURE_GRACE_FRAMES >= 2);
 
 // ── F3-Render caches: fractal / phase / ordered_visible keyed por document.version ──
 thread_local! {
@@ -1077,6 +1082,93 @@ mod overlay_layer_tests {
         assert!(!cache.contains_key(deleted));
     }
 
+    fn entry_con_textura(
+        ctx: &egui::Context,
+        nombre: &str,
+        canvas_size: (u32, u32),
+    ) -> FillTextureCache {
+        let textura = ctx.load_texture(
+            nombre,
+            egui::ColorImage::new(
+                [canvas_size.0.max(1) as usize, canvas_size.1.max(1) as usize],
+                egui::Color32::WHITE,
+            ),
+            egui::TextureOptions::LINEAR,
+        );
+        FillTextureCache::new(Some(textura), 1, canvas_size, (0.0, 1.0, 0.0, 1.0))
+    }
+
+    #[test]
+    fn fill_evict_retira_con_gracia_y_no_toca_en_vuelo() {
+        // Regresión `egui_texid_Managed(N) has been destroyed`: evictar bajo
+        // presión no destruye en el mismo frame (el submit en vuelo o una
+        // primitiva ya emitida pueden referenciar la textura).
+        let ctx = egui::Context::default();
+        let mut cache = FillTextureCacheStore::with_limits(1, usize::MAX);
+        cache.insert(
+            fixed_object_id(1),
+            entry_con_textura(&ctx, "fill_a", (4, 4)),
+        );
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.retired_pending(), 0);
+        cache.insert(
+            fixed_object_id(2),
+            entry_con_textura(&ctx, "fill_b", (4, 4)),
+        );
+        assert_eq!(cache.len(), 1, "presupuesto: solo 1 entrada viva");
+        assert_eq!(
+            cache.retired_pending(),
+            1,
+            "la evictada queda retenida, no destruida"
+        );
+        for _ in 0..crate::anim_ui::TEXTURE_GRACE_FRAMES.saturating_sub(1) {
+            cache.reap_retired_fill_textures();
+            assert_eq!(
+                cache.retired_pending(),
+                1,
+                "en-vuelo intacto durante la gracia"
+            );
+        }
+        cache.reap_retired_fill_textures();
+        assert_eq!(cache.retired_pending(), 0, "tras la gracia se libera");
+        assert_eq!(cache.len(), 1, "la entrada viva intacta");
+    }
+
+    #[test]
+    fn fill_prune_retira_invisibles_con_gracia() {
+        let ctx = egui::Context::default();
+        let mut document = Document::new();
+        let visible = document.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "x",
+            "0",
+            RelationOperator::Less,
+        )));
+        let oculta = document.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "y",
+            "0",
+            RelationOperator::Less,
+        )));
+        document
+            .get_object_mut(oculta)
+            .expect("curva oculta existe")
+            .set_visible(false);
+        let mut cache = FillTextureCacheStore::default();
+        cache.insert(visible, entry_con_textura(&ctx, "fill_vis", (2, 2)));
+        cache.insert(oculta, entry_con_textura(&ctx, "fill_hid", (2, 2)));
+        cache.retain_visible_fill_owners(&document);
+        assert!(cache.contains_key(visible));
+        assert!(!cache.contains_key(oculta));
+        assert_eq!(
+            cache.retired_pending(),
+            1,
+            "la pruneada queda retenida hasta la gracia"
+        );
+        for _ in 0..crate::anim_ui::TEXTURE_GRACE_FRAMES {
+            cache.reap_retired_fill_textures();
+        }
+        assert_eq!(cache.retired_pending(), 0);
+    }
+
     #[test]
     fn implicit_cache_misses_share_a_deterministic_frame_budget() {
         let mut document = Document::new();
@@ -1276,6 +1368,18 @@ pub struct FillTextureCacheStore {
     access_epoch: u64,
     max_entries: usize,
     max_bytes: usize,
+    /// Texturas evictadas con gracia diferida (fix `Queue::submit`
+    /// `egui_texid_Managed(N) has been destroyed`).
+    ///
+    /// La destrucción real de una textura managed es el drop del último
+    /// `TextureHandle`. Evictar/prunear y dropear en el mismo frame corre el
+    /// riesgo de que el submit GPU en vuelo (un frame atrás) o una primitiva
+    /// ya emitida en este frame todavía la referencie. Por diseño nada se
+    /// destruye en el frame del reemplazo: se retira acá y se libera tras
+    /// `TEXTURE_GRACE_FRAMES` ticks (ver `crate::anim_ui::RetentionQueue`).
+    /// NOTA: `ctx.forget_image(uri)` es no-op para texturas managed (solo
+    /// limpia loaders por URI), así que no se usa para liberar.
+    retired_textures: RetentionQueue<egui::TextureHandle>,
 }
 
 impl Default for FillTextureCacheStore {
@@ -1292,6 +1396,7 @@ impl FillTextureCacheStore {
             access_epoch: 0,
             max_entries,
             max_bytes,
+            retired_textures: RetentionQueue::new(),
         }
     }
 
@@ -1338,84 +1443,76 @@ impl FillTextureCacheStore {
         &mut self,
         object_id: grafito_core::ObjectId,
         mut entry: FillTextureCache,
-        ctx: &egui::Context,
+        _ctx: &egui::Context,
     ) {
         if entry.byte_size > self.max_bytes || self.max_entries == 0 {
             // Evita retener texturas que exceden el presupuesto de iGPU (64 MB / 8 entradas).
+            // Retiro diferido igual: el submit en vuelo puede referenciar el
+            // id que este handle representa si el caller ya emitió con él.
             if let Some(texture) = entry.texture.take() {
-                ctx.forget_image(&format!("grafito_fill_{object_id}"));
-                drop(texture);
+                self.retired_textures.retire(texture);
             }
             return;
         }
-        self.remove_with_ctx(object_id, Some(ctx));
+        self.remove_with_ctx(object_id, None);
         entry.last_used = self.next_access_epoch();
         self.total_bytes = self.total_bytes.saturating_add(entry.byte_size);
         self.entries.insert(object_id, entry);
-        self.evict_to_budget_with_ctx(Some(ctx));
+        self.evict_to_budget_with_ctx(None);
     }
 
     #[cfg(test)]
     fn remove(&mut self, object_id: grafito_core::ObjectId) {
         if let Some(entry) = self.entries.remove(&object_id) {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
+            if let Some(texture) = entry.texture {
+                self.retired_textures.retire(texture);
+            }
         }
     }
 
-    fn remove_with_ctx(&mut self, object_id: grafito_core::ObjectId, ctx: Option<&egui::Context>) {
+    fn remove_with_ctx(&mut self, object_id: grafito_core::ObjectId, _ctx: Option<&egui::Context>) {
         if let Some(entry) = self.entries.remove(&object_id) {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
-            if let (Some(ctx), Some(_)) = (ctx, entry.texture) {
-                // Libera la textura GPU asociada al LRU evicted. Necesario en iGPU con 64 MB.
-                ctx.forget_image(&format!("grafito_fill_{object_id}"));
-                ctx.forget_image(&format!("grafito_fill_complex_{object_id}"));
-                // Compatibilidad con URIs legacy fijas usadas antes de per-object URIs.
-                ctx.forget_image("implicit_fill");
-                ctx.forget_image("complex_mapping_fill");
+            // Retiro diferido en vez de `forget_image` + drop inmediato:
+            // `forget_image` es no-op para managed y el drop destruiría la
+            // textura GPU con el submit en vuelo aún referenciándola.
+            if let Some(texture) = entry.texture {
+                self.retired_textures.retire(texture);
             }
         }
     }
 
     pub(crate) fn clear(&mut self) {
+        for (_, entry) in self.entries.drain() {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
+            if let Some(texture) = entry.texture {
+                self.retired_textures.retire(texture);
+            }
+        }
         self.entries.clear();
         self.total_bytes = 0;
     }
 
     #[allow(dead_code)] // TODO P2: remover cuando clear_with_ctx se active en teardown GPU (usado en tests de presupuesto)
-    pub(crate) fn clear_with_ctx(&mut self, ctx: &egui::Context) {
-        for (id, entry) in self.entries.drain() {
+    pub(crate) fn clear_with_ctx(&mut self, _ctx: &egui::Context) {
+        for (_, entry) in self.entries.drain() {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
-            if entry.texture.is_some() {
-                ctx.forget_image(&format!("grafito_fill_{id}"));
-                ctx.forget_image(&format!("grafito_fill_complex_{id}"));
+            if let Some(texture) = entry.texture {
+                self.retired_textures.retire(texture);
             }
         }
         self.entries.clear();
         self.total_bytes = 0;
-        ctx.forget_image("implicit_fill");
-        ctx.forget_image("complex_mapping_fill");
     }
 
     fn retain_visible_fill_owners(&mut self, document: &grafito_core::Document) {
-        self.entries.retain(|id, _| match document.get_object(*id) {
-            Some(GeoObject::ImplicitCurve(curve)) => curve.visible,
-            Some(GeoObject::ComplexMapping(mapping)) => mapping.visible,
-            _ => false,
-        });
-        self.total_bytes = self
-            .entries
-            .values()
-            .fold(0usize, |total, entry| total.saturating_add(entry.byte_size));
-    }
-
-    #[allow(dead_code)] // TODO P2: remover cuando retain_visible_fill_owners_with_ctx se use en evicción LRU (usado en tests)
-    fn retain_visible_fill_owners_with_ctx(
-        &mut self,
-        document: &grafito_core::Document,
-        ctx: &egui::Context,
-    ) {
+        // Retiro diferido: primero se identifican los ids a remover y luego
+        // se remueven vía `remove_with_ctx` (que retira el handle con
+        // gracia). Un `entries.retain` directo dropearía el handle en este
+        // frame con el submit previo aún en vuelo.
         let mut evicted_ids = Vec::new();
-        self.entries.retain(|id, _| {
+        for id in self.entries.keys() {
             let keep = match document.get_object(*id) {
                 Some(GeoObject::ImplicitCurve(curve)) => curve.visible,
                 Some(GeoObject::ComplexMapping(mapping)) => mapping.visible,
@@ -1424,16 +1521,36 @@ impl FillTextureCacheStore {
             if !keep {
                 evicted_ids.push(*id);
             }
-            keep
-        });
-        for id in evicted_ids {
-            ctx.forget_image(&format!("grafito_fill_{id}"));
-            ctx.forget_image(&format!("grafito_fill_complex_{id}"));
         }
-        self.total_bytes = self
-            .entries
-            .values()
-            .fold(0usize, |total, entry| total.saturating_add(entry.byte_size));
+        for id in evicted_ids {
+            self.remove_with_ctx(id, None);
+        }
+    }
+
+    #[allow(dead_code)] // TODO P2: remover cuando retain_visible_fill_owners_with_ctx se use en evicción LRU (usado en tests)
+    fn retain_visible_fill_owners_with_ctx(
+        &mut self,
+        document: &grafito_core::Document,
+        _ctx: &egui::Context,
+    ) {
+        // Igual que `retain_visible_fill_owners` pero conservando la firma
+        // con ctx para el wiring P2: la liberación real es el retiro
+        // diferido (el ctx no se usa porque `forget_image` es no-op para
+        // managed).
+        let mut evicted_ids = Vec::new();
+        for id in self.entries.keys() {
+            let keep = match document.get_object(*id) {
+                Some(GeoObject::ImplicitCurve(curve)) => curve.visible,
+                Some(GeoObject::ComplexMapping(mapping)) => mapping.visible,
+                _ => false,
+            };
+            if !keep {
+                evicted_ids.push(*id);
+            }
+        }
+        for id in evicted_ids {
+            self.remove_with_ctx(id, None);
+        }
     }
 
     #[cfg(test)]
@@ -1441,7 +1558,7 @@ impl FillTextureCacheStore {
         self.evict_to_budget_with_ctx(None);
     }
 
-    fn evict_to_budget_with_ctx(&mut self, ctx: Option<&egui::Context>) {
+    fn evict_to_budget_with_ctx(&mut self, _ctx: Option<&egui::Context>) {
         while self.entries.len() > self.max_entries || self.total_bytes > self.max_bytes {
             let Some(id) = self
                 .entries
@@ -1455,8 +1572,22 @@ impl FillTextureCacheStore {
             else {
                 break;
             };
-            self.remove_with_ctx(id, ctx);
+            self.remove_with_ctx(id, None);
         }
+    }
+
+    /// Avanza un frame de gracia y libera las texturas expiradas. Un tick =
+    /// un frame dibujado; se llama una vez por frame desde
+    /// `prune_fill_texture_cache` (siempre, incluso sin cambios de
+    /// documento, para no retener de más).
+    fn reap_retired_fill_textures(&mut self) {
+        let _ = self.retired_textures.tick();
+    }
+
+    /// Texturas aún retenidas en gracia (solo tests / debug).
+    #[cfg(test)]
+    fn retired_pending(&self) -> usize {
+        self.retired_textures.pending()
     }
 
     #[cfg(test)]
@@ -2778,15 +2909,18 @@ impl GrafitoApp {
         let version = self.document.version;
         // PERF: solo re-prunea si el documento cambió desde la última pasada.
         // Evita tomar el write lock + barrer el LRU completo en cada frame idle.
+        // La gracia diferida SÍ tickea siempre (un tick = un frame dibujado):
+        // si el documento no cambió solo se avanza la cola de retiro.
         let already_pruned =
             LAST_FILL_PRUNE_DOC_VERSION.with(|last| last.borrow().as_ref() == Some(&version));
-        if already_pruned {
-            return;
-        }
         let mut cache = self.fill_textures.write().unwrap_or_else(|poisoned| {
             log::warn!("Fill texture cache write lock poisoned; recovering");
             poisoned.into_inner()
         });
+        cache.reap_retired_fill_textures();
+        if already_pruned {
+            return;
+        }
         cache.retain_visible_fill_owners(&self.document);
         LAST_FILL_PRUNE_DOC_VERSION.with(|last| *last.borrow_mut() = Some(version));
     }

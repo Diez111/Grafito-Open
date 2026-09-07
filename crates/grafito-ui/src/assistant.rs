@@ -409,6 +409,30 @@ pub struct AssistantMedia {
 /// `grafito-app/src/anim_native.rs`): lo que se ve es lo que se exporta.
 pub const MEDIA_CARD_BASE_FPS: f32 = 12.0;
 
+/// Frames de gracia antes de destruir las texturas de una animación
+/// reemplazada (fix use-after-free wgpu).
+///
+/// El render GPU va un frame atrás: dropear el `Vec<TextureHandle>` viejo
+/// en `set_media` encola `TexturesDelta::free` y el renderer destruye la
+/// textura wgpu ANTES del `Queue::submit` que aún la referencia
+/// (`egui_texid_Managed(N) has been destroyed`). Por diseño ninguna textura
+/// se destruye en el mismo frame en que deja de usarse: el set viejo se
+/// retira y se libera tras estos ticks (un tick = un `draw_media_card`).
+/// Réplica del protocolo canónico `grafito-app/src/anim_ui.rs`
+/// (`TEXTURE_GRACE_FRAMES`); duplicado porque la Piel no puede depender de
+/// la app (DAG `ui → app`). Presupuesto: estable retiene como máximo 1 set
+/// viejo; ráfagas transitorias acotadas por el OOM del export GIF.
+pub const MEDIA_TEXTURE_GRACE_FRAMES: u32 = 3;
+
+const _: () = assert!(MEDIA_TEXTURE_GRACE_FRAMES >= 2);
+
+/// Set de texturas de una animación reemplazada, a la espera de gracia.
+#[derive(Clone)]
+struct RetiredMediaBatch {
+    textures: Vec<egui::TextureHandle>,
+    frames_left: u32,
+}
+
 /// Alto máximo del preview inline de la card (D2).
 ///
 /// Derivado de tokens (`SPACE_XXL * 7 = 280`): evita retratos gigantes sin
@@ -637,6 +661,14 @@ pub struct AssistantPanelState {
     pub tutor_last_activity: String,
     /// Texturas de frames cargadas una sola vez al mostrar la animación.
     media_textures: Vec<egui::TextureHandle>,
+    /// Sets viejos retirados con gracia diferida (fix `Queue::submit`).
+    ///
+    /// `set_media` mueve acá el set anterior en vez de dropearlo; cada
+    /// `draw_media_card` (un tick = un frame) descuenta gracia y recién al
+    /// expirar dropea (ahí se destruye la textura GPU, con el submit en
+    /// vuelo ya terminado). `RefCell` porque la Piel dibuja con `&Estado`.
+    /// Estado estable: como máximo 1 set viejo.
+    retired_media_textures: std::cell::RefCell<Vec<RetiredMediaBatch>>,
     /// Guarda si ya se construyeron las texturas de la media actual.
     media_textures_ready: bool,
     /// Fotograma actual del reproductor en ms acumulados (B5). Avanza con el
@@ -761,6 +793,7 @@ impl Default for AssistantPanelState {
             agent_ledger: None,
             media: None,
             media_textures: Vec::new(),
+            retired_media_textures: std::cell::RefCell::new(Vec::new()),
             media_textures_ready: false,
             media_playhead_ms: std::cell::Cell::new(0),
             media_last_tick_s: std::cell::Cell::new(None),
@@ -1302,7 +1335,18 @@ pub fn verified_models_detail_text() -> &'static str {
 
 impl AssistantPanelState {
     /// Establece la animación a reproducir y prepara sus texturas de frames.
+    ///
+    /// Retención diferida: el set anterior NO se destruye acá (un submit
+    /// GPU en vuelo puede referenciarlo). Se retira con
+    /// `MEDIA_TEXTURE_GRACE_FRAMES` frames de gracia y se libera en los
+    /// ticks de `draw_media_card`. Solo se dropean de inmediato los sets
+    /// cuya gracia ya expiró.
     pub fn set_media(&mut self, media: Option<AssistantMedia>, ctx: &egui::Context) {
+        if !self.media_textures.is_empty() {
+            let old = std::mem::take(&mut self.media_textures);
+            self.retire_media_textures(old);
+        }
+        self.drop_expired_retired_media();
         self.media = media;
         self.media_textures_ready = false;
         // Card nueva = reproductor fresco (B5): playhead en 0, reloj sin
@@ -1332,6 +1376,62 @@ impl AssistantPanelState {
         } else {
             self.media_textures.clear();
         }
+    }
+
+    /// Retira un set viejo a la cola de gracia (no lo destruye).
+    fn retire_media_textures(&self, textures: Vec<egui::TextureHandle>) {
+        if textures.is_empty() {
+            return;
+        }
+        self.retired_media_textures
+            .borrow_mut()
+            .push(RetiredMediaBatch {
+                textures,
+                frames_left: MEDIA_TEXTURE_GRACE_FRAMES,
+            });
+    }
+
+    /// Dropea solo los sets cuya gracia ya expiró (sin descontar).
+    fn drop_expired_retired_media(&self) {
+        let mut queue = self.retired_media_textures.borrow_mut();
+        let mut still_pending = Vec::new();
+        for batch in queue.drain(..) {
+            if batch.frames_left == 0 {
+                drop(batch.textures);
+            } else {
+                still_pending.push(batch);
+            }
+        }
+        *queue = still_pending;
+    }
+
+    /// Avanza un frame de gracia y libera lo expirado (un tick = un frame
+    /// dibujado). Se llama al inicio de `draw_media_card`, incluso sin
+    /// media (la gracia corre aunque la card muestre "Preparando…").
+    pub(crate) fn reap_retired_media_tick(&self) {
+        let mut queue = self.retired_media_textures.borrow_mut();
+        for batch in queue.iter_mut() {
+            batch.frames_left = batch.frames_left.saturating_sub(1);
+        }
+        let mut still_pending = Vec::new();
+        for batch in queue.drain(..) {
+            if batch.frames_left == 0 {
+                drop(batch.textures);
+            } else {
+                still_pending.push(batch);
+            }
+        }
+        *queue = still_pending;
+    }
+
+    /// Texturas aún retenidas en gracia (solo tests / debug).
+    #[cfg(test)]
+    pub(crate) fn retired_media_pending_textures(&self) -> usize {
+        self.retired_media_textures
+            .borrow()
+            .iter()
+            .map(|batch| batch.textures.len())
+            .sum()
     }
 
     /// texturas de frames listas (para el dibujado del reproductor).
@@ -4966,6 +5066,9 @@ pub fn media_overlay_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
 ///   motivo si no hay frames; progreso/error vía `MediaExportState`, jamás
 ///   mudo. Prosa sin IDs literales.
 fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<AssistantUiAction> {
+    // Tick de gracia SIEMPRE (haya o no frame listo): la retención diferida
+    // libera el set viejo tras N frames dibujados, nunca en `set_media`.
+    state.reap_retired_media_tick();
     let theme = current_theme(ui.ctx());
     let now_s = ui.input(|input| input.time);
     // Snapshot barato sin retener borrows (los controles piden `&mut` y la
@@ -5014,6 +5117,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     // Handle clonado (barato): la pintura no retiene borrow del estado y los
     // controles de abajo usan `&mut` sin pelear con el borrow checker.
     // D2: tamaño de referencia = primer frame (estable entre fotogramas).
+    debug_assert!(index < frame_count, "índice de frame dentro de la media");
     let (first_w, first_h) = state
         .media_textures()
         .0
@@ -9733,6 +9837,91 @@ mod tests {
         });
         assert!(state.media.is_some());
         assert!(state.media_textures().1);
+    }
+
+    #[test]
+    fn set_media_retiene_set_viejo_hasta_gracia_con_submit_en_vuelo() {
+        // Regresión del crash `egui_texid_Managed(N) has been destroyed`:
+        // integral (A) ok → derivada (B) → el submit en vuelo aún
+        // referencia A. A no se destruye en `set_media`: queda retenida y
+        // se libera tras `MEDIA_TEXTURE_GRACE_FRAMES` ticks de draw.
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        let frame_a = egui::ColorImage::new([4, 4], egui::Color32::RED);
+        let frame_b = egui::ColorImage::new([4, 4], egui::Color32::BLUE);
+        state.set_media(
+            Some(AssistantMedia {
+                title: "integral".into(),
+                frames: vec![frame_a],
+            }),
+            &context,
+        );
+        assert_eq!(state.media_textures().0.len(), 1);
+        assert_eq!(state.retired_media_pending_textures(), 0);
+        // Llega B: A pasa a retenida, B es la visible.
+        state.set_media(
+            Some(AssistantMedia {
+                title: "derivada".into(),
+                frames: vec![frame_b],
+            }),
+            &context,
+        );
+        assert_eq!(state.media_textures().0.len(), 1);
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            1,
+            "A retenida, no destruida con B en vuelo"
+        );
+        // Simula frames dibujados: la gracia descuenta sin liberar antes.
+        for _ in 0..MEDIA_TEXTURE_GRACE_FRAMES.saturating_sub(1) {
+            state.reap_retired_media_tick();
+            assert_eq!(
+                state.retired_media_pending_textures(),
+                1,
+                "submit en vuelo: A intacta"
+            );
+        }
+        state.reap_retired_media_tick();
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            0,
+            "tras la gracia A se libera"
+        );
+        // B sigue visible e intacta.
+        assert_eq!(state.media_textures().0.len(), 1);
+        assert!(state.media_textures().1);
+    }
+
+    #[test]
+    fn set_media_none_retira_y_prune_no_toca_en_vuelo() {
+        // Cerrar la card (`None`) también retira con gracia; un reemplazo
+        // inmediato no libera lo en-vuelo antes de tiempo.
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        let frame = egui::ColorImage::new([2, 2], egui::Color32::WHITE);
+        state.set_media(
+            Some(AssistantMedia {
+                title: "a".into(),
+                frames: vec![frame.clone(), frame.clone()],
+            }),
+            &context,
+        );
+        state.set_media(None, &context);
+        assert!(state.media_textures().0.is_empty());
+        assert_eq!(state.retired_media_pending_textures(), 2);
+        state.set_media(
+            Some(AssistantMedia {
+                title: "b".into(),
+                frames: vec![frame],
+            }),
+            &context,
+        );
+        // Lo de `None` sigue en gracia (no se purgó al instalar B).
+        assert_eq!(state.retired_media_pending_textures(), 2);
+        for _ in 0..MEDIA_TEXTURE_GRACE_FRAMES {
+            state.reap_retired_media_tick();
+        }
+        assert_eq!(state.retired_media_pending_textures(), 0);
     }
 
     #[test]
