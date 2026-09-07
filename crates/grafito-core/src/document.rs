@@ -4175,6 +4175,7 @@ impl Document {
                 | GeoObject::Surface3D(_)
                 | GeoObject::Prism3D(_)
                 | GeoObject::Quadric3D(_)
+                | GeoObject::ImplicitSurface3D(_)
                 | GeoObject::ParametricCurve3D(_)
                 | GeoObject::Attractor3D(_)
                 | GeoObject::RegularPolychoron4D(_)
@@ -6236,6 +6237,9 @@ impl Document {
                 .checked_add(o.base_vertices.len().checked_mul(16).unwrap_or(usize::MAX))
                 .unwrap_or(usize::MAX),
             GeoObject::Quadric3D(_) => 512,
+            GeoObject::ImplicitSurface3D(o) => {
+                2048usize.checked_add(o.expr.len()).unwrap_or(usize::MAX)
+            }
             GeoObject::ParametricCurve2D(o) => 1024usize
                 .checked_add(o.expr_x.len())
                 .unwrap_or(usize::MAX)

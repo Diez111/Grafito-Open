@@ -713,53 +713,55 @@ impl QuadricEllipsoid {
     }
 }
 
-/// ¿Esta cuádrica cae al elipsoide aproximado ([`QuadricEllipsoid::placeholder`])?
+/// ¿Esta cuádrica carece de malla exacta (badge honesto de la UI)?
 ///
-/// Pura y testeable: la UI la usa para rotular "vista aproximada" donde la
-/// cuádrica se muestre (inspector), en vez de pasar un elipsoide genérico
-/// por la superficie real.
+/// Pura y testeable: devuelve `true` solo cuando no hay superficie real
+/// (vacío, punto, recta, coeficientes no finitos o fuera de rango). Todo
+/// tipo con lugar real —esfera, elipsoide, hiperboloides, paraboloides,
+/// cono, cilindros y planos— tiene malla exacta y devuelve `false`.
 pub fn quadric_uses_placeholder(quadric: &Quadric3DObj) -> bool {
-    quadric_ellipsoid_params(quadric).is_none()
+    let coeffs = [
+        quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g, quadric.h,
+        quadric.i, quadric.j,
+    ];
+    grafito_geometry::quadrics::classify_quadric(coeffs).is_err()
 }
 
-/// Deriva el elipsoide de una cuádrica sin términos cruzados.
+/// Deriva el elipsoide de una cuádrica con clasificación real.
 ///
-/// Completa el cuadrado de `a*x² + b*y² + c*z² + g*x + h*y + i*z + j = 0`:
-/// `a(x + g/(2a))² + b(y + h/(2b))² + c(z + i/(2c))² = g²/(4a) + h²/(4b) + i²/(4c) - j`.
-/// Devuelve `None` cuando la cuádrica no es un elipsoide real (coeficientes
-/// diagonales no positivos o lado derecho no positivo).
+/// Solo devuelve `Some` para esfera/elipsoide real con marco alineado a
+/// ejes (esta `QuadricEllipsoid` no lleva rotación). El elipsoide rotado y
+/// el resto de tipos usan la malla exacta
+/// (`grafito_geometry::quadrics::quadric_wire_points`): jamás un elipsoide
+/// falso. Devuelve `None` cuando la forma no es un elipsoide real.
 pub fn quadric_ellipsoid_params(quadric: &Quadric3DObj) -> Option<QuadricEllipsoid> {
-    let a = quadric.a;
-    let b = quadric.b;
-    let c = quadric.c;
-    if !a.is_finite() || !b.is_finite() || !c.is_finite() || a <= 0.0 || b <= 0.0 || c <= 0.0 {
+    let coeffs = [
+        quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g, quadric.h,
+        quadric.i, quadric.j,
+    ];
+    let shape = grafito_geometry::quadrics::classify_quadric(coeffs).ok()?;
+    if !matches!(
+        shape.kind,
+        grafito_geometry::quadrics::QuadricKind::Sphere
+            | grafito_geometry::quadrics::QuadricKind::Ellipsoid
+    ) {
         return None;
     }
-    let center = Point3D::new(
-        -quadric.g / (2.0 * a),
-        -quadric.h / (2.0 * b),
-        -quadric.i / (2.0 * c),
-    );
+    let perm = grafito_geometry::quadrics::quadric_axis_permutation(&shape)?;
+    let mut radii = [0.0; 3];
+    for (i, p) in perm.iter().enumerate() {
+        radii[*p] = shape.params[i];
+    }
+    let center = Point3D::new(shape.center[0], shape.center[1], shape.center[2]);
     if !center.is_finite() {
         return None;
     }
-    let rhs = quadric.g * quadric.g / (4.0 * a)
-        + quadric.h * quadric.h / (4.0 * b)
-        + quadric.i * quadric.i / (4.0 * c)
-        - quadric.j;
-    if !rhs.is_finite() || rhs <= 0.0 {
-        return None;
-    }
-    let rx = (rhs / a).sqrt();
-    let ry = (rhs / b).sqrt();
-    let rz = (rhs / c).sqrt();
-    if !rx.is_finite() || !ry.is_finite() || !rz.is_finite() || rx <= 0.0 || ry <= 0.0 || rz <= 0.0
-    {
+    if !radii.iter().all(|r| r.is_finite() && *r > 0.0) {
         return None;
     }
     Some(QuadricEllipsoid {
         center,
-        radii: glam::Vec3::new(rx as f32, ry as f32, rz as f32),
+        radii: glam::Vec3::new(radii[0] as f32, radii[1] as f32, radii[2] as f32),
     })
 }
 

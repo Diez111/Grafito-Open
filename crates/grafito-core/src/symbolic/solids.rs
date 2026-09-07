@@ -246,9 +246,31 @@ pub fn solid_area(object: &GeoObject) -> Option<f64> {
 }
 
 /// Estado honesto de la medida: exacto o motivo de indisponibilidad.
+///
+/// La cuádrica con clasificación real de esfera/elipsoide informa su volumen
+/// analítico `4/3·π·rx·ry·rz` (el área sigue por integración numérica: el
+/// resumen global continúa `None` honesto). El resto de cuádricas mantiene el
+/// mensaje de no soportado.
 pub fn solid_measure_status(object: &GeoObject) -> &'static str {
     if solid_volume(object).is_some() && solid_area(object).is_some() {
         "exacto"
+    } else if let GeoObject::Quadric3D(quadric) = object {
+        let coeffs = [
+            quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g, quadric.h,
+            quadric.i, quadric.j,
+        ];
+        match grafito_geometry::quadrics::classify_quadric(coeffs) {
+            Ok(shape)
+                if matches!(
+                    shape.kind,
+                    grafito_geometry::quadrics::QuadricKind::Sphere
+                        | grafito_geometry::quadrics::QuadricKind::Ellipsoid
+                ) =>
+            {
+                "elipsoide real: volumen 4/3·π·rx·ry·rz (área por integración numérica)"
+            }
+            _ => "no soportado: el objeto no es un sólido paramétrico con forma cerrada (usa cuádrica/superficie con integración numérica)",
+        }
     } else {
         "no soportado: el objeto no es un sólido paramétrico con forma cerrada (usa cuádrica/superficie con integración numérica)"
     }
@@ -341,11 +363,18 @@ mod tests {
 
     #[test]
     fn quadric_has_honest_status() {
+        // Esfera como cuádrica: clasificación real con volumen analítico.
         let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
             1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         ]));
         assert_eq!(solid_volume(&quadric), None);
-        assert!(solid_measure_status(&quadric).contains("no soportado"));
+        assert!(solid_measure_status(&quadric).contains("elipsoide real"));
+        // Hiperboloide: superficie real pero sin volumen cerrado.
+        let hiperboloide = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        assert_eq!(solid_volume(&hiperboloide), None);
+        assert!(solid_measure_status(&hiperboloide).contains("no soportado"));
     }
 
     #[test]

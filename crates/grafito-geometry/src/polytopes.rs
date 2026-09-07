@@ -3720,6 +3720,783 @@ pub fn pyramid_net(base_edge: f64, lateral_edge: f64) -> Result<PolyhedronNet, M
     PolyhedronNet::new(panels, base_edge)
 }
 
+// ── A3: Net REAL genérico por despliegue BFS sobre el dual ──
+//
+// `PolyhedronNet::unfold` acepta cualquier poliedro dado por vértices + caras
+// poligonales y lo despliega con BFS sobre el grafo dual: cada cara hija se
+// pega a su padre con una rotación 2D (matriz 2×2 ortonormal y finita) sobre
+// la arista compartida. La colisión se evita de forma ingenua (AABB por
+// candidato, dos gluings posibles) y el solape residual se REPORTA con
+// `overlapping_face_pairs` en vez de mentir. Las solapas de pegado se generan
+// en las aristas libres como en `cube_net`.
+// `cube_net`/`prism_net`/`pyramid_net` quedan como fast paths con idéntico
+// conteo/área que el `unfold` de su malla cerrada (ver tests A3);
+// `tetra_net` y `platonic_net` van directo por `unfold` + `platonic_mesh`.
+
+/// Malla cerrada del cubo de arista `edge_length`: 8 vértices, 6 quads.
+///
+/// El `unfold` de esta malla tiene el mismo conteo/área que `cube_net`.
+pub fn cube_mesh(edge_length: f64) -> Result<(Vec<Point3D>, Vec<Vec<usize>>), MeshError> {
+    gb_positive_edge(edge_length)?;
+    let a = edge_length;
+    let vertices = vec![
+        Point3D::new(0.0, 0.0, 0.0),
+        Point3D::new(a, 0.0, 0.0),
+        Point3D::new(a, a, 0.0),
+        Point3D::new(0.0, a, 0.0),
+        Point3D::new(0.0, 0.0, a),
+        Point3D::new(a, 0.0, a),
+        Point3D::new(a, a, a),
+        Point3D::new(0.0, a, a),
+    ];
+    let faces = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![2, 3, 7, 6],
+        vec![0, 4, 7, 3],
+        vec![1, 2, 6, 5],
+    ];
+    Ok((vertices, faces))
+}
+
+/// Malla cerrada del tetraedro regular de arista `edge_length`: 4 triángulos.
+pub fn tetra_mesh(edge_length: f64) -> Result<(Vec<Point3D>, Vec<Vec<usize>>), MeshError> {
+    gb_positive_edge(edge_length)?;
+    let a = edge_length;
+    let tri_height = a * 0.5 * 3.0_f64.sqrt();
+    let apex_height = a * (2.0_f64 / 3.0).sqrt();
+    if !tri_height.is_finite()
+        || tri_height <= 0.0
+        || !apex_height.is_finite()
+        || apex_height <= 0.0
+    {
+        return Err(MeshError::NonPositiveEdge { value: edge_length });
+    }
+    let vertices = vec![
+        Point3D::new(0.0, 0.0, 0.0),
+        Point3D::new(a, 0.0, 0.0),
+        Point3D::new(a * 0.5, tri_height, 0.0),
+        Point3D::new(a * 0.5, tri_height / 3.0, apex_height),
+    ];
+    let faces = vec![vec![0, 2, 1], vec![0, 1, 3], vec![1, 2, 3], vec![2, 0, 3]];
+    Ok((vertices, faces))
+}
+
+/// Malla cerrada de la pirámide cuadrada: base + 4 triángulos isósceles.
+///
+/// `lateral_edge` debe superar `base_edge / √2` (mismo contrato que `pyramid_net`).
+pub fn square_pyramid_mesh(
+    base_edge: f64,
+    lateral_edge: f64,
+) -> Result<(Vec<Point3D>, Vec<Vec<usize>>), MeshError> {
+    gb_positive_edge(base_edge)?;
+    gb_positive_edge(lateral_edge)?;
+    let minimum = base_edge / std::f64::consts::SQRT_2;
+    if lateral_edge <= minimum {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "la arista lateral debe superar base / √2",
+        });
+    }
+    let half = base_edge * 0.5;
+    let apex_height = (lateral_edge * lateral_edge - 2.0 * half * half).sqrt();
+    if !apex_height.is_finite() || apex_height <= 0.0 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "altura del ápice piramidal no finita",
+        });
+    }
+    let vertices = vec![
+        Point3D::new(-half, -half, 0.0),
+        Point3D::new(half, -half, 0.0),
+        Point3D::new(half, half, 0.0),
+        Point3D::new(-half, half, 0.0),
+        Point3D::new(0.0, 0.0, apex_height),
+    ];
+    let faces = vec![
+        vec![0, 3, 2, 1],
+        vec![0, 1, 4],
+        vec![1, 2, 4],
+        vec![2, 3, 4],
+        vec![3, 0, 4],
+    ];
+    Ok((vertices, faces))
+}
+
+/// Normal de Newell normalizada de una cara; `None` si es degenerada o no finita.
+fn a3_newell_normal(vertices: &[Point3D], face: &[usize]) -> Option<glam::DVec3> {
+    if face.len() < 3 {
+        return None;
+    }
+    let mut normal = glam::DVec3::ZERO;
+    for side in 0..face.len() {
+        let a = vertices.get(*face.get(side)?)?.to_dvec3();
+        let b = vertices
+            .get(*face.get((side + 1) % face.len())?)?
+            .to_dvec3();
+        normal.x += (a.y - b.y) * (a.z + b.z);
+        normal.y += (a.z - b.z) * (a.x + b.x);
+        normal.z += (a.x - b.x) * (a.y + b.y);
+    }
+    if !normal.x.is_finite() || !normal.y.is_finite() || !normal.z.is_finite() {
+        return None;
+    }
+    if normal.length_squared() <= 1.0e-24 {
+        return None;
+    }
+    let unit = normal.normalize_or_zero();
+    if unit.length_squared() <= 0.5 {
+        return None;
+    }
+    Some(unit)
+}
+
+/// Proyección local 2D de una cara sobre su plano (origen en el primer vértice).
+fn a3_face_local_coords(vertices: &[Point3D], face: &[usize]) -> Result<Vec<[f64; 2]>, MeshError> {
+    let degenerate = MeshError::DegenerateGeometry {
+        reason: "cara con área nula o arista degenerada",
+    };
+    let p0 = *vertices
+        .get(*face.first().ok_or(degenerate)?)
+        .ok_or(degenerate)?;
+    let mut edge = None;
+    for index in face.iter().skip(1) {
+        let point = *vertices.get(*index).ok_or(degenerate)?;
+        let delta = point.to_dvec3() - p0.to_dvec3();
+        if delta.length_squared() > 1.0e-24 {
+            edge = Some(delta);
+            break;
+        }
+    }
+    let Some(edge) = edge else {
+        return Err(degenerate);
+    };
+    let normal = a3_newell_normal(vertices, face).ok_or(degenerate)?;
+    let unit_u = edge.normalize_or_zero();
+    if unit_u.length_squared() <= 0.5 {
+        return Err(degenerate);
+    }
+    let unit_v = normal.cross(unit_u);
+    if unit_v.length_squared() <= 0.5 {
+        return Err(degenerate);
+    }
+    let origin = p0.to_dvec3();
+    let mut local = Vec::with_capacity(face.len());
+    for index in face {
+        let point = *vertices.get(*index).ok_or(degenerate)?;
+        let delta = point.to_dvec3() - origin;
+        let coords = [delta.dot(unit_u), delta.dot(unit_v)];
+        if !coords[0].is_finite() || !coords[1].is_finite() {
+            return Err(MeshError::NonFiniteInput);
+        }
+        local.push(coords);
+    }
+    Ok(local)
+}
+
+/// Mapa rígido 2D que lleva `l0 -> p0` y `l1 -> p1`.
+///
+/// Devuelve `((r00, r01, r10, r11), (tx, ty))` con matriz 2×2 ortonormal
+/// finita (determinante 1 ± 1e-9); si no cierra, `Err` honesto.
+fn a3_rigid_map(
+    l0: [f64; 2],
+    l1: [f64; 2],
+    p0: [f64; 2],
+    p1: [f64; 2],
+) -> Result<([f64; 4], [f64; 2]), MeshError> {
+    for value in [l0[0], l0[1], l1[0], l1[1], p0[0], p0[1], p1[0], p1[1]] {
+        if !value.is_finite() {
+            return Err(MeshError::NonFiniteInput);
+        }
+    }
+    let lv = [l1[0] - l0[0], l1[1] - l0[1]];
+    let pv = [p1[0] - p0[0], p1[1] - p0[1]];
+    let ll = (lv[0] * lv[0] + lv[1] * lv[1]).sqrt();
+    let pl = (pv[0] * pv[0] + pv[1] * pv[1]).sqrt();
+    if !ll.is_finite() || ll <= 1.0e-12 || !pl.is_finite() || pl <= 1.0e-12 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "arista dual degenerada en el despliegue",
+        });
+    }
+    if ((ll - pl) / ll.max(pl)).abs() > 1.0e-6 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "arista dual con longitudes inconsistentes",
+        });
+    }
+    let cos = (lv[0] * pv[0] + lv[1] * pv[1]) / (ll * pl);
+    let sin = (lv[0] * pv[1] - lv[1] * pv[0]) / (ll * pl);
+    if !cos.is_finite() || !sin.is_finite() {
+        return Err(MeshError::NonFiniteInput);
+    }
+    if ((cos * cos + sin * sin) - 1.0).abs() > 1.0e-9 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "rotación 2D no ortonormal",
+        });
+    }
+    // `t = p0 - R·l0` para que `l0 -> p0` exacto.
+    let tx = p0[0] - (cos * l0[0] - sin * l0[1]);
+    let ty = p0[1] - (sin * l0[0] + cos * l0[1]);
+    if !tx.is_finite() || !ty.is_finite() {
+        return Err(MeshError::NonFiniteInput);
+    }
+    Ok(([cos, -sin, sin, cos], [tx, ty]))
+}
+
+/// Aplica un mapa rígido 2D a un polígono.
+fn a3_apply_map(
+    points: &[[f64; 2]],
+    map: ([f64; 4], [f64; 2]),
+) -> Result<Vec<[f64; 2]>, MeshError> {
+    let ([r00, r01, r10, r11], [tx, ty]) = map;
+    let mut out = Vec::with_capacity(points.len());
+    for point in points {
+        let mapped = [
+            r00 * point[0] + r01 * point[1] + tx,
+            r10 * point[0] + r11 * point[1] + ty,
+        ];
+        if !mapped[0].is_finite() || !mapped[1].is_finite() {
+            return Err(MeshError::NonFiniteInput);
+        }
+        out.push(mapped);
+    }
+    Ok(out)
+}
+
+/// AABB `[min_x, min_y, max_x, max_y]` de un polígono; `None` si vacío o no finito.
+fn a3_panel_aabb(points: &[[f64; 2]]) -> Option<[f64; 4]> {
+    let first = points.first()?;
+    let mut bounds = [first[0], first[1], first[0], first[1]];
+    for point in points.iter().skip(1) {
+        if !point[0].is_finite() || !point[1].is_finite() {
+            return None;
+        }
+        bounds[0] = bounds[0].min(point[0]);
+        bounds[1] = bounds[1].min(point[1]);
+        bounds[2] = bounds[2].max(point[0]);
+        bounds[3] = bounds[3].max(point[1]);
+    }
+    if !bounds.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    Some(bounds)
+}
+
+/// `true` si el candidato colisiona (AABB ingenua) con alguna cara ya colocada.
+fn a3_collides_with_placed(candidate: &[[f64; 2]], placed: &[Option<Vec<[f64; 2]>>]) -> bool {
+    let Some(box_a) = a3_panel_aabb(candidate) else {
+        return true;
+    };
+    for slot in placed.iter().flatten() {
+        let Some(box_b) = a3_panel_aabb(slot) else {
+            continue;
+        };
+        if box_a[2] > box_b[0] + 1.0e-12
+            && box_b[2] > box_a[0] + 1.0e-12
+            && box_a[3] > box_b[1] + 1.0e-12
+            && box_b[3] > box_a[1] + 1.0e-12
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Orientación escalar 2D `(b - a) × (c - a)`; `0` si colineal dentro de `eps`.
+fn a3_orient(a: [f64; 2], b: [f64; 2], c: [f64; 2], eps: f64) -> f64 {
+    let value = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if value.abs() <= eps {
+        0.0
+    } else {
+        value
+    }
+}
+
+/// Cruce propio entre segmentos (excluye toques en extremos/aristas compartidas).
+fn a3_proper_crossing(p1: [f64; 2], p2: [f64; 2], q1: [f64; 2], q2: [f64; 2]) -> bool {
+    let eps = 1.0e-12;
+    let o1 = a3_orient(p1, p2, q1, eps);
+    let o2 = a3_orient(p1, p2, q2, eps);
+    let o3 = a3_orient(q1, q2, p1, eps);
+    let o4 = a3_orient(q1, q2, p2, eps);
+    o1 * o2 < 0.0 && o3 * o4 < 0.0
+}
+
+/// Distancia punto-segmento 2D; `None` si no finita.
+fn a3_point_segment_distance(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> Option<f64> {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let length_squared = ab[0] * ab[0] + ab[1] * ab[1];
+    if !length_squared.is_finite() || length_squared <= 1.0e-24 {
+        return Some(((point[0] - a[0]).powi(2) + (point[1] - a[1]).powi(2)).sqrt());
+    }
+    let ratio = ((point[0] - a[0]) * ab[0] + (point[1] - a[1]) * ab[1]) / length_squared;
+    let clamped = ratio.clamp(0.0, 1.0);
+    let closest = [a[0] + ab[0] * clamped, a[1] + ab[1] * clamped];
+    let distance = ((point[0] - closest[0]).powi(2) + (point[1] - closest[1]).powi(2)).sqrt();
+    distance.is_finite().then_some(distance)
+}
+
+/// Punto estrictamente interior (`false` sobre el borde: aristas compartidas no solapan).
+fn a3_point_strictly_inside(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+    for side in 0..polygon.len() {
+        let a = polygon[side];
+        let b = polygon[(side + 1) % polygon.len()];
+        if let Some(distance) = a3_point_segment_distance(point, a, b) {
+            if distance <= 1.0e-9 {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    let mut crossings = 0_usize;
+    for side in 0..polygon.len() {
+        let a = polygon[side];
+        let b = polygon[(side + 1) % polygon.len()];
+        if (a[1] > point[1]) != (b[1] > point[1]) {
+            let touch = (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0];
+            if point[0] < touch {
+                crossings += 1;
+            }
+        }
+    }
+    crossings % 2 == 1
+}
+
+/// Solape exacto ingenuo entre dos caras: AABB + cruce propio + contenido estricto.
+fn a3_panels_overlap(a: &[[f64; 2]], b: &[[f64; 2]]) -> bool {
+    let (Some(box_a), Some(box_b)) = (a3_panel_aabb(a), a3_panel_aabb(b)) else {
+        return false;
+    };
+    if box_a[2] <= box_b[0] + 1.0e-12
+        || box_b[2] <= box_a[0] + 1.0e-12
+        || box_a[3] <= box_b[1] + 1.0e-12
+        || box_b[3] <= box_a[1] + 1.0e-12
+    {
+        return false;
+    }
+    for side_a in 0..a.len() {
+        let p1 = a[side_a];
+        let p2 = a[(side_a + 1) % a.len()];
+        for side_b in 0..b.len() {
+            let q1 = b[side_b];
+            let q2 = b[(side_b + 1) % b.len()];
+            if a3_proper_crossing(p1, p2, q1, q2) {
+                return true;
+            }
+        }
+    }
+    if let (Some(first_a), Some(first_b)) = (a.first(), b.first()) {
+        if a3_point_strictly_inside(*first_a, b) || a3_point_strictly_inside(*first_b, a) {
+            return true;
+        }
+    }
+    false
+}
+
+impl PolyhedronNet {
+    /// Despliegue genérico por BFS sobre el grafo dual de `(vértices, caras)`.
+    ///
+    /// Cada cara es un anillo de índices sobre `vertices` (≥3, sin repetidos).
+    /// Cota [`GB_MAX_NET_FACES`]; aristas con más de dos caras incidentes se
+    /// rechazan (no desplegables). La arista de referencia del net es la media
+    /// de las aristas 3D únicas. Las caras se orientan hacia afuera vía Newell
+    /// antes del BFS; cada hija se pega con el gluing (reverso o directo) cuya
+    /// AABB no colisione con lo ya colocado. El solape residual se reporta con
+    /// [`Self::overlapping_face_pairs`] en vez de mentir.
+    pub fn unfold(vertices: &[Point3D], faces: &[Vec<usize>]) -> Result<Self, MeshError> {
+        if faces.is_empty() {
+            return Err(MeshError::TooFewPoints {
+                found: 0,
+                minimum: 1,
+            });
+        }
+        if faces.len() > GB_MAX_NET_FACES {
+            return Err(MeshError::MeshBudgetExceeded {
+                what: "caras de net",
+                limit: GB_MAX_NET_FACES,
+            });
+        }
+        if vertices.iter().any(|point| !point.is_finite()) {
+            return Err(MeshError::NonFiniteInput);
+        }
+        for face in faces {
+            if face.len() < 3 {
+                return Err(MeshError::TooFewPoints {
+                    found: face.len(),
+                    minimum: 3,
+                });
+            }
+            if face.len() > GB_MAX_PROFILE_POINTS {
+                return Err(MeshError::TooManyPoints {
+                    found: face.len(),
+                    maximum: GB_MAX_PROFILE_POINTS,
+                });
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for index in face {
+                if vertices.get(*index).is_none() {
+                    return Err(MeshError::DegenerateGeometry {
+                        reason: "cara con índice de vértice fuera de rango",
+                    });
+                }
+                if !seen.insert(*index) {
+                    return Err(MeshError::DegenerateGeometry {
+                        reason: "cara con vértice repetido",
+                    });
+                }
+            }
+        }
+        // Arista media sobre aristas 3D únicas (antes de reservar nada grande).
+        let mut unique_edges = std::collections::BTreeSet::new();
+        for face in faces {
+            for side in 0..face.len() {
+                let a = face[side];
+                let b = face[(side + 1) % face.len()];
+                if a == b {
+                    return Err(MeshError::DegenerateGeometry {
+                        reason: "arista 3D con extremos iguales",
+                    });
+                }
+                unique_edges.insert((a.min(b), a.max(b)));
+            }
+        }
+        let mut total = 0.0_f64;
+        for (a, b) in &unique_edges {
+            let (Some(p), Some(q)) = (vertices.get(*a), vertices.get(*b)) else {
+                return Err(MeshError::DegenerateGeometry {
+                    reason: "arista 3D con índice fuera de rango",
+                });
+            };
+            let length = p.distance(q);
+            if !length.is_finite() || length <= 1.0e-12 {
+                return Err(MeshError::DegenerateGeometry {
+                    reason: "arista 3D degenerada o no finita",
+                });
+            }
+            total += length;
+        }
+        if unique_edges.is_empty() {
+            return Err(MeshError::DegenerateGeometry {
+                reason: "malla sin aristas",
+            });
+        }
+        let edge_length = total / unique_edges.len() as f64;
+        if !edge_length.is_finite() || edge_length <= 0.0 {
+            return Err(MeshError::NonPositiveEdge { value: edge_length });
+        }
+        // Centroide para orientar caras hacia afuera (winding consistente).
+        let mut mesh_center = glam::DVec3::ZERO;
+        for vertex in vertices {
+            mesh_center += vertex.to_dvec3();
+        }
+        if vertices.is_empty() {
+            return Err(MeshError::DegenerateGeometry {
+                reason: "malla sin vértices",
+            });
+        }
+        mesh_center /= vertices.len() as f64;
+        let mut oriented: Vec<Vec<usize>> = Vec::with_capacity(faces.len());
+        for face in faces {
+            let mut ring = face.clone();
+            if let Some(normal) = a3_newell_normal(vertices, &ring) {
+                let mut centroid = glam::DVec3::ZERO;
+                for index in &ring {
+                    if let Some(point) = vertices.get(*index) {
+                        centroid += point.to_dvec3();
+                    }
+                }
+                centroid /= ring.len() as f64;
+                if normal.dot(centroid - mesh_center) < 0.0 {
+                    ring.reverse();
+                }
+            }
+            oriented.push(ring);
+        }
+        // Dual: arista 3D -> caras incidentes (máximo 2 para desplegar).
+        let mut edge_faces: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (face_index, face) in oriented.iter().enumerate() {
+            for side in 0..face.len() {
+                let a = face[side];
+                let b = face[(side + 1) % face.len()];
+                edge_faces
+                    .entry((a.min(b), a.max(b)))
+                    .or_default()
+                    .push(face_index);
+            }
+        }
+        for users in edge_faces.values() {
+            if users.len() > 2 {
+                return Err(MeshError::DegenerateGeometry {
+                    reason: "arista compartida por más de dos caras (no desplegable)",
+                });
+            }
+        }
+        let mut adjacency: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); oriented.len()];
+        for ((a, b), users) in &edge_faces {
+            if let [first, second] = users.as_slice() {
+                adjacency[*first].push((*second, *a, *b));
+                adjacency[*second].push((*first, *a, *b));
+            }
+        }
+        // Proyección local 2D por cara.
+        let mut local: Vec<Vec<[f64; 2]>> = Vec::with_capacity(oriented.len());
+        for face in &oriented {
+            local.push(a3_face_local_coords(vertices, face)?);
+        }
+        // BFS por componentes (las sueltas se corren a la derecha).
+        let mut placed: Vec<Option<Vec<[f64; 2]>>> = vec![None; oriented.len()];
+        let mut glued: std::collections::BTreeSet<(usize, usize)> =
+            std::collections::BTreeSet::new();
+        let mut visited = vec![false; oriented.len()];
+        let mut shift_x = 0.0_f64;
+        for root in 0..oriented.len() {
+            if visited[root] {
+                continue;
+            }
+            let Some(root_local) = local.get(root) else {
+                return Err(MeshError::DegenerateGeometry {
+                    reason: "cara sin proyección local",
+                });
+            };
+            let min_x = root_local
+                .iter()
+                .fold(f64::INFINITY, |best, point| best.min(point[0]));
+            if !min_x.is_finite() {
+                return Err(MeshError::NonFiniteInput);
+            }
+            let offset = shift_x - min_x;
+            let mut first: Vec<[f64; 2]> = Vec::with_capacity(root_local.len());
+            for point in root_local {
+                first.push([point[0] + offset, point[1]]);
+            }
+            placed[root] = Some(first);
+            visited[root] = true;
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(root);
+            while let Some(parent) = queue.pop_front() {
+                let neighbors =
+                    adjacency
+                        .get(parent)
+                        .cloned()
+                        .ok_or(MeshError::DegenerateGeometry {
+                            reason: "cara sin vecindad dual",
+                        })?;
+                let parent_poly = placed.get(parent).and_then(|slot| slot.clone()).ok_or(
+                    MeshError::DegenerateGeometry {
+                        reason: "cara padre sin colocar",
+                    },
+                )?;
+                let Some(parent_face) = oriented.get(parent) else {
+                    return Err(MeshError::DegenerateGeometry {
+                        reason: "cara padre desconocida",
+                    });
+                };
+                for (child, edge_a, edge_b) in neighbors {
+                    if visited.get(child).copied().unwrap_or(true) {
+                        continue;
+                    }
+                    visited[child] = true;
+                    glued.insert((edge_a.min(edge_b), edge_a.max(edge_b)));
+                    let (Some(child_face), Some(child_local)) =
+                        (oriented.get(child), local.get(child))
+                    else {
+                        return Err(MeshError::DegenerateGeometry {
+                            reason: "cara hija desconocida",
+                        });
+                    };
+                    let parent_a = parent_face
+                        .iter()
+                        .position(|vertex| *vertex == edge_a)
+                        .ok_or(MeshError::DegenerateGeometry {
+                            reason: "arista dual huérfana en el padre",
+                        })?;
+                    let parent_b = parent_face
+                        .iter()
+                        .position(|vertex| *vertex == edge_b)
+                        .ok_or(MeshError::DegenerateGeometry {
+                            reason: "arista dual huérfana en el padre",
+                        })?;
+                    let child_a = child_face
+                        .iter()
+                        .position(|vertex| *vertex == edge_a)
+                        .ok_or(MeshError::DegenerateGeometry {
+                            reason: "arista dual huérfana en la hija",
+                        })?;
+                    let child_b = child_face
+                        .iter()
+                        .position(|vertex| *vertex == edge_b)
+                        .ok_or(MeshError::DegenerateGeometry {
+                            reason: "arista dual huérfana en la hija",
+                        })?;
+                    let (Some(p_a), Some(p_b)) =
+                        (parent_poly.get(parent_a), parent_poly.get(parent_b))
+                    else {
+                        return Err(MeshError::DegenerateGeometry {
+                            reason: "arista padre sin colocar",
+                        });
+                    };
+                    let (Some(l_a), Some(l_b)) =
+                        (child_local.get(child_a), child_local.get(child_b))
+                    else {
+                        return Err(MeshError::DegenerateGeometry {
+                            reason: "arista hija sin proyección",
+                        });
+                    };
+                    // Dos gluings: reverso (default del despliegue) y directo.
+                    let reversed = a3_rigid_map(*l_a, *l_b, *p_b, *p_a)?;
+                    let direct = a3_rigid_map(*l_a, *l_b, *p_a, *p_b)?;
+                    let candidate_reversed = a3_apply_map(child_local, reversed)?;
+                    let candidate_direct = a3_apply_map(child_local, direct)?;
+                    if !a3_collides_with_placed(&candidate_reversed, &placed) {
+                        placed[child] = Some(candidate_reversed);
+                    } else if !a3_collides_with_placed(&candidate_direct, &placed) {
+                        placed[child] = Some(candidate_direct);
+                    } else {
+                        // Honesto: el solape residual lo reporta `overlapping_face_pairs`.
+                        placed[child] = Some(candidate_reversed);
+                    }
+                    queue.push_back(child);
+                }
+            }
+            let mut max_x = shift_x;
+            for slot in placed.iter().flatten() {
+                if let Some(bounds) = a3_panel_aabb(slot) {
+                    max_x = max_x.max(bounds[2]);
+                }
+            }
+            shift_x = max_x + edge_length * 2.0;
+        }
+        // Paneles de caras + solapas en aristas libres.
+        let mut panels: Vec<NetPanel> = Vec::with_capacity(oriented.len());
+        for (face_index, slot) in placed.iter().enumerate() {
+            let Some(polygon) = slot else {
+                return Err(MeshError::DegenerateGeometry {
+                    reason: "cara sin colocar en el despliegue",
+                });
+            };
+            panels.push(NetPanel {
+                points: polygon.clone(),
+                face_index,
+                is_tab: false,
+            });
+        }
+        let tab_height = edge_length * 0.25;
+        if !tab_height.is_finite() || tab_height <= 0.0 {
+            return Err(MeshError::NonPositiveEdge { value: edge_length });
+        }
+        for (face_index, face) in oriented.iter().enumerate() {
+            let Some(polygon) = placed.get(face_index).and_then(|slot| slot.as_ref()) else {
+                continue;
+            };
+            let count = polygon.len() as f64;
+            let (mut center_x, mut center_y) = (0.0_f64, 0.0_f64);
+            for point in polygon {
+                center_x += point[0];
+                center_y += point[1];
+            }
+            center_x /= count;
+            center_y /= count;
+            for side in 0..face.len() {
+                let a = face[side];
+                let b = face[(side + 1) % face.len()];
+                if glued.contains(&(a.min(b), a.max(b))) {
+                    continue;
+                }
+                let (Some(p), Some(q)) =
+                    (polygon.get(side), polygon.get((side + 1) % polygon.len()))
+                else {
+                    continue;
+                };
+                let mid = [(p[0] + q[0]) * 0.5, (p[1] + q[1]) * 0.5];
+                let mut outward = [mid[0] - center_x, mid[1] - center_y];
+                let norm = (outward[0] * outward[0] + outward[1] * outward[1]).sqrt();
+                if !norm.is_finite() || norm <= 1.0e-12 {
+                    continue;
+                }
+                outward[0] /= norm;
+                outward[1] /= norm;
+                if panels.len() >= GB_MAX_NET_FACES {
+                    return Err(MeshError::MeshBudgetExceeded {
+                        what: "paneles de net",
+                        limit: GB_MAX_NET_FACES,
+                    });
+                }
+                panels.push(gb_tab_panel(*p, *q, outward, tab_height, face_index));
+            }
+        }
+        PolyhedronNet::new(panels, edge_length)
+    }
+
+    /// Pares de caras cuyo interior se solapa en el despliegue (AABB + test ingenuo).
+    ///
+    /// Vacío = despliegue limpio. Solo caras (las solapas no participan).
+    pub fn overlapping_face_pairs(&self) -> Vec<(usize, usize)> {
+        let faces: Vec<&NetPanel> = self.panels.iter().filter(|panel| !panel.is_tab).collect();
+        let mut pairs = Vec::new();
+        for first in 0..faces.len() {
+            for second in (first + 1)..faces.len() {
+                if a3_panels_overlap(&faces[first].points, &faces[second].points) {
+                    pairs.push((faces[first].face_index, faces[second].face_index));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// `true` si algún par de caras se solapa en el despliegue.
+    pub fn has_face_overlaps(&self) -> bool {
+        !self.overlapping_face_pairs().is_empty()
+    }
+}
+
+/// Net del tetraedro regular: 4 triángulos equiláteros + solapas, vía `unfold`.
+pub fn tetra_net(edge_length: f64) -> Result<PolyhedronNet, MeshError> {
+    let (vertices, faces) = tetra_mesh(edge_length)?;
+    PolyhedronNet::unfold(&vertices, &faces)
+}
+
+/// Net de los platónicos de `platonic_mesh`: icosaedro con 20 triángulos y
+/// dodecaedro con sus 12 pentágonos clásicos (no el abanico triangulado).
+pub fn platonic_net(solid: PlatonicSolid, edge_length: f64) -> Result<PolyhedronNet, MeshError> {
+    gb_positive_edge(edge_length)?;
+    match solid {
+        PlatonicSolid::Icosahedron => {
+            let scale = edge_length / 2.0;
+            if !scale.is_finite() {
+                return Err(MeshError::NonPositiveEdge { value: edge_length });
+            }
+            let vertices: Vec<Point3D> = icosahedron_unit_vertices()
+                .iter()
+                .map(|point| Point3D::new(point.x * scale, point.y * scale, point.z * scale))
+                .collect();
+            let faces: Vec<Vec<usize>> = ICOSAHEDRON_FACES
+                .iter()
+                .map(|triangle| vec![triangle[0], triangle[1], triangle[2]])
+                .collect();
+            PolyhedronNet::unfold(&vertices, &faces)
+        }
+        PlatonicSolid::Dodecahedron => {
+            let scale = edge_length * GB_GOLDEN_RATIO / 2.0;
+            if !scale.is_finite() {
+                return Err(MeshError::NonPositiveEdge { value: edge_length });
+            }
+            let vertices: Vec<Point3D> = dodecahedron_unit_vertices()
+                .iter()
+                .map(|point| Point3D::new(point.x * scale, point.y * scale, point.z * scale))
+                .collect();
+            let pentagons = dodecahedron_pentagons().ok_or(MeshError::DegenerateGeometry {
+                reason: "la dualidad icosaedro-dodecaedro no cerró",
+            })?;
+            let faces: Vec<Vec<usize>> =
+                pentagons.iter().map(|pentagon| pentagon.to_vec()).collect();
+            PolyhedronNet::unfold(&vertices, &faces)
+        }
+    }
+}
+
 // ── Superficies de revolución (lathe) y extrusión ──
 
 fn gb_check_profile(profile: &[[f64; 2]]) -> Result<(), MeshError> {
@@ -4620,6 +5397,133 @@ mod gb_tests {
         ));
         assert!(matches!(
             TriangleMesh3D::new(vec![Point3D::new(f64::NAN, 0.0, 0.0)], Vec::new()),
+            Err(MeshError::NonFiniteInput)
+        ));
+    }
+
+    // ── A3: Net REAL genérico + tetra/platónicos vía unfold ──
+
+    #[test]
+    fn unfold_cube_mesh_matches_cube_net_area_without_overlaps() {
+        let (vertices, faces) = cube_mesh(2.0).expect("malla cubo");
+        let net = PolyhedronNet::unfold(&vertices, &faces).expect("unfold cubo");
+        assert_eq!(net.face_count(), 6);
+        assert!(net.tab_count() > 0, "solapas: {}", net.tab_count());
+        let area = net.face_area().expect("área caras");
+        assert!((area - 24.0).abs() < 1e-9, "{area}");
+        assert!(
+            !net.has_face_overlaps(),
+            "{:?}",
+            net.overlapping_face_pairs()
+        );
+        // El fast path clásico coincide en conteo y área total 6a².
+        let classic = cube_net(2.0).expect("net cubo clásico");
+        assert_eq!(classic.face_count(), net.face_count());
+        let classic_area = classic.face_area().expect("área clásica");
+        assert!(
+            (classic_area - area).abs() < 1e-9,
+            "{classic_area} vs {area}"
+        );
+    }
+
+    #[test]
+    fn tetra_net_has_four_equilateral_triangles() {
+        let net = tetra_net(2.0).expect("net tetra");
+        assert_eq!(net.face_count(), 4);
+        assert!(net.tab_count() > 0, "solapas: {}", net.tab_count());
+        for panel in net.panels().iter().filter(|panel| !panel.is_tab) {
+            assert_eq!(panel.points.len(), 3, "{panel:?}");
+            let edge =
+                |a: [f64; 2], b: [f64; 2]| ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+            let sides = [
+                edge(panel.points[0], panel.points[1]),
+                edge(panel.points[1], panel.points[2]),
+                edge(panel.points[2], panel.points[0]),
+            ];
+            for side in sides {
+                assert!((side - 2.0).abs() < 1e-9, "{side}");
+            }
+            let area = PolyhedronNet::polygon_area(&panel.points).abs();
+            assert!((area - 3.0_f64.sqrt()).abs() < 1e-9, "{area}");
+        }
+        let total = net.face_area().expect("área total");
+        assert!((total - 4.0 * 3.0_f64.sqrt()).abs() < 1e-9, "{total}");
+        assert!(
+            !net.has_face_overlaps(),
+            "{:?}",
+            net.overlapping_face_pairs()
+        );
+    }
+
+    #[test]
+    fn square_pyramid_unfold_matches_pyramid_net_area() {
+        let (vertices, faces) = square_pyramid_mesh(2.0, 3.0).expect("malla pirámide");
+        let net = PolyhedronNet::unfold(&vertices, &faces).expect("unfold pirámide");
+        assert_eq!(net.face_count(), 5);
+        assert!(net.tab_count() > 0);
+        let classic = pyramid_net(2.0, 3.0).expect("net clásico");
+        let area = net.face_area().expect("área unfold");
+        let expected = classic.face_area().expect("área clásica");
+        assert!((area - expected).abs() < 1e-6, "{area} vs {expected}");
+        assert!(
+            !net.has_face_overlaps(),
+            "{:?}",
+            net.overlapping_face_pairs()
+        );
+        assert!(square_pyramid_mesh(2.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn platonic_net_icosahedron_has_twenty_faces_with_closed_area() {
+        let net = platonic_net(PlatonicSolid::Icosahedron, 2.0).expect("net icosaedro");
+        assert_eq!(net.face_count(), 20);
+        let mesh = platonic_mesh(PlatonicSolid::Icosahedron, 2.0).expect("malla");
+        let expected = mesh.surface_area().expect("área malla");
+        let area = net.face_area().expect("área net");
+        assert!((area - expected).abs() < 1e-6, "{area} vs {expected}");
+        // El reporte de solapes siempre responde (vacío o no), sin pánico.
+        let _ = net.overlapping_face_pairs();
+    }
+
+    #[test]
+    fn unfold_rejects_over_budget_and_degenerate() {
+        let vertices = vec![
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(1.0, 0.0, 0.0),
+            Point3D::new(0.0, 1.0, 0.0),
+            Point3D::new(0.0, 0.0, 1.0),
+            Point3D::new(1.0, 1.0, 1.0),
+        ];
+        let too_many = vec![vec![0, 1, 2]; GB_MAX_NET_FACES + 1];
+        assert!(matches!(
+            PolyhedronNet::unfold(&vertices, &too_many),
+            Err(MeshError::MeshBudgetExceeded { .. })
+        ));
+        assert!(matches!(
+            PolyhedronNet::unfold(&vertices, &[vec![0, 1, 9]]),
+            Err(MeshError::DegenerateGeometry { .. })
+        ));
+        assert!(matches!(
+            PolyhedronNet::unfold(&vertices, &[vec![0, 0, 1]]),
+            Err(MeshError::DegenerateGeometry { .. })
+        ));
+        // Arista compartida por 3 caras: no desplegable.
+        let non_manifold = vec![vec![0, 1, 2], vec![0, 1, 3], vec![0, 1, 4]];
+        assert!(matches!(
+            PolyhedronNet::unfold(&vertices, &non_manifold),
+            Err(MeshError::DegenerateGeometry { .. })
+        ));
+        assert!(matches!(
+            PolyhedronNet::unfold(&vertices, &[]),
+            Err(MeshError::TooFewPoints { .. })
+        ));
+        let dirty = vec![
+            Point3D::new(f64::NAN, 0.0, 0.0),
+            Point3D::new(1.0, 0.0, 0.0),
+            Point3D::new(0.0, 1.0, 0.0),
+        ];
+        assert!(matches!(
+            PolyhedronNet::unfold(&dirty, &[vec![0, 1, 2]]),
             Err(MeshError::NonFiniteInput)
         ));
     }

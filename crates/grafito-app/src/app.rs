@@ -1586,6 +1586,16 @@ pub struct GrafitoApp {
     /// `resolve_unsaved_decision` consume `lifecycle.pending_action`, así que la acción
     /// viaja aquí y `poll_background_jobs` la ejecuta al confirmar el save.
     pending_chained_action: Option<DocumentAction>,
+    /// ── A4: slot cap-1 de superficie implícita para el frame ──
+    ///
+    /// DECISIÓN: el comando A1 eager (`ImplicitSurface` en `commands.rs`) queda
+    /// como fallback honesto fail-closed (solo crea el objeto si el campo está
+    /// definido en toda la caja). El slot es refinamiento progresivo non-blocking:
+    /// `poll` una vez por `update`, `request_repaint` mientras hay pendiente y
+    /// render de `last_valid` en `render_3d.rs` para no parpadear ante `Failed`.
+    /// Hoy el slot arranca idle; futuros UIs (inspector live-preview de alta
+    /// resolución) harán `submit` sin bloquear el hilo UI.
+    pub(crate) implicit_surface_slot: crate::implicit_surface_compute::ImplicitSurfaceSlot,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
     /// Caché de texturas de relleno para curvas implícitas. Usa `RwLock`
     /// para permitir mutación desde `draw_implicit_curve_fill` (que recibe
@@ -2246,6 +2256,7 @@ impl GrafitoApp {
             pending_import_job: None,
             pending_text_job: None,
             pending_chained_action: None,
+            implicit_surface_slot: crate::implicit_surface_compute::ImplicitSurfaceSlot::new(),
             attractor_cache: std::collections::HashMap::new(),
             fill_textures: std::sync::RwLock::new(
                 crate::render_2d::FillTextureCacheStore::default(),
@@ -4078,6 +4089,27 @@ impl GrafitoApp {
                     self.pending_text_job = Some(job);
                 }
                 Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        self.poll_implicit_surface_slot(ctx);
+    }
+
+    /// A4: avanza el slot de superficie implícita una vez por frame.
+    ///
+    /// `poll` solo hace `try_recv` (jamás bloquea el hilo UI); mientras hay
+    /// pendiente se pide otro frame vía `request_repaint`, y al llegar
+    /// `Ready`/`Failed` se repinta una vez para publicar `last_valid` (que la
+    /// UI renderiza en `render_3d.rs` sin parpadear ante `Failed`).
+    pub(crate) fn poll_implicit_surface_slot(&mut self, ctx: &egui::Context) {
+        match self.implicit_surface_slot.poll() {
+            crate::implicit_surface_compute::SurfaceSlotPoll::Pending => {
+                if self.implicit_surface_slot.has_pending() {
+                    ctx.request_repaint();
+                }
+            }
+            crate::implicit_surface_compute::SurfaceSlotPoll::Ready(_)
+            | crate::implicit_surface_compute::SurfaceSlotPoll::Failed(_) => {
+                ctx.request_repaint();
             }
         }
     }
@@ -7744,6 +7776,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         pending_import_job: None,
         pending_text_job: None,
         pending_chained_action: None,
+        implicit_surface_slot: crate::implicit_surface_compute::ImplicitSurfaceSlot::new(),
         attractor_cache: std::collections::HashMap::new(),
         fill_textures: std::sync::RwLock::new(crate::render_2d::FillTextureCacheStore::default()),
         active_color_picker: None,

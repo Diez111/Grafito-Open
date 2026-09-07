@@ -4,8 +4,8 @@
 //! only world-to-camera transform applied by this path.
 
 use grafito_core::{
-    Document, GeoObject, Prism3DObj, Quadric3DObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
-    RenderQuality, Surface3DObj,
+    Document, GeoObject, ImplicitSurface3DObj, Prism3DObj, Quadric3DObj, RegularPolychoron4DObj,
+    RegularPolytopeNDObj, RenderQuality, Surface3DObj,
 };
 use grafito_geometry::{
     curve_3d_segment_is_continuous, rotate_nd_in_plane, Camera3D, Color, NdPerspectiveProjection,
@@ -451,6 +451,14 @@ pub fn world_mesh_output_usage_for_quality(
             // Elipsoide wireframe paramétrico: 3 círculos × 32 segmentos.
             (0, 0, QUADRIC_WIRE_SEGMENTS)
         }
+        GeoObject::ImplicitSurface3D(surface) => {
+            // A1: cota conservadora 1 triángulo por celda (la esfera 24³ da
+            // 0.1..0.4 tris/celda; el peor caso suave queda muy por debajo).
+            let triangles = surface.cells.clamp(1, 32).checked_pow(3)?;
+            let fill_alpha = surface.fill_color.unwrap_or(surface.color).a;
+            let (opaque, wire) = solid_stream_triangles(triangles, Some(fill_alpha));
+            (opaque, wire, 0)
+        }
         _ => return None,
     };
     WorldMeshStreamUsage::from_primitives(opaque_triangles, wire_triangles, wire_segments)
@@ -731,6 +739,12 @@ fn world_mesh_scene_fits_limits(document: &Document) -> bool {
                     .clamp(3, crate::MAX_PRISM_BASE_VERTICES),
             ),
             GeoObject::Quadric3D(_) => QUADRIC_WIRE_SEGMENTS + 1,
+            GeoObject::ImplicitSurface3D(surface) => {
+                let Some(units) = surface.cells.clamp(1, 32).checked_pow(3) else {
+                    return false;
+                };
+                units
+            }
             _ => continue,
         };
         if !work_budget.reserve(work_units) {
@@ -1918,20 +1932,96 @@ fn append_ellipsoid_wire(
     }
 }
 
+/// Cota de salida de una superficie implícita: 1 triángulo por celda como
+/// máximo conservador (ver `world_mesh_output_usage_for_quality`). El color de
+/// relleno decide el stream (opaco vs wire translúcido) igual que el resto de
+/// sólidos vía `append_solid_triangle`.
+fn implicit_surface_output_fits(mesh: &WorldMesh, surface: &ImplicitSurface3DObj) -> bool {
+    let Some(triangles) = surface.cells.clamp(1, 32).checked_pow(3) else {
+        return false;
+    };
+    let Some(vertices) = triangles.checked_mul(3) else {
+        return false;
+    };
+    if surface.fill_color.unwrap_or(surface.color).a < 0.999 {
+        mesh_part_has_room(&mesh.wire_vertices, &mesh.wire_indices, vertices, vertices)
+    } else {
+        mesh_part_has_room(
+            &mesh.opaque_vertices,
+            &mesh.opaque_indices,
+            vertices,
+            vertices,
+        )
+    }
+}
+
+/// Deriva la malla `F(x,y,z)=0` (caché por clave en el objeto) y la vuelca
+/// como triángulos sólidos al stream que corresponda por alfa. Un `Err`
+/// honesto (`FieldUndefined`, cotas, presupuesto) dibuja cero triángulos.
+fn append_implicit(mesh: &mut WorldMesh, surface: &ImplicitSurface3DObj, document: &Document) {
+    let mesh_data = match surface.mesh_snapshot(&document.variables) {
+        Ok(mesh_data) => mesh_data,
+        Err(_) => return,
+    };
+    let fill = surface.fill_color.unwrap_or(surface.color);
+    for triangle in mesh_data.triangles() {
+        let (Some(a), Some(b), Some(c)) = (
+            mesh_data.vertices().get(triangle[0]),
+            mesh_data.vertices().get(triangle[1]),
+            mesh_data.vertices().get(triangle[2]),
+        ) else {
+            continue;
+        };
+        append_solid_triangle(mesh, *a, *b, *c, fill);
+    }
+}
+
 fn append_quadric(mesh: &mut WorldMesh, camera: &Camera3D, quadric: &Quadric3DObj, screen_h: f32) {
-    // Paso intermedio honesto: elipsoide wireframe paramétrico derivado de la
-    // cuádrica. TODO(full-quadric): clasificación general y términos cruzados.
-    let ellipsoid = crate::quadric_ellipsoid_params(quadric)
-        .unwrap_or_else(crate::QuadricEllipsoid::placeholder);
-    append_ellipsoid_wire(
-        mesh,
-        camera,
-        ellipsoid.center,
-        ellipsoid.radii,
-        quadric.width,
-        quadric.color,
-        screen_h,
-    );
+    // Cuádrica real: malla exacta del tipo clasificado. El elipsoide
+    // alineado a ejes mantiene el camino legacy; el resto (hiperboloides,
+    // paraboloides, cono, cilindros, planos, elipsoide rotado) usa sus
+    // polilíneas exactas. Degenerada sin superficie: cero segmentos y badge
+    // vía `quadric_uses_placeholder` — jamás un elipsoide falso.
+    let coeffs = [
+        quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g, quadric.h,
+        quadric.i, quadric.j,
+    ];
+    if let Some(ellipsoid) = crate::quadric_ellipsoid_params(quadric) {
+        append_ellipsoid_wire(
+            mesh,
+            camera,
+            ellipsoid.center,
+            ellipsoid.radii,
+            quadric.width,
+            quadric.color,
+            screen_h,
+        );
+        return;
+    }
+    let shape = match grafito_geometry::quadrics::classify_quadric(coeffs) {
+        Ok(shape) => shape,
+        Err(_) => return,
+    };
+    let lines = match grafito_geometry::quadrics::quadric_wire_points(&shape) {
+        Ok(lines) => lines,
+        Err(_) => return,
+    };
+    for polyline in &lines {
+        for segment in polyline.windows(2) {
+            if segment.len() < 2 {
+                continue;
+            }
+            append_wire_line(
+                mesh,
+                camera,
+                segment[0],
+                segment[1],
+                quadric.width,
+                quadric.color,
+                screen_h,
+            );
+        }
+    }
 }
 
 fn append_curve(
@@ -2273,6 +2363,18 @@ pub fn build_world_mesh(
                 }
                 append_quadric(&mut mesh, camera, quadric, screen_h);
             }
+            GeoObject::ImplicitSurface3D(surface) => {
+                let Some(work_units) = surface.cells.clamp(1, 32).checked_pow(3) else {
+                    mesh.complete = false;
+                    continue;
+                };
+                if !implicit_surface_output_fits(&mesh, surface) || !work_budget.reserve(work_units)
+                {
+                    mesh.complete = false;
+                    continue;
+                }
+                append_implicit(&mut mesh, surface, document);
+            }
             _ => {}
         }
     }
@@ -2350,6 +2452,41 @@ mod tests {
         // 96 segmentos × 4 vértices / 6 índices.
         assert_eq!(usage.wire_vertices, 384);
         assert_eq!(usage.wire_indices, 576);
+    }
+
+    #[test]
+    fn implicit_surface_mesh_generates_solid_stream_and_validates() {
+        use grafito_core::ImplicitSurface3DObj;
+        let mut document = Document::new();
+        document
+            .try_add_object(GeoObject::ImplicitSurface3D(ImplicitSurface3DObj::new(
+                "x^2+y^2+z^2-1",
+                (-1.5, 1.5, -1.5, 1.5, -1.5, 1.5),
+                16,
+            )))
+            .expect("implicit fixture");
+        let mesh = build_world_mesh(&document, &test_camera(), 800.0, 600.0);
+        assert!(mesh.is_complete());
+        // Relleno translúcido por defecto (alfa 0.4) → stream wire, sin opaco.
+        assert!(mesh.opaque_vertices.is_empty());
+        assert!(!mesh.wire_vertices.is_empty());
+        assert_eq!(mesh.wire_vertices.len() % 3, 0);
+        assert_eq!(mesh.wire_indices.len(), mesh.wire_vertices.len());
+        mesh.validate().expect("implicit mesh validates");
+    }
+
+    #[test]
+    fn implicit_surface_usage_estimate_covers_cells_cubed() {
+        use grafito_core::ImplicitSurface3DObj;
+        let surface = GeoObject::ImplicitSurface3D(ImplicitSurface3DObj::new(
+            "x^2+y^2+z^2-1",
+            (-1.5, 1.5, -1.5, 1.5, -1.5, 1.5),
+            16,
+        ));
+        let usage = world_mesh_output_usage(&surface).expect("implicit usage");
+        // 16³ triángulos estimados al stream wire (translúcido).
+        assert_eq!(usage.wire_vertices, 16_usize.pow(3) * 3);
+        assert_eq!(usage.wire_indices, 16_usize.pow(3) * 3);
     }
 
     #[test]

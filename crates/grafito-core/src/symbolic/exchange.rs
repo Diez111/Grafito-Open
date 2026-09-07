@@ -12,7 +12,7 @@
 //! - Gruntz/Risch S/M viven en la puerta [`super::cas_motor`] (motor en
 //!   `grafito-geometry::{cas,integral}`); aquí el stub solo documenta el L
 //!   restante sin expresión que evaluar.
-//! - L puro (marching cubes, Net real, iroh P2P, CRDT): solo diseño + stub
+//! - L puro (iroh P2P, CRDT): solo diseño + stub
 //!   que devuelve `Err` explicativo + test.
 
 use std::collections::BTreeMap;
@@ -553,15 +553,20 @@ pub fn solid_measure_summary(object: &GeoObject) -> Result<SolidMeasure, Exchang
 /// `Gruntz`/`Risch` ya tienen motor S/M real (puerta [`super::cas_motor`]
 /// sobre `grafito-geometry::{cas,integral}`); aquí el stub persiste porque
 /// no recibe expresión que evaluar, y su hint deriva a la puerta con
-/// cómputo. El resto (marching cubes, Net, P2P, CRDT) es L puro.
+/// cómputo. `MarchingCubes`/`Net` ya tienen motor real (A1+A3+A4):
+/// superficie por `grafito-geometry::polytopes::implicit_surface_mesh` con
+/// puerta `ImplicitSurface3DObj::compute_mesh` + comando `ImplicitSurface`,
+/// y desarrollo por `PolyhedronNet::unfold` + comando `Net`; aquí el stub
+/// persiste porque no recibe campo ni objeto que desplegar, y su hint deriva
+/// al motor. El resto (P2P, CRDT) es L puro.
 pub fn l_stub(feature: &'static str) -> Result<String, ExchangeError> {
     let hint = match feature {
         "Gruntz" => {
             "límites 0/0, ∞/∞ y jerarquía exp/log/potencia ya implementados en grafito-geometry::cas (gruntz_limit/gruntz_limit_infinite) con puerta cas_motor::cas_limit_gruntz; este stub no recibe expresión"
         }
         "Risch" => "Risch-Norman (polinomios/exponenciales/logaritmos) ya implementado en grafito-geometry::integral con puerta cas_motor::cas_integrate_risch; este stub no recibe integrando (racionales → symbolic::integrate, resto L en F10.W5)",
-        "MarchingCubes" => "superficie F(x,y,z)=0 por marching cubes (diseño F10.W5)",
-        "Net" => "desarrollo 2D de poliedros por despliegue de caras (diseño F10.W5)",
+        "MarchingCubes" => "superficie F(x,y,z)=0 por marching-tetra ya implementada en grafito-geometry::polytopes::implicit_surface_mesh con puerta ImplicitSurface3DObj::compute_mesh y comando ImplicitSurface; este stub no recibe campo que isosuperficiar",
+        "Net" => "desarrollo 2D de poliedros por PolyhedronNet::unfold ya implementado con comando Net (Cube/Tetrahedron/Pyramid/Prism → polígonos 2D); este stub no recibe objeto que desplegar",
         "IrohP2P" => "transporte P2P con iroh (diseño F10.W5, hoy Loopback en grafito-classroom)",
         "Crdt" => "fusión pizarra UUID+LWW (diseño F10.W5)",
         _ => "diseño pendiente en Tasks.md F10.W5",
@@ -777,5 +782,17 @@ mod tests {
                 "hint debe derivar a cas_motor: {err}"
             );
         }
+        // A4: MarchingCubes/Net con motor real — el hint deriva al motor,
+        // ya no miente con "diseño F10.W5".
+        let err = l_stub("MarchingCubes").expect_err("stub sin campo");
+        assert!(
+            err.to_string().contains("implicit_surface_mesh"),
+            "hint debe derivar a implicit_surface_mesh: {err}"
+        );
+        let err = l_stub("Net").expect_err("stub sin objeto");
+        assert!(
+            err.to_string().contains("PolyhedronNet::unfold"),
+            "hint debe derivar a PolyhedronNet::unfold: {err}"
+        );
     }
 }

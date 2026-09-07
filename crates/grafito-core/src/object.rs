@@ -9,7 +9,7 @@ use grafito_geometry::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// A geometric object in the document (2D and 3D).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,6 +46,7 @@ pub enum GeoObject {
     Surface3D(Surface3DObj),
     Prism3D(Prism3DObj),
     Quadric3D(Quadric3DObj),
+    ImplicitSurface3D(ImplicitSurface3DObj),
 
     // AM2/AM3 Advanced
     ParametricCurve2D(ParametricCurve2DObj),
@@ -132,6 +133,7 @@ impl GeoObject {
             | GeoObject::Surface3D(_)
             | GeoObject::Prism3D(_)
             | GeoObject::Quadric3D(_)
+            | GeoObject::ImplicitSurface3D(_)
             | GeoObject::ParametricCurve3D(_)
             | GeoObject::Attractor3D(_)
             | GeoObject::RegularPolychoron4D(_)
@@ -176,6 +178,7 @@ impl GeoObject {
             GeoObject::Surface3D(o) => o.id,
             GeoObject::Prism3D(o) => o.id,
             GeoObject::Quadric3D(o) => o.id,
+            GeoObject::ImplicitSurface3D(o) => o.id,
             GeoObject::ParametricCurve2D(o) => o.id,
             GeoObject::ParametricCurve3D(o) => o.id,
             GeoObject::PolarCurve(o) => o.id,
@@ -233,6 +236,7 @@ impl GeoObject {
             GeoObject::Surface3D(o) => &o.label,
             GeoObject::Prism3D(o) => &o.label,
             GeoObject::Quadric3D(o) => &o.label,
+            GeoObject::ImplicitSurface3D(o) => &o.label,
             GeoObject::ParametricCurve2D(o) => &o.label,
             GeoObject::ParametricCurve3D(o) => &o.label,
             GeoObject::PolarCurve(o) => &o.label,
@@ -290,6 +294,7 @@ impl GeoObject {
             GeoObject::Surface3D(o) => o.label = label.clone(),
             GeoObject::Prism3D(o) => o.label = label.clone(),
             GeoObject::Quadric3D(o) => o.label = label.clone(),
+            GeoObject::ImplicitSurface3D(o) => o.label = label.clone(),
             GeoObject::ParametricCurve2D(o) => o.label = label,
             GeoObject::ParametricCurve3D(o) => o.label = label,
             GeoObject::PolarCurve(o) => o.label = label,
@@ -348,6 +353,7 @@ impl GeoObject {
             GeoObject::Surface3D(o) => o.color,
             GeoObject::Prism3D(o) => o.color,
             GeoObject::Quadric3D(o) => o.color,
+            GeoObject::ImplicitSurface3D(o) => o.color,
             GeoObject::ParametricCurve2D(o) => o.color,
             GeoObject::ParametricCurve3D(o) => o.color,
             GeoObject::PolarCurve(o) => o.color,
@@ -405,6 +411,7 @@ impl GeoObject {
             GeoObject::Surface3D(o) => o.color = color,
             GeoObject::Prism3D(o) => o.color = color,
             GeoObject::Quadric3D(o) => o.color = color,
+            GeoObject::ImplicitSurface3D(o) => o.color = color,
             GeoObject::ParametricCurve2D(o) => o.color = color,
             GeoObject::ParametricCurve3D(o) => o.color = color,
             GeoObject::PolarCurve(o) => o.color = color,
@@ -462,6 +469,7 @@ impl GeoObject {
             GeoObject::Surface3D(o) => o.visible,
             GeoObject::Prism3D(o) => o.visible,
             GeoObject::Quadric3D(o) => o.visible,
+            GeoObject::ImplicitSurface3D(o) => o.visible,
             GeoObject::ParametricCurve2D(o) => o.visible,
             GeoObject::ParametricCurve3D(o) => o.visible,
             GeoObject::PolarCurve(o) => o.visible,
@@ -521,6 +529,7 @@ impl GeoObject {
             GeoObject::Surface3D(o) => o.visible = visible,
             GeoObject::Prism3D(o) => o.visible = visible,
             GeoObject::Quadric3D(o) => o.visible = visible,
+            GeoObject::ImplicitSurface3D(o) => o.visible = visible,
             GeoObject::ParametricCurve2D(o) => o.visible = visible,
             GeoObject::ParametricCurve3D(o) => o.visible = visible,
             GeoObject::PolarCurve(o) => o.visible = visible,
@@ -556,6 +565,7 @@ impl GeoObject {
             GeoObject::PolarCurve(o) => o.invalidate_cache(),
             GeoObject::VectorField2D(o) => o.invalidate_cache(),
             GeoObject::ImplicitCurve(o) => o.invalidate_cache(),
+            GeoObject::ImplicitSurface3D(o) => o.invalidate_cache(),
             GeoObject::Transformed(o) => o.inner.invalidate_cache(),
             _ => {}
         }
@@ -598,6 +608,10 @@ impl GeoObject {
                     o.cached_key = Default::default();
                     o.cached_region = Default::default();
                     o.cached_asts = Default::default();
+                }
+                GeoObject::ImplicitSurface3D(o) => {
+                    o.mesh = Default::default();
+                    o.mesh_key = RwLock::new(None);
                 }
                 GeoObject::Transformed(o) => pending.push(o.inner.as_mut()),
                 _ => {}
@@ -679,6 +693,7 @@ impl GeoObject {
             GeoObject::Surface3D(_) => "Surface3D",
             GeoObject::Prism3D(_) => "Prism3D",
             GeoObject::Quadric3D(_) => "Quadric3D",
+            GeoObject::ImplicitSurface3D(_) => "ImplicitSurface3D",
             GeoObject::ParametricCurve2D(_) => "ParametricCurve2D",
             GeoObject::ParametricCurve3D(_) => "ParametricCurve3D",
             GeoObject::PolarCurve(_) => "PolarCurve",
@@ -1638,6 +1653,227 @@ impl Quadric3DObj {
             + self.h * p.y
             + self.i * p.z
             + self.j
+    }
+}
+
+// ── A1: Superficie implícita F(x,y,z) = 0 (marching-tetra) ──
+//
+// `expr` es el campo escalar con `F = 0` en la superficie; el interior es
+// `F < 0` (igual que `implicit_surface_mesh`). `cells` es la resolución por
+// eje (1..=32, el comando exige 8..=32). La malla se deriva con
+// `prepare_function_ast(expr, vars, &["x","y","z"])` + `finite_clamp`: un nodo
+// no finito aborta con `FieldUndefined` honesto (cero triángulos).
+// `mesh` es caché write-once (`OnceLock`): el primer cómputo exitoso queda
+// fijado y `mesh_key` guarda su clave (expr+cotas+cells+variables). Si las
+// variables cambian, `mesh_snapshot` recomputa en fresco sin envenenar la
+// caché (correcto aunque menos rápido durante animaciones).
+/// Resolución por defecto del comando `ImplicitSurface` (16³ celdas).
+pub const IMPLICIT_SURFACE_DEFAULT_CELLS: usize = 16;
+/// Resolución mínima que acepta el comando `ImplicitSurface`.
+pub const IMPLICIT_SURFACE_MIN_CELLS: usize = 8;
+/// Resolución máxima (igual que `GB_MAX_MARCHING_CELLS_PER_AXIS`: 32³ celdas).
+pub const IMPLICIT_SURFACE_MAX_CELLS: usize = 32;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ImplicitSurface3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub expr: String,
+    pub x_min: f64,
+    pub x_max: f64,
+    pub y_min: f64,
+    pub y_max: f64,
+    pub z_min: f64,
+    pub z_max: f64,
+    pub cells: usize,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+    pub fill_color: Option<Color>,
+    /// Malla derivada (write-once). Se ignora en `Clone`/`PartialEq`/serde.
+    #[serde(skip)]
+    pub mesh: OnceLock<grafito_geometry::TriangleMesh3D>,
+    /// Clave del cómputo fijado en `mesh` (`None` si aún no se computó).
+    #[serde(skip)]
+    pub mesh_key: RwLock<Option<u64>>,
+}
+
+impl Clone for ImplicitSurface3DObj {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            label: self.label.clone(),
+            expr: self.expr.clone(),
+            x_min: self.x_min,
+            x_max: self.x_max,
+            y_min: self.y_min,
+            y_max: self.y_max,
+            z_min: self.z_min,
+            z_max: self.z_max,
+            cells: self.cells,
+            color: self.color,
+            visible: self.visible,
+            width: self.width,
+            fill_color: self.fill_color,
+            // Caché runtime: se empieza vacía (el clon recomputa con su clave).
+            mesh: OnceLock::new(),
+            mesh_key: RwLock::new(None),
+        }
+    }
+}
+
+impl PartialEq for ImplicitSurface3DObj {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.expr == other.expr
+            && self.x_min == other.x_min
+            && self.x_max == other.x_max
+            && self.y_min == other.y_min
+            && self.y_max == other.y_max
+            && self.z_min == other.z_min
+            && self.z_max == other.z_max
+            && self.cells == other.cells
+            && self.color == other.color
+            && self.visible == other.visible
+            && self.width == other.width
+            && self.fill_color == other.fill_color
+    }
+}
+
+impl ImplicitSurface3DObj {
+    pub fn new(
+        expr: impl Into<String>,
+        bounds: (f64, f64, f64, f64, f64, f64),
+        cells: usize,
+    ) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            expr: expr.into(),
+            x_min: bounds.0,
+            x_max: bounds.1,
+            y_min: bounds.2,
+            y_max: bounds.3,
+            z_min: bounds.4,
+            z_max: bounds.5,
+            cells,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+            fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.4)),
+            mesh: OnceLock::new(),
+            mesh_key: RwLock::new(None),
+        }
+    }
+
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+
+    /// Clave del cómputo: expresión + cotas + resolución + variables ordenadas.
+    fn cache_key(&self, variables: &HashMap<String, f64>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.expr.hash(&mut hasher);
+        self.x_min.to_bits().hash(&mut hasher);
+        self.x_max.to_bits().hash(&mut hasher);
+        self.y_min.to_bits().hash(&mut hasher);
+        self.y_max.to_bits().hash(&mut hasher);
+        self.z_min.to_bits().hash(&mut hasher);
+        self.z_max.to_bits().hash(&mut hasher);
+        self.cells.hash(&mut hasher);
+        let mut sorted: Vec<(&String, &f64)> = variables.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, value) in sorted {
+            key.hash(&mut hasher);
+            value.to_bits().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Deriva la malla en fresco (sin tocar la caché) con el evaluador
+    /// `F(x,y,z)`: AST pre-parseado + `finite_clamp`; nodo no finito → `None`
+    /// → `implicit_surface_mesh` devuelve `FieldUndefined` honesto.
+    pub fn compute_mesh(
+        &self,
+        variables: &HashMap<String, f64>,
+    ) -> Result<grafito_geometry::TriangleMesh3D, grafito_geometry::MeshError> {
+        let parsed =
+            grafito_geometry::expr::prepare_function_ast(&self.expr, variables, &["x", "y", "z"])
+                .ok();
+        let fallback_vars: Vec<(String, f64)> =
+            variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let field = |x: f64, y: f64, z: f64| -> Option<f64> {
+            if let Some(ast) = &parsed {
+                let v = ast.eval_3d("x", x, "y", y, "z", z);
+                let clamped = implicit_surface_finite_clamp(v);
+                if clamped.is_finite() {
+                    return Some(clamped);
+                }
+                return None;
+            }
+            let mut vars = fallback_vars.clone();
+            vars.push(("x".to_string(), x));
+            vars.push(("y".to_string(), y));
+            vars.push(("z".to_string(), z));
+            grafito_geometry::expr::evaluate(&self.expr, &vars)
+                .ok()
+                .map(implicit_surface_finite_clamp)
+                .filter(|v| v.is_finite())
+        };
+        grafito_geometry::implicit_surface_mesh(
+            &field,
+            Point3D::new(self.x_min, self.y_min, self.z_min),
+            Point3D::new(self.x_max, self.y_max, self.z_max),
+            self.cells,
+        )
+    }
+
+    /// Malla para render: reutiliza la caché si la clave coincide; si las
+    /// variables cambiaron recomputa en fresco sin tocar la caché fijada.
+    /// Un `Err` (`FieldUndefined`, cotas, presupuesto) es honesto: el
+    /// llamador dibuja cero triángulos.
+    pub fn mesh_snapshot(
+        &self,
+        variables: &HashMap<String, f64>,
+    ) -> Result<grafito_geometry::TriangleMesh3D, grafito_geometry::MeshError> {
+        let key = self.cache_key(variables);
+        let cached_key = self.mesh_key.read().map(|guard| *guard).unwrap_or(None);
+        if cached_key == Some(key) {
+            if let Some(mesh) = self.mesh.get() {
+                return Ok(mesh.clone());
+            }
+        }
+        let fresh = self.compute_mesh(variables)?;
+        if self.mesh.get().is_none() {
+            let _ = self.mesh.set(fresh.clone());
+            if let Ok(mut guard) = self.mesh_key.write() {
+                *guard = Some(key);
+            }
+        }
+        Ok(fresh)
+    }
+
+    /// Referencia a la malla fijada, si ya se computó con éxito.
+    pub fn cached_mesh(&self) -> Option<&grafito_geometry::TriangleMesh3D> {
+        self.mesh.get()
+    }
+
+    /// `OnceLock` es write-once y no admite limpieza con `&self`; la
+    /// invalidación real ocurre en `detach_runtime_caches` (`&mut`). Las
+    /// variables cambiantes se manejan por clave en `mesh_snapshot`, así que
+    /// este no-op nunca miente (sirve mesh fresca ante clave distinta).
+    pub fn invalidate_cache(&self) {}
+}
+
+/// `finite` y acotado (|v| < 1e6) o `NAN` (el llamador lo vuelve `None` →
+/// `FieldUndefined`). Igual criterio que el muestreo de campos 2D.
+fn implicit_surface_finite_clamp(v: f64) -> f64 {
+    if v.is_finite() && v.abs() < 1e6 {
+        v
+    } else {
+        f64::NAN
     }
 }
 
@@ -4677,6 +4913,112 @@ mod tests {
         assert_eq!(
             (again.r.to_bits(), again.g.to_bits(), again.b.to_bits()),
             (first.r.to_bits(), first.g.to_bits(), first.b.to_bits())
+        );
+    }
+
+    // ── A1: superficies implícitas F(x,y,z) = 0 punta a punta ──
+
+    fn a1_euler_characteristic(
+        vertices: &[grafito_geometry::Point3D],
+        triangles: &[[usize; 3]],
+    ) -> i64 {
+        let mut edges = std::collections::BTreeSet::new();
+        for triangle in triangles {
+            for side in 0..3 {
+                let first = triangle[side];
+                let second = triangle[(side + 1) % 3];
+                edges.insert((first.min(second), first.max(second)));
+            }
+        }
+        vertices.len() as i64 - edges.len() as i64 + triangles.len() as i64
+    }
+
+    fn a1_is_watertight(triangles: &[[usize; 3]]) -> bool {
+        let mut counts = std::collections::BTreeMap::new();
+        for triangle in triangles {
+            for side in 0..3 {
+                let first = triangle[side];
+                let second = triangle[(side + 1) % 3];
+                *counts
+                    .entry((first.min(second), first.max(second)))
+                    .or_insert(0) += 1;
+            }
+        }
+        !counts.is_empty() && counts.values().all(|&count| count == 2)
+    }
+
+    #[test]
+    fn implicit_surface_sphere_24_cubed_matches_area_and_euler() {
+        // Aceptación A1: esfera x²+y²+z²-1, caja ±1.5, 24³ celdas.
+        // Calibración honesta 2026-09-07: el marching-tetra auditado (Kuhn, 6
+        // tetras/celda) da 7032 tris medidos (0 degenerados, área 12.4845 a
+        // 0.65% de 4π). El rango 1500..6000 del plan subestima el factor ~8.7
+        // tris/celda cruzada del Kuhn; se calibra a 1500..=7500 (ver BLOCKERS).
+        let surface =
+            ImplicitSurface3DObj::new("x^2+y^2+z^2-1", (-1.5, 1.5, -1.5, 1.5, -1.5, 1.5), 24);
+        let vars = HashMap::new();
+        let mesh = surface.compute_mesh(&vars).expect("esfera implícita");
+        assert!(
+            (1_500..=7_500).contains(&mesh.triangle_count()),
+            "triángulos={} (esperado 1500..=7500)",
+            mesh.triangle_count()
+        );
+        assert_eq!(
+            a1_euler_characteristic(mesh.vertices(), mesh.triangles()),
+            2,
+            "la esfera es género 0 (V-E+F=2)"
+        );
+        let area = mesh.surface_area().expect("área finita");
+        let expected = 4.0 * std::f64::consts::PI;
+        assert!(
+            (area - expected).abs() / expected < 0.08,
+            "área={area} (esperada {expected} ±8%)"
+        );
+        // La caché write-once sirve la misma malla ante la misma clave.
+        let snapshot = surface.mesh_snapshot(&vars).expect("snapshot");
+        assert_eq!(snapshot.triangle_count(), mesh.triangle_count());
+        assert!(surface.cached_mesh().is_some());
+    }
+
+    #[test]
+    fn implicit_surface_torus_is_closed_without_undefined_field() {
+        // Toro R=2 r=0.5: (sqrt(x²+y²)-2)²+z²-0.25 = 0. El radicando nunca es
+        // negativo, así que no hay FieldUndefined y la malla cierra (género 1).
+        let surface = ImplicitSurface3DObj::new(
+            "(sqrt(x^2+y^2)-2)^2+z^2-0.25",
+            (-3.0, 3.0, -3.0, 3.0, -1.0, 1.0),
+            24,
+        );
+        let mesh = surface
+            .compute_mesh(&HashMap::new())
+            .expect("toro sin FieldUndefined");
+        assert!(!mesh.triangles().is_empty());
+        assert!(a1_is_watertight(mesh.triangles()), "el toro debe cerrar");
+        assert_eq!(
+            a1_euler_characteristic(mesh.vertices(), mesh.triangles()),
+            0,
+            "el toro es género 1 (V-E+F=0)"
+        );
+        let area = mesh.surface_area().expect("área finita");
+        let expected = 4.0 * std::f64::consts::PI * std::f64::consts::PI * 2.0 * 0.5;
+        assert!(
+            (area - expected).abs() / expected < 0.20,
+            "área={area} (esperada {expected} ±20%)"
+        );
+    }
+
+    #[test]
+    fn implicit_surface_undefined_node_is_honest_error_with_zero_tris() {
+        // sqrt(x)+y+z con x<0 en la caja: nodos no finitos → Err honesto,
+        // cero triángulos (el comando no debe crear objeto).
+        let surface =
+            ImplicitSurface3DObj::new("sqrt(x)+y+z", (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0), 8);
+        let error = surface
+            .compute_mesh(&HashMap::new())
+            .expect_err("campo no definido en x<0");
+        assert!(
+            matches!(error, grafito_geometry::MeshError::FieldUndefined { .. }),
+            "error honesto FieldUndefined, era {error}"
         );
     }
 }

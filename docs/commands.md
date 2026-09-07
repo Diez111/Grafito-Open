@@ -261,6 +261,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Prism[poligono, altura]`: Crea un prisma extruyendo un polígono base por un vector (altura en Z o dx,dy,dz). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Prism[poligono, dx, dy, dz]`. Alias: `prisma`.
 - `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (diseno L + stub honesto: devuelve error explicativo, ver Tasks.md F10.W5). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Net[poliedro, escala]`. Alias: `desarrollo`, `desplegado`, `unwrap`.
 - `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `cuadrica`, `cuádrica`.
+- `ImplicitSurface[expr, x0, x1, y0, y1, z0, z1, res]`: Crea una superficie implícita F(x,y,z)=0 en la caja dada (marching-tetra, res 8..=32, 16 por defecto). Mutacion: crea objetos. Riesgo: medio. Alias: `superficieimplicita`, `implicitsurface3d`.
 - `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
 ## Crear
 

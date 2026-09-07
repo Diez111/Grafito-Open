@@ -11,12 +11,13 @@ use grafito_core::{
     CasWorksheetStatus, CircleObj, ComplexGridObj, ComplexIntegralObj, ComplexMappingObj,
     Cone3DObj, Cube3DObj, Cylinder3DObj, DataTableObj, Document, EllipseObj, FitMetadata,
     Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj,
-    ImplicitCurveObj, Line3DObj, LineKind, LineObj, LiveSequenceBinding, MoebiusStripObj, ObjectId,
-    ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj,
-    PieChartObj, Plane3DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, Prism3DObj,
-    Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
+    ImplicitCurveObj, ImplicitSurface3DObj, Line3DObj, LineKind, LineObj, LiveSequenceBinding,
+    MoebiusStripObj, ObjectId, ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj,
+    PhasePortraitObj, PieChartObj, Plane3DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj,
+    Prism3DObj, Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
     RelationOperator, ScatterPlotObj, SectorObj, Segment3DObj, Sphere3DObj, SplineObj,
     Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta, VectorField2DObj, VectorField3DObj,
+    IMPLICIT_SURFACE_DEFAULT_CELLS, IMPLICIT_SURFACE_MAX_CELLS, IMPLICIT_SURFACE_MIN_CELLS,
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
@@ -5181,6 +5182,9 @@ fn handle_remaining_cas_commands(
         }
         "Quadric" if cmd.args.len() == 10 => {
             return run_quadric_command(document, &cmd.args, input_text);
+        }
+        "ImplicitSurface" if matches!(cmd.args.len(), 7 | 8) => {
+            return run_implicit_surface_command(document, &cmd.args, input_text);
         }
         "Plane3D" if cmd.args.len() == 4 => {
             // Plane3D[a, b, c, d]  →  ax + by + cz + d = 0
@@ -12965,25 +12969,251 @@ fn run_prism_vector_command(
 fn run_net_command(
     document: &mut Document,
     args: &[String],
-    _input_text: &mut str,
+    input_text: &mut String,
 ) -> CommandOutcome {
-    let label = args[0].trim().trim_matches('"').trim_matches('\'');
+    // DECISIÓN A4: persiste como polígonos 2D honestos (una cara = un `Polygon`),
+    // sin crear `GeoObject::Net`. La variante exigiría tocar `object.rs` (enum +
+    // id/label/color/visible/type_name), `document.rs`, `validation.rs`,
+    // render/export/persistencia — muy invasivo para A4. `Polygon` ya es
+    // dibujable honesto en el canvas 2D, respeta presupuestos y no miente.
+    // Solo caras (`is_tab == false`); las solapas son ayudas de pegado, no superficie.
+    let Some(raw_label) = args.first() else {
+        return CommandOutcome::Error("Net: falta el objeto poliedro".into());
+    };
+    let label = raw_label.trim().trim_matches('"').trim_matches('\'');
+    if label.is_empty() {
+        return CommandOutcome::Error("Net: el nombre del objeto no puede estar vacío".into());
+    }
+    let scale = if args.len() >= 2 {
+        match parse_numeric_arg(args[1].trim(), &document.variables) {
+            Ok(value) if value.is_finite() && value > 0.0 && value <= 10_000.0 => value,
+            Ok(_) => {
+                return CommandOutcome::Error(
+                    "Net: la escala debe ser finita y positiva (0, 10000]".into(),
+                )
+            }
+            Err(error) => {
+                return CommandOutcome::Error(format!("Net: escala inválida: {error}"));
+            }
+        }
+    } else {
+        1.0
+    };
     let Some(id) = find_object_by_label(document, label) else {
-        return CommandOutcome::Error(format!("Net: no existe el objeto '{}'", label));
+        return CommandOutcome::Error(format!("Net: no existe el objeto '{label}'"));
     };
-    let Some(obj) = document.get_object(id) else {
-        return CommandOutcome::Error(format!("Net: objeto '{}' no encontrado", label));
+    let Some(obj) = document.get_object(id).cloned() else {
+        return CommandOutcome::Error(format!("Net: objeto '{label}' no encontrado"));
     };
-    if !is_polyhedron_object(obj) {
-        return CommandOutcome::Message(format!(
-            "Net: '{}' no es un poliedro 3D reconocido — Net no implementado, use vista 3D",
-            label
+    let world_limit = grafito_geometry::MAX_WORLD_COORDINATE;
+    let (vertices, faces): (Vec<Point3D>, Vec<Vec<usize>>) = match &obj {
+        GeoObject::Cube3D(cube) => {
+            if !cube.size.is_finite() || cube.size <= 0.0 || cube.size > world_limit {
+                return CommandOutcome::Error(
+                    "Net: el cubo tiene arista inválida (debe ser finita y positiva)".into(),
+                );
+            }
+            if !cube.center.is_finite() {
+                return CommandOutcome::Error("Net: el centro del cubo no es finito".into());
+            }
+            let geometry = grafito_geometry::Cube3D::new(cube.center, cube.size);
+            let vertices = geometry.vertices().to_vec();
+            let faces = vec![
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![2, 3, 7, 6],
+                vec![0, 4, 7, 3],
+                vec![1, 2, 6, 5],
+            ];
+            (vertices, faces)
+        }
+        GeoObject::Tetrahedron3D(tetra) => {
+            if !tetra.edge_length.is_finite()
+                || tetra.edge_length <= 0.0
+                || tetra.edge_length > world_limit
+            {
+                return CommandOutcome::Error(
+                    "Net: el tetraedro tiene arista inválida (debe ser finita y positiva)".into(),
+                );
+            }
+            if !tetra.center.is_finite() {
+                return CommandOutcome::Error("Net: el centro del tetraedro no es finito".into());
+            }
+            let geometry = grafito_geometry::Tetrahedron3D::new(tetra.center, tetra.edge_length);
+            if !geometry.is_renderable() {
+                return CommandOutcome::Error(
+                    "Net: el tetraedro excede la cota renderizable".into(),
+                );
+            }
+            let vertices = geometry.vertices().to_vec();
+            let faces: Vec<Vec<usize>> =
+                geometry.faces().iter().map(|face| face.to_vec()).collect();
+            (vertices, faces)
+        }
+        GeoObject::Pyramid3D(pyramid) => {
+            if !pyramid.base_size.is_finite()
+                || pyramid.base_size <= 0.0
+                || pyramid.base_size > world_limit
+            {
+                return CommandOutcome::Error(
+                    "Net: la pirámide tiene base inválida (debe ser finita y positiva)".into(),
+                );
+            }
+            if !pyramid.base_center.is_finite() || !pyramid.apex.is_finite() {
+                return CommandOutcome::Error("Net: la pirámide tiene puntos no finitos".into());
+            }
+            let geometry = grafito_geometry::Pyramid3D::new(
+                pyramid.base_center,
+                pyramid.apex,
+                pyramid.base_size,
+            );
+            let base = geometry.base_vertices().to_vec();
+            let mut vertices = base;
+            vertices.push(pyramid.apex);
+            let faces = vec![
+                vec![0, 3, 2, 1],
+                vec![0, 1, 4],
+                vec![1, 2, 4],
+                vec![2, 3, 4],
+                vec![3, 0, 4],
+            ];
+            (vertices, faces)
+        }
+        GeoObject::Prism3D(prism) => {
+            let base = prism.base_vertices.clone();
+            if base.len() < 3 {
+                return CommandOutcome::Error(
+                    "Net: el prisma requiere al menos 3 vértices base".into(),
+                );
+            }
+            if base.len() > 64 {
+                return CommandOutcome::Error(
+                    "Net: el prisma excede 64 vértices base (presupuesto de net/render)".into(),
+                );
+            }
+            if base.iter().any(|point| !point.is_finite()) {
+                return CommandOutcome::Error("Net: la base del prisma no es finita".into());
+            }
+            if !prism.direction.is_finite() {
+                return CommandOutcome::Error("Net: la dirección del prisma no es finita".into());
+            }
+            let direction_len = prism
+                .direction
+                .x
+                .hypot(prism.direction.y)
+                .hypot(prism.direction.z);
+            if !direction_len.is_finite() || direction_len <= 1.0e-12 {
+                return CommandOutcome::Error(
+                    "Net: la dirección del prisma debe ser no nula".into(),
+                );
+            }
+            let top = prism.top_vertices();
+            if top.len() != base.len() || top.iter().any(|point| !point.is_finite()) {
+                return CommandOutcome::Error("Net: la tapa del prisma no es finita".into());
+            }
+            let count = base.len();
+            let mut vertices = base;
+            vertices.extend(top);
+            let mut faces = Vec::with_capacity(count + 2);
+            faces.push((0..count).collect());
+            faces.push((count..2 * count).collect());
+            for index in 0..count {
+                let next = (index + 1) % count;
+                faces.push(vec![index, next, count + next, count + index]);
+            }
+            (vertices, faces)
+        }
+        _ => {
+            if is_polyhedron_object(&obj) {
+                return CommandOutcome::Error(format!(
+                    "Net: '{label}' no es desplegable (superficie curva sin caras planas) — solo Cube/Tetrahedron/Pyramid/Prism"
+                ));
+            }
+            return CommandOutcome::Error(format!(
+                "Net: '{label}' no es un poliedro 3D (solo Cube3D/Tetrahedron3D/Pyramid3D/Prism3D)"
+            ));
+        }
+    };
+    let net = match grafito_geometry::PolyhedronNet::unfold(&vertices, &faces) {
+        Ok(net) => net,
+        Err(error) => {
+            return CommandOutcome::Error(format!("Net: no se pudo desplegar '{label}': {error}"));
+        }
+    };
+    let face_panels: Vec<_> = net.panels().iter().filter(|panel| !panel.is_tab).collect();
+    if face_panels.is_empty() {
+        return CommandOutcome::Error(format!("Net: despliegue vacío para '{label}'"));
+    }
+    if document.object_count() + face_panels.len() > grafito_core::validation::MAX_OBJECT_COUNT {
+        return CommandOutcome::Error(format!(
+            "Net: '{}' necesita {} caras y excede el máximo {} (presupuesto MAX_OBJECT_COUNT)",
+            label,
+            face_panels.len(),
+            grafito_core::validation::MAX_OBJECT_COUNT
         ));
     }
-    // Stub funcional: no crea geometría nueva, informa al usuario sin error.
+    // Pre-valida todo antes de insertar nada (cero estados parciales por cotas).
+    let mut pending: Vec<Vec<Point2>> = Vec::with_capacity(face_panels.len());
+    for panel in &face_panels {
+        if panel.points.len() < 3
+            || panel.points.len() > grafito_core::validation::MAX_POLYGON_VERTICES
+        {
+            return CommandOutcome::Error(format!(
+                "Net: cara con {} vértices fuera de presupuesto",
+                panel.points.len()
+            ));
+        }
+        let mut verts = Vec::with_capacity(panel.points.len());
+        for point in &panel.points {
+            let x = point[0] * scale;
+            let y = point[1] * scale;
+            if !x.is_finite() || !y.is_finite() || x.abs() > world_limit || y.abs() > world_limit {
+                return CommandOutcome::Error(
+                    "Net: el desarrollo escalado excede la cota renderizable".into(),
+                );
+            }
+            verts.push(Point2::new(x, y));
+        }
+        pending.push(verts);
+    }
+    let mut created: Vec<String> = Vec::with_capacity(pending.len());
+    for (index, verts) in pending.into_iter().enumerate() {
+        let mut poly = PolygonObj::new(verts);
+        poly.label = format!("Net_{label}_{}", index + 1);
+        match try_insert_command_object(document, GeoObject::Polygon(poly)) {
+            Ok(id) => {
+                if let Some(inserted) = document.get_object(id) {
+                    created.push(inserted.label().to_string());
+                }
+            }
+            Err(error) => {
+                return CommandOutcome::Error(format!(
+                    "Net: '{label}' parcialmente persistido ({} de {} caras): {error}",
+                    created.len(),
+                    face_panels.len()
+                ));
+            }
+        }
+    }
+    input_text.clear();
+    let overlap_note = if net.has_face_overlaps() {
+        format!(
+            " (solape residual: {} pares)",
+            net.overlapping_face_pairs().len()
+        )
+    } else {
+        String::new()
+    };
+    let scale_note = if (scale - 1.0).abs() > f64::EPSILON {
+        format!(", escala {scale}")
+    } else {
+        String::new()
+    };
     CommandOutcome::Message(format!(
-        "Net: desarrollo 2D de '{}' no implementado, use vista 3D (stub P1.4)",
-        label
+        "Net: desarrollo de '{label}' → {} caras ({}{scale_note}{overlap_note})",
+        created.len(),
+        created.join(", ")
     ))
 }
 
@@ -13028,6 +13258,110 @@ fn run_quadric_command(
         .map(|o| o.label().to_string())
         .unwrap_or_default();
     CommandOutcome::Message(format!("Quadric: cuádrica creada → {}", label))
+}
+
+/// A1: `ImplicitSurface[expr, x0, x1, y0, y1, z0, z1]` o
+/// `ImplicitSurface[expr, x0, x1, y0, y1, z0, z1, res]`.
+///
+/// `res` 8..=32 (16 por defecto). Valida expresión con
+/// `prepare_function_ast(expr, vars, &["x","y","z"])`, cotas ordenadas y
+/// presupuesto ANTES de insertar; además deriva la malla en eager con
+/// `compute_mesh`: un campo no definido en un nodo (`sqrt(x)+y+z` con x<0)
+/// da `Err` honesto sin crear objeto (cero triángulos).
+fn run_implicit_surface_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> CommandOutcome {
+    let raw_expr = args.first().map(String::as_str).unwrap_or("").trim();
+    let expr = raw_expr
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    if expr.is_empty() {
+        return CommandOutcome::Error("ImplicitSurface: la expresión no puede estar vacía".into());
+    }
+    if let Err(error) = check_w1_budget("ImplicitSurface", "expr", &expr) {
+        return CommandOutcome::Error(error);
+    }
+    let mut bounds = [0.0f64; 6];
+    for (slot, arg) in args.iter().skip(1).take(6).enumerate() {
+        match parse_numeric_arg(arg, &document.variables) {
+            Ok(v) if v.is_finite() => bounds[slot] = v,
+            Ok(_) => {
+                return CommandOutcome::Error(format!(
+                    "ImplicitSurface: la cota {} debe ser finita",
+                    ["x0", "x1", "y0", "y1", "z0", "z1"][slot]
+                ))
+            }
+            Err(error) => {
+                return CommandOutcome::Error(format!(
+                    "ImplicitSurface: cota {} inválida: {error}",
+                    ["x0", "x1", "y0", "y1", "z0", "z1"][slot]
+                ))
+            }
+        }
+    }
+    for (axis, (lo, hi)) in ["x", "y", "z"].iter().zip([
+        (bounds[0], bounds[1]),
+        (bounds[2], bounds[3]),
+        (bounds[4], bounds[5]),
+    ]) {
+        if lo >= hi {
+            return CommandOutcome::Error(format!(
+                "ImplicitSurface: la cota {axis} debe cumplir min < max"
+            ));
+        }
+        if lo.abs() > grafito_geometry::MAX_WORLD_COORDINATE
+            || hi.abs() > grafito_geometry::MAX_WORLD_COORDINATE
+        {
+            return CommandOutcome::Error(format!(
+                "ImplicitSurface: la cota {axis} excede la cota renderizable"
+            ));
+        }
+    }
+    let cells: usize = match args.get(7) {
+        None => IMPLICIT_SURFACE_DEFAULT_CELLS,
+        Some(raw) => match raw.trim().parse::<usize>() {
+            Ok(v) => v,
+            Err(_) => {
+                return CommandOutcome::Error(
+                    "ImplicitSurface: res debe ser un entero entre 8 y 32".into(),
+                )
+            }
+        },
+    };
+    if !(IMPLICIT_SURFACE_MIN_CELLS..=IMPLICIT_SURFACE_MAX_CELLS).contains(&cells) {
+        return CommandOutcome::Error(format!(
+            "ImplicitSurface: res {cells} debe estar entre {IMPLICIT_SURFACE_MIN_CELLS} y {IMPLICIT_SURFACE_MAX_CELLS}"
+        ));
+    }
+    if prepare_function_ast(&expr, &document.variables, &["x", "y", "z"]).is_err() {
+        return CommandOutcome::Error("ImplicitSurface: expresión inválida para F(x,y,z)".into());
+    }
+    let surface = ImplicitSurface3DObj::new(
+        expr,
+        (
+            bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5],
+        ),
+        cells,
+    );
+    // Eager fail-closed: deriva la malla antes de insertar. Un campo no
+    // definido en un nodo da `Err` honesto y no se crea ningún objeto.
+    if let Err(error) = surface.compute_mesh(&document.variables) {
+        return CommandOutcome::Error(format!("ImplicitSurface: {error}"));
+    }
+    let id = match try_insert_command_object(document, GeoObject::ImplicitSurface3D(surface)) {
+        Ok(id) => id,
+        Err(error) => return CommandOutcome::Error(error),
+    };
+    input_text.clear();
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    CommandOutcome::Message(format!("ImplicitSurface: superficie creada → {label}"))
 }
 
 fn run_three_plane_intersection(
@@ -19017,6 +19351,203 @@ mod tests {
             "todo-cero: {out:?}"
         );
         assert_eq!(doc.objects_iter().count(), before);
+    }
+
+    #[test]
+    fn implicit_surface_creates_real_object_and_rejects_honestly() {
+        let mut doc = Document::new();
+        let mut input =
+            "ImplicitSurface[x^2+y^2+z^2-1, -1.5, 1.5, -1.5, 1.5, -1.5, 1.5, 16]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(matches!(out, CommandOutcome::Message(_)), "crea: {out:?}");
+        let found = doc.objects_iter().find_map(|(_, obj)| match obj {
+            GeoObject::ImplicitSurface3D(s) => Some(s.cells),
+            _ => None,
+        });
+        assert_eq!(found, Some(16), "el documento tiene la superficie real");
+        // res por defecto (7 args): 16.
+        let mut input = "ImplicitSurface[x+y+z, -2, 2, -2, 2, -2, 2]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Message(_)),
+            "default res: {out:?}"
+        );
+        let before = doc.objects_iter().count();
+        // Campo no definido en x<0: `Err` honesto, sin objeto nuevo.
+        let mut input = "ImplicitSurface[sqrt(x)+y+z, -1, 1, -1, 1, -1, 1, 8]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "sqrt con x<0: {out:?}"
+        );
+        // res fuera de 8..=32: `Err` honesto.
+        let mut input =
+            "ImplicitSurface[x^2+y^2+z^2-1, -1.5, 1.5, -1.5, 1.5, -1.5, 1.5, 7]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(matches!(out, CommandOutcome::Error(_)), "res 7: {out:?}");
+        // Cotas desordenadas: `Err` honesto.
+        let mut input = "ImplicitSurface[x+y+z, 1, -1, -2, 2, -2, 2, 8]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(matches!(out, CommandOutcome::Error(_)), "cotas: {out:?}");
+        assert_eq!(doc.objects_iter().count(), before);
+    }
+
+    #[test]
+    fn net_cube_creates_six_polygons() {
+        use grafito_core::{Cube3DObj, PolygonObj};
+        let mut doc = Document::new();
+        let cube =
+            GeoObject::Cube3D(Cube3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0).with_label("CuboA"));
+        doc.try_add_object(cube).expect("cubo fixture");
+        let before = doc.objects_iter().count();
+        let mut input = "Net[CuboA]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Message(_)),
+            "Net cubo crea: {out:?}"
+        );
+        assert!(
+            !format!("{out:?}").contains("no implementado"),
+            "el stub ya no miente: {out:?}"
+        );
+        let polys: Vec<&PolygonObj> = doc
+            .objects_iter()
+            .filter_map(|(_, obj)| match obj {
+                GeoObject::Polygon(poly) => Some(poly),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(polys.len(), 6, "el cubo despliega 6 caras");
+        assert_eq!(doc.objects_iter().count(), before + 6);
+        for poly in polys {
+            assert!(
+                poly.vertices.len() == 4,
+                "cara cuadrada: {:?}",
+                poly.vertices
+            );
+            assert!(
+                poly.label.starts_with("Net_CuboA_"),
+                "etiqueta honesta: {}",
+                poly.label
+            );
+            for vertex in &poly.vertices {
+                assert!(vertex.x.is_finite() && vertex.y.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn net_tetra_creates_four_triangles() {
+        use grafito_core::Tetrahedron3DObj;
+        let mut doc = Document::new();
+        let tetra = GeoObject::Tetrahedron3D(
+            Tetrahedron3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0).with_label("TetraA"),
+        );
+        doc.try_add_object(tetra).expect("tetra fixture");
+        let mut input = "Net[TetraA]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Message(_)),
+            "Net tetra crea: {out:?}"
+        );
+        let polys: Vec<_> = doc
+            .objects_iter()
+            .filter_map(|(_, obj)| match obj {
+                GeoObject::Polygon(poly) => Some(poly),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(polys.len(), 4, "el tetraedro despliega 4 caras");
+    }
+
+    #[test]
+    fn net_prism_creates_caps_plus_sides() {
+        use grafito_core::Prism3DObj;
+        let mut doc = Document::new();
+        let base = vec![
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(1.0, 0.0, 0.0),
+            Point3D::new(1.0, 1.0, 0.0),
+            Point3D::new(0.0, 1.0, 0.0),
+        ];
+        let mut prism = Prism3DObj::new(base, Point3D::new(0.0, 0.0, 1.0));
+        prism.label = "PrismaA".to_string();
+        doc.try_add_object(GeoObject::Prism3D(prism))
+            .expect("prisma fixture");
+        let mut input = "Net[PrismaA]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Message(_)),
+            "Net prisma crea: {out:?}"
+        );
+        let count = doc
+            .objects_iter()
+            .filter(|(_, obj)| matches!(obj, GeoObject::Polygon(_)))
+            .count();
+        // Prisma cuadrangular: 2 tapas + 4 laterales = 6 caras.
+        assert_eq!(count, 6, "el prisma despliega 6 caras");
+        // Escala opcional multiplica el desarrollo.
+        let mut input = "Net[PrismaA, 2]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(&out, CommandOutcome::Message(message) if message.contains("escala 2")),
+            "escala honesta: {out:?}"
+        );
+    }
+
+    #[test]
+    fn net_rejects_curved_missing_and_bad_scale() {
+        use grafito_core::{Quadric3DObj, Sphere3DObj};
+        let mut doc = Document::new();
+        let sphere = GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(0.0, 0.0, 0.0), 1.0));
+        doc.try_add_object(sphere).expect("esfera fixture");
+        let sphere_label = doc
+            .objects_iter()
+            .find_map(|(_, obj)| match obj {
+                GeoObject::Sphere3D(_) => Some(obj.label().to_string()),
+                _ => None,
+            })
+            .expect("etiqueta esfera");
+        let before = doc.objects_iter().count();
+        // Curva: `Err` honesto, ya no `Message` stub.
+        let mut input = format!("Net[{sphere_label}]");
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "esfera no desplegable: {out:?}"
+        );
+        let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        doc.try_add_object(quadric).expect("cuádrica fixture");
+        let quad_label = doc
+            .objects_iter()
+            .find_map(|(_, obj)| match obj {
+                GeoObject::Quadric3D(_) => Some(obj.label().to_string()),
+                _ => None,
+            })
+            .expect("etiqueta cuádrica");
+        let mut input = format!("Net[{quad_label}]");
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "cuádrica no desplegable: {out:?}"
+        );
+        // Inexistente: `Err` honesto.
+        let mut input = "Net[NoExiste]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "inexistente: {out:?}"
+        );
+        // Escala inválida: `Err` honesto, sin crear nada.
+        let mut input = format!("Net[{sphere_label}, -1]");
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "escala -1: {out:?}"
+        );
+        assert_eq!(doc.objects_iter().count(), before + 1);
     }
 
     #[test]

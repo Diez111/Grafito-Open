@@ -126,7 +126,8 @@ impl ExportFormat {
             | ExportObjectKind::DataTable
             | ExportObjectKind::Transformed
             | ExportObjectKind::Prism3D
-            | ExportObjectKind::Quadric3D => ExportSupport::Unsupported,
+            | ExportObjectKind::Quadric3D
+            | ExportObjectKind::ImplicitSurface3D => ExportSupport::Unsupported,
         }
     }
 }
@@ -227,11 +228,12 @@ pub(crate) enum ExportObjectKind {
     Transformed,
     Prism3D,
     Quadric3D,
+    ImplicitSurface3D,
 }
 
 impl ExportObjectKind {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 52] = [
+    pub(crate) const ALL: [Self; 53] = [
         Self::Point,
         Self::Line,
         Self::Circle,
@@ -284,6 +286,7 @@ impl ExportObjectKind {
         Self::Transformed,
         Self::Prism3D,
         Self::Quadric3D,
+        Self::ImplicitSurface3D,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -340,6 +343,7 @@ impl ExportObjectKind {
             Self::Transformed => "Transformed",
             Self::Prism3D => "Prism3D",
             Self::Quadric3D => "Quadric3D",
+            Self::ImplicitSurface3D => "ImplicitSurface3D",
         }
     }
 
@@ -397,6 +401,7 @@ impl ExportObjectKind {
             GeoObject::Transformed(_) => Self::Transformed,
             GeoObject::Prism3D(_) => Self::Prism3D,
             GeoObject::Quadric3D(_) => Self::Quadric3D,
+            GeoObject::ImplicitSurface3D(_) => Self::ImplicitSurface3D,
             _ => return None,
         })
     }

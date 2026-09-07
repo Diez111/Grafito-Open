@@ -47,6 +47,7 @@ pub mod outcome;
 pub mod planes3d;
 pub mod polytopes;
 pub mod precision;
+pub mod quadrics;
 pub mod special_curves;
 pub mod special_functions;
 pub mod statistics;

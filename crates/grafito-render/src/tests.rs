@@ -517,10 +517,14 @@ mod tests {
             Quadric3DObj::from_coeffs([0.25, 1.0, 1.0, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, -0.75]);
         assert!(crate::quadric_ellipsoid_params(&elipsoide).is_some());
         assert!(!crate::quadric_uses_placeholder(&elipsoide));
-        // Hiperboloide (c < 0): no es elipsoide real → placeholder.
+        // Hiperboloide: no es elipsoide, pero tiene malla exacta → sin placeholder.
         let hiperboloide =
             Quadric3DObj::from_coeffs([1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]);
         assert!(crate::quadric_ellipsoid_params(&hiperboloide).is_none());
-        assert!(crate::quadric_uses_placeholder(&hiperboloide));
+        assert!(!crate::quadric_uses_placeholder(&hiperboloide));
+        // Vacío `x² + y² + z² = -1`: sin superficie → badge honesto.
+        let vacia = Quadric3DObj::from_coeffs([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        assert!(crate::quadric_ellipsoid_params(&vacia).is_none());
+        assert!(crate::quadric_uses_placeholder(&vacia));
     }
 }

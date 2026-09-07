@@ -24,6 +24,12 @@ pub(crate) mod classroom;
 pub(crate) mod commands;
 pub mod controllers;
 pub(crate) mod export;
+#[allow(dead_code)]
+// A4: slot background cableado (campo en GrafitoApp + poll por update +
+// render de last_valid en render_3d.rs). El comando A1 eager queda como
+// fallback honesto fail-closed. `submit_new`/`cancel` aún sin llamador prod
+// (futuro inspector live-preview de alta resolución), testeados headless.
+pub(crate) mod implicit_surface_compute;
 pub(crate) mod input;
 #[allow(dead_code)]
 // D3: pipeline testeado headless; D1-bis cablea el TextEdit en panels.rs (prohibido en D3).

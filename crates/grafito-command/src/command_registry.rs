@@ -2749,9 +2749,9 @@ const COMMANDS: &[CommandSpec] = &[
         "Net",
         ["desarrollo", "desplegado", "unwrap"],
         "3D",
-        "Genera el desarrollo 2D de un poliedro (diseno L + stub honesto: devuelve error explicativo, ver Tasks.md F10.W5).",
-        ReadOnly,
-        Low,
+        "Genera el desarrollo 2D de un poliedro (Cube/Tetrahedron/Pyramid/Prism vía PolyhedronNet::unfold; persiste una cara = un polígono 2D).",
+        CreatesObject,
+        Medium,
         true,
         "Net",
         [
@@ -2771,6 +2771,20 @@ const COMMANDS: &[CommandSpec] = &[
         "Quadric",
         [
             signature!("Quadric[a, b, c, d, e, f, g, h, i, j]"; "a": Number required, "b": Number required, "c": Number required, "d": Number required, "e": Number required, "f": Number required, "g": Number required, "h": Number required, "i": Number required, "j": Number required)
+        ]
+    ),
+    command!(
+        "geometry.implicit-surface-3d",
+        "ImplicitSurface",
+        ["superficieimplicita", "implicitsurface3d"],
+        "3D",
+        "Crea una superficie implícita F(x,y,z)=0 en la caja dada (marching-tetra, res 8..=32, 16 por defecto).",
+        CreatesObject,
+        Medium,
+        true,
+        "ImplicitSurface",
+        [
+            signature!("ImplicitSurface[expr, x0, x1, y0, y1, z0, z1, res]"; "expr": Expression required, "x0": Number required, "x1": Number required, "y0": Number required, "y1": Number required, "z0": Number required, "z1": Number required, "res": Integer optional)
         ]
     ),
     command!(
@@ -4164,6 +4178,7 @@ mod registry_tests {
             "Prism",
             "Net",
             "Quadric",
+            "ImplicitSurface",
             "Intersection3D",
             "Projection3D",
             "PlaneThroughLines",
@@ -4544,11 +4559,11 @@ mod registry_tests {
     fn registry_counts_match_documented_architecture() {
         // Blindaje docs↔código (architecture.md §8/§13). Si agregás un
         // comando, actualizá ESTE test + architecture.md juntos.
-        assert_eq!(all().len(), 258, "COMMANDS registrados (docs §8)");
+        assert_eq!(all().len(), 259, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            214,
-            "comandos visibles en paleta (docs §8: 214 + 14 UI = 228)"
+            215,
+            "comandos visibles en paleta (docs §8: 215 + 14 UI = 229)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

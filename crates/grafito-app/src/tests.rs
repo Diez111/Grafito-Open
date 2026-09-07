@@ -3088,9 +3088,17 @@ fn inspector_cuadrica_placeholder_lleva_badge() {
         crate::panels::inspector_type_caption(&elipsoide),
         "cuádrica 3D"
     );
-    // Hiperboloide (se dibuja el elipsoide aproximado): badge visible.
-    let aproximada = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+    // Hiperboloide (malla exacta A2): caption limpio, sin badge.
+    let exacta = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
         1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+    ]));
+    assert_eq!(
+        crate::panels::inspector_type_caption(&exacta),
+        "cuádrica 3D"
+    );
+    // Vacía `x² + y² + z² = -1`: sin superficie → badge visible.
+    let aproximada = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+        1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]));
     assert_eq!(
         crate::panels::inspector_type_caption(&aproximada),
@@ -4728,6 +4736,60 @@ fn headless_view_panel_renders_without_panic() {
     let _ = ctx.run(headless_raw_input(), |ctx| {
         crate::panels::draw_view_panel(&mut app, ctx);
     });
+}
+
+#[test]
+fn implicit_surface_slot_starts_idle_and_polls_without_blocking() {
+    use crate::implicit_surface_compute::{ImplicitSurfaceSlot, SurfaceSlotPoll};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    // A4: el estado del frame posee el slot; arranca idle sin último válido.
+    let mut app = crate::app::dummy_grafito_app();
+    assert!(!app.implicit_surface_slot.has_pending());
+    assert!(app.implicit_surface_slot.last_valid().is_none());
+    assert!(matches!(
+        app.implicit_surface_slot.poll(),
+        SurfaceSlotPoll::Pending
+    ));
+    // Poll por `update` no bloquea aunque haya trabajo en vuelo.
+    let field: crate::implicit_surface_compute::ImplicitField =
+        Arc::new(|x: f64, y: f64, z: f64| Some(x * x + y * y + z * z - 1.0));
+    app.implicit_surface_slot
+        .submit_new(
+            field,
+            grafito_geometry::Point3D::new(-1.5, -1.5, -1.5),
+            grafito_geometry::Point3D::new(1.5, 1.5, 1.5),
+            8,
+        )
+        .expect("pedido 8³ válido");
+    assert!(app.implicit_surface_slot.has_pending());
+    let started = Instant::now();
+    let _ = app.implicit_surface_slot.poll();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "poll bloqueó el hilo UI"
+    );
+    // Drena en background sin bloquear (hasta 60 s en debug).
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match app.implicit_surface_slot.poll() {
+            SurfaceSlotPoll::Pending => {
+                assert!(Instant::now() < deadline, "el job 8³ no terminó en 60 s");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            SurfaceSlotPoll::Ready(mesh) => {
+                assert!(!mesh.triangles().is_empty());
+                break;
+            }
+            SurfaceSlotPoll::Failed(error) => panic!("el job 8³ falló: {error}"),
+        }
+    }
+    assert!(!app.implicit_surface_slot.has_pending());
+    assert!(app.implicit_surface_slot.last_valid().is_some());
+    // Slot unitario aislado: mismo contrato sin app.
+    let mut slot = ImplicitSurfaceSlot::new();
+    assert!(matches!(slot.poll(), SurfaceSlotPoll::Pending));
 }
 
 #[test]

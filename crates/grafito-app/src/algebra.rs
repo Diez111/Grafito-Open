@@ -188,6 +188,15 @@ pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
             format!("r={:.2} h={:.2}  V={:.3}", co.radius, h, vol)
         }
         GeoObject::Torus3D(t) => format!("R={:.2} r={:.2}", t.r_major, t.r_minor),
+        GeoObject::ImplicitSurface3D(s) => {
+            let short: String = s.expr.chars().take(48).collect();
+            let ellipsis = if s.expr.chars().count() > 48 {
+                "…"
+            } else {
+                ""
+            };
+            format!("{short}{ellipsis}=0 [{}³]", s.cells)
+        }
         GeoObject::Segment3D(s) => {
             let dx = s.b.x - s.a.x;
             let dy = s.b.y - s.a.y;

@@ -994,6 +994,49 @@ fn validate_geo_object_legacy_match(doc: &Document, obj: &GeoObject) -> Result<(
             }
             validate_positive_f32(o.width, "Quadric3D.width")?;
         }
+        GeoObject::ImplicitSurface3D(o) => {
+            validate_expr(&o.expr)?;
+            validate_ordered_bounds(
+                o.x_min,
+                o.x_max,
+                "ImplicitSurface3D.x_min",
+                "ImplicitSurface3D.x_max",
+            )?;
+            validate_ordered_bounds(
+                o.y_min,
+                o.y_max,
+                "ImplicitSurface3D.y_min",
+                "ImplicitSurface3D.y_max",
+            )?;
+            validate_ordered_bounds(
+                o.z_min,
+                o.z_max,
+                "ImplicitSurface3D.z_min",
+                "ImplicitSurface3D.z_max",
+            )?;
+            for (value, field) in [
+                (o.x_min, "ImplicitSurface3D.x_min"),
+                (o.x_max, "ImplicitSurface3D.x_max"),
+                (o.y_min, "ImplicitSurface3D.y_min"),
+                (o.y_max, "ImplicitSurface3D.y_max"),
+                (o.z_min, "ImplicitSurface3D.z_min"),
+                (o.z_max, "ImplicitSurface3D.z_max"),
+            ] {
+                validate_finite(value, field)?;
+                if value.abs() > grafito_geometry::MAX_WORLD_COORDINATE {
+                    return Err(format!("{field} excede la cota renderizable"));
+                }
+            }
+            if o.cells < 1 || o.cells > grafito_geometry::GB_MAX_MARCHING_CELLS_PER_AXIS {
+                return Err(format!(
+                    "ImplicitSurface3D cells {} must be between 1 and {}",
+                    o.cells,
+                    grafito_geometry::GB_MAX_MARCHING_CELLS_PER_AXIS
+                ));
+            }
+            validate_positive_f32(o.width, "ImplicitSurface3D.width")?;
+            validate_optional_color(o.fill_color, "ImplicitSurface3D.fill_color")?;
+        }
         GeoObject::ParametricCurve2D(o) => {
             validate_expr(&o.expr_x)?;
             validate_expr(&o.expr_y)?;

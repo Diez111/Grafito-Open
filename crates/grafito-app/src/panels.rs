@@ -737,6 +737,7 @@ pub(crate) fn inspector_type_caption(obj: &GeoObject) -> &'static str {
             "cuádrica 3D · vista aproximada"
         }
         GeoObject::Quadric3D(_) => "cuádrica 3D",
+        GeoObject::ImplicitSurface3D(_) => "superficie implícita 3D",
         GeoObject::ParametricCurve2D(_) => "curva paramétrica 2D",
         GeoObject::ParametricCurve3D(_) => "curva paramétrica 3D",
         GeoObject::PolarCurve(_) => "curva polar",

@@ -1,8 +1,8 @@
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use glam::{DVec3, Vec3};
 use grafito_core::{
-    ChangeSet, Cone3DObj, Cube3DObj, Cylinder3DObj, Document, GeoObject, Line3DObj,
-    MoebiusStripObj, ObjectId, ParametricCurve3DObj, Plane3DObj, Point3DObj, Prism3DObj,
+    ChangeSet, Cone3DObj, Cube3DObj, Cylinder3DObj, Document, GeoObject, ImplicitSurface3DObj,
+    Line3DObj, MoebiusStripObj, ObjectId, ParametricCurve3DObj, Plane3DObj, Point3DObj, Prism3DObj,
     Pyramid3DObj, RegularPolychoron4DObj, RegularPolytopeNDObj, Segment3DObj, Sphere3DObj,
     Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField3DObj,
 };
@@ -542,20 +542,41 @@ pub(crate) fn fallback_object_bounds_with_typed_four_d_phase(
             Aabb3D::from_points(base.iter().copied().chain(top))
         }
         GeoObject::Quadric3D(quadric) => {
-            // Elipsoide derivado de la cuádrica (paso intermedio honesto).
-            let ellipsoid = grafito_render::quadric_ellipsoid_params(quadric)
-                .unwrap_or_else(grafito_render::QuadricEllipsoid::placeholder);
-            let center = ellipsoid.center.to_dvec3();
-            let radii = DVec3::new(
-                ellipsoid.radii.x as f64,
-                ellipsoid.radii.y as f64,
-                ellipsoid.radii.z as f64,
-            );
-            Aabb3D::new(
-                Point3D::from_dvec3(center - radii),
-                Point3D::from_dvec3(center + radii),
-            )
+            // A4: malla exacta A2 — jamás un elipsoide falso. El elipsoide
+            // alineado a ejes mantiene el camino legacy; el resto usa sus
+            // polilíneas exactas (`quadric_wire_points`); degenerada sin
+            // superficie → `None` honesto (sin caja ni picking falso).
+            if let Some(ellipsoid) = grafito_render::quadric_ellipsoid_params(quadric) {
+                let center = ellipsoid.center.to_dvec3();
+                let radii = DVec3::new(
+                    ellipsoid.radii.x as f64,
+                    ellipsoid.radii.y as f64,
+                    ellipsoid.radii.z as f64,
+                );
+                Aabb3D::new(
+                    Point3D::from_dvec3(center - radii),
+                    Point3D::from_dvec3(center + radii),
+                )
+            } else {
+                let coeffs = [
+                    quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g,
+                    quadric.h, quadric.i, quadric.j,
+                ];
+                let shape = match grafito_geometry::quadrics::classify_quadric(coeffs) {
+                    Ok(shape) => shape,
+                    Err(_) => return None,
+                };
+                let lines = match grafito_geometry::quadrics::quadric_wire_points(&shape) {
+                    Ok(lines) => lines,
+                    Err(_) => return None,
+                };
+                Aabb3D::from_points(lines.iter().flatten().copied())
+            }
         }
+        GeoObject::ImplicitSurface3D(surface) => Aabb3D::new(
+            Point3D::new(surface.x_min, surface.y_min, surface.z_min),
+            Point3D::new(surface.x_max, surface.y_max, surface.z_max),
+        ),
         _ => None,
     }
 }
@@ -689,6 +710,15 @@ fn object_ray_hit(
             canvas_height,
             typed_four_d_phase,
             moebius_pick_mesh(strip),
+        ),
+        GeoObject::ImplicitSurface3D(surface) => mesh_or_coarse_hit(
+            object,
+            variables,
+            camera,
+            ray,
+            canvas_height,
+            typed_four_d_phase,
+            implicit_surface_pick_mesh(surface, variables),
         ),
         _ => coarse_object_hit(
             object,
@@ -1867,6 +1897,11 @@ impl GrafitoApp {
                 GeoObject::Quadric3D(quadric) => grafito_render::quadric_ellipsoid_params(quadric)
                     .map(|ellipsoid| ellipsoid.center.to_vec3())
                     .unwrap_or(Vec3::ZERO),
+                GeoObject::ImplicitSurface3D(surface) => Vec3::new(
+                    (surface.x_min + surface.x_max) as f32 * 0.5,
+                    (surface.y_min + surface.y_max) as f32 * 0.5,
+                    (surface.z_min + surface.z_max) as f32 * 0.5,
+                ),
                 _ => continue, // Skip non-3D objects
             };
 
@@ -3394,57 +3429,184 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::Quadric3D(quadric) => {
-                    // Paso intermedio honesto: elipsoide wireframe paramétrico.
-                    // TODO(full-quadric): clasificación general y términos cruzados.
-                    let ellipsoid = grafito_render::quadric_ellipsoid_params(quadric)
-                        .unwrap_or_else(grafito_render::QuadricEllipsoid::placeholder);
-                    let center = ellipsoid.center.to_vec3();
-                    let radii = ellipsoid.radii;
-                    let light_dir = Vec3::new(0.5, 1.0, 0.3).normalize();
-                    for (u, v) in [(Vec3::X, Vec3::Y), (Vec3::X, Vec3::Z), (Vec3::Y, Vec3::Z)] {
-                        let normal = u.cross(v).normalize_or_zero();
-                        let mut prev: Option<(f32, f32)> = None;
-                        for index in 0..=32 {
-                            let angle = std::f32::consts::TAU * index as f32 / 32.0;
-                            let direction = u * angle.cos() + v * angle.sin();
-                            let point = Point3D::from_vec3(
-                                center
-                                    + Vec3::new(
-                                        direction.x * radii.x,
-                                        direction.y * radii.y,
-                                        direction.z * radii.z,
-                                    ),
-                            );
-                            if let Some(projected) = self.camera.project(&point, w, h) {
-                                if let Some(prev) = prev {
-                                    let lit = grafito_render::calculate_lighting(
-                                        quadric.color,
-                                        normal,
-                                        light_dir,
-                                    );
-                                    let stroke = Stroke::new(quadric.width, to_color32(lit));
-                                    if !overlay_only {
+                    // A4: malla exacta A2 (igual que `depth_3d::append_quadric`) —
+                    // jamás un elipsoide falso. Elipsoide alineado a ejes por el
+                    // camino legacy; el resto por `quadric_wire_points`; sin
+                    // superficie real → cero segmentos (honesto, sin placeholder).
+                    if let Some(ellipsoid) = grafito_render::quadric_ellipsoid_params(quadric) {
+                        let center = ellipsoid.center.to_vec3();
+                        let radii = ellipsoid.radii;
+                        let light_dir = Vec3::new(0.5, 1.0, 0.3).normalize();
+                        for (u, v) in [(Vec3::X, Vec3::Y), (Vec3::X, Vec3::Z), (Vec3::Y, Vec3::Z)] {
+                            let normal = u.cross(v).normalize_or_zero();
+                            let mut prev: Option<(f32, f32)> = None;
+                            for index in 0..=32 {
+                                let angle = std::f32::consts::TAU * index as f32 / 32.0;
+                                let direction = u * angle.cos() + v * angle.sin();
+                                let point = Point3D::from_vec3(
+                                    center
+                                        + Vec3::new(
+                                            direction.x * radii.x,
+                                            direction.y * radii.y,
+                                            direction.z * radii.z,
+                                        ),
+                                );
+                                if let Some(projected) = self.camera.project(&point, w, h) {
+                                    if let Some(prev) = prev {
+                                        let lit = grafito_render::calculate_lighting(
+                                            quadric.color,
+                                            normal,
+                                            light_dir,
+                                        );
+                                        let stroke = Stroke::new(quadric.width, to_color32(lit));
+                                        if !overlay_only {
+                                            painter.line_segment(
+                                                [
+                                                    origin + Vec2::new(prev.0, prev.1),
+                                                    origin + Vec2::new(projected.0, projected.1),
+                                                ],
+                                                stroke,
+                                            );
+                                        }
+                                    }
+                                    prev = Some(projected);
+                                } else {
+                                    prev = None;
+                                }
+                            }
+                        }
+                        if !quadric.label.is_empty() {
+                            if let Some(pt) = self.camera.project(&ellipsoid.center, w, h) {
+                                painter.text(
+                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &quadric.label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
+                        }
+                    } else {
+                        let coeffs = [
+                            quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f,
+                            quadric.g, quadric.h, quadric.i, quadric.j,
+                        ];
+                        // Sin superficie real: cero segmentos, sin etiqueta falsa
+                        // (no `return`: el loop debe seguir con el resto de objetos).
+                        if let Ok(shape) = grafito_geometry::quadrics::classify_quadric(coeffs) {
+                            if let Ok(lines) =
+                                grafito_geometry::quadrics::quadric_wire_points(&shape)
+                            {
+                                let stroke = Stroke::new(quadric.width, to_color32(quadric.color));
+                                // Centro honesto para la etiqueta: media de la malla exacta.
+                                let mut center_acc = Vec3::ZERO;
+                                let mut center_count = 0_usize;
+                                for polyline in &lines {
+                                    let mut prev: Option<(f32, f32)> = None;
+                                    for point in polyline {
+                                        center_acc += point.to_vec3();
+                                        center_count += 1;
+                                        if let Some(projected) = self.camera.project(point, w, h) {
+                                            if let Some(prev) = prev {
+                                                if !overlay_only {
+                                                    painter.line_segment(
+                                                        [
+                                                            origin + Vec2::new(prev.0, prev.1),
+                                                            origin
+                                                                + Vec2::new(
+                                                                    projected.0,
+                                                                    projected.1,
+                                                                ),
+                                                        ],
+                                                        stroke,
+                                                    );
+                                                }
+                                            }
+                                            prev = Some(projected);
+                                        } else {
+                                            prev = None;
+                                        }
+                                    }
+                                }
+                                if !quadric.label.is_empty() && center_count > 0 {
+                                    let center =
+                                        Point3D::from_vec3(center_acc / center_count as f32);
+                                    if let Some(pt) = self.camera.project(&center, w, h) {
+                                        painter.text(
+                                            origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                            egui::Align2::CENTER_BOTTOM,
+                                            &quadric.label,
+                                            egui::FontId::proportional(12.0),
+                                            label_color,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                GeoObject::ImplicitSurface3D(surface) => {
+                    // A1: overlay CPU wireframe de la malla `F(x,y,z)=0`. Un
+                    // `Err` honesto dibuja cero segmentos; mallas densas
+                    // (>4096 tris) van solo al GPU como sólido.
+                    let mesh_data = surface.mesh_snapshot(&self.document.variables).ok();
+                    let mesh_data = mesh_data.filter(|mesh_data| {
+                        mesh_data.triangle_count() > 0
+                            && mesh_data.triangle_count() <= GB_MAX_CPU_MESH_EDGES
+                    });
+                    if let Some(mesh_data) = mesh_data {
+                        if !overlay_only {
+                            let stroke = Stroke::new(surface.width, to_color32(surface.color));
+                            for triangle in mesh_data.triangles() {
+                                let (Some(a), Some(b), Some(c)) = (
+                                    mesh_data.vertices().get(triangle[0]),
+                                    mesh_data.vertices().get(triangle[1]),
+                                    mesh_data.vertices().get(triangle[2]),
+                                ) else {
+                                    continue;
+                                };
+                                for (start, end) in [(a, b), (b, c), (c, a)] {
+                                    if let Some((pa, pb)) =
+                                        project_segment(&self.camera, start, end, w, h)
+                                    {
                                         painter.line_segment(
                                             [
-                                                origin + Vec2::new(prev.0, prev.1),
-                                                origin + Vec2::new(projected.0, projected.1),
+                                                origin + Vec2::new(pa.0, pa.1),
+                                                origin + Vec2::new(pb.0, pb.1),
                                             ],
                                             stroke,
                                         );
                                     }
                                 }
-                                prev = Some(projected);
-                            } else {
-                                prev = None;
                             }
                         }
-                    }
-                    if !quadric.label.is_empty() {
-                        if let Some(pt) = self.camera.project(&ellipsoid.center, w, h) {
+                        if !surface.label.is_empty() {
+                            let center = Point3D::new(
+                                (surface.x_min + surface.x_max) * 0.5,
+                                (surface.y_min + surface.y_max) * 0.5,
+                                (surface.z_min + surface.z_max) * 0.5,
+                            );
+                            if let Some(pt) = self.camera.project(&center, w, h) {
+                                painter.text(
+                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &surface.label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
+                        }
+                    } else if !surface.label.is_empty() {
+                        let center = Point3D::new(
+                            (surface.x_min + surface.x_max) * 0.5,
+                            (surface.y_min + surface.y_max) * 0.5,
+                            (surface.z_min + surface.z_max) * 0.5,
+                        );
+                        if let Some(pt) = self.camera.project(&center, w, h) {
                             painter.text(
                                 origin + Vec2::new(pt.0, pt.1 - 8.0),
                                 egui::Align2::CENTER_BOTTOM,
-                                &quadric.label,
+                                &surface.label,
                                 egui::FontId::proportional(12.0),
                                 label_color,
                             );
@@ -3452,6 +3614,39 @@ impl GrafitoApp {
                     }
                 }
                 _ => {}
+            }
+        }
+        // A4: overlay del slot background — render de `last_valid`.
+        //
+        // El comando A1 eager sigue como fallback honesto (fail-closed al crear);
+        // el slot es refinamiento progresivo: mientras hay `Pending` la UI muestra
+        // el último válido sin parpadear ante `Failed`. Hoy el slot arranca idle
+        // (futuros UIs harán `submit`); si hay malla, se dibuja como wireframe
+        // con el mismo presupuesto CPU (>4096 tris solo al GPU).
+        if let Some(mesh) = self.implicit_surface_slot.last_valid() {
+            let fresh = mesh.triangle_count() > 0 && mesh.triangle_count() <= GB_MAX_CPU_MESH_EDGES;
+            if fresh && !overlay_only {
+                let stroke = Stroke::new(1.5, label_color);
+                for triangle in mesh.triangles() {
+                    let (Some(a), Some(b), Some(c)) = (
+                        mesh.vertices().get(triangle[0]),
+                        mesh.vertices().get(triangle[1]),
+                        mesh.vertices().get(triangle[2]),
+                    ) else {
+                        continue;
+                    };
+                    for (start, end) in [(a, b), (b, c), (c, a)] {
+                        if let Some((pa, pb)) = project_segment(&self.camera, start, end, w, h) {
+                            painter.line_segment(
+                                [
+                                    origin + Vec2::new(pa.0, pa.1),
+                                    origin + Vec2::new(pb.0, pb.1),
+                                ],
+                                stroke,
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -3763,6 +3958,25 @@ pub(crate) fn moebius_pick_mesh(
         }
     }
     Some((vertices, triangles))
+}
+
+/// Triángulos máximos de una superficie implícita para picking exacto
+/// (`ray_mesh_hit`); por encima cae al AABB grueso conservador.
+pub(crate) const IMPLICIT_PICK_MAX_TRIANGLES: usize = 4_096;
+
+/// Malla de picking de una superficie implícita `F(x,y,z)=0`: la malla derivada
+/// (caché por clave) si tiene como máximo `IMPLICIT_PICK_MAX_TRIANGLES`
+/// triángulos; `None` si el campo no está definido, la malla es densa o las
+/// cotas degeneran (el llamador cae al AABB grueso, nunca falla de más).
+pub(crate) fn implicit_surface_pick_mesh(
+    surface: &ImplicitSurface3DObj,
+    variables: &std::collections::HashMap<String, f64>,
+) -> Option<(Vec<Point3D>, Vec<[usize; 3]>)> {
+    let mesh = surface.mesh_snapshot(variables).ok()?;
+    if mesh.triangle_count() > IMPLICIT_PICK_MAX_TRIANGLES || mesh.triangle_count() == 0 {
+        return None;
+    }
+    Some((mesh.vertices().to_vec(), mesh.triangles().to_vec()))
 }
 
 /// Proyecta una sección poligonal 3D a píxeles relativos al canvas.
@@ -4099,6 +4313,40 @@ mod gpu_overlay_tests {
     }
 
     #[test]
+    fn quadric_exact_mesh_replaces_placeholder() {
+        use grafito_core::{GeoObject, Quadric3DObj};
+
+        // A4: hiperboloide x² + y² - z² = 1 — antes dibujaba una esfera falsa
+        // (placeholder unitario); ahora la AABB viene de la malla exacta y no
+        // colapsa a [-1, 1]³.
+        let hyperbolic_obj =
+            Quadric3DObj::from_coeffs([1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]);
+        assert!(
+            grafito_render::quadric_ellipsoid_params(&hyperbolic_obj).is_none(),
+            "el hiperboloide no es elipsoide"
+        );
+        let hyperbolic = GeoObject::Quadric3D(hyperbolic_obj);
+        let bounds = fallback_object_bounds(&hyperbolic, &std::collections::HashMap::new())
+            .expect("el hiperboloide tiene AABB exacta");
+        // La malla exacta del hiperboloide de una hoja se extiende más allá de
+        // la esfera unitaria en Z (anillos en ±h con h ≥ c/2).
+        let extends_beyond_unit = bounds.max.z > 1.0 || bounds.min.z < -1.0;
+        assert!(
+            extends_beyond_unit,
+            "la AABB exacta no es la esfera placeholder: {bounds:?}"
+        );
+        // Degenerada sin superficie (elipsoide imaginario x²+y²+z²+1=0):
+        // `None` honesto, sin caja ni picking falso.
+        let imaginary = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ]));
+        assert!(
+            fallback_object_bounds(&imaginary, &std::collections::HashMap::new()).is_none(),
+            "sin superficie real → sin AABB"
+        );
+    }
+
+    #[test]
     fn picker_hits_prism_and_quadric_via_fallback_bounds() {
         use grafito_core::{GeoObject, Prism3DObj, Quadric3DObj};
         use grafito_geometry::Point3D;
@@ -4245,7 +4493,12 @@ mod gpu_overlay_tests {
         let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
             1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         ]));
-        assert!(solid_measure_status_text(&quadric).contains("no soportado"));
+        assert!(solid_measure_status_text(&quadric).contains("elipsoide real"));
+        // Hiperboloide: superficie real sin volumen cerrado → honesto.
+        let hiperboloide = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        assert!(solid_measure_status_text(&hiperboloide).contains("no soportado"));
         // `project_with_view`: ortho delega a píxeles, perspectiva a cámara.
         let center = egui::pos2(400.0, 300.0);
         let point = grafito_geometry::Point3D::new(1.0, 2.0, 3.0);
