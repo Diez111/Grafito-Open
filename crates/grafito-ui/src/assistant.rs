@@ -10914,3 +10914,160 @@ mod tests {
         );
     }
 }
+
+// ── F10 hostile fuzz (solo tests, sin tocar prod) ─────────────────────────
+// Markdown hostil del chat (el crash fue tras 2 animaciones con prosa del
+// modelo). RAW sin catch/should_panic para ver el pánico crudo con backtrace.
+#[cfg(test)]
+mod hostile_crash_f10 {
+    use super::*;
+
+    #[test]
+    fn hostile_fences_sin_cerrar_x100() {
+        // 100 cercas abiertas sin cierre
+        let mut s = String::new();
+        for i in 0..100 {
+            s.push_str("```rust\n");
+            s.push_str(&format!("codigo {i}\n"));
+        }
+        let _ = has_unclosed_code_fence(&s);
+        let _ = parse_assistant_blocks(&s);
+        // 100 cercas abiertas+cerradas alternadas + cola sin cerrar
+        let mut s2 = String::new();
+        for i in 0..100 {
+            s2.push_str("```\n");
+            s2.push_str(&format!("bloque {i}\n"));
+            s2.push_str("```\n");
+        }
+        s2.push_str("```\ncola sin cerrar\n");
+        let _ = has_unclosed_code_fence(&s2);
+        let _ = parse_assistant_blocks(&s2);
+        // Cerca con lenguaje gigante + contenido gigante
+        let big_fence = format!("```{}\n{}\n```", "x".repeat(5000), "y".repeat(50_000));
+        let _ = parse_assistant_blocks(&big_fence);
+        let unclosed_big = format!("```\n{}", "z".repeat(100_000));
+        let _ = has_unclosed_code_fence(&unclosed_big);
+        let _ = parse_assistant_blocks(&unclosed_big);
+    }
+
+    #[test]
+    fn hostile_tablas_rotas() {
+        let casos: Vec<String> = vec![
+            "| a | b\n| --- |\n| 1 |".to_string(),
+            "| a | b |\n| --- |\n| 1 | 2 | 3 | 4 |".to_string(),
+            "||||||||||".to_string(),
+            "| |\n| --- |\n| |".to_string(),
+            "| a |\nno-separador\n| b |".to_string(),
+            "| a | b |\n| -- | -- |\n| 1 |".to_string(),
+            "| a | ".repeat(5000),
+            "| --- ".repeat(2000),
+            "<table><tr><td>hola".to_string(),
+            "<table>".repeat(100),
+            "<table><tr><td>".repeat(1000),
+            "<TABLE><TR><TD>mayús</TD></TR></TABLE>".to_string(),
+        ];
+        for tbl in &casos {
+            let _ = parse_assistant_blocks(tbl);
+            let _ = parse_markdown_table_row(tbl);
+            let _ = parse_html_table(tbl);
+        }
+        // Separador con columnas degeneradas
+        let _ = markdown_table_separator(&[], 0);
+        let _ = markdown_table_separator(&["---".to_string()], 1);
+        let _ = markdown_table_separator(&["---".to_string()], 2);
+        let _ = markdown_table_separator(&[":::".to_string()], 1);
+        let cells_10k: Vec<String> = (0..10_000).map(|i| format!("c{i}")).collect();
+        let _ = markdown_table_separator(&cells_10k, 10_000);
+        let _ = markdown_table_separator(&cells_10k, 3);
+    }
+
+    #[test]
+    fn hostile_asteriscos_10k() {
+        let stars = "**".repeat(10_000); // 20k chars
+        let _ = parse_assistant_blocks(&stars);
+        let _ = has_unclosed_code_fence(&stars);
+        let _ = humanize_prose_text(&stars);
+        let bold_chain = "**bold**".repeat(2000);
+        let _ = parse_assistant_blocks(&bold_chain);
+        // Énfasis envolvente roto
+        let casos: Vec<String> = vec![
+            "**".to_string(),
+            "****".to_string(),
+            "**a".to_string(),
+            "a**".to_string(),
+            "__".to_string(),
+            "____".to_string(),
+            "**".repeat(500),
+        ];
+        for e in &casos {
+            let _ = parse_assistant_blocks(e);
+            let _ = strip_wrapping_emphasis(e);
+        }
+    }
+
+    #[test]
+    fn hostile_emojis_multibyte() {
+        let emojis = "\u{1F600}".repeat(5000);
+        let _ = parse_assistant_blocks(&emojis);
+        let _ = has_unclosed_code_fence(&emojis);
+        let _ = humanize_prose_text(&emojis);
+        let mixed = format!(
+            "**{}** | {} | ```\n{}\n",
+            "\u{1F600}".repeat(100),
+            "\u{e9}".repeat(500),
+            emojis
+        );
+        let _ = parse_assistant_blocks(&mixed);
+        // Combinantes + ZWJ + banderas (graphemes multi-codepoint)
+        let casos: Vec<String> = vec![
+            "e\u{301}".repeat(1000),
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".repeat(500),
+            "\u{200B}".repeat(5000),
+            "a\u{0308}\u{0301}\u{0327}".repeat(1000),
+        ];
+        for s in &casos {
+            let _ = parse_assistant_blocks(s);
+            let _ = humanize_prose_text(s);
+        }
+    }
+
+    #[test]
+    fn hostile_listas_citas_math() {
+        let casos: Vec<String> = vec![
+            "1. ".repeat(2000),
+            "> ".repeat(2000),
+            "#".repeat(5000),
+            "$$".repeat(2000),
+            "\\[".repeat(1000),
+            "$$$$".to_string(),
+            "\\[\\]".to_string(),
+            "$$x^2$$ ".repeat(2000),
+            "# t ".repeat(1000),
+            "9999999999. item gigante".to_string(),
+            ">".to_string(),
+            ">>".to_string(),
+            "> > > >".to_string(),
+        ];
+        for s in &casos {
+            let _ = parse_assistant_blocks(s);
+        }
+        // Ordenados con número gigante (u32::MAX-ish vía string)
+        let _ = parse_ordered_list_item("99999999999999999999. texto");
+        let _ = parse_ordered_list_item("4294967295. texto");
+        let _ = parse_ordered_list_item("1. ");
+        let _ = parse_ordered_list_item("");
+    }
+
+    #[test]
+    fn hostile_trim_y_humanize_gigantes() {
+        let big = "á".repeat(100_000);
+        let _ = trim_turn(big);
+        let big2 = "x".repeat(200_000);
+        let _ = humanize_prose_text(&big2);
+        let _ = humanize_prose_text("");
+        let _ = humanize_prose_text("   ");
+        let _ = has_unclosed_code_fence("");
+        let empty: Vec<super::AssistantMessageBlock> = vec![];
+        let _ = empty.len();
+    }
+}

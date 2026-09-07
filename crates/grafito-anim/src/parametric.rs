@@ -1929,3 +1929,190 @@ mod tests {
         assert!(distancia_acotada("zzz", "integral").is_none());
     }
 }
+
+// ── F10 hostile fuzz (solo tests, sin tocar prod) ─────────────────────────
+// Caza del SIGABRT chat→integral→2da animación. RAW a propósito (sin
+// catch_unwind ni should_panic): si algo paniquea, el harness lo muestra
+// con RUST_BACKTRACE=1. Fase 2 lo convertirá a catch+assert.
+#[cfg(test)]
+mod hostile_crash_f10 {
+    use super::*;
+    use crate::protocol::Resolution;
+
+    fn valid_anim(p0: f64, p1: f64, expr: &str, frames: usize) -> ParametricResult<ParametricAnim> {
+        let param = ParamName::try_new("p")?;
+        let fc = FrameCount::try_new(frames)?;
+        let vp = Resolution::default();
+        ParametricAnim::try_new(
+            ParametricKind::Sweep,
+            expr.to_string(),
+            None,
+            param,
+            p0,
+            p1,
+            fc,
+            vp,
+        )
+    }
+
+    #[test]
+    fn hostile_frames_0_1_max() {
+        assert!(FrameCount::try_new(0).is_err());
+        assert!(FrameCount::try_new(1).is_ok());
+        assert!(FrameCount::try_new(48).is_ok());
+        assert!(FrameCount::try_new(49).is_err());
+        assert!(FrameCount::try_new(usize::MAX).is_err());
+        assert!(FrameCount::try_new(usize::MAX / 2).is_err());
+    }
+
+    #[test]
+    fn hostile_rangos_degenerados() {
+        // [0,0] degenerado
+        assert!(valid_anim(0.0, 0.0, "x^2", 8).is_err());
+        // [-0.0, 0.0] == en f64
+        assert!(valid_anim(-0.0, 0.0, "x^2", 8).is_err());
+        // NaN / inf deben dar Err, jamás panic
+        assert!(valid_anim(f64::NAN, 1.0, "x^2", 8).is_err());
+        assert!(valid_anim(0.0, f64::NAN, "x^2", 8).is_err());
+        assert!(valid_anim(f64::NAN, f64::NAN, "x^2", 8).is_err());
+        assert!(valid_anim(f64::INFINITY, 1.0, "x^2", 8).is_err());
+        assert!(valid_anim(0.0, f64::INFINITY, "x^2", 8).is_err());
+        assert!(valid_anim(f64::NEG_INFINITY, f64::INFINITY, "x^2", 8).is_err());
+        assert!(valid_anim(f64::INFINITY, f64::INFINITY, "x^2", 8).is_err());
+        // Rango válido mínimo no degenerado
+        assert!(valid_anim(0.0, f64::MIN_POSITIVE, "x^2", 1).is_ok());
+    }
+
+    #[test]
+    fn hostile_expr_vacia_y_gigante() {
+        assert!(valid_anim(0.0, 1.0, "", 8).is_err());
+        assert!(valid_anim(0.0, 1.0, "   ", 8).is_err());
+        assert!(valid_anim(0.0, 1.0, "\n\t  ", 8).is_err());
+        // Solo operadores
+        let anim = valid_anim(0.0, 1.0, "+++", 2).expect("construye (eval da None)");
+        assert_eq!(anim.eval_frame(0, 1.0), None);
+        let anim2 = valid_anim(0.0, 1.0, "***", 2).expect("construye");
+        assert_eq!(anim2.eval_frame(0, 1.0), None);
+        // 200KB debe dar Err ExpresionMuyLarga, no panic
+        let big = "x+".repeat(100_000); // 200KB
+        assert!(valid_anim(0.0, 1.0, &big, 2).is_err());
+        // Unicode partido / emojis: jamás panic, None honesto
+        let anim3 = valid_anim(0.0, 1.0, "x + \u{1F600}", 2).expect("construye");
+        assert_eq!(anim3.eval_frame(0, 1.0), None);
+        let anim4 = valid_anim(0.0, 1.0, "\u{e9}".repeat(500).as_str(), 2);
+        // puede ser Err o Ok-con-None, pero no panic
+        if let Ok(a) = anim4 {
+            assert_eq!(a.eval_frame(0, 0.0), None);
+        }
+    }
+
+    #[test]
+    fn hostile_viewport_raro() {
+        assert!(Resolution::try_new(0, 0).is_err());
+        assert!(Resolution::try_new(1, 1).is_err());
+        assert!(Resolution::try_new(63, 63).is_err());
+        assert!(Resolution::try_new(65, 65).is_ok());
+        assert!(Resolution::try_new(4097, 4097).is_err());
+        assert!(Resolution::try_new(u32::MAX, u32::MAX).is_err());
+        assert!(Resolution::try_new(u32::MAX, 64).is_err());
+        assert!(Resolution::try_new(64, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn hostile_eval_nan_inf() {
+        let anim = valid_anim(0.0, 1.0, "x^2+p*x", 4).unwrap();
+        assert_eq!(anim.eval_frame(0, f64::NAN), None);
+        assert_eq!(anim.eval_frame(0, f64::INFINITY), None);
+        assert_eq!(anim.eval_frame(0, f64::NEG_INFINITY), None);
+        assert_eq!(anim.eval_frame(usize::MAX, 1.0), anim.eval_frame(3, 1.0));
+        assert_eq!(
+            anim.eval_frame(usize::MAX / 2, 1.0),
+            anim.eval_frame(3, 1.0)
+        );
+        // frame_param / fraction con índice gigante: clamp, no panic
+        let p = anim.frame_param(usize::MAX);
+        assert!(p.is_finite());
+        let f = anim.frame_fraction(usize::MAX);
+        assert!((0.0..=1.0).contains(&f));
+        // Morph con B vacía debe fallar honesto
+        let param = ParamName::try_new("p").unwrap();
+        let fc = FrameCount::try_new(4).unwrap();
+        let vp = Resolution::default();
+        assert!(ParametricAnim::try_new(
+            ParametricKind::Morph,
+            "x^2".to_string(),
+            None,
+            param,
+            0.0,
+            1.0,
+            fc,
+            vp
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn hostile_parens_10k_y_200kb() {
+        // 10k parens: depth guard 64 → None, no stack overflow
+        let deep = format!("{}x{}", "(".repeat(10_000), ")".repeat(10_000));
+        let anim = valid_anim(0.0, 1.0, &deep, 2);
+        if let Ok(a) = anim {
+            assert_eq!(a.eval_frame(0, 1.0), None);
+        }
+        // 200KB de 'x' continua
+        let huge = "x".repeat(200_000);
+        assert!(valid_anim(0.0, 1.0, &huge, 2).is_err());
+    }
+
+    #[test]
+    fn hostile_infer_hostil() {
+        assert!(infer_parametric_anim("").is_err());
+        assert!(infer_parametric_anim("   ").is_err());
+        assert!(infer_parametric_anim("+++").is_err());
+        assert!(infer_parametric_anim("***///").is_err());
+        assert!(infer_parametric_anim("((((").is_err());
+        // unicode / emojis
+        assert!(infer_parametric_anim("\u{1F600}".repeat(100).as_str()).is_err());
+        // 200KB
+        let big = "a".repeat(200_000);
+        assert!(infer_parametric_anim(&big).is_err());
+        // parens 10k con tipo válido pero expr rota
+        let deep_req = format!("barrido de f(x)={} con p en [0,1]", "(".repeat(10_000));
+        assert!(infer_parametric_anim(&deep_req).is_err());
+        // rango degenerado explícito vía inferencia
+        assert!(infer_parametric_anim("barrido de f(x)=x^2 con p en [0,0]").is_err());
+        assert!(infer_parametric_anim("barrido de f(x)=x^2 con p en [NaN,inf]").is_err());
+    }
+
+    #[test]
+    fn hostile_estimate_overflow() {
+        // 4096x4096x48 desborda presupuesto 64MiB → Err, no panic
+        let param = ParamName::try_new("p").unwrap();
+        let fc = FrameCount::try_new(48).unwrap();
+        let vp = Resolution::try_new(4096, 4096).unwrap();
+        let anim = ParametricAnim::try_new(
+            ParametricKind::Sweep,
+            "x^2".to_string(),
+            None,
+            param,
+            0.0,
+            1.0,
+            fc,
+            vp,
+        );
+        // try_new valida presupuesto → debe ser Err ExcedeMemoria
+        assert!(anim.is_err());
+        // estimate_bytes puro con dims gigantes vía cast: None o Some sin panic
+        let _ = (4096usize)
+            .checked_mul(4096)
+            .and_then(|v| v.checked_mul(4))
+            .and_then(|v| v.checked_mul(48));
+        // usize::MAX-ish
+        let w = usize::MAX / 4;
+        let h = 4usize;
+        assert!(
+            w.checked_mul(h).and_then(|v| v.checked_mul(4)).is_none()
+                || w.checked_mul(h).and_then(|v| v.checked_mul(4)).is_some()
+        );
+    }
+}

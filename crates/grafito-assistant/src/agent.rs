@@ -72,45 +72,59 @@ pub fn request_agent_on_worker(
     Receiver<AgentEvent>,
 ) {
     let (sender, receiver) = std::sync::mpsc::sync_channel(128);
-    let handle = std::thread::spawn(move || {
-        // Muse Spark sólo responde por Responses API; el resto de modelos sigue
-        // por Chat Completions vía `run_agent` (path intacto).
-        if uses_responses_agent_transport(&settings) {
+    // F10-FIX mitigación (no fix): este worker despacha args DEL MODELO a
+    // `evaluate` (`SafeGrafitoDispatcher::evaluate_expr`). 8 MiB dan aire a
+    // expresiones profundas pero acotadas; el fix real es la guarda de
+    // presupuesto en `grafito_geometry::expr::evaluate` + el freno de 2000
+    // bytes en el dispatcher. Sin `unwrap`: si el spawn con nombre falla se
+    // degrada a un worker que retorna el error honesto.
+    let handle = match std::thread::Builder::new()
+        .name("grafito-agent-worker".into())
+        .stack_size(8 << 20)
+        .spawn(move || {
+            // Muse Spark sólo responde por Responses API; el resto de modelos sigue
+            // por Chat Completions vía `run_agent` (path intacto).
+            if uses_responses_agent_transport(&settings) {
+                let dispatcher = SafeGrafitoDispatcher;
+                return run_responses_agent_loop(
+                    &settings,
+                    api_key.as_deref(),
+                    &system,
+                    &user_messages,
+                    &tools,
+                    &budget,
+                    None,
+                    &dispatcher,
+                    &cancellation,
+                    |event| {
+                        // Bounded channel (128) evita crecimiento ilimitado si la UI no drena;
+                        // ante backpressure se abandona el envío (canal lleno o desconectado).
+                        let _ = sender.try_send(event);
+                    },
+                );
+            }
+            let completer = RemoteAgentCompleter::new(settings, api_key);
             let dispatcher = SafeGrafitoDispatcher;
-            return run_responses_agent_loop(
-                &settings,
-                api_key.as_deref(),
+            run_agent(
+                &completer,
+                &dispatcher,
                 &system,
                 &user_messages,
                 &tools,
                 &budget,
-                None,
-                &dispatcher,
                 &cancellation,
                 |event| {
                     // Bounded channel (128) evita crecimiento ilimitado si la UI no drena;
                     // ante backpressure se abandona el envío (canal lleno o desconectado).
                     let _ = sender.try_send(event);
                 },
-            );
+            )
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            std::thread::spawn(move || Err(format!("agent worker spawn failed: {error}")))
         }
-        let completer = RemoteAgentCompleter::new(settings, api_key);
-        let dispatcher = SafeGrafitoDispatcher;
-        run_agent(
-            &completer,
-            &dispatcher,
-            &system,
-            &user_messages,
-            &tools,
-            &budget,
-            &cancellation,
-            |event| {
-                // Bounded channel (128) evita crecimiento ilimitado si la UI no drena;
-                // ante backpressure se abandona el envío (canal lleno o desconectado).
-                let _ = sender.try_send(event);
-            },
-        )
-    });
+    };
     (handle, receiver)
 }
 
@@ -130,41 +144,51 @@ pub fn request_agent_on_worker_with_ledger(
     Receiver<AgentEvent>,
 ) {
     let (sender, receiver) = std::sync::mpsc::sync_channel(128);
-    let handle = std::thread::spawn(move || {
-        // Misma bifurcación que `request_agent_on_worker`: Spark por Responses.
-        if uses_responses_agent_transport(&settings) {
+    // F10-FIX mitigación (no fix): idem `request_agent_on_worker` —este worker
+    // con ledger también evalúa args del modelo vía `SafeGrafitoDispatcher`.
+    let handle = match std::thread::Builder::new()
+        .name("grafito-agent-worker-ledger".into())
+        .stack_size(8 << 20)
+        .spawn(move || {
+            // Misma bifurcación que `request_agent_on_worker`: Spark por Responses.
+            if uses_responses_agent_transport(&settings) {
+                let dispatcher = SafeGrafitoDispatcher;
+                return run_responses_agent_loop(
+                    &settings,
+                    api_key.as_deref(),
+                    &system,
+                    &user_messages,
+                    &tools,
+                    &budget,
+                    ledger.as_ref(),
+                    &dispatcher,
+                    &cancellation,
+                    |event| {
+                        let _ = sender.try_send(event);
+                    },
+                );
+            }
+            let completer = RemoteAgentCompleter::new(settings, api_key);
             let dispatcher = SafeGrafitoDispatcher;
-            return run_responses_agent_loop(
-                &settings,
-                api_key.as_deref(),
+            run_agent_with_ledger(
+                &completer,
+                &dispatcher,
                 &system,
                 &user_messages,
                 &tools,
                 &budget,
                 ledger.as_ref(),
-                &dispatcher,
                 &cancellation,
                 |event| {
                     let _ = sender.try_send(event);
                 },
-            );
+            )
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            std::thread::spawn(move || Err(format!("agent worker spawn failed: {error}")))
         }
-        let completer = RemoteAgentCompleter::new(settings, api_key);
-        let dispatcher = SafeGrafitoDispatcher;
-        run_agent_with_ledger(
-            &completer,
-            &dispatcher,
-            &system,
-            &user_messages,
-            &tools,
-            &budget,
-            ledger.as_ref(),
-            &cancellation,
-            |event| {
-                let _ = sender.try_send(event);
-            },
-        )
-    });
+    };
     (handle, receiver)
 }
 
@@ -336,13 +360,34 @@ fn level_label(level: grafito_pedagogy::PedagogicalLevel) -> String {
 // ── Tools base ──────────────────────────────────────────────────────────────
 
 fn evaluate_expr_tool(call: &ToolCall) -> ToolResult {
-    let Some(expression) = string_arg(call, "expression") else {
+    // F10-FIX (SIGABRT): la tool se defiende sola aunque la llamen directa
+    // (bypass de `reject_oversized_string_args`): jamás pasar a `evaluate`
+    // una expresión sobre el presupuesto —el stack overflow aborta el proceso.
+    let Some(raw) = call.arguments.get("expression").and_then(Value::as_str) else {
         return ToolResult::text(
             &call.id,
             false,
             "evaluate_expr requires an 'expression' string",
         );
     };
+    if raw.trim().is_empty() {
+        return ToolResult::text(
+            &call.id,
+            false,
+            "evaluate_expr requires an 'expression' string",
+        );
+    }
+    if raw.len() > grafito_geometry::expr::MAX_EXPR_LENGTH {
+        return ToolResult::text(
+            &call.id,
+            false,
+            format!(
+                "argument 'expression' exceeds {} byte limit",
+                grafito_geometry::expr::MAX_EXPR_LENGTH
+            ),
+        );
+    }
+    let expression = raw.to_owned();
     let mut variables = Vec::new();
     if let Some(object) = call.arguments.get("variables").and_then(Value::as_object) {
         for (name, value) in object {
@@ -2876,6 +2921,37 @@ mod tests {
         let denied = dispatch_safe_tool(&unknown);
         assert!(!denied.ok);
         assert!(denied.content.contains("not available"));
+    }
+
+    #[test]
+    fn evaluate_expr_rechaza_tool_arg_gigante_sin_abortar() {
+        // F10-FIX red-first: arg DEL MODELO de 16KB (`"x+".repeat(8000)`,
+        // el que abortaba `evaluate` en prod) → `Err` honesto, jamás SIGABRT.
+        // El solo hecho de completar el test prueba que no hay abort.
+        let hostile = "x+".repeat(8_000);
+        assert_eq!(hostile.len(), 16_000);
+        let call = ToolCall {
+            id: "call-hostil".into(),
+            name: "evaluate_expr".into(),
+            arguments: json!({"expression": hostile, "variables": {}}),
+        };
+        // Vía dispatcher (con freno genérico de 2000 bytes).
+        let via_dispatcher = dispatch_safe_tool(&call);
+        assert!(!via_dispatcher.ok);
+        assert!(via_dispatcher.content.contains("2000"));
+        // Directo a la tool (bypass del freno genérico): también `Err`.
+        let direct = evaluate_expr_tool(&call);
+        assert!(!direct.ok);
+        assert!(direct.content.contains("2000"));
+        // Parens gigantes anidados: también `Err` en ambos niveles.
+        let nested = format!("{}1{}", "(".repeat(8_000), ")".repeat(8_000));
+        let nested_call = ToolCall {
+            id: "call-hostil-paren".into(),
+            name: "evaluate_expr".into(),
+            arguments: json!({"expression": nested, "variables": {}}),
+        };
+        assert!(!dispatch_safe_tool(&nested_call).ok);
+        assert!(!evaluate_expr_tool(&nested_call).ok);
     }
 
     #[test]

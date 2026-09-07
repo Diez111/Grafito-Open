@@ -37,7 +37,13 @@ impl PaletteCommand {
         Self {
             name: spec.palette_label,
             category: spec.category,
-            syntax_hint: spec.signatures[0].syntax,
+            // F10-FIX (OOB latente): `signatures` vacío (imposible vía macro
+            // `command!`, posible a mano) → fallback honesto al canónico en
+            // vez de `signatures[0]` (index OOB → panic).
+            syntax_hint: spec
+                .signatures
+                .first()
+                .map_or(spec.canonical, |sig| sig.syntax),
             help: spec.help,
             selection_key: spec.palette_label,
             keywords: spec.id,
@@ -863,5 +869,96 @@ mod tests {
                 || super::fuzzy_match("punto", cmd.help)
                 || super::fuzzy_match("punto", cmd.keywords)
         }));
+    }
+}
+
+// ── F10 hostile fuzz P0 (solo tests, sin tocar prod) ──────────────────────
+// F10-FIX: spec con `signatures: &[]` ya no paniquea en
+// `PaletteCommand::registered` (antes `spec.signatures[0].syntax`, OOB);
+// ahora cae al fallback honesto (canónico).
+#[cfg(test)]
+mod hostile_crash_f10 {
+    use super::*;
+    use grafito_command::command_registry::{
+        ArgumentKind, CommandSignature, MutationClass, RiskLevel,
+    };
+
+    fn empty_sig_spec() -> CommandSpec {
+        CommandSpec {
+            id: "hostil.vacio",
+            canonical: "Hostil",
+            aliases: &[],
+            signatures: &[],
+            help: "comando hostil sin firmas",
+            category: "Crear",
+            insertion: "Hostil[",
+            dispatch_key: "Hostil",
+            mutation: MutationClass::CreatesObject,
+            risk: RiskLevel::Low,
+            palette_visible: true,
+            palette_label: "Hostil",
+        }
+    }
+
+    #[test]
+    fn hostile_registered_con_signatures_vacio() {
+        // F10-FIX: assert directo de fallback (antes `catch_unwind` que
+        // documentaba el panic en [0]). Ya no paniquea: `syntax_hint` cae
+        // al canónico honesto.
+        let spec: &'static CommandSpec = Box::leak(Box::new(empty_sig_spec()));
+        let cmd = PaletteCommand::registered(spec);
+        assert_eq!(cmd.syntax_hint, "Hostil");
+        assert_eq!(cmd.name, "Hostil");
+    }
+
+    #[test]
+    fn hostile_all_commands_no_paniquea_con_reales() {
+        // Con datos reales (todas tienen ≥1 firma por el macro) no debe paniquear.
+        let all = all_commands();
+        assert!(!all.is_empty());
+        let _ = all_commands_localized(crate::i18n::Locale::Es);
+    }
+
+    #[test]
+    fn hostile_filtro_con_search_gigante_y_unicode() {
+        for search in [
+            "",
+            "   ",
+            "***",
+            "(((",
+            "\u{1F600}".repeat(500).as_str(),
+            "**".repeat(5000).as_str(),
+            &"a".repeat(200_000),
+            "| a | b |",
+            "```".repeat(100).as_str(),
+        ] {
+            let state = CommandPaletteState {
+                search: search.to_string(),
+                ..Default::default()
+            };
+            let _ = state.filtered_commands();
+        }
+        // fuzzy_match hostil directo
+        let _ = fuzzy_match(&"a".repeat(10_000), &"b".repeat(10_000));
+        let _ = fuzzy_match("", "");
+        let _ = fuzzy_match("***", "\u{1F600}\u{1F600}");
+        // signatures con sintaxis vacía/rota no deben tumbar el tooltip
+        let cmd = PaletteCommand {
+            name: "",
+            category: "",
+            syntax_hint: "",
+            help: "",
+            selection_key: "",
+            keywords: "",
+            locale_slug: None,
+            insertion: None,
+            command_id: None,
+        };
+        let _ = rich_tooltip_for(&cmd);
+        let _ = CommandSignature {
+            syntax: "",
+            arguments: &[],
+        };
+        let _ = ArgumentKind::Unspecified;
     }
 }

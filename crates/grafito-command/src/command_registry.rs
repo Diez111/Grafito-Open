@@ -3719,11 +3719,15 @@ pub fn minimal_arg_for_kind(kind: ArgumentKind) -> &'static str {
 
 /// Construye un ejemplo mínimo ejecutable para un spec (usa la firma con menos args requeridos).
 pub fn minimal_example(spec: &CommandSpec) -> String {
-    let sig = spec
+    // F10-FIX (OOB latente): `signatures` vacío (imposible vía macro
+    // `command!`, posible a mano) → fallback honesto sin `[0]` (index OOB).
+    let Some(sig) = spec
         .signatures
         .iter()
         .min_by_key(|s| s.arguments.iter().filter(|a| !a.optional).count())
-        .unwrap_or(&spec.signatures[0]);
+    else {
+        return format!("{}[]", spec.canonical);
+    };
     let required = sig.arguments.iter().filter(|a| !a.optional).count();
     let args: Vec<&str> = sig
         .arguments
@@ -4420,5 +4424,72 @@ mod registry_tests {
                 spec.canonical
             );
         }
+    }
+}
+
+// ── F10 hostile fuzz (solo tests, sin tocar prod) ─────────────────────────
+// F10-FIX: spec con `signatures: &[]` ya no paniquea en `minimal_example`
+// (antes `unwrap_or(&spec.signatures[0])`, OOB); ahora fallback honesto.
+#[cfg(test)]
+mod hostile_crash_f10 {
+    use super::*;
+
+    fn empty_sig_spec() -> CommandSpec {
+        CommandSpec {
+            id: "hostil.vacio",
+            canonical: "Hostil",
+            aliases: &[],
+            signatures: &[],
+            help: "comando hostil sin firmas para cazar index OOB",
+            category: "Crear",
+            insertion: "Hostil[",
+            dispatch_key: "Hostil",
+            mutation: MutationClass::CreatesObject,
+            risk: RiskLevel::Low,
+            palette_visible: true,
+            palette_label: "Hostil",
+        }
+    }
+
+    #[test]
+    fn hostile_empty_signatures_minimal_example() {
+        // F10-FIX: assert directo de fallback (antes `catch_unwind` que
+        // documentaba el panic en [0]). Ya no paniquea: ejemplo mínimo
+        // honesto con cero args.
+        let spec = empty_sig_spec();
+        let leaked: &'static CommandSpec = Box::leak(Box::new(spec));
+        assert_eq!(minimal_example(leaked), "Hostil[]");
+    }
+
+    #[test]
+    fn hostile_empty_signatures_validate() {
+        // validate_spec_metadata SÍ chequea is_empty → debe dar Err, no panic.
+        let spec = empty_sig_spec();
+        assert!(validate_spec_metadata(&spec).is_err());
+    }
+
+    #[test]
+    fn hostile_empty_signatures_accepts_count() {
+        // accepts_argument_count usa iter().any → con &[] da false, no panic.
+        let spec = empty_sig_spec();
+        assert!(!spec.accepts_argument_count(0));
+        assert!(!spec.accepts_argument_count(1));
+        assert!(!spec.accepts_argument_count(usize::MAX));
+    }
+
+    #[test]
+    fn hostile_real_registry_nunca_vacio() {
+        // Invariante prod: ningún spec real tiene signatures vacío (el macro
+        // `command!` exige `[$($signature:expr),+]`). Si esto falla, el P0 es
+        // alcanzable en prod vía all()/palette_commands()/render_markdown().
+        for spec in all() {
+            assert!(
+                !spec.signatures.is_empty(),
+                "spec real sin firmas: {}",
+                spec.id
+            );
+        }
+        // render_markdown indexa [0] por cada spec real: no debe paniquear.
+        let _ = render_markdown();
     }
 }

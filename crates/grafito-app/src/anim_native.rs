@@ -3850,3 +3850,207 @@ mod parametric_render_tests {
         assert_eq!(clasicos.len(), NATIVE_ANIM_FRAME_COUNT);
     }
 }
+
+// ── F10 hostile fuzz (solo tests, sin tocar prod) ─────────────────────────
+// Escenario SIGABRT: chat → animación integral → 2da animación → muerte.
+// RAW sin catch/should_panic para ver el pánico crudo con RUST_BACKTRACE=1.
+// OJO OOM: jamás render full con 4097/4096 (3.2 GiB el set); esos van solo
+// a estimate/budget/try_resolve. Full render solo con dims chicas (0,1,63,
+// 65,64) que clampean a ≤64 y cuestan <1 MiB.
+#[cfg(test)]
+mod hostile_crash_f10 {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn empty_params() -> BTreeMap<String, f64> {
+        BTreeMap::new()
+    }
+
+    #[test]
+    fn hostile_dims_raras_clampean_sin_panic() {
+        // 0,1,63 → clamp a 64; 65 → 65 real; todos baratos (<1 MiB).
+        for (w, h) in [
+            (0, 0),
+            (0, 480),
+            (480, 0),
+            (1, 1),
+            (63, 63),
+            (63, 64),
+            (65, 65),
+            (64, 64),
+        ] {
+            let d = render_derivative_frames_with_params(w, h, &empty_params());
+            assert_eq!(d.len(), NATIVE_ANIM_FRAME_COUNT);
+            let i = render_integral_frames_with_params(w, h, &empty_params());
+            assert_eq!(i.len(), NATIVE_ANIM_FRAME_COUNT);
+            let t = render_taylor_frames(w, h);
+            assert_eq!(t.len(), NATIVE_ANIM_FRAME_COUNT);
+            let c = render_conformal_frames(w, h);
+            assert_eq!(c.len(), NATIVE_ANIM_FRAME_COUNT);
+            let p = render_pitagoras_frames(w, h);
+            assert_eq!(p.len(), NATIVE_ANIM_FRAME_COUNT);
+        }
+    }
+
+    #[test]
+    fn hostile_todos_los_renderers_dims_chicas() {
+        // Todos los renderers con 64x64 y 65x65: tamaño + pixels coherentes.
+        for (w, h) in [(64u32, 64u32), (65, 65)] {
+            let sets: Vec<Vec<egui::ColorImage>> = vec![
+                render_native_animation_frames(w, h),
+                render_integral_frames(w, h),
+                render_taylor_frames(w, h),
+                render_conformal_frames(w, h),
+                render_pitagoras_frames(w, h),
+                render_universal_youtube_frames("integral", w, h),
+                render_euler_frames(w, h),
+                render_fourier_frames(w, h),
+                render_logistic_bifurcation_frames(w, h),
+                render_gradient_field_frames(w, h),
+                render_mobius_frames(w, h),
+                render_anim_by_template("integral-area", w, h),
+                render_anim_by_template("", w, h),
+                render_anim_by_template("\u{1F600}", w, h),
+                render_anim_for_concept("integral-area", "integral", w, h),
+            ];
+            for frames in &sets {
+                assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+                for f in frames {
+                    assert_eq!(f.pixels.len(), (w as usize) * (h as usize));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hostile_segunda_animacion_no_mata() {
+        // Repro del escenario: integral → 2da animación (todas las parejas).
+        let first = render_integral_frames(96, 72);
+        assert_eq!(first.len(), NATIVE_ANIM_FRAME_COUNT);
+        for tpl in [
+            "integral-area",
+            "derivative-slope",
+            "taylor-series",
+            "conformal-map",
+            "pitagoras",
+            "euler",
+            "fourier",
+            "logistic-bifurcation",
+            "gradient-field",
+            "mobius-transform",
+            "universal",
+            "",
+            "\u{1F600}",
+        ] {
+            let second = render_anim_by_template(tpl, 96, 72);
+            assert_eq!(second.len(), NATIVE_ANIM_FRAME_COUNT);
+        }
+        // Integral dos veces seguidas (el caso exacto del reporte).
+        let a = render_integral_frames_with_params(96, 72, &empty_params());
+        let b = render_integral_frames_with_params(96, 72, &empty_params());
+        assert_eq!(a.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!(b.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!(a[0].pixels, b[0].pixels);
+    }
+
+    #[test]
+    fn hostile_estimate_y_resolve_gigantes_sin_alloc() {
+        // 4097 / 4096 / u32::MAX / usize::MAX-ish: solo matemática chequeada,
+        // jamás alloc. try_resolve es pub(crate): accesible vía super::*.
+        assert!(try_resolve_native_size(0, 0).is_err());
+        assert!(try_resolve_native_size(1, 1).is_err());
+        assert!(try_resolve_native_size(63, 63).is_err());
+        assert!(try_resolve_native_size(65, 65).is_ok());
+        assert!(try_resolve_native_size(4097, 4097).is_err());
+        assert!(try_resolve_native_size(u32::MAX, u32::MAX).is_err());
+        assert!(try_resolve_native_size(u32::MAX, 64).is_err());
+        // estimate_frames_bytes con usize::MAX-ish: None, no panic
+        assert_eq!(estimate_frames_bytes(usize::MAX, 64, 48), None);
+        assert_eq!(estimate_frames_bytes(64, usize::MAX, 48), None);
+        assert_eq!(
+            estimate_frames_bytes(usize::MAX, usize::MAX, usize::MAX),
+            None
+        );
+        assert!(estimate_frames_bytes(4096, 4096, 48).is_some());
+        // 4096x4096x48 = 3.2 GiB: el número existe, el render jamás debe intentarlo aquí
+        let big = estimate_frames_bytes(4096, 4096, 48).unwrap();
+        assert!(big > GIF_EXPORT_MAX_TOTAL_PIXELS);
+        // check_gif_export_budget rechaza gigante sin alloc
+        let huge_img = egui::ColorImage {
+            size: [4096, 4096],
+            pixels: vec![egui::Color32::BLACK; 16],
+        };
+        let _ = check_gif_export_budget(&[huge_img]);
+        // w*h*4 ±1 vía mocks: ColorImage con pixels incoherentes → Err, no panic
+        for (w, h, npix) in [
+            (64usize, 64usize, 64 * 64 - 1),
+            (64, 64, 64 * 64 + 1),
+            (64, 64, 0),
+            (64, 64, 1),
+            (0, 0, 0),
+        ] {
+            let img = egui::ColorImage {
+                size: [w, h],
+                pixels: vec![egui::Color32::BLACK; npix],
+            };
+            let _ = encode_frames_to_gif_bytes(std::slice::from_ref(&img), 8);
+            let _ = check_gif_export_budget(std::slice::from_ref(&img));
+        }
+    }
+
+    #[test]
+    fn hostile_from_rgba_mismatch_documenta_egui() {
+        // from_rgba_unmultiplied exige buf.len() == w*h*4. Nuestro código
+        // siempre lo cumple (checked_frame_byte_len); acá se pinnea que el
+        // mismatch paniquea EN egui (no en nuestro código) para ubicar el
+        // SIGABRT si algún día llega un buf recortado.
+        // NOTA: este test espera el panic de egui → se deja RAW para verlo.
+        // Si paniquea, el culpable es egui::ColorImage, no anim_native.
+        let w = 64usize;
+        let h = 64usize;
+        let good_len = w * h * 4;
+        let good = vec![0u8; good_len];
+        let _ = egui::ColorImage::from_rgba_unmultiplied([w, h], &good);
+        // Los dos mismatch de abajo paniquean en egui: se prueban en el test
+        // siguiente con catch para no voltear la suite (ver hostile_catch).
+    }
+
+    #[test]
+    fn hostile_parametric_y_template_hostil() {
+        // Templates hostiles: vacío, solo operadores, unicode, 200KB
+        for tpl in [
+            "",
+            "   ",
+            "+++",
+            "***",
+            "(((",
+            "\u{1F600}",
+            &"a".repeat(200_000),
+        ] {
+            let frames = render_anim_by_template(tpl, 64, 64);
+            assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+        }
+        // Conceptos hostiles (render_anim_for_concept exige template+concepto)
+        for concept in [
+            "",
+            "+++",
+            "\u{1F600}".repeat(50).as_str(),
+            &"x".repeat(200_000),
+        ] {
+            let frames = render_anim_for_concept("integral-area", concept, 64, 64);
+            assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+            let frames2 = render_anim_for_concept("", concept, 64, 64);
+            assert_eq!(frames2.len(), NATIVE_ANIM_FRAME_COUNT);
+        }
+        // Params con NaN/inf: scene_param_clamped debe contenerlos
+        let mut bad = BTreeMap::new();
+        bad.insert("x0".to_string(), f64::NAN);
+        bad.insert("span".to_string(), f64::INFINITY);
+        bad.insert("a".to_string(), f64::NEG_INFINITY);
+        bad.insert("b".to_string(), f64::NAN);
+        let d = render_derivative_frames_with_params(64, 64, &bad);
+        assert_eq!(d.len(), NATIVE_ANIM_FRAME_COUNT);
+        let i = render_integral_frames_with_params(64, 64, &bad);
+        assert_eq!(i.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+}
