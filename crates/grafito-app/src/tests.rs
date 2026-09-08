@@ -5166,6 +5166,90 @@ fn d1_escape_closes_about_and_onboarding_headless() {
 }
 
 #[test]
+fn wa_onboarding_solo_no_mostrar_persiste() {
+    // W-A red: la X solo oculta en sesión; persiste SOLO "No mostrar".
+    use crate::app::{GrafitoApp, OnboardingChoice};
+    assert!(GrafitoApp::onboarding_choice_persists(
+        OnboardingChoice::NeverShow
+    ));
+    assert!(!GrafitoApp::onboarding_choice_persists(
+        OnboardingChoice::DismissX
+    ));
+    assert!(!GrafitoApp::onboarding_choice_persists(
+        OnboardingChoice::Escape
+    ));
+    assert!(!GrafitoApp::onboarding_choice_persists(
+        OnboardingChoice::TryExample
+    ));
+    assert!(!GrafitoApp::onboarding_choice_persists(
+        OnboardingChoice::StartEmpty
+    ));
+}
+
+#[test]
+fn wa_examen_banner_siempre_y_esc_con_confirmacion() {
+    // W-A red: banner SIEMPRE visible en examen (2D y 3D) + Esc pide
+    // confirmación (no sale directo) + Esc con modal lo cancela.
+    use crate::app::{ExamEscapeAction, GrafitoApp};
+    assert!(GrafitoApp::exam_banner_should_show(true));
+    assert!(!GrafitoApp::exam_banner_should_show(false));
+    assert_eq!(
+        GrafitoApp::exam_escape_next(false, false),
+        ExamEscapeAction::None
+    );
+    assert_eq!(
+        GrafitoApp::exam_escape_next(true, false),
+        ExamEscapeAction::RequestConfirm
+    );
+    assert_eq!(
+        GrafitoApp::exam_escape_next(true, true),
+        ExamEscapeAction::CancelModal
+    );
+    // La vía sigue siendo confirmada: pedir salida abre el modal, no apaga.
+    let mut app = crate::app::dummy_grafito_app();
+    app.exam_mode = true;
+    app.exam_exit_confirm = false;
+    app.set_exam_mode(false);
+    assert!(app.exam_mode, "el lockdown sigue hasta confirmar");
+    assert!(app.exam_exit_confirm, "se abrió el modal");
+}
+
+#[test]
+fn wa_custom_tool_contador_y_nombre_live() {
+    // W-A red: contador "usando N de M" (no trunca en silencio) + nombre
+    // vacío/duplicado se valida ANTES de Guardar.
+    use crate::app::{GrafitoApp, CUSTOM_TOOL_HISTORY_LIMIT};
+    assert_eq!(GrafitoApp::custom_tool_history_usage(0), (0, 0));
+    assert_eq!(GrafitoApp::custom_tool_history_usage(10), (10, 10));
+    assert_eq!(
+        GrafitoApp::custom_tool_history_usage(CUSTOM_TOOL_HISTORY_LIMIT + 5),
+        (CUSTOM_TOOL_HISTORY_LIMIT, CUSTOM_TOOL_HISTORY_LIMIT + 5)
+    );
+    let mut store = grafito_command::ggbscript::CustomToolStore::new();
+    // Vacío bloquea.
+    let (can_save, feedback) = GrafitoApp::custom_tool_name_feedback("", &store);
+    assert!(!can_save);
+    assert!(feedback.is_some());
+    let (can_save, _) = GrafitoApp::custom_tool_name_feedback("   ", &store);
+    assert!(!can_save);
+    // Nombre nuevo válido deja guardar sin aviso.
+    let (can_save, feedback) = GrafitoApp::custom_tool_name_feedback("mi_tool", &store);
+    assert!(can_save);
+    assert!(feedback.is_none());
+    // Duplicado permite guardar (reemplaza) pero avisa en vivo.
+    store
+        .define("mi_tool", "Hide[A]; Show[A]")
+        .expect("define válido");
+    let (can_save, feedback) = GrafitoApp::custom_tool_name_feedback("mi_tool", &store);
+    assert!(can_save, "el duplicado reemplaza, no bloquea");
+    let message = feedback.expect("aviso de duplicado");
+    assert!(message.contains("ya existe"), "aviso honesto: {message}");
+    // Formato inválido bloquea.
+    let (can_save, _) = GrafitoApp::custom_tool_name_feedback("1mal", &store);
+    assert!(!can_save);
+}
+
+#[test]
 fn d1_palette_closes_on_escape_headless() {
     // La paleta ya cerraba con Esc (`command_palette.rs`, fuera de targets):
     // este test lo blinda contra regresiones desde app.

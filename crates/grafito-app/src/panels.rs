@@ -2982,6 +2982,27 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                                             .color(current_theme(ui.ctx()).danger)
                                             .size(TYPE_XS),
                                     );
+                                    // W-A: inválido mantiene el último válido
+                                    // (el documento no se tocó) + "Revertir"
+                                    // vuelve a la canónica + "Usar ejemplo"
+                                    // inserta sintaxis válida clicable.
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Revertir").clicked() {
+                                            ieq::cancel_edit(&mut eq_state, &live_now);
+                                        }
+                                        if let Some(example) = ieq::example_for(&live_now) {
+                                            if ui
+                                                .small_button("Usar ejemplo")
+                                                .on_hover_text(format!(
+                                                    "Inserta sintaxis válida: {example}"
+                                                ))
+                                                .clicked()
+                                            {
+                                                ieq::update_draft(&mut eq_state, example);
+                                                ieq::revalidate_state(&mut eq_state, &live_now);
+                                            }
+                                        }
+                                    });
                                 }
                                 let canonical_now = live_now
                                     .canonical_equation_text()
@@ -4805,6 +4826,30 @@ fn paint_continuous_density(
     );
 }
 
+/// Resuelve gl para el plot sin `clamp` silencioso: fuera de cota es `Err`
+/// honesto (el caller dibuja "fuera de cota" en vez de una curva falsa).
+/// W-A: `df = MAX_PANEL_DF + 1` → `Err`, no curva clampada a 500.
+pub(crate) fn plot_df_or_fuera_de_cota(value: f64, what: &str) -> Result<f64, String> {
+    check_panel_df(value, what)
+}
+
+/// Etiqueta honesta dentro del plot cuando no hay curva para dibujar
+/// (fuera de cota, parámetro inválido). Piel pura: solo pinta texto.
+fn paint_plot_message(
+    painter: &egui::Painter,
+    plot: egui::Rect,
+    message: &str,
+    txt_dim: egui::Color32,
+) {
+    painter.text(
+        plot.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("fuera de cota: {message}"),
+        egui::FontId::proportional(TYPE_XS),
+        txt_dim,
+    );
+}
+
 /// Curva + área P(X ≤ x) del panel de probabilidad (F3b, extendido a
 /// T/Chi²/F en C2). Puro render sobre el estado efímero: sin I/O, sin
 /// spawn, loops acotados (≤61 muestras continuas, ≤256 barras discretas).
@@ -4838,10 +4883,12 @@ fn draw_probability_plot(
     match state.dist {
         0 => {
             if !state.mu.is_finite() || !state.sigma.is_finite() || state.sigma <= 0.0 {
+                paint_plot_message(&painter, plot, "σ debe ser mayor que 0", txt_dim);
                 return;
             }
             let (lo, hi) = (state.mu - 4.0 * state.sigma, state.mu + 4.0 * state.sigma);
             if !(lo.is_finite() && hi.is_finite() && hi > lo) {
+                paint_plot_message(&painter, plot, "μ/σ fuera de rango", txt_dim);
                 return;
             }
             let (mu, sigma) = (state.mu, state.sigma);
@@ -4850,7 +4897,9 @@ fn draw_probability_plot(
                 plot,
                 lo,
                 hi,
-                |x| normal_pdf(x, mu, sigma).unwrap_or(0.0),
+                // W-A: `NaN` ante error (el filtro de `paint_continuous_density`
+                // lo salta) en vez de `0.0` que dibujaba un plano falso en 0.
+                |x| normal_pdf(x, mu, sigma).unwrap_or(f64::NAN),
                 state.x,
                 accent,
                 txt_dim,
@@ -4992,7 +5041,15 @@ fn draw_probability_plot(
             );
         }
         3 => {
-            let df = state.df.clamp(1.0, MAX_PANEL_DF);
+            // W-A: sin `clamp` silencioso — fuera de cota se avisa, no se
+            // dibuja la curva de gl=500 como si fuera la pedida.
+            let df = match plot_df_or_fuera_de_cota(state.df, "gl") {
+                Ok(df) => df,
+                Err(message) => {
+                    paint_plot_message(&painter, plot, &message, txt_dim);
+                    return;
+                }
+            };
             if !state.x.is_finite() {
                 return;
             }
@@ -5001,7 +5058,7 @@ fn draw_probability_plot(
                 plot,
                 -6.0,
                 6.0,
-                |x| student_t_pdf(x, df).unwrap_or(0.0),
+                |x| student_t_pdf(x, df).unwrap_or(f64::NAN),
                 state.x,
                 accent,
                 txt_dim,
@@ -5009,7 +5066,13 @@ fn draw_probability_plot(
             );
         }
         4 => {
-            let df = state.df.clamp(1.0, MAX_PANEL_DF);
+            let df = match plot_df_or_fuera_de_cota(state.df, "gl") {
+                Ok(df) => df,
+                Err(message) => {
+                    paint_plot_message(&painter, plot, &message, txt_dim);
+                    return;
+                }
+            };
             if !state.x.is_finite() {
                 return;
             }
@@ -5022,7 +5085,7 @@ fn draw_probability_plot(
                 plot,
                 0.0,
                 hi,
-                |x| chi_squared_pdf(x, df).unwrap_or(0.0),
+                |x| chi_squared_pdf(x, df).unwrap_or(f64::NAN),
                 state.x,
                 accent,
                 txt_dim,
@@ -5030,10 +5093,16 @@ fn draw_probability_plot(
             );
         }
         5 => {
-            let (df1, df2) = (
-                state.df1.clamp(1.0, MAX_PANEL_DF),
-                state.df2.clamp(1.0, MAX_PANEL_DF),
-            );
+            let (df1, df2) = match (
+                plot_df_or_fuera_de_cota(state.df1, "gl1"),
+                plot_df_or_fuera_de_cota(state.df2, "gl2"),
+            ) {
+                (Ok(df1), Ok(df2)) => (df1, df2),
+                (Err(message), _) | (_, Err(message)) => {
+                    paint_plot_message(&painter, plot, &message, txt_dim);
+                    return;
+                }
+            };
             if !state.x.is_finite() {
                 return;
             }
@@ -5046,7 +5115,7 @@ fn draw_probability_plot(
                 plot,
                 0.0,
                 hi,
-                |x| f_distribution_pdf(x, df1, df2).unwrap_or(0.0),
+                |x| f_distribution_pdf(x, df1, df2).unwrap_or(f64::NAN),
                 state.x,
                 accent,
                 txt_dim,
@@ -5909,9 +5978,9 @@ mod gc_piel_tests {
         binomial_cdf, binomial_pmf, binomial_quantile_honest, chi_squared_cdf, chi_squared_pdf,
         chi_squared_quantile_honest, f_distribution_cdf, f_distribution_pdf, f_quantile_honest,
         normal_cdf, normal_pdf, normal_quantile_honest, parse_series_scalar, parse_slider_prompt,
-        poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_col_label, student_t_cdf,
-        student_t_pdf, student_t_quantile_honest, MAX_BINOMIAL_N, MAX_PANEL_DF, SHEET_VIEW_COLS,
-        SHEET_VIEW_ROWS,
+        plot_df_or_fuera_de_cota, poisson_cdf, poisson_pmf, poisson_quantile_honest,
+        sheet_col_label, student_t_cdf, student_t_pdf, student_t_quantile_honest, MAX_BINOMIAL_N,
+        MAX_PANEL_DF, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
 
@@ -6059,6 +6128,19 @@ mod gc_piel_tests {
         assert!(f_distribution_pdf(1.0, 5.0, 0.0).is_err());
         assert!(f_distribution_cdf(1.0, -1.0, 10.0).is_err());
         assert!(f_quantile_honest(1.5, 5.0, 10.0).is_err());
+    }
+
+    #[test]
+    fn wa_plot_df_fuera_de_cota_no_dibuja_curva() {
+        // W-A red: `df = MAX_PANEL_DF + 1` → mensaje con "cota", no curva.
+        // Antes el caller hacía `clamp` a 500 y dibujaba la curva falsa.
+        let err = plot_df_or_fuera_de_cota(MAX_PANEL_DF + 1.0, "gl").expect_err("cota");
+        assert!(err.contains("cota"), "mensaje honesto: {err}");
+        let err1 = plot_df_or_fuera_de_cota(MAX_PANEL_DF + 1.0, "gl1").expect_err("cota");
+        assert!(err1.contains("cota"), "mensaje honesto: {err1}");
+        assert!(plot_df_or_fuera_de_cota(MAX_PANEL_DF, "gl").is_ok());
+        assert!(plot_df_or_fuera_de_cota(0.0, "gl").is_err());
+        assert!(plot_df_or_fuera_de_cota(f64::NAN, "gl").is_err());
     }
 
     #[test]

@@ -49,6 +49,10 @@ pub(crate) const MAX_UNDO_BYTES: usize = 50 * 1024 * 1024;
 /// para presupuesto O(n) acotado (500) y orden cronológico.
 pub(crate) const MAX_CONSTRUCTION_LOG: usize = 500;
 
+/// Tope de pasos del historial usados al definir una custom tool (W-A).
+/// El diálogo muestra "usando N de M" en vez de truncar en silencio.
+pub(crate) const CUSTOM_TOOL_HISTORY_LIMIT: usize = 64;
+
 /// Job de guardado en background — evita bloquear UI thread (60fps) en `save_document`.
 /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
 pub(crate) struct PendingSaveJob {
@@ -3723,10 +3727,62 @@ impl GrafitoApp {
 
     /// Diálogo "Guardar herramienta personalizada": nombre + pasos del
     /// historial CAS reciente; persiste el `.ggt` elegido por diálogo.
+    ///
+    /// Tope de pasos tomados del historial (W-A, ver
+    /// [`Self::custom_tool_history_usage`]).
+    ///
+    /// Contador honesto del historial para el diálogo (W-A, puro y testeable).
+    /// Retorna `(usados, total)` con `usados = total.min(LIMIT)`.
+    pub(crate) fn custom_tool_history_usage(total: usize) -> (usize, usize) {
+        (total.min(CUSTOM_TOOL_HISTORY_LIMIT), total)
+    }
+
+    /// Validación live del nombre de custom tool (W-A, pura y testeable).
+    ///
+    /// Retorna `(puede_guardar, aviso)`: vacío o formato inválido bloquea el
+    /// Guardar con mensaje; duplicado permite guardar (reemplaza) pero avisa;
+    /// nombre nuevo válido no avisa. Mismas reglas que `check_tool_name`
+    /// (ASCII letra/`_` inicial, resto alfanum/`_`).
+    pub(crate) fn custom_tool_name_feedback(
+        name: &str,
+        store: &grafito_command::ggbscript::CustomToolStore,
+    ) -> (bool, Option<String>) {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return (
+                false,
+                Some("Poné un nombre para la herramienta.".to_string()),
+            );
+        }
+        let mut chars = trimmed.chars();
+        let first_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !first_ok || !rest_ok {
+            return (
+                false,
+                Some("El nombre usa letras/números/_ y empieza con letra o _.".to_string()),
+            );
+        }
+        if store.get(trimmed).is_some() {
+            return (
+                true,
+                Some("Ese nombre ya existe: se va a reemplazar.".to_string()),
+            );
+        }
+        (true, None)
+    }
+
     pub(crate) fn draw_custom_tool_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_custom_tool_dialog {
             return;
         }
+        // W-A: contador honesto + validación live calculados ANTES del closure
+        // (el closure solo lee copias; el store se presta por referencia).
+        let (used, total) = Self::custom_tool_history_usage(self.cas_history.len());
+        let (can_save, name_feedback) =
+            Self::custom_tool_name_feedback(&self.custom_tool_name, &self.custom_tools);
         let mut open = true;
         let mut save_requested = false;
         let mut load_requested = false;
@@ -3735,13 +3791,25 @@ impl GrafitoApp {
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
+                // W-A: "usando N de M del historial" (antes truncaba a 64 en
+                // silencio con "los últimos N").
                 ui.label(format!(
-                    "Se guardan los últimos {} comandos del historial como pasos.",
-                    self.cas_history.len().min(64)
+                    "Usando {used} de {total} del historial como pasos (tope {CUSTOM_TOOL_HISTORY_LIMIT})."
                 ));
                 ui.text_edit_singleline(&mut self.custom_tool_name);
+                // Validación live: vacío/duplicado se ve ANTES de Guardar.
+                if let Some(feedback) = name_feedback {
+                    let theme = grafito_ui::theme::current_theme(ui.ctx());
+                    ui.label(
+                        egui::RichText::new(feedback)
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_secondary),
+                    );
+                }
                 ui.horizontal(|ui| {
-                    save_requested = ui.button("Guardar .ggt…").clicked();
+                    save_requested = ui
+                        .add_enabled(can_save, egui::Button::new("Guardar .ggt…"))
+                        .clicked();
                     load_requested = ui.button("Cargar .ggt…").clicked();
                 });
             });
@@ -3765,7 +3833,12 @@ impl GrafitoApp {
     /// I/O acotado a un JSON chico (cota `MAX_GGT_BYTES` del parser).
     pub(crate) fn save_custom_tool_from_history(&mut self) {
         use grafito_command::ggbscript as ggt;
-        let history: Vec<String> = self.cas_history.iter().take(64).cloned().collect();
+        let history: Vec<String> = self
+            .cas_history
+            .iter()
+            .take(CUSTOM_TOOL_HISTORY_LIMIT)
+            .cloned()
+            .collect();
         let name = self.custom_tool_name.trim().to_string();
         let json = match self.custom_tools.define_from_history(&name, &history) {
             Ok(json) => json,
@@ -4390,6 +4463,8 @@ impl GrafitoApp {
     /// Encender es directo. Apagar NO apaga: abre el modal de confirmación
     /// (`draw_exam_exit_modal`) y el lockdown sigue activo hasta confirmar.
     /// Sin escape por cambio de perspectiva (`set_perspective` nunca apaga).
+    /// W-A: el banner (`draw_exam_banner`) y Esc usan esta vía para que la
+    /// salida sea visible pero siempre confirmada.
     pub(crate) fn set_exam_mode(&mut self, on: bool) {
         if on {
             self.exam_mode = true;
@@ -4409,6 +4484,59 @@ impl GrafitoApp {
         if marcado != self.exam_mode {
             self.set_exam_mode(marcado);
         }
+    }
+
+    /// ¿Debe verse el banner de examen? W-A: SIEMPRE que `exam_mode`, en 2D
+    /// y 3D (antes solo en 2D y sin vía de salida visible).
+    pub(crate) fn exam_banner_should_show(exam_mode: bool) -> bool {
+        exam_mode
+    }
+
+    /// Próximo paso ante Esc en examen (W-A, puro y testeable).
+    ///
+    /// - Sin examen → `None` (Esc es de otro diálogo).
+    /// - En examen sin modal → `RequestConfirm` (abre el modal, no sale directo).
+    /// - Con modal abierto → `CancelModal` (Esc cancela, el lockdown sigue).
+    pub(crate) fn exam_escape_next(exam_mode: bool, exit_confirm: bool) -> ExamEscapeAction {
+        if !exam_mode {
+            ExamEscapeAction::None
+        } else if exit_confirm {
+            ExamEscapeAction::CancelModal
+        } else {
+            ExamEscapeAction::RequestConfirm
+        }
+    }
+
+    /// Banner de examen SIEMPRE visible con salida explícita (W-A).
+    ///
+    /// Piel pura salvo el clic en "Salir examen", que llama
+    /// [`Self::set_exam_mode`] (abre el modal de confirmación, jamás sale
+    /// directo). Llamar al inicio del `CentralPanel` tanto en 2D como en 3D.
+    pub(crate) fn draw_exam_banner(&mut self, ui: &mut egui::Ui) {
+        if !Self::exam_banner_should_show(self.exam_mode) {
+            return;
+        }
+        let theme = grafito_ui::theme::current_theme(ui.ctx());
+        egui::TopBottomPanel::top("exam_banner")
+            .show_separator_line(false)
+            .frame(egui::Frame::none().fill(theme.danger).inner_margin(8.0))
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("MODO EXAMEN ACTIVO")
+                                .color(theme.toast_text)
+                                .size(18.0)
+                                .strong(),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Salir examen").clicked() {
+                            self.set_exam_mode(false);
+                        }
+                    });
+                });
+            });
     }
 
     /// ¿Bloquea el examen esta acción? (asistente, internet, export).
@@ -5882,21 +6010,8 @@ impl eframe::App for GrafitoApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none().fill(theme.canvas_bg))
                     .show(ctx, |ui| {
-                        if self.exam_mode {
-                            egui::TopBottomPanel::top("exam_banner")
-                                .show_separator_line(false)
-                                .frame(egui::Frame::none().fill(theme.danger).inner_margin(8.0))
-                                .show_inside(ui, |ui| {
-                                    ui.vertical_centered(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("MODO EXAMEN ACTIVO")
-                                                .color(theme.toast_text)
-                                                .size(18.0)
-                                                .strong(),
-                                        );
-                                    });
-                                });
-                        }
+                        // W-A: banner SIEMPRE visible con "Salir examen".
+                        self.draw_exam_banner(ui);
 
                         let canvas_rect = ui.available_rect_before_wrap();
                         let canvas_size = canvas_rect.size();
@@ -6059,6 +6174,8 @@ impl eframe::App for GrafitoApp {
             }
             ViewMode::D3 => {
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    // W-A: banner SIEMPRE visible también en 3D.
+                    self.draw_exam_banner(ui);
                     let canvas_rect = ui.available_rect_before_wrap();
                     self.canvas_origin = Some(canvas_rect.min);
                     let canvas_size = canvas_rect.size();
@@ -6384,6 +6501,20 @@ impl eframe::App for GrafitoApp {
         // Piel pura (cero I/O en Ui::, el job ya cargó todo en background).
         self.draw_recovery_modal(ctx);
         // D2 lockdown examen: salida solo con confirmación explícita.
+        // W-A: Esc con confirmación — sin modal pide confirmación (visible);
+        // con modal abierto lo cancela (el lockdown sigue). No roba el Esc
+        // de otros diálogos (onboarding/about/custom-tool van primero).
+        if !self.show_onboarding
+            && !self.show_about
+            && !self.show_custom_tool_dialog
+            && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+        {
+            match Self::exam_escape_next(self.exam_mode, self.exam_exit_confirm) {
+                ExamEscapeAction::RequestConfirm => self.set_exam_mode(false),
+                ExamEscapeAction::CancelModal => self.exam_exit_confirm = false,
+                ExamEscapeAction::None => {}
+            }
+        }
         self.draw_exam_exit_modal(ctx);
         // Configuración — ventana única (legado show_mascot_config delega a assistant.settings_open)
         if self.show_mascot_config {
@@ -7241,10 +7372,37 @@ mod ggb_import_local_tests {
     }
 }
 
+/// Elección del usuario ante el onboarding (W-A, pura y testeable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnboardingChoice {
+    /// Botón "Probar ejemplo": solo oculta en sesión.
+    TryExample,
+    /// Botón "Empezar vacío": solo oculta en sesión.
+    StartEmpty,
+    /// Botón "No mostrar de nuevo": única que persiste.
+    NeverShow,
+    /// Cierre con X de la ventana: solo oculta en sesión.
+    DismissX,
+    /// Tecla Esc: solo oculta en sesión.
+    Escape,
+}
+
+/// Próximo paso ante Esc en examen (W-A, ver `exam_escape_next`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExamEscapeAction {
+    /// Sin examen: Esc es de otro diálogo, no hacer nada acá.
+    None,
+    /// En examen sin modal: pedir confirmación (abre el modal).
+    RequestConfirm,
+    /// Con modal abierto: cancelar el modal (el lockdown sigue).
+    CancelModal,
+}
+
 impl GrafitoApp {
     /// Ventana onboarding 30s Scandinavian — gating `AppConfig::onboarding_completed` (utils.rs:46-48).
     /// 420px, 3 pasos accionables, botones [Probar ejemplo][Empezar vacío][No mostrar de nuevo].
-    /// Si no se alcanza UI completa, al menos Window stub con “No mostrar” que setea `onboarding_completed=true`.
+    /// W-A: la X solo oculta en sesión (`show=false`); persiste SOLO "No mostrar
+    /// de nuevo" (ver [`onboarding_choice_persists`]). Esc también solo oculta.
     pub(crate) fn draw_onboarding_window(&mut self, ctx: &egui::Context) {
         if !self.show_onboarding {
             return;
@@ -7315,10 +7473,9 @@ impl GrafitoApp {
                         .clicked()
                     {
                         let _ = self.load_perspective_examples(self.perspective);
-                        self.show_onboarding = false;
-                        let mut cfg = load_config();
-                        cfg.onboarding_completed = true;
-                        save_config(&cfg);
+                        // W-A: "Probar ejemplo" solo oculta en sesión; persiste
+                        // SOLO "No mostrar de nuevo" (vía helper, fuente única).
+                        self.apply_onboarding_choice(OnboardingChoice::TryExample);
                         self.notify(
                             "Ejemplo cargado — ¡explora Grafito!",
                             grafito_ui::toast::ToastKind::Success,
@@ -7337,11 +7494,8 @@ impl GrafitoApp {
                         )
                         .clicked()
                     {
-                        self.show_onboarding = false;
-                        // W3 — "Empezar vacío" también persiste: no reaparece.
-                        let mut cfg = load_config();
-                        cfg.onboarding_completed = true;
-                        save_config(&cfg);
+                        // W-A: "Empezar vacío" solo oculta en sesión.
+                        self.apply_onboarding_choice(OnboardingChoice::StartEmpty);
                     }
                     if ui
                         .add_sized(
@@ -7357,26 +7511,41 @@ impl GrafitoApp {
                         )
                         .clicked()
                     {
-                        self.show_onboarding = false;
-                        let mut cfg = load_config();
-                        cfg.onboarding_completed = true;
-                        save_config(&cfg);
+                        // Única vía que persiste: "No mostrar de nuevo".
+                        self.apply_onboarding_choice(OnboardingChoice::NeverShow);
                     }
                 });
                 ui.add_space(grafito_ui::tokens::SPACE_XS);
             });
         if !open {
-            self.show_onboarding = false;
-            // W3 — cerrar con X equivale a "No mostrar de nuevo".
+            // W-A: la X solo oculta en sesión, NO persiste (antes equivalía a
+            // "No mostrar de nuevo" y el onboarding no volvía jamás).
+            self.apply_onboarding_choice(OnboardingChoice::DismissX);
+        }
+        // A11Y (D1) + W-A: Esc solo oculta la vista (pospone, no persiste).
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.apply_onboarding_choice(OnboardingChoice::Escape);
+        }
+    }
+
+    /// Aplica una elección del onboarding: siempre oculta en sesión y persiste
+    /// `onboarding_completed=true` SOLO si [`Self::onboarding_choice_persists`]
+    /// lo dice (hoy: solo `NeverShow`). Fuente única prod + tests.
+    fn apply_onboarding_choice(&mut self, choice: OnboardingChoice) {
+        self.show_onboarding = false;
+        if Self::onboarding_choice_persists(choice) {
             let mut cfg = load_config();
             cfg.onboarding_completed = true;
             save_config(&cfg);
         }
-        // A11Y (D1): Esc solo cierra la vista (pospone, no persiste: la X es
-        // la que equivale a "No mostrar de nuevo").
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.show_onboarding = false;
-        }
+    }
+
+    /// Elección del onboarding para decidir persistencia (W-A, testeable sin I/O).
+    ///
+    /// Solo [`OnboardingChoice::NeverShow`] persiste
+    /// `onboarding_completed=true`; el resto solo oculta en sesión.
+    pub(crate) fn onboarding_choice_persists(choice: OnboardingChoice) -> bool {
+        matches!(choice, OnboardingChoice::NeverShow)
     }
 
     /// Ventana "Acerca de Grafito" — resumida, Scandinavian quiet.

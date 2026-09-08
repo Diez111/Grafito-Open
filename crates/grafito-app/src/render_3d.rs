@@ -544,8 +544,10 @@ pub(crate) fn fallback_object_bounds_with_typed_four_d_phase(
         GeoObject::Quadric3D(quadric) => {
             // A4: malla exacta A2 — jamás un elipsoide falso. El elipsoide
             // alineado a ejes mantiene el camino legacy; el resto usa sus
-            // polilíneas exactas (`quadric_wire_points`); degenerada sin
+            // polilíneas exactas cacheadas (`cached_quadric_wire_points` en
+            // depth_3d, NO matemática por frame en UI); degenerada sin
             // superficie → `None` honesto (sin caja ni picking falso).
+            // W-A: la UI solo itera el `Arc` del cache.
             if let Some(ellipsoid) = grafito_render::quadric_ellipsoid_params(quadric) {
                 let center = ellipsoid.center.to_dvec3();
                 let radii = DVec3::new(
@@ -562,11 +564,7 @@ pub(crate) fn fallback_object_bounds_with_typed_four_d_phase(
                     quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g,
                     quadric.h, quadric.i, quadric.j,
                 ];
-                let shape = match grafito_geometry::quadrics::classify_quadric(coeffs) {
-                    Ok(shape) => shape,
-                    Err(_) => return None,
-                };
-                let lines = match grafito_geometry::quadrics::quadric_wire_points(&shape) {
+                let lines = match grafito_render::depth_3d::cached_quadric_wire_points(coeffs) {
                     Ok(lines) => lines,
                     Err(_) => return None,
                 };
@@ -3493,53 +3491,48 @@ impl GrafitoApp {
                         ];
                         // Sin superficie real: cero segmentos, sin etiqueta falsa
                         // (no `return`: el loop debe seguir con el resto de objetos).
-                        if let Ok(shape) = grafito_geometry::quadrics::classify_quadric(coeffs) {
-                            if let Ok(lines) =
-                                grafito_geometry::quadrics::quadric_wire_points(&shape)
-                            {
-                                let stroke = Stroke::new(quadric.width, to_color32(quadric.color));
-                                // Centro honesto para la etiqueta: media de la malla exacta.
-                                let mut center_acc = Vec3::ZERO;
-                                let mut center_count = 0_usize;
-                                for polyline in &lines {
-                                    let mut prev: Option<(f32, f32)> = None;
-                                    for point in polyline {
-                                        center_acc += point.to_vec3();
-                                        center_count += 1;
-                                        if let Some(projected) = self.camera.project(point, w, h) {
-                                            if let Some(prev) = prev {
-                                                if !overlay_only {
-                                                    painter.line_segment(
-                                                        [
-                                                            origin + Vec2::new(prev.0, prev.1),
-                                                            origin
-                                                                + Vec2::new(
-                                                                    projected.0,
-                                                                    projected.1,
-                                                                ),
-                                                        ],
-                                                        stroke,
-                                                    );
-                                                }
+                        // W-A: matemática cacheada en depth_3d; acá solo se itera.
+                        if let Ok(lines) =
+                            grafito_render::depth_3d::cached_quadric_wire_points(coeffs)
+                        {
+                            let stroke = Stroke::new(quadric.width, to_color32(quadric.color));
+                            // Centro honesto para la etiqueta: media de la malla exacta.
+                            let mut center_acc = Vec3::ZERO;
+                            let mut center_count = 0_usize;
+                            for polyline in lines.iter() {
+                                let mut prev: Option<(f32, f32)> = None;
+                                for point in polyline.iter() {
+                                    center_acc += point.to_vec3();
+                                    center_count += 1;
+                                    if let Some(projected) = self.camera.project(point, w, h) {
+                                        if let Some(prev) = prev {
+                                            if !overlay_only {
+                                                painter.line_segment(
+                                                    [
+                                                        origin + Vec2::new(prev.0, prev.1),
+                                                        origin
+                                                            + Vec2::new(projected.0, projected.1),
+                                                    ],
+                                                    stroke,
+                                                );
                                             }
-                                            prev = Some(projected);
-                                        } else {
-                                            prev = None;
                                         }
+                                        prev = Some(projected);
+                                    } else {
+                                        prev = None;
                                     }
                                 }
-                                if !quadric.label.is_empty() && center_count > 0 {
-                                    let center =
-                                        Point3D::from_vec3(center_acc / center_count as f32);
-                                    if let Some(pt) = self.camera.project(&center, w, h) {
-                                        painter.text(
-                                            origin + Vec2::new(pt.0, pt.1 - 8.0),
-                                            egui::Align2::CENTER_BOTTOM,
-                                            &quadric.label,
-                                            egui::FontId::proportional(12.0),
-                                            label_color,
-                                        );
-                                    }
+                            }
+                            if !quadric.label.is_empty() && center_count > 0 {
+                                let center = Point3D::from_vec3(center_acc / center_count as f32);
+                                if let Some(pt) = self.camera.project(&center, w, h) {
+                                    painter.text(
+                                        origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                        egui::Align2::CENTER_BOTTOM,
+                                        &quadric.label,
+                                        egui::FontId::proportional(12.0),
+                                        label_color,
+                                    );
                                 }
                             }
                         }

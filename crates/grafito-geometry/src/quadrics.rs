@@ -1288,6 +1288,100 @@ pub fn quadric_axis_permutation(shape: &QuadricShape) -> Option<[usize; 3]> {
     Some(perm)
 }
 
+/// Tope de entradas del cache de wireframes de cuádricas (LRU simple).
+pub const QUADRIC_WIRE_CACHE_ENTRIES: usize = 32;
+
+/// `PolylineSet` wireframe compartido de una cuádrica (ver [`QuadricWireCache`]).
+pub type QuadricWirePolylines = std::sync::Arc<Vec<Vec<crate::Point3D>>>;
+
+/// Hash estable de los 10 coeficientes (bits `f64`, `-0.0` ≡ `0.0`).
+///
+/// Solo para diagnóstico/estadística: la clave real del cache es
+/// [`coeffs_bits`] (los 10 `u64` completos). Un `u64` solo colisiona en la
+/// práctica: FNV-1a dio la misma clave para el hiperboloide
+/// `[1,1,-1,…,-1]` y el imaginario `[1,1,1,…,1]` (verificado) — por eso el
+/// hit exige igualdad total de bits, jamás solo el hash.
+#[must_use]
+pub fn quadric_coeffs_hash(coeffs: [f64; 10]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for bits in coeffs_bits(coeffs) {
+        hash ^= bits;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+/// Clave exacta del cache: los 10 coeficientes como bits (`-0.0` ≡ `0.0`).
+#[must_use]
+pub fn coeffs_bits(coeffs: [f64; 10]) -> [u64; 10] {
+    let mut bits = [0_u64; 10];
+    for (index, value) in coeffs.iter().enumerate() {
+        // Normaliza -0.0 → 0.0 para que la clave sea estable ante el signo del cero.
+        bits[index] = (value + 0.0).to_bits();
+    }
+    bits
+}
+
+/// Cache de `PolylineSet` de cuádricas por los 10 coeficientes exactos.
+///
+/// Vive en core (`grafito-geometry`), NO en UI: la UI solo itera lo que
+/// devuelve [`QuadricWireCache::wire_for`]. `wire_for` clasifica + malla
+/// solo en miss; en hit devuelve el `Arc` compartido sin recomputar.
+/// W-A: 2 frames con mismos coeficientes → 1 cómputo (`compute_count() == 1`).
+/// La clave es exacta ([`coeffs_bits`]): el hash FNV colisiona en la práctica
+/// (hiperboloide vs imaginario) y un hit falso dibujaría geometría ajena.
+#[derive(Debug, Default)]
+pub struct QuadricWireCache {
+    entries: Vec<([u64; 10], QuadricWirePolylines)>,
+    compute_count: usize,
+}
+
+impl QuadricWireCache {
+    /// Cache vacío.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cantidad de cómputos reales (`classify` + `wire`) desde la creación.
+    #[must_use]
+    pub fn compute_count(&self) -> usize {
+        self.compute_count
+    }
+
+    /// Cantidad de entradas cacheadas.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// `true` si no hay entradas cacheadas.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Wireframe cacheado para `coeffs`. En miss clasifica + malla, guarda
+    /// (evicción FIFO al superar [`QUADRIC_WIRE_CACHE_ENTRIES`]) y cuenta 1.
+    /// El `Err` honesto NO se cachea: la degenerada se revalida cada vez.
+    pub fn wire_for(&mut self, coeffs: [f64; 10]) -> Result<QuadricWirePolylines, QuadricError> {
+        // Clave exacta: el hash u64 solo colisiona (ver `quadric_coeffs_hash`).
+        let key = coeffs_bits(coeffs);
+        if let Some((_, cached)) = self.entries.iter().find(|(k, _)| *k == key) {
+            return Ok(std::sync::Arc::clone(cached));
+        }
+        let shape = classify_quadric(coeffs)?;
+        let lines = quadric_wire_points(&shape)?;
+        let shared = std::sync::Arc::new(lines);
+        self.compute_count += 1;
+        if self.entries.len() >= QUADRIC_WIRE_CACHE_ENTRIES {
+            self.entries.remove(0);
+        }
+        self.entries.push((key, std::sync::Arc::clone(&shared)));
+        Ok(shared)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1304,6 +1398,43 @@ mod tests {
         for r in shape.params {
             assert!((r - 1.0).abs() < 1e-9, "radio {r}");
         }
+    }
+
+    #[test]
+    fn wa_wire_cache_dos_frames_un_computo() {
+        // W-A red: 2 frames con mismos 10 coeficientes → 1 cómputo.
+        let mut cache = QuadricWireCache::new();
+        let c = coeffs(1.0, 1.0, -1.0, -1.0);
+        let first = cache.wire_for(c).expect("una hoja");
+        assert_eq!(cache.compute_count(), 1);
+        let second = cache.wire_for(c).expect("hit");
+        assert_eq!(cache.compute_count(), 1, "el 2do frame no recomputa");
+        assert_eq!(first.len(), second.len());
+        assert!(std::sync::Arc::ptr_eq(&first, &second), "mismo Arc en hit");
+        // Coeficientes distintos → miss y 2do cómputo.
+        let other = coeffs(1.0, 1.0, -1.0, 1.0);
+        let _ = cache.wire_for(other).expect("dos hojas");
+        assert_eq!(cache.compute_count(), 2);
+        // Degenerada sin superficie: Err honesto y NO se cachea ni cuenta.
+        let before = cache.compute_count();
+        assert!(cache.wire_for([0.0; 10]).is_err());
+        assert_eq!(cache.compute_count(), before);
+        // Colisión FNV real (verificada): hiperboloide `[1,1,-1,…,-1]` e
+        // imaginario `[1,1,1,…,1]` daban el mismo `u64` — con clave exacta el
+        // imaginario sigue siendo `Err` aunque el hiperboloide esté cacheado.
+        let hyperbolic = coeffs(1.0, 1.0, -1.0, -1.0);
+        let imaginary = coeffs(1.0, 1.0, 1.0, 1.0);
+        assert_eq!(
+            quadric_coeffs_hash(hyperbolic),
+            quadric_coeffs_hash(imaginary),
+            "colisión documentada del hash"
+        );
+        let mut cache2 = QuadricWireCache::new();
+        assert!(cache2.wire_for(hyperbolic).is_ok());
+        assert!(
+            cache2.wire_for(imaginary).is_err(),
+            "el imaginario no debe reusar el hit del hiperboloide"
+        );
     }
 
     #[test]

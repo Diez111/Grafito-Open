@@ -73,6 +73,34 @@ pub fn hint_for(obj: &GeoObject) -> &'static str {
     }
 }
 
+/// Ejemplo clicable de sintaxis válida por tipo (W-A, puro y testeable).
+///
+/// Cada ejemplo pasa [`validate_draft`] contra un objeto de su tipo: el botón
+/// "Usar ejemplo" del Inspector lo inserta como borrador cuando el actual es
+/// inválido, en vez de dejar al usuario sin salida. `None` si el tipo no se
+/// edita por ecuación.
+pub fn example_for(obj: &GeoObject) -> Option<&'static str> {
+    match obj {
+        GeoObject::Function(_) => Some("y = x^2"),
+        GeoObject::ParametricCurve2D(_) => Some("(cos(t), sin(t))"),
+        GeoObject::ParametricCurve3D(_) => Some("(cos(t), sin(t), t)"),
+        GeoObject::ImplicitCurve(_) => Some("x^2 + y^2 = 1"),
+        GeoObject::Line(_) => Some("2x - 3y = 5 [(1,-1) - (4,1)]"),
+        GeoObject::Circle(_) => Some("(x - 1)^2 + (y - 2)^2 = 9"),
+        GeoObject::Ellipse(_) => Some("elipse centro=(0, 0) rx=3 ry=2 rot=0"),
+        GeoObject::Parabola(_) => Some("parabola vertice=(0, 0) p=1 vertical=true rot=0"),
+        GeoObject::Hyperbola(_) => Some("hiperbola centro=(0, 0) a=3 b=2 horizontal=true rot=0"),
+        GeoObject::Point(_) => Some("(1, 2)"),
+        GeoObject::Polygon(_) => Some("[(0,0), (1,0), (0,1)]"),
+        GeoObject::Text(_) => Some("\"hola\" @ (0, 0)"),
+        GeoObject::PolarCurve(_) => Some("r = 1 + cos(t)"),
+        GeoObject::Surface3D(s) if s.is_parametric => Some("(u, v, u+v)"),
+        GeoObject::Surface3D(s) if s.is_complex => Some("|z^2 + 1|"),
+        GeoObject::Surface3D(_) => Some("z = x + y"),
+        _ => None,
+    }
+}
+
 /// Valida el borrador sin tocar el documento. `Ok(objeto)` trae la misma `id`.
 pub fn validate_draft(original: &GeoObject, draft: &str) -> Result<GeoObject, String> {
     inspector_equation::parse_inspector_equation(original, draft).map_err(|e| e.message)
@@ -217,5 +245,59 @@ mod tests {
         assert_eq!(st.draft, "y = x");
         assert_eq!(st.error, None);
         assert!(!st.editing);
+    }
+
+    #[test]
+    fn wa_ejemplo_valido_por_tipo_y_revertir() {
+        // W-A red: cada ejemplo clicable valida contra su tipo (sintaxis
+        // válida real, no prosa) y `cancel_edit` es el "Revertir" que vuelve
+        // al último válido (canónica) sin tocar el documento.
+        use grafito_core::{
+            CircleObj, EllipseObj, HyperbolaObj, LineObj, ParabolaObj, ParametricCurve2DObj,
+            PolarCurveObj, PolygonObj, TextObj,
+        };
+        use grafito_geometry::Point2;
+        let cases: Vec<GeoObject> = vec![
+            GeoObject::Function(FunctionObj::new("x")),
+            GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0))),
+            GeoObject::Circle(CircleObj::new(Point2::new(0.0, 0.0), 1.0)),
+            GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0))),
+            GeoObject::Ellipse(EllipseObj::new(Point2::new(0.0, 0.0), 3.0, 2.0)),
+            GeoObject::Parabola(ParabolaObj::new(Point2::new(0.0, 0.0), 1.0)),
+            GeoObject::Hyperbola(HyperbolaObj::new(Point2::new(0.0, 0.0), 3.0, 2.0)),
+            GeoObject::Polygon(PolygonObj::new(vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0, 0.0),
+                Point2::new(0.0, 1.0),
+            ])),
+            GeoObject::Text(TextObj::new("hola", Point2::new(0.0, 0.0))),
+            GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(
+                "cos(t)",
+                "sin(t)",
+                0.0,
+                std::f64::consts::TAU,
+            )),
+            GeoObject::PolarCurve(PolarCurveObj::new("1", 0.0, std::f64::consts::TAU)),
+        ];
+        assert!(!cases.is_empty());
+        for obj in &cases {
+            let example = example_for(obj).expect("editable con ejemplo");
+            assert!(
+                validate_draft(obj, example).is_ok(),
+                "ejemplo inválido para {:?}: {example}",
+                std::mem::discriminant(obj)
+            );
+            // Revertir: borrador roto → canónica (último válido), sin error.
+            let mut st = begin_edit(obj).expect("editable");
+            update_draft(&mut st, "sintaxis rota ((( ");
+            cancel_edit(&mut st, obj);
+            assert_eq!(st.draft, obj.canonical_equation_text().expect("canónica"));
+            assert_eq!(st.error, None);
+        }
+        // No editable → sin ejemplo honesto.
+        use grafito_core::Cube3DObj;
+        use grafito_geometry::Point3D;
+        let cube = GeoObject::Cube3D(Cube3DObj::new(Point3D::new(0.0, 0.0, 0.0), 1.0));
+        assert_eq!(example_for(&cube), None);
     }
 }

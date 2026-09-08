@@ -676,6 +676,19 @@ impl AssistantRuntime {
     }
 }
 
+/// Mensaje honesto ante 2da animación en curso (W-A, puro y testeable).
+///
+/// `was_animating=true` → `Some("Ya estoy animando…")` (el caller ya hizo el
+/// cancel real y arranca la nueva = reemplazo explícito avisado, no mudo).
+/// `false` → `None` (arranque normal, sin aviso).
+pub(crate) fn anim_replace_message(was_animating: bool) -> Option<&'static str> {
+    if was_animating {
+        Some("Ya estoy animando: cancelo la anterior y arranco la nueva.")
+    } else {
+        None
+    }
+}
+
 /// Limpia la burbuja provisional del streaming (cancelación o resultado).
 ///
 /// Sólo retira el último turno si es del asistente: con el slot remoto
@@ -3072,10 +3085,14 @@ impl GrafitoApp {
         template: &str,
         concept: &str,
     ) {
-        // Si hay una animación en curso, cancelarla para regenerar la nueva (evita "tomo una ya hecha").
-        // Cancel real (AS4): señala el token antes de dropear, el hilo descarta.
+        // W-A: si hay una animación en curso, reemplazo EXPLÍCITO avisado
+        // (antes era mudo). Cancel real (AS4): señala el token antes de
+        // dropear, el hilo descarta. El toast dice "espero o reemplazo".
         if self.assistant_runtime.cancel_anim_job() {
             self.assistant.anim_progress = false;
+            if let Some(message) = anim_replace_message(true) {
+                self.notify(message, ToastKind::Info);
+            }
         }
         // No destruir texturas durante el draw (evita wgpu panic 'Texture has been destroyed').
         // La media previa se mantiene visible hasta que la nueva la reemplace en sync_assistant_for_frame
@@ -6686,6 +6703,18 @@ mod tests {
         assert_eq!(saw, vec![(1, 3), (2, 3), (3, 3)]);
         cancel.cancel();
         assert!(worker.is_cancelled(), "cancel debe verse entre frames");
+    }
+
+    #[test]
+    fn wa_segunda_animacion_avisa_reemplazo_explicito() {
+        // W-A red: 2da animación en curso → toast "ya estoy animando",
+        // no muda. Sin animación → `None` (arranque silencioso normal).
+        let message = super::anim_replace_message(true).expect("aviso");
+        assert!(
+            message.contains("animando"),
+            "el aviso debe decir animando: {message}"
+        );
+        assert!(super::anim_replace_message(false).is_none());
     }
 
     #[test]

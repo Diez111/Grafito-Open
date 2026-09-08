@@ -105,6 +105,26 @@ static POLYCHORON_TOPOLOGY_CACHE: OnceLock<Result<PolychoronTopologyCache, ()>> 
 static GENERIC_POLYTOPE_TOPOLOGY_CACHE: OnceLock<Result<GenericPolytopeTopologyCache, ()>> =
     OnceLock::new();
 static PROJECTED_POLYTOPE_CACHE: OnceLock<Mutex<ProjectedPolytopeCache>> = OnceLock::new();
+/// W-A: cache global de wireframes de cuádricas por hash de los 10
+/// coeficientes. Vive en `depth_3d` (render), NO en UI: la UI
+/// (`grafito-app/src/render_3d.rs`) solo itera el `Arc` devuelto.
+static QUADRIC_WIRE_CACHE: OnceLock<Mutex<grafito_geometry::quadrics::QuadricWireCache>> =
+    OnceLock::new();
+
+/// Wireframe exacto de cuádrica con cache por hash de coeficientes.
+///
+/// En hit devuelve el `Arc` compartido sin recomputar (`classify` +
+/// `wire` solo en miss). El `Err` honesto no se cachea. La UI solo itera.
+pub fn cached_quadric_wire_points(
+    coeffs: [f64; 10],
+) -> Result<Arc<Vec<Vec<Point3D>>>, grafito_geometry::quadrics::QuadricError> {
+    let cache = QUADRIC_WIRE_CACHE
+        .get_or_init(|| Mutex::new(grafito_geometry::quadrics::QuadricWireCache::new()));
+    let mut guard: MutexGuard<grafito_geometry::quadrics::QuadricWireCache> = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.wire_for(coeffs)
+}
 
 fn once_lock_slots<T>(count: usize) -> Result<Vec<OnceLock<T>>, ()> {
     let mut entries = Vec::new();
@@ -1998,15 +2018,13 @@ fn append_quadric(mesh: &mut WorldMesh, camera: &Camera3D, quadric: &Quadric3DOb
         );
         return;
     }
-    let shape = match grafito_geometry::quadrics::classify_quadric(coeffs) {
-        Ok(shape) => shape,
-        Err(_) => return,
-    };
-    let lines = match grafito_geometry::quadrics::quadric_wire_points(&shape) {
+    // W-A: matemática cacheada por hash de coeficientes (en este módulo,
+    // no en UI). La UI solo itera el `Arc`; en hit no hay `classify` ni `wire`.
+    let lines = match cached_quadric_wire_points(coeffs) {
         Ok(lines) => lines,
         Err(_) => return,
     };
-    for polyline in &lines {
+    for polyline in lines.iter() {
         for segment in polyline.windows(2) {
             if segment.len() < 2 {
                 continue;
@@ -2510,5 +2528,22 @@ mod tests {
             crate::prism_base_vertices(&prism).len(),
             crate::MAX_PRISM_BASE_VERTICES
         );
+    }
+
+    #[test]
+    fn wa_cached_quadric_wire_dos_frames_mismo_arc() {
+        // W-A: 2 frames con mismos coeficientes → mismo `Arc` (hit, sin
+        // recomputar). Usa hiperboloide de una hoja (no elipsoide: ese va
+        // por camino legacy y no pasa por el cache).
+        let coeffs = [1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0];
+        let first = cached_quadric_wire_points(coeffs).expect("una hoja");
+        assert!(!first.is_empty());
+        let second = cached_quadric_wire_points(coeffs).expect("hit");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "el 2do frame debe reusar el Arc cacheado"
+        );
+        // Degenerada: Err honesto, sin pánico.
+        assert!(cached_quadric_wire_points([0.0; 10]).is_err());
     }
 }

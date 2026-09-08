@@ -16,11 +16,8 @@
 //! `ctx.request_repaint()` mientras [`ImplicitSurfaceSlot::has_pending`].
 //! Ver `BLOCKERS` en el mensaje de entrega A3.
 
-use std::sync::{
-    mpsc::{sync_channel, Receiver, TryRecvError},
-    Arc,
-};
-use std::time::Instant;
+use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
+use std::sync::Arc;
 
 use grafito_geometry::polytopes::{
     implicit_surface_mesh, MeshError, TriangleMesh3D, GB_MAX_MARCHING_CELLS_PER_AXIS,
@@ -139,7 +136,6 @@ pub struct ImplicitSurfaceSlot {
     receiver: Option<Receiver<ImplicitSurfaceOutcome>>,
     last_valid: Option<TriangleMesh3D>,
     pending_cells: usize,
-    submitted_at: Option<Instant>,
 }
 
 impl ImplicitSurfaceSlot {
@@ -159,7 +155,6 @@ impl ImplicitSurfaceSlot {
         let request = ImplicitSurfaceRequest::new(field, min, max, cells_per_axis)?;
         self.receiver = Some(spawn_implicit_surface_job(request));
         self.pending_cells = cells_per_axis;
-        self.submitted_at = Some(Instant::now());
         Ok(())
     }
 
@@ -181,17 +176,14 @@ impl ImplicitSurfaceSlot {
             }
             Ok(Ok(mesh)) => {
                 self.pending_cells = 0;
-                self.submitted_at = None;
-                self.last_valid = Some(mesh.clone());
-                if let Some(cached) = self.last_valid.clone() {
-                    SurfaceSlotPoll::Ready(cached)
-                } else {
-                    SurfaceSlotPoll::Pending
-                }
+                // Un solo clone: uno se mueve al slot, la copia sale en
+                // `Ready`. Antes había dos (`mesh.clone()` + `last_valid.clone()`).
+                let ready = mesh.clone();
+                self.last_valid = Some(mesh);
+                SurfaceSlotPoll::Ready(ready)
             }
             Ok(Err(error)) => {
                 self.pending_cells = 0;
-                self.submitted_at = None;
                 SurfaceSlotPoll::Failed(error)
             }
         }
@@ -220,14 +212,13 @@ impl ImplicitSurfaceSlot {
     pub fn cancel(&mut self) {
         self.receiver = None;
         self.pending_cells = 0;
-        self.submitted_at = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn sphere_field() -> ImplicitField {
         Arc::new(|x: f64, y: f64, z: f64| Some(x * x + y * y + z * z - 1.0))
@@ -357,5 +348,29 @@ mod tests {
         assert_eq!(slot.pending_cells(), 0);
         assert!(matches!(slot.poll(), SurfaceSlotPoll::Pending));
         assert!(slot.last_valid().is_none());
+    }
+
+    #[test]
+    fn ready_triangle_count_matches_last_valid_sin_residuo() {
+        // W-A: un solo clone — lo que sale en `Ready` es lo que queda en
+        // `last_valid`, sin pendiente residual ni celdas colgadas.
+        let (min, max) = test_box();
+        let mut slot = ImplicitSurfaceSlot::new();
+        slot.submit_new(sphere_field(), min, max, 8)
+            .expect("esfera válida");
+        let outcome = poll_until_done(&mut slot);
+        let ready_count = match outcome {
+            SurfaceSlotPoll::Ready(mesh) => mesh.triangle_count(),
+            SurfaceSlotPoll::Failed(error) => panic!("job 8³ falló: {error}"),
+            SurfaceSlotPoll::Pending => panic!("poll salió Pending tras el deadline"),
+        };
+        assert!(ready_count > 0, "la esfera 8³ debe tener triángulos");
+        assert_eq!(
+            slot.last_valid().expect("último válido").triangle_count(),
+            ready_count,
+            "Ready y last_valid deben coincidir (un solo clone)"
+        );
+        assert!(!slot.has_pending(), "sin job residual tras Ready");
+        assert_eq!(slot.pending_cells(), 0, "sin celdas residuales tras Ready");
     }
 }
