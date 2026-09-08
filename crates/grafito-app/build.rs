@@ -35,6 +35,19 @@ fn main() -> io::Result<()> {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/grafito-icon-256x256.png");
     println!("cargo:rerun-if-changed={}", icon_source.display());
 
+    // Hash del commit para "Acerca de" (prueba de versión visible).
+    // `rerun-if-changed` sobre HEAD: se re-emite en cada commit.
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    let hash = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local".to_string());
+    println!("cargo:rustc-env=GRAFITO_BUILD_HASH={hash}");
+
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "windows" {
         return Ok(());
     }

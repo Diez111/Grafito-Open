@@ -3199,7 +3199,35 @@ impl GrafitoApp {
                         }
                         match rendered {
                             Ok(frames) => {
-                                let title = format!("{} (paramétrica)", concept_owned);
+                                // Título curado por kind (no eco crudo del pedido:
+                                // venía con typos y sufijos contradictorios).
+                                let title = match anim.kind {
+                                    grafito_anim::parametric::ParametricKind::Tangent => {
+                                        format!("Tangente móvil · {}", anim.expr_a)
+                                    }
+                                    grafito_anim::parametric::ParametricKind::Area => {
+                                        format!(
+                                            "Área acumulada · {} [{},{}]",
+                                            anim.expr_a, anim.p0, anim.p1
+                                        )
+                                    }
+                                    grafito_anim::parametric::ParametricKind::Sweep => {
+                                        format!(
+                                            "Barrido · {} ({})",
+                                            anim.expr_a,
+                                            anim.param.as_str()
+                                        )
+                                    }
+                                    grafito_anim::parametric::ParametricKind::Trace => {
+                                        format!("Traza · {}", anim.expr_a)
+                                    }
+                                    grafito_anim::parametric::ParametricKind::Morph => {
+                                        "Transición".to_string()
+                                    }
+                                    grafito_anim::parametric::ParametricKind::Locus => {
+                                        "Lugar geométrico".to_string()
+                                    }
+                                };
                                 Ok(grafito_ui::assistant::AssistantMedia { title, frames })
                             }
                             Err(error) => Err(error.to_string()),

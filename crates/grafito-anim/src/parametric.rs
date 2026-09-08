@@ -1659,6 +1659,151 @@ pub fn infer_area_anim(pedido: &str) -> ParametricResult<AreaPedido> {
     Ok(AreaPedido::Canonica(anim))
 }
 
+/// Expresión canónica de tangente cuando el pedido no trae función
+/// (espejo del Submit `derivative-slope`: `Tangent x^2 p [-1.5,1.5]`).
+pub const TANGENT_CANONICAL_EXPR: &str = "x^2";
+/// Rango canónico `[-1.5, 1.5]` cuando el pedido no trae rango.
+pub const TANGENT_CANONICAL_P0: f64 = -1.5;
+pub const TANGENT_CANONICAL_P1: f64 = 1.5;
+/// Parámetro canónico de la animación de tangente.
+pub const TANGENT_CANONICAL_PARAM: &str = "p";
+/// Prosa rioplatense que declara la canónica (Submit + agente la usan tal
+/// cual; el renderer dibuja etiquetas ASCII por separado).
+pub const TANGENT_CANONICAL_PROSA: &str =
+    "te muestro con f(x)=x² y su tangente móvil; pedime otra y la cambio";
+
+/// ¿El pedido menciona derivada/tangente/pendiente? Espejo de
+/// `pedido_menciona_area`: normaliza sin tildes + fuzzy acotado
+/// ("derivda" matchea "derivada"). Puro, sin I/O.
+pub fn pedido_menciona_tangente(pedido: &str) -> bool {
+    let norm = normaliza_para_match(pedido);
+    for token in norm.split(|c: char| !c.is_alphabetic()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token_matchea_clave(token, "tangente")
+            || token_matchea_clave(token, "derivada")
+            || token_matchea_clave(token, "pendiente")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pedido de tangente/derivada ya resuelto: canónico o explícito.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TangentPedido {
+    /// Sin función (o con prosa sin `x` no evaluable): canónico `x^2 [-1.5,1.5]`.
+    Canonica(ParametricAnim),
+    /// Con función válida del usuario.
+    Explicita(ParametricAnim),
+}
+
+impl TangentPedido {
+    /// La animación a renderizar en ambas ramas.
+    pub fn anim(&self) -> &ParametricAnim {
+        match self {
+            Self::Canonica(a) | Self::Explicita(a) => a,
+        }
+    }
+
+    /// `true` solo en la rama canónica (la prosa debe declararlo).
+    pub fn es_canonica(&self) -> bool {
+        matches!(self, Self::Canonica(_))
+    }
+}
+
+fn tangent_anim(
+    expr: String,
+    param_raw: &str,
+    p0: f64,
+    p1: f64,
+    pedido_lower: &str,
+) -> ParametricResult<ParametricAnim> {
+    let param_nombre: String = if param_raw.trim().is_empty() {
+        guess_param_name(&expr, None).to_string()
+    } else {
+        param_raw.to_string()
+    };
+    let param = ParamName::try_new(&param_nombre)?;
+    let n = extract_frames(pedido_lower)?.unwrap_or(PARAMETRIC_MAX_FRAMES);
+    let frames = FrameCount::try_new(n)?;
+    let viewport = extract_viewport(pedido_lower).unwrap_or_default();
+    ParametricAnim::try_new(
+        ParametricKind::Tangent,
+        expr,
+        None,
+        param,
+        p0,
+        p1,
+        frames,
+        viewport,
+    )
+}
+
+/// Infiere un pedido de tangente/derivada a `TangentPedido`.
+///
+/// - Sin expresión tras `=` → `Canonica` (`x^2` en `[-1.5,1.5]`, o el rango
+///   pedido si lo trae).
+/// - Con expresión evaluable → `Explicita`.
+/// - Con prosa sin `x` no evaluable → se ignora la prosa y va `Canonica`.
+/// - Con `x` no evaluable en ningún punto → `Err` honesto, sin frames.
+pub fn infer_tangent_anim(pedido: &str) -> ParametricResult<TangentPedido> {
+    let text = pedido.trim();
+    if text.is_empty() {
+        return Err(ParametricError::PedidoVacio);
+    }
+    if text.chars().count() > 2000 {
+        return Err(ParametricError::ExpresionMuyLarga {
+            got: text.chars().count(),
+            max: 2000,
+        });
+    }
+    if !pedido_menciona_tangente(pedido) {
+        return Err(ParametricError::FaltaTipo);
+    }
+    let lower = text.to_lowercase();
+    let (param_raw, p0, p1) = extract_range(text).map_or_else(
+        || (String::new(), TANGENT_CANONICAL_P0, TANGENT_CANONICAL_P1),
+        |(nombre, a, b)| (nombre, a, b),
+    );
+    let Some(expr) = extract_single_expr(text) else {
+        let anim = tangent_anim(
+            TANGENT_CANONICAL_EXPR.to_string(),
+            &param_raw,
+            p0,
+            p1,
+            &lower,
+        )?;
+        return Ok(TangentPedido::Canonica(anim));
+    };
+    let param_efectivo: String = if param_raw.trim().is_empty() {
+        guess_param_name(&expr, None).to_string()
+    } else {
+        param_raw.clone()
+    };
+    if area_expr_evaluable(&expr, &param_efectivo, p0, p1) {
+        let anim = tangent_anim(expr, &param_raw, p0, p1, &lower)?;
+        return Ok(TangentPedido::Explicita(anim));
+    }
+    if expr.contains('x') || expr.contains('X') {
+        return Err(ParametricError::NoSoportado {
+            detalle: format!(
+                "la función {expr:?} no se puede evaluar en [{p0},{p1}]: revisá la expresión, por ejemplo f(x)=x^2"
+            ),
+        });
+    }
+    let anim = tangent_anim(
+        TANGENT_CANONICAL_EXPR.to_string(),
+        &param_raw,
+        p0,
+        p1,
+        &lower,
+    )?;
+    Ok(TangentPedido::Canonica(anim))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1895,6 +2040,34 @@ mod tests {
             extract_single_expr("integral de f(x)=x^2 [0,2]").as_deref(),
             Some("x^2")
         );
+    }
+
+    #[test]
+    fn pedido_derivada_pelada_es_canonica_tangente() {
+        // Espejo del caso integral: "hace una animacion de una derivada
+        // (paramétrica)" va a canónica x^2 [-1.5,1.5] (igual que el Submit
+        // `derivative-slope`), no a `FaltaTipo`.
+        let pedido = "hace una animacion de una derivada (paramétrica)";
+        assert!(
+            pedido_menciona_tangente(pedido),
+            "derivada debe mencionar tangente"
+        );
+        let res = infer_tangent_anim(pedido).unwrap();
+        assert!(res.es_canonica(), "sin función va a canónica");
+        assert_eq!(res.anim().expr_a, TANGENT_CANONICAL_EXPR);
+        assert_eq!((res.anim().p0, res.anim().p1), (-1.5, 1.5));
+        assert_eq!(res.anim().kind, ParametricKind::Tangent);
+        assert!(TANGENT_CANONICAL_PROSA.contains("pedime otra"));
+    }
+
+    #[test]
+    fn tangente_explicita_y_errores_honestos() {
+        let res = infer_tangent_anim("tangente movil de f(x)=x^3 en [-2,2]").unwrap();
+        assert!(!res.es_canonica());
+        assert_eq!(res.anim().expr_a, "x^3");
+        assert!(infer_tangent_anim("haceme una animación").is_err());
+        assert!(infer_tangent_anim("").is_err());
+        assert!(infer_tangent_anim("tangente de f(x)=foo(x)").is_err());
     }
 
     #[test]

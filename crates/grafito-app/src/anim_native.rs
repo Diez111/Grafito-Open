@@ -1045,13 +1045,14 @@ pub fn render_derivative_frames_with_params(
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
-    render_derivative_frames_with_params_impl(width, height, params, &mut |_, _| {})
+    render_derivative_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
 }
 
 fn render_derivative_frames_with_params_impl(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let center = scene_param_clamped(params, SCENE_PARAM_X0, 0.0, -3.0, 3.0);
@@ -1107,17 +1108,19 @@ fn render_derivative_frames_with_params_impl(
         draw_line(&mut buf, w, h, (ax, ay), (bx, by), TANGENT_BLUE);
         let (px, py) = to_pixel(w, h, x0, y0);
         draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
-        // titulo superior
-        draw_text_block(
-            &mut buf,
-            w,
-            h,
-            w / 12,
-            h / 12,
-            "derivada  f'(x)",
-            TEXT_COLOR,
-            1,
-        );
+        // titulo superior (solo standalone/export: el chat ya titula en el header)
+        if con_rotulo {
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 12,
+                h / 12,
+                "derivada  f'(x)",
+                TEXT_COLOR,
+                1,
+            );
+        }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -1125,12 +1128,13 @@ fn render_derivative_frames_with_params_impl(
 }
 
 pub(crate) fn render_pitagoras_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    render_pitagoras_frames_impl(width, height, &mut |_, _| {})
+    render_pitagoras_frames_impl(width, height, true, &mut |_, _| {})
 }
 
 fn render_pitagoras_frames_impl(
     width: u32,
     height: u32,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
@@ -1165,16 +1169,18 @@ fn render_pitagoras_frames_impl(
             draw_line(&mut buf, w, h, p3, mid, SQUARE_GREEN);
             draw_line(&mut buf, w, h, mid, p1, SQUARE_GREEN);
         }
-        draw_text_block(
-            &mut buf,
-            w,
-            h,
-            w / 14,
-            h / 12,
-            "a^2 + b^2 = c^2",
-            TEXT_COLOR,
-            1,
-        );
+        if con_rotulo {
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "a^2 + b^2 = c^2",
+                TEXT_COLOR,
+                1,
+            );
+        }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -1200,7 +1206,7 @@ pub fn render_integral_frames_with_params(
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
-    render_integral_frames_with_params_impl(width, height, params, &mut |_, _| {})
+    render_integral_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
 }
 
 /// Anim canónica de integral (N1): la vía clásica evalúa con EL MISMO
@@ -1284,6 +1290,7 @@ fn render_integral_frames_with_params_impl(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let lo = scene_param_clamped(params, SCENE_PARAM_A, 0.0, -3.0, 3.0);
@@ -1353,8 +1360,11 @@ fn render_integral_frames_with_params_impl(
         );
         // Curva fija por encima (idéntica en los 48 frames).
         draw_curve_gaps(&mut buf, w, h, &curva, CURVE_MAIN);
-        // Etiquetas ASCII honestas: título fijo + valor acumulado del frame.
-        draw_text_block(&mut buf, w, h, w / 14, h / 12, "y=x^2", TEXT_COLOR, 1);
+        // Etiquetas ASCII honestas: título fijo (solo export) + valor acumulado
+        // del frame (siempre: es dato, no rótulo).
+        if con_rotulo {
+            draw_text_block(&mut buf, w, h, w / 14, h / 12, "y=x^2", TEXT_COLOR, 1);
+        }
         let etiqueta = match integral_acumulada(anim_ref, frame, a, x_end) {
             Some(s) => format!("[{a:.2},{x_end:.2}] S={s:.2}"),
             None => format!("[{a:.2},{x_end:.2}] S=?"),
@@ -1376,16 +1386,17 @@ fn render_integral_frames_with_params_impl(
 }
 
 pub(crate) fn render_taylor_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    render_taylor_frames_impl(width, height, &mut |_, _| {})
+    render_taylor_frames_impl(width, height, true, &mut |_, _| {})
 }
 
 fn render_taylor_frames_impl(
     width: u32,
     height: u32,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     // Legacy intacto: orden 3 + etiqueta histórica (píxeles pineados).
-    render_taylor_frames_inner(width, height, 3, "taylor  sin(x)", on_frame)
+    render_taylor_frames_inner(width, height, 3, "taylor  sin(x)", con_rotulo, on_frame)
 }
 
 /// Suma parcial de `sin(x)` a grado `grado` (solo impares aportan).
@@ -1426,19 +1437,20 @@ pub fn render_taylor_frames_with_params(
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
-    render_taylor_frames_with_params_impl(width, height, params, &mut |_, _| {})
+    render_taylor_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
 }
 
 fn render_taylor_frames_with_params_impl(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let orden = scene_param_clamped(params, SCENE_PARAM_TERMS, 3.0, 1.0, 10.0) as usize;
     let orden = orden.clamp(1, 10);
     let etiqueta = format!("taylor sin(x) n={orden}");
-    render_taylor_frames_inner(width, height, orden, &etiqueta, on_frame)
+    render_taylor_frames_inner(width, height, orden, &etiqueta, con_rotulo, on_frame)
 }
 
 fn render_taylor_frames_inner(
@@ -1446,6 +1458,7 @@ fn render_taylor_frames_inner(
     height: u32,
     orden: usize,
     etiqueta: &str,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
@@ -1495,7 +1508,9 @@ fn render_taylor_frames_inner(
             c[3] = (alpha as f64 * w0.min(w1)) as u8;
             draw_line(&mut buf, w, h, a, b, c);
         }
-        draw_text_block(&mut buf, w, h, w / 14, h / 12, etiqueta, TEXT_COLOR, 1);
+        if con_rotulo {
+            draw_text_block(&mut buf, w, h, w / 14, h / 12, etiqueta, TEXT_COLOR, 1);
+        }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -1503,12 +1518,13 @@ fn render_taylor_frames_inner(
 }
 
 pub(crate) fn render_conformal_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    render_conformal_frames_impl(width, height, &mut |_, _| {})
+    render_conformal_frames_impl(width, height, true, &mut |_, _| {})
 }
 
 fn render_conformal_frames_impl(
     width: u32,
     height: u32,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
@@ -1562,16 +1578,18 @@ fn render_conformal_frames_impl(
             let b = to_pixel(w, h, x1, y1);
             draw_line(&mut buf, w, h, a, b, LINE_SOFT_BLUE);
         }
-        draw_text_block(
-            &mut buf,
-            w,
-            h,
-            w / 14,
-            h / 12,
-            "conforme  w=f(z)",
-            TEXT_COLOR,
-            1,
-        );
+        if con_rotulo {
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "conforme  w=f(z)",
+                TEXT_COLOR,
+                1,
+            );
+        }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -1593,13 +1611,14 @@ pub fn render_universal_youtube_frames(
     width: u32,
     height: u32,
 ) -> Vec<egui::ColorImage> {
-    render_universal_youtube_frames_impl(concept, width, height, &mut |_, _| {})
+    render_universal_youtube_frames_impl(concept, width, height, true, &mut |_, _| {})
 }
 
 fn render_universal_youtube_frames_impl(
     concept: &str,
     width: u32,
     height: u32,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
@@ -1621,21 +1640,24 @@ fn render_universal_youtube_frames_impl(
         // fase de la curva y órbitas de partículas).
         fill_background(&mut buf, w, h, "universal", 0.0);
         draw_subtle_grid(&mut buf, w, h, 0.0);
-        // Rótulo honesto + eco del pedido (estáticos en todos los frames).
+        // Rótulo honesto + eco del pedido (solo standalone/export: el chat ya
+        // titula en el header de la card).
         let echo: String = concept_norm.chars().take(32).collect();
-        let title_h = 30;
-        draw_filled_rect(&mut buf, w, h, 6, 6, w.saturating_sub(12), title_h, SCRIM);
-        draw_text_block(
-            &mut buf,
-            w,
-            h,
-            10,
-            10,
-            UNIVERSAL_PLACEHOLDER_LABEL,
-            TEXT_COLOR,
-            1,
-        );
-        draw_text_block(&mut buf, w, h, 10, 20, &echo, TEXT_COLOR, 1);
+        if con_rotulo {
+            let title_h = 30;
+            draw_filled_rect(&mut buf, w, h, 6, 6, w.saturating_sub(12), title_h, SCRIM);
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                10,
+                10,
+                UNIVERSAL_PLACEHOLDER_LABEL,
+                TEXT_COLOR,
+                1,
+            );
+            draw_text_block(&mut buf, w, h, 10, 20, &echo, TEXT_COLOR, 1);
+        }
         // Barra de progreso inferior: posición real del frame (cromo honesto).
         let bar_y = h.saturating_sub(6);
         let bar_w = (w as f64 * t) as usize;
@@ -1731,6 +1753,10 @@ pub fn render_anim_for_concept_with_params(
 /// mover `AnimPreviewState.progress` y `request_repaint`; el render es
 /// determinista: el callback no altera los píxeles (ver test).
 /// Presupuesto intacto: siempre 48 frames (`NATIVE_ANIM_FRAME_COUNT`).
+///
+/// Sin rótulo quemado (pipeline del chat: el header egui de la card v3 ya
+/// titula). Para standalone / export GIF, usar `render_anim_for_export` o
+/// `render_anim_with_progress_con_rotulo(..., true, ...)`.
 pub fn render_anim_with_progress(
     template: &str,
     concept: &str,
@@ -1739,18 +1765,61 @@ pub fn render_anim_with_progress(
     params: &std::collections::BTreeMap<String, f64>,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
+    render_anim_with_progress_con_rotulo(template, concept, width, height, params, false, on_frame)
+}
+
+/// Núcleo con flag de rótulo: `con_rotulo=true` reproduce los píxeles
+/// históricos (título quemado arriba-izquierda + SCRIM del universal);
+/// `false` los omite sin tocar la matemática (fondo, grilla, curvas, áreas).
+pub fn render_anim_with_progress_con_rotulo(
+    template: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     match resolve_native_template(template, concept) {
-        "integral-area" => render_integral_frames_with_params_impl(width, height, params, on_frame),
-        "taylor-series" => render_taylor_frames_with_params_impl(width, height, params, on_frame),
-        "derivative-slope" => {
-            render_derivative_frames_with_params_impl(width, height, params, on_frame)
+        "integral-area" => {
+            render_integral_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
         }
-        "euler" => render_euler_frames_with_params_impl(width, height, params, on_frame),
-        "fourier" => render_fourier_frames_with_params_impl(width, height, params, on_frame),
+        "taylor-series" => {
+            render_taylor_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "derivative-slope" => {
+            render_derivative_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "euler" => {
+            render_euler_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "fourier" => {
+            render_fourier_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
         tmpl => render_anim_for_concept_legacy_with_progress(
-            tmpl, concept, width, height, params, on_frame,
+            tmpl, concept, width, height, params, con_rotulo, on_frame,
         ),
     }
+}
+
+/// Atajo standalone / export GIF: mismos 48 frames pero CON rótulo quemado
+/// (el GIF se ve fuera de la app, sin header egui que lo titule).
+pub fn render_anim_for_export(
+    template: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_anim_with_progress_con_rotulo(
+        template,
+        concept,
+        width,
+        height,
+        params,
+        true,
+        &mut |_, _| {},
+    )
 }
 
 /// Rama legacy con progreso (mismo match que `render_anim_for_concept_legacy`,
@@ -1761,23 +1830,34 @@ fn render_anim_for_concept_legacy_with_progress(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     match tmpl {
-        "integral-area" => render_integral_frames_with_params_impl(width, height, params, on_frame),
-        "taylor-series" => render_taylor_frames_impl(width, height, on_frame),
-        "conformal-map" => render_conformal_frames_impl(width, height, on_frame),
-        "pitagoras" => render_pitagoras_frames_impl(width, height, on_frame),
-        "derivative-slope" => {
-            render_derivative_frames_with_params_impl(width, height, params, on_frame)
+        "integral-area" => {
+            render_integral_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
         }
-        "euler" => render_euler_frames_with_params_impl(width, height, params, on_frame),
-        "fourier" => render_fourier_frames_with_params_impl(width, height, params, on_frame),
-        "logistic-bifurcation" => render_logistic_bifurcation_frames_impl(width, height, on_frame),
-        "gradient-field" => render_gradient_field_frames_impl(width, height, on_frame),
-        "mobius-transform" => render_mobius_frames_impl(width, height, on_frame),
-        "universal" => render_universal_youtube_frames_impl(concept, width, height, on_frame),
-        _ => render_universal_youtube_frames_impl(concept, width, height, on_frame),
+        "taylor-series" => render_taylor_frames_impl(width, height, con_rotulo, on_frame),
+        "conformal-map" => render_conformal_frames_impl(width, height, con_rotulo, on_frame),
+        "pitagoras" => render_pitagoras_frames_impl(width, height, con_rotulo, on_frame),
+        "derivative-slope" => {
+            render_derivative_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "euler" => {
+            render_euler_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "fourier" => {
+            render_fourier_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "logistic-bifurcation" => {
+            render_logistic_bifurcation_frames_impl(width, height, con_rotulo, on_frame)
+        }
+        "gradient-field" => render_gradient_field_frames_impl(width, height, con_rotulo, on_frame),
+        "mobius-transform" => render_mobius_frames_impl(width, height, con_rotulo, on_frame),
+        "universal" => {
+            render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame)
+        }
+        _ => render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame),
     }
 }
 
@@ -1818,13 +1898,14 @@ pub fn render_euler_frames_with_params(
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
-    render_euler_frames_with_params_impl(width, height, params, &mut |_, _| {})
+    render_euler_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
 }
 
 fn render_euler_frames_with_params_impl(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let max_terms = scene_param_clamped(params, SCENE_PARAM_TERMS, 7.0, 1.0, 7.0) as usize;
@@ -1912,17 +1993,19 @@ fn render_euler_frames_with_params_impl(
             let b = to_pixel(w, h, x1, partial(x1));
             draw_line(&mut buf, w, h, a, b, TANGENT_BLUE);
         }
-        // indicator text terms
-        draw_text_block(
-            &mut buf,
-            w,
-            h,
-            w / 14,
-            h / 12,
-            &format!("e^x  n={}", terms - 1),
-            TEXT_COLOR,
-            1,
-        );
+        // Indicador de términos (solo export: en el chat duplica el header).
+        if con_rotulo {
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                &format!("e^x  n={}", terms - 1),
+                TEXT_COLOR,
+                1,
+            );
+        }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -1942,13 +2025,14 @@ pub fn render_fourier_frames_with_params(
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
-    render_fourier_frames_with_params_impl(width, height, params, &mut |_, _| {})
+    render_fourier_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
 }
 
 fn render_fourier_frames_with_params_impl(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let max_harm = scene_param_clamped(params, SCENE_PARAM_TERMS, 6.0, 1.0, 6.0) as usize;
@@ -2026,16 +2110,18 @@ fn render_fourier_frames_with_params_impl(
                 draw_filled_circle(&mut buf, w, h, p.0, p.1, 2, GIBBS_RED);
             }
         }
-        draw_text_block(
-            &mut buf,
-            w,
-            h,
-            w / 14,
-            h / 12,
-            &format!("fourier  k={}", harmonics),
-            TEXT_COLOR,
-            1,
-        );
+        if con_rotulo {
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                &format!("fourier  k={}", harmonics),
+                TEXT_COLOR,
+                1,
+            );
+        }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -2046,12 +2132,13 @@ fn render_fourier_frames_with_params_impl(
 /// Fondo + diagrama tenue estático + columna highlight que barre con t.
 /// Determinista, <2s (muestreo cada 2px, 120 iters/col).
 pub fn render_logistic_bifurcation_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    render_logistic_bifurcation_frames_impl(width, height, &mut |_, _| {})
+    render_logistic_bifurcation_frames_impl(width, height, true, &mut |_, _| {})
 }
 
 fn render_logistic_bifurcation_frames_impl(
     width: u32,
     height: u32,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
@@ -2157,7 +2244,9 @@ fn render_logistic_bifurcation_frames_impl(
                 POINT_RED,
             );
         }
-        draw_text_block(&mut buf, w, h, w / 14, h / 12, "bifurcacion r", PAL_FG, 1);
+        if con_rotulo {
+            draw_text_block(&mut buf, w, h, w / 14, h / 12, "bifurcacion r", PAL_FG, 1);
+        }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -2167,12 +2256,13 @@ fn render_logistic_bifurcation_frames_impl(
 /// Campo de gradiente: f(x,y)=sin(x)·cos(y), grad=(cos·cos, −sin·sin).
 /// 25 flechas + 6 partículas orbitando moduladas por |grad|. <2s.
 pub fn render_gradient_field_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    render_gradient_field_frames_impl(width, height, &mut |_, _| {})
+    render_gradient_field_frames_impl(width, height, true, &mut |_, _| {})
 }
 
 fn render_gradient_field_frames_impl(
     width: u32,
     height: u32,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
@@ -2261,7 +2351,9 @@ fn render_gradient_field_frames_impl(
             let col = with_alpha(POINT_RED, (140.0 + 100.0 * pulse) as u8);
             draw_filled_circle(&mut buf, w, h, p.0, p.1, 3, col);
         }
-        draw_text_block(&mut buf, w, h, w / 14, h / 12, "gradiente f", PAL_FG, 1);
+        if con_rotulo {
+            draw_text_block(&mut buf, w, h, w / 14, h / 12, "gradiente f", PAL_FG, 1);
+        }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -2272,12 +2364,13 @@ fn render_gradient_field_frames_impl(
 /// Rejilla tenue original + rejilla transformada brillante + círculo unidad.
 /// <2s (25 puntos + 60 segmentos/frame).
 pub fn render_mobius_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    render_mobius_frames_impl(width, height, &mut |_, _| {})
+    render_mobius_frames_impl(width, height, true, &mut |_, _| {})
 }
 
 fn render_mobius_frames_impl(
     width: u32,
     height: u32,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
@@ -2381,7 +2474,9 @@ fn render_mobius_frames_impl(
         // Parámetro c(t) en rojo.
         let pc = to_pixel(w, h, cr * 2.0, ci * 2.0);
         draw_filled_circle(&mut buf, w, h, pc.0, pc.1, 3, POINT_RED);
-        draw_text_block(&mut buf, w, h, w / 14, h / 12, "mobius  w(z)", PAL_FG, 1);
+        if con_rotulo {
+            draw_text_block(&mut buf, w, h, w / 14, h / 12, "mobius  w(z)", PAL_FG, 1);
+        }
         // Barra de progreso inferior: garantiza primero != último aunque c coincida.
         let bar_y = h.saturating_sub(4);
         let bar_w = (w as f64 * t) as usize;
@@ -2503,7 +2598,11 @@ fn check_parametric_budget(
 }
 
 /// Ejes + título común del mundo paramétrico [-3,3]².
-fn draw_parametric_base(buf: &mut [u8], w: usize, h: usize, t: f64, title: &str) {
+///
+/// `con_rotulo=false` omite el texto quemado (el header egui de la card ya
+/// titula); el fondo sigue usando `title` para el acento. `true` = histórico
+/// (standalone / export GIF).
+fn draw_parametric_base(buf: &mut [u8], w: usize, h: usize, t: f64, title: &str, con_rotulo: bool) {
     fill_background(buf, w, h, title, t * 0.08);
     draw_subtle_grid(buf, w, h, t);
     draw_line(
@@ -2523,7 +2622,9 @@ fn draw_parametric_base(buf: &mut [u8], w: usize, h: usize, t: f64, title: &str)
         AXIS_COLOR,
     );
     let short: String = title.chars().take(24).collect();
-    draw_text_block(buf, w, h, w / 12, h / 12, &short, TEXT_COLOR, 1);
+    if con_rotulo {
+        draw_text_block(buf, w, h, w / 12, h / 12, &short, TEXT_COLOR, 1);
+    }
 }
 
 /// Muestrea `y = anim(frame i, x)` en 121 puntos de [-3,3]; huecos donde no hay dominio.
@@ -2574,8 +2675,21 @@ pub fn render_parametric_frames(
 }
 
 /// Idem + progreso REAL por frame (`on_frame(done 1..=n, total n)`).
+///
+/// Sin rótulo quemado (pipeline del chat: el header egui ya titula). Para
+/// standalone / export, usar `render_parametric_frames_con_rotulo(anim, true)`.
 pub fn render_parametric_frames_with_progress(
     anim: &ParametricAnim,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
+    render_parametric_frames_with_progress_con_rotulo(anim, false, on_frame)
+}
+
+/// Núcleo con flag de rótulo: `true` = título quemado histórico (export GIF
+/// standalone); `false` = chat (sin duplicar el header de la card).
+pub fn render_parametric_frames_with_progress_con_rotulo(
+    anim: &ParametricAnim,
+    con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
     let (w, h, n) = check_parametric_budget(anim)?;
@@ -2595,7 +2709,7 @@ pub fn render_parametric_frames_with_progress(
                 bytes: got.unwrap_or(w.saturating_mul(h).saturating_mul(4)),
             }
         })?;
-        draw_parametric_base(&mut buf, w, h, s, &anim.expr_a);
+        draw_parametric_base(&mut buf, w, h, s, &anim.expr_a, con_rotulo);
         match anim.kind {
             ParametricKind::Sweep | ParametricKind::Morph => {
                 let pts = sample_curve(anim, frame);
@@ -2702,6 +2816,14 @@ pub fn render_parametric_frames_with_progress(
         on_frame(frames.len(), n);
     }
     Ok(frames)
+}
+
+/// Atajo sin progreso con flag de rótulo (standalone / export GIF con `true`).
+pub fn render_parametric_frames_con_rotulo(
+    anim: &ParametricAnim,
+    con_rotulo: bool,
+) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
+    render_parametric_frames_with_progress_con_rotulo(anim, con_rotulo, &mut |_, _| {})
 }
 
 /// Equivalente paramétrico canónico de un template viejo, si lo tiene.
@@ -3298,6 +3420,112 @@ mod tests {
         // No sólido: hay grilla + texto + barra.
         let px0 = primero.pixels[0];
         assert!(primero.pixels.iter().any(|p| *p != px0), "frame no sólido");
+    }
+    // ── F10-C: sin rótulo quemado en el chat, con rótulo en export ────
+    /// Píxeles de texto quemado (`TEXT_COLOR`/`PAL_FG` opaco) en la franja
+    /// superior `0..y_hasta`. El chat debe dar 0 (el header egui ya titula);
+    /// el export standalone debe dar >0.
+    fn cuenta_texto_quemado(frame: &egui::ColorImage, y_hasta: usize) -> usize {
+        let w = frame.size[0];
+        frame
+            .pixels
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| i / w < y_hasta && c.r() == 235 && c.g() == 235 && c.b() == 245)
+            .count()
+    }
+
+    /// Banda media (lejos del título superior y de la barra/S inferior):
+    /// idéntica entre variantes con/sin rótulo (el flag solo toca el texto).
+    fn banda_media_igual(a: &egui::ColorImage, b: &egui::ColorImage) -> bool {
+        assert_eq!(a.size, b.size, "mismo tamaño para comparar banda");
+        let (w, h) = (a.size[0], a.size[1]);
+        let y0 = 40.min(h);
+        let y1 = h.saturating_sub(8).max(y0);
+        a.pixels
+            .iter()
+            .zip(b.pixels.iter())
+            .enumerate()
+            .all(|(i, (x, y))| {
+                let yy = i / w;
+                yy < y0 || yy >= y1 || x == y
+            })
+    }
+
+    #[test]
+    fn chat_sin_rotulo_export_con_rotulo() {
+        let empty = params_map(&[]);
+        // 96x72: el título (y≈6..13; universal hasta y≈36 con SCRIM+eco)
+        // cabe en la franja 0..40; las etiquetas de dato (S= abajo) y las
+        // barras de progreso quedan fuera.
+        for tmpl in NATIVE_TEMPLATES {
+            let chat =
+                render_anim_with_progress(tmpl, "concepto libre", 96, 72, &empty, &mut |_, _| {});
+            let export = render_anim_for_export(tmpl, "concepto libre", 96, 72, &empty);
+            assert_eq!(chat.len(), NATIVE_ANIM_FRAME_COUNT, "{tmpl}: 48 chat");
+            assert_eq!(export.len(), NATIVE_ANIM_FRAME_COUNT, "{tmpl}: 48 export");
+            // El flag cambia píxeles (el rótulo existe en export)...
+            assert_ne!(
+                chat[0].pixels, export[0].pixels,
+                "{tmpl}: chat y export deben diferir en el rótulo"
+            );
+            // ...pero la matemática no: banda media idéntica.
+            assert!(
+                banda_media_igual(&chat[0], &export[0]),
+                "{tmpl}: la banda media no debe cambiar"
+            );
+            // Ausencia en chat + presencia en export (franja superior).
+            assert_eq!(
+                cuenta_texto_quemado(&chat[0], 40),
+                0,
+                "{tmpl}: el chat no debe traer título quemado"
+            );
+            assert!(
+                cuenta_texto_quemado(&export[0], 40) > 0,
+                "{tmpl}: el export debe mantener el rótulo"
+            );
+            // El último frame también (el rótulo es estático, no animado).
+            assert_eq!(
+                cuenta_texto_quemado(&chat[NATIVE_ANIM_FRAME_COUNT - 1], 40),
+                0,
+                "{tmpl}: último frame del chat sin rótulo"
+            );
+        }
+    }
+
+    #[test]
+    fn parametrica_chat_sin_rotulo_export_con_rotulo() {
+        // Viewport 96x72 (como el dispatcher): el título (y≈6..13) queda en
+        // la franja 0..40 y fuera de la banda media (la canónica de
+        // `parametric_for_template` es 640x480 y su título cae en y≈40..47).
+        let anim = ParametricAnim::try_new(
+            ParametricKind::Tangent,
+            "x^2".to_string(),
+            None,
+            ParamName::try_new("p").expect("param p válido"),
+            -1.5,
+            1.5,
+            FrameCount::try_new(8).expect("8 frames válidos"),
+            Resolution::try_new(96, 72).expect("viewport válido"),
+        )
+        .expect("anim válida");
+        let chat = render_parametric_frames(&anim).expect("chat renderiza");
+        let export = render_parametric_frames_con_rotulo(&anim, true).expect("export renderiza");
+        assert_eq!(chat.len(), export.len());
+        assert_ne!(chat[0].pixels, export[0].pixels, "el rótulo debe diferir");
+        assert!(
+            banda_media_igual(&chat[0], &export[0]),
+            "la banda media no debe cambiar"
+        );
+        assert_eq!(
+            cuenta_texto_quemado(&chat[0], 40),
+            0,
+            "paramétrica del chat sin título"
+        );
+        assert!(
+            cuenta_texto_quemado(&export[0], 40) > 0,
+            "paramétrica de export con título"
+        );
     }
     #[test]
     fn normalize_handles_edge_cases() {
@@ -4441,7 +4669,7 @@ pub fn render_morph_frames(
                 bytes: got.unwrap_or(w.saturating_mul(h).saturating_mul(4)),
             }
         })?;
-        draw_parametric_base(&mut buf, w, h, t, "morph");
+        draw_parametric_base(&mut buf, w, h, t, "morph", true);
         draw_polyline_mundo(&mut buf, w, h, forma, cerrada, CURVE_MAIN);
         // Punto inicial marcado (misma semántica que la tangente: rojo).
         if let Some(primero) = forma.first() {

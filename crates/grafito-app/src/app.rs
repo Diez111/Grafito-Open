@@ -7801,6 +7801,12 @@ impl GrafitoApp {
                             .color(theme.text_secondary),
                     );
                     ui.label(
+                        egui::RichText::new(format!("Build {}", env!("GRAFITO_BUILD_HASH")))
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_tertiary)
+                            .monospace(),
+                    );
+                    ui.label(
                         egui::RichText::new(format!("Idioma: {}", self.locale.code()))
                             .size(grafito_ui::tokens::TYPE_XS)
                             .color(theme.text_tertiary),

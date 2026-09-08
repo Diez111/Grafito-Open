@@ -2341,10 +2341,17 @@ pub use crate::prosa::{humanize_control_name, humanize_prose_text};
 
 /// Tamaño del preview inline de la card (D2, puro y testeable).
 ///
-/// Todo el ancho disponible, aspecto preservado (`alto = ancho * h/w`),
-/// alto clampeado a `max_h` (tokens). Sin upscale >1.0 para no pixelar
-/// texturas chicas y sin re-reservar por frame: el llamador usa el tamaño
-/// del primer frame para que el bloque sea estable entre fotogramas.
+/// Ocupa TODO el ancho disponible, aspecto preservado (`alto = ancho * h/w`),
+/// alto clampeado a `max_h` (tokens). SÍ permite upscale: la card pide llenar
+/// el ancho y el filtrado GPU suaviza frames chicos (los nativos salen a
+/// ~480px; solo texturas de test de 8px pixlearían, jamás contenido real).
+/// El llamador usa el tamaño del primer frame para que el bloque sea estable
+/// entre fotogramas.
+///
+/// Bordes negros propios del frame: NO se recortan acá. Recortar exigiría
+/// escanear píxeles por frame (O(n) por frame contra el presupuesto, con la
+/// textura ya subida y la Piel sin análisis de imagen): el letterbox del
+/// renderer nativo se documenta, no se miente escalando el contenido.
 pub fn media_preview_size(frame_w: f32, frame_h: f32, avail_w: f32, max_h: f32) -> (f32, f32) {
     let fw = if frame_w.is_finite() && frame_w > 0.0 {
         frame_w
@@ -2366,7 +2373,8 @@ pub fn media_preview_size(frame_w: f32, frame_h: f32, avail_w: f32, max_h: f32) 
     } else {
         MEDIA_CARD_MAX_PREVIEW_H
     };
-    let scale = (avail / fw).min(1.0);
+    // Llena el ancho (upscale incluido) y deriva el alto por aspecto.
+    let scale = avail / fw;
     let mut w = (fw * scale).ceil();
     let mut h = (fh * scale).ceil();
     if h > cap {
@@ -4652,6 +4660,92 @@ pub fn media_loop_duration_ms(frame_count: usize, fps: f32) -> u64 {
     (ms as u64).clamp(1, grafito_anim::protocol::MAX_TIMELINE_DURATION_MS)
 }
 
+/// Retardo hasta el próximo cambio de fotograma (FLICKER, puro y testeable).
+///
+/// El autoplay pedía `request_repaint_after(40ms)` fijo
+/// (`MEDIA_PLAYBACK_REPAINT_INTERVAL`): a 12 fps/1x el contenido cambia cada
+/// ~83 ms, así que la mitad de los wakes repintaba el MISMO frame (pinta
+/// redundante + re-layout del `ScrollArea` → flicker percibido). Este helper
+/// despierta justo en el borde donde `media_frame_at` cambia (las mitades
+/// entre keys del timeline lineal `0 → N-1`, mismo redondeo): ni spamea ni
+/// llega tarde. Piso 16 ms (un frame de UI) y techo 250 ms (el `dt` del
+/// playhead capa ahí, ver `advance_media_playhead`: despertar más tarde no
+/// salta). `fps`/`rate` no finitos o ≤ 0 caen a base/1x; sin frames o sin
+/// duración → intervalo base. Puro, sin I/O ni panic.
+pub fn media_next_frame_delay_ms(playhead_ms: u64, frame_count: usize, fps: f32, rate: f32) -> u64 {
+    let base_ms = MEDIA_PLAYBACK_REPAINT_INTERVAL
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let base_ms = base_ms.clamp(1, 250);
+    if frame_count <= 1 {
+        return base_ms;
+    }
+    let fps = if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        MEDIA_CARD_BASE_FPS
+    };
+    let rate = if rate.is_finite() && rate > 0.0 {
+        rate
+    } else {
+        1.0
+    };
+    let duration_ms = media_loop_duration_ms(frame_count, fps);
+    if duration_ms == 0 {
+        return base_ms;
+    }
+    let last = (frame_count.saturating_sub(1)) as f64;
+    if !last.is_finite() || last <= 0.0 {
+        return base_ms;
+    }
+    let duration_f = duration_ms as f64;
+    if !duration_f.is_finite() || duration_f <= 0.0 {
+        return base_ms;
+    }
+    let position_f = (playhead_ms.min(duration_ms)) as f64;
+    let value = position_f / duration_f * last;
+    if !value.is_finite() {
+        return base_ms;
+    }
+    let index_f = value.round().clamp(0.0, last);
+    let index = index_f as usize;
+    // Último frame: el próximo cambio es el loop a 0.
+    let delta_p = if index >= frame_count.saturating_sub(1) {
+        duration_f - position_f
+    } else {
+        (index_f + 0.5) * duration_f / last - position_f
+    };
+    if !delta_p.is_finite() || delta_p <= 0.0 {
+        return base_ms.min(16);
+    }
+    let real_ms = delta_p / f64::from(rate);
+    if !real_ms.is_finite() || real_ms <= 0.0 {
+        return base_ms;
+    }
+    (real_ms.ceil() as u64).clamp(16, 250)
+}
+
+/// Ancho fijo del slot `N/M` de la toolbar (FLICKER, puro y testeable).
+///
+/// El deslizador usa el ancho restante (`disponible − botones − contador`):
+/// si el contador midiera su texto, `9/48 → 10/48` ensancharía el label y el
+/// slider cambiaría de ancho en cada rollover de dígitos → jitter de layout a
+/// mitad del loop. El slot depende SOLO de `frame_count` (dígitos del total,
+/// peor caso `N/M` con ambos del mismo ancho), jamás del índice: estable
+/// entre frames. Factor 0.6em por dígito (proporcional) + `SPACE_XS` de aire;
+/// `frame_count == 0` → slot de `0/0`. Puro, sin panic.
+pub fn media_counter_slot_width(frame_count: usize) -> f32 {
+    let total = frame_count.max(1);
+    let mut digits = 0usize;
+    let mut rest = total;
+    while rest > 0 {
+        digits += 1;
+        rest /= 10;
+    }
+    let chars = digits.saturating_mul(2).saturating_add(1).max(3);
+    (chars as f32) * TYPE_XS * 0.6 + SPACE_XS
+}
+
 /// Timeline de scrub para `frame_count` fotogramas (B5).
 ///
 /// Dos keys lineales `0 → 0.0` y `duración → N-1`: el deslizador mapea
@@ -4716,6 +4810,56 @@ pub fn media_counter_text(index: usize, frame_count: usize) -> (String, String) 
 /// espacio restante real (los botones derechos se reservan primero), este
 /// piso solo evita el colapso en paneles angostos. Puro.
 const MEDIA_TOOLBAR_MIN_SLIDER_W: f32 = crate::tokens::SPACE_XXL + crate::tokens::SPACE_XS;
+
+/// Anchos fijos estimados de los botones de la toolbar (tokens, sin literales).
+///
+/// Derivados de la escala base 4: el play/icono usan el piso táctil, la
+/// velocidad un `SPACE_XXL` y Exportar dos `SPACE_XXL` menos un `SPACE_XS`
+/// ("Exportar" ≈ 7 chars + padding). Son cotas de decisión, no medición de
+/// texto: si sobra, la fila única igual entra; si falta, se colapsa a dos
+/// filas antes de cortar nada.
+const MEDIA_TOOLBAR_PLAY_W: f32 = crate::tokens::HIT_TARGET_MIN;
+const MEDIA_TOOLBAR_ICON_W: f32 = crate::tokens::HIT_TARGET_MIN;
+const MEDIA_TOOLBAR_SPEED_W: f32 = crate::tokens::SPACE_XXL;
+const MEDIA_TOOLBAR_EXPORT_W: f32 = crate::tokens::SPACE_XXL * 2.0 - crate::tokens::SPACE_XS;
+
+/// Disposición de la toolbar única v3 (pura y testeable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaToolbarLayout {
+    /// Una fila: `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
+    SingleRow,
+    /// Dos filas limpias: arriba `[▶/⏸] [deslizador + N/M]`, abajo
+    /// `[1x▾] [⛶/Cerrar] [Exportar]` a la derecha. Jamás iconos mudos:
+    /// cada acción conserva su etiqueta legible.
+    TwoRows,
+}
+
+/// Decide la disposición por tokens (pura, sin `unwrap`).
+///
+/// Dos filas si el panel es angosto (`< ASSISTANT_PANEL_NARROW_WIDTH`, el
+/// mismo umbral que colapsa el composer: 300/340 caen acá, 520 no) o si el
+/// resto para el deslizador baja del piso `MEDIA_TOOLBAR_MIN_SLIDER_W`
+/// (contador gigante con panel justo). Ancho inválido → dos filas
+/// (conservador: nunca corta). Sin panic.
+pub fn media_toolbar_layout(avail_w: f32, frame_count: usize) -> MediaToolbarLayout {
+    if !avail_w.is_finite() || avail_w <= 0.0 {
+        return MediaToolbarLayout::TwoRows;
+    }
+    if avail_w < ASSISTANT_PANEL_NARROW_WIDTH {
+        return MediaToolbarLayout::TwoRows;
+    }
+    let gaps = SPACE_XS * 5.0;
+    let fixed = MEDIA_TOOLBAR_PLAY_W
+        + MEDIA_TOOLBAR_ICON_W
+        + MEDIA_TOOLBAR_SPEED_W
+        + MEDIA_TOOLBAR_EXPORT_W
+        + media_counter_slot_width(frame_count)
+        + gaps;
+    if avail_w - fixed < MEDIA_TOOLBAR_MIN_SLIDER_W {
+        return MediaToolbarLayout::TwoRows;
+    }
+    MediaToolbarLayout::SingleRow
+}
 
 /// Límite del título del pedido en el header v3 (card angosta, 1 línea).
 ///
@@ -4783,8 +4927,8 @@ pub fn media_header_status(generating: bool, export: &MediaExportState) -> Strin
 }
 
 /// Tamaño del preview en el overlay (N2): llena `min(ancho, alto-disponible)`
-/// respetando aspecto. A diferencia de la card inline SÍ permite upscale:
-/// "ver grande" lo pide y el usuario lo abrió a propósito. Puro, sin `unwrap`.
+/// respetando aspecto. Igual que la card inline permite upscale: "ver grande"
+/// lo pide y el usuario lo abrió a propósito. Puro, sin `unwrap`.
 pub fn media_overlay_preview_size(
     frame_w: f32,
     frame_h: f32,
@@ -4892,14 +5036,17 @@ struct MediaToolbarOutcome {
     close_requested: bool,
 }
 
-/// Toolbar ÚNICA v3: `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]` en una
-/// sola fila, sin contadores sueltos ni filas dobles.
+/// Toolbar ÚNICA v3: una fila en panel ancho, dos filas limpias en angosto.
 ///
-/// Los botones derechos se reservan primero (layout derecha→izquierda) y el
-/// deslizador usa el espacio restante real: jamás desborda ni se corta a la
-/// mitad, sin estimar anchos de texto. El deslizador no lleva `.text()` (esa
-/// etiqueta lateral apretaba la fila): la posición se lee en `N/M` + hover
-/// con el texto largo. Piel pura: muta solo `Cell`s, emite `ExportMedia`.
+/// Ancha (`SingleRow`): `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
+/// Angosta (`TwoRows`, ver `media_toolbar_layout`): arriba `[▶/⏸]
+/// [deslizador + N/M]`, abajo `[1x▾] [⛶/Cerrar] [Exportar]` a la derecha.
+/// El deslizador usa el espacio restante real sin piso forzado (el piso vive
+/// en la decisión, no en el dibujo: forzar un mínimo acá empujaba Exportar
+/// fuera del panel → el "Expor…" cortado del screenshot). Sin `.text()`
+/// lateral (apretaba la fila): la posición se lee en `N/M` + hover con el
+/// texto largo. UN solo contador (vive en `draw_media_counter_slot`, jamás
+/// etiqueta suelta). Piel pura: muta solo `Cell`s, emite `ExportMedia`.
 fn draw_media_toolbar(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -4907,91 +5054,152 @@ fn draw_media_toolbar(
 ) -> MediaToolbarOutcome {
     let mut action = None;
     let mut close_requested = false;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-        let paused = state.media_paused.get();
-        if ui
-            .small_button(if paused { "▶" } else { "⏸" })
-            .on_hover_text(if paused {
-                MEDIA_TIP_PLAY
-            } else {
-                MEDIA_TIP_PAUSE
-            })
-            .clicked()
-        {
-            state.media_paused.set(!paused);
-        }
-        // Botones derechos primero: el deslizador ocupa lo que quede.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let export_response = ui.add_enabled(
-                view.frame_count > 0 && !view.exporting,
-                egui::Button::new("Exportar").small(),
-            );
-            if export_response.clicked() {
-                action = Some(AssistantUiAction::ExportMedia);
-            }
-            if view.frame_count == 0 {
-                export_response.on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
-            } else if view.exporting {
-                export_response.on_disabled_hover_text("Ya se está exportando…");
-            } else {
-                export_response.on_hover_text(MEDIA_TIP_EXPORT);
-            }
-            if view.in_fullscreen {
-                if ui
-                    .small_button("Cerrar (Esc)")
-                    .on_hover_text("Cierra esta vista grande")
-                    .clicked()
-                {
-                    close_requested = true;
-                }
-            } else if ui
-                .small_button("⛶")
-                .on_hover_text(MEDIA_TIP_FULLSCREEN)
-                .clicked()
-            {
-                state.media_fullscreen.set(true);
-            }
-            if ui
-                .small_button(format!("{} ▾", view.speed_label))
-                .on_hover_text(MEDIA_TIP_SPEED)
-                .clicked()
-            {
-                state.media_speed.set(state.media_speed.get().cycle());
-            }
-            // N/M siempre visible, integrado junto al deslizador.
-            ui.label(
-                egui::RichText::new(view.counter_compact)
-                    .color(current_theme(ui.ctx()).text_secondary)
-                    .size(TYPE_XS)
-                    .strong(),
-            );
+    if media_toolbar_layout(ui.available_width(), view.frame_count) == MediaToolbarLayout::TwoRows {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+            draw_media_play_button(ui, state);
+            // Solo el contador a la derecha: el deslizador se queda con un
+            // resto holgado (play + contador son lo único fijo acá).
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                draw_media_counter_slot(ui, view);
+            });
+            draw_media_scrub_slider(ui, state, view);
         });
-        // Deslizador en el hueco restante (sin etiqueta lateral: N/M + hover
-        // ya dicen la posición).
-        if view.frame_count > 1 && view.duration_ms > 0 {
-            let slider_w = ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W);
-            let mut fraction = (state.media_playhead_ms.get().min(view.duration_ms) as f32)
-                / (view.duration_ms as f32);
-            fraction = fraction.clamp(0.0, 1.0);
-            let response = ui
-                .add_sized(
-                    egui::vec2(slider_w, ui.spacing().interact_size.y),
-                    egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
-                )
-                .on_hover_text(view.counter_long);
-            if response.dragged() || response.changed() {
-                // Se pausa al arrastrar y queda en pausa (retomar es
-                // explícito, nunca salta solo).
-                let t_ms = (fraction.clamp(0.0, 1.0) * (view.duration_ms as f32)).round() as u64;
-                state.media_playhead_ms.set(t_ms.min(view.duration_ms));
-                state.media_paused.set(true);
-            }
-        }
-    });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                draw_media_right_buttons(ui, state, view, &mut action, &mut close_requested);
+            });
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+            draw_media_play_button(ui, state);
+            // Botones derechos primero: el deslizador ocupa lo que quede.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                draw_media_right_buttons(ui, state, view, &mut action, &mut close_requested);
+                draw_media_counter_slot(ui, view);
+            });
+            draw_media_scrub_slider(ui, state, view);
+        });
+    }
     MediaToolbarOutcome {
         action,
         close_requested,
+    }
+}
+
+/// Botón play/pausa de la toolbar (extraído para no duplicar por fila).
+fn draw_media_play_button(ui: &mut egui::Ui, state: &AssistantPanelState) {
+    let paused = state.media_paused.get();
+    if ui
+        .small_button(if paused { "▶" } else { "⏸" })
+        .on_hover_text(if paused {
+            MEDIA_TIP_PLAY
+        } else {
+            MEDIA_TIP_PAUSE
+        })
+        .clicked()
+    {
+        state.media_paused.set(!paused);
+    }
+}
+
+/// Único contador visible `N/M` en slot fijo (solo f(frame_count)): si el
+/// label midiera su texto, `9/48 → 10/48` movería el deslizador.
+fn draw_media_counter_slot(ui: &mut egui::Ui, view: &MediaToolbarView) {
+    ui.add_sized(
+        egui::vec2(
+            media_counter_slot_width(view.frame_count),
+            ui.spacing().interact_size.y,
+        ),
+        egui::Label::new(
+            egui::RichText::new(view.counter_compact)
+                .color(current_theme(ui.ctx()).text_secondary)
+                .size(TYPE_XS)
+                .strong(),
+        ),
+    );
+}
+
+/// Botones derechos de la toolbar (velocidad, grande/cerrar, exportar).
+/// Sin contador: el único vive en `draw_media_counter_slot`.
+fn draw_media_right_buttons(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    view: &MediaToolbarView,
+    action: &mut Option<AssistantUiAction>,
+    close_requested: &mut bool,
+) {
+    let export_response = ui.add_enabled(
+        view.frame_count > 0 && !view.exporting,
+        egui::Button::new("Exportar").small(),
+    );
+    if export_response.clicked() {
+        *action = Some(AssistantUiAction::ExportMedia);
+    }
+    if view.frame_count == 0 {
+        export_response.on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+    } else if view.exporting {
+        export_response.on_disabled_hover_text("Ya se está exportando…");
+    } else {
+        export_response.on_hover_text(MEDIA_TIP_EXPORT);
+    }
+    if view.in_fullscreen {
+        if ui
+            .small_button("Cerrar (Esc)")
+            .on_hover_text("Cierra esta vista grande")
+            .clicked()
+        {
+            *close_requested = true;
+        }
+    } else if ui
+        .small_button("⛶")
+        .on_hover_text(MEDIA_TIP_FULLSCREEN)
+        .clicked()
+    {
+        state.media_fullscreen.set(true);
+    }
+    if ui
+        .small_button(format!("{} ▾", view.speed_label))
+        .on_hover_text(MEDIA_TIP_SPEED)
+        .clicked()
+    {
+        state.media_speed.set(state.media_speed.get().cycle());
+    }
+}
+
+/// Deslizador de scrub en el hueco restante, sin ancho mínimo forzado.
+///
+/// El piso `MEDIA_TOOLBAR_MIN_SLIDER_W` vive en `media_toolbar_layout`
+/// (decisión): acá se usa el resto tal cual — forzar un mínimo empujaba los
+/// botones fuera del panel. Resto no positivo → no se dibuja (jamás desborda).
+fn draw_media_scrub_slider(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    view: &MediaToolbarView,
+) {
+    if view.frame_count > 1 && view.duration_ms > 0 {
+        let slider_w = ui.available_width();
+        if slider_w <= 0.0 {
+            return;
+        }
+        let mut fraction = (state.media_playhead_ms.get().min(view.duration_ms) as f32)
+            / (view.duration_ms as f32);
+        fraction = fraction.clamp(0.0, 1.0);
+        let response = ui
+            .add_sized(
+                egui::vec2(slider_w, ui.spacing().interact_size.y),
+                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
+            )
+            .on_hover_text(view.counter_long);
+        if response.dragged() || response.changed() {
+            // Se pausa al arrastrar y queda en pausa (retomar es
+            // explícito, nunca salta solo).
+            let t_ms = (fraction.clamp(0.0, 1.0) * (view.duration_ms as f32)).round() as u64;
+            state.media_playhead_ms.set(t_ms.min(view.duration_ms));
+            state.media_paused.set(true);
+        }
     }
 }
 
@@ -5001,11 +5209,12 @@ fn draw_media_toolbar(
 ///   derecha (`generando…` / `lista` / `error: motivo`).
 /// - Cero pills/toasts superpuestos: el progreso vive DENTRO (barra fina +
 ///   texto). Los avisos flotantes los emite la app en otro sistema (Z3).
-/// - Preview full-width, altura estable = f(ancho, aspecto del primer
-///   frame); la textura solo se re-selecciona si cambió el frame; sin
+/// - Preview full-width y centrado, altura estable = f(ancho, aspecto del
+///   primer frame); la textura solo se re-selecciona si cambió el frame; sin
 ///   textura lista se reserva el mismo rect con placeholder centrado (jamás
 ///   etiqueta suelta fuera de rango).
-/// - UNA toolbar: `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
+/// - UNA toolbar: una fila en panel ancho, dos filas limpias en angosto
+///   (ver `media_toolbar_layout`); UN solo contador `N/M`, jamás duplicado.
 /// - Botón Exportar emite `AssistantUiAction::ExportMedia` (la app ejecuta
 ///   en el hilo existente; cero I/O/spawn en `Ui::`). Progreso/error de
 ///   export vía `MediaExportState`, jamás mudo. Prosa sin IDs literales.
@@ -5121,11 +5330,22 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             );
             ui.add_space(SPACE_XS);
             // Preview full-width, altura estable = f(ancho, aspecto del
-            // primer frame). Sin textura lista se reserva el MISMO rect con
+            // primer frame). Se reserva SIEMPRE el ancho total y la imagen se
+            // pinta centrada adentro: con retrato clampeado (`dw < max_w`) el
+            // resto es fondo de la card, jamás banda negra pegada a la
+            // izquierda. Sin textura lista se reserva el MISMO rect con
             // placeholder centrado: jamás etiqueta suelta fuera de rango.
             let max_w = ui.available_width().max(80.0);
             let (dw, dh) = media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(dw, dh), egui::Sense::hover());
+            let (full_rect, _) =
+                ui.allocate_exact_size(egui::vec2(max_w, dh), egui::Sense::hover());
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    full_rect.min.x + ((max_w - dw) / 2.0).max(0.0),
+                    full_rect.min.y,
+                ),
+                egui::vec2(dw, dh),
+            );
             if let Some(texture) = &texture {
                 ui.painter().image(
                     texture.id(),
@@ -5261,11 +5481,19 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     }
     // F17: playback media card — wake source local (no cubierto por is_pending).
     // Solo cuando reproduce: en pausa la card es estática (las interacciones
-    // repintan solas) y no se quema CPU. La barra fina (generando/exportando)
-    // late con el otro intervalo.
+    // repintan solas) y no se quema CPU. FLICKER: despertar alineado al borde
+    // donde cambia el frame (no a 40 ms fijos: la mitad de los wakes repintaba
+    // el mismo frame). La barra fina (generando/exportando) late con el otro
+    // intervalo.
     if !state.media_paused.get() {
+        let delay_ms = media_next_frame_delay_ms(
+            state.media_playhead_ms.get(),
+            frame_count,
+            MEDIA_CARD_BASE_FPS,
+            state.media_speed.get().rate(),
+        );
         ui.ctx()
-            .request_repaint_after(MEDIA_PLAYBACK_REPAINT_INTERVAL);
+            .request_repaint_after(std::time::Duration::from_millis(delay_ms));
     }
     if exporting {
         ui.ctx()
@@ -10733,7 +10961,9 @@ mod tests {
 
     #[test]
     fn media_preview_size_usa_todo_el_ancho_y_preserva_aspecto() {
-        // D2: ancho total, alto = ancho * h/w, clampeado a max_h.
+        // D2 + frente layout: ancho total SIEMPRE (upscale incluido), alto =
+        // ancho * h/w clampeado a max_h. La card pide llenar el ancho; el
+        // filtrado GPU suaviza frames chicos.
         let (w, h) = media_preview_size(400.0, 200.0, 340.0, 280.0);
         assert_eq!((w, h), (340.0, 170.0), "debe usar todo el ancho");
         // Retrato gigante: el alto se clampa sin cambiar el ancho de reserva
@@ -10741,13 +10971,179 @@ mod tests {
         let (w2, h2) = media_preview_size(200.0, 800.0, 340.0, 280.0);
         assert!(h2 <= 280.0, "alto sin clampear: {h2}");
         assert!(w2 <= 340.0, "ancho desbordado: {w2}");
-        // Sin upscale: textura chica no se pixela.
+        // Textura chica: también llena el ancho (aspecto preservado).
         let (w3, h3) = media_preview_size(100.0, 50.0, 340.0, 280.0);
-        assert_eq!((w3, h3), (100.0, 50.0), "no debe agrandar: {w3}x{h3}");
+        assert_eq!((w3, h3), (340.0, 170.0), "debe llenar: {w3}x{h3}");
         // Estable entre frames: mismo ref da misma reserva siempre.
         let a = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
         let b = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
         assert_eq!(a, b, "la reserva debe ser estable");
+    }
+
+    #[test]
+    fn media_preview_llena_ancho_centrado_a_300_340_520() {
+        // Frente layout §1 (screenshot 340px como spec): a todo ancho de
+        // panel el preview llena el ancho con aspecto preservado y altura
+        // bajo el tope de tokens. El centrado horizontal lo garantiza el
+        // rect compensado en `draw_media_card` (acá se pinnea el tamaño que
+        // lo hace posible: `w == ancho`).
+        for avail in [300.0, 340.0, 520.0] {
+            let (w, h) = media_preview_size(480.0, 360.0, avail, MEDIA_CARD_MAX_PREVIEW_H);
+            // O llena el ancho o manda el tope de alto (4:3 a 520 da 390 >
+            // tope → el downscale proporcional achica el ancho, sin bandas).
+            assert!(
+                w == avail || h == MEDIA_CARD_MAX_PREVIEW_H,
+                "a {avail}: o llena ({w}) o manda el tope ({h})"
+            );
+            assert!(
+                (w / h - 480.0 / 360.0).abs() < 0.02,
+                "aspecto preservado a {avail}: {w}x{h}"
+            );
+            assert!(h <= MEDIA_CARD_MAX_PREVIEW_H, "tope tokens a {avail}");
+            // Retrato: clampeado al tope sin desbordar el ancho.
+            let (pw, ph) = media_preview_size(200.0, 800.0, avail, MEDIA_CARD_MAX_PREVIEW_H);
+            assert!(pw <= avail, "retrato desborda a {avail}: {pw}");
+            assert!(ph <= MEDIA_CARD_MAX_PREVIEW_H, "retrato sin tope a {avail}");
+        }
+        // Anchos del screenshot: 300/340 sí llenan (4:3 cabe bajo el tope).
+        assert_eq!(
+            media_preview_size(480.0, 360.0, 300.0, MEDIA_CARD_MAX_PREVIEW_H).0,
+            300.0
+        );
+        assert_eq!(
+            media_preview_size(480.0, 360.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H).0,
+            340.0
+        );
+    }
+
+    #[test]
+    fn media_toolbar_layout_dos_filas_en_angosto_una_en_ancho() {
+        // Frente layout §2: 300/340 (bajo `ASSISTANT_PANEL_NARROW_WIDTH`)
+        // colapsan a dos filas limpias; 520 queda en una sola. Decisión por
+        // tokens, jamás iconos mudos ni cortes.
+        assert_eq!(
+            media_toolbar_layout(300.0, 48),
+            MediaToolbarLayout::TwoRows,
+            "a 300px no entra una fila"
+        );
+        assert_eq!(
+            media_toolbar_layout(340.0, 48),
+            MediaToolbarLayout::TwoRows,
+            "screenshot 340px: dos filas"
+        );
+        assert_eq!(
+            media_toolbar_layout(520.0, 48),
+            MediaToolbarLayout::SingleRow,
+            "a 520px entra una fila"
+        );
+        // Ancho inválido → conservador (dos filas, nunca corta).
+        assert_eq!(
+            media_toolbar_layout(f32::NAN, 48),
+            MediaToolbarLayout::TwoRows
+        );
+        assert_eq!(media_toolbar_layout(0.0, 48), MediaToolbarLayout::TwoRows);
+        assert_eq!(media_toolbar_layout(-10.0, 48), MediaToolbarLayout::TwoRows);
+        // Contador gigante con panel justo también colapsa en vez de cortar.
+        assert_eq!(
+            media_toolbar_layout(360.0, 1_000_000_000),
+            MediaToolbarLayout::TwoRows
+        );
+    }
+
+    #[test]
+    fn media_toolbar_dibuja_sin_panico_a_300_340_520() {
+        // Frente layout §2 headless: ejerce la rama real de dibujo a cada
+        // ancho (300/340 → dos filas, 520 → una) con el contador del
+        // screenshot (`9/48`), en card y en overlay. Si una rama cortara o
+        // panicara, acá cae.
+        for width in [300.0, 340.0, 520.0] {
+            let context = egui::Context::default();
+            let state = AssistantPanelState::default();
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let (compact, long) = media_counter_text(8, 48);
+                        assert_eq!(compact, "9/48");
+                        let view = MediaToolbarView {
+                            counter_compact: &compact,
+                            counter_long: &long,
+                            speed_label: "1x",
+                            duration_ms: 4000,
+                            frame_count: 48,
+                            exporting: false,
+                            in_fullscreen: false,
+                        };
+                        let _ = draw_media_toolbar(ui, &state, &view);
+                        let overlay = MediaToolbarView {
+                            counter_compact: &compact,
+                            counter_long: &long,
+                            speed_label: "1x",
+                            duration_ms: 4000,
+                            frame_count: 48,
+                            exporting: false,
+                            in_fullscreen: true,
+                        };
+                        let _ = draw_media_toolbar(ui, &state, &overlay);
+                    });
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn media_toolbar_un_solo_contador_y_dos_toolbar_por_vista() {
+        // Frente layout §4 + §3: UN solo contador integrado (el largo vive
+        // solo en el hover) y UNA toolbar por vista (inline + overlay = 2
+        // llamadas en la card, cero duplicados por vista).
+        let source = include_str!("assistant.rs");
+        let tb_start = source
+            .find("fn draw_media_toolbar(")
+            .expect("existe draw_media_toolbar");
+        let tb_end = source[tb_start..]
+            .find("/// Reproductor de animación v3")
+            .map(|off| tb_start + off)
+            .expect("existe el cierre de la toolbar");
+        let toolbar = &source[tb_start..tb_end];
+        assert_eq!(
+            toolbar.matches("draw_media_counter_slot(ui, view)").count(),
+            2,
+            "contador en ambas ramas (una/dos filas), una vez por rama"
+        );
+        assert!(
+            !toolbar.contains(".text("),
+            "sin etiqueta lateral en el deslizador (apretaba la fila)"
+        );
+        assert!(
+            toolbar.contains("show_value(false)"),
+            "el deslizador no muestra valor: N/M manda"
+        );
+        assert!(
+            toolbar.contains("TwoRows"),
+            "la rama angosta existe (dos filas limpias)"
+        );
+        let card_start = source
+            .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
+            .expect("existe draw_media_card");
+        let card_end = source
+            .find("fn retain_first_assistant_action")
+            .expect("existe el cierre del bloque v3");
+        let card = &source[card_start..card_end];
+        assert_eq!(
+            card.matches("draw_media_toolbar(ui, state,").count(),
+            2,
+            "UNA toolbar en inline + UNA en overlay, cero duplicados por vista"
+        );
+        assert!(
+            !card.contains("Fotograma"),
+            "el contador largo no se dibuja como etiqueta"
+        );
     }
 
     #[test]
@@ -10899,6 +11295,162 @@ mod tests {
         let state = AssistantPanelState::default();
         assert!(!state.media_fullscreen.get());
         assert_eq!(state.media_last_shown.get(), None);
+    }
+
+    #[test]
+    fn flicker_delay_alineado_al_frame_no_fijo_40() {
+        // H1: el autoplay despertaba cada 40 ms fijos con contenido a 12 fps
+        // (~83 ms/frame): la mitad de los wakes repintaba el mismo frame.
+        // El delay se alinea al borde donde `media_frame_at` cambia.
+        // N=12 @12fps → loop 1000 ms, primer borde en 500/11 ≈ 45.45 ms.
+        assert_eq!(
+            media_next_frame_delay_ms(0, 12, MEDIA_CARD_BASE_FPS, 1.0),
+            46
+        );
+        assert_eq!(
+            media_next_frame_delay_ms(0, 12, MEDIA_CARD_BASE_FPS, 2.0),
+            23
+        );
+        assert_eq!(
+            media_next_frame_delay_ms(0, 12, MEDIA_CARD_BASE_FPS, 0.5),
+            91
+        );
+        // Mitad del loop: valor 5.5 → frame 6, próximo borde a 590.9 ms.
+        assert_eq!(
+            media_next_frame_delay_ms(500, 12, MEDIA_CARD_BASE_FPS, 1.0),
+            91
+        );
+        // Último frame: el próximo cambio es el loop → piso 16 ms.
+        assert_eq!(
+            media_next_frame_delay_ms(999, 12, MEDIA_CARD_BASE_FPS, 1.0),
+            16
+        );
+        // Sin frames o un solo frame: intervalo base, jamás 0.
+        assert_eq!(
+            media_next_frame_delay_ms(0, 0, MEDIA_CARD_BASE_FPS, 1.0),
+            40
+        );
+        assert_eq!(
+            media_next_frame_delay_ms(0, 1, MEDIA_CARD_BASE_FPS, 1.0),
+            40
+        );
+        // Entradas no finitas caen a base/1x sin panic.
+        assert_eq!(
+            media_next_frame_delay_ms(0, 12, f32::NAN, 1.0),
+            46,
+            "fps NaN → base"
+        );
+        assert_eq!(
+            media_next_frame_delay_ms(0, 12, MEDIA_CARD_BASE_FPS, f32::NAN),
+            46,
+            "rate NaN → 1x"
+        );
+        assert_eq!(media_next_frame_delay_ms(0, 12, 0.0, 1.0), 46);
+        // N=48 nativo @12fps → loop 4000 ms, siempre dentro del presupuesto.
+        for playhead in [0, 100, 2000, 3999] {
+            let delay = media_next_frame_delay_ms(playhead, 48, MEDIA_CARD_BASE_FPS, 1.0);
+            assert!(
+                (16..=250).contains(&delay),
+                "delay {delay} fuera de 16..=250 en {playhead}"
+            );
+        }
+    }
+
+    #[test]
+    fn flicker_slot_contador_solo_depende_del_total() {
+        // H3: el slider usa el ancho restante; si el contador midiera su texto,
+        // `9/48 → 10/48` movería el slider a mitad del loop. El slot es solo
+        // f(frame_count): estable entre frames.
+        let wide = media_counter_slot_width(48);
+        assert_eq!(wide, media_counter_slot_width(48), "estable entre frames");
+        assert!(wide.is_finite() && wide > 0.0, "slot útil: {wide}");
+        assert!(
+            media_counter_slot_width(9) < wide,
+            "el total manda el ancho, no el índice"
+        );
+        assert!(media_counter_slot_width(1000) > wide, "crece con dígitos");
+        assert!(media_counter_slot_width(0).is_finite());
+        assert!(media_counter_slot_width(0) > 0.0, "0/0 también reserva");
+    }
+
+    #[test]
+    fn flicker_handles_estables_entre_frames() {
+        // H1: la textura se sube UNA vez en `set_media`; avanzar el playhead
+        // (un tick = un frame dibujado) jamás re-sube ni cambia handles.
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        state.set_media(
+            Some(AssistantMedia {
+                title: "derivada".into(),
+                frames: vec![
+                    egui::ColorImage::new([8, 6], egui::Color32::RED),
+                    egui::ColorImage::new([8, 6], egui::Color32::GREEN),
+                    egui::ColorImage::new([8, 6], egui::Color32::BLUE),
+                ],
+            }),
+            &context,
+        );
+        let ids_antes: Vec<egui::TextureId> =
+            state.media_textures().0.iter().map(|t| t.id()).collect();
+        assert_eq!(ids_antes.len(), 3);
+        // Simula varios frames de autoplay con reloj avanzando.
+        for tick in [1.0, 1.1, 1.2, 1.5, 2.0] {
+            let _ = state.advance_media_playhead(tick, 3, state.media_textures().1);
+        }
+        let ids_despues: Vec<egui::TextureId> =
+            state.media_textures().0.iter().map(|t| t.id()).collect();
+        assert_eq!(ids_antes, ids_despues, "ni un handle cambia por frame");
+        assert!(state.media_textures().1, "siguen listas");
+        assert_eq!(state.retired_media_pending_textures(), 0, "nada retirado");
+    }
+
+    #[test]
+    fn flicker_altura_reservada_constante_entre_frames() {
+        // H1: la reserva es f(primer frame, ancho) — el índice del frame no
+        // entra, así el `ScrollArea` no re-reserva layout por frame.
+        let avail = 340.0;
+        let first = media_preview_size(480.0, 360.0, avail, MEDIA_CARD_MAX_PREVIEW_H);
+        for _ in 0..48 {
+            let again = media_preview_size(480.0, 360.0, avail, MEDIA_CARD_MAX_PREVIEW_H);
+            assert_eq!(first, again, "misma reserva en los 48 frames");
+        }
+        assert!(first.1 <= MEDIA_CARD_MAX_PREVIEW_H, "tope tokens");
+        // Retrato gigante: clampeado y también estable.
+        let tall = media_preview_size(200.0, 800.0, avail, MEDIA_CARD_MAX_PREVIEW_H);
+        assert_eq!(
+            tall,
+            media_preview_size(200.0, 800.0, avail, MEDIA_CARD_MAX_PREVIEW_H)
+        );
+        assert!(tall.1 <= MEDIA_CARD_MAX_PREVIEW_H);
+    }
+
+    #[test]
+    fn flicker_card_sin_label_arriba_izquierda() {
+        // H2: dentro del área del plot no hay etiqueta de frame/título: el
+        // único `painter().text` de la card es el placeholder CENTRADO cuando
+        // no hay textura; `Fotograma N de M` vive solo en el hover del slider.
+        let source = include_str!("assistant.rs");
+        let start = source
+            .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
+            .expect("existe draw_media_card");
+        let end = source
+            .find("fn retain_first_assistant_action")
+            .expect("existe el cierre del bloque v3");
+        let card = &source[start..end];
+        assert_eq!(
+            card.matches("painter().text").count(),
+            1,
+            "solo el placeholder centrado pinta texto"
+        );
+        assert!(card.contains("CENTER_CENTER"), "placeholder centrado");
+        assert!(
+            !card.contains("LEFT_TOP"),
+            "nada arriba-izquierda en la card"
+        );
+        assert!(
+            !card.contains("Fotograma"),
+            "el contador largo no se dibuja como etiqueta"
+        );
     }
 
     #[test]

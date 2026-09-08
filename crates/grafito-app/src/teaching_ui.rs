@@ -2213,6 +2213,36 @@ mod tests {
     }
 
     #[test]
+    fn flicker_rellamada_sin_cambios_no_realoca() {
+        // FLICKER: un tick = un frame dibujado y `draw_teaching_overlay`
+        // llama a `ensure_textures` en cada uno. Sin frames nuevos no debe
+        // re-subir nada: mismos handles, nada retirado (re-subir por frame
+        // parpadearía y quemaría GPU).
+        let ctx = egui::Context::default();
+        let mut estado = TeachingUiState {
+            anim_frames: Some(vec![
+                frame_solido(egui::Color32::RED),
+                frame_solido(egui::Color32::GREEN),
+            ]),
+            ..Default::default()
+        };
+        estado.ensure_textures(&ctx);
+        assert_eq!(estado.anim_textures.len(), 2);
+        let ids_antes: Vec<egui::TextureId> = estado.anim_textures.iter().map(|t| t.id()).collect();
+        for _ in 0..8 {
+            estado.ensure_textures(&ctx);
+        }
+        let ids_despues: Vec<egui::TextureId> =
+            estado.anim_textures.iter().map(|t| t.id()).collect();
+        assert_eq!(ids_antes, ids_despues, "ni un handle cambia por frame");
+        assert_eq!(
+            estado.retired_anim_textures.pending(),
+            0,
+            "nada retirado sin reemplazo"
+        );
+    }
+
+    #[test]
     fn pista_para_topico_cubre_13_variantes_cerradas() {
         assert_eq!(
             pista_para_topico(&TeachingTopic::Derivada),

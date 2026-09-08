@@ -827,6 +827,9 @@ fn propose_parametric_tool(call_id: &str, pedido: &str) -> ToolResult {
     if grafito_anim::parametric::pedido_menciona_area(pedido) {
         return propose_area_tool(call_id, pedido);
     }
+    if grafito_anim::parametric::pedido_menciona_tangente(pedido) {
+        return propose_tangent_tool(call_id, pedido);
+    }
     match grafito_anim::parametric::infer_parametric_anim(pedido) {
         Err(error) => ToolResult::text(call_id, false, error.to_string()),
         Ok(anim) => {
@@ -863,6 +866,40 @@ fn propose_area_tool(call_id: &str, pedido: &str) -> ToolResult {
             if resuelto.es_canonica() {
                 hint.push(' ');
                 hint.push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+            }
+            let payload = json!({
+                "kind": anim.kind.as_str(),
+                "kind_label": anim.kind.en_espanol(),
+                "expr_a": anim.expr_a,
+                "expr_b": anim.expr_b,
+                "param": anim.param.as_str(),
+                "range": [anim.p0, anim.p1],
+                "frames": anim.frame_count(),
+                "viewport": [anim.viewport.width, anim.viewport.height],
+                "canonical": resuelto.es_canonica(),
+                "hint": hint,
+                "protocol_version": grafito_anim::protocol::ANIM_PROTOCOL_VERSION,
+                "note": "plan paramétrico validado en Rust nativo; la vista previa se genera en la UI tras aprobación explícita"
+            });
+            ToolResult::text(call_id, true, payload.to_string())
+        }
+    }
+}
+
+/// Propuesta de tangente/derivada: canónica declarada, explícita o `Err`.
+///
+/// Espejo de `propose_area_tool`: sin función va la canónica `x^2 [-1.5,1.5]`
+/// (igual que el Submit `derivative-slope`); jamás pregunta y muestra a la
+/// vez. Puro, sin E/S ni motor.
+fn propose_tangent_tool(call_id: &str, pedido: &str) -> ToolResult {
+    match grafito_anim::parametric::infer_tangent_anim(pedido) {
+        Err(error) => ToolResult::text(call_id, false, error.to_string()),
+        Ok(resuelto) => {
+            let anim = resuelto.anim();
+            let mut hint = grafito_anim::parametric::parametric_hint(anim);
+            if resuelto.es_canonica() {
+                hint.push(' ');
+                hint.push_str(grafito_anim::parametric::TANGENT_CANONICAL_PROSA);
             }
             let payload = json!({
                 "kind": anim.kind.as_str(),
