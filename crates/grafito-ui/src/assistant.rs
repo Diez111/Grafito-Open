@@ -442,14 +442,12 @@ struct RetiredMediaBatch {
 /// es `ancho * h/w` clampeado a este tope para no mover el scroll.
 const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 
-/// Tooltips cortos de la toolbar de la card (D2, ≤60 chars, sin cortes).
+/// Tooltips cortos de la toolbar única v3 (≤60 chars, sin cortes).
 const MEDIA_TIP_SPEED: &str = "Cambia la velocidad: 0.5x, 1x, 2x";
 const MEDIA_TIP_FULLSCREEN: &str = "Ver grande. Esc para cerrar";
 const MEDIA_TIP_EXPORT: &str = "Guarda la animación como GIF";
 const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual";
 const MEDIA_TIP_PLAY: &str = "Retoma donde quedó";
-const MEDIA_TIP_REPEAT: &str = "Vuelve al inicio y sigue reproduciendo";
-const MEDIA_TIP_SEQUENCE: &str = "Ejecuta los pasos en orden, con pausas";
 
 /// Velocidad del reproductor de la card (B5).
 ///
@@ -700,13 +698,6 @@ pub struct AssistantPanelState {
     /// Exportación a GIF de la card (la app la actualiza desde el hilo de
     /// export; la UI solo la renderiza, cero I/O/spawn en `Ui::`).
     media_export: MediaExportState,
-    /// Q4: pasos de la playlist que originó la media (`None` = animación
-    /// simple). La app la estagia al lanzar el job (`stage_media_playlist`)
-    /// y la limpia en single / turno sin animación. Solo flag de conteo:
-    /// la playlist completa vive en el runtime de la app (transporte
-    /// existente); la Piel solo decide si mostrar "Reproducir secuencia".
-    /// Cero I/O/spawn en `Ui::`.
-    media_playlist_len: Option<usize>,
     /// Confirmación del usuario de que el modelo elegido admite imágenes.
     pub vision_enabled: bool,
     /// Autoriza explícitamente una revisión con el modelo de razonamiento
@@ -784,9 +775,6 @@ pub struct AssistantPanelState {
     /// scrolleó arriba a leer, el stream no lo mueve. Se actualiza desde el
     /// `ScrollAreaOutput` en cada frame; arranca clavado.
     pub transcript_at_bottom: bool,
-    /// W-E: el empty-state pidió (re)lanzar el tour guiado. Piel pura: la app
-    /// lo consume en su tick (`poll_guided_tour`) y arranca el tour.
-    pub tour_requested: bool,
 }
 
 impl Default for AssistantPanelState {
@@ -814,7 +802,6 @@ impl Default for AssistantPanelState {
             media_last_shown: std::cell::Cell::new(None),
             media_fullscreen: std::cell::Cell::new(false),
             media_export: MediaExportState::default(),
-            media_playlist_len: None,
             anim_progress: false,
             tutor_level: 0,
             tutor_covered: 0,
@@ -861,7 +848,6 @@ impl Default for AssistantPanelState {
             new_fact_draft: String::new(),
             working_memory: grafito_profile::WorkingMemory::default(),
             transcript_at_bottom: true,
-            tour_requested: false,
         }
     }
 }
@@ -916,8 +902,6 @@ impl AssistantPanelState {
         self.cancel_remote_authorization();
         self.clear_proposed_plan();
         self.clear_pending_clarification();
-        // Q4: sin turnos no hay secuencia que reproducir (sin replay rancio).
-        self.clear_media_playlist();
         self.error = None;
     }
 
@@ -1470,62 +1454,6 @@ impl AssistantPanelState {
     /// hilo de export; la UI nunca lo toca).
     pub fn set_media_export(&mut self, state: MediaExportState) {
         self.media_export = state;
-    }
-
-    /// Q4: estagia que la media en curso es una playlist de `len` pasos.
-    ///
-    /// La app la llama al lanzar `run_assistant_playlist_with`; la Piel
-    /// solo guarda el conteo para mostrar "Reproducir secuencia". Puro,
-    /// sin I/O. `0` se ignora (honesto: sin pasos no hay secuencia).
-    pub fn stage_media_playlist(&mut self, len: usize) {
-        if len == 0 {
-            return;
-        }
-        // Tope grueso del protocolo (8): más allá se clampe honestamente
-        // al mostrar, pero se guarda el real para el label.
-        self.media_playlist_len = Some(len);
-    }
-
-    /// Q4: la media vuelve a ser simple (single). La app la llama al lanzar
-    /// animación simple y en turnos sin animación.
-    pub fn clear_media_playlist(&mut self) {
-        self.media_playlist_len = None;
-    }
-
-    /// Q4: ¿la media actual viene de una playlist? Puro.
-    pub fn media_is_playlist(&self) -> bool {
-        self.media_playlist_len.is_some_and(|len| len > 0)
-    }
-
-    /// Q4: conteo de pasos para el label (None = simple). Puro.
-    pub fn media_playlist_len(&self) -> Option<usize> {
-        self.media_playlist_len
-    }
-
-    /// Q4: etiqueta del botón de secuencia ("Reproducir secuencia (N pasos)").
-    /// `None` si no hay playlist. Pura, testeable headless.
-    pub fn playlist_sequence_label(&self) -> Option<String> {
-        let len = self.media_playlist_len?;
-        if len == 0 {
-            return None;
-        }
-        Some(format!("Reproducir secuencia ({len} pasos)"))
-    }
-
-    /// Q4: "Repetir" = loop honesto con el player existente.
-    ///
-    /// Vuelve el playhead a 0 y retoma la reproducción (sin re-generar,
-    /// sin I/O/spawn: solo `Cell`s locales). Devuelve `true` si había
-    /// media para repetir, `false` si no había nada (el llamante explica,
-    /// jamás mudo). Puro estado UI.
-    pub fn repeat_media(&self) -> bool {
-        if self.media.is_none() {
-            return false;
-        }
-        self.media_playhead_ms.set(0);
-        self.media_last_shown.set(None);
-        self.media_paused.set(false);
-        true
     }
 
     /// Avanza el reloj del reproductor y devuelve el índice a mostrar (B5).
@@ -2613,14 +2541,6 @@ pub enum AssistantUiAction {
     /// de export existente (`spawn_gif_export`) y publica progreso/error en
     /// `MediaExportState`. Sin I/O ni spawn en `Ui::`.
     ExportMedia,
-    /// Q4: re-ejecutar la secuencia (playlist Group/Wait) en orden con el
-    /// transporte existente (`run_assistant_playlist_with`).
-    ///
-    /// Piel pura: la card emite la intención solo cuando
-    /// `media_is_playlist()`; la app re-encola la playlist guardada en su
-    /// runtime (seam mínimo, sin refactorear el agente). Sin I/O ni spawn
-    /// en `Ui::`.
-    ReplayPlaylist,
     /// Preguntarle al tutor qué estudiar a continuación.
     AskNextTopic,
     /// Feedback del usuario: la última explicación le sirvió.
@@ -4790,11 +4710,76 @@ pub fn media_counter_text(index: usize, frame_count: usize) -> (String, String) 
     )
 }
 
-/// N2 (nota N1): la etiqueta del contador se suprime con gracia bajo ~160px
-/// de ancho disponible: el deslizador sigue (posición vía hover) pero no se
-/// dibuja texto que se truncaría. Piso legible `TYPE_XS` en el render. Pura.
-pub fn media_show_counter_label(avail_w: f32) -> bool {
-    avail_w.is_finite() && avail_w >= 160.0
+/// Ancho mínimo del deslizador de la toolbar única v3 (tokens).
+///
+/// Derivado de escala base 4 (`SPACE_XXL + SPACE_XS`): el deslizador usa el
+/// espacio restante real (los botones derechos se reservan primero), este
+/// piso solo evita el colapso en paneles angostos. Puro.
+const MEDIA_TOOLBAR_MIN_SLIDER_W: f32 = crate::tokens::SPACE_XXL + crate::tokens::SPACE_XS;
+
+/// Límite del título del pedido en el header v3 (card angosta, 1 línea).
+///
+/// A `TYPE_SM` ~32 caracteres entran en ~200px (título + estado a la derecha
+/// en panel ≥300). El overlay usa `MEDIA_HEADER_TITLE_MAX_CHARS_WIDE`.
+const MEDIA_HEADER_TITLE_MAX_CHARS: usize = 32;
+/// Límite del título en el overlay (más ancho disponible).
+const MEDIA_HEADER_TITLE_MAX_CHARS_WIDE: usize = 48;
+/// Límite del motivo en `error: motivo` (header, 1 línea).
+const MEDIA_HEADER_ERROR_MAX_CHARS: usize = 72;
+
+/// Recorta a `max_chars` caracteres con `…` (Z2, v3 minimalista).
+///
+/// Puro, sin panic (corte por chars, jamás a mitad de scalar UTF-8):
+/// `max_chars == 0` → `""`; texto corto → intacto.
+fn elide_chars(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let kept: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// Título del pedido para el header v3 (1 línea, elide).
+///
+/// Vacío → `"Animación"` (fallback honesto, jamás etiqueta fantasma).
+/// Puro, testeable.
+pub fn media_elided_title(title: &str, max_chars: usize) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return "Animación".to_owned();
+    }
+    elide_chars(trimmed, max_chars)
+}
+
+/// Estado textual del header v3: `generando…` / `lista` / `error: motivo`
+/// (+ `exportando…` mientras el hilo de export vuela).
+///
+/// Puro (`&Estado -> String`): el color lo resuelve el render. El motivo de
+/// error se elide a `MEDIA_HEADER_ERROR_MAX_CHARS`; el detalle completo vive
+/// en la línea de export dentro de la card, jamás flotando.
+pub fn media_header_status(generating: bool, export: &MediaExportState) -> String {
+    match export {
+        MediaExportState::Failed(reason) => {
+            let why = elide_chars(reason, MEDIA_HEADER_ERROR_MAX_CHARS);
+            if why.is_empty() {
+                "error".to_owned()
+            } else {
+                format!("error: {why}")
+            }
+        }
+        MediaExportState::Exporting => "exportando…".to_owned(),
+        MediaExportState::Idle | MediaExportState::Done => {
+            if generating {
+                "generando…".to_owned()
+            } else {
+                "lista".to_owned()
+            }
+        }
+    }
 }
 
 /// Tamaño del preview en el overlay (N2): llena `min(ancho, alto-disponible)`
@@ -4856,20 +4841,174 @@ pub fn media_overlay_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
     (w.clamp(480.0, 900.0), h.clamp(420.0, 720.0))
 }
 
-/// Reproductor de animación (GIF-like) en el chat (B5).
+/// Header v3 de la card (UNA línea): título del pedido con elide + estado
+/// textual a la derecha (`generando…` / `lista` / `error: motivo`).
 ///
-/// - Autoplay a 12 fps (`MEDIA_CARD_BASE_FPS`); al arrastrar el deslizador
-///   se pausa y QUEDA en pausa con estado visible («en pausa» + botón
-///   Reproducir): retomar es explícito y nunca salta solo.
-/// - Deslizador mapea fracción → `t_ms` → `media_frame_at`
-///   (`Timeline::sample` + round + clamp).
-/// - Estado siempre visible: «Fotograma N de M» + reproduciendo/en pausa.
-/// - Velocidad por card (0.5x/1x/2x, botón que rota); la app la usa para el
-///   delay del GIF.
+/// Piel pura: el estado se reserva primero (derecha) y el título usa el
+/// resto sin wrap (el elide manual ya lo acota). Sin I/O ni spawn.
+fn draw_media_header(
+    ui: &mut egui::Ui,
+    title_elided: &str,
+    status: &str,
+    status_color: egui::Color32,
+) {
+    let theme = current_theme(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(status)
+                    .color(status_color)
+                    .size(TYPE_XS)
+                    .strong(),
+            );
+        });
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(title_elided)
+                    .color(theme.text_primary)
+                    .size(TYPE_SM)
+                    .strong(),
+            )
+            .wrap_mode(egui::TextWrapMode::Truncate),
+        );
+    });
+}
+
+/// Vista inmutable para la toolbar única v3 (todo copiado: la toolbar solo
+/// lee `Cell`s y emite intención; el export real lo ejecuta la app).
+struct MediaToolbarView<'a> {
+    counter_compact: &'a str,
+    counter_long: &'a str,
+    speed_label: &'a str,
+    duration_ms: u64,
+    frame_count: usize,
+    exporting: bool,
+    in_fullscreen: bool,
+}
+
+/// Salida de la toolbar única v3: intención de export + cierre del overlay.
+struct MediaToolbarOutcome {
+    action: Option<AssistantUiAction>,
+    close_requested: bool,
+}
+
+/// Toolbar ÚNICA v3: `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]` en una
+/// sola fila, sin contadores sueltos ni filas dobles.
+///
+/// Los botones derechos se reservan primero (layout derecha→izquierda) y el
+/// deslizador usa el espacio restante real: jamás desborda ni se corta a la
+/// mitad, sin estimar anchos de texto. El deslizador no lleva `.text()` (esa
+/// etiqueta lateral apretaba la fila): la posición se lee en `N/M` + hover
+/// con el texto largo. Piel pura: muta solo `Cell`s, emite `ExportMedia`.
+fn draw_media_toolbar(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    view: &MediaToolbarView,
+) -> MediaToolbarOutcome {
+    let mut action = None;
+    let mut close_requested = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+        let paused = state.media_paused.get();
+        if ui
+            .small_button(if paused { "▶" } else { "⏸" })
+            .on_hover_text(if paused {
+                MEDIA_TIP_PLAY
+            } else {
+                MEDIA_TIP_PAUSE
+            })
+            .clicked()
+        {
+            state.media_paused.set(!paused);
+        }
+        // Botones derechos primero: el deslizador ocupa lo que quede.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let export_response = ui.add_enabled(
+                view.frame_count > 0 && !view.exporting,
+                egui::Button::new("Exportar").small(),
+            );
+            if export_response.clicked() {
+                action = Some(AssistantUiAction::ExportMedia);
+            }
+            if view.frame_count == 0 {
+                export_response.on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+            } else if view.exporting {
+                export_response.on_disabled_hover_text("Ya se está exportando…");
+            } else {
+                export_response.on_hover_text(MEDIA_TIP_EXPORT);
+            }
+            if view.in_fullscreen {
+                if ui
+                    .small_button("Cerrar (Esc)")
+                    .on_hover_text("Cierra esta vista grande")
+                    .clicked()
+                {
+                    close_requested = true;
+                }
+            } else if ui
+                .small_button("⛶")
+                .on_hover_text(MEDIA_TIP_FULLSCREEN)
+                .clicked()
+            {
+                state.media_fullscreen.set(true);
+            }
+            if ui
+                .small_button(format!("{} ▾", view.speed_label))
+                .on_hover_text(MEDIA_TIP_SPEED)
+                .clicked()
+            {
+                state.media_speed.set(state.media_speed.get().cycle());
+            }
+            // N/M siempre visible, integrado junto al deslizador.
+            ui.label(
+                egui::RichText::new(view.counter_compact)
+                    .color(current_theme(ui.ctx()).text_secondary)
+                    .size(TYPE_XS)
+                    .strong(),
+            );
+        });
+        // Deslizador en el hueco restante (sin etiqueta lateral: N/M + hover
+        // ya dicen la posición).
+        if view.frame_count > 1 && view.duration_ms > 0 {
+            let slider_w = ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W);
+            let mut fraction = (state.media_playhead_ms.get().min(view.duration_ms) as f32)
+                / (view.duration_ms as f32);
+            fraction = fraction.clamp(0.0, 1.0);
+            let response = ui
+                .add_sized(
+                    egui::vec2(slider_w, ui.spacing().interact_size.y),
+                    egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
+                )
+                .on_hover_text(view.counter_long);
+            if response.dragged() || response.changed() {
+                // Se pausa al arrastrar y queda en pausa (retomar es
+                // explícito, nunca salta solo).
+                let t_ms = (fraction.clamp(0.0, 1.0) * (view.duration_ms as f32)).round() as u64;
+                state.media_playhead_ms.set(t_ms.min(view.duration_ms));
+                state.media_paused.set(true);
+            }
+        }
+    });
+    MediaToolbarOutcome {
+        action,
+        close_requested,
+    }
+}
+
+/// Reproductor de animación v3 (UNA card minimalista escandinava).
+///
+/// - Header en 1 línea: título del pedido (elide) + estado textual a la
+///   derecha (`generando…` / `lista` / `error: motivo`).
+/// - Cero pills/toasts superpuestos: el progreso vive DENTRO (barra fina +
+///   texto). Los avisos flotantes los emite la app en otro sistema (Z3).
+/// - Preview full-width, altura estable = f(ancho, aspecto del primer
+///   frame); la textura solo se re-selecciona si cambió el frame; sin
+///   textura lista se reserva el mismo rect con placeholder centrado (jamás
+///   etiqueta suelta fuera de rango).
+/// - UNA toolbar: `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
 /// - Botón Exportar emite `AssistantUiAction::ExportMedia` (la app ejecuta
-///   en el hilo existente; cero I/O/spawn en `Ui::`). Deshabilitado con
-///   motivo si no hay frames; progreso/error vía `MediaExportState`, jamás
-///   mudo. Prosa sin IDs literales.
+///   en el hilo existente; cero I/O/spawn en `Ui::`). Progreso/error de
+///   export vía `MediaExportState`, jamás mudo. Prosa sin IDs literales.
 fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<AssistantUiAction> {
     // Tick de gracia SIEMPRE (haya o no frame listo): la retención diferida
     // libera el set viejo tras N frames dibujados, nunca en `set_media`.
@@ -4888,7 +5027,22 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         state.media_textures().1 && !state.media_textures().0.is_empty(),
     );
     let mut action = None;
+    let generating = state.anim_progress;
+    let status = media_header_status(generating, &state.media_export);
+    let status_color = match &state.media_export {
+        MediaExportState::Failed(_) => theme.warning,
+        MediaExportState::Exporting => theme.text_secondary,
+        MediaExportState::Idle | MediaExportState::Done => {
+            if generating {
+                theme.text_secondary
+            } else {
+                theme.success
+            }
+        }
+    };
     let Some(index) = index else {
+        // v3 generando: header + barra fina + texto + [Cancelar], todo DENTRO
+        // de la card. Nada flota sobre otros paneles.
         egui::Frame::none()
             .fill(theme.input_bg)
             .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -4897,24 +5051,20 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.set_min_height(assistant_media_min_side());
-                ui.label(
-                    egui::RichText::new("Animación")
-                        .color(theme.text_primary)
-                        .size(TYPE_SM)
-                        .strong(),
+                draw_media_header(
+                    ui,
+                    &media_elided_title(&title, MEDIA_HEADER_TITLE_MAX_CHARS),
+                    &status,
+                    status_color,
                 );
+                ui.add_space(SPACE_XS);
+                let pulse = ((now_s * 2.4).sin() + 1.0) * 0.5;
+                ui.add(egui::ProgressBar::new(0.2 + 0.55 * pulse as f32).desired_height(SPACE_XS));
                 ui.add_space(SPACE_XS);
                 ui.label(
                     egui::RichText::new("Armando tu animación… ~20 s")
                         .color(theme.text_secondary)
                         .size(TYPE_SM),
-                );
-                ui.add_space(SPACE_XS);
-                ui.label(
-                    egui::RichText::new("Te aviso cuando esté lista.")
-                        .color(theme.text_tertiary)
-                        .size(TYPE_XS)
-                        .weak(),
                 );
                 ui.add_space(SPACE_XS);
                 if ui
@@ -4925,11 +5075,14 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     action = Some(AssistantUiAction::Cancel);
                 }
             });
+        ui.ctx()
+            .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
         return action;
     };
-    // Handle clonado (barato): la pintura no retiene borrow del estado y los
-    // controles de abajo usan `&mut` sin pelear con el borrow checker.
-    // D2: tamaño de referencia = primer frame (estable entre fotogramas).
+    // Handle clonado (barato): la pintura no retiene borrow del estado.
+    // Tamaño de referencia = primer frame (estable entre fotogramas); la
+    // textura solo se re-selecciona si cambió el frame (las texturas se
+    // suben una sola vez en `set_media`, acá no hay I/O).
     debug_assert!(index < frame_count, "índice de frame dentro de la media");
     let (first_w, first_h) = state
         .media_textures()
@@ -4938,16 +5091,13 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         .map(|t| (t.size_vec2().x, t.size_vec2().y))
         .unwrap_or((1.0, 1.0));
     let texture = state.media_textures().0.get(index).cloned();
-    // D2 gate anti-parpadeo: las texturas se suben una sola vez en
-    // `set_media`; acá sólo se re-selecciona el handle si el índice cambió.
-    // El rect es estable (misma reserva siempre) así el scroll no salta.
-    state.media_last_shown.set(Some(index));
+    if state.media_last_shown.get() != Some(index) {
+        state.media_last_shown.set(Some(index));
+    }
     let duration_ms = media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS);
-    let paused = state.media_paused.get();
     let speed_label = state.media_speed.get().label();
-    // N2: UN solo contador (el compacto vive en la toolbar); el largo solo
-    // va al hover del deslizador, jamás como etiqueta suelta duplicada.
     let (counter_compact, counter_long) = media_counter_text(index, frame_count);
+    let exporting = matches!(state.media_export, MediaExportState::Exporting);
     let export_line: Option<(String, egui::Color32)> = match &state.media_export {
         MediaExportState::Idle => None,
         MediaExportState::Exporting => Some(("Exportando…".to_owned(), theme.text_secondary)),
@@ -4963,45 +5113,20 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.set_min_height(transcript_button_row_min_height());
-                ui.label(
-                    egui::RichText::new("Animación")
-                        .color(theme.text_primary)
-                        .size(TYPE_SM)
-                        .strong(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (status, color) = if paused {
-                        ("en pausa", theme.text_tertiary)
-                    } else {
-                        ("reproduciendo", theme.success)
-                    };
-                    ui.label(
-                        egui::RichText::new(status)
-                            .color(color)
-                            .size(TYPE_XS)
-                            .strong(),
-                    );
-                });
-            });
-            if !title.is_empty() {
-                ui.label(
-                    egui::RichText::new(&title)
-                        .color(theme.text_primary)
-                        .size(TYPE_SM),
-                );
-            }
+            draw_media_header(
+                ui,
+                &media_elided_title(&title, MEDIA_HEADER_TITLE_MAX_CHARS),
+                &status,
+                status_color,
+            );
             ui.add_space(SPACE_XS);
+            // Preview full-width, altura estable = f(ancho, aspecto del
+            // primer frame). Sin textura lista se reserva el MISMO rect con
+            // placeholder centrado: jamás etiqueta suelta fuera de rango.
+            let max_w = ui.available_width().max(80.0);
+            let (dw, dh) = media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(dw, dh), egui::Sense::hover());
             if let Some(texture) = &texture {
-                // D2: todo el ancho disponible, aspecto preservado
-                // (`alto = ancho * h/w`), misma reserva siempre (ref = primer
-                // frame) para no mover el scroll entre fotogramas.
-                let max_w = ui.available_width().max(80.0);
-                let (dw, dh) =
-                    media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
-                let display = egui::vec2(dw, dh);
-                let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
                 ui.painter().image(
                     texture.id(),
                     rect,
@@ -5009,144 +5134,46 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     egui::Color32::WHITE,
                 );
             } else {
-                ui.label(
-                    egui::RichText::new("Fotograma no disponible.")
-                        .color(theme.warning)
-                        .size(TYPE_SM),
+                ui.painter().rect_filled(
+                    rect,
+                    egui::Rounding::same(RADIUS_SM),
+                    theme.separator.gamma_multiply(0.35),
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Preparando fotograma…",
+                    egui::FontId::new(TYPE_XS, egui::FontFamily::Proportional),
+                    theme.text_tertiary,
                 );
             }
             ui.add_space(SPACE_XS);
-            // N2: UNA sola barra (el deslizador) + UN solo contador (el de la
-            // toolbar). El texto largo vive solo en el hover: nada duplicado.
-            if frame_count > 1 && duration_ms > 0 {
-                let mut fraction =
-                    (state.media_playhead_ms.get().min(duration_ms) as f32) / (duration_ms as f32);
-                fraction = fraction.clamp(0.0, 1.0);
-                let response = ui
-                    .add(
-                        egui::Slider::new(&mut fraction, 0.0..=1.0)
-                            .text("Recorrer fotogramas")
-                            .show_value(false),
-                    )
-                    .on_hover_text(&counter_long);
-                if response.dragged() || response.changed() {
-                    // Se pausa al arrastrar y queda en pausa con estado
-                    // visible (decisión B5 documentada arriba).
-                    let t_ms = (fraction.clamp(0.0, 1.0) * (duration_ms as f32)).round() as u64;
-                    state.media_playhead_ms.set(t_ms.min(duration_ms));
-                    state.media_paused.set(true);
-                }
+            let toolbar_view = MediaToolbarView {
+                counter_compact: &counter_compact,
+                counter_long: &counter_long,
+                speed_label,
+                duration_ms,
+                frame_count,
+                exporting,
+                in_fullscreen: false,
+            };
+            if let Some(export_action) = draw_media_toolbar(ui, state, &toolbar_view).action {
+                action = Some(export_action);
             }
-            ui.add_space(SPACE_XS);
-            // D2 toolbar compacta con wrap por tokens: todo abre algo o
-            // explica (nada mudo). Contador integrado en la misma fila.
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
-                let toggle_label = if state.media_paused.get() {
-                    "▶ Reproducir"
-                } else {
-                    "⏸ Pausar"
-                };
-                if ui
-                    .small_button(toggle_label)
-                    .on_hover_text(if state.media_paused.get() {
-                        MEDIA_TIP_PLAY
-                    } else {
-                        MEDIA_TIP_PAUSE
-                    })
-                    .clicked()
-                {
-                    state.media_paused.set(!state.media_paused.get());
-                }
-                if ui
-                    .small_button(format!("{speed_label} ▾"))
-                    .on_hover_text(MEDIA_TIP_SPEED)
-                    .clicked()
-                {
-                    state.media_speed.set(state.media_speed.get().cycle());
-                }
-                if ui
-                    .small_button("⛶ Pantalla completa")
-                    .on_hover_text(MEDIA_TIP_FULLSCREEN)
-                    .clicked()
-                {
-                    state.media_fullscreen.set(true);
-                }
-                // N2: mismo tamaño que el resto (`.small()`): el `Button`
-                // grande empujaba este último control fuera del panel ~340px
-                // y quedaba cortado en el borde. Con wrap por tokens jamás
-                // queda medio afuera: baja de fila antes de cortarse.
-                // Q4: "Repetir" = loop honesto con el player existente
-                // (playhead a 0 + retoma; sin re-generar, sin I/O/spawn).
-                if ui
-                    .small_button("↺ Repetir")
-                    .on_hover_text(MEDIA_TIP_REPEAT)
-                    .clicked()
-                {
-                    state.repeat_media();
-                }
-                // Q4: "Reproducir secuencia" solo si el turno trae playlist
-                // (Group/Wait con espera). Ejecuta en orden con el transporte
-                // existente vía `ReplayPlaylist`; la app re-encola la guardada
-                // en su runtime (seam mínimo, sin refactorear el agente).
-                // Nada mudo: sin playlist no se muestra; en curso se
-                // deshabilita con motivo.
-                if let Some(seq_label) = state.playlist_sequence_label() {
-                    let busy = state.anim_progress;
-                    let seq_response = ui.add_enabled(
-                        frame_count > 0 && !busy,
-                        egui::Button::new(seq_label).small(),
-                    );
-                    if seq_response.clicked() {
-                        action = Some(AssistantUiAction::ReplayPlaylist);
-                    }
-                    if frame_count == 0 {
-                        seq_response
-                            .on_disabled_hover_text("Todavía no hay fotogramas de la secuencia.");
-                    } else if busy {
-                        seq_response.on_disabled_hover_text("Ya se está generando la secuencia…");
-                    } else {
-                        seq_response.on_hover_text(MEDIA_TIP_SEQUENCE);
-                    }
-                }
-                let exporting = matches!(state.media_export, MediaExportState::Exporting);
-                let export_response = ui.add_enabled(
-                    frame_count > 0 && !exporting,
-                    egui::Button::new("Exportar").small(),
-                );
-                if export_response.clicked() {
-                    action = Some(AssistantUiAction::ExportMedia);
-                }
-                if frame_count == 0 {
-                    export_response
-                        .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
-                } else if exporting {
-                    export_response.on_disabled_hover_text("Ya se está exportando…");
-                } else {
-                    export_response.on_hover_text(MEDIA_TIP_EXPORT);
-                }
-                // N2: contador único integrado; bajo ~160px se suprime con
-                // gracia (nota N1) en vez de truncarse.
-                if media_show_counter_label(ui.available_width()) {
-                    ui.label(
-                        egui::RichText::new(&counter_compact)
-                            .color(theme.text_secondary)
-                            .size(TYPE_XS)
-                            .strong(),
-                    );
-                }
-            });
+            if exporting {
+                ui.add_space(SPACE_XS);
+                let pulse = ((now_s * 2.4).sin() + 1.0) * 0.5;
+                ui.add(egui::ProgressBar::new(0.2 + 0.55 * pulse as f32).desired_height(SPACE_XS));
+            }
             if let Some((text, color)) = &export_line {
                 ui.add_space(SPACE_XS);
                 ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
             }
         });
-    // N2 overlay rediseñado: preview CENTRADO que ocupa el espacio (respeta
-    // aspecto con `media_overlay_preview_size`: `min(ancho, alto-disponible)`)
-    // + UNA toolbar abajo con [Play/Pausa][deslizador+contador][1x][Exportar]
-    // [Cerrar(Esc)]. Sin columnas vacías, sin contadores duplicados.
-    // Patrón `egui::Window` existente (ver `draw_assistant_settings_window`);
-    // sin I/O ni spawn, sólo renderiza `&Estado`.
+    // Overlay de pantalla completa: se conserva (ventana centrada + preview
+    // que llena + cierre con Esc/botón), solo ajustado a la misma toolbar
+    // única v3. Patrón `egui::Window` existente; sin I/O ni spawn, sólo
+    // renderiza `&Estado`.
     if state.media_fullscreen.get() {
         let mut open = true;
         let mut close_requested = false;
@@ -5173,17 +5200,13 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             )
             .show(ui.ctx(), |ui| {
                 ui.set_min_width(ui.available_width());
-                if !title.is_empty() {
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            egui::RichText::new(&title)
-                                .color(theme.text_primary)
-                                .size(TYPE_SM)
-                                .strong(),
-                        );
-                    });
-                    ui.add_space(SPACE_XS);
-                }
+                draw_media_header(
+                    ui,
+                    &media_elided_title(&title, MEDIA_HEADER_TITLE_MAX_CHARS_WIDE),
+                    &status,
+                    status_color,
+                );
+                ui.add_space(SPACE_XS);
                 if let Some(texture) = state.media_textures().0.get(index).cloned() {
                     let size = texture.size_vec2();
                     // Reserva honesta para título + toolbar (todo tokens): lo
@@ -5205,92 +5228,32 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                         );
                     });
                 } else {
-                    ui.label(
-                        egui::RichText::new("Fotograma no disponible.")
-                            .color(theme.warning)
-                            .size(TYPE_SM),
-                    );
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("Preparando fotograma…")
+                                .color(theme.text_tertiary)
+                                .size(TYPE_SM),
+                        );
+                    });
                 }
                 ui.add_space(SPACE_SM);
-                // UNA sola toolbar (wrap por tokens: baja de fila, jamás se
-                // corta a la mitad): deslizador + contador juntos.
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
-                    let toggle_label = if state.media_paused.get() {
-                        "▶ Reproducir"
-                    } else {
-                        "⏸ Pausar"
-                    };
-                    if ui
-                        .small_button(toggle_label)
-                        .on_hover_text(if state.media_paused.get() {
-                            MEDIA_TIP_PLAY
-                        } else {
-                            MEDIA_TIP_PAUSE
-                        })
-                        .clicked()
-                    {
-                        state.media_paused.set(!state.media_paused.get());
-                    }
-                    if frame_count > 1 && duration_ms > 0 {
-                        let mut fraction = (state.media_playhead_ms.get().min(duration_ms) as f32)
-                            / (duration_ms as f32);
-                        fraction = fraction.clamp(0.0, 1.0);
-                        let slider_w = ui.available_width().max(80.0);
-                        let response = ui
-                            .add_sized(
-                                egui::vec2(slider_w, ui.spacing().interact_size.y),
-                                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
-                            )
-                            .on_hover_text(&counter_long);
-                        if response.dragged() || response.changed() {
-                            let t_ms =
-                                (fraction.clamp(0.0, 1.0) * (duration_ms as f32)).round() as u64;
-                            state.media_playhead_ms.set(t_ms.min(duration_ms));
-                            state.media_paused.set(true);
-                        }
-                    }
-                    // Contador único junto al deslizador; bajo ~160px se
-                    // suprime con gracia (nota N1) en vez de truncarse.
-                    if media_show_counter_label(ui.available_width()) {
-                        ui.label(
-                            egui::RichText::new(&counter_compact)
-                                .color(theme.text_secondary)
-                                .size(TYPE_XS)
-                                .strong(),
-                        );
-                    }
-                    if ui
-                        .small_button(format!("{speed_label} ▾"))
-                        .on_hover_text(MEDIA_TIP_SPEED)
-                        .clicked()
-                    {
-                        state.media_speed.set(state.media_speed.get().cycle());
-                    }
-                    let exporting = matches!(state.media_export, MediaExportState::Exporting);
-                    let export_response = ui.add_enabled(
-                        frame_count > 0 && !exporting,
-                        egui::Button::new("Exportar").small(),
-                    );
-                    if export_response.clicked() {
-                        action = Some(AssistantUiAction::ExportMedia);
-                    }
-                    if frame_count == 0 {
-                        export_response
-                            .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
-                    } else if exporting {
-                        export_response.on_disabled_hover_text("Ya se está exportando…");
-                    } else {
-                        export_response.on_hover_text(MEDIA_TIP_EXPORT);
-                    }
-                    if ui
-                        .small_button("Cerrar (Esc)")
-                        .on_hover_text("Cierra esta vista grande")
-                        .clicked()
-                    {
-                        close_requested = true;
-                    }
-                });
+                // Misma toolbar única v3 (con [Cerrar] en vez de [⛶]).
+                let overlay_view = MediaToolbarView {
+                    counter_compact: &counter_compact,
+                    counter_long: &counter_long,
+                    speed_label,
+                    duration_ms,
+                    frame_count,
+                    exporting,
+                    in_fullscreen: true,
+                };
+                let outcome = draw_media_toolbar(ui, state, &overlay_view);
+                if let Some(export_action) = outcome.action {
+                    action = Some(export_action);
+                }
+                if outcome.close_requested {
+                    close_requested = true;
+                }
             });
         if !open || close_requested {
             state.media_fullscreen.set(false);
@@ -5298,10 +5261,15 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     }
     // F17: playback media card — wake source local (no cubierto por is_pending).
     // Solo cuando reproduce: en pausa la card es estática (las interacciones
-    // repintan solas) y no se quema CPU.
+    // repintan solas) y no se quema CPU. La barra fina (generando/exportando)
+    // late con el otro intervalo.
     if !state.media_paused.get() {
         ui.ctx()
             .request_repaint_after(MEDIA_PLAYBACK_REPAINT_INTERVAL);
+    }
+    if exporting {
+        ui.ctx()
+            .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
     }
     action
 }
@@ -5726,55 +5694,23 @@ fn draw_assistant_empty_state(
                 .weak(),
         );
         ui.add_space(crate::tokens::SPACE_XS);
-        // W3 — vacío con camino: chips que envían el texto al turno.
-        // Piel pura: setean el borrador y emiten `Submit`; la app decide.
-        ui.horizontal(|ui| {
-            let left = ((ui.available_width() - crate::tokens::SPACE_SM) / 2.0).max(0.0);
-            if ui
-                .add_sized(
-                    egui::vec2(left, 28.0),
-                    egui::Button::new(
-                        egui::RichText::new("Graficá y=x²").size(crate::tokens::TYPE_XS),
-                    )
-                    .rounding(crate::tokens::RADIUS_PILL)
-                    .fill(theme.accent.gamma_multiply(0.10))
-                    .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35))),
-                )
-                .on_hover_text("La dibujo en el lienzo")
-                .clicked()
-            {
-                state.problem = "Graficá y=x²".to_owned();
-                action = Some(AssistantUiAction::Submit);
-            }
-            if ui
-                .add_sized(
-                    egui::vec2(left, 28.0),
-                    egui::Button::new(
-                        egui::RichText::new("Animá una derivada").size(crate::tokens::TYPE_XS),
-                    )
-                    .rounding(crate::tokens::RADIUS_PILL)
-                    .fill(theme.accent.gamma_multiply(0.10))
-                    .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35))),
-                )
-                .on_hover_text("Armo la animación paso a paso")
-                .clicked()
-            {
-                state.problem = "Animá la derivada de x²".to_owned();
-                action = Some(AssistantUiAction::Submit);
-            }
-        });
-        ui.add_space(crate::tokens::SPACE_SM);
-        // W-E — relanzar el tour guiado sin duplicar chips: el paso 3 del
-        // tour usa los chips de arriba; este botón solo prende el flag que la
-        // app consume en su tick. Piel pura: memoria, sin I/O ni acción nueva.
+        // W3 — vacío con camino: chip que envía el texto al turno.
+        // Piel pura: setea el borrador y emite `Submit`; la app decide.
         if ui
-            .small_button("Hacer el tour guiado")
-            .on_hover_text("3 pasos: crear, arrastrar y pedir una pista")
+            .add_sized(
+                egui::vec2(ui.available_width(), 28.0),
+                egui::Button::new(egui::RichText::new("Graficá y=x²").size(crate::tokens::TYPE_XS))
+                    .rounding(crate::tokens::RADIUS_PILL)
+                    .fill(theme.accent.gamma_multiply(0.10))
+                    .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35))),
+            )
+            .on_hover_text("La dibujo en el lienzo")
             .clicked()
         {
-            state.tour_requested = true;
+            state.problem = "Graficá y=x²".to_owned();
+            action = Some(AssistantUiAction::Submit);
         }
-        ui.add_space(crate::tokens::SPACE_XS);
+        ui.add_space(crate::tokens::SPACE_SM);
         // B7 — entrada al ciclo de ejercicio sin conversación previa.
         if ui
             .button("Andamiar: practicá con un ejercicio")
@@ -6241,11 +6177,14 @@ fn conversation_turn_appearance(
 ///
 /// Puro (`&Estado -> Option`): `None` = habilitado. El render nunca es mudo:
 /// con `Some` muestra botón deshabilitado + tooltip + texto con este motivo.
+/// `has_animation` = el turno trae animación en curso o media instalada: una
+/// explicación matemática con animación siempre habilita (Z3).
 fn stepwise_disabled_reason(
     blocks: &[AssistantMessageBlock],
     content: &str,
+    has_animation: bool,
 ) -> Option<&'static str> {
-    if should_show_stepwise(blocks, content) {
+    if should_show_stepwise(blocks, content, has_animation) {
         return None;
     }
     Some("Se habilita en explicaciones con matemática, tabla, código o desarrollo largo")
@@ -6296,7 +6235,7 @@ pub fn greeting_answer(text: &str) -> Option<String> {
         "cómo andás",
     ];
     if SALUDOS.contains(&norm) {
-        Some("¡Hola! Soy Mora. Probá con “graficá y=x²” o pedime “animá una derivada”.".to_owned())
+        Some("¡Hola! Soy Mili. Probá con “graficá y=x²” o arrastrá un punto del lienzo.".to_owned())
     } else {
         None
     }
@@ -6326,7 +6265,14 @@ pub fn over_budget_hint(budget: usize) -> String {
 
 /// Decide si una respuesta merece el botón "Explícame paso a paso".
 /// Solo para contenido complejo: headings, math, tablas o cuerpo largo.
-fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool {
+/// `has_animation` cubre la explicación matemática con animación (Z3): la
+/// animación ya es la marcha visual, así que la matemática en prosa o en
+/// bloque alcanza aunque el texto sea corto y sin marcha escrita.
+fn should_show_stepwise(
+    blocks: &[AssistantMessageBlock],
+    content: &str,
+    has_animation: bool,
+) -> bool {
     if blocks.is_empty() {
         return content.chars().count() > 400;
     }
@@ -6355,6 +6301,12 @@ fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool
         || lower.contains("funcion");
     // Para temas de enseñanza, basta con tener math para ofrecer paso a paso
     if is_teaching_topic && has_math {
+        return true;
+    }
+    // Z3: explicación matemática CON animación habilita aunque sea corta y
+    // sin bloques ricos ni marcha escrita: la animación es la marcha visual
+    // (antes este caso quedaba deshabilitado).
+    if has_animation && (has_math || is_teaching_topic || mentions_math_text(&lower)) {
         return true;
     }
     // R1: explicación con marcha (pasos/proceso a aplicar) + matemática
@@ -6568,7 +6520,11 @@ fn draw_conversation_turn(
             // complejo, el botón queda deshabilitado con su motivo (tooltip +
             // texto) en vez de desaparecer sin explicación.
             let blocks_for_gate = cache.blocks(&turn.content);
-            let stepwise_reason = stepwise_disabled_reason(&blocks_for_gate, &turn.content);
+            // Z3: el turno con animación (en curso o ya instalada) habilita
+            // el paso a paso si la explicación trae matemática.
+            let has_animation = state.anim_progress || state.media.is_some();
+            let stepwise_reason =
+                stepwise_disabled_reason(&blocks_for_gate, &turn.content, has_animation);
             ui.add_space(SPACE_SM);
             // Botón ghost Scandinavian integrado, full-width dentro del flujo
             let stepwise_btn = || {
@@ -8744,8 +8700,8 @@ mod tests {
                 "el saludo ofrece graficar: {respuesta}"
             );
             assert!(
-                respuesta.contains("derivada"),
-                "el saludo ofrece animar: {respuesta}"
+                respuesta.contains("arrastrá"),
+                "el saludo ofrece arrastrar: {respuesta}"
             );
         }
         assert_eq!(greeting_answer("2 + 2"), None);
@@ -8784,16 +8740,6 @@ mod tests {
             ..Default::default()
         };
         assert!(state.can_submit());
-    }
-
-    #[test]
-    fn we_tour_requested_arranca_apagado_para_el_handshake_con_la_app() {
-        // Contrato W-E: el empty-state solo prende el flag; la app lo
-        // consume en su tick y arranca el tour (sin acción nueva).
-        let mut state = AssistantPanelState::default();
-        assert!(!state.tour_requested);
-        state.tour_requested = true;
-        assert!(state.tour_requested);
     }
 
     #[test]
@@ -10013,56 +9959,6 @@ mod tests {
     }
 
     #[test]
-    fn q4_repetir_resetea_playhead_y_retoma_sin_io() {
-        // Q4: "Repetir" = loop honesto con el player existente (sin
-        // re-generar, sin I/O/spawn). Sin media → false (el llamante
-        // explica, jamás mudo).
-        let context = egui::Context::default();
-        let state = AssistantPanelState::default();
-        assert!(!state.repeat_media(), "sin media no hay qué repetir");
-        let mut state = AssistantPanelState::default();
-        let frame = egui::ColorImage::new([2, 2], egui::Color32::WHITE);
-        state.set_media(
-            Some(AssistantMedia {
-                title: "una".into(),
-                frames: vec![frame],
-            }),
-            &context,
-        );
-        state.media_paused.set(true);
-        state.media_playhead_ms.set(1234);
-        assert!(state.repeat_media());
-        assert_eq!(state.media_playhead_ms.get(), 0);
-        assert!(!state.media_paused.get());
-        assert!(!state.media_is_playlist());
-        assert!(state.playlist_sequence_label().is_none());
-    }
-
-    #[test]
-    fn q4_playlist_estagia_flag_y_label_sin_io() {
-        // Q4: la playlist llega a la card como flag de conteo (la completa
-        // vive en el runtime de la app). `stage`/`clear` puros, headless.
-        let mut state = AssistantPanelState::default();
-        assert!(!state.media_is_playlist());
-        state.stage_media_playlist(0);
-        assert!(!state.media_is_playlist(), "0 pasos se ignora");
-        state.stage_media_playlist(2);
-        assert!(state.media_is_playlist());
-        assert_eq!(state.media_playlist_len(), Some(2));
-        assert_eq!(
-            state.playlist_sequence_label().as_deref(),
-            Some("Reproducir secuencia (2 pasos)")
-        );
-        state.clear_media_playlist();
-        assert!(!state.media_is_playlist());
-        assert!(state.playlist_sequence_label().is_none());
-        // Limpiar conversación también limpia la secuencia (sin replay rancio).
-        state.stage_media_playlist(3);
-        state.clear_conversation();
-        assert!(!state.media_is_playlist());
-    }
-
-    #[test]
     fn full_permission_defaults_to_automatic_remote_answers() {
         let state = AssistantPanelState::default();
         assert!(state.full_permission);
@@ -10799,17 +10695,94 @@ mod tests {
     }
 
     #[test]
-    fn media_toolbar_cabe_en_panel_300_y_520_y_calla_bajo_160() {
-        // N2 bug 2: panel 300..520 (ASSISTANT_PANEL_MIN/MAX_WIDTH) muestra el
-        // contador; bug 5 (nota N1): bajo ~160px se suprime con gracia en vez
-        // de truncarse. Con wrap por tokens ningún control queda medio afuera.
-        assert!(media_show_counter_label(300.0));
-        assert!(media_show_counter_label(520.0));
-        assert!(media_show_counter_label(340.0));
-        assert!(!media_show_counter_label(159.9));
-        assert!(!media_show_counter_label(80.0));
-        assert!(!media_show_counter_label(f32::NAN));
-        assert!(!media_show_counter_label(f32::INFINITY));
+    fn z2_media_header_elide_una_linea_con_fallback_honesto() {
+        // v3: título del pedido en 1 línea; vacío → "Animación" (jamás
+        // etiqueta fantasma). Corte por chars, nunca a mitad de UTF-8.
+        assert_eq!(media_elided_title("", 32), "Animación");
+        assert_eq!(media_elided_title("   ", 32), "Animación");
+        assert_eq!(media_elided_title("Derivada de x²", 32), "Derivada de x²");
+        let largo = "a".repeat(40);
+        let elided = media_elided_title(&largo, 32);
+        assert_eq!(elided.chars().count(), 32, "elide a 32: {elided}");
+        assert!(elided.ends_with('…'), "marca el corte: {elided}");
+        // Unicode: cuenta chars, no bytes.
+        let uni = "∫".repeat(40);
+        let elided_uni = media_elided_title(&uni, 32);
+        assert_eq!(elided_uni.chars().count(), 32);
+        assert!(elided_uni.is_char_boundary(elided_uni.len()));
+    }
+
+    #[test]
+    fn z2_media_header_status_cubre_generando_lista_y_error() {
+        // v3: el estado textual vive en el header, dentro de la card.
+        assert_eq!(
+            media_header_status(true, &MediaExportState::Idle),
+            "generando…"
+        );
+        assert_eq!(media_header_status(false, &MediaExportState::Idle), "lista");
+        assert_eq!(media_header_status(false, &MediaExportState::Done), "lista");
+        assert_eq!(
+            media_header_status(false, &MediaExportState::Exporting),
+            "exportando…"
+        );
+        assert_eq!(
+            media_header_status(false, &MediaExportState::Failed("corte".into())),
+            "error: corte"
+        );
+        assert_eq!(
+            media_header_status(false, &MediaExportState::Failed(String::new())),
+            "error"
+        );
+        // Motivo largo: elide a 72 en el header (el detalle vive abajo).
+        let motivo = "x".repeat(200);
+        let status = media_header_status(false, &MediaExportState::Failed(motivo));
+        assert!(status.starts_with("error: "), "prefijo: {status}");
+        assert_eq!(status.chars().count(), 7 + MEDIA_HEADER_ERROR_MAX_CHARS);
+    }
+
+    #[test]
+    fn z2_media_card_v3_una_toolbar_sin_controles_viejos() {
+        // Blindaje v3: UNA toolbar `[▶/⏸] [slider+N/M] [1x▾] [⛶]
+        // [Exportar]`; nada de Repetir/Secuencia, nada de etiquetas sueltas
+        // (eran la fila "Exportar 7/48" y la fantasma arriba-izquierda), nada
+        // de `.text()` lateral en el deslizador (apretaba la fila).
+        let source = include_str!("assistant.rs");
+        let start = source
+            .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
+            .expect("existe draw_media_card");
+        let end = source
+            .find("fn retain_first_assistant_action")
+            .expect("existe el cierre del bloque v3");
+        assert!(start < end, "orden del bloque v3");
+        let card = &source[start..end];
+        // Positivos: header v3 + toolbar única + placeholder dentro del rect
+        // + progreso dentro (los literales `generando…/lista/error:` viven en
+        // `media_header_status`, justo antes de este bloque).
+        for kept in [
+            "media_elided_title",
+            "media_header_status",
+            "draw_media_header",
+            "draw_media_toolbar",
+            "MediaToolbarView",
+            "Preparando fotograma…",
+            "ProgressBar",
+        ] {
+            assert!(card.contains(kept), "v3 contiene {kept:?}");
+        }
+        for gone in [
+            "Repetir",
+            "playlist_sequence_label",
+            "repeat_media",
+            "Recorrer fotogramas",
+            "Fotograma no disponible.",
+            "Pantalla completa",
+            "Reproducir\"",
+            "Pausar\"",
+            "horizontal_wrapped",
+            "show_counter_label",
+        ] {
+            assert!(!card.contains(gone), "v3 sin {gone:?}");
+        }
     }
 
     #[test]
@@ -10859,11 +10832,11 @@ mod tests {
     fn stepwise_reason_is_never_silent() {
         // Bug 4: deshabilitado sin explicación → motivo; complejo → None.
         let short = parse_assistant_blocks("Sí, es correcto.");
-        assert!(stepwise_disabled_reason(&short, "Sí, es correcto.").is_some());
+        assert!(stepwise_disabled_reason(&short, "Sí, es correcto.", false).is_some());
         let complex = parse_assistant_blocks(
             "# Derivada\n\n$$\\frac{d}{dx} x^2$$\n\n```grafito\nFunction[x^2]\n```\n\nTexto largo de cierre con desarrollo suficiente para superar el umbral de longitud mínima exigida por el gate de contenido complejo del asistente matemático.",
         );
-        assert_eq!(stepwise_disabled_reason(&complex, "x"), None);
+        assert_eq!(stepwise_disabled_reason(&complex, "x", false), None);
     }
 
     #[test]
@@ -11015,15 +10988,36 @@ mod tests {
         let content = "Vamos con calma, paso a paso. En 4D Grafito hace una proyección por CPU a 3D/2D, vos elegís si aplicarla:";
         let blocks = parse_assistant_blocks(content);
         assert_eq!(
-            stepwise_disabled_reason(&blocks, content),
+            stepwise_disabled_reason(&blocks, content, false),
             None,
             "marcha + matemática debe habilitar"
         );
         // Negativo: saludos vacíos siguen disabled con motivo (nunca mudo).
         let hola = parse_assistant_blocks("hola");
-        assert!(stepwise_disabled_reason(&hola, "hola").is_some());
+        assert!(stepwise_disabled_reason(&hola, "hola", false).is_some());
         let empty: Vec<AssistantMessageBlock> = Vec::new();
-        assert!(stepwise_disabled_reason(&empty, "").is_some());
+        assert!(stepwise_disabled_reason(&empty, "", false).is_some());
+    }
+
+    #[test]
+    fn z3_stepwise_enables_math_explanation_with_animation() {
+        // Z3: explicación matemática corta CON animación habilita aunque no
+        // traiga marcha escrita ni bloques ricos (la animación es la marcha
+        // visual). Sin animación el mismo contenido sigue deshabilitado.
+        let content = "Mirá cómo se mueve la tangente.\n\n$$y = 2x + 1$$";
+        let blocks = parse_assistant_blocks(content);
+        assert!(
+            stepwise_disabled_reason(&blocks, content, false).is_some(),
+            "sin animación sigue deshabilitado: {blocks:?}"
+        );
+        assert_eq!(
+            stepwise_disabled_reason(&blocks, content, true),
+            None,
+            "matemática + animación debe habilitar"
+        );
+        // Sin matemática ni siquiera la animación habilita (no es explicación).
+        let hola = parse_assistant_blocks("hola");
+        assert!(stepwise_disabled_reason(&hola, "hola", true).is_some());
     }
 
     #[test]

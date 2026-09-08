@@ -60,6 +60,14 @@ impl ToastKind {
     }
 }
 
+/// Máximo de toasts visibles a la vez (Z3): la pila nunca tapa el panel
+/// Álgebra ni el composer; el resto expira en cola sin dibujarse.
+pub const TOAST_MAX_VISIBLE: usize = 2;
+/// Tope de toasts guardados (Z3): evita crecimiento sin cota si se spamea
+/// `push` más rápido que el expiry de 7 s. Solo se descartan no-persistentes
+/// (los errores viven hasta clic/Esc).
+const TOAST_MAX_STORED: usize = 8;
+
 #[derive(Default)]
 pub struct ToastManager {
     toasts: Vec<Toast>,
@@ -68,14 +76,27 @@ pub struct ToastManager {
 }
 
 impl ToastManager {
+    /// Encola un aviso con coalescing por tópico (Z3): mismo mensaje + misma
+    /// severidad = reemplaza (refresca el temporizador), no apila. Así
+    /// "Generando animación…" repetido jamás forma pills superpuestas.
     pub fn push(&mut self, msg: impl Into<String>, kind: ToastKind, time: f64) {
+        let message = msg.into();
+        self.toasts
+            .retain(|t| !(t.message == message && t.kind == kind));
         let duration = kind.default_duration();
         self.toasts.push(Toast {
-            message: msg.into(),
+            message,
             kind,
             created: time,
             duration,
         });
+        // Cota de guardado: descarta los no-persistentes más viejos.
+        while self.toasts.len() > TOAST_MAX_STORED && self.toasts.iter().any(|t| !t.is_persistent())
+        {
+            if let Some(pos) = self.toasts.iter().position(|t| !t.is_persistent()) {
+                self.toasts.remove(pos);
+            }
+        }
     }
 
     /// Descarta el persistente más reciente (errores sin auto-dismiss).
@@ -121,7 +142,9 @@ impl ToastManager {
         let mut hovered: Vec<usize> = Vec::new();
         let mut clicked: Vec<usize> = Vec::new();
 
-        for (index, toast) in self.toasts.iter().enumerate().rev() {
+        // Z3: como mucho TOAST_MAX_VISIBLE (los más recientes primero). Junto
+        // al coalescing de `push`, dos jobs encadenados jamás se enciman.
+        for (index, toast) in self.toasts.iter().enumerate().rev().take(TOAST_MAX_VISIBLE) {
             let elapsed = (current_time - toast.created) as f32;
             let fade_in = (elapsed / TOAST_FADE_IN).min(1.0);
             let fade_out = if elapsed > toast.duration as f32 - TOAST_FADE_OUT {
@@ -150,7 +173,12 @@ impl ToastManager {
                 break;
             }
 
-            let pos = egui::pos2(screen_rect.min.x + SPACE_MD, screen_rect.min.y + y_offset);
+            let pos = egui::pos2(
+                // Z3: centrado bajo la top-bar, jamás sobre el panel Álgebra
+                // (izquierda) ni el drawer/asistente (derecha).
+                screen_rect.min.x + ((screen_rect.width() - w) * 0.5).max(0.0),
+                screen_rect.min.y + y_offset,
+            );
             let rect = egui::Rect::from_min_size(pos, Vec2::new(w, h));
             y_offset += h + SPACE_SM;
             let response = ui.interact(rect, ui.id().with(("toast", index)), egui::Sense::click());
@@ -352,9 +380,10 @@ mod tests {
 
     #[test]
     fn hover_pauses_toast_expiry() {
-        // Toast en (12, 56): hover en (20, 65), lejos en (350, 1100).
+        // Toast centrado en viewport 400px: hover en (200, 65) cae sobre la
+        // pill; lejos en (350, 1100).
         let ctx = egui::Context::default();
-        let hover = egui::pos2(20.0, 65.0);
+        let hover = egui::pos2(200.0, 65.0);
         let away = egui::pos2(350.0, 1_100.0);
         let moved = |pos| vec![egui::Event::PointerMoved(pos)];
         let mut manager = ToastManager::default();
@@ -377,7 +406,7 @@ mod tests {
     #[test]
     fn click_dismisses_toast() {
         let ctx = egui::Context::default();
-        let at_toast = egui::pos2(20.0, 65.0);
+        let at_toast = egui::pos2(200.0, 65.0);
         let mut manager = ToastManager::default();
         let baseline = draw_with_pointer(&ctx, &mut ToastManager::default(), 0.0, Vec::new());
         manager.push("fuera", ToastKind::Error, 0.0);
@@ -447,5 +476,32 @@ mod tests {
         let baseline = draw_with_pointer(&ctx, &mut ToastManager::default(), 0.5, Vec::new());
         assert_eq!(draw_with_pointer(&ctx, &mut manager, 0.5, esc), baseline);
         assert!(manager.toasts.is_empty());
+    }
+
+    #[test]
+    fn same_topic_replaces_instead_of_stacking() {
+        // Z3: "Generando animación…" repetido = UNA pill con timer fresco,
+        // no dos encimadas. Distinto mensaje sí convive.
+        let mut manager = ToastManager::default();
+        manager.push("Generando animación…", ToastKind::Info, 0.0);
+        manager.push("Generando animación…", ToastKind::Info, 3.0);
+        assert_eq!(manager.toasts.len(), 1);
+        assert_eq!(manager.toasts[0].created, 3.0);
+        manager.push("Animación lista.", ToastKind::Success, 3.5);
+        assert_eq!(manager.toasts.len(), 2);
+    }
+
+    #[test]
+    fn at_most_two_toasts_drawn() {
+        // Z3: con 3 avisos encolados solo se dibujan los 2 más recientes.
+        // Cada toast pinta 2 rects (fondo + borde); se resta el baseline.
+        let mut manager = ToastManager::default();
+        manager.push("uno", ToastKind::Info, 0.0);
+        manager.push("dos", ToastKind::Info, 0.0);
+        manager.push("tres", ToastKind::Info, 0.0);
+        let ctx = egui::Context::default();
+        let count = draw_with_pointer(&ctx, &mut manager, 0.5, Vec::new());
+        let baseline = draw_with_pointer(&ctx, &mut ToastManager::default(), 0.5, Vec::new());
+        assert_eq!(count - baseline, 2 * super::TOAST_MAX_VISIBLE);
     }
 }

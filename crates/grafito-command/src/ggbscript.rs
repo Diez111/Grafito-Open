@@ -330,13 +330,14 @@ pub fn check_script_allowlist(script: &str) -> Result<Vec<String>, String> {
             .iter()
             .any(|name| name.eq_ignore_ascii_case(canonical));
         if !allowed {
-            // Q4: `Group`/`Wait` no pasan silenciosos — error honesto con
-            // alternativa en la card (P2 ya vive: "Repetir" + "Reproducir
-            // secuencia" ejecutan en orden con el transporte existente).
-            // El resto sigue con el genérico fuera-del-subset.
+            // Z3: `Group`/`Wait` no pasan silenciosos — error honesto con
+            // alternativa real: la secuencia con espera vive en la animación
+            // del asistente (pedí «X y después Y» en el chat) o en los
+            // comandos Repeat/PlayPause. El resto sigue con el genérico
+            // fuera-del-subset.
             if canonical.eq_ignore_ascii_case("Group") || canonical.eq_ignore_ascii_case("Wait") {
                 return Err(format!(
-                    "paso '{step}' usa '{canonical}': la secuencia con espera vive en la card de animación; usá «Repetir» o «Reproducir secuencia» ahí (o Repeat/PlayPause como alternativa)"
+                    "paso '{step}' usa '{canonical}': la secuencia con espera vive en la animación del asistente; pedí «X y después Y» en el chat (o Repeat/PlayPause como alternativa)"
                 ));
             }
             return Err(format!(
@@ -1703,9 +1704,9 @@ mod tests {
 
     #[test]
     fn group_y_wait_fallan_honesto_aun_sin_ui() {
-        // Q4: nada aceptado-y-mudo — `Group`/`Wait` devuelven error honesto
-        // con alternativa en la card ("Repetir" / "Reproducir secuencia"),
-        // jamás silencio ni ejecución parcial.
+        // Z3: nada aceptado-y-mudo — `Group`/`Wait` devuelven error honesto
+        // con alternativa real (animación del asistente «X y después Y» o
+        // Repeat/PlayPause), jamás silencio ni ejecución parcial.
         for cmd in [
             "Group[Show[A]]",
             "Wait[1000]",
@@ -1714,13 +1715,11 @@ mod tests {
         ] {
             let err = check_script_allowlist(cmd).expect_err("debe rechazar");
             assert!(
-                err.contains("card de animación"),
-                "{cmd} debe apuntar a la card, fue: {err}"
+                err.contains("animación del asistente"),
+                "{cmd} debe apuntar al asistente, fue: {err}"
             );
             assert!(
-                err.contains("Repetir")
-                    || err.contains("Reproducir secuencia")
-                    || err.contains("Repeat"),
+                err.contains("Repeat") || err.contains("PlayPause"),
                 "{cmd} debe sugerir alternativa, fue: {err}"
             );
         }

@@ -221,7 +221,7 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "onboarding.subtitle", es: "Grafito — pizarra geométrica interactiva", en: "Grafito — interactive geometry board" },
     Msg { key: "onboarding.bullet_primary", es: "1. Dibujá un punto y una recta", en: "1. Draw a point and a line" },
     Msg { key: "onboarding.bullet_secondary", es: "2. Pedí “graficá y=x²” en el asistente", en: "2. Ask the assistant for “graficá y=x²”" },
-    Msg { key: "onboarding.bullet_tertiary", es: "3. Animá la derivada con un clic", en: "3. Animate the derivative in one click" },
+    Msg { key: "onboarding.bullet_tertiary", es: "3. Arrastrá un punto y mirá qué se mueve", en: "3. Drag a point and watch what follows" },
     Msg { key: "onboarding.bullet_university", es: "• Universidad desbloquea 18 grupos — Cónicas, 3D, CAS, Estadística, Complejos, Dinámica…", en: "• University unlocks 18 groups — Conics, 3D, CAS, Statistics, Complex, Dynamics…" },
     Msg { key: "onboarding.btn_example", es: "Probar ejemplo", en: "Try an example" },
     Msg { key: "onboarding.btn_empty", es: "Empezar vacío", en: "Start empty" },

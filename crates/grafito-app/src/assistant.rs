@@ -256,7 +256,6 @@ pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
 /// media: limpia el slot para que el turno no-animación no re-muestre la
 /// animación del turno anterior. El resto de decisiones no se toca (Render*
 /// ya limpia antes de spawnear; la guía nunca tuvo media). Sin I/O ni spawn.
-/// Q4: también limpia el flag de playlist (sin secuencia rancia).
 pub(crate) fn limpiar_media_si_no_animacion(
     panel: &mut grafito_ui::assistant::AssistantPanelState,
     decision: &DecisionAnimacion,
@@ -264,7 +263,6 @@ pub(crate) fn limpiar_media_si_no_animacion(
 ) {
     if matches!(decision, DecisionAnimacion::NoAnimacion) {
         panel.set_media(None, ctx);
-        panel.clear_media_playlist();
     }
 }
 
@@ -320,11 +318,6 @@ pub(crate) struct AssistantRuntime {
     image_job: Option<AssistantImageJob>,
     agent_job: Option<AssistantAgentJob>,
     anim_job: Option<AssistantAnimJob>,
-    /// Q4: última playlist ("X y después Y") para "Reproducir secuencia".
-    /// Seam mínimo: la playlist solo vivía transitoria en `playlist_para_pedido`;
-    /// acá se guarda al lanzar el job para que la card la re-encole con el
-    /// transporte existente, sin refactorear el agente entero.
-    last_playlist: Option<grafito_anim::protocol::Playlist>,
     /// Export a GIF de la card en vuelo (B5): `JoinHandle` de
     /// `spawn_gif_export` que `poll_gif_export_job` drena sin bloquear.
     gif_export_job: Option<GifExportJob>,
@@ -1422,6 +1415,24 @@ impl GrafitoApp {
                 // señala el token, el hilo descarta.
                 if self.assistant_runtime.cancel_anim_job() {
                     self.assistant.anim_progress = false;
+                    // Z3 trigger único: si el pedido nuevo también anima, el
+                    // reemplazo se avisa explícito (misma frase que los
+                    // runners, sin duplicar el texto). Si no anima, el cancel
+                    // es limpieza silenciosa.
+                    let arranca_nueva = matches!(
+                        decision,
+                        DecisionAnimacion::RenderCanonico { .. }
+                            | DecisionAnimacion::RenderExplicito { .. }
+                            | DecisionAnimacion::RenderGenerico { .. }
+                    );
+                    let reemplazo = if arranca_nueva {
+                        anim_replace_message(true)
+                    } else {
+                        None
+                    };
+                    if let Some(message) = reemplazo {
+                        self.notify(message, ToastKind::Info);
+                    }
                 }
                 // Pedido ambiguo o función inválida: turno guía local sin
                 // media ni hilo ni remoto, jamás inventa.
@@ -1549,8 +1560,6 @@ impl GrafitoApp {
                         // Reset T1 (Bug B): sin animación en este mensaje la
                         // media anterior no se re-muestra en este turno.
                         limpiar_media_si_no_animacion(&mut self.assistant, &decision, ctx);
-                        // Q4: sin animación tampoco hay secuencia (sin replay rancio).
-                        self.assistant_runtime.last_playlist = None;
                     }
                 }
                 // B7 — Pedido de ejercicio en texto: genera la tarjeta en vez de
@@ -1809,19 +1818,6 @@ impl GrafitoApp {
             }
             AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
             AssistantUiAction::ExportMedia => self.export_assistant_media(ctx),
-            AssistantUiAction::ReplayPlaylist => {
-                // Q4: "Reproducir secuencia" re-encola la playlist guardada
-                // con el transporte existente (mismo hilo + concat + scrub).
-                // Nada mudo: sin playlist guardada se explica en vez de
-                // quedarse quieto.
-                if let Some(playlist) = self.assistant_runtime.last_playlist.clone() {
-                    self.run_assistant_playlist_with(ctx, playlist);
-                } else {
-                    let message = "No hay secuencia para repetir: pedí algo con «y después».";
-                    self.notify(message, ToastKind::Info);
-                    self.show_assistant_error(message);
-                }
-            }
             AssistantUiAction::AskNextTopic => {
                 let memory = self.profile.memory();
                 self.assistant.problem = format!(
@@ -3076,10 +3072,6 @@ impl GrafitoApp {
                 self.notify(message, ToastKind::Info);
             }
         }
-        // Q4: single limpia la secuencia guardada (sin replay rancio de
-        // una playlist vieja cuando ahora se pidió una sola animación).
-        self.assistant_runtime.last_playlist = None;
-        self.assistant.clear_media_playlist();
         // No destruir texturas durante el draw (evita wgpu panic 'Texture has been destroyed').
         // La media previa se mantiene visible hasta que la nueva la reemplace en sync_assistant_for_frame
         // (inicio del próximo frame). Solo limpiar si es la primera vez o si el usuario lo pidió explícitamente.
@@ -3318,7 +3310,9 @@ impl GrafitoApp {
             cancellation,
             receiver,
         });
-        self.notify("Generando animación…", ToastKind::Info);
+        // Z3: sin toast de "generando": la card ya muestra el progreso dentro
+        // (barra + "Armando tu animación…"); el único toast del flujo feliz
+        // es "Animación lista." (la card lo promete: "Te aviso cuando esté lista.").
     }
 
     /// Reproduce una playlist F2b ("X y después Y") como UNA media (scrub total).
@@ -3339,18 +3333,18 @@ impl GrafitoApp {
         ctx: &egui::Context,
         playlist: grafito_anim::protocol::Playlist,
     ) {
+        // Z3 trigger único: mismo reemplazo explícito que el single
+        // (`anim_replace_message`, sin duplicar el texto).
         if self.assistant_runtime.cancel_anim_job() {
             self.assistant.anim_progress = false;
+            if let Some(message) = anim_replace_message(true) {
+                self.notify(message, ToastKind::Info);
+            }
         }
-        // Q4 seam mínimo: la playlist llega a la card. Se guarda el conteo
-        // en la Piel (para mostrar "Reproducir secuencia") y la playlist
-        // completa en el runtime (para re-encolarla sin refactorear el
-        // agente). El `Group` simultáneo se ejecuta FIFO honesto en orden
-        // (ver `AnimationGroup`: sin compositor alfa, el orden documentado
-        // es la ejecución secuencial); el `Wait` congela el último frame
-        // vía el hold del concat.
-        self.assistant.stage_media_playlist(playlist.len());
-        self.assistant_runtime.last_playlist = Some(playlist.clone());
+        // Z3: la playlist se concatena en UNA media con holds (`concat`): el
+        // `Group` simultáneo corre FIFO honesto en orden y el `Wait` congela
+        // el último frame vía el hold. Sin secuencia guardada para replay: el
+        // player ya repite en loop y la card v3 no tiene botón de secuencia.
         let cancellation = CancellationToken::default();
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -3454,7 +3448,8 @@ impl GrafitoApp {
             cancellation,
             receiver,
         });
-        self.notify("Generando animación…", ToastKind::Info);
+        // Z3: sin toast de "generando" (la card ya muestra el progreso
+        // dentro); el único toast del flujo feliz es "Animación lista.".
     }
 
     fn start_remote_proposal_verification(
@@ -6898,30 +6893,6 @@ mod tests {
             grafito_anim::protocol::playlist_frame_at(&timeline, 4499, todo.len()),
             todo.len() - 1
         );
-    }
-
-    #[test]
-    fn q4_limpiar_sin_animacion_tambien_limpia_secuencia() {
-        // Q4 seam mínimo: el flag de playlist vive en la Piel y se limpia
-        // con el turno sin animación (sin replay rancio). Headless, sin hilos.
-        let ctx = egui::Context::default();
-        let mut panel = grafito_ui::assistant::AssistantPanelState::default();
-        panel.stage_media_playlist(2);
-        assert!(panel.media_is_playlist());
-        limpiar_media_si_no_animacion(&mut panel, &DecisionAnimacion::NoAnimacion, &ctx);
-        assert!(!panel.media_is_playlist());
-        // Render* no limpia acá (lo hace el lanzamiento del job); el flag
-        // sobrevive hasta el stage del transporte.
-        panel.stage_media_playlist(2);
-        limpiar_media_si_no_animacion(
-            &mut panel,
-            &DecisionAnimacion::RenderGenerico {
-                plantilla: "derivative-slope".into(),
-                concepto: "derivada".into(),
-            },
-            &ctx,
-        );
-        assert!(panel.media_is_playlist());
     }
 
     #[test]
