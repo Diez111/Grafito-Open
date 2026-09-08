@@ -488,6 +488,23 @@ pub(crate) fn fallback_object_bounds_with_typed_four_d_phase(
             grafito_geometry::Tetrahedron3D::new(tetrahedron.center, tetrahedron.edge_length)
                 .vertices(),
         ),
+        GeoObject::Platonic3D(p) => {
+            grafito_geometry::platonic_mesh(p.kind.to_geometry_solid(), p.edge_length)
+                .ok()
+                .and_then(|mesh| {
+                    let verts: Vec<Point3D> = mesh
+                        .vertices()
+                        .iter()
+                        .map(|v| Point3D::new(v.x + p.center.x, v.y + p.center.y, v.z + p.center.z))
+                        .collect();
+                    Aabb3D::from_points(verts)
+                })
+        }
+        GeoObject::InfiniteCone3D(c) => {
+            // Clip honesto ±50 alrededor del ápice.
+            center_extent_bounds(c.apex, 50.0)
+        }
+        GeoObject::InfiniteCylinder3D(c) => center_extent_bounds(c.base_point, 50.0),
         GeoObject::Cone3D(cone) => {
             endpoints_radius_bounds(cone.base_center, cone.apex, cone.radius)
         }
@@ -627,6 +644,18 @@ fn object_ray_hit(
             .intersect_sphere(sphere.center, sphere.radius)
             .map(PickHit::exact),
         GeoObject::Cube3D(cube) => center_extent_bounds(cube.center, cube.size * 0.5)
+            .and_then(|bounds| ray.intersect_aabb(bounds))
+            .map(PickHit::exact),
+        GeoObject::Platonic3D(p) => {
+            let extent = (p.edge_length * 1.5).max(0.5);
+            center_extent_bounds(p.center, extent)
+                .and_then(|bounds| ray.intersect_aabb(bounds))
+                .map(PickHit::exact)
+        }
+        GeoObject::InfiniteCone3D(c) => center_extent_bounds(c.apex, 50.0)
+            .and_then(|bounds| ray.intersect_aabb(bounds))
+            .map(PickHit::exact),
+        GeoObject::InfiniteCylinder3D(c) => center_extent_bounds(c.base_point, 50.0)
             .and_then(|bounds| ray.intersect_aabb(bounds))
             .map(PickHit::exact),
         GeoObject::Plane3D(plane) => {
@@ -1846,6 +1875,9 @@ impl GrafitoApp {
                 GeoObject::Cylinder3D(c) => {
                     (c.base_center.to_vec3() + c.top_center.to_vec3()) * 0.5
                 }
+                GeoObject::Platonic3D(p) => p.center.to_vec3(),
+                GeoObject::InfiniteCone3D(c) => c.apex.to_vec3(),
+                GeoObject::InfiniteCylinder3D(c) => c.base_point.to_vec3(),
                 GeoObject::Torus3D(t) => t.center.to_vec3(),
                 GeoObject::MoebiusStrip(m) => m.center.to_vec3(),
                 GeoObject::Surface3D(surface) => {
@@ -2196,6 +2228,174 @@ impl GrafitoApp {
                                 egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
+                        }
+                    }
+                }
+                GeoObject::Platonic3D(p) => {
+                    // Wireframe honesto desde platonic_mesh trasladada al centro.
+                    let mesh_opt =
+                        grafito_geometry::platonic_mesh(p.kind.to_geometry_solid(), p.edge_length)
+                            .ok();
+                    if let Some(mesh) = mesh_opt {
+                        let verts: Vec<Point3D> = mesh
+                            .vertices()
+                            .iter()
+                            .map(|v| {
+                                Point3D::new(v.x + p.center.x, v.y + p.center.y, v.z + p.center.z)
+                            })
+                            .collect();
+                        if !overlay_only {
+                            if let Some(fill) = p.fill_color {
+                                for tri in mesh.triangles() {
+                                    let pts: Vec<Pos2> = tri
+                                        .iter()
+                                        .filter_map(|i| {
+                                            let v = verts.get(*i).copied().unwrap_or(p.center);
+                                            self.camera.project(&v, w, h)
+                                        })
+                                        .map(|(x, y)| origin + Vec2::new(x, y))
+                                        .collect();
+                                    if pts.len() == 3 {
+                                        painter.add(egui::Shape::convex_polygon(
+                                            pts,
+                                            to_color32(fill),
+                                            Stroke::NONE,
+                                        ));
+                                    }
+                                }
+                            }
+                            let stroke = Stroke::new(p.width, to_color32(p.color));
+                            for tri in mesh.triangles() {
+                                for e in 0..3 {
+                                    let a_idx = tri[e];
+                                    let b_idx = tri[(e + 1) % 3];
+                                    let (Some(a_vert), Some(b_vert)) =
+                                        (verts.get(a_idx), verts.get(b_idx))
+                                    else {
+                                        continue;
+                                    };
+                                    if let Some((a, b)) =
+                                        project_segment(&self.camera, a_vert, b_vert, w, h)
+                                    {
+                                        painter.line_segment(
+                                            [
+                                                origin + Vec2::new(a.0, a.1),
+                                                origin + Vec2::new(b.0, b.1),
+                                            ],
+                                            stroke,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if !p.label.is_empty() {
+                            if let Some(pt) = self.camera.project(&p.center, w, h) {
+                                painter.text(
+                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &p.label,
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
+                                    label_color,
+                                );
+                            }
+                        }
+                    }
+                }
+                GeoObject::InfiniteCone3D(c) => {
+                    // Cono infinito clipado honesto a ±50: 4 generatrices + círculo a distancia 50.
+                    const CLIP: f64 = 50.0;
+                    let dir = (c.direction.to_vec3() - c.apex.to_vec3()).normalize_or_zero();
+                    if dir.length() > 1e-12 && !overlay_only {
+                        let stroke = Stroke::new(c.width, to_color32(c.color));
+                        // Base ortonormal alrededor del eje.
+                        let up = if dir.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+                        let u = dir.cross(up).normalize_or_zero();
+                        let v = dir.cross(u).normalize_or_zero();
+                        let tan_a = c.half_angle_rad.tan();
+                        for (cu, cv) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                            let gen = (dir + (u * cu as f32 + v * cv as f32) * tan_a as f32)
+                                .normalize_or_zero();
+                            for sign in [1.0f32, -1.0f32] {
+                                let end = c.apex.to_vec3() + gen * (CLIP as f32 * sign);
+                                let end_p = Point3D::new(
+                                    f64::from(end.x),
+                                    f64::from(end.y),
+                                    f64::from(end.z),
+                                );
+                                if let Some((a, b)) =
+                                    project_segment(&self.camera, &c.apex, &end_p, w, h)
+                                {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(a.0, a.1),
+                                            origin + Vec2::new(b.0, b.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
+                            }
+                        }
+                        if !c.label.is_empty() {
+                            if let Some(pt) = self.camera.project(&c.apex, w, h) {
+                                painter.text(
+                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &c.label,
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
+                                    label_color,
+                                );
+                            }
+                        }
+                    }
+                }
+                GeoObject::InfiniteCylinder3D(c) => {
+                    // Cilindro infinito clipado honesto a ±50: eje + 2 laterales.
+                    const CLIP: f64 = 50.0;
+                    let dir = (c.direction.to_vec3() - c.base_point.to_vec3()).normalize_or_zero();
+                    if dir.length() > 1e-12 && !overlay_only {
+                        let stroke = Stroke::new(c.width, to_color32(c.color));
+                        let up = if dir.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+                        let u = dir.cross(up).normalize_or_zero();
+                        let v = dir.cross(u).normalize_or_zero();
+                        let p0 = c.base_point.to_vec3() - dir * CLIP as f32;
+                        let p1 = c.base_point.to_vec3() + dir * CLIP as f32;
+                        let offs = [u * c.radius as f32, v * c.radius as f32];
+                        for off in offs {
+                            let a_p = Point3D::new(
+                                f64::from(p0.x + off.x),
+                                f64::from(p0.y + off.y),
+                                f64::from(p0.z + off.z),
+                            );
+                            let b_p = Point3D::new(
+                                f64::from(p1.x + off.x),
+                                f64::from(p1.y + off.y),
+                                f64::from(p1.z + off.z),
+                            );
+                            if let Some((a, b)) = project_segment(&self.camera, &a_p, &b_p, w, h) {
+                                painter.line_segment(
+                                    [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                                    stroke,
+                                );
+                            }
+                        }
+                        let a0 = Point3D::new(f64::from(p0.x), f64::from(p0.y), f64::from(p0.z));
+                        let b0 = Point3D::new(f64::from(p1.x), f64::from(p1.y), f64::from(p1.z));
+                        if let Some((a, b)) = project_segment(&self.camera, &a0, &b0, w, h) {
+                            painter.line_segment(
+                                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                                stroke,
+                            );
+                        }
+                        if !c.label.is_empty() {
+                            if let Some(pt) = self.camera.project(&c.base_point, w, h) {
+                                painter.text(
+                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &c.label,
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
+                                    label_color,
+                                );
+                            }
                         }
                     }
                 }

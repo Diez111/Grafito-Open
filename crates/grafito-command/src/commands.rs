@@ -12,9 +12,10 @@ use grafito_core::{
     CasWorksheetStatus, CircleObj, ComplexGridObj, ComplexIntegralObj, ComplexMappingObj,
     Cone3DObj, Cube3DObj, Cylinder3DObj, DataTableObj, Document, EllipseObj, FitMetadata,
     Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj,
-    ImplicitCurveObj, ImplicitSurface3DObj, Line3DObj, LineKind, LineObj, LiveSequenceBinding,
-    MoebiusStripObj, ObjectId, ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj,
-    PhasePortraitObj, PieChartObj, Plane3DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj,
+    ImplicitCurveObj, ImplicitSurface3DObj, InfiniteCone3DObj, InfiniteCylinder3DObj, Line3DObj,
+    LineKind, LineObj, LiveSequenceBinding, MoebiusStripObj, ObjectId, ParabolaObj,
+    ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj, PieChartObj,
+    Plane3DObj, Platonic3DObj, PlatonicKind, Point3DObj, PointObj, PolarCurveObj, PolygonObj,
     PolylineObj, Prism3DObj, Pyramid3DObj, Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj,
     RegularPolytopeNDObj, RelationOperator, ScatterPlotObj, SectorObj, Segment3DObj, Sphere3DObj,
     SplineObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta, VectorField2DObj,
@@ -5315,6 +5316,190 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Ok;
         }
+        "Dodecahedron" if cmd.args.len() == 4 => {
+            let coords = cmd
+                .args
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    parse_finite_command_arg(
+                        "Dodecahedron",
+                        ["x", "y", "z", "edge"][index],
+                        value,
+                        &document.variables,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let coords = command_result!(coords);
+            if coords[3] <= 0.0 {
+                return CommandOutcome::Error("Dodecahedron: la arista debe ser positiva.".into());
+            }
+            let center = Point3D::new(coords[0], coords[1], coords[2]);
+            if grafito_geometry::platonic_mesh(
+                grafito_geometry::PlatonicSolid::Dodecahedron,
+                coords[3],
+            )
+            .is_err()
+            {
+                return CommandOutcome::Error(
+                    "Dodecahedron: arista no construible (debe ser finita y positiva)".into(),
+                );
+            }
+            let obj = GeoObject::Platonic3D(Platonic3DObj::new(
+                center,
+                PlatonicKind::Dodecahedron,
+                coords[3],
+            ));
+            insert_command_object!(document, obj);
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "Icosahedron" if cmd.args.len() == 4 => {
+            let coords = cmd
+                .args
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    parse_finite_command_arg(
+                        "Icosahedron",
+                        ["x", "y", "z", "edge"][index],
+                        value,
+                        &document.variables,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let coords = command_result!(coords);
+            if coords[3] <= 0.0 {
+                return CommandOutcome::Error("Icosahedron: la arista debe ser positiva.".into());
+            }
+            let center = Point3D::new(coords[0], coords[1], coords[2]);
+            if grafito_geometry::platonic_mesh(
+                grafito_geometry::PlatonicSolid::Icosahedron,
+                coords[3],
+            )
+            .is_err()
+            {
+                return CommandOutcome::Error(
+                    "Icosahedron: arista no construible (debe ser finita y positiva)".into(),
+                );
+            }
+            let obj = GeoObject::Platonic3D(Platonic3DObj::new(
+                center,
+                PlatonicKind::Icosahedron,
+                coords[3],
+            ));
+            insert_command_object!(document, obj);
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "Octahedron" if cmd.args.len() == 4 => {
+            let coords = cmd
+                .args
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    parse_finite_command_arg(
+                        "Octahedron",
+                        ["x", "y", "z", "edge"][index],
+                        value,
+                        &document.variables,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let coords = command_result!(coords);
+            if coords[3] <= 0.0 {
+                return CommandOutcome::Error("Octahedron: la arista debe ser positiva.".into());
+            }
+            let center = Point3D::new(coords[0], coords[1], coords[2]);
+            if grafito_geometry::platonic_mesh(
+                grafito_geometry::PlatonicSolid::Octahedron,
+                coords[3],
+            )
+            .is_err()
+            {
+                return CommandOutcome::Error(
+                    "Octahedron: arista no construible (debe ser finita y positiva)".into(),
+                );
+            }
+            let obj = GeoObject::Platonic3D(Platonic3DObj::new(
+                center,
+                PlatonicKind::Octahedron,
+                coords[3],
+            ));
+            insert_command_object!(document, obj);
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "InfiniteCone" if cmd.args.len() == 7 => {
+            let vals = cmd
+                .args
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    parse_finite_command_arg(
+                        "InfiniteCone",
+                        ["ax", "ay", "az", "dx", "dy", "dz", "angle_deg"][index],
+                        value,
+                        &document.variables,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let vals = command_result!(vals);
+            let apex = Point3D::new(vals[0], vals[1], vals[2]);
+            let dir_pt = Point3D::new(vals[3], vals[4], vals[5]);
+            let dx = dir_pt.x - apex.x;
+            let dy = dir_pt.y - apex.y;
+            let dz = dir_pt.z - apex.z;
+            if dx.hypot(dy).hypot(dz) <= 1e-12 {
+                return CommandOutcome::Error("InfiniteCone: la dirección debe ser no nula".into());
+            }
+            if !vals[6].is_finite() || vals[6] <= 0.0 || vals[6] >= 90.0 {
+                return CommandOutcome::Error(
+                    "InfiniteCone: angle_deg debe estar en (0, 90)".into(),
+                );
+            }
+            let half = vals[6].to_radians();
+            let obj = GeoObject::InfiniteCone3D(InfiniteCone3DObj::new(apex, dir_pt, half));
+            insert_command_object!(document, obj);
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "InfiniteCylinder" if cmd.args.len() == 7 => {
+            let vals = cmd
+                .args
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    parse_finite_command_arg(
+                        "InfiniteCylinder",
+                        ["x", "y", "z", "dx", "dy", "dz", "radius"][index],
+                        value,
+                        &document.variables,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let vals = command_result!(vals);
+            let base = Point3D::new(vals[0], vals[1], vals[2]);
+            let dir_pt = Point3D::new(vals[3], vals[4], vals[5]);
+            let dx = dir_pt.x - base.x;
+            let dy = dir_pt.y - base.y;
+            let dz = dir_pt.z - base.z;
+            if dx.hypot(dy).hypot(dz) <= 1e-12 {
+                return CommandOutcome::Error(
+                    "InfiniteCylinder: la dirección debe ser no nula".into(),
+                );
+            }
+            if vals[6] <= 0.0 {
+                return CommandOutcome::Error(
+                    "InfiniteCylinder: el radio debe ser positivo".into(),
+                );
+            }
+            let obj =
+                GeoObject::InfiniteCylinder3D(InfiniteCylinder3DObj::new(base, dir_pt, vals[6]));
+            insert_command_object!(document, obj);
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
         "Torus" if cmd.args.len() == 5 => {
             if let (Ok(x), Ok(y), Ok(z), Ok(rmaj), Ok(rmin)) = (
                 parse_numeric_arg(&cmd.args[0], &document.variables),
@@ -5871,6 +6056,277 @@ fn handle_remaining_cas_commands(
             }
             input_text.clear();
             return CommandOutcome::Ok;
+        }
+        "AreCollinear" if cmd.args.len() == 3 => {
+            let mut pts = Vec::with_capacity(3);
+            for (i, raw) in cmd.args.iter().enumerate() {
+                let Some(id) = find_object_by_label(document, raw.trim()) else {
+                    return CommandOutcome::Error(format!(
+                        "AreCollinear: no se encontró '{}'",
+                        raw.trim()
+                    ));
+                };
+                match document.get_object(id) {
+                    Some(GeoObject::Point(p)) => {
+                        if !p.position.x.is_finite() || !p.position.y.is_finite() {
+                            return CommandOutcome::Error(
+                                "AreCollinear: punto con coordenadas no finitas".into(),
+                            );
+                        }
+                        pts.push((p.position.x, p.position.y, raw.trim().to_string()));
+                    }
+                    _ => {
+                        return CommandOutcome::Error(format!(
+                            "AreCollinear: '{}' no es un punto (arg {})",
+                            raw.trim(),
+                            i + 1
+                        ));
+                    }
+                }
+            }
+            let (ax, ay, _) = pts[0];
+            let (bx, by, _) = pts[1];
+            let (cx, cy, _) = pts[2];
+            let abx = bx - ax;
+            let aby = by - ay;
+            let acx = cx - ax;
+            let acy = cy - ay;
+            let cross = (abx * acy - aby * acx).abs();
+            let scale = 1.0 + abx.hypot(aby) + acx.hypot(acy);
+            let tol = 1e-9 * scale;
+            let ok = cross.is_finite() && cross <= tol;
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "AreCollinear[{}, {}, {}] = {}",
+                pts[0].2, pts[1].2, pts[2].2, ok
+            ));
+        }
+        "AreConcurrent" if cmd.args.len() == 3 => {
+            let mut lines: Vec<(f64, f64, f64, f64, String)> = Vec::with_capacity(3);
+            for raw in &cmd.args {
+                let Some(id) = find_object_by_label(document, raw.trim()) else {
+                    return CommandOutcome::Error(format!(
+                        "AreConcurrent: no se encontró '{}'",
+                        raw.trim()
+                    ));
+                };
+                match document.get_object(id) {
+                    Some(GeoObject::Line(l)) => {
+                        let dx = l.end.x - l.start.x;
+                        let dy = l.end.y - l.start.y;
+                        if !dx.is_finite() || !dy.is_finite() || dx.hypot(dy) <= 1e-12 {
+                            return CommandOutcome::Error(format!(
+                                "AreConcurrent: '{}' es degenerada",
+                                raw.trim()
+                            ));
+                        }
+                        lines.push((l.start.x, l.start.y, dx, dy, raw.trim().to_string()));
+                    }
+                    _ => {
+                        return CommandOutcome::Error(format!(
+                            "AreConcurrent: '{}' no es una recta",
+                            raw.trim()
+                        ));
+                    }
+                }
+            }
+            // Intersección l∩m: p1+s·d1 = p2+t·d2.
+            let (x1, y1, dx1, dy1, _) = lines[0];
+            let (x2, y2, dx2, dy2, _) = lines[1];
+            let s_den = dx1 * dy2 - dy1 * dx2;
+            if !s_den.is_finite() || s_den.abs() <= 1e-12 {
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "AreConcurrent[{}, {}, {}] = false",
+                    lines[0].4, lines[1].4, lines[2].4
+                ));
+            }
+            let s_num = (x2 - x1) * dy2 - (y2 - y1) * dx2;
+            if !s_num.is_finite() {
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "AreConcurrent[{}, {}, {}] = false",
+                    lines[0].4, lines[1].4, lines[2].4
+                ));
+            }
+            let s = s_num / s_den;
+            if !s.is_finite() {
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "AreConcurrent[{}, {}, {}] = false",
+                    lines[0].4, lines[1].4, lines[2].4
+                ));
+            }
+            let px = x1 + s * dx1;
+            let py = y1 + s * dy1;
+            if !px.is_finite() || !py.is_finite() {
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "AreConcurrent[{}, {}, {}] = false",
+                    lines[0].4, lines[1].4, lines[2].4
+                ));
+            }
+            // Distancia de P a la tercera recta.
+            let (x3, y3, dx3, dy3, _) = lines[2];
+            let len3 = dx3.hypot(dy3);
+            if !len3.is_finite() || len3 <= 1e-12 {
+                return CommandOutcome::Error("AreConcurrent: tercera recta degenerada".into());
+            }
+            let dist = ((px - x3) * dy3 - (py - y3) * dx3).abs() / len3;
+            let ok = dist.is_finite() && dist <= 1e-9 * (1.0 + px.hypot(py));
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "AreConcurrent[{}, {}, {}] = {}",
+                lines[0].4, lines[1].4, lines[2].4, ok
+            ));
+        }
+        "AreConcyclic" if cmd.args.len() == 4 => {
+            let mut pts: Vec<(f64, f64, String)> = Vec::with_capacity(4);
+            for raw in &cmd.args {
+                let Some(id) = find_object_by_label(document, raw.trim()) else {
+                    return CommandOutcome::Error(format!(
+                        "AreConcyclic: no se encontró '{}'",
+                        raw.trim()
+                    ));
+                };
+                match document.get_object(id) {
+                    Some(GeoObject::Point(p)) => {
+                        if !p.position.x.is_finite() || !p.position.y.is_finite() {
+                            return CommandOutcome::Error(
+                                "AreConcyclic: punto con coordenadas no finitas".into(),
+                            );
+                        }
+                        pts.push((p.position.x, p.position.y, raw.trim().to_string()));
+                    }
+                    _ => {
+                        return CommandOutcome::Error(format!(
+                            "AreConcyclic: '{}' no es un punto",
+                            raw.trim()
+                        ));
+                    }
+                }
+            }
+            let (ax, ay, _) = pts[0];
+            let (bx, by, _) = pts[1];
+            let (cx, cy, _) = pts[2];
+            let d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+            if !d.is_finite() || d.abs() <= 1e-12 {
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "AreConcyclic[{}, {}, {}, {}] = false",
+                    pts[0].2, pts[1].2, pts[2].2, pts[3].2
+                ));
+            }
+            let a2 = ax * ax + ay * ay;
+            let b2 = bx * bx + by * by;
+            let c2 = cx * cx + cy * cy;
+            let ox = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d;
+            let oy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d;
+            if !ox.is_finite() || !oy.is_finite() {
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "AreConcyclic[{}, {}, {}, {}] = false",
+                    pts[0].2, pts[1].2, pts[2].2, pts[3].2
+                ));
+            }
+            let r = (ax - ox).hypot(ay - oy);
+            let (dx, dy, _) = pts[3];
+            let rd = (dx - ox).hypot(dy - oy);
+            if !r.is_finite() || !rd.is_finite() {
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "AreConcyclic[{}, {}, {}, {}] = false",
+                    pts[0].2, pts[1].2, pts[2].2, pts[3].2
+                ));
+            }
+            let ok = (rd - r).abs() <= 1e-9 * (1.0 + r);
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "AreConcyclic[{}, {}, {}, {}] = {}",
+                pts[0].2, pts[1].2, pts[2].2, pts[3].2, ok
+            ));
+        }
+        "AreParallel" if cmd.args.len() == 2 => {
+            let mut dirs: Vec<(f64, f64, String)> = Vec::with_capacity(2);
+            for raw in &cmd.args {
+                let Some(id) = find_object_by_label(document, raw.trim()) else {
+                    return CommandOutcome::Error(format!(
+                        "AreParallel: no se encontró '{}'",
+                        raw.trim()
+                    ));
+                };
+                match document.get_object(id) {
+                    Some(GeoObject::Line(l)) => {
+                        let dx = l.end.x - l.start.x;
+                        let dy = l.end.y - l.start.y;
+                        if !dx.is_finite() || !dy.is_finite() || dx.hypot(dy) <= 1e-12 {
+                            return CommandOutcome::Error(format!(
+                                "AreParallel: '{}' es degenerada",
+                                raw.trim()
+                            ));
+                        }
+                        dirs.push((dx, dy, raw.trim().to_string()));
+                    }
+                    _ => {
+                        return CommandOutcome::Error(format!(
+                            "AreParallel: '{}' no es una recta",
+                            raw.trim()
+                        ));
+                    }
+                }
+            }
+            let (dx1, dy1, _) = dirs[0];
+            let (dx2, dy2, _) = dirs[1];
+            let cross = (dx1 * dy2 - dy1 * dx2).abs();
+            let n1 = dx1.hypot(dy1);
+            let n2 = dx2.hypot(dy2);
+            let ok = cross.is_finite() && cross <= 1e-9 * n1 * n2;
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "AreParallel[{}, {}] = {}",
+                dirs[0].2, dirs[1].2, ok
+            ));
+        }
+        "ArePerpendicular" if cmd.args.len() == 2 => {
+            let mut dirs: Vec<(f64, f64, String)> = Vec::with_capacity(2);
+            for raw in &cmd.args {
+                let Some(id) = find_object_by_label(document, raw.trim()) else {
+                    return CommandOutcome::Error(format!(
+                        "ArePerpendicular: no se encontró '{}'",
+                        raw.trim()
+                    ));
+                };
+                match document.get_object(id) {
+                    Some(GeoObject::Line(l)) => {
+                        let dx = l.end.x - l.start.x;
+                        let dy = l.end.y - l.start.y;
+                        if !dx.is_finite() || !dy.is_finite() || dx.hypot(dy) <= 1e-12 {
+                            return CommandOutcome::Error(format!(
+                                "ArePerpendicular: '{}' es degenerada",
+                                raw.trim()
+                            ));
+                        }
+                        dirs.push((dx, dy, raw.trim().to_string()));
+                    }
+                    _ => {
+                        return CommandOutcome::Error(format!(
+                            "ArePerpendicular: '{}' no es una recta",
+                            raw.trim()
+                        ));
+                    }
+                }
+            }
+            let (dx1, dy1, _) = dirs[0];
+            let (dx2, dy2, _) = dirs[1];
+            let dot = (dx1 * dx2 + dy1 * dy2).abs();
+            let n1 = dx1.hypot(dy1);
+            let n2 = dx2.hypot(dy2);
+            let ok = dot.is_finite() && dot <= 1e-9 * n1 * n2;
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "ArePerpendicular[{}, {}] = {}",
+                dirs[0].2, dirs[1].2, ok
+            ));
         }
         "PointOnObject" if cmd.args.len() == 2 => {
             let Some(object_id) = find_object_by_label(document, cmd.args[0].trim()) else {
@@ -9282,6 +9738,48 @@ fn handle_remaining_cas_commands(
                 if visible { "visible" } else { "oculto" }
             ));
         }
+        "SetCaption" if cmd.args.len() == 2 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!(
+                    "SetCaption: objeto '{label}' no encontrado"
+                ));
+            };
+            let caption = cmd.args[1]
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .trim()
+                .to_string();
+            if caption.is_empty() {
+                return CommandOutcome::Error("SetCaption: el rótulo no puede estar vacío".into());
+            }
+            if caption.len() > 64 {
+                return CommandOutcome::Error("SetCaption: el rótulo excede 64 caracteres".into());
+            }
+            if caption.contains('\n') || caption.contains('\r') {
+                return CommandOutcome::Error(
+                    "SetCaption: el rótulo no puede tener saltos de línea".into(),
+                );
+            }
+            // Colisión honesta: otro objeto con ese rótulo.
+            if let Some(other) = find_object_by_label(document, &caption) {
+                if other != id {
+                    return CommandOutcome::Error(format!(
+                        "SetCaption: ya existe otro objeto '{caption}'"
+                    ));
+                }
+            }
+            match document.get_object_mut(id) {
+                Some(obj) => obj.set_label(caption.clone()),
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "SetCaption: objeto '{label}' no encontrado"
+                    ));
+                }
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("SetCaption: '{label}' → '{caption}'"));
+        }
         "Surface" if cmd.args.len() == 1 => {
             let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
             let Some(id) = find_object_by_label(document, label) else {
@@ -10572,6 +11070,72 @@ fn handle_remaining_cas_commands(
                 a, b, x, pdf, x, cdf
             ));
         }
+        "Exponential" if matches!(cmd.args.len(), 1 | 2) => {
+            let lambda = command_result!(parse_finite_command_arg(
+                "Exponential",
+                "lambda",
+                &cmd.args[0],
+                &document.variables,
+            ));
+            if !lambda.is_finite() || lambda <= 0.0 {
+                return CommandOutcome::Error(
+                    "Exponential: lambda debe ser finito y positivo".into(),
+                );
+            }
+            let x = command_result!(parse_optional_finite_command_arg(
+                "Exponential",
+                "x",
+                &cmd.args,
+                1,
+                1.0 / lambda,
+                &document.variables,
+            ));
+            let pdf = grafito_geometry::statistics::exponential_pdf(x, lambda);
+            let cdf = grafito_geometry::statistics::exponential_cdf(x, lambda);
+            command_result!(require_finite_outputs("Exponential", &[pdf, cdf]));
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "Exp({}): PDF({}) = {:.6}, CDF({}) = {:.6}",
+                lambda, x, pdf, x, cdf
+            ));
+        }
+        "ChiSquared" if matches!(cmd.args.len(), 1 | 2) => {
+            let df = command_result!(parse_finite_command_arg(
+                "ChiSquared",
+                "df",
+                &cmd.args[0],
+                &document.variables,
+            ));
+            if !df.is_finite() || df <= 0.0 {
+                return CommandOutcome::Error("ChiSquared: df debe ser finito y positivo".into());
+            }
+            let x = command_result!(parse_optional_finite_command_arg(
+                "ChiSquared",
+                "x",
+                &cmd.args,
+                1,
+                df,
+                &document.variables,
+            ));
+            let pdf = grafito_geometry::statistics::chi_squared_pdf(x, df);
+            let cdf = grafito_geometry::statistics::chi_squared_cdf(x, df);
+            // chi_squared_pdf devuelve inf en x=0,k<2: honesto, no exigir finito ahí.
+            if !cdf.is_finite() {
+                return CommandOutcome::Error(
+                    "ChiSquared: CDF no finita para esos parámetros".into(),
+                );
+            }
+            if !(pdf.is_finite() || x == 0.0 && df < 2.0) {
+                return CommandOutcome::Error(
+                    "ChiSquared: PDF no finita para esos parámetros".into(),
+                );
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "χ²({}): PDF({}) = {:.6}, CDF({}) = {:.6}",
+                df, x, pdf, x, cdf
+            ));
+        }
         "GammaDist" if matches!(cmd.args.len(), 2 | 3) => {
             let alpha = command_result!(parse_finite_command_arg(
                 "GammaDist",
@@ -11050,6 +11614,65 @@ fn handle_remaining_cas_commands(
             command_result!(require_finite_outputs("InverseF", &[q]));
             input_text.clear();
             return CommandOutcome::Message(format!("InverseF[{p}, {df1}, {df2}] = {:.6}", q));
+        }
+        "InverseExponential" if cmd.args.len() == 2 => {
+            let p = command_result!(parse_finite_command_arg(
+                "InverseExponential",
+                "p",
+                &cmd.args[0],
+                &document.variables,
+            ));
+            let lambda = command_result!(parse_finite_command_arg(
+                "InverseExponential",
+                "lambda",
+                &cmd.args[1],
+                &document.variables,
+            ));
+            if !(0.0 < p && p < 1.0) {
+                return CommandOutcome::Error("InverseExponential: p debe estar en (0,1)".into());
+            }
+            if !lambda.is_finite() || lambda <= 0.0 {
+                return CommandOutcome::Error(
+                    "InverseExponential: lambda debe ser positivo y finito".into(),
+                );
+            }
+            let q = -(1.0 - p).ln() / lambda;
+            command_result!(require_finite_outputs("InverseExponential", &[q]));
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "InverseExponential[{p}, {lambda}] = {:.6}",
+                q
+            ));
+        }
+        "InverseUniform" if cmd.args.len() == 3 => {
+            let p = command_result!(parse_finite_command_arg(
+                "InverseUniform",
+                "p",
+                &cmd.args[0],
+                &document.variables,
+            ));
+            let a = command_result!(parse_finite_command_arg(
+                "InverseUniform",
+                "a",
+                &cmd.args[1],
+                &document.variables,
+            ));
+            let b = command_result!(parse_finite_command_arg(
+                "InverseUniform",
+                "b",
+                &cmd.args[2],
+                &document.variables,
+            ));
+            if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+                return CommandOutcome::Error("InverseUniform: p debe estar en [0,1]".into());
+            }
+            if !a.is_finite() || !b.is_finite() || a >= b {
+                return CommandOutcome::Error("InverseUniform: se requiere a < b finitos".into());
+            }
+            let q = a + p * (b - a);
+            command_result!(require_finite_outputs("InverseUniform", &[q]));
+            input_text.clear();
+            return CommandOutcome::Message(format!("InverseUniform[{p}, {a}, {b}] = {:.6}", q));
         }
         "FrequencyTable" if cmd.args.len() == 1 => {
             let data = command_result!(parse_data_command_arg(
@@ -13598,6 +14221,131 @@ fn execute_cas_command_typed(
                 }
                 grafito_geometry::outcome::MathResult::NotConverged(err) => {
                     Some(Err(format!("IFactor no convergió: {err:?}")))
+                }
+            }
+        }
+        "CFactor" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: CFactor requiere CFactor[expr] o CFactor[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if expr.trim().is_empty() {
+                return Some(Err("Error: CFactor requiere una expresión no vacía".into()));
+            }
+            let var = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: CFactor requiere una variable válida".into()));
+            }
+            match symbolic::c_factor_typed(&expr, var) {
+                grafito_geometry::outcome::MathResult::Exact(value) => {
+                    Some(Ok(format!("CFactor[{expr}] = {value}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                    Some(Ok(format!("CFactor[{expr}] ≈ {value}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(err) => {
+                    Some(Err(format!("CFactor error de dominio: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
+                    Some(Err(format!("CFactor límite de recursos: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("CFactor no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("CFactor no convergió: {err:?}")))
+                }
+            }
+        }
+        "CIFactor" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: CIFactor requiere CIFactor[expr] o CIFactor[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if expr.trim().is_empty() {
+                return Some(Err("Error: CIFactor requiere una expresión no vacía".into()));
+            }
+            let var = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: CIFactor requiere una variable válida".into()));
+            }
+            match symbolic::ci_factor_typed(&expr, var) {
+                grafito_geometry::outcome::MathResult::Exact(value) => {
+                    Some(Ok(format!("CIFactor[{expr}] = {value}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                    Some(Ok(format!("CIFactor[{expr}] ≈ {value}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(err) => {
+                    Some(Err(format!("CIFactor error de dominio: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
+                    Some(Err(format!("CIFactor límite de recursos: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("CIFactor no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("CIFactor no convergió: {err:?}")))
+                }
+            }
+        }
+        "PartialFractions" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: PartialFractions requiere PartialFractions[expr] o PartialFractions[expr, variable]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: PartialFractions requiere una expresión no vacía".into(),
+                ));
+            }
+            let var = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err(
+                    "Error: PartialFractions requiere una variable válida".into()
+                ));
+            }
+            match symbolic::partial_fractions_typed(&expr, var) {
+                grafito_geometry::outcome::MathResult::Exact(value) => {
+                    Some(Ok(format!("PartialFractions[{expr}] = {value}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                    Some(Ok(format!("PartialFractions[{expr}] ≈ {value}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(err) => {
+                    Some(Err(format!("PartialFractions error de dominio: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
+                    Some(Err(format!("PartialFractions límite de recursos: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("PartialFractions no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("PartialFractions no convergió: {err:?}")))
                 }
             }
         }

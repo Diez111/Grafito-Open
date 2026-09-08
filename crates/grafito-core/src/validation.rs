@@ -942,6 +942,53 @@ fn validate_geo_object_legacy_match(doc: &Document, obj: &GeoObject) -> Result<(
             validate_positive_f32(o.width, "Cylinder3D.width")?;
             validate_optional_color(o.fill_color, "Cylinder3D.fill_color")?;
         }
+        GeoObject::Platonic3D(o) => {
+            validate_point3(o.center, "Platonic3D.center")?;
+            validate_positive(o.edge_length, "Platonic3D.edge_length")?;
+            if grafito_geometry::platonic_mesh(o.kind.to_geometry_solid(), o.edge_length).is_err() {
+                return Err(
+                    "Platonic3D malla no construible con esa arista (debe ser finita y positiva)"
+                        .to_string(),
+                );
+            }
+            validate_positive_f32(o.width, "Platonic3D.width")?;
+            validate_optional_color(o.fill_color, "Platonic3D.fill_color")?;
+        }
+        GeoObject::InfiniteCone3D(o) => {
+            validate_point3(o.apex, "InfiniteCone3D.apex")?;
+            validate_point3(o.direction, "InfiniteCone3D.direction")?;
+            let dx = o.direction.x - o.apex.x;
+            let dy = o.direction.y - o.apex.y;
+            let dz = o.direction.z - o.apex.z;
+            if !dx.is_finite() || !dy.is_finite() || !dz.is_finite() {
+                return Err("InfiniteCone3D.direction no finita".to_string());
+            }
+            if dx.hypot(dy).hypot(dz) <= 1e-12 {
+                return Err("InfiniteCone3D requiere dirección no nula".to_string());
+            }
+            if !o.half_angle_rad.is_finite()
+                || o.half_angle_rad <= 0.0
+                || o.half_angle_rad >= std::f64::consts::FRAC_PI_2
+            {
+                return Err("InfiniteCone3D.half_angle debe estar en (0, π/2)".to_string());
+            }
+            validate_positive_f32(o.width, "InfiniteCone3D.width")?;
+        }
+        GeoObject::InfiniteCylinder3D(o) => {
+            validate_point3(o.base_point, "InfiniteCylinder3D.base_point")?;
+            validate_point3(o.direction, "InfiniteCylinder3D.direction")?;
+            let dx = o.direction.x - o.base_point.x;
+            let dy = o.direction.y - o.base_point.y;
+            let dz = o.direction.z - o.base_point.z;
+            if !dx.is_finite() || !dy.is_finite() || !dz.is_finite() {
+                return Err("InfiniteCylinder3D.direction no finita".to_string());
+            }
+            if dx.hypot(dy).hypot(dz) <= 1e-12 {
+                return Err("InfiniteCylinder3D requiere dirección no nula".to_string());
+            }
+            validate_positive(o.radius, "InfiniteCylinder3D.radius")?;
+            validate_positive_f32(o.width, "InfiniteCylinder3D.width")?;
+        }
         GeoObject::Torus3D(o) => {
             validate_point3(o.center, "Torus3D.center")?;
             validate_positive(o.r_major, "Torus3D.r_major")?;

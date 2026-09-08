@@ -179,6 +179,24 @@ pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
             let vol = t.edge_length.powi(3) / (6.0 * 2.0_f64.sqrt());
             format!("edge={:.2}  V={:.3}", t.edge_length, vol)
         }
+        GeoObject::Platonic3D(p) => {
+            format!("{} edge={:.2}", p.kind.as_str(), p.edge_length)
+        }
+        GeoObject::InfiniteCone3D(c) => {
+            format!(
+                "ápice=({:.1},{:.1},{:.1}) θ={:.1}° (clip ±50)",
+                c.apex.x,
+                c.apex.y,
+                c.apex.z,
+                c.half_angle_rad.to_degrees()
+            )
+        }
+        GeoObject::InfiniteCylinder3D(c) => {
+            format!(
+                "r={:.2} eje→({:.1},{:.1},{:.1}) (clip ±50)",
+                c.radius, c.direction.x, c.direction.y, c.direction.z
+            )
+        }
         GeoObject::RegularPolychoron4D(polychoron) => regular_polychoron_summary(polychoron),
         GeoObject::RegularPolytopeND(polytope) => regular_polytope_nd_summary(polytope),
         GeoObject::Cylinder3D(cy) => {
@@ -672,6 +690,24 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         grafito_core::GeoObject::Tetrahedron3D(t) => {
                             let vol = t.edge_length.powi(3) / (6.0 * 2.0_f64.sqrt());
                             format!("edge={:.2}  V={:.3}", t.edge_length, vol)
+                        }
+                        grafito_core::GeoObject::Platonic3D(p) => {
+                            format!("{} edge={:.2}", p.kind.as_str(), p.edge_length)
+                        }
+                        grafito_core::GeoObject::InfiniteCone3D(c) => {
+                            format!(
+                                "ápice=({:.1},{:.1},{:.1}) θ={:.1}° (clip ±50)",
+                                c.apex.x,
+                                c.apex.y,
+                                c.apex.z,
+                                c.half_angle_rad.to_degrees()
+                            )
+                        }
+                        grafito_core::GeoObject::InfiniteCylinder3D(c) => {
+                            format!(
+                                "r={:.2} eje→({:.1},{:.1},{:.1}) (clip ±50)",
+                                c.radius, c.direction.x, c.direction.y, c.direction.z
+                            )
                         }
                         grafito_core::GeoObject::RegularPolychoron4D(polychoron) => {
                             regular_polychoron_summary(polychoron)

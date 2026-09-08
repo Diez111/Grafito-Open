@@ -3192,6 +3192,9 @@ pub enum PlatonicSolid {
     /// 20 vértices `(±1, ±1, ±1)`, `(0, ±φ, ±1/φ)` y permutaciones cíclicas;
     /// 12 pentágonos. La orientación es la dual del [`PlatonicSolid::Icosahedron`].
     Dodecahedron,
+    /// 6 vértices `(±1, 0, 0)`, `(0, ±1, 0)`, `(0, 0, ±1)`; 8 caras triangulares.
+    /// Arista canónica `sqrt(2)` (p. ej. `(1,0,0)-(0,1,0)`).
+    Octahedron,
 }
 
 fn gb_positive_edge(edge_length: f64) -> Result<f64, MeshError> {
@@ -3360,6 +3363,7 @@ pub fn dodecahedron_pentagons() -> Option<[[usize; 5]; 12]> {
 /// Malla exacta del sólido platónico con la arista pedida (vértices gold-ratio).
 ///
 /// El dodecaedro triangula cada pentágono en abanico (3 triángulos por cara).
+/// El octaedro usa 6 vértices axiales con arista canónica √2.
 pub fn platonic_mesh(solid: PlatonicSolid, edge_length: f64) -> Result<TriangleMesh3D, MeshError> {
     gb_positive_edge(edge_length)?;
     match solid {
@@ -3395,6 +3399,33 @@ pub fn platonic_mesh(solid: PlatonicSolid, edge_length: f64) -> Result<TriangleM
                 }
             }
             TriangleMesh3D::new(vertices, triangles)
+        }
+        PlatonicSolid::Octahedron => {
+            // Arista canónica √2 entre axiales (p. ej. (1,0,0)-(0,1,0)).
+            let scale = edge_length / std::f64::consts::SQRT_2;
+            if !scale.is_finite() {
+                return Err(MeshError::NonPositiveEdge { value: edge_length });
+            }
+            let vertices = vec![
+                Point3D::new(scale, 0.0, 0.0),
+                Point3D::new(-scale, 0.0, 0.0),
+                Point3D::new(0.0, scale, 0.0),
+                Point3D::new(0.0, -scale, 0.0),
+                Point3D::new(0.0, 0.0, scale),
+                Point3D::new(0.0, 0.0, -scale),
+            ];
+            // 8 caras: cada octante (signos) con orientación saliente.
+            let faces = vec![
+                [0, 2, 4],
+                [2, 1, 4],
+                [1, 3, 4],
+                [3, 0, 4],
+                [2, 0, 5],
+                [1, 2, 5],
+                [3, 1, 5],
+                [0, 3, 5],
+            ];
+            TriangleMesh3D::new(vertices, faces)
         }
     }
 }
@@ -4492,6 +4523,31 @@ pub fn platonic_net(solid: PlatonicSolid, edge_length: f64) -> Result<Polyhedron
             })?;
             let faces: Vec<Vec<usize>> =
                 pentagons.iter().map(|pentagon| pentagon.to_vec()).collect();
+            PolyhedronNet::unfold(&vertices, &faces)
+        }
+        PlatonicSolid::Octahedron => {
+            let scale = edge_length / std::f64::consts::SQRT_2;
+            if !scale.is_finite() {
+                return Err(MeshError::NonPositiveEdge { value: edge_length });
+            }
+            let vertices = vec![
+                Point3D::new(scale, 0.0, 0.0),
+                Point3D::new(-scale, 0.0, 0.0),
+                Point3D::new(0.0, scale, 0.0),
+                Point3D::new(0.0, -scale, 0.0),
+                Point3D::new(0.0, 0.0, scale),
+                Point3D::new(0.0, 0.0, -scale),
+            ];
+            let faces: Vec<Vec<usize>> = vec![
+                vec![0, 2, 4],
+                vec![2, 1, 4],
+                vec![1, 3, 4],
+                vec![3, 0, 4],
+                vec![2, 0, 5],
+                vec![1, 2, 5],
+                vec![3, 1, 5],
+                vec![0, 3, 5],
+            ];
             PolyhedronNet::unfold(&vertices, &faces)
         }
     }

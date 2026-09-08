@@ -5082,6 +5082,45 @@ pub(crate) fn uniform_quantile_honest(p: f64, a: f64, b: f64) -> Result<f64, Str
     finish_probability_scalar(a + p * (b - a), "El cuantil")
 }
 
+/// Densidad Exponencial(λ) en x: λ·exp(-λx) para x≥0, 0 fuera.
+/// `Err` honesto si λ ≤ 0 o hay no-finitos.
+pub(crate) fn exponential_pdf(x: f64, lambda: f64) -> Result<f64, String> {
+    let x = check_probability_point(x, "x")?;
+    let lambda = check_probability_point(lambda, "λ")?;
+    if lambda <= 0.0 {
+        return Err("λ debe ser mayor que 0".to_string());
+    }
+    finish_probability_scalar(
+        grafito_geometry::statistics::exponential_pdf(x, lambda),
+        "La densidad",
+    )
+}
+
+/// Acumulada Exponencial(λ) en x: P(X ≤ x). Delega en el motor.
+pub(crate) fn exponential_cdf(x: f64, lambda: f64) -> Result<f64, String> {
+    let x = check_probability_point(x, "x")?;
+    let lambda = check_probability_point(lambda, "λ")?;
+    if lambda <= 0.0 {
+        return Err("λ debe ser mayor que 0".to_string());
+    }
+    finish_probability_scalar(
+        grafito_geometry::statistics::exponential_cdf(x, lambda),
+        "La acumulada",
+    )
+}
+
+/// Cuantil Exponencial: forma cerrada -ln(1-p)/λ, sin iterar.
+pub(crate) fn exponential_quantile_honest(p: f64, lambda: f64) -> Result<f64, String> {
+    if !(p.is_finite() && 0.0 < p && p < 1.0) {
+        return Err("p debe estar en el intervalo (0, 1)".to_string());
+    }
+    let lambda = check_probability_point(lambda, "λ")?;
+    if lambda <= 0.0 {
+        return Err("λ debe ser mayor que 0".to_string());
+    }
+    finish_probability_scalar(-(1.0 - p).ln() / lambda, "El cuantil")
+}
+
 /// Prompt auto de velocidad para sliders Play. Acepta:
 /// número («1.5»), palabra («lento/medio/rápido») o «N vueltas en S s».
 /// Todo lo demás es `Err` honesto (nunca se inventa una velocidad).
@@ -5132,7 +5171,7 @@ pub(crate) fn parse_slider_prompt(input: &str) -> Result<f64, String> {
 
 /// Estado efímero del panel de probabilidad (vive en `ctx.data`, sin I/O).
 /// `dist`: 0 Normal, 1 Binomial, 2 Poisson, 3 t-Student, 4 χ², 5 F (C2),
-/// 6 Geométrica, 7 Uniforme (W-E: el motor ya las trae).
+/// 6 Geométrica, 7 Uniforme (W-E: el motor ya las trae), 8 Exponencial (P4).
 #[derive(Debug, Clone)]
 struct ProbabilityPanelState {
     dist: u8,
@@ -5645,7 +5684,7 @@ fn draw_probability_plot(
 }
 
 /// Sección Probabilidad: Normal / Binomial / Poisson / t-Student / χ² / F
-/// / Geométrica / Uniforme con PDF/CDF honestos. Llamada desde el panel Vista (alcanzable) — sin
+/// / Geométrica / Uniforme / Exponencial con PDF/CDF honestos. Llamada desde el panel Vista (alcanzable) — sin
 /// botones mudos: el selector cambia la distribución y cada parámetro
 /// recalcula en vivo.
 pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -5679,6 +5718,11 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                 "p éxito: fallos antes del primer éxito, P(X = k) y P(X ≤ k)",
             ),
             (7u8, "Uniforme", "a, b: densidad 1/(b−a) y acumulada"),
+            (
+                8u8,
+                "Exponencial",
+                "λ tasa: densidad λ·exp(-λx) y acumulada",
+            ),
         ] {
             let selected = state.dist == index;
             if ui
@@ -5730,10 +5774,18 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             ui.add(egui::Slider::new(&mut state.p, 0.01..=1.0).text("p éxito"));
             ui.add(egui::Slider::new(&mut state.k, 0.0..=50.0).text("k fallos"));
         }
-        _ => {
+        7 => {
             ui.add(egui::Slider::new(&mut state.ua, -10.0..=10.0).text("a mínimo"));
             ui.add(egui::Slider::new(&mut state.ub, -10.0..=10.0).text("b máximo"));
             ui.add(egui::Slider::new(&mut state.x, -10.0..=10.0).text("x punto"));
+        }
+        _ => {
+            ui.add(
+                egui::Slider::new(&mut state.lambda, 0.1..=10.0)
+                    .logarithmic(true)
+                    .text("λ tasa"),
+            );
+            ui.add(egui::Slider::new(&mut state.x, 0.0..=20.0).text("x punto"));
         }
     }
     ui.add_space(SPACE_XS);
@@ -5819,7 +5871,7 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     format!("P(X = {k}) · p = {}", format_statistic(state.p),),
                 )
             }
-            _ => {
+            7 => {
                 let (pdf, cdf) = (
                     uniform_pdf(state.x, state.ua, state.ub)?,
                     uniform_cdf(state.x, state.ua, state.ub)?,
@@ -5832,6 +5884,21 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                         format_statistic(state.x),
                         format_statistic(state.ua),
                         format_statistic(state.ub)
+                    ),
+                )
+            }
+            _ => {
+                let (pdf, cdf) = (
+                    exponential_pdf(state.x, state.lambda)?,
+                    exponential_cdf(state.x, state.lambda)?,
+                );
+                (
+                    pdf,
+                    cdf,
+                    format!(
+                        "f({}) · Exp(λ={})",
+                        format_statistic(state.x),
+                        format_statistic(state.lambda)
                     ),
                 )
             }
@@ -5966,7 +6033,7 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     format_statistic(state.p)
                 )
             }
-            _ => {
+            7 => {
                 let q = uniform_quantile_honest(state.p_inv, state.ua, state.ub)?;
                 format!(
                     "x con P(X≤x)={:.3} → {} (a={}, b={})",
@@ -5974,6 +6041,15 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     format_statistic(q),
                     format_statistic(state.ua),
                     format_statistic(state.ub)
+                )
+            }
+            _ => {
+                let q = exponential_quantile_honest(state.p_inv, state.lambda)?;
+                format!(
+                    "x con P(X≤x)={:.3} → {} (λ={})",
+                    state.p_inv,
+                    format_statistic(q),
+                    format_statistic(state.lambda)
                 )
             }
         })
@@ -5988,7 +6064,7 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             );
             ui.label(
                 egui::RichText::new(
-                    "Misma inversa que InverseNormal/InverseT/InverseChiSquared/InverseF (motor único); Geométrica acumula pmf y Uniforme usa a+p·(b−a).",
+                    "Misma inversa que InverseNormal/InverseT/InverseChiSquared/InverseF/InverseExponential/InverseUniform (motor único); Geométrica acumula pmf y Uniforme/Exponencial usan forma cerrada.",
                 )
                 .color(txt_dim)
                 .size(TYPE_XS),

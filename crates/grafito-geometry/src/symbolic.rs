@@ -3756,6 +3756,734 @@ fn linear_factor(var: &str, root: f64) -> String {
     }
 }
 
+/// Factor lineal complejo `(var - (re ± im·i))` con formato estable.
+fn complex_linear_factor(var: &str, re: f64, im: f64) -> String {
+    if im.abs() < 1e-12 {
+        return linear_factor(var, re);
+    }
+    let re_s = format!("{re}");
+    let im_s = format!("{}", im.abs());
+    if im >= 0.0 {
+        format!("({var} - ({re_s} + {im_s}*i))")
+    } else {
+        format!("({var} - ({re_s} - {im_s}*i))")
+    }
+}
+
+/// Factorización compleja: grado 1-2 con raíces complejas + raíces racionales
+/// para grado>2 con resto cuadrático complejo. Fuera del subset devuelve la
+/// expresión original (igual que [`factor`]); grado>2 sin raíz racional da `Err`.
+pub fn c_factor(expr: &str, var: &str) -> Result<String, String> {
+    if !is_math_identifier(var) {
+        return Err(format!("variable '{var}' no es un identificador válido"));
+    }
+    let pp = expr.replace(' ', "");
+    let ast = parse_ast(&pp).map_err(|e| format!("No se pudo factorizar '{expr}': {e}"))?;
+    let simplified = simplify_expr(&ast);
+    let Some(coeffs_wide) = collect_polynomial_coeffs(&simplified, var, 64) else {
+        return Ok(pp);
+    };
+    if coeffs_wide.iter().any(|c| !c.is_finite()) {
+        return Ok(pp);
+    }
+    let degree_opt = coeffs_wide.iter().rposition(|c| *c != 0.0);
+    let Some(degree) = degree_opt else {
+        return Ok("0".to_string());
+    };
+    if degree == 0 {
+        return Ok(pp);
+    }
+    if degree == 1 {
+        return factor(expr, var);
+    }
+    if degree == 2 {
+        let (Some(a), Some(b), Some(c)) = (
+            coeffs_wide.get(2).copied(),
+            coeffs_wide.get(1).copied(),
+            coeffs_wide.get(0).copied(),
+        ) else {
+            return Ok(pp);
+        };
+        if a == 0.0 {
+            return factor(expr, var);
+        }
+        let disc = b.mul_add(b, -4.0 * a * c);
+        if !disc.is_finite() {
+            return Ok(pp);
+        }
+        if disc >= 0.0 {
+            return factor(expr, var);
+        }
+        // Raíces complejas conjugadas.
+        let re = -b / (2.0 * a);
+        let im = (-disc).sqrt() / (2.0 * a);
+        if !re.is_finite() || !im.is_finite() || im == 0.0 {
+            return Ok(pp);
+        }
+        let f1 = complex_linear_factor(var, re, im);
+        let f2 = complex_linear_factor(var, re, -im);
+        if a == 1.0 {
+            return Ok(format!("{f1} * {f2}"));
+        }
+        return Ok(format!("{a} * {f1} * {f2}"));
+    }
+    // Grado>2: extrae raíces racionales y factoriza el resto (real o complejo).
+    let trimmed = poly_trim(&coeffs_wide);
+    let mut rem = trimmed.clone();
+    let mut fac_strs: Vec<String> = Vec::new();
+    let orig_leading = coeffs_wide[degree];
+    loop {
+        let cur_deg = poly_degree(&rem).unwrap_or(0);
+        if cur_deg <= 2 {
+            break;
+        }
+        let roots = find_rational_roots(&rem);
+        if roots.is_empty() {
+            break;
+        }
+        let mut progressed = false;
+        for r in roots {
+            let lin = vec![-r, 1.0];
+            while let Some(q) = poly_exact_div(&rem, &lin) {
+                fac_strs.push(linear_factor(var, r));
+                rem = q;
+                progressed = true;
+                if poly_is_zero(&rem) || poly_degree(&rem).is_none() {
+                    break;
+                }
+            }
+            if progressed {
+                break;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let rem_deg = poly_degree(&rem);
+    match rem_deg {
+        None => {
+            if orig_leading != 1.0 {
+                fac_strs.insert(0, orig_leading.to_string());
+            }
+            if fac_strs.is_empty() {
+                return Ok(pp);
+            }
+            return Ok(fac_strs.join(" * "));
+        }
+        Some(1) => {
+            let leading = rem[1];
+            let root = -rem[0] / leading;
+            if root.is_finite() {
+                fac_strs.push(linear_factor(var, root));
+                if orig_leading != 1.0 {
+                    fac_strs.insert(0, orig_leading.to_string());
+                }
+                return Ok(fac_strs.join(" * "));
+            }
+            return Err(
+                "grado>2 no soportado: CFactor solo factoriza con raíces racionales".to_string(),
+            );
+        }
+        Some(2) => {
+            let (Some(a), Some(b), Some(c)) = (
+                rem.get(2).copied(),
+                rem.get(1).copied(),
+                rem.get(0).copied(),
+            ) else {
+                return Err("grado>2 no soportado: resto cuadrático inválido".to_string());
+            };
+            if a == 0.0 {
+                return Err("grado>2 no soportado: resto degenerado".to_string());
+            }
+            let disc = b.mul_add(b, -4.0 * a * c);
+            if !disc.is_finite() {
+                return Err("grado>2 no soportado: discriminante no finito".to_string());
+            }
+            if disc >= 0.0 {
+                // Reúsa camino real vía factor del resto.
+                let rem_str = format_polynomial_from_coeffs(&rem, var);
+                match factor(&rem_str, var) {
+                    Ok(f) => {
+                        fac_strs.push(format!("({f})"));
+                        if orig_leading != 1.0 {
+                            fac_strs.insert(0, orig_leading.to_string());
+                        }
+                        return Ok(fac_strs.join(" * "));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            let re = -b / (2.0 * a);
+            let im = (-disc).sqrt() / (2.0 * a);
+            if !re.is_finite() || !im.is_finite() || im == 0.0 {
+                return Err("grado>2 no soportado: raíces complejas no finitas".to_string());
+            }
+            fac_strs.push(complex_linear_factor(var, re, im));
+            fac_strs.push(complex_linear_factor(var, re, -im));
+            if orig_leading != 1.0 {
+                fac_strs.insert(0, orig_leading.to_string());
+            }
+            return Ok(fac_strs.join(" * "));
+        }
+        _ => {
+            return Err(
+                "grado>2 no soportado: CFactor requiere raíces racionales o resto ≤2".to_string(),
+            );
+        }
+    }
+}
+
+/// Variante tipada de [`c_factor`] con errores estructurados.
+pub fn c_factor_typed(expr: &str, var: &str) -> MathResult<String> {
+    if expr.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: expr.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    match c_factor(expr, var) {
+        Ok(value) => {
+            if value.len() > MAX_MATH_INPUT_BYTES {
+                MathResult::ResourceLimit(MathError::InputTooLarge {
+                    operation: MathOperation::SymbolicDerivative,
+                    provided_bytes: value.len(),
+                    maximum_bytes: MAX_MATH_INPUT_BYTES,
+                })
+            } else {
+                MathResult::Exact(value)
+            }
+        }
+        Err(reason) => {
+            if reason.contains("grado>2") {
+                MathResult::Unsupported(MathError::DerivativeUnavailable {
+                    expression: expr.into(),
+                    variable: var.into(),
+                    reason,
+                })
+            } else {
+                MathResult::DomainError(MathError::InvalidExpression {
+                    operation: MathOperation::SymbolicDerivative,
+                    expression: expr.into(),
+                    reason,
+                })
+            }
+        }
+    }
+}
+
+/// Adaptador de `CFactor`.
+pub fn cfactor(expr: &str, var: &str) -> Result<String, String> {
+    adapt_symbolic_result(c_factor_typed(expr, var))
+}
+
+/// Factorización gaussiana: contenido entero (vía `PrimeFactors`, como
+/// `IFactor`) + resto factorizado en complejos (vía [`c_factor`]).
+pub fn ci_factor_typed(expr: &str, var: &str) -> MathResult<String> {
+    if expr.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: expr.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    let var_eff = if var.trim().is_empty() {
+        "x"
+    } else {
+        var.trim()
+    };
+    if !is_math_identifier(var_eff) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: "expresión vacía para CIFactor".into(),
+        });
+    }
+    // Reúsa IFactor para el contenido entero cuando hay gcd>1.
+    let content_part: Option<String> = (|| {
+        let ast = parse_math_expression(expr, MathOperation::SymbolicDerivative).ok()?;
+        let coeffs = collect_polynomial_coeffs(&ast, var_eff, 20)?;
+        let mut int_coeffs: Vec<i128> = Vec::new();
+        for &c in &coeffs {
+            if !c.is_finite() {
+                return None;
+            }
+            let rounded = c.round();
+            if (c - rounded).abs() > 1e-9 {
+                return None;
+            }
+            if rounded.abs() > MAX_PRIME_FACTOR as f64 {
+                return None;
+            }
+            int_coeffs.push(rounded as i128);
+        }
+        let mut gcd_val: i128 = 0;
+        for &ic in &int_coeffs {
+            let av = ic.abs();
+            if av == 0 {
+                continue;
+            }
+            gcd_val = if gcd_val == 0 {
+                av
+            } else {
+                gcd_i128(gcd_val, av)
+            };
+        }
+        if gcd_val > 1 {
+            match prime_factors_typed(&gcd_val.to_string()) {
+                MathResult::Exact(s) => Some(s),
+                _ => Some(gcd_val.to_string()),
+            }
+        } else {
+            None
+        }
+    })();
+    // Parte primitiva factorizada en complejos.
+    let prim_factored = match c_factor(expr, var_eff) {
+        Ok(s) => {
+            if s.contains('=') {
+                s.split('=').next_back().unwrap_or(&s).trim().to_string()
+            } else {
+                s
+            }
+        }
+        Err(e) => {
+            return MathResult::Unsupported(MathError::DerivativeUnavailable {
+                expression: expr.into(),
+                variable: var_eff.into(),
+                reason: e,
+            });
+        }
+    };
+    let cleaned = {
+        let t = prim_factored.trim();
+        if let Some(rest) = t.strip_prefix("1 * ") {
+            rest.trim_start().to_string()
+        } else if let Some(rest) = t.strip_prefix("1*") {
+            rest.trim_start().to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    let out = match content_part {
+        None => cleaned,
+        Some(g) => {
+            if cleaned == "1" || cleaned.is_empty() {
+                g
+            } else {
+                format!("{g} * ({cleaned})")
+            }
+        }
+    };
+    if out.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: out.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    MathResult::Exact(out)
+}
+
+/// Adaptador de `CIFactor`.
+pub fn cifactor(expr: &str, var: &str) -> Result<String, String> {
+    adapt_symbolic_result(ci_factor_typed(expr, var))
+}
+
+/// Divide `expr` en numerador/denominador por la `/` top-level (fuera de paréntesis).
+fn split_rational_top_level(expr: &str) -> Option<(String, String)> {
+    let mut depth_paren = 0usize;
+    let mut depth_brack = 0usize;
+    let mut depth_brace = 0usize;
+    let bytes = expr.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth_paren += 1,
+            b')' => depth_paren = depth_paren.saturating_sub(1),
+            b'[' => depth_brack += 1,
+            b']' => depth_brack = depth_brack.saturating_sub(1),
+            b'{' => depth_brace += 1,
+            b'}' => depth_brace = depth_brace.saturating_sub(1),
+            b'/' => {
+                if depth_paren == 0 && depth_brack == 0 && depth_brace == 0 {
+                    let num = expr[..i].trim().to_string();
+                    let den = expr[i + 1..].trim().to_string();
+                    if num.is_empty() || den.is_empty() {
+                        return None;
+                    }
+                    return Some((num, den));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Evalúa polinomio en coeficientes ascendentes.
+fn poly_eval(coeffs: &[f64], x: f64) -> f64 {
+    let mut acc = 0.0;
+    for &c in coeffs.iter().rev() {
+        acc = acc * x + c;
+    }
+    acc
+}
+
+/// Fracciones parciales: denominador factorizable en lineales (con
+/// multiplicidad) + cuadráticas irreducibles. Requiere fracción propia y
+/// denominador de grado 2..=6 con coeficientes finitos. Devuelve suma de
+/// términos `A/(x-r)^k` y `(Bx+C)/(quad)^k` verificable por re-suma.
+pub fn partial_fractions(expr: &str, var: &str) -> Result<String, String> {
+    if !is_math_identifier(var) {
+        return Err(format!("variable '{var}' no es un identificador válido"));
+    }
+    let pp = expr.replace(' ', "");
+    if pp.is_empty() {
+        return Err("PartialFractions requiere una expresión racional no vacía".to_string());
+    }
+    let (num_s, den_s) = split_rational_top_level(&pp).ok_or_else(|| {
+        "PartialFractions requiere forma num/den (p.ej. (2*x+3)/((x-1)*(x+2)))".to_string()
+    })?;
+    let num_ast =
+        parse_ast(&num_s).map_err(|e| format!("No se pudo parsear numerador '{num_s}': {e}"))?;
+    let den_ast =
+        parse_ast(&den_s).map_err(|e| format!("No se pudo parsear denominador '{den_s}': {e}"))?;
+    let Some(num_c) = collect_polynomial_coeffs(&num_ast, var, 12) else {
+        return Err("PartialFractions: numerador no es polinomio en la variable".to_string());
+    };
+    let Some(den_c) = collect_polynomial_coeffs(&den_ast, var, 12) else {
+        return Err("PartialFractions: denominador no es polinomio en la variable".to_string());
+    };
+    if num_c.iter().any(|c| !c.is_finite()) || den_c.iter().any(|c| !c.is_finite()) {
+        return Err("PartialFractions: coeficientes no finitos".to_string());
+    }
+    let num_d = poly_degree(&poly_trim(&num_c));
+    let den_d = poly_degree(&poly_trim(&den_c))
+        .ok_or_else(|| "PartialFractions: denominador nulo no admite descomposición".to_string())?;
+    if den_d < 2 || den_d > 6 {
+        return Err(format!(
+            "PartialFractions: denominador grado {den_d} fuera de 2..=6 (subset honesto)"
+        ));
+    }
+    let num_deg = num_d.unwrap_or(0);
+    if num_deg >= den_d {
+        return Err(
+            "PartialFractions requiere fracción propia (grado num < grado den)".to_string(),
+        );
+    }
+    // Factoriza denominador: raíces racionales con multiplicidad + resto cuadrático.
+    let mut rem = poly_trim(&den_c);
+    let mut linears: Vec<(f64, usize)> = Vec::new();
+    loop {
+        let cur = poly_degree(&rem).unwrap_or(0);
+        if cur <= 2 {
+            break;
+        }
+        let roots = find_rational_roots(&rem);
+        if roots.is_empty() {
+            break;
+        }
+        let mut progressed = false;
+        for r in roots {
+            let lin = vec![-r, 1.0];
+            let mut mult = 0usize;
+            while let Some(q) = poly_exact_div(&rem, &lin) {
+                rem = q;
+                mult += 1;
+                progressed = true;
+                if poly_is_zero(&rem) || poly_degree(&rem).is_none() {
+                    break;
+                }
+            }
+            if mult > 0 {
+                if let Some(entry) = linears
+                    .iter_mut()
+                    .find(|(root, _)| (*root - r).abs() < 1e-9)
+                {
+                    entry.1 += mult;
+                } else {
+                    linears.push((r, mult));
+                }
+                break;
+            }
+            if progressed {
+                break;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let mut quads: Vec<(f64, f64, usize)> = Vec::new();
+    match poly_degree(&rem) {
+        None => {
+            return Err("PartialFractions: denominador degenerado tras factorizar".to_string());
+        }
+        Some(1) => {
+            let r = -rem[0] / rem[1];
+            if !r.is_finite() {
+                return Err("PartialFractions: raíz lineal no finita".to_string());
+            }
+            if let Some(entry) = linears
+                .iter_mut()
+                .find(|(root, _)| (*root - r).abs() < 1e-9)
+            {
+                entry.1 += 1;
+            } else {
+                linears.push((r, 1));
+            }
+        }
+        Some(2) => {
+            let (Some(a), Some(b), Some(c)) = (
+                rem.get(2).copied(),
+                rem.get(1).copied(),
+                rem.get(0).copied(),
+            ) else {
+                return Err("PartialFractions: resto cuadrático inválido".to_string());
+            };
+            if a == 0.0 {
+                let r = -c / b;
+                if !r.is_finite() {
+                    return Err("PartialFractions: resto lineal no finito".to_string());
+                }
+                linears.push((r, 1));
+            } else {
+                let disc = b.mul_add(b, -4.0 * a * c);
+                if !disc.is_finite() {
+                    return Err("PartialFractions: discriminante no finito".to_string());
+                }
+                if disc >= 0.0 {
+                    // Parte en dos lineales reales estables.
+                    let s = disc.sqrt();
+                    let qv = if b >= 0.0 {
+                        -0.5 * (b + s)
+                    } else {
+                        -0.5 * (b - s)
+                    };
+                    let (r1, r2) = if qv == 0.0 {
+                        let r = -b / (2.0 * a);
+                        (r, r)
+                    } else {
+                        (qv / a, c / qv)
+                    };
+                    if !r1.is_finite() || !r2.is_finite() {
+                        return Err("PartialFractions: raíces reales no finitas".to_string());
+                    }
+                    for r in [r1, r2] {
+                        if let Some(entry) = linears
+                            .iter_mut()
+                            .find(|(root, _)| (*root - r).abs() < 1e-9)
+                        {
+                            entry.1 += 1;
+                        } else {
+                            linears.push((r, 1));
+                        }
+                    }
+                } else {
+                    // Cuadrática mónica irreducible (divide por a).
+                    quads.push((b / a, c / a, 1));
+                }
+            }
+        }
+        Some(0) => {}
+        _ => {
+            return Err(
+                "PartialFractions: denominador no factorizable en lineales/cuadráticas (subset)"
+                    .to_string(),
+            );
+        }
+    }
+    let total_unknowns: usize =
+        linears.iter().map(|(_, m)| *m).sum::<usize>() + quads.iter().map(|_| 2).sum::<usize>();
+    if total_unknowns != den_d {
+        return Err(
+            "PartialFractions: la factorización no cubre el grado del denominador".to_string(),
+        );
+    }
+    // Construye muestras evitando raíces (puntos -4..=4 + 0.5 offsets).
+    let roots_flat: Vec<f64> = linears.iter().map(|(r, _)| *r).collect();
+    let mut samples: Vec<f64> = Vec::new();
+    let mut cand = -4.0;
+    while samples.len() < total_unknowns && cand <= 12.0 {
+        let clash = roots_flat.iter().any(|r| (cand - *r).abs() < 0.35);
+        if !clash {
+            // Evita ceros del cuadrático irreducible.
+            let mut ok = true;
+            for (bq, cq, _) in &quads {
+                let v = cand * cand + bq * cand + cq;
+                if v.abs() < 1e-6 {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                samples.push(cand);
+            }
+        }
+        cand += 0.5;
+    }
+    if samples.len() < total_unknowns {
+        return Err("PartialFractions: sin muestras estables para el sistema".to_string());
+    }
+    // Columnas: para lineal (r,m): den/(x-r)^k evaluado; para quad: den/quad * x y den/quad.
+    let den_eval = |x: f64| poly_eval(&den_c, x);
+    let mut mat: Vec<Vec<f64>> = Vec::with_capacity(total_unknowns);
+    let mut rhs: Vec<f64> = Vec::with_capacity(total_unknowns);
+    for &x in &samples {
+        let d = den_eval(x);
+        if !d.is_finite() || d.abs() < 1e-9 {
+            continue;
+        }
+        let n = poly_eval(&num_c, x);
+        if !n.is_finite() {
+            continue;
+        }
+        let mut row: Vec<f64> = Vec::with_capacity(total_unknowns);
+        for (r, m) in &linears {
+            for k in 1..=*m {
+                let pw = (x - *r).powi(k as i32);
+                if !pw.is_finite() || pw.abs() < 1e-12 {
+                    row.push(0.0);
+                } else {
+                    let v = d / pw;
+                    row.push(if v.is_finite() { v } else { 0.0 });
+                }
+            }
+        }
+        for (bq, cq, _) in &quads {
+            let q = x * x + bq * x + cq;
+            if !q.is_finite() || q.abs() < 1e-12 {
+                row.push(0.0);
+                row.push(0.0);
+            } else {
+                let base = d / q;
+                row.push(if (base * x).is_finite() {
+                    base * x
+                } else {
+                    0.0
+                });
+                row.push(if base.is_finite() { base } else { 0.0 });
+            }
+        }
+        if row.len() != total_unknowns {
+            continue;
+        }
+        mat.push(row);
+        rhs.push(n);
+        if mat.len() == total_unknowns {
+            break;
+        }
+    }
+    if mat.len() != total_unknowns {
+        return Err("PartialFractions: sistema subdeterminado (muestras)".to_string());
+    }
+    let sol = solve_linear_system(mat, rhs)
+        .ok_or_else(|| "PartialFractions: sistema singular (denominador degenerado)".to_string())?;
+    // Formatea términos con tolerancia de cero.
+    let mut terms: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    for (r, m) in &linears {
+        for k in 1..=*m {
+            let a = sol[idx];
+            idx += 1;
+            if !a.is_finite() {
+                return Err("PartialFractions: coeficiente no finito".to_string());
+            }
+            if a.abs() < 1e-9 {
+                continue;
+            }
+            let denom = if k == 1 {
+                linear_factor(var, *r)
+            } else {
+                format!("{} ^{k}", linear_factor(var, *r))
+            };
+            terms.push(format!("{a} / {denom}"));
+        }
+    }
+    for (bq, cq, _) in &quads {
+        let bcoef = sol[idx];
+        let ccoef = sol[idx + 1];
+        idx += 2;
+        if !bcoef.is_finite() || !ccoef.is_finite() {
+            return Err("PartialFractions: coeficiente cuadrático no finito".to_string());
+        }
+        if bcoef.abs() < 1e-9 && ccoef.abs() < 1e-9 {
+            continue;
+        }
+        let num_s = if bcoef.abs() < 1e-9 {
+            format!("{ccoef}")
+        } else if ccoef.abs() < 1e-9 {
+            format!("{bcoef}*{var}")
+        } else if ccoef >= 0.0 {
+            format!("{bcoef}*{var} + {ccoef}")
+        } else {
+            format!("{bcoef}*{var} - {}", ccoef.abs())
+        };
+        let quad_s = if bq.abs() < 1e-12 && cq.abs() < 1e-12 {
+            format!("{var}^2")
+        } else {
+            format!("({} + {bq}*{var} + {cq})", format!("{var}^2"))
+        };
+        terms.push(format!("({num_s}) / {quad_s}"));
+    }
+    if terms.is_empty() {
+        return Err("PartialFractions: descomposición nula (numerador cero?)".to_string());
+    }
+    Ok(terms.join(" + "))
+}
+
+/// Variante tipada de [`partial_fractions`].
+pub fn partial_fractions_typed(expr: &str, var: &str) -> MathResult<String> {
+    if expr.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: expr.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    match partial_fractions(expr, var) {
+        Ok(v) => {
+            if v.len() > MAX_MATH_INPUT_BYTES {
+                MathResult::ResourceLimit(MathError::InputTooLarge {
+                    operation: MathOperation::SymbolicDerivative,
+                    provided_bytes: v.len(),
+                    maximum_bytes: MAX_MATH_INPUT_BYTES,
+                })
+            } else {
+                MathResult::Exact(v)
+            }
+        }
+        Err(reason) => MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason,
+        }),
+    }
+}
+
 /// Simplificación algebraica: const folding aritmético e identidades
 /// (0+x=x, 1*x=x, x^1=x, -(-x)=x, x-x=0, …), sin eliminar
 /// condiciones de dominio como `x/x`, `0/x` o `f^0`.

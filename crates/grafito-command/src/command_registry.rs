@@ -1395,6 +1395,51 @@ const COMMANDS: &[CommandSpec] = &[
         ]
     ),
     command!(
+        "cas.cfactor",
+        "CFactor",
+        ["cfactorizar", "factorComplejo", "factor_complejo"],
+        "CAS",
+        "Factorización compleja: lineales/cuadráticas con raíces complejas conjugadas + raíces racionales grado>2.",
+        ReadOnly,
+        Low,
+        true,
+        "CFactor",
+        [
+            signature!("CFactor[expr]"; "expr": Expression required),
+            signature!("CFactor[expr, variable]"; "expr": Expression required, "variable": Variable required)
+        ]
+    ),
+    command!(
+        "cas.cifactor",
+        "CIFactor",
+        ["cifactorizar", "factorGaussiano", "factor_gaussiano"],
+        "CAS",
+        "Factorización gaussiana: contenido entero vía PrimeFactors + resto en complejos vía CFactor.",
+        ReadOnly,
+        Low,
+        true,
+        "CIFactor",
+        [
+            signature!("CIFactor[expr]"; "expr": Expression required),
+            signature!("CIFactor[expr, variable]"; "expr": Expression required, "variable": Variable required)
+        ]
+    ),
+    command!(
+        "cas.partial-fractions",
+        "PartialFractions",
+        ["fracciones_parciales", "fraccionesParciales", "partial_fractions"],
+        "CAS",
+        "Fracciones parciales: denominador factorizable en lineales + cuadráticas irreducibles, grado 2..=6, fracción propia.",
+        ReadOnly,
+        Low,
+        true,
+        "PartialFractions",
+        [
+            signature!("PartialFractions[expr]"; "expr": Expression required),
+            signature!("PartialFractions[expr, variable]"; "expr": Expression required, "variable": Variable required)
+        ]
+    ),
+    command!(
         "cas.assume",
         "Assume",
         ["asumir", "suponer", "supone"],
@@ -1776,6 +1821,30 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("Diagonalization[A]"; "A": Matrix required)]
     ),
     command!(
+        "matrix.eigenvalues",
+        "Eigenvalues",
+        ["autovalores", "eigen_valores"],
+        "Matrices",
+        "Autovalores (reales y complejos) vía SymmetricEigen/complex_eigenvalues; matriz cuadrada.",
+        ReadOnly,
+        Low,
+        true,
+        "Eigenvalues",
+        [signature!("Eigenvalues[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.eigenvectors",
+        "Eigenvectors",
+        ["autovectores", "eigen_vectores"],
+        "Matrices",
+        "Autovectores reales (simétrica) u honestos si el par complejo no admite vector real; matriz cuadrada.",
+        ReadOnly,
+        Low,
+        true,
+        "Eigenvectors",
+        [signature!("Eigenvectors[A]"; "A": Matrix required)]
+    ),
+    command!(
         "probability.normal",
         "Normal",
         [],
@@ -1812,6 +1881,51 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "Poisson",
         [signature!("Poisson[lambda, k]"; "lambda": Number required, "k": Integer required)]
+    ),
+    command!(
+        "probability.uniform",
+        "Uniform",
+        ["uniforme", "uniform_distribution"],
+        "Probabilidad",
+        "Uniforme U(a,b): PDF 1/(b-a) y CDF; con 2 args evalúa en x=(a+b)/2.",
+        ReadOnly,
+        Low,
+        true,
+        "Uniform",
+        [
+            signature!("Uniform[a, b]"; "a": Number required, "b": Number required),
+            signature!("Uniform[a, b, x]"; "a": Number required, "b": Number required, "x": Number required)
+        ]
+    ),
+    command!(
+        "probability.exponential",
+        "Exponential",
+        ["exponencial", "exponential_distribution"],
+        "Probabilidad",
+        "Exponencial Exp(λ): PDF λ·exp(-λx) y CDF 1-exp(-λx) para x≥0, λ>0.",
+        ReadOnly,
+        Low,
+        true,
+        "Exponential",
+        [
+            signature!("Exponential[lambda]"; "lambda": Number required),
+            signature!("Exponential[lambda, x]"; "lambda": Number required, "x": Number required)
+        ]
+    ),
+    command!(
+        "probability.chi-squared",
+        "ChiSquared",
+        ["chi_cuadrado_dist", "dist_chi2"],
+        "Probabilidad",
+        "Chi-cuadrado χ²(k): PDF y CDF vía gamma regularizada; k>0.",
+        ReadOnly,
+        Low,
+        true,
+        "ChiSquared",
+        [
+            signature!("ChiSquared[df]"; "df": Number required),
+            signature!("ChiSquared[df, x]"; "df": Number required, "x": Number required)
+        ]
     ),
     command!(
         "statistics.histogram",
@@ -2106,6 +2220,30 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "InverseF",
         [signature!("InverseF[p, df1, df2]"; "p": Number required, "df1": Number required, "df2": Number required)]
+    ),
+    command!(
+        "probability.inverse-exponential",
+        "InverseExponential",
+        ["inverse_exponential", "cuantilexponencial", "cuantil_exponencial"],
+        "Probabilidad",
+        "Cuantil exponencial cerrado: -ln(1-p)/λ (p en (0,1), λ>0).",
+        ReadOnly,
+        Low,
+        true,
+        "InverseExponential",
+        [signature!("InverseExponential[p, lambda]"; "p": Number required, "lambda": Number required)]
+    ),
+    command!(
+        "probability.inverse-uniform",
+        "InverseUniform",
+        ["inverse_uniform", "cuantiluniforme", "cuantil_uniforme"],
+        "Probabilidad",
+        "Cuantil uniforme cerrado: a+p·(b-a) (p en [0,1], a<b).",
+        ReadOnly,
+        Low,
+        true,
+        "InverseUniform",
+        [signature!("InverseUniform[p, a, b]"; "p": Number required, "a": Number required, "b": Number required)]
     ),
     command!(
         "statistics.frequency-table",
@@ -2717,6 +2855,66 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("Cone[x, y, z, radius, height]"; "x": Number required, "y": Number required, "z": Number required, "radius": Number required, "height": Number required)]
     ),
     command!(
+        "geometry.dodecahedron-3d",
+        "Dodecahedron",
+        ["dodecaedro"],
+        "3D",
+        "Dodecaedro regular centrado en (x,y,z) con arista dada; malla platonic_mesh.",
+        CreatesObject,
+        Medium,
+        true,
+        "Dodecahedron",
+        [signature!("Dodecahedron[x, y, z, edge]"; "x": Number required, "y": Number required, "z": Number required, "edge": Number required)]
+    ),
+    command!(
+        "geometry.icosahedron-3d",
+        "Icosahedron",
+        ["icosaedro"],
+        "3D",
+        "Icosaedro regular centrado en (x,y,z) con arista dada; malla platonic_mesh.",
+        CreatesObject,
+        Medium,
+        true,
+        "Icosahedron",
+        [signature!("Icosahedron[x, y, z, edge]"; "x": Number required, "y": Number required, "z": Number required, "edge": Number required)]
+    ),
+    command!(
+        "geometry.octahedron-3d",
+        "Octahedron",
+        ["octaedro"],
+        "3D",
+        "Octaedro regular centrado en (x,y,z) con arista dada; 6 vértices axiales.",
+        CreatesObject,
+        Medium,
+        true,
+        "Octahedron",
+        [signature!("Octahedron[x, y, z, edge]"; "x": Number required, "y": Number required, "z": Number required, "edge": Number required)]
+    ),
+    command!(
+        "geometry.infinite-cone-3d",
+        "InfiniteCone",
+        ["cono_infinito", "conoinfinito"],
+        "3D",
+        "Cono infinito por ápice y dirección, semiángulo en grados; render clipado honesto ±50.",
+        CreatesObject,
+        Medium,
+        true,
+        "InfiniteCone",
+        [signature!("InfiniteCone[ax, ay, az, dx, dy, dz, angle_deg]"; "ax": Number required, "ay": Number required, "az": Number required, "dx": Number required, "dy": Number required, "dz": Number required, "angle_deg": Number required)]
+    ),
+    command!(
+        "geometry.infinite-cylinder-3d",
+        "InfiniteCylinder",
+        ["cilindro_infinito", "cilindroinfinito"],
+        "3D",
+        "Cilindro infinito por punto base y dirección con radio; render clipado honesto ±50.",
+        CreatesObject,
+        Medium,
+        true,
+        "InfiniteCylinder",
+        [signature!("InfiniteCylinder[x, y, z, dx, dy, dz, radius]"; "x": Number required, "y": Number required, "z": Number required, "dx": Number required, "dy": Number required, "dz": Number required, "radius": Number required)]
+    ),
+    command!(
         "geometry.pyramid-3d",
         "Pyramid",
         ["piramide"],
@@ -3318,6 +3516,66 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "IsTangent",
         [signature!("IsTangent[recta, conica]"; "recta": ObjectLabel required, "conica": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.are-collinear",
+        "AreCollinear",
+        ["son_colineales", "colineales"],
+        "Construir",
+        "Predicado numérico AreCollinear[A,B,C]: |AB×AC| ≤ 1e-9·(1+|AB|+|AC|).",
+        ReadOnly,
+        Low,
+        true,
+        "AreCollinear",
+        [signature!("AreCollinear[A, B, C]"; "A": ObjectLabel required, "B": ObjectLabel required, "C": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.are-concurrent",
+        "AreConcurrent",
+        ["son_concurrentes", "concurrentes"],
+        "Construir",
+        "Predicado numérico AreConcurrent[l,m,n]: intersección l∩m a ≤1e-9 de n; paralelas ⇒ false.",
+        ReadOnly,
+        Low,
+        true,
+        "AreConcurrent",
+        [signature!("AreConcurrent[l, m, n]"; "l": ObjectLabel required, "m": ObjectLabel required, "n": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.are-concyclic",
+        "AreConcyclic",
+        ["son_conciclicos", "conciclicos"],
+        "Construir",
+        "Predicado numérico AreConcyclic[A,B,C,D]: |D-O|≈R del círculo ABC con tol 1e-9·(1+R).",
+        ReadOnly,
+        Low,
+        true,
+        "AreConcyclic",
+        [signature!("AreConcyclic[A, B, C, D]"; "A": ObjectLabel required, "B": ObjectLabel required, "C": ObjectLabel required, "D": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.are-parallel",
+        "AreParallel",
+        ["son_paralelas", "paralelas"],
+        "Construir",
+        "Predicado numérico AreParallel[l,m]: |dir_l×dir_m| ≤ 1e-9·|l|·|m|.",
+        ReadOnly,
+        Low,
+        true,
+        "AreParallel",
+        [signature!("AreParallel[l, m]"; "l": ObjectLabel required, "m": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.are-perpendicular",
+        "ArePerpendicular",
+        ["son_perpendiculares", "perpendiculares"],
+        "Construir",
+        "Predicado numérico ArePerpendicular[l,m]: |dir_l·dir_m| ≤ 1e-9·|l|·|m|.",
+        ReadOnly,
+        Low,
+        true,
+        "ArePerpendicular",
+        [signature!("ArePerpendicular[l, m]"; "l": ObjectLabel required, "m": ObjectLabel required)]
     ),
     command!(
         "text.table-text",
@@ -4329,6 +4587,18 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("SetVisible[objeto, visible]"; "objeto": ObjectLabel required, "visible": Expression required)]
     ),
     command!(
+        "scripting.set-caption",
+        "SetCaption",
+        ["poner_rotulo"],
+        "Dinámica",
+        "Pone el rótulo visible del objeto (caption = etiqueta mostrada en álgebra y canvas).",
+        TransformsObject,
+        Low,
+        true,
+        "SetCaption",
+        [signature!("SetCaption[objeto, rotulo]"; "objeto": ObjectLabel required, "rotulo": Expression required)]
+    ),
+    command!(
         "3d.surface-measure",
         "Surface",
         [],
@@ -4957,6 +5227,28 @@ mod registry_tests {
             "Cell",
             "Column",
             "Row",
+            // Oleada 2 P4: 21 handlers nuevos (specs visibles + brazos).
+            "Eigenvalues",
+            "Eigenvectors",
+            "Uniform",
+            "Exponential",
+            "ChiSquared",
+            "InverseExponential",
+            "InverseUniform",
+            "CFactor",
+            "CIFactor",
+            "PartialFractions",
+            "AreCollinear",
+            "AreConcurrent",
+            "AreConcyclic",
+            "AreParallel",
+            "ArePerpendicular",
+            "SetCaption",
+            "Dodecahedron",
+            "Icosahedron",
+            "Octahedron",
+            "InfiniteCone",
+            "InfiniteCylinder",
         ];
         let mut set = HashSet::new();
         for h in static_handlers {
@@ -5300,11 +5592,16 @@ mod registry_tests {
         // dispatch_key sin brazo nuevo + 22 wrappers con brazo delegante en
         // commands.rs). PROHIBIDO tocar architecture.md en esta oleada: el sync
         // §8/§13 queda pendiente y se reporta como BLOCKER.
-        assert_eq!(all().len(), 309, "COMMANDS registrados (docs §8)");
+        // Oleada 2 P4 (f10-plan-total): +21 visibles M (2 Eigen specs para brazos
+        // fantasmas + 3 Uniform/Exponential/ChiSquared + 2 inversas cerradas +
+        // 3 CFactor/CIFactor/PartialFractions + 5 Are* + 1 SetCaption + 5
+        // Dodeca/Icosa/Octa/InfiniteCone/InfiniteCylinder). SetLineStyle/
+        // SetPointStyle/SetLayer van a Fase 5 (necesitan campos + render).
+        assert_eq!(all().len(), 330, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            263,
-            "comandos visibles en paleta (docs §8: 263 + 14 UI = 277)"
+            284,
+            "comandos visibles en paleta (docs §8: 284 + 14 UI = 298)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

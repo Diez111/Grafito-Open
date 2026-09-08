@@ -4378,6 +4378,9 @@ impl Document {
                 | GeoObject::Pyramid3D(_)
                 | GeoObject::Cone3D(_)
                 | GeoObject::Cylinder3D(_)
+                | GeoObject::Platonic3D(_)
+                | GeoObject::InfiniteCone3D(_)
+                | GeoObject::InfiniteCylinder3D(_)
                 | GeoObject::Torus3D(_)
                 | GeoObject::MoebiusStrip(_)
                 | GeoObject::Surface3D(_)
@@ -6441,6 +6444,9 @@ impl Document {
             GeoObject::Pyramid3D(_) => 380,
             GeoObject::Cone3D(_) => 380,
             GeoObject::Cylinder3D(_) => 380,
+            GeoObject::Platonic3D(_) => 360,
+            GeoObject::InfiniteCone3D(_) => 320,
+            GeoObject::InfiniteCylinder3D(_) => 320,
             GeoObject::Torus3D(_) => 380,
             GeoObject::MoebiusStrip(_) => 512,
             GeoObject::Surface3D(_) => 2048,

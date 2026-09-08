@@ -133,7 +133,8 @@ fn oleada1_todos_visibles_en_paleta() {
     ] {
         palette_must_be_visible(canonical);
     }
-    assert_eq!(command_registry::palette_commands().count(), 263);
+    // Total actualizado por Oleada 2 P4 (+21 visibles): 263 → 284.
+    assert_eq!(command_registry::palette_commands().count(), 284);
 }
 
 #[test]

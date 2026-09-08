@@ -109,6 +109,9 @@ impl ExportFormat {
             | ExportObjectKind::Pyramid3D
             | ExportObjectKind::Cone3D
             | ExportObjectKind::Cylinder3D
+            | ExportObjectKind::Platonic3D
+            | ExportObjectKind::InfiniteCone3D
+            | ExportObjectKind::InfiniteCylinder3D
             | ExportObjectKind::Torus3D
             | ExportObjectKind::MoebiusStrip
             | ExportObjectKind::Surface3D
@@ -200,6 +203,9 @@ pub(crate) enum ExportObjectKind {
     Pyramid3D,
     Cone3D,
     Cylinder3D,
+    Platonic3D,
+    InfiniteCone3D,
+    InfiniteCylinder3D,
     Torus3D,
     MoebiusStrip,
     Surface3D,
@@ -233,7 +239,7 @@ pub(crate) enum ExportObjectKind {
 
 impl ExportObjectKind {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 54] = [
+    pub(crate) const ALL: [Self; 57] = [
         Self::Point,
         Self::Line,
         Self::Circle,
@@ -259,6 +265,9 @@ impl ExportObjectKind {
         Self::Pyramid3D,
         Self::Cone3D,
         Self::Cylinder3D,
+        Self::Platonic3D,
+        Self::InfiniteCone3D,
+        Self::InfiniteCylinder3D,
         Self::Torus3D,
         Self::MoebiusStrip,
         Self::Surface3D,
@@ -317,6 +326,9 @@ impl ExportObjectKind {
             Self::Pyramid3D => "Pyramid3D",
             Self::Cone3D => "Cone3D",
             Self::Cylinder3D => "Cylinder3D",
+            Self::Platonic3D => "Platonic3D",
+            Self::InfiniteCone3D => "InfiniteCone3D",
+            Self::InfiniteCylinder3D => "InfiniteCylinder3D",
             Self::Torus3D => "Torus3D",
             Self::MoebiusStrip => "MoebiusStrip",
             Self::Surface3D => "Surface3D",
@@ -376,6 +388,9 @@ impl ExportObjectKind {
             GeoObject::Pyramid3D(_) => Self::Pyramid3D,
             GeoObject::Cone3D(_) => Self::Cone3D,
             GeoObject::Cylinder3D(_) => Self::Cylinder3D,
+            GeoObject::Platonic3D(_) => Self::Platonic3D,
+            GeoObject::InfiniteCone3D(_) => Self::InfiniteCone3D,
+            GeoObject::InfiniteCylinder3D(_) => Self::InfiniteCylinder3D,
             GeoObject::Torus3D(_) => Self::Torus3D,
             GeoObject::MoebiusStrip(_) => Self::MoebiusStrip,
             GeoObject::Surface3D(_) => Self::Surface3D,

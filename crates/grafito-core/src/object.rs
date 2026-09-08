@@ -42,6 +42,9 @@ pub enum GeoObject {
     Pyramid3D(Pyramid3DObj),
     Cone3D(Cone3DObj),
     Cylinder3D(Cylinder3DObj),
+    Platonic3D(Platonic3DObj),
+    InfiniteCone3D(InfiniteCone3DObj),
+    InfiniteCylinder3D(InfiniteCylinder3DObj),
     Torus3D(Torus3DObj),
     MoebiusStrip(MoebiusStripObj),
     Surface3D(Surface3DObj),
@@ -130,6 +133,9 @@ impl GeoObject {
             | GeoObject::Pyramid3D(_)
             | GeoObject::Cone3D(_)
             | GeoObject::Cylinder3D(_)
+            | GeoObject::Platonic3D(_)
+            | GeoObject::InfiniteCone3D(_)
+            | GeoObject::InfiniteCylinder3D(_)
             | GeoObject::Torus3D(_)
             | GeoObject::MoebiusStrip(_)
             | GeoObject::Surface3D(_)
@@ -176,6 +182,9 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.id,
             GeoObject::Cone3D(o) => o.id,
             GeoObject::Cylinder3D(o) => o.id,
+            GeoObject::Platonic3D(o) => o.id,
+            GeoObject::InfiniteCone3D(o) => o.id,
+            GeoObject::InfiniteCylinder3D(o) => o.id,
             GeoObject::Torus3D(o) => o.id,
             GeoObject::MoebiusStrip(o) => o.id,
             GeoObject::Surface3D(o) => o.id,
@@ -235,6 +244,9 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => &o.label,
             GeoObject::Cone3D(o) => &o.label,
             GeoObject::Cylinder3D(o) => &o.label,
+            GeoObject::Platonic3D(o) => &o.label,
+            GeoObject::InfiniteCone3D(o) => &o.label,
+            GeoObject::InfiniteCylinder3D(o) => &o.label,
             GeoObject::Torus3D(o) => &o.label,
             GeoObject::MoebiusStrip(o) => &o.label,
             GeoObject::Surface3D(o) => &o.label,
@@ -294,6 +306,9 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.label = label,
             GeoObject::Cone3D(o) => o.label = label,
             GeoObject::Cylinder3D(o) => o.label = label,
+            GeoObject::Platonic3D(o) => o.label = label,
+            GeoObject::InfiniteCone3D(o) => o.label = label,
+            GeoObject::InfiniteCylinder3D(o) => o.label = label,
             GeoObject::Torus3D(o) => o.label = label.clone(),
             GeoObject::MoebiusStrip(o) => o.label = label.clone(),
             GeoObject::Surface3D(o) => o.label = label.clone(),
@@ -354,6 +369,9 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.color,
             GeoObject::Cone3D(o) => o.color,
             GeoObject::Cylinder3D(o) => o.color,
+            GeoObject::Platonic3D(o) => o.color,
+            GeoObject::InfiniteCone3D(o) => o.color,
+            GeoObject::InfiniteCylinder3D(o) => o.color,
             GeoObject::Torus3D(o) => o.color,
             GeoObject::MoebiusStrip(o) => o.color,
             GeoObject::Surface3D(o) => o.color,
@@ -413,6 +431,9 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.color = color,
             GeoObject::Cone3D(o) => o.color = color,
             GeoObject::Cylinder3D(o) => o.color = color,
+            GeoObject::Platonic3D(o) => o.color = color,
+            GeoObject::InfiniteCone3D(o) => o.color = color,
+            GeoObject::InfiniteCylinder3D(o) => o.color = color,
             GeoObject::Torus3D(o) => o.color = color,
             GeoObject::MoebiusStrip(o) => o.color = color,
             GeoObject::Surface3D(o) => o.color = color,
@@ -472,6 +493,9 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.visible,
             GeoObject::Cone3D(o) => o.visible,
             GeoObject::Cylinder3D(o) => o.visible,
+            GeoObject::Platonic3D(o) => o.visible,
+            GeoObject::InfiniteCone3D(o) => o.visible,
+            GeoObject::InfiniteCylinder3D(o) => o.visible,
             GeoObject::Torus3D(o) => o.visible,
             GeoObject::MoebiusStrip(o) => o.visible,
             GeoObject::Surface3D(o) => o.visible,
@@ -533,6 +557,9 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.visible = visible,
             GeoObject::Cone3D(o) => o.visible = visible,
             GeoObject::Cylinder3D(o) => o.visible = visible,
+            GeoObject::Platonic3D(o) => o.visible = visible,
+            GeoObject::InfiniteCone3D(o) => o.visible = visible,
+            GeoObject::InfiniteCylinder3D(o) => o.visible = visible,
             GeoObject::Torus3D(o) => o.visible = visible,
             GeoObject::MoebiusStrip(o) => o.visible = visible,
             GeoObject::Surface3D(o) => o.visible = visible,
@@ -697,6 +724,9 @@ impl GeoObject {
             GeoObject::Pyramid3D(_) => "Pyramid3D",
             GeoObject::Cone3D(_) => "Cone3D",
             GeoObject::Cylinder3D(_) => "Cylinder3D",
+            GeoObject::Platonic3D(_) => "Platonic3D",
+            GeoObject::InfiniteCone3D(_) => "InfiniteCone3D",
+            GeoObject::InfiniteCylinder3D(_) => "InfiniteCylinder3D",
             GeoObject::Torus3D(_) => "Torus3D",
             GeoObject::MoebiusStrip(_) => "MoebiusStrip",
             GeoObject::Surface3D(_) => "Surface3D",
@@ -1516,6 +1546,130 @@ impl Cylinder3DObj {
             visible: true,
             width: 1.5,
             fill_color: None,
+        }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlatonicKind {
+    Dodecahedron,
+    Icosahedron,
+    Octahedron,
+}
+
+impl PlatonicKind {
+    pub fn from_command(name: &str) -> Option<Self> {
+        match name {
+            "Dodecahedron" => Some(Self::Dodecahedron),
+            "Icosahedron" => Some(Self::Icosahedron),
+            "Octahedron" => Some(Self::Octahedron),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dodecahedron => "Dodecahedron",
+            Self::Icosahedron => "Icosahedron",
+            Self::Octahedron => "Octahedron",
+        }
+    }
+    pub fn to_geometry_solid(self) -> grafito_geometry::PlatonicSolid {
+        match self {
+            Self::Dodecahedron => grafito_geometry::PlatonicSolid::Dodecahedron,
+            Self::Icosahedron => grafito_geometry::PlatonicSolid::Icosahedron,
+            Self::Octahedron => grafito_geometry::PlatonicSolid::Octahedron,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Platonic3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub center: Point3D,
+    pub kind: PlatonicKind,
+    pub edge_length: f64,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+    pub fill_color: Option<Color>,
+}
+impl Platonic3DObj {
+    pub fn new(center: Point3D, kind: PlatonicKind, edge_length: f64) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            center,
+            kind,
+            edge_length,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+            fill_color: None,
+        }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfiniteCone3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub apex: Point3D,
+    pub direction: Point3D,
+    pub half_angle_rad: f64,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+}
+impl InfiniteCone3DObj {
+    pub fn new(apex: Point3D, direction: Point3D, half_angle_rad: f64) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            apex,
+            direction,
+            half_angle_rad,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+        }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfiniteCylinder3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub base_point: Point3D,
+    pub direction: Point3D,
+    pub radius: f64,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+}
+impl InfiniteCylinder3DObj {
+    pub fn new(base_point: Point3D, direction: Point3D, radius: f64) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            base_point,
+            direction,
+            radius,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {

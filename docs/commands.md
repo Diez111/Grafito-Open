@@ -128,6 +128,9 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `CompleteSquare[expr, variable]`: Completa cuadrado: convierte a*x^2+b*x+c a a*(x+b/2a)^2 + (c - b^2/4a). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CompleteSquare[expr]`. Alias: `complete_square`, `completarCuadrado`, `completar_cuadrado`.
 - `PrimeFactors[n]`: Factoriza un entero n (2 <= n <= 1e12) en primos por trial division. Mutacion: solo consulta. Riesgo: bajo. Alias: `prime_factors`, `factoresPrimos`, `factores_primos`.
 - `IFactor[expr]`: Factorización entera: si es entero usa PrimeFactors, si es polinomio extrae contenido entero y lo factoriza. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `IFactor[expr, variable]`. Alias: `ifactorizar`, `factorEntero`, `factor_entero`.
+- `CFactor[expr]`: Factorización compleja: lineales/cuadráticas con raíces complejas conjugadas + raíces racionales grado>2. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CFactor[expr, variable]`. Alias: `cfactorizar`, `factorComplejo`, `factor_complejo`.
+- `CIFactor[expr]`: Factorización gaussiana: contenido entero vía PrimeFactors + resto en complejos vía CFactor. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CIFactor[expr, variable]`. Alias: `cifactorizar`, `factorGaussiano`, `factor_gaussiano`.
+- `PartialFractions[expr]`: Fracciones parciales: denominador factorizable en lineales + cuadráticas irreducibles, grado 2..=6, fracción propia. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `PartialFractions[expr, variable]`. Alias: `fracciones_parciales`, `fraccionesParciales`, `partial_fractions`.
 - `Assume[predicado]`: Almacena hipótesis como x>0 (positive), x!=0 (nonzero), x real/integer; guarda en Document.variables_assumptions. Mutacion: solo consulta. Riesgo: bajo. Alias: `asumir`, `suponer`, `supone`.
 ## Análisis
 
@@ -167,11 +170,16 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Cramer[A, b]`: Resuelve un sistema por Cramer. Mutacion: solo consulta. Riesgo: medio.
 - `ChangeOfBasis[v, B_from, B_to]`: Cambia coordenadas entre bases. Mutacion: solo consulta. Riesgo: medio.
 - `Diagonalization[A]`: Intenta diagonalizar una matriz. Mutacion: solo consulta. Riesgo: alto.
+- `Eigenvalues[A]`: Autovalores (reales y complejos) vía SymmetricEigen/complex_eigenvalues; matriz cuadrada. Mutacion: solo consulta. Riesgo: bajo. Alias: `autovalores`, `eigen_valores`.
+- `Eigenvectors[A]`: Autovectores reales (simétrica) u honestos si el par complejo no admite vector real; matriz cuadrada. Mutacion: solo consulta. Riesgo: bajo. Alias: `autovectores`, `eigen_vectores`.
 ## Probabilidad
 
 - `Normal[mu, sigma]`: Evalua o crea una distribucion normal. Mutacion: solo consulta. Riesgo: bajo.
 - `Binomial[n, p, k]`: Evalua una distribucion binomial. Mutacion: solo consulta. Riesgo: bajo.
 - `Poisson[lambda, k]`: Evalua una distribucion de Poisson. Mutacion: solo consulta. Riesgo: bajo.
+- `Uniform[a, b]`: Uniforme U(a,b): PDF 1/(b-a) y CDF; con 2 args evalúa en x=(a+b)/2. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Uniform[a, b, x]`. Alias: `uniforme`, `uniform_distribution`.
+- `Exponential[lambda]`: Exponencial Exp(λ): PDF λ·exp(-λx) y CDF 1-exp(-λx) para x≥0, λ>0. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Exponential[lambda, x]`. Alias: `exponencial`, `exponential_distribution`.
+- `ChiSquared[df]`: Chi-cuadrado χ²(k): PDF y CDF vía gamma regularizada; k>0. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ChiSquared[df, x]`. Alias: `chi_cuadrado_dist`, `dist_chi2`.
 ## Estadística
 
 - `Histogram[{data}, bins]`: Crea un histograma. Mutacion: crea objetos. Riesgo: medio. Alias: `histograma`.
@@ -200,6 +208,8 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `InverseT[p, df]`: Cuantil t-Student: InverseT[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_t`, `cuantilt`, `cuantil_t`.
 - `InverseChiSquared[p, df]`: Cuantil chi-cuadrado: InverseChiSquared[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_chi_squared`, `inversachicuadrado`, `cuantilchicuadrado`.
 - `InverseF[p, df1, df2]`: Cuantil F de Fisher: InverseF[p, df1, df2] (p en (0,1), df1>0, df2>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_f`, `cuantilf`, `cuantil_f`.
+- `InverseExponential[p, lambda]`: Cuantil exponencial cerrado: -ln(1-p)/λ (p en (0,1), λ>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_exponential`, `cuantilexponencial`, `cuantil_exponencial`.
+- `InverseUniform[p, a, b]`: Cuantil uniforme cerrado: a+p·(b-a) (p en [0,1], a<b). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_uniform`, `cuantiluniforme`, `cuantil_uniforme`.
 ## Estadística
 
 - `FrequencyTable[{datos}]`: Tabla de frecuencias: FrequencyTable[{datos}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `frequency_table`, `frecuencia`, `tabl frecuencias`.
@@ -257,6 +267,11 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Tetrahedron[x, y, z, edge]`: Crea un tetraedro regular 3D sólido. Mutacion: crea objetos. Riesgo: medio.
 - `Cylinder[x, y, z, radius, height]`: Crea un cilindro 3D vertical. Mutacion: crea objetos. Riesgo: medio.
 - `Cone[x, y, z, radius, height]`: Crea un cono 3D vertical. Mutacion: crea objetos. Riesgo: medio.
+- `Dodecahedron[x, y, z, edge]`: Dodecaedro regular centrado en (x,y,z) con arista dada; malla platonic_mesh. Mutacion: crea objetos. Riesgo: medio. Alias: `dodecaedro`.
+- `Icosahedron[x, y, z, edge]`: Icosaedro regular centrado en (x,y,z) con arista dada; malla platonic_mesh. Mutacion: crea objetos. Riesgo: medio. Alias: `icosaedro`.
+- `Octahedron[x, y, z, edge]`: Octaedro regular centrado en (x,y,z) con arista dada; 6 vértices axiales. Mutacion: crea objetos. Riesgo: medio. Alias: `octaedro`.
+- `InfiniteCone[ax, ay, az, dx, dy, dz, angle_deg]`: Cono infinito por ápice y dirección, semiángulo en grados; render clipado honesto ±50. Mutacion: crea objetos. Riesgo: medio. Alias: `cono_infinito`, `conoinfinito`.
+- `InfiniteCylinder[x, y, z, dx, dy, dz, radius]`: Cilindro infinito por punto base y dirección con radio; render clipado honesto ±50. Mutacion: crea objetos. Riesgo: medio. Alias: `cilindro_infinito`, `cilindroinfinito`.
 - `Pyramid[x, y, z, base_size, height]`: Crea una piramide 3D de base cuadrada (base en (x,y,z), apice en (x,y+h,z)). Mutacion: crea objetos. Riesgo: medio. Alias: `piramide`.
 - `Torus[x, y, z, major_radius, minor_radius]`: Crea un toro 3D. Mutacion: crea objetos. Riesgo: alto.
 - `Moebius[radius, width]`: Crea una banda de Moebius 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `mobius`.
@@ -313,6 +328,13 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Eccentricity[conica]`: Devuelve la excentricidad e de una cónica (0 círculo, 0<e<1 elipse, e=1 parábola, e>1 hipérbola). Mutacion: solo consulta. Riesgo: bajo. Alias: `Excentricidad`, `ecc`.
 - `Axes[conica]`: Devuelve los semiejes (a,b) de elipse/hipérbola o parámetro p de parábola usando exact::axes. Mutacion: solo consulta. Riesgo: bajo. Alias: `Ejes`, `semiejes`.
 - `IsTangent[recta, conica]`: Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante). Mutacion: solo consulta. Riesgo: bajo. Alias: `EsTangente`.
+## Construir
+
+- `AreCollinear[A, B, C]`: Predicado numérico AreCollinear[A,B,C]: |AB×AC| ≤ 1e-9·(1+|AB|+|AC|). Mutacion: solo consulta. Riesgo: bajo. Alias: `son_colineales`, `colineales`.
+- `AreConcurrent[l, m, n]`: Predicado numérico AreConcurrent[l,m,n]: intersección l∩m a ≤1e-9 de n; paralelas ⇒ false. Mutacion: solo consulta. Riesgo: bajo. Alias: `son_concurrentes`, `concurrentes`.
+- `AreConcyclic[A, B, C, D]`: Predicado numérico AreConcyclic[A,B,C,D]: |D-O|≈R del círculo ABC con tol 1e-9·(1+R). Mutacion: solo consulta. Riesgo: bajo. Alias: `son_conciclicos`, `conciclicos`.
+- `AreParallel[l, m]`: Predicado numérico AreParallel[l,m]: |dir_l×dir_m| ≤ 1e-9·|l|·|m|. Mutacion: solo consulta. Riesgo: bajo. Alias: `son_paralelas`, `paralelas`.
+- `ArePerpendicular[l, m]`: Predicado numérico ArePerpendicular[l,m]: |dir_l·dir_m| ≤ 1e-9·|l|·|m|. Mutacion: solo consulta. Riesgo: bajo. Alias: `son_perpendiculares`, `perpendiculares`.
 ## Texto
 
 - `TableText[funcion, min, max, paso]`: Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `TableText[expr, min, max, paso]`. Alias: `TablaTexto`.
@@ -415,6 +437,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `SetColor[objeto, color]`: Cambia el color de trazo de un objeto existente y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
 - `SetCoords[objeto, coords]`: Mueve un punto libre a nuevas coordenadas y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
 - `SetVisible[objeto, visible]`: Cambia la visibilidad de un objeto (true/false) y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetCaption[objeto, rotulo]`: Pone el rótulo visible del objeto (caption = etiqueta mostrada en álgebra y canvas). Mutacion: transforma objetos. Riesgo: bajo. Alias: `poner_rotulo`.
 ## 3D
 
 - `Surface[objeto]`: Muestra el área exacta de un sólido 3D del documento. Mutacion: solo consulta. Riesgo: bajo.
