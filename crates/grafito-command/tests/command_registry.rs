@@ -605,6 +605,87 @@ fn w1_symbolic_gate_validates_max_expr_length_budget() {
 }
 
 #[test]
+fn resolve_alias_escolares_resuelve() {
+    // Onda 1 red-first: aliases escolares que morían sin spec.
+    // `Laplace` NO resuelve (es distribución legado sin spec); el help de
+    // `LaplaceT` desambigua con "¿Buscabas LaplaceT[expr]?".
+    for (alias, canonical) in [
+        ("SolveODE", "SolveODEN"),
+        ("solveode", "SolveODEN"),
+        ("BinomialDist", "Binomial"),
+        ("binomialdist", "Binomial"),
+        ("NormalDist", "Normal"),
+        ("normaldist", "Normal"),
+    ] {
+        let spec = command_registry::resolve(alias)
+            .unwrap_or_else(|| panic!("alias escolar {alias} debe resolver"));
+        assert_eq!(spec.canonical, canonical, "alias {alias}");
+        assert_eq!(
+            command_registry::canonicalize(alias),
+            Some(canonical),
+            "canonicalize {alias}"
+        );
+        let parsed = parse_cas_command(&format!("{alias}[x]"))
+            .unwrap_or_else(|| panic!("alias {alias} debe parsear"));
+        assert_eq!(parsed.command, canonical, "parse {alias}");
+    }
+    // Laplace sigue siendo distribución (sin spec), no alias de LaplaceT.
+    assert!(command_registry::resolve("Laplace").is_none());
+    let laplace_t = command_registry::resolve("LaplaceT").expect("LaplaceT registrado");
+    assert!(
+        laplace_t.help.contains("Laplace es distribución"),
+        "help desambigua, fue: {}",
+        laplace_t.help
+    );
+    assert!(
+        laplace_t.help.contains("¿Buscabas LaplaceT[expr]?"),
+        "help sugiere forma, fue: {}",
+        laplace_t.help
+    );
+    // Normal acepta 2 (crea) y 3 (evalúa PDF/CDF vía statistics).
+    let normal = command_registry::resolve("Normal").expect("Normal registrado");
+    assert!(normal.accepts_argument_count(2));
+    assert!(normal.accepts_argument_count(3));
+}
+
+#[test]
+fn alias_escolares_e2e_por_alias() {
+    fn run(command: &str) -> CommandOutcome {
+        let mut document = Document::new();
+        let mut input = command.to_owned();
+        process_input(&mut document, &mut input)
+    }
+    // SolveODE alias delega al mismo brazo que SolveODEN.
+    match run("SolveODE[{1,0,1}, 0]") {
+        CommandOutcome::Message(msg) => assert!(msg.contains("cos"), "fue: {msg}"),
+        other => panic!("SolveODE alias debe dar Message, dio {other:?}"),
+    }
+    // BinomialDist alias evalúa igual que Binomial.
+    match run("BinomialDist[10, 0.5, 5]") {
+        CommandOutcome::Message(msg) => assert!(msg.contains("P(X=5)"), "fue: {msg}"),
+        other => panic!("BinomialDist alias debe dar Message, dio {other:?}"),
+    }
+    // NormalDist alias crea igual que Normal[mu, sigma].
+    match run("NormalDist[0, 1]") {
+        CommandOutcome::Message(msg) => assert!(msg.contains("Normal"), "fue: {msg}"),
+        other => panic!("NormalDist alias debe dar Message, dio {other:?}"),
+    }
+    // Normal[mu, sigma, x] evalúa PDF/CDF vía statistics.
+    match run("Normal[0, 1, 0]") {
+        CommandOutcome::Message(msg) => {
+            assert!(msg.contains("PDF"), "fue: {msg}");
+            assert!(msg.contains("CDF"), "fue: {msg}");
+        }
+        other => panic!("Normal 3 args debe dar Message, dio {other:?}"),
+    }
+    // Laplace distribución intacta.
+    match run("Laplace[0, 1]") {
+        CommandOutcome::Message(msg) => assert!(msg.contains("PDF"), "fue: {msg}"),
+        other => panic!("Laplace debe seguir distribución, dio {other:?}"),
+    }
+}
+
+#[test]
 fn w1_new_names_do_not_shadow_laplace_distribution_or_numeric_ode() {
     fn run(command: &str) -> CommandOutcome {
         let mut document = Document::new();

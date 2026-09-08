@@ -1847,19 +1847,22 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "probability.normal",
         "Normal",
-        [],
+        ["normaldist"],
         "Probabilidad",
         "Evalua o crea una distribucion normal.",
         ReadOnly,
         Low,
         true,
         "Normal",
-        [signature!("Normal[mu, sigma]"; "mu": Number required, "sigma": Number required)]
+        [
+            signature!("Normal[mu, sigma]"; "mu": Number required, "sigma": Number required),
+            signature!("Normal[mu, sigma, x]"; "mu": Number required, "sigma": Number required, "x": Number required)
+        ]
     ),
     command!(
         "probability.binomial",
         "Binomial",
-        [],
+        ["binomialdist"],
         "Probabilidad",
         "Evalua una distribucion binomial.",
         ReadOnly,
@@ -4009,7 +4012,7 @@ const COMMANDS: &[CommandSpec] = &[
         "LaplaceT",
         ["transformadalaplace", "laplace_t"],
         "CAS",
-        "Calculá la transformada de Laplace directa del subset F3c (1, t^n con n≤20, exp, sin/cos y combinaciones lineales): LaplaceT[expr] o LaplaceT[expr, t, s]. El resto da error honesto, no inventa.",
+        "Calculá la transformada de Laplace directa del subset F3c (1, t^n con n≤20, exp, sin/cos y combinaciones lineales): LaplaceT[expr] o LaplaceT[expr, t, s]. El resto da error honesto, no inventa. Laplace es distribución. ¿Buscabas LaplaceT[expr]?",
         ReadOnly,
         Low,
         true,
@@ -4071,7 +4074,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.solve-ode-n",
         "SolveODEN",
-        ["edo_n"],
+        ["edo_n", "solveode"],
         "CAS",
         "Resolvé EDO lineal de orden n≤8 con coeficientes constantes por anulador + resonancia: SolveODEN[{a2,a1,a0}, rhs] o SolveODEN[{a2,a1,a0}, rhs, x]. Fuera del subset da error honesto.",
         ReadOnly,
@@ -5638,6 +5641,11 @@ mod registry_tests {
         // Frente Q2 (f10-plan-total): +3 visibles S (SetLineStyle/SetPointStyle/
         // SetLayer, con campos + render + brazos + paleta; blindaje y docs
         // actualizados acá, architecture.md §8/§13 queda BLOCKER como en P2).
+        // Onda 1 (f10-plan-total): +0 comandos (conteos intactos 333/287/25);
+        // +3 aliases escolares (solveode→SolveODEN, binomialdist→Binomial,
+        // normaldist→Normal) +1 firma Normal[mu,sigma,x] con brazo PDF/CDF vía
+        // statistics + desambiguación Laplace en help LaplaceT; docs/commands.md
+        // regenerado vía markdown_reference_is_the_registry_projection.
         assert_eq!(all().len(), 333, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),

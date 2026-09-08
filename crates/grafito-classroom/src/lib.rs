@@ -22,7 +22,7 @@
 //!   backoff exponencial, descarte honesto tras 5 intentos) + codec persistente
 //!   acotado puro (`encode_persist` / [`offline::decode_persist`], 320 KiB;
 //!   el archivo vive en la app, I/O en background/arranque).
-//! - [`stubs`]: L honestos (iroh P2P, CRDT completo con `uuid`/HLC real,
+//! - [`stubs`]: L honestos (iroh P2P, CRDT diseño LWW (stub sin P2P real),
 //!   sesiones cifradas y outbox persistente: solo diseño + `Err`).
 //!
 //! # Presupuestos (heredados)
@@ -606,6 +606,24 @@ mod tests {
             "  deadbeef  ".to_string(),
         );
         assert_eq!(d2.snapshot_digest, "deadbeef");
+    }
+
+    #[test]
+    fn dashboard_names_cap_pinneado() {
+        // Onda 1: cap decorativo pinneado (coherente con MAX_OBJECT_COUNT).
+        assert_eq!(MAX_DASHBOARD_NAMES, 5_000);
+        let many: Vec<String> = (0..MAX_DASHBOARD_NAMES + 2)
+            .map(|i| format!("N{i}"))
+            .collect();
+        let d = TeacherDashboard::from_live(
+            "GRAF-1".to_string(),
+            many.len(),
+            0,
+            many,
+            None,
+            "d".to_string(),
+        );
+        assert_eq!(d.names.len(), MAX_DASHBOARD_NAMES);
     }
 
     #[test]

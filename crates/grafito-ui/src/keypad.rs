@@ -312,6 +312,8 @@ mod tests {
 
     #[test]
     fn mru_dedups_and_caps() {
+        // Onda 1: cap decorativo pinneado (8 recientes bastan sin tapar).
+        assert_eq!(KEYPAD_MRU_CAP, 8);
         let mut state = MathKeypadState::default();
         state.record_insertion("");
         assert!(state.recent().is_empty());

@@ -435,9 +435,10 @@ fn honest_todo_text_generic_is_omitted() {
     let bytes = ggb_with_xml(&xml);
     let rep = import_ggb_bytes(&bytes).expect("text generic");
     assert!(
-        rep.omitidos
-            .iter()
-            .any(|o| o.tipo == "text" && o.razon.contains("Text genérico")),
+        rep.omitidos.iter().any(|o| o.tipo == "text"
+            && o.razon.contains("Texto decorativo omitido")
+            && o.razon.contains("sin comando Text estable")
+            && !o.razon.contains("TODO")),
         "Text debe ser omitido honesto {:?}",
         rep.omitidos
     );

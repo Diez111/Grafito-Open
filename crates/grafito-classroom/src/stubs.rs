@@ -1,6 +1,6 @@
 //! Stubs L honestos del aula/P2P (diseño + `Err` explicativo + test).
 //!
-//! Alcance F10 G-G: `iroh P2P`, `CRDT completo con uuid/HLC`, `sesiones
+//! Alcance F10 G-G: `iroh P2P`, `CRDT diseño LWW (stub sin P2P real)`, `sesiones
 //! cifradas` y `outbox persistente` son L — aquí solo vive su diseño y un
 //! stub que siempre falla honesto. El frente útil (S/M) ya es funcional:
 //! [`crate::session`] (expiración + CSV) + [`crate::transport::LoopbackTransport`]
@@ -27,7 +27,7 @@ pub fn iroh_p2p_stub() -> Result<String, ClassroomError> {
     })
 }
 
-/// Diseño CRDT pizarra `UUID+LWW` completo (L): cada trazo/objeto con `Uuid`
+/// Diseño CRDT pizarra LWW (stub sin P2P real) (L): cada trazo/objeto con `Uuid`
 /// v4 (`uuid` crate) + `HybridLogicalClock` real + `Last-Writer-Wins` por campo,
 /// fusión conmutativa/idempotente y GC de tombstones con cota 5000. Requiere
 /// deps `uuid` + reloj híbrido (fuera del frente). Hoy: mínimo funcional en

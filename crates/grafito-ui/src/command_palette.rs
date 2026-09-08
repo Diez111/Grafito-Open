@@ -938,6 +938,8 @@ mod tests {
 
     #[test]
     fn mru_ordena_recientes_primero_sin_perder_comandos() {
+        // Onda 1: cap decorativo pinneado (8 recientes sin tapar búsqueda).
+        assert_eq!(MruPalette::CAP, 8);
         let all = all_commands();
         let mut mru = MruPalette::default();
         assert_eq!(mru.apply_order(&all).len(), all.len());

@@ -635,7 +635,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                 });
                                 continue;
                             }
-                            reporte.omitidos.push(OmittedObject { tipo: el.tipo.clone(), label: etiqueta, razon: "numeric sin slider ni celda de hoja — pendiente mapeo variable (TODO F2)".to_string() });
+                            reporte.omitidos.push(OmittedObject { tipo: el.tipo.clone(), label: etiqueta, razon: "Variable numérica omitida (sin slider ni celda de hoja en esta versión)".to_string() });
                         } else {
                             reporte.omitidos.push(OmittedObject {
                                 tipo: el.tipo.clone(),
@@ -694,7 +694,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                             );
                             let len = ((ex - sx).powi(2) + (ey - sy).powi(2)).sqrt();
                             if len.is_finite() {
-                                reporte.omitidos.push(OmittedObject { tipo: "Text".to_string(), label: format!("{etiqueta}_medida"), razon: format!("medida vector len {} — Text genérico sin comando estable (TODO honesto F2)", fmt_num(len)) });
+                                reporte.omitidos.push(OmittedObject { tipo: "Text".to_string(), label: format!("{etiqueta}_medida"), razon: format!("medida vector len {} — Texto decorativo omitido (sin comando Text estable en esta versión)", fmt_num(len)) });
                             }
                         } else {
                             reporte.omitidos.push(OmittedObject {
@@ -760,7 +760,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                 tipo: el.tipo.clone(),
                                 label: etiqueta,
                                 razon:
-                                    "Text genérico — no hay comando Text estable (TODO honesto F2)"
+                                    "Texto decorativo omitido (sin comando Text estable en esta versión)"
                                         .to_string(),
                             });
                         } else {
@@ -772,7 +772,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                 "penstroke" => "trazo a mano alzada omitido (requiere pizarra)",
                                 "locus" => "locus omitido (dependencia dinámica)",
                                 "list" => "list omitido (colección no mapeada en F2)",
-                                _ => "texto/objeto decorativo omitido (TODO honesto)",
+                                _ => "Texto/objeto decorativo omitido (sin comando estable en esta versión)",
                             };
                             reporte.omitidos.push(OmittedObject {
                                 tipo: el.tipo.clone(),
@@ -952,7 +952,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                 );
                                 let len = ((e_.0 - s.0).powi(2) + (e_.1 - s.1).powi(2)).sqrt();
                                 if len.is_finite() {
-                                    reporte.omitidos.push(OmittedObject { tipo: "Text".to_string(), label: format!("{salida_etiqueta}_medida"), razon: format!("medida vector len {} — Text genérico sin comando (TODO honesto F2)", fmt_num(len)) });
+                                    reporte.omitidos.push(OmittedObject { tipo: "Text".to_string(), label: format!("{salida_etiqueta}_medida"), razon: format!("medida vector len {} — Texto decorativo omitido (sin comando Text estable en esta versión)", fmt_num(len)) });
                                 }
                             } else {
                                 reporte.omitidos.push(OmittedObject {
@@ -1118,7 +1118,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                     tipo: "Text".to_string(),
                                     label: format!("{salida_etiqueta}_area"),
                                     razon: format!(
-                                        "área {} — Text sin comando (TODO honesto F2)",
+                                        "área {} — Texto decorativo omitido (sin comando Text estable en esta versión)",
                                         fmt_num(area)
                                     ),
                                 });
@@ -1157,7 +1157,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                         tipo: "Text".to_string(),
                                         label: format!("{salida_etiqueta}_medida"),
                                         razon: format!(
-                                            "ángulo {}° — Text sin comando (TODO honesto F2)",
+                                            "ángulo {}° — Texto decorativo omitido (sin comando Text estable en esta versión)",
                                             fmt_num(ang)
                                         ),
                                     });
@@ -1226,7 +1226,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                         reporte.omitidos.push(OmittedObject {
                             tipo: cmd.nombre.clone(),
                             label: salida_etiqueta,
-                            razon: "Text genérico — no hay comando Text estable (TODO honesto F2)"
+                            razon: "Texto decorativo omitido (sin comando Text estable en esta versión)"
                                 .to_string(),
                         });
                     }

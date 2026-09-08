@@ -1,4 +1,4 @@
-# docs/architecture.md — Grafito v1.2.35 (Plan supera GeoGebra 2026-08-26; sync BUILD 2026-09-04 + F5 2026-09-07)
+# docs/architecture.md — Grafito v1.2.35 (Paridad parcial GeoGebra: subset verificado, resto stub honesto 2026-08-26; sync BUILD 2026-09-04 + F5 2026-09-07)
 
 ## 1. Vision
 Grafito es pizarra geometrica con **Cerebro** (Rust puro) y **Piel** (egui/wgpu).
@@ -188,7 +188,7 @@ Notas:
 - Packaging fixtures (`packaging/tests/packaging-fixtures.sh`) es gate en `workflow-lint`: verifica iconos `16..512` + scalable `hicolor/scalable/apps/grafito.svg`, `grafito-icon.svg`, abort si falta asset, y `desktop Icon=grafito`, mas plugins `usr/share/grafito/plugins` (`j-space`), `postrm` parse, MSRV 1.92 docs, MSVC static CRT, e icon asset existencia; `assets/mora.png/.svg` existen y se embeben via `include_bytes!` (verificado en `app.rs:4870` test `<32 KiB`).
 - Baseline 2026-08-20: 7/8 PASS (gpu_compute SKIP headless, release-build SKIP 45m). Desde 14-job split: gpu-compute ya no SKIP, package-debian y workflow-lint son blocking. BUILD 2026-09-04: 17 jobs (se suman `coverage` 75%, `bench-regression` >10%, `mutation` semanal). F5 2026-09-07: `coverage` sin fallback (el job `test` ya cubre), `bench-regression` degradado a informativo explicito (sin baseline estable no hay comparacion >10% real), `mutation` documentado semanal a proposito.
 
-## 10. Novedades v1.2.35 — supera GeoGebra (2026-08-26)
+## 10. Novedades v1.2.35 — Paridad parcial GeoGebra: subset verificado, resto stub honesto (2026-08-26)
 
 **Pedagogía multi-nivel (primaria→ingeniería)**
 - `grafito-pedagogy::Curriculum` 42 LOs: UTN AM1 8, AM2 7, Álgebra 6, Prob 6, Secundaria 10, Primaria 5 (level_min, requires DAG, tags, topological_order Kahn)

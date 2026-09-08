@@ -1967,6 +1967,14 @@ impl GrafitoApp {
         (done, stage)
     }
 
+    /// Onda 1: el splash nunca es mudo. Pura y testeable: hay progreso
+    /// visible (spinner + barra) mientras `done < 3`, incluso en
+    /// "Cargando extensiones…" (done=2). La etiqueta de fase es la
+    /// live-region (siempre renderizada, el lector anuncia cada cambio).
+    fn carga_muestra_progreso(done: u32) -> bool {
+        done < 3
+    }
+
     /// Mantiene la proyección ligada al rectángulo real del canvas sin
     /// invalidar el índice espacial ni preparar GPU cuando el tamaño no cambió.
     fn sync_canvas_screen_size(&mut self, canvas_size: egui::Vec2) -> bool {
@@ -6652,17 +6660,31 @@ impl eframe::App for GrafitoApp {
                             } else {
                                 format!("{stage} · {done} de 3 · {elapsed_ms}ms")
                             };
+                            // Onda 1 live-region: la fase siempre se renderiza
+                            // (el lector anuncia cada cambio); con progreso
+                            // pendiente hay spinner + barra, nunca texto mudo.
                             ui.label(
                                 egui::RichText::new(phase)
                                     .size(13.0)
                                     .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
                             );
                             ui.add_space(grafito_ui::tokens::SPACE_XS);
-                            ui.add(
-                                egui::ProgressBar::new(done as f32 / 3.0)
-                                    .desired_width(220.0)
-                                    .show_percentage(),
-                            );
+                            if Self::carga_muestra_progreso(done) {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new());
+                                    ui.add(
+                                        egui::ProgressBar::new(done as f32 / 3.0)
+                                            .desired_width(220.0)
+                                            .show_percentage(),
+                                    );
+                                });
+                            } else {
+                                ui.add(
+                                    egui::ProgressBar::new(done as f32 / 3.0)
+                                        .desired_width(220.0)
+                                        .show_percentage(),
+                                );
+                            }
                         });
                     });
                 // Fix busy-loop: antes `request_repaint()` sin delay saturaba CPU/GPU a 100%
@@ -8457,6 +8479,20 @@ mod splash_tests {
         let (done_pending, stage_pending) = app.splash_stage();
         assert_eq!(done_pending, done);
         assert_eq!(stage_pending, "Abriendo documento…");
+    }
+
+    #[test]
+    fn carga_muestra_progreso() {
+        // Onda 1: el splash nunca es mudo — hay spinner + barra + live-region
+        // mientras done < 3, incluso en "Cargando extensiones…" (done=2).
+        assert!(GrafitoApp::carga_muestra_progreso(0));
+        assert!(GrafitoApp::carga_muestra_progreso(1));
+        assert!(GrafitoApp::carga_muestra_progreso(2));
+        assert!(!GrafitoApp::carga_muestra_progreso(3));
+        // La fase 2 es exactamente el texto que era mudo.
+        let app = dummy_grafito_app();
+        let (_, stage_gate0) = app.startup_splash_phase();
+        assert!(!stage_gate0.is_empty());
     }
 
     #[test]

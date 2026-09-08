@@ -44,7 +44,7 @@ const GROUP_LINE: &[ToolEntry] = &[
 ];
 
 const GROUP_CIRCLE: &[ToolEntry] = &[
-    (Tool::Circle, "Circulo centro-punto", "F4"),
+    (Tool::Circle, "Círculo centro-punto", "F4"),
     (Tool::Compass, "Compás", ""),
     (Tool::Tangent, "Tangente", ""),
     (Tool::Arc, "Arco 3 puntos", ""),
@@ -57,7 +57,7 @@ const GROUP_POLYGON: &[ToolEntry] = &[
     (Tool::RegularPolygon, "Poligono regular", ""),
 ];
 
-const GROUP_PENCIL: &[ToolEntry] = &[(Tool::Pencil, "Lapiz", "Ctrl+P")];
+const GROUP_PENCIL: &[ToolEntry] = &[(Tool::Pencil, "Lápiz", "Ctrl+P")];
 
 const GROUP_ERASER: &[ToolEntry] = &[(Tool::Eraser, "Borrador", "Ctrl+E")];
 

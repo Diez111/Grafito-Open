@@ -1,6 +1,6 @@
-# Diseño: Asistente Pedagógico Completo + Motor de Animaciones Profesional
+# Diseño: Tutor socrático subset F3 (BKT demo, FSRS-lite) + Motor de Animaciones Profesional
 
-> **Objetivo:** Convertir al asistente de Grafito en tutor pedagógico completo (socrático, currículum, ejercicios, feedback) y al generador de animaciones en motor profesional callable e integrado.
+> **Objetivo:** Convertir al asistente de Grafito en tutor socrático subset F3 (BKT demo, FSRS-lite: currículum, ejercicios, feedback) y al generador de animaciones en motor profesional callable e integrado.
 > **Stack:** Rust 2021, egui 0.29, wgpu, Muse Spark 1.2, Manim, crates puros.
 
 ## 1. Diagnóstico actual

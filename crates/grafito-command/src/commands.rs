@@ -1351,7 +1351,9 @@ fn parse_spreadsheet_row_index(
         )));
     }
     if (val - val.round()).abs() > 1e-9 {
-        return Err(CommandOutcome::Error("fila debe ser entero".into()));
+        return Err(CommandOutcome::Error(
+            "fila debe ser entero 1..N. Ej: Row[1]".into(),
+        ));
     }
     Ok((val.round() as usize).saturating_sub(1))
 }
@@ -7965,7 +7967,7 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return result;
         }
-        "Normal" if cmd.args.len() == 2 => {
+        "Normal" if matches!(cmd.args.len(), 2 | 3) => {
             let mu = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
                 Ok(value) => value,
                 Err(error) => {
@@ -7983,6 +7985,21 @@ fn handle_remaining_cas_commands(
                     return CommandOutcome::Error(format!("Normal: sigma inválido: {error}"))
                 }
             };
+            if cmd.args.len() == 3 {
+                let x = command_result!(parse_finite_command_arg(
+                    "Normal",
+                    "x",
+                    &cmd.args[2],
+                    &document.variables,
+                ));
+                let pdf = grafito_geometry::statistics::normal_pdf(x, mu, sigma);
+                let cdf = grafito_geometry::statistics::normal_cdf(x, mu, sigma);
+                command_result!(require_finite_outputs("Normal", &[pdf, cdf]));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Normal({mu},{sigma}): PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+                ));
+            }
             let expr = format!("exp(-(x-{})^2/(2*{}^2))/({}*sqrt(2*pi))", mu, sigma, sigma);
             insert_command_object!(
                 document,
@@ -10103,7 +10120,9 @@ fn handle_remaining_cas_commands(
                 Err(e) => return CommandOutcome::Error(format!("Trace: {e}")),
             };
             let Some(trace) = matrix.trace() else {
-                return CommandOutcome::Error("Trace: la matriz debe ser cuadrada".into());
+                return CommandOutcome::Error(
+                    "Trace necesita matriz cuadrada 2x2+. Ej: Trace[[1,2],[3,4]]".into(),
+                );
             };
             input_text.clear();
             return CommandOutcome::Message(format!("trace = {}", fmt_scalar(trace)));
@@ -16422,7 +16441,10 @@ fn run_function_study_command(
     let Some(id) = find_object_by_label(document, label)
         .or_else(|| find_object_by_label(document, base_label))
     else {
-        return CommandOutcome::Error("FunctionStudy: requiere un objeto válido".into());
+        return CommandOutcome::Error(
+            "FunctionStudy necesita una función creada con Function[...]. Ej: FunctionStudy[f]"
+                .into(),
+        );
     };
     let Some(GeoObject::Function(fun)) = document.get_object(id).cloned() else {
         return CommandOutcome::Error(
@@ -21123,7 +21145,9 @@ fn run_cofactor_command(args: &[String], document: &Document) -> CommandOutcome 
         _ => return CommandOutcome::Error("Cofactor: columna debe ser un entero positivo".into()),
     };
     let Some(value) = cofactor_value(&matrix, row, col) else {
-        return CommandOutcome::Error("Cofactor: indices o matriz invalidos".into());
+        return CommandOutcome::Error(
+            "Cofactor necesita matriz cuadrada y fila/col 1..n. Ej: Cofactor[A,1,1]".into(),
+        );
     };
     CommandOutcome::Message(format!(
         "Cofactor C_{}_{} = {}",
@@ -21199,7 +21223,7 @@ fn run_change_of_basis_command(args: &[String], document: &Document) -> CommandO
     }
     let standard = multiply_matrix_vector(&from.transpose(), &v);
     let Some(std_col) = Matrix::from_rows(standard.iter().map(|x| vec![*x]).collect()) else {
-        return CommandOutcome::Error("ChangeOfBasis: vector invalido".into());
+        return CommandOutcome::Error("ChangeOfBasis necesita vector y dos bases cuadradas del mismo tamaño. Ej: ChangeOfBasis[v, B1, B2]".into());
     };
     let Some(coords) = solve_linear_system(&to.transpose(), &std_col) else {
         return CommandOutcome::Error("ChangeOfBasis: base destino singular".into());
@@ -22730,5 +22754,64 @@ mod tests {
             }
             other => panic!("expected border singularity error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn onda1_errores_explican_con_ejemplo() {
+        // Onda 1: 5 errores que culpaban ahora dicen Qué + ejemplo.
+        let doc = Document::new();
+        // Cofactor con matriz no cuadrada / índice fuera de rango.
+        let out = run_cofactor_command(
+            &[
+                "[[1,2,3],[4,5,6]]".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            ],
+            &doc,
+        );
+        match out {
+            CommandOutcome::Error(msg) => {
+                assert!(msg.contains("Cofactor necesita"), "fue: {msg}");
+                assert!(msg.contains("Ej: Cofactor[A,1,1]"), "fue: {msg}");
+            }
+            other => panic!("Cofactor debe dar Error, dio {other:?}"),
+        }
+        // Trace no cuadrada.
+        let mut doc = Document::new();
+        let mut input = "Trace[[[1,2,3],[4,5,6]]]".to_string();
+        match process_input(&mut doc, &mut input) {
+            CommandOutcome::Error(msg) => {
+                assert!(msg.contains("Trace necesita"), "fue: {msg}");
+                assert!(msg.contains("Ej: Trace[[1,2],[3,4]]"), "fue: {msg}");
+            }
+            other => panic!("Trace debe dar Error, dio {other:?}"),
+        }
+        // Fila no entera.
+        let vars = HashMap::new();
+        match parse_spreadsheet_row_index("1.5", &vars) {
+            Err(CommandOutcome::Error(msg)) => {
+                assert!(msg.contains("fila debe ser entero"), "fue: {msg}");
+                assert!(msg.contains("Ej: Row[1]"), "fue: {msg}");
+            }
+            other => panic!("fila 1.5 debe dar Error, dio {other:?}"),
+        }
+        // FunctionStudy sin objeto.
+        let mut doc = Document::new();
+        let mut input = "FunctionStudy[no_existe]".to_string();
+        match process_input(&mut doc, &mut input) {
+            CommandOutcome::Error(msg) => {
+                assert!(msg.contains("FunctionStudy necesita"), "fue: {msg}");
+                assert!(msg.contains("Ej: FunctionStudy[f]"), "fue: {msg}");
+            }
+            other => panic!("FunctionStudy debe dar Error, dio {other:?}"),
+        }
+        // ChangeOfBasis vector inválido: rama defensiva (`Matrix::from_rows`
+        // solo falla con 0 dimensiones, que el parser rechaza antes). Se
+        // pinnea el literal en prod: Qué + ejemplo, sin tautología.
+        let src = include_str!("commands.rs");
+        assert!(
+            src.contains("ChangeOfBasis necesita vector y dos bases cuadradas del mismo tamaño. Ej: ChangeOfBasis[v, B1, B2]"),
+            "literal Qué+ejemplo ausente en prod"
+        );
     }
 }

@@ -8,8 +8,8 @@
 //!   [`t`], [`group_label`], [`tool_label`], [`palette_action`],
 //!   [`onboarding_msg`], [`cheat_sheet_msg`], [`toast_msg`] o
 //!   [`palette_footer`]. Piel pura: sin I/O, sin spawn, sin lógica.
-//! - Español idéntico al UI actual (sin normalizar tildes ausentes como
-//!   `"Circulo centro-punto"` o `"Lapiz"` — Oleada 3 los migra tal cual).
+//! - Español idéntico al UI actual (con tildes correctas como
+//!   `"Círculo centro-punto"` o `"Lápiz"` — Onda 1 los normaliza).
 //! - Números: [`format_number`] es sólo display (ES/PT coma, EN punto, sin
 //!   miles, `NaN`/`∞`); [`parse_number_tolerant`] mapea `,`→`.` y rechaza
 //!   miles ambiguos (`"1.234,56"` → `None`).
@@ -116,11 +116,11 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.tool.ray", es: "Semirrecta", en: "Ray" },
     Msg { key: "toolbar.tool.vector", es: "Vector", en: "Vector" },
     Msg { key: "toolbar.tool.perpendicular", es: "Perpendicular", en: "Perpendicular" },
-    Msg { key: "toolbar.tool.circle", es: "Circulo centro-punto", en: "Center-point circle" },
+    Msg { key: "toolbar.tool.circle", es: "Círculo centro-punto", en: "Center-point circle" },
     Msg { key: "toolbar.tool.tangent", es: "Tangente", en: "Tangent" },
     Msg { key: "toolbar.tool.polygon", es: "Poligono", en: "Polygon" },
     Msg { key: "toolbar.tool.regular_polygon", es: "Poligono regular", en: "Regular polygon" },
-    Msg { key: "toolbar.tool.pencil", es: "Lapiz", en: "Pencil" },
+    Msg { key: "toolbar.tool.pencil", es: "Lápiz", en: "Pencil" },
     Msg { key: "toolbar.tool.eraser", es: "Borrador", en: "Eraser" },
     Msg { key: "toolbar.tool.ellipse_foci", es: "Elipse por focos", en: "Ellipse by foci" },
     Msg { key: "toolbar.tool.parabola_focus", es: "Parabola foco-directriz", en: "Focus-directrix parabola" },
@@ -834,7 +834,7 @@ mod tests {
         // ES idéntico a los literales actuales (toolbar / paleta / onboarding).
         let es = Locale::Es;
         assert_eq!(super::t("toolbar.group.move", es), "Seleccionar");
-        assert_eq!(super::t("toolbar.tool.circle", es), "Circulo centro-punto");
+        assert_eq!(super::t("toolbar.tool.circle", es), "Círculo centro-punto");
         assert_eq!(super::t("toolbar.tool.parallel", es), "Paralela");
         assert_eq!(super::t("toolbar.tool.arc", es), "Arco 3 puntos");
         assert_eq!(super::t("toolbar.tool.sector", es), "Sector circular");
@@ -844,7 +844,7 @@ mod tests {
             super::t("toolbar.tool.trig_animation", es),
             "Animación trigonométrica"
         );
-        assert_eq!(super::t("toolbar.tool.pencil", es), "Lapiz");
+        assert_eq!(super::t("toolbar.tool.pencil", es), "Lápiz");
         assert_eq!(super::t("palette.action.point", es), "Herramienta Punto");
         assert_eq!(super::t("palette.empty", es), "No se encontraron comandos");
         assert_eq!(super::t("onboarding.title", es), "Bienvenido a Grafito");
@@ -1113,7 +1113,7 @@ mod tests {
         assert_eq!(t("toast.saved", Locale::Pt), "Documento salvo em {path}");
         // Sin PT (87 tools): cae a ES, jamás vacío.
         assert_eq!(t("toolbar.tool.translate", Locale::Pt), "Traslada");
-        assert_eq!(t("toolbar.tool.circle", Locale::Pt), "Circulo centro-punto");
+        assert_eq!(t("toolbar.tool.circle", Locale::Pt), "Círculo centro-punto");
         assert!(!t("toolbar.tool.translate", Locale::Pt).is_empty());
         // Clave inexistente: la propia clave (igual que ES/EN).
         assert_eq!(t("does.not.exist", Locale::Pt), "does.not.exist");
