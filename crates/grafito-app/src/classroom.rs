@@ -79,11 +79,16 @@ pub struct ClassroomPanel {
     is_host: bool,
     /// Outbox offline persistida en disco (D2): se carga al arrancar
     /// (`new`) y se guarda en background (`persist_outbox_background`).
-    /// Hoy sin productores reales (Loopback sigue en memoria); el ciclo
-    /// load→save existe y está testeado para cuando lleguen.
+    /// P1b: productor real cableado — el chat del aula encola acá cuando
+    /// no hay red (`enqueue_chat_message`); el ciclo load→save ya no está
+    /// ocioso y el pendiente es visible en el panel.
     outbox: grafito_classroom::OfflineOutbox,
     /// Aviso honesto de carga corrupta (se muestra una vez en el panel).
     outbox_notice: Option<String>,
+    /// Borrador del chat offline (UI state, acotado a 2048 en `set_chat_draft`).
+    chat_draft: String,
+    /// Aviso del último envío ("se enviará al reconectar…" o error honesto).
+    chat_notice: Option<String>,
 }
 
 impl Default for ClassroomPanel {
@@ -105,6 +110,8 @@ impl ClassroomPanel {
             is_host: false,
             outbox,
             outbox_notice,
+            chat_draft: String::new(),
+            chat_notice: None,
         }
     }
 
@@ -144,6 +151,76 @@ impl ClassroomPanel {
     /// Outbox offline (lectura para la UI; la mutación futura persiste aparte).
     pub fn outbox(&self) -> &grafito_classroom::OfflineOutbox {
         &self.outbox
+    }
+
+    /// Pendientes en la outbox (visible en el panel, P1b).
+    pub fn pending_count(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Borrador del chat (lo edita el TextEdit del panel).
+    pub fn chat_draft(&self) -> &str {
+        &self.chat_draft
+    }
+
+    /// Fija el borrador acotando a 2048 bytes (presupuesto `MAX_OFFLINE_BODY_BYTES`).
+    pub fn set_chat_draft(&mut self, draft: impl Into<String>) {
+        let mut text = draft.into();
+        while text.len() > grafito_classroom::MAX_OFFLINE_BODY_BYTES {
+            text.pop();
+        }
+        self.chat_draft = text;
+    }
+
+    /// Aviso del último envío del chat, si hubo.
+    pub fn chat_notice(&self) -> Option<&str> {
+        self.chat_notice.as_deref()
+    }
+
+    /// Reloj del caller para la outbox (secs desde UNIX_EPOCH, 0 si falla).
+    fn outbox_now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Productor real P1b: encola un mensaje de chat offline.
+    ///
+    /// F0 sin red → todo envío va a la outbox con aviso
+    /// "se enviará al reconectar". Vacío → `Err` honesto sin encolar.
+    /// Llena (128) o cuerpo inválido → `Err` honesto con motivo.
+    /// En éxito limpia el borrador, avisa y persiste en background
+    /// (I/O fuera del hilo UI vía `persist_outbox_background`).
+    pub fn enqueue_chat_message(&mut self, body: &str) -> Result<u64, String> {
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            self.chat_notice = Some("Escribí un mensaje antes de enviar, che.".to_string());
+            return Err("el mensaje no debe estar vacío".to_string());
+        }
+        let now = Self::outbox_now_secs();
+        match self.outbox.enqueue("chat", trimmed, now) {
+            Ok(id) => {
+                self.chat_draft.clear();
+                self.chat_notice = Some(format!(
+                    "Sin red (F0): mensaje #{id} encolado, se enviará al reconectar ({} pendiente(s)).",
+                    self.outbox.len()
+                ));
+                self.persist_outbox_background();
+                Ok(id)
+            }
+            Err(grafito_classroom::ClassroomError::QueueFull) => {
+                self.chat_notice = Some(
+                    "La cola offline está llena (128): reintentá al reconectar, che.".to_string(),
+                );
+                Err("cola offline llena (128)".to_string())
+            }
+            Err(err) => {
+                let motivo = format!("{err:?}");
+                self.chat_notice = Some(format!("No se pudo encolar: {motivo}"));
+                Err(motivo)
+            }
+        }
     }
 
     /// Aviso honesto de carga (corrupción/descarte), si hubo.
@@ -246,6 +323,36 @@ impl ClassroomPanel {
                 .size(TYPE_XS)
                 .weak(),
         );
+        // P1b: outbox visible — pendientes + último aviso (carga o envío).
+        ui.add_space(SPACE_SM);
+        ui.separator();
+        ui.add_space(SPACE_XS);
+        ui.label(
+            egui::RichText::new(format!(
+                "Cola offline: {} pendiente(s) (máx 128×2048).",
+                self.outbox.len()
+            ))
+            .size(TYPE_XS)
+            .weak(),
+        );
+        if let Some(aviso) = self.outbox_notice.as_deref() {
+            ui.label(
+                egui::RichText::new(aviso)
+                    .size(TYPE_XS)
+                    .color(ui.visuals().weak_text_color()),
+            );
+        }
+        if let Some(aviso) = self.chat_notice.as_deref() {
+            ui.label(egui::RichText::new(aviso).size(TYPE_XS).weak());
+        }
+        ui.add_space(SPACE_XS);
+        ui.label(
+            egui::RichText::new(
+                "Chat offline: sin red todo mensaje se encola y se envía al reconectar.",
+            )
+            .size(TYPE_XS)
+            .weak(),
+        );
     }
 }
 
@@ -336,6 +443,7 @@ pub fn draw_classroom_panel(app: &mut crate::app::GrafitoApp, ctx: &egui::Contex
     let mut opt_in_toggled: Option<bool> = None;
     let mut regenerate_code = false;
     let mut toggle_host = false;
+    let mut send_chat = false;
     let opt_in_snapshot = app.advanced_red_opt_in;
     let panel_was_opt_in = app.classroom.is_opt_in();
     let mut opt_in = opt_in_snapshot;
@@ -366,6 +474,26 @@ pub fn draw_classroom_panel(app: &mut crate::app::GrafitoApp, ctx: &egui::Contex
                         toggle_host = true;
                     }
                 });
+                // P1b: chat offline — el TextEdit muta solo el borrador (UI
+                // state, sin I/O); el enqueue + persist van FUERA de Ui::.
+                ui.add_space(SPACE_SM);
+                ui.separator();
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new("Chat del aula (offline)")
+                        .size(TYPE_SM)
+                        .strong(),
+                );
+                ui.horizontal(|ui| {
+                    let draft = &mut app.classroom.chat_draft;
+                    let resp = ui.text_edit_singleline(draft);
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        send_chat = true;
+                    }
+                    if ui.button("Enviar").clicked() {
+                        send_chat = true;
+                    }
+                });
             }
         });
     // Aplicación FUERA de Ui:: (contexto `update`, sin layout en curso).
@@ -380,6 +508,10 @@ pub fn draw_classroom_panel(app: &mut crate::app::GrafitoApp, ctx: &egui::Contex
     if toggle_host {
         let cur = app.classroom.is_host();
         app.classroom.set_host(!cur);
+    }
+    if send_chat {
+        let body = app.classroom.chat_draft.clone();
+        let _ = app.classroom.enqueue_chat_message(&body);
     }
 }
 
@@ -582,5 +714,44 @@ mod tests {
     fn outbox_arranca_vacia_y_acotada() {
         let panel = ClassroomPanel::new();
         assert!(panel.outbox().len() <= grafito_classroom::MAX_OFFLINE_QUEUE);
+    }
+
+    #[test]
+    fn chat_offline_encola_con_aviso_de_reconexion() {
+        // P1b: productor real — enviar con red caída encola + avisa.
+        let mut panel = ClassroomPanel::new();
+        panel.outbox.clear();
+        let base = panel.pending_count();
+        let id = panel
+            .enqueue_chat_message("hola aula")
+            .expect("chat se encola");
+        assert!(id >= 1);
+        assert_eq!(panel.pending_count(), base + 1);
+        let aviso = panel.chat_notice().expect("aviso visible");
+        assert!(
+            aviso.contains("se enviará al reconectar"),
+            "aviso P1b esperado, fue: {aviso}"
+        );
+        assert!(
+            panel.chat_draft().is_empty(),
+            "borrador se limpia tras encolar"
+        );
+    }
+
+    #[test]
+    fn chat_offline_vacio_no_encola_y_avisa_honesto() {
+        let mut panel = ClassroomPanel::new();
+        panel.outbox.clear();
+        let base = panel.pending_count();
+        assert!(panel.enqueue_chat_message("   ").is_err());
+        assert_eq!(panel.pending_count(), base, "vacío no encola");
+        assert!(panel.chat_notice().is_some());
+    }
+
+    #[test]
+    fn chat_draft_se_acota_a_2048_bytes() {
+        let mut panel = ClassroomPanel::new();
+        panel.set_chat_draft("x".repeat(5000));
+        assert!(panel.chat_draft().len() <= grafito_classroom::MAX_OFFLINE_BODY_BYTES);
     }
 }

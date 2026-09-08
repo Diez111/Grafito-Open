@@ -295,10 +295,12 @@ fn escape_pdf_text(text: &str) -> String {
     out
 }
 
-/// PDF 1.4 mínimo de una página (Helvetica) con el conteo de objetos y
-/// hasta 40 etiquetas. Interino hasta el vectorial con `printpdf` del lead;
-/// abre en cualquier visor y nunca inventa geometría.
+/// PDF 1.4 mínimo multipágina (Helvetica) con el conteo de objetos y
+/// 40 etiquetas por página. P1a-4: pagina de verdad en vez de truncar a 1
+/// página en silencio; abre en cualquier visor y nunca inventa geometría.
+/// Interino hasta el vectorial con `printpdf` del lead.
 pub fn document_to_pdf(document: &Document) -> Result<Vec<u8>, ExchangeError> {
+    const ROWS_PER_PAGE: usize = 40;
     let objects: Vec<String> = document
         .objects_iter_sorted()
         .map(|(_, object)| object.name().to_string())
@@ -306,25 +308,67 @@ pub fn document_to_pdf(document: &Document) -> Result<Vec<u8>, ExchangeError> {
     if objects.len() > MAX_EXCHANGE_OBJECTS {
         return Err(ExchangeError::TooManyObjects { got: objects.len() });
     }
-    let mut lines = vec![format!("Grafito - {} objetos", objects.len())];
-    for (index, kind) in objects.iter().take(40).enumerate() {
-        lines.push(format!("{}. {}", index + 1, kind));
+    // Paginación simple: 40 filas por página, numeración global continua.
+    let page_count = objects.len().max(1).div_ceil(ROWS_PER_PAGE).max(1);
+    let mut contents: Vec<String> = Vec::with_capacity(page_count);
+    // Construir contenidos por página (caso 0 objetos = 1 página solo conteo).
+    if objects.is_empty() {
+        let content = format!(
+            "BT /F1 12 Tf 50 780 Td 14 TL ({}) Tj T* ET",
+            escape_pdf_text("Grafito - 0 objetos (página 1 de 1)")
+        );
+        contents.push(content);
+    } else {
+        for (page_idx, chunk) in objects.chunks(ROWS_PER_PAGE).enumerate() {
+            let mut lines = vec![format!(
+                "Grafito - {} objetos (página {} de {})",
+                objects.len(),
+                page_idx + 1,
+                page_count
+            )];
+            let base = page_idx * ROWS_PER_PAGE;
+            for (offset, kind) in chunk.iter().enumerate() {
+                lines.push(format!("{}. {}", base + offset + 1, kind));
+            }
+            let mut content = String::from("BT /F1 12 Tf 50 780 Td 14 TL ");
+            for line in &lines {
+                content.push_str(&format!("({}) Tj T* ", escape_pdf_text(line)));
+            }
+            content.push_str("ET");
+            contents.push(content);
+        }
     }
-    if objects.len() > 40 {
-        lines.push(format!("... y {} mas", objects.len() - 40));
+    debug_assert_eq!(contents.len(), page_count);
+    // Objetos PDF: 1=Catalog, 2=Pages, luego (Page, Contents) por página, N=Font.
+    let mut kids = String::new();
+    for idx in 0..page_count {
+        let page_obj = 3 + idx * 2;
+        if idx > 0 {
+            kids.push(' ');
+        }
+        kids.push_str(&format!("{page_obj} 0 R"));
     }
-    let mut content = String::from("BT /F1 12 Tf 50 780 Td 14 TL ");
-    for line in &lines {
-        content.push_str(&format!("({}) Tj T* ", escape_pdf_text(line)));
+    let font_obj = 3 + page_count * 2;
+    let mut objects_pdf: Vec<String> = Vec::with_capacity(font_obj);
+    objects_pdf.push("<< /Type /Catalog /Pages 2 0 R >>".to_string());
+    objects_pdf.push(format!(
+        "<< /Type /Pages /Kids [{kids}] /Count {page_count} >>"
+    ));
+    for (idx, content) in contents.iter().enumerate() {
+        let page_obj = 3 + idx * 2;
+        let content_obj = 4 + idx * 2;
+        objects_pdf.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 {font_obj} 0 R >> >> /Contents {content_obj} 0 R >>"
+        ));
+        debug_assert_eq!(objects_pdf.len(), page_obj);
+        objects_pdf.push(format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ));
+        debug_assert_eq!(objects_pdf.len(), content_obj);
     }
-    content.push_str("ET");
-    let objects_pdf = [
-        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
-        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
-    ];
+    objects_pdf.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string());
+    debug_assert_eq!(objects_pdf.len(), font_obj);
     let mut pdf = String::from("%PDF-1.4\n");
     let mut offsets = Vec::with_capacity(objects_pdf.len());
     for (index, body) in objects_pdf.iter().enumerate() {
@@ -683,6 +727,30 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF-1.4"));
         assert!(pdf.windows(5).any(|w| w == b"%%EOF"));
         assert!(!pdf.is_empty());
+        // 1 objeto = 1 página.
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/Count 1"), "1 página esperada: {text}");
+    }
+
+    #[test]
+    fn pdf_pagina_de_verdad_con_41_objetos() {
+        // P1a-4: 41 objetos ya no se truncan a 1 página; van a 2 páginas reales.
+        let mut document = Document::new();
+        for idx in 0..41 {
+            document
+                .try_add_object(point_fixture(&format!("P{idx}")))
+                .expect("punto fixture");
+        }
+        let pdf = document_to_pdf(&document).expect("pdf multipágina");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/Count 2"), "2 páginas esperadas: {text}");
+        assert!(text.contains("página 1 de 2"), "numeración p1: {text}");
+        assert!(text.contains("página 2 de 2"), "numeración p2: {text}");
+        assert!(
+            text.contains("41. "),
+            "la fila 41 debe existir (sin truncar)"
+        );
+        assert!(!text.contains("... y"), "ya no se trunca con '... y N mas'");
     }
 
     #[test]

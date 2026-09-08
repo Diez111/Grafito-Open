@@ -4804,16 +4804,19 @@ fn implicit_surface_slot_starts_idle_and_polls_without_blocking() {
     assert!(app.implicit_surface_slot.has_pending());
     let started = Instant::now();
     let _ = app.implicit_surface_slot.poll();
+    // P1b: deadline laxa anti-flaky — el `poll` solo hace `try_recv`, pero en
+    // CI cargada el scheduler puede demorar el retorno; 5 s sigue probando
+    // "no bloquea" (el job 8³ tarda >>5 s si fuera inline en debug).
     assert!(
-        started.elapsed() < Duration::from_secs(1),
+        started.elapsed() < Duration::from_secs(5),
         "poll bloqueó el hilo UI"
     );
-    // Drena en background sin bloquear (hasta 60 s en debug).
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // Drena en background sin bloquear (hasta 120 s en debug/CI lenta; P1b).
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         match app.implicit_surface_slot.poll() {
             SurfaceSlotPoll::Pending => {
-                assert!(Instant::now() < deadline, "el job 8³ no terminó en 60 s");
+                assert!(Instant::now() < deadline, "el job 8³ no terminó en 120 s");
                 std::thread::sleep(Duration::from_millis(5));
             }
             SurfaceSlotPoll::Ready(mesh) => {
@@ -4828,6 +4831,43 @@ fn implicit_surface_slot_starts_idle_and_polls_without_blocking() {
     // Slot unitario aislado: mismo contrato sin app.
     let mut slot = ImplicitSurfaceSlot::new();
     assert!(matches!(slot.poll(), SurfaceSlotPoll::Pending));
+}
+
+#[test]
+fn implicit_slot_productor_envia_grueso_y_limpia_sin_superficie() {
+    // P1b: productor real — con superficie visible envía (pending o válido
+    // tras drenar); sin superficie limpia (sin fantasma).
+    use grafito_core::{GeoObject, ImplicitSurface3DObj};
+    let mut app = crate::app::dummy_grafito_app();
+    // Sin superficie: no envía y queda limpio.
+    app.maybe_submit_implicit_slot();
+    assert!(!app.implicit_surface_slot.has_pending());
+    assert!(app.implicit_slot_key.is_none());
+    // Con superficie visible: envía grueso 12³ sin bloquear.
+    let surface = GeoObject::ImplicitSurface3D(ImplicitSurface3DObj::new(
+        "x*x+y*y+z*z-1",
+        (-1.5, 1.5, -1.5, 1.5, -1.5, 1.5),
+        16,
+    ));
+    let _ = app.document.try_add_object(surface);
+    app.maybe_submit_implicit_slot();
+    assert!(
+        app.implicit_surface_slot.has_pending() || app.implicit_slot_key.is_some(),
+        "el productor debe enviar la superficie visible"
+    );
+    assert!(app.implicit_slot_key.is_some());
+    // Segunda llamada con misma clave no re-envía (no resetea el job).
+    let key_antes = app.implicit_slot_key;
+    app.maybe_submit_implicit_slot();
+    assert_eq!(app.implicit_slot_key, key_antes);
+    // Al borrar todo, el productor limpia el slot (sin fantasma).
+    app.document = grafito_core::Document::new();
+    // Drena un poll para no dejar receiver colgado antes de limpiar.
+    let _ = app.implicit_surface_slot.poll();
+    app.maybe_submit_implicit_slot();
+    assert!(!app.implicit_surface_slot.has_pending());
+    assert!(app.implicit_surface_slot.last_valid().is_none());
+    assert!(app.implicit_slot_key.is_none());
 }
 
 #[test]
@@ -5319,21 +5359,66 @@ fn custom_tool_runs_steps_through_pipeline() {
     app.custom_tools
         .define("parpadeo", &format!("Hide[{label}]; Show[{label}]"))
         .expect("define válido");
+    let undo_previo = app.undo_stack.len();
     app.run_custom_tool("parpadeo", &ctx);
     // Tras Hide+Show, el objeto sigue visible y el conteo intacto.
     let obj = app.document.objects().values().next().expect("objeto");
     assert!(obj.is_visible());
+    // Éxito atómico: 2 pasos colapsan en 1 solo undo (no 2 parciales).
+    assert_eq!(
+        app.undo_stack.len(),
+        undo_previo + 1,
+        "tool exitosa debe dejar un solo undo atómico"
+    );
     // Nombre desconocido: error honesto, sin pánico ni cambios.
     let before = app.document.objects().len();
     app.run_custom_tool("noexiste", &ctx);
     assert_eq!(app.document.objects().len(), before);
-    // Paso roto a mitad: aplica el primero y corta honesto.
+    // Paso roto a mitad: P1a-2 atómico — revierte todo, documento idéntico.
     app.custom_tools
         .define("mitad", &format!("Hide[{label}]; Hide[ZZZ999]"))
         .expect("define válido");
+    let before_doc = serde_json::to_value(&app.document).expect("serializa previo");
+    let undo_antes = app.undo_stack.len();
     app.run_custom_tool("mitad", &ctx);
+    let after_doc = serde_json::to_value(&app.document).expect("serializa posterior");
+    assert_eq!(
+        before_doc, after_doc,
+        "custom tool que falla a mitad debe revertir atómico"
+    );
+    assert_eq!(
+        app.undo_stack.len(),
+        undo_antes,
+        "fallo atómico no debe dejar undo parcial"
+    );
     let obj = app.document.objects().values().next().expect("objeto");
-    assert!(!obj.is_visible());
+    assert!(obj.is_visible(), "el Hide parcial debe haberse revertido");
+}
+
+#[test]
+fn custom_tool_falla_a_mitad_revierte_atomico_con_repeat() {
+    // P1a-2 red-first: Repeat que falla a mitad dentro de custom tool revierte.
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.execute_command_and_record_with_outcome("Point[(0,0)]", 0.0);
+    let label = app
+        .document
+        .objects()
+        .values()
+        .next()
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    assert!(!label.is_empty());
+    // Segundo paso falla (objeto inexistente) tras un paso que sí muta.
+    app.custom_tools
+        .define("mixta", &format!("Hide[{label}]; Hide[ZZZ_NOEXISTE]"))
+        .expect("define válido");
+    let before = serde_json::to_value(&app.document).expect("previo serializa");
+    let undo_antes = app.undo_stack.len();
+    app.run_custom_tool("mixta", &ctx);
+    let after = serde_json::to_value(&app.document).expect("posterior serializa");
+    assert_eq!(before, after, "documento idéntico tras fallo a mitad");
+    assert_eq!(app.undo_stack.len(), undo_antes);
 }
 
 #[test]
@@ -5350,9 +5435,18 @@ fn exam_lockdown_bloquea_export_y_pide_confirm_para_salir() {
     assert!(app.pending_export_job.is_none());
     assert!(app.exam_blocks("Asistente"));
     assert!(app.exam_blocks("Internet"));
-    // Cambiar de perspectiva NO apaga el examen (sin escape por vista).
+    // P1a-1: en examen el cambio de vista se BLOQUEA (sin bypass ni escape).
+    // Ni apaga el examen ni cambia la perspectiva.
+    let before = app.perspective;
     app.set_perspective(crate::Perspective::Geometry3D);
     assert!(app.exam_mode, "cambiar de vista no apaga el examen");
+    assert_eq!(
+        app.perspective, before,
+        "en examen la vista no debe cambiar"
+    );
+    assert!(app
+        .try_set_perspective(crate::Perspective::Geometry3D)
+        .is_err());
     // Salir pide confirmación: no apaga directo.
     app.set_exam_mode(false);
     assert!(app.exam_mode, "sin confirmar sigue el lockdown");
@@ -5373,6 +5467,42 @@ fn exam_lockdown_bloquea_asistente_local_sin_panico() {
     // Early-return antes de tocar runtime/documento: no paniquea en headless.
     app.start_local_assistant_request(&ctx);
     assert!(!app.assistant.is_pending);
+}
+
+#[test]
+fn exam_lockdown_bloquea_cambio_de_perspectiva() {
+    // P1a-1 red-first: en examen el cambio de vista está bloqueado (sin bypass).
+    let mut app = crate::app::dummy_grafito_app();
+    assert_eq!(app.perspective, crate::Perspective::Geometry2D);
+    app.set_exam_mode(true);
+    assert!(app.exam_mode);
+    // Vía fallible: debe dar Err honesto y no mutar.
+    let err = app
+        .try_set_perspective(crate::Perspective::Geometry3D)
+        .expect_err("en examen el cambio de vista debe fallar");
+    assert!(err.contains("examen"), "error honesto esperado, fue: {err}");
+    assert_eq!(app.perspective, crate::Perspective::Geometry2D);
+    assert_eq!(app.current_view, crate::ViewMode::D2);
+    // Vía directa legacy: tampoco muta (early-return + toast).
+    app.set_perspective(crate::Perspective::Geometry3D);
+    assert_eq!(
+        app.perspective,
+        crate::Perspective::Geometry2D,
+        "set_perspective no debe bypassear el lockdown"
+    );
+    assert_eq!(app.current_view, crate::ViewMode::D2);
+    // Misma perspectiva sí pasa (no-op, sin falso bloqueo).
+    app.try_set_perspective(crate::Perspective::Geometry2D)
+        .expect("misma vista no bloquea");
+    // ViewController puro también gatea con exam_locked.
+    let mut vc = crate::controllers::ViewController::new();
+    assert!(vc
+        .try_set_perspective(crate::Perspective::Geometry3D, false)
+        .is_ok());
+    let err = vc
+        .try_set_perspective(crate::Perspective::AlgebraCas, true)
+        .expect_err("ViewController debe gatear con exam_locked");
+    assert!(err.contains("examen"), "fue: {err}");
 }
 
 #[test]

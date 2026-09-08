@@ -3609,37 +3609,56 @@ impl GrafitoApp {
                 _ => {}
             }
         }
-        // A4: overlay del slot background — render de `last_valid`.
+        // A4 + P1b: overlay del slot background — render de `last_valid`.
         //
         // El comando A1 eager sigue como fallback honesto (fail-closed al crear);
         // el slot es refinamiento progresivo: mientras hay `Pending` la UI muestra
-        // el último válido sin parpadear ante `Failed`. Hoy el slot arranca idle
-        // (futuros UIs harán `submit`); si hay malla, se dibuja como wireframe
-        // con el mismo presupuesto CPU (>4096 tris solo al GPU).
-        if let Some(mesh) = self.implicit_surface_slot.last_valid() {
-            let fresh = mesh.triangle_count() > 0 && mesh.triangle_count() <= GB_MAX_CPU_MESH_EDGES;
-            if fresh && !overlay_only {
-                let stroke = Stroke::new(1.5, label_color);
-                for triangle in mesh.triangles() {
-                    let (Some(a), Some(b), Some(c)) = (
-                        mesh.vertices().get(triangle[0]),
-                        mesh.vertices().get(triangle[1]),
-                        mesh.vertices().get(triangle[2]),
-                    ) else {
-                        continue;
-                    };
-                    for (start, end) in [(a, b), (b, c), (c, a)] {
-                        if let Some((pa, pb)) = project_segment(&self.camera, start, end, w, h) {
-                            painter.line_segment(
-                                [
-                                    origin + Vec2::new(pa.0, pa.1),
-                                    origin + Vec2::new(pb.0, pb.1),
-                                ],
-                                stroke,
-                            );
+        // el último válido sin parpadear ante `Failed`. P1b cablea el productor
+        // (`maybe_submit_implicit_slot` en `app.rs`): con superficie visible el
+        // slot deja de arrancar idle; sin superficie visible no se dibuja nada
+        // (sin fantasma: `clear` en el productor). Presupuesto CPU igual
+        // (>4096 tris solo al GPU). Si hay pendiente sin válido aún, aviso chico.
+        let has_visible_implicit = self
+            .document
+            .objects()
+            .values()
+            .any(|o| matches!(o, GeoObject::ImplicitSurface3D(s) if s.visible));
+        if has_visible_implicit {
+            if let Some(mesh) = self.implicit_surface_slot.last_valid() {
+                let fresh =
+                    mesh.triangle_count() > 0 && mesh.triangle_count() <= GB_MAX_CPU_MESH_EDGES;
+                if fresh && !overlay_only {
+                    let stroke = Stroke::new(1.5, label_color);
+                    for triangle in mesh.triangles() {
+                        let (Some(a), Some(b), Some(c)) = (
+                            mesh.vertices().get(triangle[0]),
+                            mesh.vertices().get(triangle[1]),
+                            mesh.vertices().get(triangle[2]),
+                        ) else {
+                            continue;
+                        };
+                        for (start, end) in [(a, b), (b, c), (c, a)] {
+                            if let Some((pa, pb)) = project_segment(&self.camera, start, end, w, h)
+                            {
+                                painter.line_segment(
+                                    [
+                                        origin + Vec2::new(pa.0, pa.1),
+                                        origin + Vec2::new(pb.0, pb.1),
+                                    ],
+                                    stroke,
+                                );
+                            }
                         }
                     }
                 }
+            } else if self.implicit_surface_slot.has_pending() && !overlay_only {
+                painter.text(
+                    origin + Vec2::new(8.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    "refinando implícita…",
+                    egui::FontId::proportional(11.0),
+                    label_color,
+                );
             }
         }
     }

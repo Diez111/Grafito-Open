@@ -1521,12 +1521,16 @@ impl TeachingUiState {
         }
         let old = std::mem::take(&mut self.anim_textures);
         self.retired_anim_textures.retire_all(old);
+        // P1b: nombre con hash (mismo patrón retención+hash que
+        // `render_2d::FillTextureCacheStore`): el set viejo ya quedó retirado
+        // con gracia arriba, y el nombre versionado distingue dos sets del
+        // mismo largo en los logs.
         self.anim_textures = frames
             .iter()
             .enumerate()
             .map(|(idx, frame)| {
                 ctx.load_texture(
-                    format!("teaching_anim_{idx}"),
+                    format!("teaching_anim_{idx}_{hash:016x}"),
                     frame.clone(),
                     egui::TextureOptions::LINEAR,
                 )

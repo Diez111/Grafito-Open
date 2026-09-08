@@ -2143,7 +2143,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         }
                                     }
                                     if export_pill_button(ui, "Exportar PDF").on_hover_text(
-                                        "Vectorial de 1 página: rectas, círculos, polígonos y texto (Helvetica)",
+                                        "Vectorial de 1 página por ahora: vista + hoja actual (rectas, círculos, polígonos y texto Helvetica). Si el libro tiene varias hojas con contenido, avisa sin escribir.",
                                     ).clicked()
                                     {
                                         if let Some(path) = rfd::FileDialog::new()

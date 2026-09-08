@@ -79,7 +79,13 @@ pub fn serialize_document(document: &Document) -> Result<String, DocumentPersist
         producer_version: env!("CARGO_PKG_VERSION").to_string(),
         document: validated.into_inner(),
     };
-    let json = serde_json::to_string_pretty(&envelope)?;
+    // P1a-3 determinista: `to_value` normaliza los HashMap (`variables`,
+    // `variables_assumptions`, `variable_meta`, `next_label_number`,
+    // `spreadsheet_coordinate_points`) a `serde_json::Map` (BTreeMap ordenado
+    // sin `preserve_order`), así 2 saves del mismo contenido son byte-iguales.
+    // `objects` ya es BTreeMap en el struct.
+    let value = serde_json::to_value(&envelope)?;
+    let json = serde_json::to_string_pretty(&value)?;
     if json.len() > MAX_DOCUMENT_SIZE_BYTES {
         return Err(DocumentPersistenceError::SemanticValidation(format!(
             "Document size {} exceeds maximum {}",
@@ -94,6 +100,7 @@ pub fn serialize_document(document: &Document) -> Result<String, DocumentPersist
 ///
 /// Útil para callers que ya trabajan con `CoreError` (p. ej. `validate_and_serialize`).
 /// Mantiene la misma validación fail-closed vía `ValidatedDocument::try_new_typed`.
+/// P1a-3: igual normalización determinista vía `to_value` que `serialize_document`.
 pub fn serialize_document_typed(document: &Document) -> Result<String, CoreError> {
     let validated = ValidatedDocument::try_new_typed(document.clone())?;
     let envelope = DocumentEnvelope {
@@ -101,7 +108,9 @@ pub fn serialize_document_typed(document: &Document) -> Result<String, CoreError
         producer_version: env!("CARGO_PKG_VERSION").to_string(),
         document: validated.into_inner(),
     };
-    let json = serde_json::to_string_pretty(&envelope)
+    let value = serde_json::to_value(&envelope)
+        .map_err(|error| CoreError::Persistence(error.to_string()))?;
+    let json = serde_json::to_string_pretty(&value)
         .map_err(|error| CoreError::Persistence(error.to_string()))?;
     if json.len() > MAX_DOCUMENT_SIZE_BYTES {
         return Err(CoreError::Validation(format!(
@@ -1906,5 +1915,73 @@ mod tests {
             autosave_sidecar_path(&main).is_some_and(|sidecar| !sidecar.exists()),
             "fail-closed: no debe quedar sidecar a medias"
         );
+    }
+
+    #[test]
+    fn variables_y_assumptions_guardan_en_orden_determinista() {
+        // P1a-3 golden: mismo contenido lógico insertado en distinto orden
+        // debe serializar byte-idéntico (variables + assumptions ordenadas).
+        let mut doc_a = Document::new();
+        for (name, value) in [("zeta", 1.0), ("alfa", 2.0), ("media", 3.0), ("beta", 4.0)] {
+            doc_a
+                .try_set_variable(name.to_string(), value)
+                .expect("var válida");
+        }
+        doc_a
+            .variables_assumptions
+            .insert("zeta".to_string(), "positive".to_string());
+        doc_a
+            .variables_assumptions
+            .insert("alfa".to_string(), "real".to_string());
+        doc_a
+            .variables_assumptions
+            .insert("beta".to_string(), "nonzero".to_string());
+
+        let mut doc_b = Document::new();
+        for (name, value) in [("beta", 4.0), ("media", 3.0), ("alfa", 2.0), ("zeta", 1.0)] {
+            doc_b
+                .try_set_variable(name.to_string(), value)
+                .expect("var válida");
+        }
+        doc_b
+            .variables_assumptions
+            .insert("beta".to_string(), "nonzero".to_string());
+        doc_b
+            .variables_assumptions
+            .insert("alfa".to_string(), "real".to_string());
+        doc_b
+            .variables_assumptions
+            .insert("zeta".to_string(), "positive".to_string());
+
+        let json_a = serialize_document(&doc_a).expect("serializa A");
+        let json_b = serialize_document(&doc_b).expect("serializa B");
+        assert_eq!(
+            json_a, json_b,
+            "2 saves del mismo contenido deben ser byte-iguales"
+        );
+
+        // Doble save del mismo documento también es byte-idéntico (golden).
+        let json_a2 = serialize_document(&doc_a).expect("re-serializa A");
+        assert_eq!(json_a, json_a2, "re-save debe ser byte-idéntico");
+
+        // Orden visible: alfa < beta < media < zeta en el JSON.
+        let pos_alfa = json_a.find("\"alfa\"").expect("alfa en JSON");
+        let pos_beta = json_a.find("\"beta\"").expect("beta en JSON");
+        let pos_zeta = json_a.find("\"zeta\"").expect("zeta en JSON");
+        assert!(
+            pos_alfa < pos_beta && pos_beta < pos_zeta,
+            "variables ordenadas"
+        );
+
+        // Y en disco vía write atómico también.
+        let path_a = temporary_path("determinista_a.json");
+        let path_b = temporary_path("determinista_b.json");
+        write_document_atomic(&doc_a, &path_a).expect("write A");
+        write_document_atomic(&doc_b, &path_b).expect("write B");
+        let bytes_a = fs::read(&path_a).expect("lee A");
+        let bytes_b = fs::read(&path_b).expect("lee B");
+        assert_eq!(bytes_a, bytes_b, "archivos en disco byte-iguales");
+        let _ = fs::remove_file(path_a);
+        let _ = fs::remove_file(path_b);
     }
 }

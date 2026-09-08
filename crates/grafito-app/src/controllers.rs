@@ -283,9 +283,28 @@ impl ViewController {
     }
 
     /// Cambia la perspectiva y sincroniza `current_view`.
+    ///
+    /// Vía legacy sin lockdown: para examen usar [`Self::try_set_perspective`].
     pub fn set_perspective(&mut self, perspective: crate::Perspective) {
         self.perspective = perspective;
         self.sync_view();
+    }
+
+    /// Vía fallible con lockdown de examen (P1a-1, crash-safe/pérdida-datos).
+    ///
+    /// Si `exam_locked` y la perspectiva pedida difiere de la activa, no muta
+    /// nada y retorna `Err` honesto. Misma perspectiva = `Ok` (no-op).
+    pub fn try_set_perspective(
+        &mut self,
+        perspective: crate::Perspective,
+        exam_locked: bool,
+    ) -> Result<(), String> {
+        if exam_locked && self.perspective != perspective {
+            return Err("Cambio de perspectiva bloqueado en modo examen".to_string());
+        }
+        self.perspective = perspective;
+        self.sync_view();
+        Ok(())
     }
 
     /// Verifica el invariante `current_view == perspective.view_mode()`.

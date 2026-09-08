@@ -264,20 +264,32 @@ fn draw_view_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 
 fn draw_perspectives_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.menu_button("Perspectivas", |ui| {
-        let mut selected = app.perspective;
-        for perspective in Perspective::ALL {
-            ui.radio_value(
-                &mut selected,
-                perspective,
-                format!(
-                    "{}  (Ctrl+Shift+{})",
-                    perspective.title(),
-                    perspective.shortcut_number()
-                ),
-            );
-        }
-        if selected != app.perspective {
-            app.set_perspective(selected);
+        // P1a-1 VIBLE: en examen el selector se deshabilita (lockdown sin bypass).
+        ui.add_enabled_ui(!app.exam_mode, |ui| {
+            let mut selected = app.perspective;
+            for perspective in Perspective::ALL {
+                ui.radio_value(
+                    &mut selected,
+                    perspective,
+                    format!(
+                        "{}  (Ctrl+Shift+{})",
+                        perspective.title(),
+                        perspective.shortcut_number()
+                    ),
+                )
+                .on_hover_text(if app.exam_mode {
+                    "Bloqueado en modo examen"
+                } else {
+                    perspective.title()
+                });
+            }
+            if selected != app.perspective {
+                // `set_perspective` también gatea (defensa en profundidad).
+                let _ = app.try_set_perspective(selected);
+            }
+        });
+        if app.exam_mode {
+            ui.label("Bloqueado en modo examen: salí del examen para cambiar de vista.");
         }
         ui.separator();
         if ui.button("Cargar ejemplo de esta perspectiva").clicked() {

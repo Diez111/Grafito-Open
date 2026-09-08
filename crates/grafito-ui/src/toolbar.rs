@@ -1346,18 +1346,32 @@ pub fn toolbar_localized(
 /// guarda la config (ver `save_app_config`). Códigos de idioma, no texto
 /// traducible: no necesita claves del catálogo.
 pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
-    ui.horizontal(|ui| {
-        let _ = ui
-            .selectable_value(locale, Locale::Es, "ES")
-            .on_hover_text("Idioma · Language · Idioma: Español");
-        let _ = ui
-            .selectable_value(locale, Locale::En, "EN")
-            .on_hover_text("Idioma · Language · Idioma: English");
-        let _ = ui
-            .selectable_value(locale, Locale::Pt, "PT")
-            .on_hover_text("Idioma · Language · Idioma: Português");
-    })
-    .response
+    let resp = ui
+        .horizontal(|ui| {
+            let _ = ui
+                .selectable_value(locale, Locale::Es, "ES")
+                .on_hover_text("Idioma · Language · Idioma: Español");
+            let _ = ui
+                .selectable_value(locale, Locale::En, "EN")
+                .on_hover_text("Idioma · Language · Idioma: English");
+            let _ = ui
+                .selectable_value(locale, Locale::Pt, "PT")
+                .on_hover_text(format!(
+                    "Idioma · Language · Idioma: {}",
+                    crate::i18n::pt_partial_badge_text()
+                ));
+        })
+        .response;
+    // P1b: badge visible — el PT parcial no pasa silencioso. Solo cuando está
+    // activo, para no ensuciar ES/EN.
+    if *locale == Locale::Pt {
+        ui.label(
+            egui::RichText::new(crate::i18n::pt_partial_badge_text())
+                .small()
+                .weak(),
+        );
+    }
+    resp
 }
 
 // ── Custom tools en la toolbar (W2, superficie API) ──

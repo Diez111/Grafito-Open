@@ -24,6 +24,12 @@ mod scanline_speed_tests {
         count
     }
 
+    // P1b: gate informativo separado (no bloquea PR). Mediciones `println`
+    // sin asserts: correr a mano con
+    // `cargo test -p grafito-geometry --test scanline_speed -- --ignored --nocapture`.
+    // El gate de perf con criterio es `cargo bench` (job `bench-regression`
+    // informativo). Los 2 `#[ignore]` de este archivo (+1 en `speed_test.rs`
+    // = 3 totales) se quedan ignorados a propósito.
     #[test]
     #[ignore]
     fn bench_scanline_speedup() {
@@ -49,6 +55,7 @@ mod scanline_speed_tests {
     #[test]
     #[ignore]
     fn bench_scanline_complex() {
+        // Ver nota P1b en `bench_scanline_speedup`: gate informativo manual.
         // Expresión compleja con ~20 nodos.
         let expr = "sin(x)*cos(y) + exp(-(x^2 + y^2)) * log(x^2 + y^2 + 1)";
         let ast = prepare_function_ast(expr, &HashMap::new(), &["x", "y"]).unwrap();

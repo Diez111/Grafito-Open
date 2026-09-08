@@ -25,12 +25,12 @@ pub(crate) mod commands;
 pub mod controllers;
 pub(crate) mod export;
 #[allow(dead_code)]
-// A4: slot background PARCIALMENTE cableado (campo en GrafitoApp + poll por
-// update + render de last_valid en render_3d.rs). El comando A1 eager queda
-// como fallback honesto fail-closed. `submit_new`/`cancel` aún sin llamador
-// prod (verificado: solo tests en implicit_surface_compute.rs + tests.rs;
-// futuro inspector live-preview de alta resolución), testeados headless.
-// El `allow` cubre solo ese par muerto en prod, no el módulo entero.
+// A4 + P1b: slot background cableado (campo en GrafitoApp + `poll` por update
+// + productor `maybe_submit_implicit_slot` en `app.rs` + render de `last_valid`
+// en `render_3d.rs` con gate anti-fantasma). El comando A1 eager queda como
+// fallback honesto fail-closed. `cancel` sigue sin llamador prod (API P2 para
+// el futuro inspector live-preview de alta resolución), testeado headless.
+// El `allow` cubre ese resto muerto en prod, no el módulo entero.
 pub(crate) mod implicit_surface_compute;
 pub(crate) mod input;
 #[allow(dead_code)]

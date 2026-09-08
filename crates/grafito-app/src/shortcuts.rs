@@ -179,7 +179,8 @@ impl GrafitoApp {
                 ];
                 for (key, p) in NUM_KEYS {
                     if ctx.input(|i| i.key_pressed(key) && i.modifiers.ctrl && i.modifiers.shift) {
-                        self.set_perspective(p);
+                        // P1a-1: en examen el atajo no bypassea (toast + Err, sin mutar).
+                        let _ = self.try_set_perspective(p);
                         break;
                     }
                 }

@@ -3989,6 +3989,31 @@ fn pdf_failure(reason: impl Into<String>) -> String {
     reason.into()
 }
 
+/// Chequeo previo de alcance multipágina (P1a-4, puro, sin I/O).
+///
+/// Retorna `Some(Err honesto)` si el libro tiene >1 hoja con contenido: el PDF
+/// vectorial es de 1 página por ahora (solo vista + hoja actual) y truncaría
+/// en silencio. `None` = 0/1 hoja con contenido, exportable.
+fn pdf_multipage_book_error(document: &Document) -> Option<String> {
+    let (pages, current) = document.whiteboard_export_pages();
+    let non_empty: Vec<&str> = pages
+        .iter()
+        .filter(|page| !page.doc.elements().is_empty())
+        .map(|page| page.title.as_str())
+        .collect();
+    if non_empty.len() > 1 {
+        let actual = pages
+            .get(current)
+            .map(|page| page.title.as_str())
+            .unwrap_or("Hoja actual");
+        return Some(format!(
+            "PDF no reemplazó el destino; PDF de 1 página por ahora: el libro tiene {} hojas con contenido, solo se exportaría '{actual}' (multipágina pendiente)",
+            non_empty.len()
+        ));
+    }
+    None
+}
+
 fn map_core_exchange_error(context: &'static str, error: ExchangeError) -> String {
     match error {
         ExchangeError::TooManyObjects { got } => format!(
@@ -4008,11 +4033,18 @@ fn map_core_exchange_error(context: &'static str, error: ExchangeError) -> Strin
 /// Puro + escritura atómica: ningún error toca el destino.
 /// Devuelve `(path, summary)` como el canal de `PendingExportJob`.
 /// No se añade `ExportFormat::Pdf` a propósito (ver nota del módulo).
+///
+/// P1a-4 honesto (costo S: se eligió `Err` + hover en vez de paginar, que es M):
+/// si el libro de pizarra tiene >1 hoja con contenido, falla ANTES de escribir
+/// con "1 página por ahora" en vez de truncar en silencio a la hoja actual.
 pub(crate) fn export_pdf(
     document: &Document,
     path: impl AsRef<Path>,
 ) -> Result<(PathBuf, String), String> {
     let path = path.as_ref();
+    if let Some(err) = pdf_multipage_book_error(document) {
+        return Err(err);
+    }
     // La escena vectorial es la misma que SVG (1px = 1pt); los errores se
     // re-etiquetan a PDF para no mentir con el nombre del formato.
     let options = ExportOptions::from_document(document, ExportFormat::Svg)
@@ -6168,6 +6200,42 @@ mod tests {
             error.contains("no pudo escribir"),
             "error honesto esperado, fue: {error}"
         );
+    }
+
+    #[test]
+    fn pdf_multipage_book_falla_honesto_antes_de_escribir() {
+        // P1a-4 red-first: libro con 2 hojas con contenido no se trunca en
+        // silencio a 1 página; falla honesto ANTES de tocar el destino.
+        use grafito_whiteboard::WhiteboardElement;
+        let mut document = common_2d_document();
+        let mut hoja1 = grafito_core::WhiteboardPageData::blank("Hoja 1");
+        hoja1.doc.add(WhiteboardElement::Text {
+            at: (0.0, 0.0),
+            text: "uno".to_string(),
+            size: 14.0,
+        });
+        let mut hoja2 = grafito_core::WhiteboardPageData::blank("Hoja 2");
+        hoja2.doc.add(WhiteboardElement::Text {
+            at: (10.0, 10.0),
+            text: "dos".to_string(),
+            size: 14.0,
+        });
+        document
+            .set_whiteboard_book(vec![hoja1, hoja2], 0)
+            .expect("libro 2 hojas");
+        let path = temp_export_path("pdf");
+        std::fs::write(&path, b"keep me").expect("sentinel");
+        let error = export_pdf(&document, &path).expect_err("multipágina debe fallar honesto");
+        assert!(
+            error.contains("1 página por ahora"),
+            "alcance honesto esperado, fue: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("sentinel intacto"),
+            b"keep me",
+            "el destino no debe tocarse ante Err honesto"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

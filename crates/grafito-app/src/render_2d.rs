@@ -1172,6 +1172,11 @@ mod overlay_layer_tests {
         assert!(!cache.contains_key(deleted));
     }
 
+    // P1b: helper SOLO de tests — texturas de vida corta dentro del test
+    // (nunca salen a un submit GPU real en vuelo). Por eso no usa la cola de
+    // retención ni hash en el nombre: el ciclo de vida lo cubren los tests
+    // `fill_evict_*`/`fill_prune_*` con `insert` + `reap`. En prod los dos
+    // call-sites reales (`grafito_fill_*_{hash}`) sí usan retención+hash.
     fn entry_con_textura(
         ctx: &egui::Context,
         nombre: &str,
@@ -3408,12 +3413,16 @@ impl GrafitoApp {
             .collect();
 
         // 8) Subir textura a GPU.
+        // P1b: nombre con hash del `cache_key` (mismo patrón retención+hash
+        // que el resto del caché): el `insert_with_ctx` de abajo ya retira
+        // con gracia la versión vieja, y el nombre versionado evita confundir
+        // dos versiones del mismo objeto en los logs de egui/wgpu.
         let image = egui::ColorImage {
             size: [texture_w as usize, texture_h as usize],
             pixels: rows.into_iter().flatten().collect(),
         };
         let texture = painter.ctx().load_texture(
-            format!("grafito_fill_complex_{cm_id}"),
+            format!("grafito_fill_complex_{cm_id}_{cache_key:016x}"),
             image,
             egui::TextureOptions::LINEAR,
         );
@@ -3592,12 +3601,13 @@ impl GrafitoApp {
 
         // Construir ColorImage directamente desde los Color32 (sin
         // conversión a bytes intermedia) y subir como TextureHandle.
+        // P1b: nombre con hash (igual que el fill complejo de arriba).
         let image = egui::ColorImage {
             size: [texture_w as usize, texture_h as usize],
             pixels: rows.into_iter().flatten().collect(),
         };
         let texture = painter.ctx().load_texture(
-            format!("grafito_fill_{object_id}"),
+            format!("grafito_fill_{object_id}_{cache_key:016x}"),
             image,
             egui::TextureOptions::LINEAR,
         );

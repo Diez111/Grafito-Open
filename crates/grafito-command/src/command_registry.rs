@@ -502,7 +502,7 @@ const COMMANDS: &[CommandSpec] = &[
         "LocusEquation",
         ["locus_equation", "ecuacionlocus", "ecuacion_locus"],
         "Dinámica",
-        "Aproxima eliminación Groebner (mock) a partir de muestreo de locus + regresión simbólica; genera curva implícita presupuestada.",
+        "Aproximación por regresión (no exacta) a partir de muestreo de locus; no es eliminación Groebner exacta; genera curva implícita presupuestada con RMSE.",
         CreatesObject,
         Medium,
         true,

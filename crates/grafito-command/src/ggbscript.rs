@@ -330,6 +330,14 @@ pub fn check_script_allowlist(script: &str) -> Result<Vec<String>, String> {
             .iter()
             .any(|name| name.eq_ignore_ascii_case(canonical));
         if !allowed {
+            // P1b: `Group`/`Wait` no pasan silenciosos — error honesto "aún
+            // sin UI" con alternativa (nada aceptado-y-mudo). El resto sigue
+            // con el genérico fuera-del-subset.
+            if canonical.eq_ignore_ascii_case("Group") || canonical.eq_ignore_ascii_case("Wait") {
+                return Err(format!(
+                    "paso '{step}' usa '{canonical}', aún sin UI: la playlist con espera vive en la card de animación (P2); hoy usá Repeat/PlayPause como alternativa"
+                ));
+            }
             return Err(format!(
                 "paso '{step}' usa '{canonical}', fuera del subset GGBScript (permitidos: {})",
                 GGBSCRIPT_ALLOWLIST.join(", ")
@@ -368,6 +376,10 @@ pub(crate) fn run_ggb_steps(
     if script_budget.ggb_steps.saturating_add(steps.len()) > MAX_GGBSCRIPT_STEPS {
         return Err(format!("el guion excede {MAX_GGBSCRIPT_STEPS} pasos"));
     }
+    // P1a-2 atómico: snapshot pre-guion; si un paso falla a mitad (p. ej.
+    // `Repeat 1000` con error en la iteración 500), se restaura el documento
+    // previo para no dejar parcial. El presupuesto anti-DoS no se revierte.
+    let doc_before = document.clone();
     script_budget.depth = script_budget.depth.saturating_add(1);
     let mut executed = 0usize;
     for step in steps {
@@ -376,8 +388,9 @@ pub(crate) fn run_ggb_steps(
         match execute_snippet_sequence(document, &mut nested, script_budget) {
             Ok(()) => executed = executed.saturating_add(1),
             Err(message) => {
+                *document = doc_before;
                 script_budget.depth = script_budget.depth.saturating_sub(1);
-                return Err(format!("{step}: {message}"));
+                return Err(format!("{step}: {message} (cambios revertidos)"));
             }
         }
     }
@@ -1664,6 +1677,52 @@ mod tests {
             process_input(&mut doc, &mut input),
             CommandOutcome::Error(_)
         ));
+    }
+
+    #[test]
+    fn ggb_steps_fallidos_revierten_atomico() {
+        // P1a-2: guion que falla a mitad no deja parcial (compara serializado).
+        use crate::commands::ScriptBudget;
+        let mut doc = Document::new();
+        doc.try_set_variable("a".into(), 0.0).expect("var");
+        let before = serde_json::to_value(&doc).expect("previo serializa");
+        let steps = vec![
+            "SetValue[a, 1]".to_string(),
+            "SetValue[a, no_existe_xyz + 1]".to_string(),
+        ];
+        let mut budget = ScriptBudget::default();
+        let err = run_ggb_steps(&mut doc, &steps, &mut budget).expect_err("debe fallar");
+        assert!(
+            err.contains("revertidos"),
+            "aviso atómico esperado, fue: {err}"
+        );
+        let after = serde_json::to_value(&doc).expect("posterior serializa");
+        assert_eq!(before, after, "documento idéntico tras fallo a mitad");
+    }
+
+    #[test]
+    fn group_y_wait_fallan_honesto_aun_sin_ui() {
+        // P1b: nada aceptado-y-mudo — `Group`/`Wait` devuelven "aún sin UI"
+        // con alternativa, jamás silencio ni ejecución parcial.
+        for cmd in [
+            "Group[Show[A]]",
+            "Wait[1000]",
+            "group[Show[A]]",
+            "wait[500]",
+        ] {
+            let err = check_script_allowlist(cmd).expect_err("debe rechazar");
+            assert!(
+                err.contains("aún sin UI"),
+                "{cmd} debe avisar sin-UI, fue: {err}"
+            );
+            assert!(
+                err.contains("Repeat") || err.contains("PlayPause"),
+                "{cmd} debe sugerir alternativa, fue: {err}"
+            );
+        }
+        // El resto fuera-del-subset sigue con su mensaje genérico.
+        let err = check_script_allowlist("Delete[A]").expect_err("debe rechazar");
+        assert!(err.contains("fuera del subset"), "genérico esperado: {err}");
     }
 
     #[test]

@@ -213,6 +213,17 @@ impl ImplicitSurfaceSlot {
         self.receiver = None;
         self.pending_cells = 0;
     }
+
+    /// Limpia todo el slot (job en vuelo + último válido).
+    ///
+    /// P1b: evita la malla fantasma cuando el documento ya no tiene
+    /// superficie implícita visible — sin esto `last_valid` sobreviviría
+    /// al borrado y `render_3d.rs` dibujaría un wireframe huérfano.
+    pub fn clear(&mut self) {
+        self.receiver = None;
+        self.last_valid = None;
+        self.pending_cells = 0;
+    }
 }
 
 #[cfg(test)]

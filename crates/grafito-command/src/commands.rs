@@ -7427,7 +7427,7 @@ fn handle_remaining_cas_commands(
                 .unwrap_or_else(|| "ImplicitCurve".to_string());
             input_text.clear();
             return CommandOutcome::Message(format!(
-                "LocusEquation[{}] (grado {} RMSE {:.6}): {} =0 → {}",
+                "LocusEquation[{}] (aproximación por regresión, no exacta; grado {} RMSE {:.6}): {} =0 → {}",
                 label.trim(),
                 result.degree,
                 result.rmse,

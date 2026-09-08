@@ -1622,9 +1622,12 @@ pub struct GrafitoApp {
     /// definido en toda la caja). El slot es refinamiento progresivo non-blocking:
     /// `poll` una vez por `update`, `request_repaint` mientras hay pendiente y
     /// render de `last_valid` en `render_3d.rs` para no parpadear ante `Failed`.
-    /// Hoy el slot arranca idle; futuros UIs (inspector live-preview de alta
-    /// resolución) harán `submit` sin bloquear el hilo UI.
+    /// P1b: productor real cableado — `maybe_submit_implicit_slot` envía la
+    /// primera superficie visible (grueso 12³) y el overlay muestra ese
+    /// `last_valid` mientras refina; sin superficie visible se limpia (sin fantasma).
     pub(crate) implicit_surface_slot: crate::implicit_surface_compute::ImplicitSurfaceSlot,
+    /// Clave de la superficie ya enviada al slot (evita re-submit por frame).
+    pub(crate) implicit_slot_key: Option<u64>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
     /// Caché de texturas de relleno para curvas implícitas. Usa `RwLock`
     /// para permitir mutación desde `draw_implicit_curve_fill` (que recibe
@@ -2289,6 +2292,7 @@ impl GrafitoApp {
             pending_text_job: None,
             pending_chained_action: None,
             implicit_surface_slot: crate::implicit_surface_compute::ImplicitSurfaceSlot::new(),
+            implicit_slot_key: None,
             attractor_cache: std::collections::HashMap::new(),
             fill_textures: std::sync::RwLock::new(
                 crate::render_2d::FillTextureCacheStore::default(),
@@ -3719,7 +3723,12 @@ impl GrafitoApp {
 
     /// Ejecuta una herramienta personalizada (.ggt) paso a paso por el
     /// pipeline normal de comandos (misma allowlist y presupuesto por paso).
-    /// Corta en el primer error honesto; el undo queda por pasos aplicados.
+    ///
+    /// P1a-2 atómico: snapshot pre-script + rollback. Si un paso falla, el
+    /// documento vuelve al estado previo (comparable por serializado), se
+    /// truncan los undo parciales y se restaura redo/log. El toast avisa
+    /// "(cambios revertidos)". Si todo ok, colapsa los N snapshots en uno
+    /// solo para que un undo revierta la herramienta entera.
     pub(crate) fn run_custom_tool(&mut self, tool_name: &str, ctx: &egui::Context) {
         let Some(def) = self.custom_tools.get(tool_name).cloned() else {
             self.notify(
@@ -3730,18 +3739,68 @@ impl GrafitoApp {
         };
         let time = ctx.input(|i| i.time);
         let total = def.steps.len();
+        // Snapshot pre-script (documento + historial + log).
+        let doc_before = self.document.clone();
+        let undo_len_antes = self.undo_stack.len();
+        let undo_bytes_antes = self.undo_total_bytes;
+        let redo_antes = self.redo_stack.clone();
+        let log_len_antes = self.construction_log.len();
+        let cas_antes = self.cas_result.clone();
         let mut done = 0_usize;
         for step in &def.steps {
             match self.execute_command_and_record_with_outcome(step, time) {
                 grafito_command::commands::CommandOutcome::Error(message) => {
+                    // Rollback atómico: documento + undo parcial + redo + log.
+                    self.document = doc_before;
+                    while self.undo_stack.len() > undo_len_antes {
+                        if let Some(popped) = self.undo_stack.pop_back() {
+                            self.undo_total_bytes = self
+                                .undo_total_bytes
+                                .saturating_sub(popped.estimated_bytes());
+                        } else {
+                            break;
+                        }
+                    }
+                    // Si el presupuesto evictó entradas viejas durante los pasos,
+                    // el contador puede haber quedado por debajo; lo restauramos
+                    // al valor previo sólo si no hay inconsistencia (len igual).
+                    if self.undo_stack.len() == undo_len_antes {
+                        self.undo_total_bytes = undo_bytes_antes;
+                    }
+                    self.redo_stack = redo_antes;
+                    self.construction_log.truncate(log_len_antes);
+                    self.cas_result = cas_antes;
+                    self.selected_object = None;
+                    self.preview_object = None;
                     self.notify(
-                        format!("{tool_name}: paso {} de {total} falló: {message}", done + 1),
+                        format!(
+                            "{tool_name}: paso {} de {total} falló: {message} (cambios revertidos)",
+                            done + 1
+                        ),
                         grafito_ui::toast::ToastKind::Error,
                     );
                     return;
                 }
                 _ => done += 1,
             }
+        }
+        // Éxito: colapsa los N snapshots del tool en uno solo (undo atómico).
+        if done > 0 && self.undo_stack.len() > undo_len_antes {
+            while self.undo_stack.len() > undo_len_antes {
+                if let Some(popped) = self.undo_stack.pop_back() {
+                    self.undo_total_bytes = self
+                        .undo_total_bytes
+                        .saturating_sub(popped.estimated_bytes());
+                } else {
+                    break;
+                }
+            }
+            // Push único del estado previo con contador O(1) + presupuestos.
+            let bytes = doc_before.estimated_bytes();
+            self.undo_stack.push_back(doc_before);
+            self.redo_stack.clear();
+            self.undo_total_bytes = self.undo_total_bytes.saturating_add(bytes);
+            enforce_undo_budgets(&mut self.undo_stack, &mut self.undo_total_bytes);
         }
         self.notify(
             format!("{tool_name}: {done} de {total} pasos aplicados"),
@@ -4216,7 +4275,10 @@ impl GrafitoApp {
     /// pendiente se pide otro frame vía `request_repaint`, y al llegar
     /// `Ready`/`Failed` se repinta una vez para publicar `last_valid` (que la
     /// UI renderiza en `render_3d.rs` sin parpadear ante `Failed`).
+    /// P1b: antes de `poll`, `maybe_submit_implicit_slot` envía la primera
+    /// superficie visible si el slot está idle y con clave distinta.
     pub(crate) fn poll_implicit_surface_slot(&mut self, ctx: &egui::Context) {
+        self.maybe_submit_implicit_slot();
         match self.implicit_surface_slot.poll() {
             crate::implicit_surface_compute::SurfaceSlotPoll::Pending => {
                 if self.implicit_surface_slot.has_pending() {
@@ -4227,6 +4289,93 @@ impl GrafitoApp {
             | crate::implicit_surface_compute::SurfaceSlotPoll::Failed(_) => {
                 ctx.request_repaint();
             }
+        }
+    }
+
+    /// P1b: productor real del slot progresivo.
+    ///
+    /// Busca la primera `ImplicitSurface3D` visible; si no hay, limpia el
+    /// slot (sin fantasma) y olvida la clave. Si hay y la clave
+    /// (expr+cotas+cells+vars) difiere de la enviada y no hay job en vuelo,
+    /// envía un grueso acotado (`min(cells,12)`, máx 12³ = 1728 celdas) con
+    /// campo `owned` (`expr` + snapshot de vars vía `evaluate`, sin AST
+    /// compartido para seguir `Send + 'static`). El overlay dibuja ese
+    /// `last_valid` mientras el eager A1 muestra el fino: progresivo real.
+    /// `Err` de validación (cotas/cells) → no se envía, el eager ya avisó.
+    pub(crate) fn maybe_submit_implicit_slot(&mut self) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        /// Superficie visible resumida para el slot (expr + caja + cells).
+        type SurfaceSummary = (String, (f64, f64, f64, f64, f64, f64), usize);
+        let mut first: Option<SurfaceSummary> = None;
+        for obj in self.document.objects().values() {
+            if let GeoObject::ImplicitSurface3D(s) = obj {
+                if s.visible {
+                    first = Some((
+                        s.expr.clone(),
+                        (s.x_min, s.x_max, s.y_min, s.y_max, s.z_min, s.z_max),
+                        s.cells,
+                    ));
+                    break;
+                }
+            }
+        }
+        let Some((expr, (x0, x1, y0, y1, z0, z1), cells)) = first else {
+            // Sin superficie visible: limpieza total (job en vuelo + válido),
+            // sin fantasma en el overlay aunque un job viejo termine tarde
+            // (su `send` falla silencioso con el receiver ya soltado).
+            self.implicit_surface_slot.clear();
+            self.implicit_slot_key = None;
+            return;
+        };
+        let mut hasher = DefaultHasher::new();
+        expr.hash(&mut hasher);
+        x0.to_bits().hash(&mut hasher);
+        x1.to_bits().hash(&mut hasher);
+        y0.to_bits().hash(&mut hasher);
+        y1.to_bits().hash(&mut hasher);
+        z0.to_bits().hash(&mut hasher);
+        z1.to_bits().hash(&mut hasher);
+        cells.hash(&mut hasher);
+        let mut sorted: Vec<(&String, &f64)> = self.document.variables.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in sorted {
+            k.hash(&mut hasher);
+            v.to_bits().hash(&mut hasher);
+        }
+        let key = hasher.finish();
+        if self.implicit_slot_key == Some(key) || self.implicit_surface_slot.has_pending() {
+            return;
+        }
+        if self.implicit_surface_slot.last_valid().is_some() && self.implicit_slot_key.is_some() {
+            return;
+        }
+        let coarse = cells.clamp(1, 12);
+        let vars: Vec<(String, f64)> = self
+            .document
+            .variables
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        let expr_owned = expr.clone();
+        let field: crate::implicit_surface_compute::ImplicitField =
+            std::sync::Arc::new(move |x: f64, y: f64, z: f64| {
+                let mut full = vars.clone();
+                full.push(("x".to_string(), x));
+                full.push(("y".to_string(), y));
+                full.push(("z".to_string(), z));
+                grafito_geometry::expr::evaluate(&expr_owned, &full)
+                    .ok()
+                    .filter(|v| v.is_finite() && v.abs() < 1e6)
+            });
+        let min = Point3D::new(x0, y0, z0);
+        let max = Point3D::new(x1, y1, z1);
+        if self
+            .implicit_surface_slot
+            .submit_new(field, min, max, coarse)
+            .is_ok()
+        {
+            self.implicit_slot_key = Some(key);
         }
     }
 
@@ -4649,7 +4798,19 @@ impl GrafitoApp {
     /// `perspective`; `current_view` nunca se asigna directamente fuera de aquí
     /// (o `sync_current_view`). Garantiza
     /// `debug_assert_eq!(current_view, perspective.view_mode())` al salir.
+    ///
+    /// P1a-1 lockdown: en `exam_mode` el cambio a otra perspectiva se bloquea
+    /// (early-return + toast, sin mutar). Misma perspectiva = no-op permitido.
+    /// Para chequear sin mutar y con `Err` honesto usar
+    /// [`Self::try_set_perspective`].
     pub(crate) fn set_perspective(&mut self, p: Perspective) {
+        if self.exam_mode && self.perspective != p {
+            self.notify(
+                "Cambio de vista bloqueado en modo examen, che.",
+                grafito_ui::toast::ToastKind::Error,
+            );
+            return;
+        }
         if self.perspective == p {
             // Incluso si la perspectiva no cambia, el cache debe permanecer
             // consistente (defensa contra mutaciones externas accidentales).
@@ -4727,6 +4888,22 @@ impl GrafitoApp {
         // Siempre bump_version para invalidar caches GPU.
         self.document.bump_version();
         self.assert_view_invariant();
+    }
+
+    /// Vía fallible con lockdown de examen (P1a-1, VIBLE: toast + `Err`).
+    ///
+    /// Chequea ANTES de mutar: en `exam_mode` y otra perspectiva retorna `Err`
+    /// honesto sin tocar documento/vista. Misma perspectiva = `Ok` (no-op).
+    pub(crate) fn try_set_perspective(&mut self, p: Perspective) -> Result<(), String> {
+        if self.exam_mode && self.perspective != p {
+            self.notify(
+                "Cambio de vista bloqueado en modo examen, che.",
+                grafito_ui::toast::ToastKind::Error,
+            );
+            return Err("Cambio de perspectiva bloqueado en modo examen".to_string());
+        }
+        self.set_perspective(p);
+        Ok(())
     }
 
     /// Grupos visibles ya filtrados por el nivel del perfil del estudiante (progressive disclosure).
@@ -8128,6 +8305,12 @@ fn build_about_changelog() -> &'static [&'static str] {
     ]
 }
 
+/// P1b: singletons estáticos — retención vía `Option<TextureHandle>`
+/// (`get_or_insert_with`, jamás se reemplazan ni se dropean en caliente),
+/// por eso NO usan la cola de gracia ni hash en el nombre como los fills
+/// animados (`render_2d`) o `teaching_anim_*_{hash}`. Imagen fija de arranque
+/// / avatar: sin versionado, sin leak, sin submit en vuelo que las referencie
+/// tras un reemplazo (no hay reemplazo).
 fn splash_logo_texture<'a>(
     ctx: &egui::Context,
     splash_logo: &'a mut Option<egui::TextureHandle>,
@@ -8510,6 +8693,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         pending_text_job: None,
         pending_chained_action: None,
         implicit_surface_slot: crate::implicit_surface_compute::ImplicitSurfaceSlot::new(),
+        implicit_slot_key: None,
         attractor_cache: std::collections::HashMap::new(),
         fill_textures: std::sync::RwLock::new(crate::render_2d::FillTextureCacheStore::default()),
         active_color_picker: None,

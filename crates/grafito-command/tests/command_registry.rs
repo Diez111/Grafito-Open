@@ -157,6 +157,69 @@ fn registry_exposes_locus_and_gd_action_objects() {
 }
 
 #[test]
+fn locus_equation_help_es_aproximacion_no_exacta() {
+    // P1a-5 red-first: el help no debe vender "Groebner mock" como exacto.
+    let spec = command_registry::resolve("LocusEquation").expect("LocusEquation registrado");
+    let lower = spec.help.to_lowercase();
+    assert!(
+        lower.contains("aproximación por regresión"),
+        "help honesto esperado, fue: {}",
+        spec.help
+    );
+    assert!(
+        lower.contains("no exacta"),
+        "help debe decir no exacta, fue: {}",
+        spec.help
+    );
+    assert!(
+        !lower.contains("mock"),
+        "ya no debe decir mock, fue: {}",
+        spec.help
+    );
+}
+
+#[test]
+fn locus_equation_mensaje_es_aproximacion_no_exacta() {
+    // P1a-5: el mensaje de éxito avisa que es regresión, no exacta. Sin cambiar matemática.
+    use grafito_core::GeoObject;
+    use grafito_geometry::Point2;
+    let mut doc = Document::new();
+    let driver = doc
+        .try_add_point(Point2::new(0.0, 0.0))
+        .expect("driver fixture");
+    let target = doc
+        .try_add_point(Point2::new(1.0, 0.0))
+        .expect("target fixture");
+    let (locus_id, _) = doc.try_add_locus(driver, target).expect("locus fixture");
+    // Muestras de círculo para que la regresión grado 2 converja.
+    if let Some(GeoObject::Pencil(pencil)) = doc.get_object_mut(locus_id) {
+        pencil.points.clear();
+        for idx in 0..50 {
+            let angle = idx as f64 / 50.0 * std::f64::consts::TAU;
+            pencil.points.push(Point2::new(angle.cos(), angle.sin()));
+        }
+    } else {
+        panic!("locus esperado");
+    }
+    let label = doc
+        .get_object(locus_id)
+        .map(|o| o.label().to_string())
+        .expect("etiqueta locus");
+    let mut input = format!("LocusEquation[{label}]");
+    match process_input(&mut doc, &mut input) {
+        CommandOutcome::Message(msg) => {
+            assert!(
+                msg.contains("aproximación por regresión"),
+                "mensaje honesto esperado, fue: {msg}"
+            );
+            assert!(msg.contains("no exacta"), "fue: {msg}");
+            assert!(msg.contains("RMSE"), "fue: {msg}");
+        }
+        other => panic!("LocusEquation debe dar Message, fue: {other:?}"),
+    }
+}
+
+#[test]
 fn markdown_reference_is_the_registry_projection() {
     const RUNTIME_VALIDITY_NOTES: &str = "\n## Valores validos\n";
     let documentation = include_str!("../../../docs/commands.md");

@@ -1,8 +1,8 @@
-//! Aproximación mock de eliminación Groebner vía sampling + regresión simbólica.
+//! Aproximación por regresión (no exacta) vía sampling + regresión simbólica.
 //!
 //! El lugar geométrico real se obtiene por trazo dinámico (`Locus` como `Pencil`);
 //! este módulo deriva una ecuación implícita `f(x,y)=0` a partir de sus muestras
-//! usando regresión en base monomial acotada. No es un Groebner simbólico exacto,
+//! usando regresión en base monomial acotada. No es eliminación Groebner exacta,
 //! sino un sustituto numérico presupuestado que respeta los límites de
 //! `grafito-core::validation` y de `grafito-geometry::statistics`.
 

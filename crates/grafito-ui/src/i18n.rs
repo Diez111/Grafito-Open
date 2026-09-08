@@ -705,6 +705,26 @@ pub fn pt_coverage() -> (usize, usize) {
     (PT_MESSAGES.len(), MESSAGES.len())
 }
 
+/// Badge honesto del overlay parcial PT (P1b, visible en el selector).
+///
+/// El test `pt_partial_badge_pinned` lo pinnea junto a la cobertura: si sube
+/// la cobertura hay que actualizar numerador Y este badge (o removerlo al
+/// llegar a 100%).
+pub const PT_PARTIAL_BADGE: &str = "Português parcial";
+
+/// `true` mientras el overlay PT no cubra el catálogo (hoy 79/167 ≈ 47%).
+pub fn pt_is_partial() -> bool {
+    let (cubiertas, total) = pt_coverage();
+    cubiertas < total
+}
+
+/// Texto del badge con conteo real, p. ej. `"Português parcial · 79/167"`.
+/// Puro, sin I/O: el selector lo muestra cuando `Locale::Pt` está activo.
+pub fn pt_partial_badge_text() -> String {
+    let (cubiertas, total) = pt_coverage();
+    format!("{PT_PARTIAL_BADGE} · {cubiertas}/{total}")
+}
+
 // ── Números (display + parse tolerante) ──
 
 /// Formatea un número sólo para mostrar (nunca para persistir ni calcular).
@@ -764,8 +784,9 @@ pub fn parse_number_tolerant(text: &str) -> Option<f64> {
 mod tests {
     use super::{
         cheat_sheet_msg, format_number, group_label, onboarding_msg, palette_action,
-        palette_footer, parse_number_tolerant, pt, pt_coverage, toast_msg, tool_label, Locale,
-        CHEAT_KEYS, GROUP_SLUGS, MESSAGES, MSG_COUNT, ONBOARDING_KEYS, PT_MESSAGES, TOAST_KEYS,
+        palette_footer, parse_number_tolerant, pt, pt_coverage, pt_is_partial,
+        pt_partial_badge_text, toast_msg, tool_label, Locale, CHEAT_KEYS, GROUP_SLUGS, MESSAGES,
+        MSG_COUNT, ONBOARDING_KEYS, PT_MESSAGES, PT_PARTIAL_BADGE, TOAST_KEYS,
     };
 
     #[test]
@@ -1122,5 +1143,17 @@ mod tests {
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (tools 0/87 en fallback ES)");
         assert!((pct - 47.3).abs() < 0.1, "pct real: {pct}");
+    }
+
+    #[test]
+    fn pt_partial_badge_pinned() {
+        // P1b: el PT parcial es visible en el selector (badge + conteo).
+        // Si sube la cobertura, actualizar (79, 167) Y el badge; al llegar a
+        // 100% remover el badge y este test.
+        assert!(pt_is_partial(), "hoy 79/167 < 100%: el badge debe existir");
+        assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 79/167");
+        let (covered, total) = pt_coverage();
+        assert_eq!((covered, total), (79, 167));
     }
 }

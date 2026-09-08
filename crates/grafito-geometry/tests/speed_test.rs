@@ -5,6 +5,11 @@ mod speed_tests {
     use std::collections::HashMap;
     use std::time::Instant;
 
+    // P1b: gate informativo separado (no bloquea PR). Son mediciones
+    // `println` sin asserts, ~segundos en debug: se corren a mano con
+    // `cargo test -p grafito-geometry --test speed_test -- --ignored --nocapture`.
+    // El gate de perf con asserts es `cargo bench` (criterion, job
+    // `bench-regression` informativo). Se mantienen `#[ignore]` a propósito.
     #[test]
     #[ignore]
     fn bench_eval_2d_simple() {
