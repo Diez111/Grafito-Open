@@ -894,6 +894,22 @@ pub(crate) fn free_point_position_differs(
         )
 }
 
+/// W-B: snapshot único por gesto de arrastre. Clona `before` sólo en el
+/// primer frame que realmente mueve el punto; los frames siguientes del mismo
+/// gesto devuelven `None`, así que un gesto completo cuesta exactamente un
+/// undo (el llamador guarda el `Some` con `save_snapshot`; al soltar sólo se
+/// limpian los flags). I/O cero: un `Document::clone` en memoria por gesto,
+/// nunca por frame.
+pub(crate) fn capture_point_drag_snapshot(
+    document: &Document,
+    id: ObjectId,
+    new_pos: Point2,
+    already_mutated: bool,
+) -> Option<Document> {
+    (!already_mutated && free_point_position_differs(document, id, new_pos))
+        .then(|| document.clone())
+}
+
 /// Delegado fino a `Document::estimated_bytes()` (`max(object_count*200KiB, json_len, 8KiB)`).
 /// Mantiene compatibilidad con call-sites heredados; el presupuesto real vive en `Document`.
 /// `DocumentController` (controllers.rs) mantiene `undo_total_bytes` como running

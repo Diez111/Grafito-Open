@@ -833,6 +833,7 @@ fn document_at_object_capacity() -> grafito_core::Document {
 
 #[test]
 fn zero_radius_circle_tool_is_rejected_without_history_or_document_mutation() {
+    use grafito_command::commands::CommandOutcome;
     use grafito_geometry::Point2;
     use grafito_ui::Tool;
 
@@ -842,25 +843,19 @@ fn zero_radius_circle_tool_is_rejected_without_history_or_document_mutation() {
     let first =
         crate::tool_dispatcher::dispatch_tool(Tool::Circle, &mut state, &mut document, point);
     assert!(first.objects.is_empty());
+    // W-B: la tool encamina a `Circle[(2, 3), (2, 3)]` y el comando rechaza
+    // el radio nulo sin crear objetos (rechazo temprano honesto, sin mutar).
     let second =
         crate::tool_dispatcher::dispatch_tool(Tool::Circle, &mut state, &mut document, point);
-    assert_eq!(second.objects.len(), 1);
+    assert!(second.objects.is_empty());
+    let error = match state.last_outcome.take() {
+        Some(CommandOutcome::Error(error)) => error,
+        other => panic!("expected command error, got {other:?}"),
+    };
+    assert!(error.contains("Circle.radius") || error.contains("radio"));
 
     let before = serde_json::to_value(&document).expect("serialize document before rejection");
-    let mut undo_stack = VecDeque::new();
-    let mut redo_stack = VecDeque::new();
-    let error = crate::app::commit_object_insertions(
-        &mut document,
-        &mut undo_stack,
-        &mut redo_stack,
-        second.objects,
-    )
-    .expect_err("a circle whose two tool clicks coincide must be rejected");
-
-    assert!(error.contains("Circle.radius"));
     assert!(state.pending.is_empty());
-    assert!(undo_stack.is_empty());
-    assert!(redo_stack.is_empty());
     assert_eq!(
         serde_json::to_value(&document).expect("serialize document after rejection"),
         before
@@ -1120,6 +1115,49 @@ fn eraser_stroke_saves_exactly_one_snapshot_and_noop_keeps_redo() {
     ));
     assert!(noop_undo_stack.is_empty());
     assert_eq!(noop_redo_stack.len(), 1);
+}
+
+#[test]
+fn point_drag_gesture_captures_exactly_one_snapshot_covering_dependents() {
+    // W-B: tres frames del mismo gesto por el protocolo real (input.rs usa
+    // `capture_point_drag_snapshot` + `try_move_point_and_re_evaluate`):
+    // sólo el primer frame clona `before`, así que un gesto = un undo que
+    // restaura punto libre + hijos derivados.
+    use grafito_core::{GeoObject, PointObj};
+    use grafito_geometry::Point2;
+
+    let mut document = grafito_core::Document::new();
+    let a = document.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+    let b = document.add_object(GeoObject::Point(PointObj::new(Point2::new(2.0, 0.0))));
+    let (mid, _) = document
+        .try_add_constructed_object(
+            GeoObject::Point(PointObj::new(Point2::new(1.0, 0.0)).with_label("M")),
+            "Midpoint",
+            &[a, b],
+        )
+        .expect("midpoint construction");
+
+    let mut snapshots: VecDeque<grafito_core::Document> = VecDeque::new();
+    let mut mutated = false;
+    for x in [0.5, 1.0, 1.5] {
+        let target = Point2::new(x, 0.0);
+        let before = crate::app::capture_point_drag_snapshot(&document, a, target, mutated);
+        if document
+            .try_move_point_and_re_evaluate(a, target)
+            .expect("drag frame commits")
+        {
+            if let Some(before) = before {
+                snapshots.push_back(before);
+            }
+            mutated = true;
+        }
+    }
+    assert_eq!(snapshots.len(), 1, "un gesto = un único snapshot");
+    assert_eq!(document.point_position(mid), Some(Point2::new(1.75, 0.0)));
+    let restored = snapshots.pop_back().expect("one snapshot");
+    document = restored;
+    assert_eq!(document.point_position(a), Some(Point2::new(0.0, 0.0)));
+    assert_eq!(document.point_position(mid), Some(Point2::new(1.0, 0.0)));
 }
 
 #[test]

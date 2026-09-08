@@ -63,6 +63,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Segment[(x1, y1), (x2, y2)]`: Crea un segmento por dos puntos. Mutacion: crea objetos. Riesgo: bajo.
 - `Vector[(x1, y1), (x2, y2)]`: Crea un vector por dos puntos. Mutacion: crea objetos. Riesgo: bajo.
 - `Ray[(x1, y1), (x2, y2)]`: Crea una semirrecta por dos puntos. Mutacion: crea objetos. Riesgo: bajo.
+- `MeasureDistance[A, B]`: Crea un texto vivo con la distancia entre dos puntos. Mutacion: crea objetos. Riesgo: bajo. Alias: `medirdistancia`, `distancia`.
 ## Transformar
 
 - `Translate[punto, (dx, dy)]`: Traslada un objeto. Mutacion: transforma objetos. Riesgo: medio.

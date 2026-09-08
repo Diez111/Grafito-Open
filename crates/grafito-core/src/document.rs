@@ -97,6 +97,16 @@ pub struct LiveSequenceBinding {
 pub const MAX_LIVE_SEQUENCES: usize = 64;
 pub const MAX_LIVE_SEQUENCE_LENGTH: usize = 10_000;
 
+/// Presupuestos del gesto de arrastre (frente W-B, geometría dinámica).
+/// Profundidad máxima de la cadena de dependencias re-evaluada por frame de
+/// arrastre (alineada a `MAX_TRANSFORM_DEPTH` de validación).
+pub const MAX_DRAG_PROPAGATION_DEPTH: usize = 64;
+/// Re-evaluaciones constructivas máximas por frame de arrastre: a 60fps el
+/// gesto re-evalúa sólo el subgrafo sucio (`propagation_order`), nunca todo.
+pub const MAX_DRAG_REEVALS_PER_FRAME: usize = 512;
+/// Salidas dependientes máximas alcanzables desde el punto arrastrado.
+pub const MAX_DRAG_FANOUT: usize = 1024;
+
 fn default_animation_speed() -> f64 {
     1.0
 }
@@ -121,6 +131,41 @@ fn to_subscript(n: usize) -> String {
 }
 
 const MAX_AUTO_LABEL_NUMBER: usize = crate::validation::MAX_OBJECT_COUNT + 1;
+
+/// Decodifica el parámetro `kind` de `LineByTwoPoints`: 0 = recta infinita,
+/// 1 = segmento, 2 = semirrecta. Ausente = recta (GeoGebra `Line[A, B]`).
+fn line_by_two_points_kind(params: &HashMap<String, f64>) -> Result<LineKind, String> {
+    match params.get("kind").copied().unwrap_or(0.0) {
+        0.0 => Ok(LineKind::Line),
+        1.0 => Ok(LineKind::Segment),
+        2.0 => Ok(LineKind::Ray),
+        _ => Err("LineByTwoPoints: el parámetro 'kind' debe ser 0, 1 o 2".to_string()),
+    }
+}
+
+/// ¿La expresión menciona alguna variable del documento? Escaneo léxico por
+/// tokens `[alnum _]+` comparados enteros contra el mapa de variables (así
+/// `1e3` no colisiona con una variable `e`). W-B: distingue fórmula viva
+/// (manejada por su variable, no arrastrable) de constante (`"0"`, liberable
+/// al arrastrar). Sin evaluar: el motor resuelve identificadores desconocidos
+/// sin fallar, así que el `evaluate` no discrimina.
+fn expr_references_variables(expr: &str, variables: &HashMap<String, f64>) -> bool {
+    if variables.is_empty() {
+        return false;
+    }
+    let mut token = String::new();
+    for ch in expr.chars().chain(std::iter::once(' ')) {
+        if ch.is_alphanumeric() || ch == '_' {
+            token.push(ch);
+        } else if !token.is_empty() {
+            if variables.contains_key(&token) {
+                return true;
+            }
+            token.clear();
+        }
+    }
+    false
+}
 
 fn canonical_label_counter(counter: usize) -> usize {
     if (1..=MAX_AUTO_LABEL_NUMBER).contains(&counter) {
@@ -1377,6 +1422,13 @@ impl Document {
         self.validate_constructive_constraint_parts(constraint_name, inputs, &obj, &params)?;
         self.constraints
             .validate_new_constraint(constraint_name, inputs, &[id], &params)?;
+        // W-B: el grafo es un DAG; la creación que cerraría un ciclo se rechaza
+        // aquí (fail-closed) en vez de degradar el orden topológico.
+        if self.constraints.would_create_cycle(inputs, &[id]) {
+            return Err(format!(
+                "{constraint_name}: la construcción cerraría un ciclo de dependencias"
+            ));
+        }
 
         let mut staged = self.detached_clone_for_staging();
         let id = staged.try_add_object(obj)?;
@@ -1501,16 +1553,68 @@ impl Document {
         }
 
         let mut staged = self.detached_clone_for_staging();
-        let Some(GeoObject::Point(point)) = staged.objects.get_mut(&id) else {
-            return Ok(false);
-        };
-        update(point)?;
+        {
+            let Some(GeoObject::Point(point)) = staged.objects.get_mut(&id) else {
+                return Ok(false);
+            };
+            update(point)?;
+        }
 
         if ChangeSet::same_semantic_state(self, &staged)? {
             return Ok(false);
         }
+        // W-B: el arrastre redefine el punto (GeoGebra). Sólo tras confirmar
+        // que hubo cambio real: un binding de fórmula constante (`A = (0, 0)`
+        // guarda `x_expr = "0"`) se libera y la mutación geométrica pasa a ser
+        // la definición. Una fórmula viva (menciona variables del documento)
+        // se rechaza con error honesto en vez del anterior snap-back
+        // silencioso que revertía el gesto sin avisar.
+        let Some(GeoObject::Point(point)) = staged.objects.get_mut(&id) else {
+            return Ok(false);
+        };
+        let live_axis = ["x", "y"]
+            .into_iter()
+            .zip([&point.x_expr, &point.y_expr])
+            .find(|(_, binding)| {
+                binding
+                    .as_deref()
+                    .is_some_and(|expr| expr_references_variables(expr, &self.variables))
+            })
+            .map(|(axis, _)| axis);
+        if let Some(axis) = live_axis {
+            return Err(format!(
+                "Point {id}: la coordenada {axis} tiene fórmula viva; se edita con SetValue o su expresión"
+            ));
+        }
+        point.x_expr = None;
+        point.y_expr = None;
 
         let order = staged.propagation_order(&[id]);
+        // W-B: presupuestos por frame de arrastre (I/O cero: todo en memoria).
+        // Sólo se re-evalúa el subgrafo sucio; un gesto a 60fps nunca recorre
+        // el documento entero. El rechazo deja el estado vivo intacto.
+        if order.len() > MAX_DRAG_REEVALS_PER_FRAME {
+            return Err(format!(
+                "Arrastre: {} re-evaluaciones exceden el máximo por frame {MAX_DRAG_REEVALS_PER_FRAME}",
+                order.len()
+            ));
+        }
+        let depth = staged.constraints.downstream_depth(&[id]);
+        if depth > MAX_DRAG_PROPAGATION_DEPTH {
+            return Err(format!(
+                "Arrastre: profundidad {depth} excede el máximo {MAX_DRAG_PROPAGATION_DEPTH}"
+            ));
+        }
+        let fanout: usize = order
+            .iter()
+            .filter_map(|cons_id| staged.constraints.get_constraint(*cons_id))
+            .map(|cons| cons.outputs.len())
+            .sum();
+        if fanout > MAX_DRAG_FANOUT {
+            return Err(format!(
+                "Arrastre: fan-out {fanout} excede el máximo {MAX_DRAG_FANOUT}"
+            ));
+        }
         staged.re_evaluate_constraints_in_place(&order)?;
         // F3b: mover un punto es cambiar la fuente de `=x(A)` y de las
         // coordenadas con fórmulas: se recomputa la hoja vinculada (incluye
@@ -2171,6 +2275,41 @@ impl Document {
                     || radius <= 0.0
                 {
                     return Err("CircleByThreePoints: el círculo no es representable".into());
+                }
+            }
+            // W-B: geometría dinámica arrastrable. Estas tres construcciones
+            // re-ejecutan su definición paramétrica en cada frame del gesto
+            // (`apply_constructive_constraints`); el resto de tipos queda libre
+            // y congelado de forma documentada, jamás en silencio.
+            "LineByTwoPoints" => {
+                require_arity(2)?;
+                if !matches!(output, GeoObject::Line(_)) {
+                    return Err("LineByTwoPoints: el resultado debe ser una recta".into());
+                }
+                let a = point(0)?;
+                let b = point(1)?;
+                if a.distance(&b) <= crate::validation::GEOM_EPS {
+                    return Err("LineByTwoPoints: los puntos deben ser distintos".into());
+                }
+                line_by_two_points_kind(params)?;
+            }
+            "CircleByCenterPoint" => {
+                require_arity(2)?;
+                if !matches!(output, GeoObject::Circle(_)) {
+                    return Err("CircleByCenterPoint: el resultado debe ser un círculo".into());
+                }
+                let radius = point(0)?.distance(&point(1)?);
+                if !radius.is_finite() || radius <= crate::validation::GEOM_EPS {
+                    return Err("CircleByCenterPoint: el radio debe ser positivo".into());
+                }
+            }
+            "MeasureDistance" => {
+                require_arity(2)?;
+                if !matches!(output, GeoObject::Text(_)) {
+                    return Err("MeasureDistance: el resultado debe ser un texto".into());
+                }
+                if !point(0)?.distance(&point(1)?).is_finite() {
+                    return Err("MeasureDistance: la distancia no es finita".into());
                 }
             }
             "EllipseByFoci" => {
@@ -3193,6 +3332,59 @@ impl Document {
                 "Locus" => {
                     // La captura ocurre una sola vez tras la estabilización del
                     // documento en `capture_locus_samples`, nunca por pase.
+                }
+                // W-B: re-ejecución paramétrica por frame de arrastre. La
+                // validación previa ya rechazó padres degenerados (el frame
+                // entero falla y el vivo conserva lo último válido); estos
+                // guardas son defensa en profundidad para no escribir jamás
+                // geometría no finita aunque cambie el orden validar/aplicar.
+                "LineByTwoPoints" if cons.inputs.len() >= 2 && !cons.outputs.is_empty() => {
+                    let kind = line_by_two_points_kind(&cons.params).unwrap_or(LineKind::Line);
+                    let a = self.get_object(cons.inputs[0]).cloned();
+                    let b = self.get_object(cons.inputs[1]).cloned();
+                    if let (Some(GeoObject::Point(pa)), Some(GeoObject::Point(pb))) = (&a, &b) {
+                        if pa.position.distance(&pb.position) > crate::validation::GEOM_EPS {
+                            if let Some(GeoObject::Line(out)) = self.get_object_mut(cons.outputs[0])
+                            {
+                                out.start = pa.position;
+                                out.end = pb.position;
+                                out.kind = kind;
+                            }
+                        }
+                    }
+                }
+                "CircleByCenterPoint" if cons.inputs.len() >= 2 && !cons.outputs.is_empty() => {
+                    let center = self.get_object(cons.inputs[0]).cloned();
+                    let edge = self.get_object(cons.inputs[1]).cloned();
+                    if let (Some(GeoObject::Point(c)), Some(GeoObject::Point(e))) = (&center, &edge)
+                    {
+                        let radius = c.position.distance(&e.position);
+                        if radius.is_finite() && radius > crate::validation::GEOM_EPS {
+                            if let Some(GeoObject::Circle(out)) =
+                                self.get_object_mut(cons.outputs[0])
+                            {
+                                out.center = c.position;
+                                out.radius = radius;
+                            }
+                        }
+                    }
+                }
+                "MeasureDistance" if cons.inputs.len() >= 2 && !cons.outputs.is_empty() => {
+                    let a = self.get_object(cons.inputs[0]).cloned();
+                    let b = self.get_object(cons.inputs[1]).cloned();
+                    if let (Some(GeoObject::Point(pa)), Some(GeoObject::Point(pb))) = (&a, &b) {
+                        let dist = pa.position.distance(&pb.position);
+                        if dist.is_finite() {
+                            if let Some(GeoObject::Text(out)) = self.get_object_mut(cons.outputs[0])
+                            {
+                                out.content = format!("{dist:.3}");
+                                out.position = Point2::new(
+                                    (pa.position.x + pb.position.x) * 0.5,
+                                    (pa.position.y + pb.position.y) * 0.5,
+                                );
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -6882,6 +7074,306 @@ mod tests {
         } else {
             panic!("expected midpoint point after move");
         }
+    }
+
+    // ── Frente W-B: geometría dinámica arrastrable ──────────────────────
+    #[test]
+    fn drag_free_point_moves_line_circle_midpoint_and_live_measure() {
+        let mut doc = Document::new();
+        let a = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(0.0, 0.0)).with_label("A"),
+            ))
+            .unwrap();
+        let b = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(4.0, 0.0)).with_label("B"),
+            ))
+            .unwrap();
+        let (line, _) = doc
+            .try_add_constructed_object_with_params(
+                GeoObject::Line(
+                    LineObj::new_with_kind(
+                        Point2::new(0.0, 0.0),
+                        Point2::new(4.0, 0.0),
+                        LineKind::Line,
+                    )
+                    .with_label("l"),
+                ),
+                "LineByTwoPoints",
+                &[a, b],
+                HashMap::from([("kind".to_string(), 0.0)]),
+            )
+            .unwrap();
+        assert_eq!(
+            doc.creator_of(&line).unwrap().name,
+            "LineByTwoPoints",
+            "la recta debe declarar padres en el grafo"
+        );
+        assert_eq!(doc.creator_of(&line).unwrap().inputs, vec![a, b]);
+        let (mid, _) = doc
+            .try_add_constructed_object(
+                GeoObject::Point(PointObj::new(Point2::new(2.0, 0.0)).with_label("M")),
+                "Midpoint",
+                &[a, b],
+            )
+            .unwrap();
+        let (circle, _) = doc
+            .try_add_constructed_object(
+                GeoObject::Circle(CircleObj::new(Point2::new(0.0, 0.0), 4.0)),
+                "CircleByCenterPoint",
+                &[a, b],
+            )
+            .unwrap();
+        let mut text = crate::TextObj::new("4.000", Point2::new(2.0, 0.0));
+        text.label = "m".to_string();
+        let (measure, _) = doc
+            .try_add_constructed_object(GeoObject::Text(text), "MeasureDistance", &[a, b])
+            .unwrap();
+
+        // Un frame de arrastre por el camino real del gesto (input.rs).
+        assert!(doc
+            .try_move_point_and_re_evaluate(a, Point2::new(0.0, 2.0))
+            .unwrap());
+
+        if let GeoObject::Line(moved) = doc.get_object(line).unwrap() {
+            assert_eq!(moved.start, Point2::new(0.0, 2.0));
+            assert_eq!(moved.end, Point2::new(4.0, 0.0));
+            assert_eq!(moved.kind, LineKind::Line);
+        } else {
+            panic!("expected line");
+        }
+        if let GeoObject::Point(moved) = doc.get_object(mid).unwrap() {
+            assert!((moved.position.x - 2.0).abs() < 1e-9);
+            assert!((moved.position.y - 1.0).abs() < 1e-9);
+        } else {
+            panic!("expected midpoint");
+        }
+        if let GeoObject::Circle(moved) = doc.get_object(circle).unwrap() {
+            assert_eq!(moved.center, Point2::new(0.0, 2.0));
+            assert!((moved.radius - 20.0f64.sqrt()).abs() < 1e-9);
+        } else {
+            panic!("expected circle");
+        }
+        if let GeoObject::Text(moved) = doc.get_object(measure).unwrap() {
+            assert_eq!(moved.content, format!("{:.3}", 20.0f64.sqrt()));
+            assert!((moved.position.x - 2.0).abs() < 1e-9);
+            assert!((moved.position.y - 1.0).abs() < 1e-9);
+        } else {
+            panic!("expected measure text");
+        }
+    }
+
+    #[test]
+    fn drag_onto_degenerate_parents_rejects_frame_and_keeps_last_valid() {
+        // A arrastrado exactamente sobre B: la validación constructiva
+        // rechaza el frame (igual que Perpendicular hoy) y el estado vivo
+        // conserva la última geometría válida: congelado honesto con error
+        // visible, jamás escritura silenciosa de basura.
+        let mut doc = Document::new();
+        let a = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(0.0, 0.0)).with_label("A"),
+            ))
+            .unwrap();
+        let b = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(4.0, 0.0)).with_label("B"),
+            ))
+            .unwrap();
+        let (line, _) = doc
+            .try_add_constructed_object_with_params(
+                GeoObject::Line(
+                    LineObj::new_with_kind(
+                        Point2::new(0.0, 0.0),
+                        Point2::new(4.0, 0.0),
+                        LineKind::Line,
+                    )
+                    .with_label("l"),
+                ),
+                "LineByTwoPoints",
+                &[a, b],
+                HashMap::from([("kind".to_string(), 0.0)]),
+            )
+            .unwrap();
+        let (circle, _) = doc
+            .try_add_constructed_object(
+                GeoObject::Circle(CircleObj::new(Point2::new(0.0, 0.0), 4.0)),
+                "CircleByCenterPoint",
+                &[a, b],
+            )
+            .unwrap();
+
+        assert!(doc
+            .try_move_point_and_re_evaluate(a, Point2::new(4.0, 0.0))
+            .unwrap_err()
+            .contains("distintos"));
+        if let GeoObject::Line(frozen) = doc.get_object(line).unwrap() {
+            assert_eq!(frozen.start, Point2::new(0.0, 0.0));
+            assert_eq!(frozen.end, Point2::new(4.0, 0.0));
+        } else {
+            panic!("expected line");
+        }
+        if let GeoObject::Circle(frozen) = doc.get_object(circle).unwrap() {
+            assert_eq!(frozen.center, Point2::new(0.0, 0.0));
+            assert!((frozen.radius - 4.0).abs() < 1e-12);
+        } else {
+            panic!("expected circle");
+        }
+    }
+
+    #[test]
+    fn construction_closing_a_dependency_cycle_is_rejected() {
+        let mut doc = Document::new();
+        let a = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(0.0, 0.0)).with_label("A"),
+            ))
+            .unwrap();
+        let b = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(4.0, 0.0)).with_label("B"),
+            ))
+            .unwrap();
+        let (m, _) = doc
+            .try_add_constructed_object(
+                GeoObject::Point(PointObj::new(Point2::new(2.0, 0.0)).with_label("M")),
+                "Midpoint",
+                &[a, b],
+            )
+            .unwrap();
+        // Re-envolver A (existente) como derivado de su propio descendiente M
+        // cerraría A → M → A: se rechaza sin mutar el documento.
+        let forged_a = doc.get_object(a).unwrap().clone();
+        let error = doc
+            .try_add_constructed_object(forged_a, "Midpoint", &[m, b])
+            .unwrap_err();
+        assert!(error.contains("ciclo"), "unexpected error: {error}");
+        // Self-loop directo: B derivado de B.
+        let forged_b = doc.get_object(b).unwrap().clone();
+        let error = doc
+            .try_add_constructed_object(forged_b, "Midpoint", &[b, m])
+            .unwrap_err();
+        assert!(error.contains("ciclo"), "unexpected error: {error}");
+        // El documento sigue intacto: A libre, M con su creador.
+        assert!(doc.constraints.is_free(&a));
+        assert_eq!(doc.creator_of(&m).unwrap().name, "Midpoint");
+        assert_eq!(doc.object_count(), 3);
+    }
+
+    #[test]
+    fn drag_liberates_constant_formula_binding_like_geogebra() {
+        // `A = (0, 0)` guarda `x_expr = "0"`: el arrastre redefine el punto
+        // (libera el binding) y los hijos siguen, sin snap-back silencioso.
+        let mut doc = Document::new();
+        let mut a = PointObj::new(Point2::new(0.0, 0.0)).with_label("A");
+        a.x_expr = Some("0".to_string());
+        a.y_expr = Some("0".to_string());
+        let a = doc.try_add_object(GeoObject::Point(a)).unwrap();
+        let b = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(4.0, 0.0)).with_label("B"),
+            ))
+            .unwrap();
+        let (mid, _) = doc
+            .try_add_constructed_object(
+                GeoObject::Point(PointObj::new(Point2::new(2.0, 0.0)).with_label("M")),
+                "Midpoint",
+                &[a, b],
+            )
+            .unwrap();
+        assert!(doc
+            .try_move_point_and_re_evaluate(a, Point2::new(0.0, 3.0))
+            .unwrap());
+        if let GeoObject::Point(moved) = doc.get_object(a).unwrap() {
+            assert_eq!(moved.position, Point2::new(0.0, 3.0));
+            assert!(moved.x_expr.is_none() && moved.y_expr.is_none());
+        } else {
+            panic!("expected point");
+        }
+        if let GeoObject::Point(moved) = doc.get_object(mid).unwrap() {
+            assert!((moved.position.x - 2.0).abs() < 1e-9);
+            assert!((moved.position.y - 1.5).abs() < 1e-9);
+        } else {
+            panic!("expected midpoint");
+        }
+    }
+
+    #[test]
+    fn drag_rejects_live_formula_binding_with_honest_error() {
+        // `x_expr = "t"` con variable `t`: el punto lo maneja la variable,
+        // el gesto se rechaza con error visible (antes: snap-back silencioso).
+        let mut doc = Document::new();
+        doc.try_set_variable("t".to_string(), 1.0).unwrap();
+        let mut p = PointObj::new(Point2::new(1.0, 0.0)).with_label("P");
+        p.x_expr = Some("t".to_string());
+        let p = doc.try_add_object(GeoObject::Point(p)).unwrap();
+        let error = doc
+            .try_move_point_and_re_evaluate(p, Point2::new(9.0, 0.0))
+            .unwrap_err();
+        assert!(error.contains("fórmula viva"), "unexpected error: {error}");
+        assert_eq!(doc.point_position(p), Some(Point2::new(1.0, 0.0)));
+    }
+
+    #[test]
+    fn drag_rejects_propagation_chains_deeper_than_budget() {
+        let mut doc = Document::new();
+        let first = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(0.0, 0.0)).with_label("P0"),
+            ))
+            .unwrap();
+        // Cadena Translate de 70 eslabones (> MAX_DRAG_PROPAGATION_DEPTH = 64).
+        // Inserción directa al grafo: el camino productivo siempre valida.
+        let mut prev = first;
+        for _ in 1..=70 {
+            let next = doc
+                .try_add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))))
+                .unwrap();
+            doc.constraints
+                .try_add_constraint(
+                    "Translate",
+                    vec![prev],
+                    vec![next],
+                    HashMap::from([("dx".to_string(), 1.0), ("dy".to_string(), 0.0)]),
+                )
+                .unwrap();
+            prev = next;
+        }
+        let error = doc
+            .try_move_point_and_re_evaluate(first, Point2::new(5.0, 0.0))
+            .unwrap_err();
+        assert!(error.contains("profundidad"), "unexpected error: {error}");
+        // Fail-closed: el estado vivo queda intacto.
+        assert_eq!(doc.point_position(first), Some(Point2::new(0.0, 0.0)));
+    }
+
+    #[test]
+    fn drag_rejects_frames_beyond_reevaluation_budget() {
+        let mut doc = Document::new();
+        let a = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(0.0, 0.0)).with_label("A"),
+            ))
+            .unwrap();
+        let b = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(4.0, 0.0)).with_label("B"),
+            ))
+            .unwrap();
+        for _ in 0..(MAX_DRAG_REEVALS_PER_FRAME + 10) {
+            let m = doc
+                .try_add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))))
+                .unwrap();
+            doc.constraints
+                .try_add_constraint("Midpoint", vec![a, b], vec![m], HashMap::new())
+                .unwrap();
+        }
+        let error = doc
+            .try_move_point_and_re_evaluate(a, Point2::new(1.0, 0.0))
+            .unwrap_err();
+        assert!(error.contains("Arrastre"), "unexpected error: {error}");
+        assert_eq!(doc.point_position(a), Some(Point2::new(0.0, 0.0)));
     }
 
     #[test]

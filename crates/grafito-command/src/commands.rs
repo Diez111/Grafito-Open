@@ -2289,23 +2289,71 @@ fn handle_primitive_commands(
             Some(CommandOutcome::Ok)
         }
         "Circle" if cmd.args.len() == 2 => {
-            let center = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
-                Ok(point) => point,
-                Err(error) => return Some(CommandOutcome::Error(format!("Circle: {error}"))),
-            };
-            let radius = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables))
-            {
-                Ok(radius) if radius > 0.0 => radius,
-                _ => {
-                    return Some(CommandOutcome::Error(
-                        "Circle: el radio debe ser finito y positivo".into(),
-                    ))
+            // W-B: `Circle[A, B]` (centro + borde etiquetados) sigue a ambos
+            // puntos; `Circle[A, r]` sigue al centro con radio congelado al
+            // valor actual; el resto queda libre (congelado honesto).
+            let (center_pos, center_id) = match resolve_point_arg(document, &cmd.args[0]) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return Some(CommandOutcome::Error(format!("Circle: {error}")));
                 }
             };
-            insert_command_object_some!(
-                document,
-                GeoObject::Circle(CircleObj::new(center, radius))
-            );
+            if let Ok((edge_pos, edge_id)) = resolve_point_arg(document, &cmd.args[1]) {
+                let radius = center_pos.distance(&edge_pos);
+                if let (Some(center), Some(edge)) = (center_id, edge_id) {
+                    let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
+                    if let Err(error) = document.try_add_constructed_object(
+                        output,
+                        "CircleByCenterPoint",
+                        &[center, edge],
+                    ) {
+                        return Some(CommandOutcome::Error(format!("Circle: {error}")));
+                    }
+                } else if let Some(center) = center_id {
+                    let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
+                    let params = HashMap::from([("radius".to_string(), radius)]);
+                    if let Err(error) = document.try_add_constructed_object_with_params(
+                        output,
+                        "CircleByCenterRadius",
+                        &[center],
+                        params,
+                    ) {
+                        return Some(CommandOutcome::Error(format!("Circle: {error}")));
+                    }
+                } else {
+                    insert_command_object_some!(
+                        document,
+                        GeoObject::Circle(CircleObj::new(center_pos, radius))
+                    );
+                }
+            } else {
+                let radius =
+                    match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                        Ok(radius) if radius > 0.0 => radius,
+                        _ => {
+                            return Some(CommandOutcome::Error(
+                                "Circle: el segundo argumento debe ser un punto o un radio finito y positivo".into(),
+                            ))
+                        }
+                    };
+                if let Some(center) = center_id {
+                    let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
+                    let params = HashMap::from([("radius".to_string(), radius)]);
+                    if let Err(error) = document.try_add_constructed_object_with_params(
+                        output,
+                        "CircleByCenterRadius",
+                        &[center],
+                        params,
+                    ) {
+                        return Some(CommandOutcome::Error(format!("Circle: {error}")));
+                    }
+                } else {
+                    insert_command_object_some!(
+                        document,
+                        GeoObject::Circle(CircleObj::new(center_pos, radius))
+                    );
+                }
+            }
             input_text.clear();
             Some(CommandOutcome::Ok)
         }
@@ -3617,20 +3665,68 @@ fn handle_remaining_cas_commands(
             return CommandOutcome::Ok;
         }
         "Circle" if cmd.args.len() == 2 => {
-            let center = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
-                Ok(point) => point,
+            // W-B: espejo del fast-path primitivo (normalmente inalcanzable,
+            // pero se mantiene sincronizado): etiquetas → paramétrico.
+            let (center_pos, center_id) = match resolve_point_arg(document, &cmd.args[0]) {
+                Ok(resolved) => resolved,
                 Err(error) => return CommandOutcome::Error(format!("Circle: {error}")),
             };
-            let radius = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables))
-            {
-                Ok(radius) if radius > 0.0 => radius,
-                _ => {
-                    return CommandOutcome::Error(
-                        "Circle: el radio debe ser finito y positivo".into(),
-                    )
+            if let Ok((edge_pos, edge_id)) = resolve_point_arg(document, &cmd.args[1]) {
+                let radius = center_pos.distance(&edge_pos);
+                if let (Some(center), Some(edge)) = (center_id, edge_id) {
+                    let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
+                    if let Err(error) = document.try_add_constructed_object(
+                        output,
+                        "CircleByCenterPoint",
+                        &[center, edge],
+                    ) {
+                        return CommandOutcome::Error(format!("Circle: {error}"));
+                    }
+                } else if let Some(center) = center_id {
+                    let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
+                    let params = HashMap::from([("radius".to_string(), radius)]);
+                    if let Err(error) = document.try_add_constructed_object_with_params(
+                        output,
+                        "CircleByCenterRadius",
+                        &[center],
+                        params,
+                    ) {
+                        return CommandOutcome::Error(format!("Circle: {error}"));
+                    }
+                } else {
+                    insert_command_object!(
+                        document,
+                        GeoObject::Circle(CircleObj::new(center_pos, radius))
+                    );
                 }
-            };
-            insert_command_object!(document, GeoObject::Circle(CircleObj::new(center, radius)));
+            } else {
+                let radius =
+                    match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                        Ok(radius) if radius > 0.0 => radius,
+                        _ => {
+                            return CommandOutcome::Error(
+                                "Circle: el segundo argumento debe ser un punto o un radio finito y positivo".into(),
+                            )
+                        }
+                    };
+                if let Some(center) = center_id {
+                    let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
+                    let params = HashMap::from([("radius".to_string(), radius)]);
+                    if let Err(error) = document.try_add_constructed_object_with_params(
+                        output,
+                        "CircleByCenterRadius",
+                        &[center],
+                        params,
+                    ) {
+                        return CommandOutcome::Error(format!("Circle: {error}"));
+                    }
+                } else {
+                    insert_command_object!(
+                        document,
+                        GeoObject::Circle(CircleObj::new(center_pos, radius))
+                    );
+                }
+            }
             input_text.clear();
             return CommandOutcome::Ok;
         }
@@ -5621,6 +5717,44 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Ok;
         }
+        "MeasureDistance" if cmd.args.len() == 2 => {
+            // W-B: texto vivo que sigue a los puntos (contenido + posición se
+            // re-evalúan en cada frame del gesto). Requiere etiquetas.
+            let id_a = find_object_by_label(document, cmd.args[0].trim());
+            let id_b = find_object_by_label(document, cmd.args[1].trim());
+            let (Some(id_a), Some(id_b)) = (id_a, id_b) else {
+                return CommandOutcome::Error(format!(
+                    "MeasureDistance: no se encontraron los puntos '{}' o '{}' (se requieren etiquetas)",
+                    cmd.args[0], cmd.args[1]
+                ));
+            };
+            let (Some(GeoObject::Point(a)), Some(GeoObject::Point(b))) = (
+                document.get_object(id_a).cloned(),
+                document.get_object(id_b).cloned(),
+            ) else {
+                return CommandOutcome::Error(
+                    "MeasureDistance: ambos objetos deben ser puntos".into(),
+                );
+            };
+            let dist = a.position.distance(&b.position);
+            if !dist.is_finite() {
+                return CommandOutcome::Error("MeasureDistance: la distancia no es finita".into());
+            }
+            let mid = Point2::new(
+                (a.position.x + b.position.x) * 0.5,
+                (a.position.y + b.position.y) * 0.5,
+            );
+            let mut text = grafito_core::TextObj::new(format!("{dist:.3}"), mid);
+            text.label = unique_object_label(document, "m");
+            insert_command_construction!(
+                document,
+                GeoObject::Text(text),
+                "MeasureDistance",
+                &[id_a, id_b]
+            );
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
         "Perpendicular" if cmd.args.len() == 2 => {
             let Some(first_id) = find_object_by_label(document, cmd.args[0].trim()) else {
                 return CommandOutcome::Error(format!(
@@ -5871,54 +6005,116 @@ fn handle_remaining_cas_commands(
             return CommandOutcome::Ok;
         }
         "Vector" if cmd.args.len() == 2 => {
-            let start = command_result!(parse_finite_point_arg(&cmd.args[0], &document.variables,)
-                .map_err(|error| CommandOutcome::Error(format!("Vector: {error}"))));
-            let end = command_result!(parse_finite_point_arg(&cmd.args[1], &document.variables,)
-                .map_err(|error| CommandOutcome::Error(format!("Vector: {error}"))));
-            insert_command_object!(
-                document,
-                GeoObject::Line(
-                    LineObj::new_with_kind(start, end, LineKind::Segment).with_label("v")
-                )
-            );
+            // W-B: `Vector[A, B]` con etiquetas sigue a los puntos (segmento
+            // paramétrico); con literales queda libre congelado.
+            let ((start, start_id), (end, end_id)) =
+                command_result!(resolve_two_point_args(document, "Vector", &cmd.args));
+            if let (Some(a), Some(b)) = (start_id, end_id) {
+                let output = GeoObject::Line(
+                    LineObj::new_with_kind(start, end, LineKind::Segment).with_label("v"),
+                );
+                let params = HashMap::from([("kind".to_string(), 1.0)]);
+                if let Err(error) = document.try_add_constructed_object_with_params(
+                    output,
+                    "LineByTwoPoints",
+                    &[a, b],
+                    params,
+                ) {
+                    return CommandOutcome::Error(format!("Vector: {error}"));
+                }
+            } else {
+                insert_command_object!(
+                    document,
+                    GeoObject::Line(
+                        LineObj::new_with_kind(start, end, LineKind::Segment).with_label("v")
+                    )
+                );
+            }
             input_text.clear();
             return CommandOutcome::Ok;
         }
         "Ray" if cmd.args.len() == 2 => {
-            let start = command_result!(parse_finite_point_arg(&cmd.args[0], &document.variables,)
-                .map_err(|error| CommandOutcome::Error(format!("Ray: {error}"))));
-            let end = command_result!(parse_finite_point_arg(&cmd.args[1], &document.variables,)
-                .map_err(|error| CommandOutcome::Error(format!("Ray: {error}"))));
-            insert_command_object!(
-                document,
-                GeoObject::Line(LineObj::new_with_kind(start, end, LineKind::Ray).with_label("r"))
-            );
+            // W-B: `Ray[A, B]` con etiquetas sigue a los puntos; si no, libre.
+            let ((start, start_id), (end, end_id)) =
+                command_result!(resolve_two_point_args(document, "Ray", &cmd.args));
+            if let (Some(a), Some(b)) = (start_id, end_id) {
+                let output = GeoObject::Line(
+                    LineObj::new_with_kind(start, end, LineKind::Ray).with_label("r"),
+                );
+                let params = HashMap::from([("kind".to_string(), 2.0)]);
+                if let Err(error) = document.try_add_constructed_object_with_params(
+                    output,
+                    "LineByTwoPoints",
+                    &[a, b],
+                    params,
+                ) {
+                    return CommandOutcome::Error(format!("Ray: {error}"));
+                }
+            } else {
+                insert_command_object!(
+                    document,
+                    GeoObject::Line(
+                        LineObj::new_with_kind(start, end, LineKind::Ray).with_label("r")
+                    )
+                );
+            }
             input_text.clear();
             return CommandOutcome::Ok;
         }
         "Line" if cmd.args.len() == 2 => {
-            let start = command_result!(parse_finite_point_arg(&cmd.args[0], &document.variables,)
-                .map_err(|error| CommandOutcome::Error(format!("Line: {error}"))));
-            let end = command_result!(parse_finite_point_arg(&cmd.args[1], &document.variables,)
-                .map_err(|error| CommandOutcome::Error(format!("Line: {error}"))));
-            insert_command_object!(
-                document,
-                GeoObject::Line(LineObj::new_with_kind(start, end, LineKind::Line).with_label("l"))
-            );
+            // W-B: `Line[A, B]` con etiquetas sigue a los puntos (recta
+            // paramétrica GeoGebra); con literales queda libre congelado.
+            let ((start, start_id), (end, end_id)) =
+                command_result!(resolve_two_point_args(document, "Line", &cmd.args));
+            if let (Some(a), Some(b)) = (start_id, end_id) {
+                let output = GeoObject::Line(
+                    LineObj::new_with_kind(start, end, LineKind::Line).with_label("l"),
+                );
+                let params = HashMap::from([("kind".to_string(), 0.0)]);
+                if let Err(error) = document.try_add_constructed_object_with_params(
+                    output,
+                    "LineByTwoPoints",
+                    &[a, b],
+                    params,
+                ) {
+                    return CommandOutcome::Error(format!("Line: {error}"));
+                }
+            } else {
+                insert_command_object!(
+                    document,
+                    GeoObject::Line(
+                        LineObj::new_with_kind(start, end, LineKind::Line).with_label("l")
+                    )
+                );
+            }
             input_text.clear();
             return CommandOutcome::Ok;
         }
         "Segment" if cmd.args.len() == 2 => {
-            let start = command_result!(parse_finite_point_arg(&cmd.args[0], &document.variables,)
-                .map_err(|error| CommandOutcome::Error(format!("Segment: {error}"))));
-            let end = command_result!(parse_finite_point_arg(&cmd.args[1], &document.variables,)
-                .map_err(|error| CommandOutcome::Error(format!("Segment: {error}"))));
-            insert_command_object!(
-                document,
-                GeoObject::Line(
-                    LineObj::new_with_kind(start, end, LineKind::Segment).with_label("s")
-                )
-            );
+            // W-B: `Segment[A, B]` con etiquetas sigue a los puntos; si no, libre.
+            let ((start, start_id), (end, end_id)) =
+                command_result!(resolve_two_point_args(document, "Segment", &cmd.args));
+            if let (Some(a), Some(b)) = (start_id, end_id) {
+                let output = GeoObject::Line(
+                    LineObj::new_with_kind(start, end, LineKind::Segment).with_label("s"),
+                );
+                let params = HashMap::from([("kind".to_string(), 1.0)]);
+                if let Err(error) = document.try_add_constructed_object_with_params(
+                    output,
+                    "LineByTwoPoints",
+                    &[a, b],
+                    params,
+                ) {
+                    return CommandOutcome::Error(format!("Segment: {error}"));
+                }
+            } else {
+                insert_command_object!(
+                    document,
+                    GeoObject::Line(
+                        LineObj::new_with_kind(start, end, LineKind::Segment).with_label("s")
+                    )
+                );
+            }
             input_text.clear();
             return CommandOutcome::Ok;
         }
@@ -14771,6 +14967,25 @@ fn resolve_point_arg(
         };
     }
     parse_finite_point_arg(argument, &document.variables).map(|point| (point, None))
+}
+
+/// Punto resuelto: posición + `Some(id)` si es un objeto del documento
+/// (construcción paramétrica) o `None` si es literal (objeto libre).
+type ResolvedPointArg = (Point2, Option<ObjectId>);
+
+/// Resuelve `Comando[p, q]` donde cada argumento puede ser etiqueta de punto
+/// u literal `(x, y)`. El `Some(ObjectId)` marca construcción paramétrica:
+/// el llamador registra padres sólo cuando ambos son objetos (W-B honesto).
+fn resolve_two_point_args(
+    document: &Document,
+    command: &str,
+    args: &[String],
+) -> Result<(ResolvedPointArg, ResolvedPointArg), CommandOutcome> {
+    let a = resolve_point_arg(document, &args[0])
+        .map_err(|error| CommandOutcome::Error(format!("{command}: {error}")))?;
+    let b = resolve_point_arg(document, &args[1])
+        .map_err(|error| CommandOutcome::Error(format!("{command}: {error}")))?;
+    Ok((a, b))
 }
 
 pub fn next_function_label(document: &Document) -> String {

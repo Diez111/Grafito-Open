@@ -114,34 +114,31 @@ pub fn dispatch_tool(
                 reset_tool: false,
             }
         }
-        Tool::Line => handle_multi_point(state, world, 2, |pts| {
-            GeoObject::Line(grafito_core::LineObj::new(pts[0], pts[1]))
-        }),
-        Tool::Circle => handle_multi_point(state, world, 2, |pts| {
-            let r = pts[0].distance(&pts[1]);
-            GeoObject::Circle(grafito_core::CircleObj::new(pts[0], r))
-        }),
+        Tool::Line => handle_two_click_command(state, document, world, "Line", "Recta creada"),
+        Tool::Circle => {
+            handle_two_click_command(state, document, world, "Circle", "Círculo creado")
+        }
         Tool::Segment => handle_two_click_line(
             state,
+            document,
             world,
-            grafito_core::LineKind::Segment,
-            "s",
+            "Segment",
             "Select start point",
             "Segment created",
         ),
         Tool::Ray => handle_two_click_line(
             state,
+            document,
             world,
-            grafito_core::LineKind::Ray,
-            "r",
+            "Ray",
             "Select start point",
             "Ray created",
         ),
         Tool::Vector => handle_two_click_line(
             state,
+            document,
             world,
-            grafito_core::LineKind::Segment,
-            "v",
+            "Vector",
             "Select start point",
             "Vector created",
         ),
@@ -228,11 +225,9 @@ pub fn dispatch_tool(
         Tool::Angle => handle_measure(state, document, world, "Angle"),
         Tool::Area => handle_measure(state, document, world, "Area"),
         Tool::Slope => handle_measure(state, document, world, "Slope"),
-        Tool::Midpoint => handle_multi_point(state, world, 2, |pts| {
-            let mx = (pts[0].x + pts[1].x) * 0.5;
-            let my = (pts[0].y + pts[1].y) * 0.5;
-            GeoObject::Point(grafito_core::PointObj::new(Point2::new(mx, my)).with_label("M"))
-        }),
+        Tool::Midpoint => {
+            handle_two_click_command(state, document, world, "Midpoint", "Punto medio creado")
+        }
         Tool::Slider => {
             // Crear slider: usa el sistema de variables + VariableMeta
             let mut idx = document.variables.len();
@@ -445,36 +440,6 @@ pub fn dispatch_tool(
     }
 }
 
-fn handle_multi_point(
-    state: &mut ToolState,
-    world: Point2,
-    needed: usize,
-    create: fn(&[Point2]) -> GeoObject,
-) -> ToolResult {
-    state.pending.push(world);
-    if state.pending.len() >= needed {
-        let pts = state.pending[..needed].to_vec();
-        let obj = create(&pts);
-        state.pending.clear();
-        ToolResult {
-            objects: vec![obj],
-            message: None,
-            reset_tool: false,
-        }
-    } else {
-        ToolResult {
-            objects: vec![],
-            message: Some(format!(
-                "{}° point ({} of {})",
-                needed,
-                state.pending.len(),
-                needed
-            )),
-            reset_tool: false,
-        }
-    }
-}
-
 fn handle_polygon(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
     state.pending.push(world);
     if state.pending.len() >= 3 {
@@ -592,6 +557,20 @@ fn handle_measure(
         "Distance" if state.pending.len() == 2 => {
             let a = state.pending[0];
             let b = state.pending[1];
+            // W-B: sobre puntos etiquetados → medida viva (`MeasureDistance`,
+            // sigue al arrastre); si no, línea+texto congelados honestos.
+            if let (Some(first), Some(second)) =
+                (point_label_at(document, a), point_label_at(document, b))
+            {
+                state.pending.clear();
+                return finish_with_command(
+                    state,
+                    document,
+                    format!("MeasureDistance[{first}, {second}]"),
+                    format!("Distancia viva entre {first} y {second}"),
+                    false,
+                );
+            }
             let d = a.distance(&b);
             let mid = Point2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
             let mut line = grafito_core::LineObj::new(a, b);
@@ -1153,32 +1132,58 @@ fn handle_sector(state: &mut ToolState, document: &mut Document, world: Point2) 
     }
 }
 
-fn handle_two_click_line(
+/// W-B: dos clics encaminados a `Comando[arg0, arg1]` con `point_arg`
+/// (etiqueta si el clic cae sobre un punto existente, literal si no). El
+/// comando crea construcción paramétrica viva o libre congelado; el
+/// dispatcher no decide, sólo encamina. Nunca muta a mano.
+fn handle_two_click_command(
     state: &mut ToolState,
+    document: &mut Document,
     world: Point2,
-    kind: grafito_core::LineKind,
-    label: &str,
-    first_msg: &str,
+    command: &str,
     done_msg: &str,
 ) -> ToolResult {
     state.pending.push(world);
     if state.pending.len() >= 2 {
         let pts = state.pending[..2].to_vec();
-        state.pending.clear();
-        let obj = GeoObject::Line(
-            grafito_core::LineObj::new_with_kind(pts[0], pts[1], kind).with_label(label),
+        let cmd = format!(
+            "{command}[{}, {}]",
+            point_arg(document, pts[0]),
+            point_arg(document, pts[1])
         );
-        ToolResult {
-            objects: vec![obj],
-            message: Some(done_msg.into()),
-            reset_tool: false,
-        }
-    } else {
-        ToolResult {
-            objects: vec![],
-            message: Some(first_msg.into()),
-            reset_tool: false,
-        }
+        return finish_with_command(state, document, cmd, done_msg.into(), false);
+    }
+    ToolResult {
+        objects: vec![],
+        message: Some("Select 2nd point".into()),
+        reset_tool: false,
+    }
+}
+
+fn handle_two_click_line(
+    state: &mut ToolState,
+    document: &mut Document,
+    world: Point2,
+    command: &str,
+    first_msg: &str,
+    done_msg: &str,
+) -> ToolResult {
+    // W-B: mismo encaminamiento que `handle_two_click_command`, pero conserva
+    // el hint del primer clic propio de cada herramienta.
+    state.pending.push(world);
+    if state.pending.len() >= 2 {
+        let pts = state.pending[..2].to_vec();
+        let cmd = format!(
+            "{command}[{}, {}]",
+            point_arg(document, pts[0]),
+            point_arg(document, pts[1])
+        );
+        return finish_with_command(state, document, cmd, done_msg.into(), false);
+    }
+    ToolResult {
+        objects: vec![],
+        message: Some(first_msg.into()),
+        reset_tool: false,
     }
 }
 
@@ -1265,7 +1270,8 @@ fn finish_with_command(
 }
 
 /// Etiqueta no vacía del punto existente bajo el clic, si lo hay.
-fn point_label_at(document: &mut Document, world: Point2) -> Option<String> {
+/// `pub(crate)` para que `input.rs` encamine clics a comandos paramétricos.
+pub(crate) fn point_label_at(document: &mut Document, world: Point2) -> Option<String> {
     let tolerance = 10.0 / document.view().scale;
     let id = document.pick_object(world, tolerance)?;
     match document.get_object(id) {
@@ -1278,7 +1284,8 @@ fn point_label_at(document: &mut Document, world: Point2) -> Option<String> {
 
 /// Argumento punto para comandos: etiqueta si el clic cae sobre un punto
 /// existente (preserva construcción paramétrica), literal `(x, y)` si no.
-fn point_arg(document: &mut Document, world: Point2) -> String {
+/// `pub(crate)` para que `input.rs` encamine clics a comandos paramétricos.
+pub(crate) fn point_arg(document: &mut Document, world: Point2) -> String {
     point_label_at(document, world).unwrap_or_else(|| format!("({:.2},{:.2})", world.x, world.y))
 }
 

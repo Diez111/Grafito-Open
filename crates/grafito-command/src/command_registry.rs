@@ -705,6 +705,18 @@ const COMMANDS: &[CommandSpec] = &[
     ),
     // Transformar
     command!(
+        "construction.measure_distance",
+        "MeasureDistance",
+        ["medirdistancia", "distancia"],
+        "Construir",
+        "Crea un texto vivo con la distancia entre dos puntos.",
+        CreatesObject,
+        Low,
+        true,
+        "MeasureDistance",
+        [signature!("MeasureDistance[A, B]"; "A": Object required, "B": Object required)]
+    ),
+    command!(
         "transform.translate",
         "Translate",
         [],
@@ -4397,6 +4409,7 @@ mod registry_tests {
             "Circumference",
             "Length",
             "Slope",
+            "MeasureDistance",
             "Script",
             "Button",
             "Checkbox",
@@ -4753,13 +4766,14 @@ mod registry_tests {
         // +LaplaceInt/+GroebnerOrdered/+Eliminate (7, todos visibles).
         // Frente C1: +Polyline (abierta, no visible) +Pyramid (3D, no visible).
         // Frente C2: +FillSeries (serie lineal/geométrica 1D, visible).
+        // Frente W-B: +MeasureDistance (texto vivo de distancia, visible).
         // FitLine/FillDown/ChiSquareTest/InverseChiSquare NO se agregaron:
         // duplicarían FitLinear/FillColumn/ChiSqTest/InverseChiSquared.
-        assert_eq!(all().len(), 271, "COMMANDS registrados (docs §8)");
+        assert_eq!(all().len(), 272, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            225,
-            "comandos visibles en paleta (docs §8: 225 + 14 UI = 239)"
+            226,
+            "comandos visibles en paleta (docs §8: 226 + 14 UI = 240)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

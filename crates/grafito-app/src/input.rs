@@ -130,9 +130,21 @@ impl GrafitoApp {
             Tool::Line => {
                 self.tool_state.pending.push(world);
                 if self.tool_state.pending.len() == 2 {
-                    let a = self.tool_state.pending[0];
-                    let b = self.tool_state.pending[1];
-                    self.insert_object_from_tool(GeoObject::Line(LineObj::new(a, b)), "Line", time);
+                    let pts = self.tool_state.pending.clone();
+                    // W-B: clics sobre puntos etiquetados → recta paramétrica
+                    // viva (`Line[A, B]`, sigue al arrastre); si no, objeto
+                    // libre congelado como antes.
+                    let first = crate::tool_dispatcher::point_label_at(&mut self.document, pts[0]);
+                    let second = crate::tool_dispatcher::point_label_at(&mut self.document, pts[1]);
+                    if let (Some(a), Some(b)) = (first, second) {
+                        self.execute_command_and_record(&format!("Line[{a}, {b}]"), time);
+                    } else {
+                        self.insert_object_from_tool(
+                            GeoObject::Line(LineObj::new(pts[0], pts[1])),
+                            "Line",
+                            time,
+                        );
+                    }
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
                 }
@@ -140,14 +152,23 @@ impl GrafitoApp {
             Tool::Circle => {
                 self.tool_state.pending.push(world);
                 if self.tool_state.pending.len() == 2 {
-                    let center = self.tool_state.pending[0];
-                    let edge = self.tool_state.pending[1];
-                    let radius = center.distance(&edge);
-                    self.insert_object_from_tool(
-                        GeoObject::Circle(CircleObj::new(center, radius)),
-                        "Circle",
-                        time,
-                    );
+                    let pts = self.tool_state.pending.clone();
+                    let center = pts[0];
+                    let edge = pts[1];
+                    // W-B: centro+borde etiquetados → círculo paramétrico vivo
+                    // (`Circle[A, B]`); si no, libre congelado como antes.
+                    let first = crate::tool_dispatcher::point_label_at(&mut self.document, center);
+                    let second = crate::tool_dispatcher::point_label_at(&mut self.document, edge);
+                    if let (Some(a), Some(b)) = (first, second) {
+                        self.execute_command_and_record(&format!("Circle[{a}, {b}]"), time);
+                    } else {
+                        let radius = center.distance(&edge);
+                        self.insert_object_from_tool(
+                            GeoObject::Circle(CircleObj::new(center, radius)),
+                            "Circle",
+                            time,
+                        );
+                    }
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
                 }
@@ -931,9 +952,12 @@ impl GrafitoApp {
                     if self.snap_to_grid {
                         world = snap_world_to_grid(world, self.document.view().scale);
                     }
-                    let before = (!self.point_drag_has_mutated
-                        && crate::app::free_point_position_differs(&self.document, sel_id, world))
-                    .then(|| self.document.clone());
+                    let before = crate::app::capture_point_drag_snapshot(
+                        &self.document,
+                        sel_id,
+                        world,
+                        self.point_drag_has_mutated,
+                    );
                     let version_before = self.document.version;
                     match self.document.try_move_point_and_re_evaluate(sel_id, world) {
                         Ok(true) => {

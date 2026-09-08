@@ -627,6 +627,7 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
                 "function" | "func" => "Function",
                 "piecewise" | "pw" => "Piecewise",
                 "distance" | "dist" => "Distance",
+                "measuredistance" | "medirdistancia" | "distancia" => "MeasureDistance",
                 "root" | "raices" | "raiz" => "Root",
                 "extremum" | "extremos" | "max" | "min" => "Extremum",
                 "intersect" | "interseccion" => "Intersect",

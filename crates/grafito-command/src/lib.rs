@@ -133,6 +133,115 @@ mod tests {
         );
     }
 
+    // ── Frente W-B: comandos label-aware crean construcción viva ─────────
+    #[test]
+    fn line_segment_circle_measure_with_labels_create_live_constructions() {
+        let mut doc = Document::new();
+        process_input(&mut doc, &mut "A = (0, 0)".to_string());
+        process_input(&mut doc, &mut "B = (4, 0)".to_string());
+
+        for command in [
+            "Line[A, B]",
+            "Segment[A, B]",
+            "Circle[A, B]",
+            "MeasureDistance[A, B]",
+        ] {
+            let outcome = process_input(&mut doc, &mut command.to_string());
+            assert!(
+                matches!(outcome, CommandOutcome::Ok),
+                "{command} should succeed, got {outcome:?}"
+            );
+        }
+
+        // Toda la familia declara padres en el grafo de dependencias.
+        let mut live = 0;
+        for (_, object) in doc.objects_iter() {
+            if doc.creator_of(&object.id()).is_some() {
+                live += 1;
+            }
+        }
+        assert_eq!(
+            live, 4,
+            "Line+Segment+Circle+MeasureDistance deben ser vivos"
+        );
+
+        // La medida nace con el valor actual.
+        let measure = doc
+            .objects_iter()
+            .find(|(_, object)| matches!(object, GeoObject::Text(_)))
+            .expect("MeasureDistance creates a text");
+        if let GeoObject::Text(text) = measure.1 {
+            assert_eq!(text.content, "4.000");
+        }
+
+        // Arrastrar A mueve recta, círculo y medida (camino real del gesto).
+        let a = doc.try_find_object_by_label("A").unwrap().unwrap();
+        assert!(doc
+            .try_move_point_and_re_evaluate(a, Point2::new(0.0, 3.0))
+            .unwrap());
+        let measure = doc
+            .objects_iter()
+            .find(|(_, object)| matches!(object, GeoObject::Text(_)))
+            .expect("measure survives the drag");
+        if let GeoObject::Text(text) = measure.1 {
+            assert_eq!(text.content, format!("{:.3}", 25.0f64.sqrt()));
+            assert!((text.position.x - 2.0).abs() < 1e-9);
+            assert!((text.position.y - 1.5).abs() < 1e-9);
+        } else {
+            panic!("expected measure text");
+        }
+        let live_line = doc
+            .objects_iter()
+            .find(|(_, object)| {
+                matches!(object, GeoObject::Line(_))
+                    && doc
+                        .creator_of(&object.id())
+                        .is_some_and(|cons| cons.name == "LineByTwoPoints")
+            })
+            .expect("live line survives the drag");
+        if let GeoObject::Line(line) = live_line.1 {
+            assert_eq!(line.start, Point2::new(0.0, 3.0));
+            assert_eq!(line.end, Point2::new(4.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn line_with_literals_stays_free_and_honest() {
+        let mut doc = Document::new();
+        let outcome = process_input(&mut doc, &mut "Line[(0, 0), (1, 1)]".to_string());
+        assert!(matches!(outcome, CommandOutcome::Ok));
+        let (_, object) = doc
+            .objects_iter()
+            .find(|(_, object)| matches!(object, GeoObject::Line(_)))
+            .expect("literal line is created");
+        assert!(
+            doc.creator_of(&object.id()).is_none(),
+            "sin etiquetas no hay padres: libre documentado, no silencio"
+        );
+    }
+
+    #[test]
+    fn circle_center_radius_follows_center_with_frozen_radius() {
+        let mut doc = Document::new();
+        process_input(&mut doc, &mut "A = (1, 1)".to_string());
+        let outcome = process_input(&mut doc, &mut "Circle[A, 2]".to_string());
+        assert!(matches!(outcome, CommandOutcome::Ok));
+        let a = doc.try_find_object_by_label("A").unwrap().unwrap();
+        assert!(doc
+            .try_move_point_and_re_evaluate(a, Point2::new(5.0, 1.0))
+            .unwrap());
+        let (_, object) = doc
+            .objects_iter()
+            .find(|(_, object)| matches!(object, GeoObject::Circle(_)))
+            .expect("circle survives the drag");
+        if let GeoObject::Circle(circle) = object {
+            assert_eq!(circle.center, Point2::new(5.0, 1.0));
+            assert!((circle.radius - 2.0).abs() < 1e-12);
+        } else {
+            panic!("expected circle");
+        }
+    }
+
     #[test]
     fn midpoint_with_labels() {
         let mut doc = Document::new();

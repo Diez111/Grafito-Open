@@ -624,6 +624,68 @@ impl ConstraintGraph {
         order
     }
 
+    /// Would registering `outputs` as derived from `inputs` close a dependency
+    /// cycle? Returns `true` when any id is both input and output, or when any
+    /// input is already downstream of any output through existing edges.
+    /// Creation paths must reject `true` so the graph stays a DAG (fail-closed);
+    /// deserialized cycles are still rejected by [`Self::validate_structure`].
+    /// Iterative DFS: hostile chains cannot exhaust the call stack.
+    pub fn would_create_cycle(&self, inputs: &[ObjectId], outputs: &[ObjectId]) -> bool {
+        for output in outputs {
+            if inputs.contains(output) {
+                return true;
+            }
+        }
+        let mut seen: HashSet<ObjectId> = outputs.iter().copied().collect();
+        let mut stack: Vec<ObjectId> = seen.iter().copied().collect();
+        while let Some(id) = stack.pop() {
+            let Some(dependents) = self.dependents.get(&id) else {
+                continue;
+            };
+            for cons_id in dependents {
+                let Some(cons) = self.constraints.get(cons_id) else {
+                    continue;
+                };
+                for out in &cons.outputs {
+                    if inputs.contains(out) {
+                        return true;
+                    }
+                    if seen.insert(*out) {
+                        stack.push(*out);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Longest downstream dependency chain (in constraints) rooted at `changed`.
+    /// Computed over the topological update order, so every constraint is
+    /// visited exactly once even on cyclic fallback orders. Drag paths cap it
+    /// with `MAX_DRAG_PROPAGATION_DEPTH` (`document.rs`).
+    pub fn downstream_depth(&self, changed: &[ObjectId]) -> usize {
+        let order = self.get_update_order(changed);
+        let mut depth: HashMap<usize, usize> = HashMap::new();
+        let mut max_depth = 0usize;
+        for cons_id in order {
+            let Some(cons) = self.constraints.get(&cons_id) else {
+                continue;
+            };
+            let mut best = 0usize;
+            for input in &cons.inputs {
+                if let Some(creator) = self.creator.get(input) {
+                    if let Some(known) = depth.get(creator) {
+                        best = best.max(*known);
+                    }
+                }
+            }
+            let here = best.saturating_add(1);
+            depth.insert(cons_id, here);
+            max_depth = max_depth.max(here);
+        }
+        max_depth
+    }
+
     /// Check if an object is free (user-created, no parent constraint).
     pub fn is_free(&self, id: &ObjectId) -> bool {
         self.free_objects.contains(id)
@@ -831,6 +893,44 @@ mod tests {
 
         assert_ne!(next, usize::MAX);
         assert!(restored.get_constraint(next).expect("new constraint").order < usize::MAX);
+    }
+
+    #[test]
+    fn would_create_cycle_detects_back_edges() {
+        let mut graph = ConstraintGraph::new();
+        let o0 = ObjectId::new();
+        let o1 = ObjectId::new();
+        let o2 = ObjectId::new();
+        graph.add_free_object(o0);
+        graph.add_constraint("C1", vec![o0], vec![o1], HashMap::new());
+        graph.add_constraint("C2", vec![o1], vec![o2], HashMap::new());
+
+        // Derivar o0 (ancestro) de o2 (descendiente) cerraría el ciclo.
+        assert!(graph.would_create_cycle(&[o2], &[o0]));
+        // Self-loop directo.
+        assert!(graph.would_create_cycle(&[o0], &[o0]));
+        // Salida fresca nunca cicla, venga de donde venga la entrada.
+        assert!(!graph.would_create_cycle(&[o0], &[ObjectId::new()]));
+        assert!(!graph.would_create_cycle(&[o2], &[ObjectId::new()]));
+    }
+
+    #[test]
+    fn downstream_depth_counts_the_longest_chain() {
+        let mut graph = ConstraintGraph::new();
+        let o0 = ObjectId::new();
+        let o1 = ObjectId::new();
+        let o2 = ObjectId::new();
+        let other = ObjectId::new();
+        let other_out = ObjectId::new();
+        graph.add_free_object(o0);
+        graph.add_free_object(other);
+        graph.add_constraint("C1", vec![o0], vec![o1], HashMap::new());
+        graph.add_constraint("C2", vec![o1], vec![o2], HashMap::new());
+        graph.add_constraint("C3", vec![other], vec![other_out], HashMap::new());
+
+        assert_eq!(graph.downstream_depth(&[o0]), 2);
+        assert_eq!(graph.downstream_depth(&[other]), 1);
+        assert_eq!(graph.downstream_depth(&[ObjectId::new()]), 0);
     }
 
     #[test]
