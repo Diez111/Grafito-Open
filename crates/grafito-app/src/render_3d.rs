@@ -2,9 +2,9 @@ use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use glam::{DVec3, Vec3};
 use grafito_core::{
     ChangeSet, Cone3DObj, Cube3DObj, Cylinder3DObj, Document, GeoObject, ImplicitSurface3DObj,
-    Line3DObj, MoebiusStripObj, ObjectId, ParametricCurve3DObj, Plane3DObj, Point3DObj, Prism3DObj,
-    Pyramid3DObj, RegularPolychoron4DObj, RegularPolytopeNDObj, Segment3DObj, Sphere3DObj,
-    Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField3DObj,
+    Line3DObj, MoebiusStripObj, ObjectId, ParametricCurve3DObj, Plane3DObj, Point3DObj, PointStyle,
+    Prism3DObj, Pyramid3DObj, RegularPolychoron4DObj, RegularPolytopeNDObj, Segment3DObj,
+    Sphere3DObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField3DObj,
 };
 use grafito_geometry::{
     curve_3d_segment_is_continuous, ray_mesh_hit, Aabb3D, Camera3D, Point3D, PolyhedronNet, Ray3D,
@@ -1952,7 +1952,41 @@ impl GrafitoApp {
                     {
                         let pos = origin + pt;
                         if should_draw_cpu_3d_geometry(obj, overlay_only) {
-                            painter.circle_filled(pos, p.size.min(5.0), to_color32(p.color));
+                            // Q2: mismo glifo que en 2D (Dot = círculo
+                            // relleno histórico); el tamaño ya viene
+                            // acotado a 5px como antes.
+                            let size = p.size.min(5.0);
+                            let color = to_color32(p.color);
+                            match p.point_style {
+                                PointStyle::Dot => {
+                                    painter.circle_filled(pos, size, color);
+                                }
+                                PointStyle::Circle => {
+                                    painter.circle_stroke(pos, size, Stroke::new(1.5, color));
+                                }
+                                PointStyle::Cross => {
+                                    let d = Vec2::new(size, size);
+                                    painter
+                                        .line_segment([pos - d, pos + d], Stroke::new(1.5, color));
+                                    painter.line_segment(
+                                        [
+                                            pos + Vec2::new(-size, size),
+                                            pos + Vec2::new(size, -size),
+                                        ],
+                                        Stroke::new(1.5, color),
+                                    );
+                                }
+                                PointStyle::Plus => {
+                                    painter.line_segment(
+                                        [pos - Vec2::new(size, 0.0), pos + Vec2::new(size, 0.0)],
+                                        Stroke::new(1.5, color),
+                                    );
+                                    painter.line_segment(
+                                        [pos - Vec2::new(0.0, size), pos + Vec2::new(0.0, size)],
+                                        Stroke::new(1.5, color),
+                                    );
+                                }
+                            }
                         }
                         if !p.label.is_empty() {
                             painter.text(

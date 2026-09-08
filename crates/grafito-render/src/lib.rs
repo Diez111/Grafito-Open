@@ -875,13 +875,18 @@ pub fn scene_layer_2d(object: &GeoObject) -> SceneLayer2D {
 }
 
 /// Objetos 2D visibles en el único orden usado para pintar y admitir geometría.
+///
+/// Orden Q2: `(capa, SceneLayer2D, ObjectId)`. La capa del documento manda
+/// (0 = fondo); dentro de la misma capa se conserva el orden histórico por
+/// tipo y luego por id estable.
 pub fn ordered_visible_2d_objects(document: &Document) -> Vec<(ObjectId, &GeoObject)> {
     let mut objects: Vec<_> = document
         .objects_iter()
         .filter(|(_, object)| object.is_visible() && !object.is_3d())
         .map(|(id, object)| (*id, object))
         .collect();
-    objects.sort_unstable_by_key(|(id, object)| (scene_layer_2d(object), *id));
+    objects
+        .sort_unstable_by_key(|(id, object)| (document.layer_of(*id), scene_layer_2d(object), *id));
     objects
 }
 

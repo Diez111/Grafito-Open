@@ -13,13 +13,13 @@ use grafito_core::{
     Cone3DObj, Cube3DObj, Cylinder3DObj, DataTableObj, Document, EllipseObj, FitMetadata,
     Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj,
     ImplicitCurveObj, ImplicitSurface3DObj, InfiniteCone3DObj, InfiniteCylinder3DObj, Line3DObj,
-    LineKind, LineObj, LiveSequenceBinding, MoebiusStripObj, ObjectId, ParabolaObj,
+    LineKind, LineObj, LineStyle, LiveSequenceBinding, MoebiusStripObj, ObjectId, ParabolaObj,
     ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj, PieChartObj,
-    Plane3DObj, Platonic3DObj, PlatonicKind, Point3DObj, PointObj, PolarCurveObj, PolygonObj,
-    PolylineObj, Prism3DObj, Pyramid3DObj, Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj,
-    RegularPolytopeNDObj, RelationOperator, ScatterPlotObj, SectorObj, Segment3DObj, Sphere3DObj,
-    SplineObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta, VectorField2DObj,
-    VectorField3DObj, IMPLICIT_SURFACE_DEFAULT_CELLS, IMPLICIT_SURFACE_MAX_CELLS,
+    Plane3DObj, Platonic3DObj, PlatonicKind, Point3DObj, PointObj, PointStyle, PolarCurveObj,
+    PolygonObj, PolylineObj, Prism3DObj, Pyramid3DObj, Quadric3DObj, RegressionLineObj,
+    RegularPolychoron4DObj, RegularPolytopeNDObj, RelationOperator, ScatterPlotObj, SectorObj,
+    Segment3DObj, Sphere3DObj, SplineObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta,
+    VectorField2DObj, VectorField3DObj, IMPLICIT_SURFACE_DEFAULT_CELLS, IMPLICIT_SURFACE_MAX_CELLS,
     IMPLICIT_SURFACE_MIN_CELLS,
 };
 use grafito_geometry::analysis::{
@@ -9779,6 +9779,109 @@ fn handle_remaining_cas_commands(
             }
             input_text.clear();
             return CommandOutcome::Message(format!("SetCaption: '{label}' → '{caption}'"));
+        }
+        "SetLineStyle" if cmd.args.len() == 2 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!(
+                    "SetLineStyle: objeto '{label}' no encontrado"
+                ));
+            };
+            let style_name = cmd.args[1].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(style) = LineStyle::parse_name(style_name) else {
+                return CommandOutcome::Error(
+                    "SetLineStyle: estilo no soportado (usa solid/dashed/dotted)".into(),
+                );
+            };
+            match document.get_object_mut(id) {
+                Some(obj) => {
+                    if !obj.set_line_style(style) {
+                        return CommandOutcome::Error(format!(
+                            "SetLineStyle: '{label}' no tiene trazo con estilo (puntos, texto, tablas y geometría GPU no aplican)"
+                        ));
+                    }
+                }
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "SetLineStyle: objeto '{label}' no encontrado"
+                    ));
+                }
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "SetLineStyle: '{label}' → {}",
+                style.canonical_name()
+            ));
+        }
+        "SetPointStyle" if cmd.args.len() == 2 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!(
+                    "SetPointStyle: objeto '{label}' no encontrado"
+                ));
+            };
+            let style_name = cmd.args[1].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(style) = PointStyle::parse_name(style_name) else {
+                return CommandOutcome::Error(
+                    "SetPointStyle: forma no soportada (usa dot/circle/cross/plus)".into(),
+                );
+            };
+            match document.get_object_mut(id) {
+                Some(obj) => {
+                    if !obj.set_point_style(style) {
+                        return CommandOutcome::Error(format!(
+                            "SetPointStyle: '{label}' no es un punto (solo Point/Point3D aplican)"
+                        ));
+                    }
+                }
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "SetPointStyle: objeto '{label}' no encontrado"
+                    ));
+                }
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "SetPointStyle: '{label}' → {}",
+                style.canonical_name()
+            ));
+        }
+        "SetLayer" if cmd.args.len() == 2 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!("SetLayer: objeto '{label}' no encontrado"));
+            };
+            let raw = cmd.args[1].trim().trim_matches(|c| c == '"' || c == '\'');
+            // Entero directo; si viene expresión con variable, se evalúa.
+            let parsed = raw.parse::<i64>().map_err(|_| ()).or_else(|()| {
+                parse_numeric_arg(raw, &document.variables)
+                    .map_err(|_| ())
+                    .and_then(|v| {
+                        if v.is_finite() {
+                            Ok(v.trunc() as i64)
+                        } else {
+                            Err(())
+                        }
+                    })
+            });
+            let Ok(wanted) = parsed else {
+                return CommandOutcome::Error("SetLayer: usa un entero 0..=255".into());
+            };
+            match document.set_layer_clamped(id, wanted) {
+                Ok((applied, false)) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "SetLayer: '{label}' → capa {applied}"
+                    ));
+                }
+                Ok((applied, true)) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "SetLayer: '{label}' → capa {applied} (clamp a 255)"
+                    ));
+                }
+                Err(error) => return CommandOutcome::Error(format!("SetLayer: {error}")),
+            }
         }
         "Surface" if cmd.args.len() == 1 => {
             let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');

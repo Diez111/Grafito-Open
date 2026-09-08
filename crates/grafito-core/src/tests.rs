@@ -1586,6 +1586,7 @@ mod tests {
             color: Color::BLACK,
             visible: true,
             width: 2.0,
+            line_style: crate::LineStyle::default(),
         };
         let cos_a = pb.angle.cos();
         let sin_a = pb.angle.sin();
@@ -1622,6 +1623,7 @@ mod tests {
             color: Color::BLACK,
             visible: true,
             width: 2.0,
+            line_style: crate::LineStyle::default(),
         };
         let cos_a = hb.angle.cos();
         let sin_a = hb.angle.sin();

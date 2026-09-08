@@ -262,7 +262,7 @@ Sin tocar geometría exacta, A11Y ni perf; sin `unwrap` (gates §9).
 | Volumen/área 3D | `symbolic/solids.rs` (esfera/cubo/cilindro/cono/toro/tetra/pirámide/prisma exactos; cuádrica → `None` + `solid_measure_status`) | Volume/Area 3D | S cerrado |
 | Vistas ortográficas | `symbolic/solids.rs` (`OrthoView` alzado/planta/perfil) + `render_3d.rs` (`OrthoProjection`, píxeles egui) | vistas 3D | S cerrado (cableado cámara P2) |
 | Groebner | `symbolic/mod.rs` (`groebner_gate`: 2×2 lineal exacto, >2×2 `Err` → Eliminate) | CAS Groebner | S cerrado; Buchberger = L (F10.W5) |
-| PDF | `symbolic/exchange.rs` (`document_to_pdf` 1.4 mínimo, 1 pág.); vectorial `printpdf` pendiente lead en `app/src/export.rs:3850-3880` | export PDF | M parcial (bloqueador: dep `printpdf` por crate) |
+| PDF | `app/src/export.rs` (`serialize_pdf_vectorial` vía `printpdf 0.12`: rectas/círculos/polígonos/texto Helvetica, 1 pág.; `document_to_pdf` queda referencia histórica) | export PDF | S cerrado (multipágina falla honesto) |
 | CSV RFC 4180 | `symbolic/csv.rs` (`to_csv` CRLF + `parse_csv` con `""`, cotas 20k filas/10M) | import/export CSV | S cerrado (wiring UI P2) |
-| Clipboard SVG/PNG | `symbolic/exchange.rs` (SVG real punto/círculo/polígono/texto; PNG `Err` honesto) | copiar SVG/PNG | S+M parcial (bloqueador: raster `image`/`tiny-skia` en app) |
+| Clipboard SVG/PNG | `app/src/export.rs` (SVG real punto/círculo/polígono/texto; PNG vía `clipboard_png_bytes` + `arboard` "Copiar PNG", headless honesto) | copiar SVG/PNG | S cerrado |
 | Gruntz / Risch / marching cubes / Net / iroh / CRDT | `symbolic/exchange.rs` (`l_stub` siempre `Err` + diseño en mensaje) | CAS y P2P | L solo diseño + stub (F10.W5) |

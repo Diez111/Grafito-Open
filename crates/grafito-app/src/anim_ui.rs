@@ -152,12 +152,12 @@ pub fn animation_concept_from_request(text: &str) -> Result<String, String> {
 
 /// Frase de referencia para la prosa del turno (nombres humanos, jamás IDs).
 ///
-/// Usa el mapa `humanize_control_name` de ui solo en espíritu (deslizador,
-/// reproducir, pausar): no contiene "PlayPause", "Slider", "Button" ni ningún
-/// identificador literal de control. La UI ya humaniza el resto vía
-/// `humanize_prose_text` al dibujar.
+/// Q3: el literal canónico vive en `grafito_ui::prosa::ANIMATION_REFERENCE_SENTENCE`
+/// (usa el mapa `humanize_control_name` de ui solo en espíritu: deslizador,
+/// reproducir, pausar; sin "PlayPause"/"Slider"/"Button"). La UI ya humaniza
+/// el resto vía `humanize_prose_text` al dibujar.
 pub fn animation_reference_sentence() -> &'static str {
-    "La animación está lista abajo: mové el deslizador para recorrer los fotogramas y usá reproducir o pausar para controlarla."
+    grafito_ui::prosa::ANIMATION_REFERENCE_SENTENCE
 }
 
 // ── Retención diferida de texturas egui (fix use-after-free wgpu) ───────────

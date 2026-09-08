@@ -4599,6 +4599,42 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("SetCaption[objeto, rotulo]"; "objeto": ObjectLabel required, "rotulo": Expression required)]
     ),
     command!(
+        "scripting.set-line-style",
+        "SetLineStyle",
+        ["estilo_linea"],
+        "Dinámica",
+        "Cambia el trazo de un objeto con línea (solid/dashed/dotted) y lo refleja en el canvas.",
+        TransformsObject,
+        Low,
+        true,
+        "SetLineStyle",
+        [signature!("SetLineStyle[objeto, estilo]"; "objeto": ObjectLabel required, "estilo": Expression required)]
+    ),
+    command!(
+        "scripting.set-point-style",
+        "SetPointStyle",
+        ["estilo_punto"],
+        "Dinámica",
+        "Cambia la forma del marcador de un punto (dot/circle/cross/plus) y la refleja en el canvas.",
+        TransformsObject,
+        Low,
+        true,
+        "SetPointStyle",
+        [signature!("SetPointStyle[objeto, estilo]"; "objeto": ObjectLabel required, "estilo": Expression required)]
+    ),
+    command!(
+        "scripting.set-layer",
+        "SetLayer",
+        ["poner_capa"],
+        "Dinámica",
+        "Mueve un objeto a una capa de dibujo 0..=255 (0 = fondo; >255 cae a 255 avisando).",
+        TransformsObject,
+        Low,
+        true,
+        "SetLayer",
+        [signature!("SetLayer[objeto, capa]"; "objeto": ObjectLabel required, "capa": Integer required)]
+    ),
+    command!(
         "3d.surface-measure",
         "Surface",
         [],
@@ -5244,6 +5280,9 @@ mod registry_tests {
             "AreParallel",
             "ArePerpendicular",
             "SetCaption",
+            "SetLineStyle",
+            "SetPointStyle",
+            "SetLayer",
             "Dodecahedron",
             "Icosahedron",
             "Octahedron",
@@ -5595,13 +5634,15 @@ mod registry_tests {
         // Oleada 2 P4 (f10-plan-total): +21 visibles M (2 Eigen specs para brazos
         // fantasmas + 3 Uniform/Exponential/ChiSquared + 2 inversas cerradas +
         // 3 CFactor/CIFactor/PartialFractions + 5 Are* + 1 SetCaption + 5
-        // Dodeca/Icosa/Octa/InfiniteCone/InfiniteCylinder). SetLineStyle/
-        // SetPointStyle/SetLayer van a Fase 5 (necesitan campos + render).
-        assert_eq!(all().len(), 330, "COMMANDS registrados (docs §8)");
+        // Dodeca/Icosa/Octa/InfiniteCone/InfiniteCylinder).
+        // Frente Q2 (f10-plan-total): +3 visibles S (SetLineStyle/SetPointStyle/
+        // SetLayer, con campos + render + brazos + paleta; blindaje y docs
+        // actualizados acá, architecture.md §8/§13 queda BLOCKER como en P2).
+        assert_eq!(all().len(), 333, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            284,
-            "comandos visibles en paleta (docs §8: 284 + 14 UI = 298)"
+            287,
+            "comandos visibles en paleta (docs §8: 287 + 14 UI = 301)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

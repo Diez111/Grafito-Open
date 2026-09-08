@@ -592,6 +592,73 @@ impl GeoObject {
         }
     }
 
+    /// Estilo de trazo si el objeto tiene línea dibujada por CPU (`None` =
+    /// sin trazo CPU: texto, tabla, campos, sólidos 3D, geometría del path
+    /// GPU —`Arc`/`Sector`/`Bezier`/`Spline`— y resto sin `line_style`).
+    pub fn line_style(&self) -> Option<LineStyle> {
+        match self {
+            GeoObject::Line(o) => Some(o.line_style),
+            GeoObject::Circle(o) => Some(o.line_style),
+            GeoObject::Polygon(o) => Some(o.line_style),
+            GeoObject::Polyline(o) => Some(o.line_style),
+            GeoObject::Pencil(o) => Some(o.line_style),
+            GeoObject::Function(o) => Some(o.line_style),
+            GeoObject::Ellipse(o) => Some(o.line_style),
+            GeoObject::Parabola(o) => Some(o.line_style),
+            GeoObject::Hyperbola(o) => Some(o.line_style),
+            GeoObject::ParametricCurve2D(o) => Some(o.line_style),
+            GeoObject::PolarCurve(o) => Some(o.line_style),
+            GeoObject::ImplicitCurve(o) => Some(o.line_style),
+            GeoObject::RegressionLine(o) => Some(o.line_style),
+            GeoObject::Transformed(o) => o.inner.line_style(),
+            _ => None,
+        }
+    }
+
+    /// Cambia el estilo de trazo. Devuelve `false` sin mutar si el objeto
+    /// no tiene línea CPU (el comando responde error honesto, no fantasma).
+    pub fn set_line_style(&mut self, style: LineStyle) -> bool {
+        match self {
+            GeoObject::Line(o) => o.line_style = style,
+            GeoObject::Circle(o) => o.line_style = style,
+            GeoObject::Polygon(o) => o.line_style = style,
+            GeoObject::Polyline(o) => o.line_style = style,
+            GeoObject::Pencil(o) => o.line_style = style,
+            GeoObject::Function(o) => o.line_style = style,
+            GeoObject::Ellipse(o) => o.line_style = style,
+            GeoObject::Parabola(o) => o.line_style = style,
+            GeoObject::Hyperbola(o) => o.line_style = style,
+            GeoObject::ParametricCurve2D(o) => o.line_style = style,
+            GeoObject::PolarCurve(o) => o.line_style = style,
+            GeoObject::ImplicitCurve(o) => o.line_style = style,
+            GeoObject::RegressionLine(o) => o.line_style = style,
+            GeoObject::Transformed(o) => return o.inner.set_line_style(style),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Forma del marcador si el objeto es un punto (`None` en el resto).
+    pub fn point_style(&self) -> Option<PointStyle> {
+        match self {
+            GeoObject::Point(o) => Some(o.point_style),
+            GeoObject::Point3D(o) => Some(o.point_style),
+            GeoObject::Transformed(o) => o.inner.point_style(),
+            _ => None,
+        }
+    }
+
+    /// Cambia la forma del marcador. `false` sin mutar si no es punto.
+    pub fn set_point_style(&mut self, style: PointStyle) -> bool {
+        match self {
+            GeoObject::Point(o) => o.point_style = style,
+            GeoObject::Point3D(o) => o.point_style = style,
+            GeoObject::Transformed(o) => return o.inner.set_point_style(style),
+            _ => return false,
+        }
+        true
+    }
+
     pub fn invalidate_cache(&self) {
         match self {
             GeoObject::Function(o) => o.invalidate_cache(),
@@ -772,6 +839,8 @@ pub struct PointObj {
     pub color: Color,
     pub visible: bool,
     pub size: f32,
+    #[serde(default)]
+    pub point_style: PointStyle,
 }
 
 impl PointObj {
@@ -785,6 +854,7 @@ impl PointObj {
             color: Color::BLUE,
             visible: true,
             size: 6.0,
+            point_style: PointStyle::default(),
         }
     }
 
@@ -795,6 +865,77 @@ impl PointObj {
 }
 
 pub use grafito_geometry::LineKind;
+
+/// Estilo de trazo de los objetos con línea (frente Q2: estilos reales).
+///
+/// `Solid` es el default y preserva el render histórico píxel a píxel: el
+/// camino `Solid` del renderer llama a las mismas primitivas que antes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LineStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+impl LineStyle {
+    /// Parsea un nombre de estilo en español o inglés (case-insensitive).
+    /// `None` si no es un estilo conocido (error honesto del llamador).
+    pub fn parse_name(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "solid" | "solido" | "sólido" | "continuo" | "continua" | "normal" => {
+                Some(Self::Solid)
+            }
+            "dashed" | "rayada" | "rayado" | "guiones" | "trazos" | "discontinua" => {
+                Some(Self::Dashed)
+            }
+            "dotted" | "punteada" | "punteado" | "puntos" | "punteo" => Some(Self::Dotted),
+            _ => None,
+        }
+    }
+
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Solid => "solid",
+            Self::Dashed => "dashed",
+            Self::Dotted => "dotted",
+        }
+    }
+}
+
+/// Forma del marcador de punto (frente Q2: estilos reales).
+///
+/// `Dot` es el default y preserva el render histórico (círculo relleno).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PointStyle {
+    #[default]
+    Dot,
+    Circle,
+    Cross,
+    Plus,
+}
+
+impl PointStyle {
+    /// Parsea un nombre de forma en español o inglés (case-insensitive).
+    pub fn parse_name(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "dot" | "punto" | "relleno" => Some(Self::Dot),
+            "circle" | "circulo" | "círculo" | "aro" | "hueco" => Some(Self::Circle),
+            "cross" | "cruz" | "equis" | "x" => Some(Self::Cross),
+            "plus" | "mas" | "más" | "+" => Some(Self::Plus),
+            _ => None,
+        }
+    }
+
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Dot => "dot",
+            Self::Circle => "circle",
+            Self::Cross => "cross",
+            Self::Plus => "plus",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineObj {
@@ -815,6 +956,8 @@ pub struct LineObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 
 impl LineObj {
@@ -836,6 +979,7 @@ impl LineObj {
             color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
         }
     }
 
@@ -910,6 +1054,8 @@ pub struct CircleObj {
     pub visible: bool,
     pub width: f32,
     pub fill_color: Option<Color>,
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 
 impl CircleObj {
@@ -924,6 +1070,7 @@ impl CircleObj {
             visible: true,
             width: 2.0,
             fill_color: None,
+            line_style: LineStyle::default(),
         }
     }
 
@@ -950,6 +1097,8 @@ pub struct PolygonObj {
     pub visible: bool,
     pub width: f32,
     pub fill_color: Option<Color>,
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 
 impl PolygonObj {
@@ -964,6 +1113,7 @@ impl PolygonObj {
             visible: true,
             width: 2.0,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.2)),
+            line_style: LineStyle::default(),
         }
     }
 
@@ -996,6 +1146,8 @@ pub struct PolylineObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 
 impl PolylineObj {
@@ -1007,6 +1159,7 @@ impl PolylineObj {
             color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
         }
     }
 
@@ -1024,6 +1177,8 @@ pub struct FunctionObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
     pub domain_min: Option<f64>,
     pub domain_max: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1061,6 +1216,7 @@ impl Clone for FunctionObj {
             color: self.color,
             visible: self.visible,
             width: self.width,
+            line_style: self.line_style,
             domain_min: self.domain_min,
             domain_max: self.domain_max,
             domain_min_expr: self.domain_min_expr.clone(),
@@ -1085,6 +1241,7 @@ impl PartialEq for FunctionObj {
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
+            && self.line_style == other.line_style
             && self.domain_min == other.domain_min
             && self.domain_max == other.domain_max
             && self.domain_min_expr == other.domain_min_expr
@@ -1106,6 +1263,7 @@ impl FunctionObj {
             color: Color::BLUE,
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
             domain_min: None,
             domain_max: None,
             domain_min_expr: None,
@@ -1194,6 +1352,8 @@ pub struct Point3DObj {
     pub color: Color,
     pub visible: bool,
     pub size: f32,
+    #[serde(default)]
+    pub point_style: PointStyle,
 }
 
 impl Point3DObj {
@@ -1205,6 +1365,7 @@ impl Point3DObj {
             color: Color::BLUE,
             visible: true,
             size: 8.0,
+            point_style: PointStyle::default(),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -2322,6 +2483,8 @@ pub struct EllipseObj {
     pub visible: bool,
     pub width: f32,
     pub fill_color: Option<Color>,
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 impl EllipseObj {
     pub fn new(center: Point2, rx: f64, ry: f64) -> Self {
@@ -2336,6 +2499,7 @@ impl EllipseObj {
             visible: true,
             width: 2.0,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)),
+            line_style: LineStyle::default(),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -2356,6 +2520,8 @@ pub struct ParabolaObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 impl ParabolaObj {
     pub fn new(vertex: Point2, p: f64) -> Self {
@@ -2369,6 +2535,7 @@ impl ParabolaObj {
             color: Color::RED,
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -2390,6 +2557,8 @@ pub struct HyperbolaObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 impl HyperbolaObj {
     pub fn new(center: Point2, a: f64, b: f64) -> Self {
@@ -2404,6 +2573,7 @@ impl HyperbolaObj {
             color: Color::RED,
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -2782,6 +2952,8 @@ pub struct ParametricCurve2DObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
     #[serde(skip)]
     pub cached_samples: Arc<RwLock<Curve2DSamples>>,
     #[serde(skip)]
@@ -2802,6 +2974,7 @@ impl Clone for ParametricCurve2DObj {
             color: self.color,
             visible: self.visible,
             width: self.width,
+            line_style: self.line_style,
             cached_samples: self.cached_samples.clone(),
             cached_key: self.cached_key.clone(),
         }
@@ -2821,6 +2994,7 @@ impl PartialEq for ParametricCurve2DObj {
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
+            && self.line_style == other.line_style
     }
 }
 
@@ -2838,6 +3012,7 @@ impl ParametricCurve2DObj {
             color: Color::BLUE,
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
             cached_samples: Arc::new(RwLock::new(Curve2DSamples::new())),
             cached_key: Arc::new(RwLock::new(None)),
         }
@@ -2992,6 +3167,8 @@ pub struct PolarCurveObj {
     pub visible: bool,
     pub width: f32,
     pub fill_color: Option<Color>,
+    #[serde(default)]
+    pub line_style: LineStyle,
     #[serde(skip)]
     pub cached_samples: Arc<RwLock<Curve2DSamples>>,
     #[serde(skip)]
@@ -3011,6 +3188,7 @@ impl Clone for PolarCurveObj {
             color: self.color,
             visible: self.visible,
             width: self.width,
+            line_style: self.line_style,
             fill_color: self.fill_color,
             cached_samples: self.cached_samples.clone(),
             cached_key: self.cached_key.clone(),
@@ -3030,6 +3208,7 @@ impl PartialEq for PolarCurveObj {
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
+            && self.line_style == other.line_style
             && self.fill_color == other.fill_color
     }
 }
@@ -3047,6 +3226,7 @@ impl PolarCurveObj {
             color: Color::new(0.0, 0.7, 0.3, 1.0),
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
             fill_color: None,
             cached_samples: Arc::new(RwLock::new(Curve2DSamples::new())),
             cached_key: Arc::new(RwLock::new(None)),
@@ -3474,6 +3654,8 @@ pub struct ImplicitCurveObj {
     pub fill_color: Option<Color>,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
     pub contour_levels: Option<Vec<f64>>,
     pub contour_colors: Option<Vec<Color>>,
     /// Cached geometry: one segment list per contour level (world-space).
@@ -3520,6 +3702,7 @@ impl Clone for ImplicitCurveObj {
             fill_color: self.fill_color,
             visible: self.visible,
             width: self.width,
+            line_style: self.line_style,
             contour_levels: self.contour_levels.clone(),
             contour_colors: self.contour_colors.clone(),
             cached_segments: self.cached_segments.clone(),
@@ -3540,6 +3723,7 @@ impl PartialEq for ImplicitCurveObj {
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
+            && self.line_style == other.line_style
             && self.contour_levels == other.contour_levels
             && self.contour_colors == other.contour_colors
     }
@@ -3560,6 +3744,7 @@ impl ImplicitCurveObj {
             fill_color: Some(Color::new(0.6, 0.2, 0.8, 0.5)),
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
             contour_levels: None,
             contour_colors: None,
             cached_segments: Arc::new(RwLock::new(ImplicitCurveSegments::new())),
@@ -4562,6 +4747,8 @@ pub struct RegressionLineObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 impl RegressionLineObj {
     pub fn linear(xs: Vec<f64>, ys: Vec<f64>, slope: f64, intercept: f64, r2: f64) -> Self {
@@ -4605,6 +4792,7 @@ impl RegressionLineObj {
             color: Color::RED,
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -5263,5 +5451,129 @@ mod tests {
             matches!(error, grafito_geometry::MeshError::FieldUndefined { .. }),
             "error honesto FieldUndefined, era {error}"
         );
+    }
+
+    // ── Q2: estilos reales + invariante de render ─────────────────────────
+    // Defaults Solid/Dot preservan el render histórico: el camino Solid/Dot
+    // del renderer llama a las mismas primitivas que antes (invariante por
+    // construcción, blindado acá a nivel de datos + serde).
+
+    #[test]
+    fn q2_line_style_default_is_solid_on_every_stroked_constructor() {
+        assert_eq!(
+            LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(
+            CircleObj::new(Point2::new(0.0, 0.0), 1.0).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(
+            PolygonObj::new(vec![Point2::new(0.0, 0.0)]).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(
+            PolylineObj::new(vec![Point2::new(0.0, 0.0)]).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(FunctionObj::new("x").line_style, LineStyle::Solid);
+        assert_eq!(
+            EllipseObj::new(Point2::new(0.0, 0.0), 1.0, 2.0).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(
+            ParabolaObj::new(Point2::new(0.0, 0.0), 1.0).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(
+            HyperbolaObj::new(Point2::new(0.0, 0.0), 1.0, 1.0).line_style,
+            LineStyle::Solid
+        );
+        // Granularidad mínima S: Arc/Sector/Bezier/Spline van por el path
+        // GPU y no tienen `line_style` (el comando da error honesto).
+        assert_eq!(
+            ParametricCurve2DObj::new("t", "t", 0.0, 1.0).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(
+            PolarCurveObj::new("1", 0.0, 1.0).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(
+            ImplicitCurveObj::new("x", "0", RelationOperator::Eq).line_style,
+            LineStyle::Solid
+        );
+        assert_eq!(
+            RegressionLineObj::linear(vec![0.0, 1.0], vec![0.0, 1.0], 1.0, 0.0, 1.0).line_style,
+            LineStyle::Solid
+        );
+    }
+
+    #[test]
+    fn q2_point_style_default_is_dot() {
+        assert_eq!(
+            PointObj::new(Point2::new(0.0, 0.0)).point_style,
+            PointStyle::Dot
+        );
+        assert_eq!(
+            Point3DObj::new(Point3D::new(0.0, 0.0, 0.0)).point_style,
+            PointStyle::Dot
+        );
+    }
+
+    #[test]
+    fn q2_legacy_json_without_style_fields_deserializes_to_defaults() {
+        // JSON viejo (sin line_style/point_style/layers) → Solid/Dot/capa 0.
+        let line: LineObj = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000000","label":"","start":{"x":0.0,"y":0.0},"end":{"x":1.0,"y":1.0},"color":{"r":0.0,"g":0.0,"b":0.0,"a":1.0},"visible":true,"width":2.0}"#,
+        )
+        .expect("JSON legado debe parsear");
+        assert_eq!(line.line_style, LineStyle::Solid);
+        let point: PointObj = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000000","label":"","position":{"x":0.0,"y":0.0},"color":{"r":0.0,"g":0.0,"b":1.0,"a":1.0},"visible":true,"size":6.0}"#,
+        )
+        .expect("JSON legado debe parsear");
+        assert_eq!(point.point_style, PointStyle::Dot);
+    }
+
+    #[test]
+    fn q2_style_names_parse_es_and_en() {
+        assert_eq!(LineStyle::parse_name("solid"), Some(LineStyle::Solid));
+        assert_eq!(LineStyle::parse_name("  Rayada "), Some(LineStyle::Dashed));
+        assert_eq!(LineStyle::parse_name("PUNTEADA"), Some(LineStyle::Dotted));
+        assert_eq!(LineStyle::parse_name("ondulada"), None);
+        assert_eq!(PointStyle::parse_name("dot"), Some(PointStyle::Dot));
+        assert_eq!(PointStyle::parse_name("círculo"), Some(PointStyle::Circle));
+        assert_eq!(PointStyle::parse_name("CRUZ"), Some(PointStyle::Cross));
+        assert_eq!(PointStyle::parse_name("+"), Some(PointStyle::Plus));
+        assert_eq!(PointStyle::parse_name("estrella"), None);
+    }
+
+    #[test]
+    fn q2_geo_object_style_accessors_are_honest() {
+        let mut line = GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)));
+        assert_eq!(line.line_style(), Some(LineStyle::Solid));
+        assert!(line.set_line_style(LineStyle::Dashed));
+        assert_eq!(line.line_style(), Some(LineStyle::Dashed));
+        // Sin trazo: texto y tabla devuelven None/false sin mutar.
+        let mut text = GeoObject::Text(TextObj::new("hola", Point2::new(0.0, 0.0)));
+        assert_eq!(text.line_style(), None);
+        assert!(!text.set_line_style(LineStyle::Dashed));
+        assert_eq!(text.point_style(), None);
+        assert!(!text.set_point_style(PointStyle::Cross));
+        // Puntos sí; líneas no aceptan estilo de punto.
+        let mut point = GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)));
+        assert_eq!(point.point_style(), Some(PointStyle::Dot));
+        assert!(point.set_point_style(PointStyle::Plus));
+        assert_eq!(point.point_style(), Some(PointStyle::Plus));
+        assert!(!line.set_point_style(PointStyle::Cross));
+        // Transformed delega al interior.
+        let mut wrapped = GeoObject::Transformed(TransformedObj::new(point.clone(), "z"));
+        assert_eq!(wrapped.point_style(), Some(PointStyle::Plus));
+        assert!(wrapped.set_point_style(PointStyle::Circle));
+        assert_eq!(wrapped.point_style(), Some(PointStyle::Circle));
+        // Path GPU (Arc/Sector/Bezier/Spline): sin estilo CPU, None honesto.
+        let arc = GeoObject::Arc(ArcObj::new(Point2::new(0.0, 0.0), 1.0, 0.0, 1.0));
+        assert_eq!(arc.line_style(), None);
     }
 }

@@ -6,7 +6,9 @@ use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_core::parametric_sampling;
 use grafito_core::tex_raster::{TexBitmap, MAX_TEX_LINE_CHARS, MAX_TEX_MTEXT_BYTES};
 use grafito_core::vector_field_sampling;
-use grafito_core::{GeoObject, ImplicitCurveObj, ObjectId, RelationOperator};
+use grafito_core::{
+    GeoObject, ImplicitCurveObj, LineStyle, ObjectId, PointStyle, RelationOperator,
+};
 use grafito_geometry::expr::{
     eval_batch_1d, eval_function_with_vars, eval_integral_batch, prepare_function_ast,
 };
@@ -1327,6 +1329,113 @@ fn draw_dashed_line(
         let end = a + dir * (dist + dash_len).min(len);
         painter.line_segment([start, end], stroke);
         dist += dash_len + gap_len;
+    }
+}
+
+/// Patrón de trazo Q2 (puro, testeable headless): `Solid` → `None` = dibujar
+/// el segmento tal cual (camino histórico, ni un píxel distinto);
+/// `Dashed`/`Dotted` → `(trazo, hueco)` en px proporcionales al grosor.
+pub(crate) fn dash_pattern(style: LineStyle, width: f32) -> Option<(f32, f32)> {
+    let width = if width.is_finite() && width > 0.0 {
+        width
+    } else {
+        1.0
+    };
+    match style {
+        LineStyle::Solid => None,
+        LineStyle::Dashed => Some((
+            (6.0 * width).clamp(6.0, 18.0),
+            (4.0 * width).clamp(3.0, 12.0),
+        )),
+        LineStyle::Dotted => Some((width.clamp(1.0, 3.0), (3.0 * width).clamp(2.0, 9.0))),
+    }
+}
+
+/// Un segmento con estilo: `Solid` = `line_segment` directo (idéntico a
+/// antes); el resto va por `draw_dashed_line`.
+fn stroke_segment(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, style: LineStyle) {
+    if let Some((dash, gap)) = dash_pattern(style, stroke.width) {
+        draw_dashed_line(painter, a, b, stroke, dash, gap);
+    } else {
+        painter.line_segment([a, b], stroke);
+    }
+}
+
+/// Polilínea con estilo, abierta o cerrada. No-op con <2 puntos.
+fn stroke_polyline(
+    painter: &egui::Painter,
+    points: &[Pos2],
+    closed: bool,
+    stroke: Stroke,
+    style: LineStyle,
+) {
+    if points.len() < 2 {
+        return;
+    }
+    let last = if closed {
+        points.len()
+    } else {
+        points.len() - 1
+    };
+    for i in 0..last {
+        stroke_segment(
+            painter,
+            points[i],
+            points[(i + 1) % points.len()],
+            stroke,
+            style,
+        );
+    }
+}
+
+/// Trazo de una muestra continua con estilo: `Solid` = `Shape::line`
+/// histórico; el resto va por segmentos dashed (misma muestra, sin re-muestrear).
+fn stroke_run(painter: &egui::Painter, points: Vec<Pos2>, stroke: Stroke, style: LineStyle) {
+    if points.len() < 2 {
+        return;
+    }
+    if matches!(style, LineStyle::Solid) {
+        painter.add(Shape::line(points, stroke));
+    } else {
+        stroke_polyline(painter, &points, false, stroke, style);
+    }
+}
+
+/// Glifo de punto Q2: `Dot` = círculo relleno histórico; el resto usa `size`
+/// como semieje del marcador con el mismo color.
+fn draw_point_glyph(
+    painter: &egui::Painter,
+    pos: Pos2,
+    size: f32,
+    color: Color32,
+    style: PointStyle,
+) {
+    let size = if size.is_finite() { size.max(1.0) } else { 1.0 };
+    match style {
+        PointStyle::Dot => {
+            painter.circle_filled(pos, size, color);
+        }
+        PointStyle::Circle => {
+            painter.circle_stroke(pos, size, Stroke::new(1.5, color));
+        }
+        PointStyle::Cross => {
+            let d = Vec2::new(size, size);
+            painter.line_segment([pos - d, pos + d], Stroke::new(1.5, color));
+            painter.line_segment(
+                [pos + Vec2::new(-size, size), pos + Vec2::new(size, -size)],
+                Stroke::new(1.5, color),
+            );
+        }
+        PointStyle::Plus => {
+            painter.line_segment(
+                [pos - Vec2::new(size, 0.0), pos + Vec2::new(size, 0.0)],
+                Stroke::new(1.5, color),
+            );
+            painter.line_segment(
+                [pos - Vec2::new(0.0, size), pos + Vec2::new(0.0, size)],
+                Stroke::new(1.5, color),
+            );
+        }
     }
 }
 
@@ -3683,7 +3792,7 @@ impl GrafitoApp {
                 let size = get_size(p.size, style).max(1.0);
                 let color = to_color32(get_color(p.color, style));
                 let label = get_label(&p.label, style);
-                painter.circle_filled(pos, size, color);
+                draw_point_glyph(&painter, pos, size, color, p.point_style);
                 // Marcas de eje para puntos de intercepto (cerca de x=0 o y=0).
                 let axis_tol = 1e-6f64.max(2.0 / view.scale);
                 let tick_world = 6.0 / view.scale;
@@ -3752,7 +3861,7 @@ impl GrafitoApp {
                     let pa = canvas_rect.min + Vec2::new(a.x, a.y);
                     let pb = canvas_rect.min + Vec2::new(b.x, b.y);
                     if !overlay_only {
-                        painter.line_segment([pa, pb], stroke);
+                        stroke_segment(&painter, pa, pb, stroke, l.line_style);
                     }
 
                     // Arrowhead for vectors at the forward (t=1) end.
@@ -3793,7 +3902,17 @@ impl GrafitoApp {
                     if let Some(fill) = fill_color {
                         painter.circle_filled(pos, radius, to_color32(fill));
                     }
-                    painter.circle_stroke(pos, radius, stroke);
+                    if matches!(c.line_style, LineStyle::Solid) {
+                        painter.circle_stroke(pos, radius, stroke);
+                    } else {
+                        // 128-gon con dash: indistinguible del círculo.
+                        let mut pts = Vec::with_capacity(128);
+                        for i in 0..128 {
+                            let t = i as f32 / 128.0 * std::f32::consts::TAU;
+                            pts.push(pos + Vec2::new(radius * t.cos(), radius * t.sin()));
+                        }
+                        stroke_polyline(&painter, &pts, true, stroke, c.line_style);
+                    }
                 }
                 if !label.is_empty() {
                     painter.text(
@@ -3837,7 +3956,12 @@ impl GrafitoApp {
                     None
                 };
                 if !overlay_only {
-                    painter.add(Shape::convex_polygon(points, fill, stroke));
+                    if matches!(poly.line_style, LineStyle::Solid) {
+                        painter.add(Shape::convex_polygon(points, fill, stroke));
+                    } else {
+                        painter.add(Shape::convex_polygon(points.clone(), fill, Stroke::NONE));
+                        stroke_polyline(&painter, &points, true, stroke, poly.line_style);
+                    }
                 }
                 if let Some(centroid) = centroid {
                     painter.text(
@@ -3863,7 +3987,7 @@ impl GrafitoApp {
                     let pb = canvas_rect.min + Vec2::new(b.x, b.y);
                     screen.push(pa);
                     if !overlay_only {
-                        painter.line_segment([pa, pb], stroke);
+                        stroke_segment(&painter, pa, pb, stroke, line.line_style);
                     }
                     if i + 2 == line.points.len() {
                         screen.push(pb);
@@ -3890,12 +4014,12 @@ impl GrafitoApp {
                 for w in pencil.points.windows(2) {
                     let a = view.world_to_screen(w[0]);
                     let b = view.world_to_screen(w[1]);
-                    painter.line_segment(
-                        [
-                            canvas_rect.min + Vec2::new(a.x, a.y),
-                            canvas_rect.min + Vec2::new(b.x, b.y),
-                        ],
+                    stroke_segment(
+                        &painter,
+                        canvas_rect.min + Vec2::new(a.x, a.y),
+                        canvas_rect.min + Vec2::new(b.x, b.y),
                         stroke,
+                        pencil.line_style,
                     );
                 }
                 if pencil.is_dynamic_locus() {
@@ -4051,6 +4175,7 @@ impl GrafitoApp {
 
                 if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
                     let stroke = Stroke::new(width, to_color32(color));
+                    let line_style = fun.line_style;
                     let mut optimized_points = Vec::new();
                     let mut i = 0;
                     while i < projected_samples.len() {
@@ -4100,16 +4225,18 @@ impl GrafitoApp {
                             i = j;
                         } else {
                             if !optimized_points.is_empty() {
-                                painter.add(Shape::line(
+                                stroke_run(
+                                    &painter,
                                     std::mem::take(&mut optimized_points),
                                     stroke,
-                                ));
+                                    line_style,
+                                );
                             }
                             i += 1;
                         }
                     }
                     if !optimized_points.is_empty() {
-                        painter.add(Shape::line(optimized_points, stroke));
+                        stroke_run(&painter, optimized_points, stroke, line_style);
                     }
                 }
 
@@ -4179,7 +4306,12 @@ impl GrafitoApp {
                     .fill_color
                     .map(to_color32)
                     .unwrap_or(Color32::TRANSPARENT);
-                painter.add(Shape::convex_polygon(pts, fill, stroke));
+                if matches!(el.line_style, LineStyle::Solid) {
+                    painter.add(Shape::convex_polygon(pts, fill, stroke));
+                } else {
+                    painter.add(Shape::convex_polygon(pts.clone(), fill, Stroke::NONE));
+                    stroke_polyline(&painter, &pts, true, stroke, el.line_style);
+                }
                 if !el.label.is_empty() {
                     let s = view.world_to_screen(el.center);
                     painter.text(
@@ -4213,7 +4345,7 @@ impl GrafitoApp {
                     if wx.is_finite() && wy.is_finite() {
                         if let Some(prev_p) = prev {
                             if (p.x - prev_p.x).abs() < 300.0 {
-                                painter.line_segment([prev_p, p], stroke);
+                                stroke_segment(&painter, prev_p, p, stroke, pb.line_style);
                             }
                         }
                         prev = Some(p);
@@ -4259,7 +4391,7 @@ impl GrafitoApp {
                             let p = canvas_rect.min + Vec2::new(s.x, s.y);
                             if let Some(prev_p) = prev {
                                 if (p.x - prev_p.x).abs() < 300.0 {
-                                    painter.line_segment([prev_p, p], stroke);
+                                    stroke_segment(&painter, prev_p, p, stroke, hb.line_style);
                                 }
                             }
                             prev = Some(p);
@@ -4480,12 +4612,12 @@ impl GrafitoApp {
                 let y1 = rl.slope * x1 + rl.intercept;
                 let s0 = view.world_to_screen(Point2::new(x0, y0));
                 let s1 = view.world_to_screen(Point2::new(x1, y1));
-                painter.line_segment(
-                    [
-                        canvas_rect.min + Vec2::new(s0.x, s0.y),
-                        canvas_rect.min + Vec2::new(s1.x, s1.y),
-                    ],
+                stroke_segment(
+                    &painter,
+                    canvas_rect.min + Vec2::new(s0.x, s0.y),
+                    canvas_rect.min + Vec2::new(s1.x, s1.y),
                     stroke,
+                    rl.line_style,
                 );
                 let pt_color = to_color32(rl.color);
                 for (x, y) in rl.xs.iter().zip(rl.ys.iter()) {
@@ -4555,9 +4687,12 @@ impl GrafitoApp {
                                 && !style.is_some_and(|style| style.skip_stroke)
                                 && should_connect_screen_points(prev_pos, pos, canvas_rect)
                             {
-                                painter.line_segment(
-                                    [prev_pos, pos],
+                                stroke_segment(
+                                    &painter,
+                                    prev_pos,
+                                    pos,
                                     Stroke::new(pc.width, to_color32(pc.color)),
+                                    pc.line_style,
                                 );
                             }
                         }
@@ -4587,9 +4722,12 @@ impl GrafitoApp {
                 if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
                     for run in &runs {
                         for points in run.windows(2) {
-                            painter.line_segment(
-                                [points[0], points[1]],
+                            stroke_segment(
+                                &painter,
+                                points[0],
+                                points[1],
                                 Stroke::new(pol.width, to_color32(pol.color)),
+                                pol.line_style,
                             );
                         }
                     }
@@ -4908,7 +5046,7 @@ impl GrafitoApp {
                             let p2 = view.world_to_screen(*b);
                             let pos1 = canvas_rect.min + Vec2::new(p1.x, p1.y);
                             let pos2 = canvas_rect.min + Vec2::new(p2.x, p2.y);
-                            painter.line_segment([pos1, pos2], stroke);
+                            stroke_segment(&painter, pos1, pos2, stroke, ic.line_style);
                         }
                     }
                 }
@@ -6246,5 +6384,82 @@ mod tex_label_tests {
             draw_tex_bitmap(&painter, Pos2::new(f32::INFINITY, 0.0), &bitmap, color);
         }
         let _ = canvas;
+    }
+}
+
+#[cfg(test)]
+mod q2_style_tests {
+    use super::*;
+
+    #[test]
+    fn solid_has_no_dash_pattern_so_history_paints_pixel_identical() {
+        // Invariante golden por construcción: `Solid` → `None` → el renderer
+        // llama a las mismas primitivas que antes del frente Q2.
+        assert_eq!(dash_pattern(LineStyle::Solid, 2.0), None);
+        assert_eq!(dash_pattern(LineStyle::Solid, 0.0), None);
+    }
+
+    #[test]
+    fn dashed_and_dotted_patterns_are_positive_and_finite() {
+        for style in [LineStyle::Dashed, LineStyle::Dotted] {
+            for width in [0.5, 1.0, 2.0, 10.0] {
+                let (dash, gap) = dash_pattern(style, width).expect("patrón");
+                assert!(dash.is_finite() && dash > 0.0, "{style:?} {width}");
+                assert!(gap.is_finite() && gap > 0.0, "{style:?} {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn dash_pattern_survives_degenerate_widths() {
+        for width in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            for style in [LineStyle::Dashed, LineStyle::Dotted] {
+                let (dash, gap) = dash_pattern(style, width).expect("fallback");
+                assert!(dash.is_finite() && dash > 0.0);
+                assert!(gap.is_finite() && gap > 0.0);
+            }
+            assert_eq!(dash_pattern(LineStyle::Solid, width), None);
+        }
+    }
+
+    #[test]
+    fn point_glyphs_paint_headless_without_panic() {
+        let ctx = egui::Context::default();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        for style in [
+            PointStyle::Dot,
+            PointStyle::Circle,
+            PointStyle::Cross,
+            PointStyle::Plus,
+        ] {
+            draw_point_glyph(&painter, Pos2::new(10.0, 10.0), 6.0, Color32::WHITE, style);
+            draw_point_glyph(
+                &painter,
+                Pos2::new(10.0, 10.0),
+                f32::NAN,
+                Color32::WHITE,
+                style,
+            );
+        }
+    }
+
+    #[test]
+    fn stroke_helpers_ignore_degenerate_geometry_headless() {
+        let ctx = egui::Context::default();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        let stroke = Stroke::new(2.0, Color32::WHITE);
+        let a = Pos2::new(0.0, 0.0);
+        stroke_segment(&painter, a, a, stroke, LineStyle::Dashed);
+        stroke_segment(
+            &painter,
+            Pos2::new(f32::NAN, 0.0),
+            a,
+            stroke,
+            LineStyle::Dotted,
+        );
+        stroke_polyline(&painter, &[], true, stroke, LineStyle::Dashed);
+        stroke_polyline(&painter, &[a], true, stroke, LineStyle::Dashed);
+        stroke_run(&painter, vec![], stroke, LineStyle::Dashed);
+        stroke_run(&painter, vec![a], stroke, LineStyle::Solid);
     }
 }

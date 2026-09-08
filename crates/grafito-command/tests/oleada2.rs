@@ -121,6 +121,9 @@ fn oleada2_todos_visibles_en_paleta() {
         "AreParallel",
         "ArePerpendicular",
         "SetCaption",
+        "SetLineStyle",
+        "SetPointStyle",
+        "SetLayer",
         "Dodecahedron",
         "Icosahedron",
         "Octahedron",
@@ -129,8 +132,8 @@ fn oleada2_todos_visibles_en_paleta() {
     ] {
         palette_must_be_visible(canonical);
     }
-    assert_eq!(command_registry::palette_commands().count(), 284);
-    assert_eq!(command_registry::all().len(), 330);
+    assert_eq!(command_registry::palette_commands().count(), 287);
+    assert_eq!(command_registry::all().len(), 333);
 }
 
 #[test]

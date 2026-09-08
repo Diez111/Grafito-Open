@@ -4942,6 +4942,48 @@ fn headless_right_properties_panel_renders_without_panic() {
 }
 
 #[test]
+fn q4_inspector_implicita_cells_altas_render_sin_panico_con_cancel_real() {
+    // Q4: Inspector live-preview + cancel, headless. Superficie de cells
+    // altas (32³) seleccionada: el panel dibuja sin pánico, el productor
+    // existente envía el grueso, y `cancel()` corta el pendiente de verdad
+    // sin tocar el último válido.
+    use grafito_core::{GeoObject, ImplicitSurface3DObj};
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Geometry3D);
+    let surface = GeoObject::ImplicitSurface3D(ImplicitSurface3DObj::new(
+        "x*x+y*y+z*z-1",
+        (-1.5, 1.5, -1.5, 1.5, -1.5, 1.5),
+        32,
+    ));
+    let id = app.document.add_object(surface);
+    app.selected_object = Some(id);
+    let out = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_right_properties_panel(&mut app, ctx);
+    });
+    assert!(
+        out.shapes.len() < 15_000,
+        "inspector implícita sin overflow"
+    );
+    // Helpers puros del slot (mismo contrato que los botones usan).
+    assert!(crate::implicit_surface_compute::should_offer_quick_preview(
+        32
+    ));
+    assert!(!crate::implicit_surface_compute::should_offer_quick_preview(8));
+    // Vista previa rápida vía productor existente (no bloquea).
+    app.maybe_submit_implicit_slot();
+    assert!(
+        app.implicit_surface_slot.has_pending() || app.implicit_slot_key.is_some(),
+        "el productor debe enviar la implícita visible"
+    );
+    // Cancel real: corta el pendiente, preserva clave/estado sin fantasma.
+    if app.implicit_surface_slot.has_pending() {
+        app.implicit_surface_slot.cancel();
+        assert!(!app.implicit_surface_slot.has_pending());
+        assert_eq!(app.implicit_surface_slot.pending_cells(), 0);
+    }
+}
+
+#[test]
 fn headless_cas_and_trig_panels_render_without_panic() {
     let ctx = egui::Context::default();
     let mut app = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::AlgebraCas);

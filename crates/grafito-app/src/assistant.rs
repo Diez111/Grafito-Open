@@ -26,6 +26,7 @@ use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm, Turn};
 use grafito_ui::assistant::{
     AssistantCorrectionContext, AssistantPanelState, AssistantUiAction, VerifiedAssistantProposal,
 };
+use grafito_ui::prosa::{append_canonical_integral_prose, prosa_integral_explicita};
 use grafito_ui::toast::ToastKind;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -249,53 +250,13 @@ pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
     }
 }
 
-/// Prosa rioplatense para integral explícita: nombra la función y el rango.
-///
-/// La usa el turno local-only para que la media nunca quede huérfana.
-/// Sin "pedime otra" (ese marcador es solo de la canónica). Pura, sin I/O.
-fn prosa_integral_explicita(expr: &str, pedido: &str) -> String {
-    let (_, p0, p1) = grafito_anim::parametric::infer_area_anim(pedido)
-        .map(|resuelto| {
-            let anim = resuelto.anim();
-            (anim.expr_a.clone(), anim.p0, anim.p1)
-        })
-        .unwrap_or_else(|_| {
-            (
-                expr.to_string(),
-                grafito_anim::parametric::INTEGRAL_CANONICAL_P0,
-                grafito_anim::parametric::INTEGRAL_CANONICAL_P1,
-            )
-        });
-    format!(
-        "te muestro con f(x)={expr} en [{p0},{p1}].\n\n{}",
-        crate::anim_ui::animation_reference_sentence()
-    )
-}
-
-/// Agrega la declaración de la canónica al último turno del asistente.
-///
-/// Idempotente por contenido ("pedime otra" ya presente → no duplica).
-/// Puro sobre el transcript (sin I/O ni spawn): el hilo de render no se
-/// toca acá.
-fn append_canonical_integral_prose(conversation: &mut [ConversationTurn]) {
-    let Some(turno) = conversation.last_mut() else {
-        return;
-    };
-    if turno.role != ConversationRole::Assistant || turno.content.contains("pedime otra") {
-        return;
-    }
-    turno.content.push_str("\n\n");
-    turno
-        .content
-        .push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
-}
-
 /// Reset T1 por turno (Bug B: integral pegada).
 ///
 /// Sin mención de animación en EL MENSAJE ACTUAL (`NoAnimacion`) → jamás
 /// media: limpia el slot para que el turno no-animación no re-muestre la
 /// animación del turno anterior. El resto de decisiones no se toca (Render*
 /// ya limpia antes de spawnear; la guía nunca tuvo media). Sin I/O ni spawn.
+/// Q4: también limpia el flag de playlist (sin secuencia rancia).
 pub(crate) fn limpiar_media_si_no_animacion(
     panel: &mut grafito_ui::assistant::AssistantPanelState,
     decision: &DecisionAnimacion,
@@ -303,6 +264,7 @@ pub(crate) fn limpiar_media_si_no_animacion(
 ) {
     if matches!(decision, DecisionAnimacion::NoAnimacion) {
         panel.set_media(None, ctx);
+        panel.clear_media_playlist();
     }
 }
 
@@ -358,6 +320,11 @@ pub(crate) struct AssistantRuntime {
     image_job: Option<AssistantImageJob>,
     agent_job: Option<AssistantAgentJob>,
     anim_job: Option<AssistantAnimJob>,
+    /// Q4: última playlist ("X y después Y") para "Reproducir secuencia".
+    /// Seam mínimo: la playlist solo vivía transitoria en `playlist_para_pedido`;
+    /// acá se guarda al lanzar el job para que la card la re-encole con el
+    /// transporte existente, sin refactorear el agente entero.
+    last_playlist: Option<grafito_anim::protocol::Playlist>,
     /// Export a GIF de la card en vuelo (B5): `JoinHandle` de
     /// `spawn_gif_export` que `poll_gif_export_job` drena sin bloquear.
     gif_export_job: Option<GifExportJob>,
@@ -1582,6 +1549,8 @@ impl GrafitoApp {
                         // Reset T1 (Bug B): sin animación en este mensaje la
                         // media anterior no se re-muestra en este turno.
                         limpiar_media_si_no_animacion(&mut self.assistant, &decision, ctx);
+                        // Q4: sin animación tampoco hay secuencia (sin replay rancio).
+                        self.assistant_runtime.last_playlist = None;
                     }
                 }
                 // B7 — Pedido de ejercicio en texto: genera la tarjeta en vez de
@@ -1840,6 +1809,19 @@ impl GrafitoApp {
             }
             AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
             AssistantUiAction::ExportMedia => self.export_assistant_media(ctx),
+            AssistantUiAction::ReplayPlaylist => {
+                // Q4: "Reproducir secuencia" re-encola la playlist guardada
+                // con el transporte existente (mismo hilo + concat + scrub).
+                // Nada mudo: sin playlist guardada se explica en vez de
+                // quedarse quieto.
+                if let Some(playlist) = self.assistant_runtime.last_playlist.clone() {
+                    self.run_assistant_playlist_with(ctx, playlist);
+                } else {
+                    let message = "No hay secuencia para repetir: pedí algo con «y después».";
+                    self.notify(message, ToastKind::Info);
+                    self.show_assistant_error(message);
+                }
+            }
             AssistantUiAction::AskNextTopic => {
                 let memory = self.profile.memory();
                 self.assistant.problem = format!(
@@ -3094,6 +3076,10 @@ impl GrafitoApp {
                 self.notify(message, ToastKind::Info);
             }
         }
+        // Q4: single limpia la secuencia guardada (sin replay rancio de
+        // una playlist vieja cuando ahora se pidió una sola animación).
+        self.assistant_runtime.last_playlist = None;
+        self.assistant.clear_media_playlist();
         // No destruir texturas durante el draw (evita wgpu panic 'Texture has been destroyed').
         // La media previa se mantiene visible hasta que la nueva la reemplace en sync_assistant_for_frame
         // (inicio del próximo frame). Solo limpiar si es la primera vez o si el usuario lo pidió explícitamente.
@@ -3356,6 +3342,15 @@ impl GrafitoApp {
         if self.assistant_runtime.cancel_anim_job() {
             self.assistant.anim_progress = false;
         }
+        // Q4 seam mínimo: la playlist llega a la card. Se guarda el conteo
+        // en la Piel (para mostrar "Reproducir secuencia") y la playlist
+        // completa en el runtime (para re-encolarla sin refactorear el
+        // agente). El `Group` simultáneo se ejecuta FIFO honesto en orden
+        // (ver `AnimationGroup`: sin compositor alfa, el orden documentado
+        // es la ejecución secuencial); el `Wait` congela el último frame
+        // vía el hold del concat.
+        self.assistant.stage_media_playlist(playlist.len());
+        self.assistant_runtime.last_playlist = Some(playlist.clone());
         let cancellation = CancellationToken::default();
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -6903,6 +6898,30 @@ mod tests {
             grafito_anim::protocol::playlist_frame_at(&timeline, 4499, todo.len()),
             todo.len() - 1
         );
+    }
+
+    #[test]
+    fn q4_limpiar_sin_animacion_tambien_limpia_secuencia() {
+        // Q4 seam mínimo: el flag de playlist vive en la Piel y se limpia
+        // con el turno sin animación (sin replay rancio). Headless, sin hilos.
+        let ctx = egui::Context::default();
+        let mut panel = grafito_ui::assistant::AssistantPanelState::default();
+        panel.stage_media_playlist(2);
+        assert!(panel.media_is_playlist());
+        limpiar_media_si_no_animacion(&mut panel, &DecisionAnimacion::NoAnimacion, &ctx);
+        assert!(!panel.media_is_playlist());
+        // Render* no limpia acá (lo hace el lanzamiento del job); el flag
+        // sobrevive hasta el stage del transporte.
+        panel.stage_media_playlist(2);
+        limpiar_media_si_no_animacion(
+            &mut panel,
+            &DecisionAnimacion::RenderGenerico {
+                plantilla: "derivative-slope".into(),
+                concepto: "derivada".into(),
+            },
+            &ctx,
+        );
+        assert!(panel.media_is_playlist());
     }
 
     #[test]

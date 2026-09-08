@@ -6,10 +6,10 @@ use crate::export::{
 };
 use crate::GrafitoApp;
 use egui::Color32;
-use grafito_core::symbolic::{clipboard_svg, series as spreadsheet_series, LayerTable, MAX_LAYERS};
+use grafito_core::symbolic::{clipboard_svg, series as spreadsheet_series, MAX_LAYERS};
 use grafito_core::{
-    CasWorksheetStatus, ChangeSet, DataTableObj, Document, GeoObject, ObjectId,
-    RegularPolytopeNDObj, ScatterPlotObj,
+    CasWorksheetStatus, ChangeSet, DataTableObj, Document, GeoObject, LineStyle, ObjectId,
+    PointStyle, RegularPolytopeNDObj, ScatterPlotObj,
 };
 use grafito_geometry::{Color, RegularPolychoron, RegularPolytopeFamily};
 use grafito_ui::icons::{action_icon_button, Icon};
@@ -26,13 +26,12 @@ use std::path::Path;
 
 const MAX_LOCAL_DATA_IMPORT_BYTES: usize = 2_000_000;
 
-/// Estado del panel Capas (oleada M): `LayerTable` del core + capa elegida
-/// para asignar. Vive en la memoria temporal de egui (sin I/O, sin campos
-/// nuevos en `GrafitoApp`); las ids de documentos cerrados se podan al
-/// dibujar vía [`LayerTable::prune_missing`].
+/// Estado del panel Capas (Q2): solo la capa elegida para asignar. La
+/// tabla vive en el documento (`Document::layers`, persistente y con undo);
+/// en temp egui queda únicamente el `selected_layer`. Las ids de documentos
+/// cerrados se podan al dibujar vía [`Document::prune_layers`].
 #[derive(Debug, Clone, Default)]
 struct LayerPanelState {
-    table: LayerTable,
     selected_layer: u32,
 }
 
@@ -888,6 +887,25 @@ fn draw_inspector_identity(ui: &mut egui::Ui, obj: &GeoObject) {
         });
 }
 
+/// Etiqueta ES del estilo de trazo para el Inspector (Q2).
+fn line_style_label(style: LineStyle) -> &'static str {
+    match style {
+        LineStyle::Solid => "Continuo",
+        LineStyle::Dashed => "Rayado",
+        LineStyle::Dotted => "Punteado",
+    }
+}
+
+/// Etiqueta ES de la forma de punto para el Inspector (Q2).
+fn point_style_label(style: PointStyle) -> &'static str {
+    match style {
+        PointStyle::Dot => "Punto",
+        PointStyle::Circle => "Aro",
+        PointStyle::Cross => "Cruz",
+        PointStyle::Plus => "Cruz +",
+    }
+}
+
 fn draw_inspector_section(
     ui: &mut egui::Ui,
     title: &str,
@@ -1705,21 +1723,17 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
 
-    // Estado Capas (oleada M): vive en temp egui; se poda y escribe de vuelta
-    // alrededor del frame. Solo lectura del documento fuera de los handlers.
+    // Estado Capas (Q2: tabla persistente en el documento; en temp egui
+    // solo la capa elegida). Se poda al dibujar para acotar memoria.
     let layer_panel_id = egui::Id::new("grafito_layer_panel_state");
     let mut layer_state: LayerPanelState = ctx
         .data_mut(|data| data.get_temp::<LayerPanelState>(layer_panel_id))
         .unwrap_or_default();
-    layer_state.table.prune_missing(&app.document);
+    app.document.prune_layers();
     let selection: Option<(ObjectId, String, u32)> = app.selected_object.and_then(|id| {
-        app.document.get_object(id).map(|object| {
-            (
-                id,
-                object.label().to_string(),
-                layer_state.table.layer_of(id),
-            )
-        })
+        app.document
+            .get_object(id)
+            .map(|object| (id, object.label().to_string(), app.document.layer_of(id)))
     });
 
     egui::SidePanel::left("view_panel")
@@ -1967,7 +1981,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             );
                             ui.add_space(CARD_SPACING);
 
-                            // Capas — orden + visibilidad (oleada M, API F10-C).
+                            // Capas — orden + visibilidad (Q2, tabla persistente).
                             // Piel pura: lee &Estado, muta documento con snapshot
                             // de undo; el diálogo/trabajo pesado no aplica aquí
                             // (solo toggles y assigns en memoria).
@@ -1976,7 +1990,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 "Capas",
                                 "Ordená objetos en capas 0..=255 y alterná su visibilidad conjunta.",
                                 |ui| {
-                                    let used = layer_state.table.used_layers(&app.document);
+                                    let used = app.document.used_layers();
                                     if used.is_empty() {
                                         ui.label(
                                             egui::RichText::new(
@@ -1987,10 +2001,8 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         );
                                     }
                                     for (layer, count) in used {
-                                        let visible = layer_state.table.is_layer_visible(
-                                            &app.document,
-                                            layer,
-                                        );
+                                        let visible =
+                                            app.document.is_layer_visible(layer);
                                         ui.horizontal(|ui| {
                                             ui.label(
                                                 egui::RichText::new(format!(
@@ -2015,10 +2027,9 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                                 app.undo_stack.len(),
                                                             );
                                                         snap.capture(&app.document);
-                                                        let touched = layer_state
-                                                            .table
+                                                        let touched = app
+                                                            .document
                                                             .set_layer_visible(
-                                                                &mut app.document,
                                                                 layer,
                                                                 !visible,
                                                             );
@@ -2086,9 +2097,14 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             .clicked()
                                         {
                                             if let Some((id, label, _)) = selection.as_ref() {
-                                                match layer_state
-                                                    .table
-                                                    .assign(*id, layer_state.selected_layer)
+                                                let mut snap =
+                                                    crate::app::DeferredPanelSnapshot::new(
+                                                        app.undo_stack.len(),
+                                                    );
+                                                snap.capture(&app.document);
+                                                match app
+                                                    .document
+                                                    .set_layer(*id, layer_state.selected_layer)
                                                 {
                                                     Ok(()) => {
                                                         let name = if label.is_empty() {
@@ -2111,6 +2127,11 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                         );
                                                     }
                                                 }
+                                                snap.save_if_semantically_changed(
+                                                    &mut app.document,
+                                                    &mut app.undo_stack,
+                                                    &mut app.redo_stack,
+                                                );
                                             }
                                         }
                                     });
@@ -3391,6 +3412,99 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                     }
                     ui.add_space(SPACE_MD);
                     let mut changed = false;
+                    let mut layer_value = app.document.layer_of(id);
+                    let layer_before = layer_value;
+
+                    // Q2: estilos reales + capa. Trazo/marcador mutan el
+                    // clon y entran al undo por el `apply` común de abajo;
+                    // la capa vive en el documento y se aplica con su propio
+                    // snapshot justo después.
+                    draw_inspector_section(
+                        ui,
+                        "Estilo",
+                        "Trazo, marcador y capa de dibujo (0 = fondo).",
+                        |ui| {
+                            if let Some(current) = edited_object.line_style() {
+                                let mut next = current;
+                                egui::ComboBox::from_id_salt("inspector_line_style")
+                                    .selected_text(line_style_label(next))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut next,
+                                            LineStyle::Solid,
+                                            line_style_label(LineStyle::Solid),
+                                        );
+                                        ui.selectable_value(
+                                            &mut next,
+                                            LineStyle::Dashed,
+                                            line_style_label(LineStyle::Dashed),
+                                        );
+                                        ui.selectable_value(
+                                            &mut next,
+                                            LineStyle::Dotted,
+                                            line_style_label(LineStyle::Dotted),
+                                        );
+                                    });
+                                if next != current {
+                                    edited_object.set_line_style(next);
+                                    changed = true;
+                                }
+                            }
+                            if let Some(current) = edited_object.point_style() {
+                                let mut next = current;
+                                egui::ComboBox::from_id_salt("inspector_point_style")
+                                    .selected_text(point_style_label(next))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut next,
+                                            PointStyle::Dot,
+                                            point_style_label(PointStyle::Dot),
+                                        );
+                                        ui.selectable_value(
+                                            &mut next,
+                                            PointStyle::Circle,
+                                            point_style_label(PointStyle::Circle),
+                                        );
+                                        ui.selectable_value(
+                                            &mut next,
+                                            PointStyle::Cross,
+                                            point_style_label(PointStyle::Cross),
+                                        );
+                                        ui.selectable_value(
+                                            &mut next,
+                                            PointStyle::Plus,
+                                            point_style_label(PointStyle::Plus),
+                                        );
+                                    });
+                                if next != current {
+                                    edited_object.set_point_style(next);
+                                    changed = true;
+                                }
+                            }
+                            if edited_object.line_style().is_none()
+                                && edited_object.point_style().is_none()
+                            {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Este tipo no tiene trazo ni marcador con estilo.",
+                                    )
+                                    .color(txt_dim)
+                                    .size(TYPE_XS),
+                                );
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Capa:").color(txt_dim).size(TYPE_SM),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut layer_value)
+                                        .range(0..=MAX_LAYERS)
+                                        .speed(1),
+                                );
+                            });
+                        },
+                    );
+                    ui.add_space(SPACE_XS);
 
                     let label_col = theme.text_secondary;
                     match &mut edited_object {
@@ -3829,6 +3943,133 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                             });
                     });
                 }
+                GeoObject::ImplicitSurface3D(s) => {
+                    // Q4: Inspector live-preview + cancel (P2 con UI).
+                    // Piel pura en el dibujado (cero I/O/spawn en `Ui::` salvo
+                    // los handlers de botón que delegan al slot existente):
+                    // "Vista previa rápida" corre el slot en background vía
+                    // `maybe_submit_implicit_slot` existente; "Cancelar" llama
+                    // `cancel()` de verdad (antes sin llamador prod); el
+                    // overlay `last_valid` progresivo ya vive en `render_3d.rs`
+                    // (sin parpadeo ante `Failed`). Todo abre algo o explica.
+                    ui.label(
+                        egui::RichText::new("Superficie implícita 3D")
+                            .color(label_col)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("F(x, y, z) = {}", s.expr))
+                            .color(txt_col)
+                            .size(TYPE_SM),
+                    );
+                    ui.add_space(SPACE_XS);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Caja [{:.2}, {:.2}] × [{:.2}, {:.2}] × [{:.2}, {:.2}] · {}³ celdas",
+                            s.x_min, s.x_max, s.y_min, s.y_max, s.z_min, s.z_max, s.cells
+                        ))
+                        .color(txt_dim)
+                        .size(TYPE_XS),
+                    );
+                    let has_pending = app.implicit_surface_slot.has_pending();
+                    let pending_cells = app.implicit_surface_slot.pending_cells();
+                    let tri_count = app
+                        .implicit_surface_slot
+                        .last_valid()
+                        .map(|mesh| mesh.triangle_count());
+                    let status = crate::implicit_surface_compute::implicit_preview_status(
+                        has_pending,
+                        tri_count.is_some(),
+                        pending_cells,
+                        tri_count,
+                    );
+                    ui.add_space(SPACE_XS);
+                    ui.label(
+                        egui::RichText::new(format!("Estado: {status}"))
+                            .color(txt_dim)
+                            .size(TYPE_XS),
+                    );
+                    if let Some(tris) = tri_count {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Vista previa: {tris} triángulos (el canvas la muestra mientras refina)"
+                            ))
+                            .color(txt_dim)
+                            .size(TYPE_XS),
+                        );
+                    }
+                    if crate::implicit_surface_compute::should_offer_quick_preview(s.cells) {
+                        ui.label(
+                            egui::RichText::new(
+                                "Celdas altas: el fino tarda; la vista previa gruesa (12³) llega primero.",
+                            )
+                            .color(txt_dim)
+                            .size(TYPE_XS),
+                        );
+                    }
+                    ui.add_space(SPACE_XS);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                        // "Vista previa rápida": usa el productor existente.
+                        // Si ya hay pendiente o válida con misma clave, el
+                        // productor no re-envía (honesto: se avisa, nada mudo).
+                        if ui
+                            .small_button("Vista previa rápida")
+                            .on_hover_text("Genera el grueso 12³ en segundo plano")
+                            .clicked()
+                        {
+                            let was_pending = app.implicit_surface_slot.has_pending();
+                            let had_valid =
+                                app.implicit_surface_slot.last_valid().is_some();
+                            app.maybe_submit_implicit_slot();
+                            ui.ctx().request_repaint();
+                            if app.implicit_surface_slot.has_pending() && !was_pending {
+                                app.notify(
+                                    "Vista previa en curso…",
+                                    grafito_ui::toast::ToastKind::Info,
+                                );
+                            } else if had_valid {
+                                app.notify(
+                                    "Ya hay vista previa mostrándose en el canvas.",
+                                    grafito_ui::toast::ToastKind::Info,
+                                );
+                            } else if was_pending {
+                                app.notify(
+                                    "Ya se está generando la vista previa…",
+                                    grafito_ui::toast::ToastKind::Info,
+                                );
+                            } else {
+                                app.notify(
+                                    "No se pudo iniciar la vista previa (revisá la superficie).",
+                                    grafito_ui::toast::ToastKind::Error,
+                                );
+                            }
+                        }
+                        // "Cancelar": llama `cancel()` de verdad (antes sin
+                        // llamador prod). Suelta el job en vuelo sin tocar el
+                        // último válido; deshabilitado con motivo si no hay nada.
+                        let cancel_resp = ui.add_enabled(
+                            has_pending,
+                            egui::Button::new("Cancelar").small(),
+                        );
+                        if cancel_resp.clicked() {
+                            app.implicit_surface_slot.cancel();
+                            ui.ctx().request_repaint();
+                            app.notify(
+                                "Vista previa cancelada.",
+                                grafito_ui::toast::ToastKind::Info,
+                            );
+                        }
+                        if !has_pending {
+                            cancel_resp.on_disabled_hover_text(
+                                "No hay vista previa en curso para cancelar.",
+                            );
+                        } else {
+                            cancel_resp.on_hover_text("Detiene la vista previa en curso");
+                        }
+                    });
+                    ui.add_space(SPACE_XS);
+                }
                 _ => {
                     // Display-only: la ecuación ya va en grande en la card de
                     // identidad. Sin nombre muerto ni texto que no sirve.
@@ -3863,6 +4104,28 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                             );
                             app.cas_result = message.clone();
                             app.notify(message, grafito_ui::toast::ToastKind::Error);
+                        }
+                    }
+                    // Q2: la capa vive en el documento (no en el objeto).
+                    // Mismo pipeline validado que el reemplazo de objeto:
+                    // staging + `capture_successful_replacement`, un solo
+                    // snapshot por frame (ver test `idle_object_panel_edit…`).
+                    if layer_value != layer_before {
+                        match app.document.try_set_layer_with_previous(id, layer_value) {
+                            Ok(Some(before)) => {
+                                snapshot.capture_successful_replacement(before);
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                let message = format!("Capa: {error}");
+                                ui.label(
+                                    egui::RichText::new(&message)
+                                        .color(current_theme(ui.ctx()).danger)
+                                        .size(TYPE_XS),
+                                );
+                                app.cas_result = message.clone();
+                                app.notify(message, grafito_ui::toast::ToastKind::Error);
+                            }
                         }
                     }
                 });
@@ -4645,9 +4908,11 @@ mod layer_panel_tests {
     fn layer_panel_state_defaults_empty_on_layer_zero() {
         let state = LayerPanelState::default();
         assert_eq!(state.selected_layer, 0);
+        // Q2: la tabla vive en el documento (persistente); el estado del
+        // panel solo guarda la capa elegida.
         let document = Document::new();
-        assert_eq!(state.table.used_layers(&document), vec![]);
-        assert!(state.table.is_layer_visible(&document, 0));
+        assert_eq!(document.used_layers(), vec![]);
+        assert!(document.is_layer_visible(0));
     }
 }
 

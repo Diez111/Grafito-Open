@@ -893,6 +893,15 @@ pub struct Document {
     /// visible (comportamiento histórico). Solo vista, sin validación.
     #[serde(default = "default_number_plane_labels")]
     pub number_plane_labels: bool,
+    /// Capas de dibujo por objeto (frente Q2: capas reales persistentes).
+    ///
+    /// `objeto → capa 0..=255` (0 = fondo, como GeoGebra). `#[serde(default)]`
+    /// migra JSON viejo a "todo en capa 0" = orden histórico. El orden de
+    /// pintado es `(capa, ObjectId)` en `ordered_visible_2d_objects`.
+    /// Solo crece vía [`Self::set_layer`] (objeto existente + rango válido);
+    /// se poda en [`Self::remove_object`] y [`Self::prune_layers`].
+    #[serde(default)]
+    layers: BTreeMap<ObjectId, u32>,
 }
 
 /// Máximo de muestras por estela de rastro (512 pts × 16 B ≈ 8 KiB/objeto).
@@ -976,6 +985,7 @@ impl Default for Document {
             trace_enabled: BTreeMap::new(),
             trails: BTreeMap::new(),
             number_plane_labels: true,
+            layers: BTreeMap::new(),
         }
     }
 }
@@ -1469,6 +1479,7 @@ impl Document {
         self.selection.retain(|&s| s != id);
         self.trace_enabled.remove(&id);
         self.trails.remove(&id);
+        self.layers.remove(&id);
         self.spreadsheet_coordinate_points
             .retain(|_, point_id| *point_id != id);
         self.live_sequences.remove(&id);
@@ -3436,6 +3447,135 @@ impl Document {
         self.objects.iter()
     }
 
+    /// Capa de dibujo de un objeto (0 por defecto, como GeoGebra; Q2).
+    /// Los ids desconocidos (stale) devuelven 0 sin paniquear.
+    pub fn layer_of(&self, id: ObjectId) -> u32 {
+        self.layers.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Vista prestada de la tabla de capas (para validación y serialización).
+    pub fn layers(&self) -> &BTreeMap<ObjectId, u32> {
+        &self.layers
+    }
+
+    /// Asigna un objeto existente a una capa `0..=255` (Q2).
+    /// Error honesto si el objeto no existe o la capa excede el máximo.
+    pub fn set_layer(&mut self, id: ObjectId, layer: u32) -> Result<(), String> {
+        if !self.objects.contains_key(&id) {
+            return Err(format!("capa: objeto {id} no encontrado"));
+        }
+        if layer > crate::symbolic::exchange::MAX_LAYERS {
+            return Err(format!(
+                "capa {layer} excede el máximo {}",
+                crate::symbolic::exchange::MAX_LAYERS
+            ));
+        }
+        self.bump_version();
+        self.spatial_dirty = true;
+        if layer == 0 {
+            self.layers.remove(&id);
+        } else {
+            self.layers.insert(id, layer);
+        }
+        Ok(())
+    }
+
+    /// Asigna con clamp honesto (Q2): capas >255 caen a 255 y se avisa.
+    /// Devuelve la capa aplicada. Error si el objeto no existe o `layer` < 0.
+    pub fn set_layer_clamped(&mut self, id: ObjectId, layer: i64) -> Result<(u32, bool), String> {
+        if !self.objects.contains_key(&id) {
+            return Err(format!("capa: objeto {id} no encontrado"));
+        }
+        if layer < 0 {
+            return Err(format!("capa {layer} inválida: usa un entero 0..=255"));
+        }
+        let max = i64::from(crate::symbolic::exchange::MAX_LAYERS);
+        let clamped = layer > max;
+        let applied = if clamped {
+            crate::symbolic::exchange::MAX_LAYERS
+        } else {
+            layer as u32
+        };
+        self.set_layer(id, applied)?;
+        Ok((applied, clamped))
+    }
+
+    /// Descarta asignaciones a objetos que ya no existen (documentos viejos
+    /// o borrados en cascada). La piel la llama al dibujar para acotar memoria.
+    pub fn prune_layers(&mut self) {
+        self.layers.retain(|id, _| self.objects.contains_key(id));
+        self.layers
+            .retain(|_, layer| *layer <= crate::symbolic::exchange::MAX_LAYERS);
+    }
+
+    /// Capas no vacías `(capa, cantidad)` en orden ascendente, en una sola
+    /// pasada. La piel la usa para listar sin escanear 256 capas.
+    pub fn used_layers(&self) -> Vec<(u32, usize)> {
+        let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+        for (id, _) in self.objects.iter() {
+            *counts.entry(self.layer_of(*id)).or_default() += 1;
+        }
+        counts.into_iter().collect()
+    }
+
+    /// Visibilidad conjunta de una capa: `true` si todos sus objetos están
+    /// visibles (vacía = `true` por vacuidad; la piel solo la llama con
+    /// capas de [`Self::used_layers`]).
+    pub fn is_layer_visible(&self, layer: u32) -> bool {
+        self.objects
+            .iter()
+            .filter(|(id, _)| self.layer_of(**id) == layer)
+            .all(|(_, object)| object.is_visible())
+    }
+
+    /// Aplica visibilidad a toda la capa; devuelve cuántos objetos tocó.
+    /// La piel lo envuelve en snapshot de undo.
+    pub fn set_layer_visible(&mut self, layer: u32, visible: bool) -> usize {
+        let ids: Vec<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|(id, _)| self.layer_of(**id) == layer)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut touched = 0;
+        for id in ids {
+            if let Some(object) = self.get_object_mut(id) {
+                object.set_visible(visible);
+                touched += 1;
+            }
+        }
+        touched
+    }
+
+    /// Fija la capa devolviendo el documento anterior sólo tras un commit
+    /// exitoso (mismo patrón que [`Self::try_replace_object_with_previous`]:
+    /// staging + validación + reemplazo; la piel lo usa para no mutar el
+    /// documento fuera del pipeline validado). `Ok(None)` = sin cambio.
+    pub fn try_set_layer_with_previous(
+        &mut self,
+        id: ObjectId,
+        layer: u32,
+    ) -> Result<Option<Self>, String> {
+        if !self.objects.contains_key(&id) {
+            return Err(format!("capa: objeto {id} no encontrado"));
+        }
+        if layer > crate::symbolic::exchange::MAX_LAYERS {
+            return Err(format!(
+                "capa {layer} excede el máximo {}",
+                crate::symbolic::exchange::MAX_LAYERS
+            ));
+        }
+        if self.layer_of(id) == layer {
+            return Ok(None);
+        }
+        let mut staged = self.detached_clone_for_staging();
+        staged.set_layer(id, layer)?;
+        crate::validation::validate_document(&staged)?;
+        staged.version = self.version.wrapping_add(1);
+        staged.spatial_dirty = true;
+        Ok(Some(std::mem::replace(self, staged)))
+    }
+
     /// Returns every exact label match in stable object-ID order. Legacy files
     /// may contain duplicates even though new insertions reject them.
     pub fn object_ids_by_label(&self, label: &str) -> Vec<ObjectId> {
@@ -4419,6 +4559,7 @@ impl Document {
         self.spatial_dirty = true;
         self.constraints = ConstraintGraph::new();
         self.last_solution.clear();
+        self.layers.clear();
     }
 
     pub fn resolve_expr(&self, expr: &Option<String>, fallback: f64) -> f64 {
@@ -5780,6 +5921,12 @@ impl Document {
         Ok(staged)
     }
 
+    /// Escritura sin validar, solo para tests (simula JSON editado a mano).
+    #[cfg(test)]
+    pub(crate) fn layers_mut_for_test(&mut self, id: ObjectId, layer: u32) {
+        self.layers.insert(id, layer);
+    }
+
     /// Helper análogo a FillColumn pero por fila: rellena `row` en columnas [start_col..=end_col].
     pub fn stage_fill_row(
         &self,
@@ -6752,6 +6899,7 @@ fn conic_from_five_points(points: &[Point2]) -> Option<GeoObject> {
                 visible: true,
                 width: 2.0,
                 fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)),
+                line_style: crate::LineStyle::default(),
             }));
         }
     } else if discriminant > 1e-12 {
@@ -6782,6 +6930,7 @@ fn conic_from_five_points(points: &[Point2]) -> Option<GeoObject> {
                 color: Color::RED,
                 visible: true,
                 width: 2.0,
+                line_style: crate::LineStyle::default(),
             }));
         }
     }
@@ -7846,5 +7995,121 @@ mod live_param_tests {
         assert!(doc
             .set_spreadsheet_cell(0, Document::MAX_SPREADSHEET_COLS, "1".to_string())
             .is_err());
+    }
+
+    #[test]
+    fn q2_try_set_layer_with_previous_commits_staged_and_reports_noop() {
+        let mut doc = Document::new();
+        let id = doc.add_object(GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(0.0, 0.0),
+        )));
+        let version = doc.version;
+        // Sin cambio → None sin versionar.
+        assert!(doc
+            .try_set_layer_with_previous(id, 0)
+            .expect("no-op ok")
+            .is_none());
+        assert_eq!(doc.version, version);
+        // Cambio → Some(before) con la capa vieja y versión +1.
+        let before = doc
+            .try_set_layer_with_previous(id, 4)
+            .expect("cambio ok")
+            .expect("previo");
+        assert_eq!(before.layer_of(id), 0);
+        assert_eq!(doc.layer_of(id), 4);
+        assert_eq!(doc.version, version.wrapping_add(1));
+        // Errores honestos sin mutar.
+        assert!(doc.try_set_layer_with_previous(id, 256).is_err());
+        assert!(doc
+            .try_set_layer_with_previous(crate::ObjectId::new(), 1)
+            .is_err());
+        assert_eq!(doc.layer_of(id), 4);
+    }
+
+    // ── Q2: capas reales persistentes ─────────────────────────────────────
+
+    #[test]
+    fn q2_layer_default_is_zero_and_set_roundtrips() {
+        let mut doc = Document::new();
+        let id = doc.add_object(GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(0.0, 0.0),
+        )));
+        assert_eq!(doc.layer_of(id), 0);
+        doc.set_layer(id, 3).expect("capa válida");
+        assert_eq!(doc.layer_of(id), 3);
+        // Capa 0 no se almacena (documento flaco); volver a 0 limpia.
+        doc.set_layer(id, 0).expect("capa 0");
+        assert_eq!(doc.layer_of(id), 0);
+        assert!(doc.layers().is_empty());
+    }
+
+    #[test]
+    fn q2_layer_rejects_missing_object_and_overflow() {
+        let mut doc = Document::new();
+        let missing = crate::ObjectId::new();
+        assert!(doc.set_layer(missing, 1).is_err());
+        assert!(doc.set_layer_clamped(missing, 1).is_err());
+        let id = doc.add_object(GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(0.0, 0.0),
+        )));
+        assert!(doc.set_layer(id, 256).is_err());
+        assert!(doc.set_layer_clamped(id, -1).is_err());
+        // Clamp honesto: 300 → 255 avisando.
+        let (applied, clamped) = doc.set_layer_clamped(id, 300).expect("clamp");
+        assert_eq!(applied, 255);
+        assert!(clamped);
+        assert_eq!(doc.layer_of(id), 255);
+        let (applied, clamped) = doc.set_layer_clamped(id, 7).expect("exacta");
+        assert_eq!((applied, clamped), (7, false));
+    }
+
+    #[test]
+    fn q2_layer_prune_and_remove_keep_table_bounded() {
+        let mut doc = Document::new();
+        let a = doc.add_object(GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(0.0, 0.0),
+        )));
+        let b = doc.add_object(GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(1.0, 1.0),
+        )));
+        doc.set_layer(a, 2).expect("capa");
+        doc.set_layer(b, 2).expect("capa");
+        assert_eq!(doc.used_layers(), vec![(2, 2)]);
+        doc.remove_object(a);
+        assert_eq!(doc.layer_of(a), 0);
+        assert_eq!(doc.used_layers(), vec![(2, 1)]);
+        doc.clear();
+        assert!(doc.layers().is_empty());
+        assert_eq!(doc.used_layers(), vec![]);
+    }
+
+    #[test]
+    fn q2_layers_persist_through_serde_and_legacy_defaults_to_zero() {
+        let mut doc = Document::new();
+        let id = doc.add_object(GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(0.0, 0.0),
+        )));
+        doc.set_layer(id, 5).expect("capa");
+        let json = serde_json::to_string(&doc).expect("serializa");
+        assert!(json.contains("\"layers\""), "layers persiste en JSON");
+        let back: Document = serde_json::from_str(&json).expect("deserializa");
+        assert_eq!(back.layer_of(id), 5);
+        // JSON viejo sin `layers` → todo en capa 0 (orden histórico).
+        let legacy = json.replace("\"layers\"", "\"layers_legacy_ignored\"");
+        let legacy_doc: Document = serde_json::from_str(&legacy).expect("migra");
+        assert_eq!(legacy_doc.layer_of(id), 0);
+    }
+
+    #[test]
+    fn q2_validation_rejects_layer_overflow_from_hand_edited_json() {
+        let mut doc = Document::new();
+        let id = doc.add_object(GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(0.0, 0.0),
+        )));
+        doc.set_layer(id, 9).expect("capa");
+        crate::validation::validate_document(&doc).expect("documento válido");
+        let mut hacked = doc.clone();
+        hacked.layers_mut_for_test(id, 999);
+        assert!(crate::validation::validate_document(&hacked).is_err());
     }
 }

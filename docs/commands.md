@@ -438,6 +438,9 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `SetCoords[objeto, coords]`: Mueve un punto libre a nuevas coordenadas y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
 - `SetVisible[objeto, visible]`: Cambia la visibilidad de un objeto (true/false) y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
 - `SetCaption[objeto, rotulo]`: Pone el rótulo visible del objeto (caption = etiqueta mostrada en álgebra y canvas). Mutacion: transforma objetos. Riesgo: bajo. Alias: `poner_rotulo`.
+- `SetLineStyle[objeto, estilo]`: Cambia el trazo de un objeto con línea (solid/dashed/dotted) y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo. Alias: `estilo_linea`.
+- `SetPointStyle[objeto, estilo]`: Cambia la forma del marcador de un punto (dot/circle/cross/plus) y la refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo. Alias: `estilo_punto`.
+- `SetLayer[objeto, capa]`: Mueve un objeto a una capa de dibujo 0..=255 (0 = fondo; >255 cae a 255 avisando). Mutacion: transforma objetos. Riesgo: bajo. Alias: `poner_capa`.
 ## 3D
 
 - `Surface[objeto]`: Muestra el área exacta de un sólido 3D del documento. Mutacion: solo consulta. Riesgo: bajo.

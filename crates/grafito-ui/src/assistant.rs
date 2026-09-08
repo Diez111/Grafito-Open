@@ -449,6 +449,8 @@ const MEDIA_TIP_FULLSCREEN: &str = "Ver grande. Esc para cerrar";
 const MEDIA_TIP_EXPORT: &str = "Guarda la animación como GIF";
 const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual";
 const MEDIA_TIP_PLAY: &str = "Retoma donde quedó";
+const MEDIA_TIP_REPEAT: &str = "Vuelve al inicio y sigue reproduciendo";
+const MEDIA_TIP_SEQUENCE: &str = "Ejecuta los pasos en orden, con pausas";
 
 /// Velocidad del reproductor de la card (B5).
 ///
@@ -701,6 +703,13 @@ pub struct AssistantPanelState {
     /// Exportación a GIF de la card (la app la actualiza desde el hilo de
     /// export; la UI solo la renderiza, cero I/O/spawn en `Ui::`).
     media_export: MediaExportState,
+    /// Q4: pasos de la playlist que originó la media (`None` = animación
+    /// simple). La app la estagia al lanzar el job (`stage_media_playlist`)
+    /// y la limpia en single / turno sin animación. Solo flag de conteo:
+    /// la playlist completa vive en el runtime de la app (transporte
+    /// existente); la Piel solo decide si mostrar "Reproducir secuencia".
+    /// Cero I/O/spawn en `Ui::`.
+    media_playlist_len: Option<usize>,
     /// Confirmación del usuario de que el modelo elegido admite imágenes.
     pub vision_enabled: bool,
     /// Autoriza explícitamente una revisión con el modelo de razonamiento
@@ -808,6 +817,7 @@ impl Default for AssistantPanelState {
             media_last_shown: std::cell::Cell::new(None),
             media_fullscreen: std::cell::Cell::new(false),
             media_export: MediaExportState::default(),
+            media_playlist_len: None,
             anim_progress: false,
             tutor_level: 0,
             tutor_covered: 0,
@@ -909,6 +919,8 @@ impl AssistantPanelState {
         self.cancel_remote_authorization();
         self.clear_proposed_plan();
         self.clear_pending_clarification();
+        // Q4: sin turnos no hay secuencia que reproducir (sin replay rancio).
+        self.clear_media_playlist();
         self.error = None;
     }
 
@@ -1461,6 +1473,62 @@ impl AssistantPanelState {
     /// hilo de export; la UI nunca lo toca).
     pub fn set_media_export(&mut self, state: MediaExportState) {
         self.media_export = state;
+    }
+
+    /// Q4: estagia que la media en curso es una playlist de `len` pasos.
+    ///
+    /// La app la llama al lanzar `run_assistant_playlist_with`; la Piel
+    /// solo guarda el conteo para mostrar "Reproducir secuencia". Puro,
+    /// sin I/O. `0` se ignora (honesto: sin pasos no hay secuencia).
+    pub fn stage_media_playlist(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        // Tope grueso del protocolo (8): más allá se clampe honestamente
+        // al mostrar, pero se guarda el real para el label.
+        self.media_playlist_len = Some(len);
+    }
+
+    /// Q4: la media vuelve a ser simple (single). La app la llama al lanzar
+    /// animación simple y en turnos sin animación.
+    pub fn clear_media_playlist(&mut self) {
+        self.media_playlist_len = None;
+    }
+
+    /// Q4: ¿la media actual viene de una playlist? Puro.
+    pub fn media_is_playlist(&self) -> bool {
+        self.media_playlist_len.is_some_and(|len| len > 0)
+    }
+
+    /// Q4: conteo de pasos para el label (None = simple). Puro.
+    pub fn media_playlist_len(&self) -> Option<usize> {
+        self.media_playlist_len
+    }
+
+    /// Q4: etiqueta del botón de secuencia ("Reproducir secuencia (N pasos)").
+    /// `None` si no hay playlist. Pura, testeable headless.
+    pub fn playlist_sequence_label(&self) -> Option<String> {
+        let len = self.media_playlist_len?;
+        if len == 0 {
+            return None;
+        }
+        Some(format!("Reproducir secuencia ({len} pasos)"))
+    }
+
+    /// Q4: "Repetir" = loop honesto con el player existente.
+    ///
+    /// Vuelve el playhead a 0 y retoma la reproducción (sin re-generar,
+    /// sin I/O/spawn: solo `Cell`s locales). Devuelve `true` si había
+    /// media para repetir, `false` si no había nada (el llamante explica,
+    /// jamás mudo). Puro estado UI.
+    pub fn repeat_media(&self) -> bool {
+        if self.media.is_none() {
+            return false;
+        }
+        self.media_playhead_ms.set(0);
+        self.media_last_shown.set(None);
+        self.media_paused.set(false);
+        true
     }
 
     /// Avanza el reloj del reproductor y devuelve el índice a mostrar (B5).
@@ -2343,190 +2411,8 @@ fn flush_assistant_paragraph(
     paragraph.clear();
 }
 
-/// Nombre humano en español para un identificador literal de control.
-///
-/// El modelo a veces escribe nombres técnicos en la prosa (`PlayPause`).
-/// Esta tabla sólo contiene controles que existen de verdad (`Tool::name`,
-/// `Icon::Play`/`Pause`): `PlayPause` no existe como control, así que su
-/// texto dice cómo llegar (la animación del chat se reproduce sola).
-/// Puro (`&str -> Option`), sin I/O.
-pub fn humanize_control_name(id: &str) -> Option<&'static str> {
-    match id {
-        "PlayPause" => Some("reproducción — la animación del chat se reproduce sola, sin botón"),
-        "Play" => Some("reproducir"),
-        "Pause" => Some("pausar"),
-        "Slider" => Some("deslizador"),
-        "Button" => Some("botón"),
-        "Eraser" => Some("borrador"),
-        "Pencil" => Some("lápiz"),
-        "Select" => Some("selección"),
-        "Tangent" => Some("tangente"),
-        "Perpendicular" => Some("perpendicular"),
-        "Parallel" => Some("paralela"),
-        "Midpoint" => Some("punto medio"),
-        "Distance" => Some("distancia"),
-        "Angle" => Some("ángulo"),
-        "Area" => Some("área"),
-        "Function" => Some("función"),
-        "Polygon" => Some("polígono"),
-        "Circle" => Some("círculo"),
-        "Line" => Some("recta"),
-        "Point" => Some("punto"),
-        "Vector" => Some("vector"),
-        "Segment" => Some("segmento"),
-        "Ray" => Some("semirrecta"),
-        _ => None,
-    }
-}
-
-/// Reemplaza identificadores literales de controles en prosa por su nombre
-/// humano. Orden longest-first (`PlayPause` antes que `Play`/`Pause`) y
-/// reemplazos en minúsculas para no re-matchear. Puro, conserva UTF-8.
-/// Además absorbe el sufijo GeoGebra `Id[param]` (ej. `Button[a]`): el
-/// modelo a veces filtra `Button` dejando `[a]` suelto ("sin botón[a]");
-/// la prosa final jamás tiene corchetes (D2): queda "sin botón".
-pub fn humanize_prose_text(text: &str) -> String {
-    const KNOWN_IDS: &[&str] = &[
-        "PlayPause",
-        "Perpendicular",
-        "Parallel",
-        "Midpoint",
-        "Distance",
-        "Tangent",
-        "Slider",
-        "Button",
-        "Eraser",
-        "Pencil",
-        "Select",
-        "Angle",
-        "Function",
-        "Polygon",
-        "Circle",
-        "Segment",
-        "Vector",
-        "Pause",
-        "Area",
-        "Line",
-        "Point",
-        "Play",
-        "Ray",
-    ];
-    let mut out = text.to_owned();
-    for id in KNOWN_IDS {
-        if out.contains(id) {
-            if let Some(human) = humanize_control_name(id) {
-                out = replace_control_with_optional_param(&out, id, human);
-            }
-        }
-    }
-    // N2: el modelo generaliza la sintaxis `Id[param]` del system prompt a la
-    // palabra ya humana (`botón[a]` en vez de `Button[a]`): el pase D2 no la
-    // ve porque busca `Button` exacto. Este barre la variante humana en
-    // cualquier caja, con/sin tilde, y absorbe `[param]`.
-    out = replace_human_button_params(&out);
-    out
-}
-
-/// N2: reemplaza `botón`/`boton`/`button` en cualquier caja seguidos de un
-/// opcional `[param]` por `botón`, sin dejar corchetes.
-///
-/// Cubre lo que el pase D2 (`Button` exacto) no ve: el modelo escribe la
-/// palabra ya humana con sufijo GeoGebra (`botón[a]`, `BOTÓN[A]`, `boton[a]`).
-/// Frontera honesta: si tras la raíz viene letra (`botones`) no toca nada.
-/// Puro, UTF-8 seguro (chars, jamás índices byte), sin `unwrap`.
-fn replace_human_button_params(text: &str) -> String {
-    const MAX_PARAM_LEN: usize = 64;
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if let Some(stem) = match_button_stem(&chars[i..]) {
-            let mut j = i + stem;
-            if chars.get(j) == Some(&'[') {
-                let mut k = j + 1;
-                let mut seen = 0;
-                while k < chars.len() && chars[k] != ']' && seen <= MAX_PARAM_LEN {
-                    k += 1;
-                    seen += 1;
-                }
-                if k < chars.len() && chars[k] == ']' {
-                    j = k + 1;
-                }
-            }
-            out.push_str("botón");
-            i = j;
-        } else {
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
-    out
-}
-
-/// Raíz `boton`/`botón`/`button` case-insensitive (ASCII + Ó/ó) al inicio del
-/// slice. Devuelve chars consumidos o `None`. Exige frontera no-letra detrás
-/// para no romper `botones`. Pura, sin `unwrap`.
-fn match_button_stem(chunk: &[char]) -> Option<usize> {
-    let lower_at =
-        |pos: usize| -> Option<char> { chunk.get(pos).and_then(|c| c.to_lowercase().next()) };
-    let is_boton = lower_at(0) == Some('b')
-        && lower_at(1) == Some('o')
-        && lower_at(2) == Some('t')
-        && matches!(
-            (lower_at(3), lower_at(4)),
-            (Some('o'), Some('n')) | (Some('ó'), Some('n'))
-        );
-    let is_button = lower_at(0) == Some('b')
-        && lower_at(1) == Some('u')
-        && lower_at(2) == Some('t')
-        && lower_at(3) == Some('t')
-        && lower_at(4) == Some('o')
-        && lower_at(5) == Some('n');
-    let stem = if is_boton {
-        5
-    } else if is_button {
-        6
-    } else {
-        return None;
-    };
-    let boundary_ok = chunk.get(stem).is_none_or(|c| !c.is_alphabetic());
-    boundary_ok.then_some(stem)
-}
-
-/// Reemplaza `id` y `id[lo que sea]` por `human` sin dejar corchetes.
-///
-/// Recorre por bytes con fronteras char (nunca corta scalars): si tras el
-/// `id` viene `[`, absorbe hasta el `]` de cierre (acotado a 64 chars para
-/// no comerse párrafos si falta el cierre). Pura, sin panic ni `unwrap`.
-fn replace_control_with_optional_param(haystack: &str, id: &str, human: &str) -> String {
-    const MAX_PARAM_LEN: usize = 64;
-    let mut out = String::with_capacity(haystack.len());
-    let mut rest = haystack;
-    while let Some(pos) = rest.find(id) {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos + id.len()..];
-        if let Some(stripped) = after.strip_prefix('[') {
-            // Busca `]` de cierre en los próximos 64 chars (límite honesto).
-            let window_len: usize = stripped
-                .char_indices()
-                .take_while(|(offset, _)| *offset <= MAX_PARAM_LEN)
-                .last()
-                .map(|(offset, ch)| offset + ch.len_utf8())
-                .unwrap_or(0);
-            let window = &stripped[..window_len.min(stripped.len())];
-            if let Some(close) = window.find(']') {
-                out.push_str(human);
-                rest = &stripped[close + 1..];
-                continue;
-            }
-            // Sin cierre: deja el `[` como texto y sigue (jamás panic).
-        }
-        out.push_str(human);
-        rest = after;
-    }
-    out.push_str(rest);
-    out
-}
+/// Q3: fuente única en `crate::prosa` — re-export para no romper call-sites.
+pub use crate::prosa::{humanize_control_name, humanize_prose_text};
 
 /// Tamaño del preview inline de la card (D2, puro y testeable).
 ///
@@ -2730,6 +2616,14 @@ pub enum AssistantUiAction {
     /// de export existente (`spawn_gif_export`) y publica progreso/error en
     /// `MediaExportState`. Sin I/O ni spawn en `Ui::`.
     ExportMedia,
+    /// Q4: re-ejecutar la secuencia (playlist Group/Wait) en orden con el
+    /// transporte existente (`run_assistant_playlist_with`).
+    ///
+    /// Piel pura: la card emite la intención solo cuando
+    /// `media_is_playlist()`; la app re-encola la playlist guardada en su
+    /// runtime (seam mínimo, sin refactorear el agente). Sin I/O ni spawn
+    /// en `Ui::`.
+    ReplayPlaylist,
     /// Preguntarle al tutor qué estudiar a continuación.
     AskNextTopic,
     /// Feedback del usuario: la última explicación le sirvió.
@@ -5332,6 +5226,39 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 // grande empujaba este último control fuera del panel ~340px
                 // y quedaba cortado en el borde. Con wrap por tokens jamás
                 // queda medio afuera: baja de fila antes de cortarse.
+                // Q4: "Repetir" = loop honesto con el player existente
+                // (playhead a 0 + retoma; sin re-generar, sin I/O/spawn).
+                if ui
+                    .small_button("↺ Repetir")
+                    .on_hover_text(MEDIA_TIP_REPEAT)
+                    .clicked()
+                {
+                    state.repeat_media();
+                }
+                // Q4: "Reproducir secuencia" solo si el turno trae playlist
+                // (Group/Wait con espera). Ejecuta en orden con el transporte
+                // existente vía `ReplayPlaylist`; la app re-encola la guardada
+                // en su runtime (seam mínimo, sin refactorear el agente).
+                // Nada mudo: sin playlist no se muestra; en curso se
+                // deshabilita con motivo.
+                if let Some(seq_label) = state.playlist_sequence_label() {
+                    let busy = state.anim_progress;
+                    let seq_response = ui.add_enabled(
+                        frame_count > 0 && !busy,
+                        egui::Button::new(seq_label).small(),
+                    );
+                    if seq_response.clicked() {
+                        action = Some(AssistantUiAction::ReplayPlaylist);
+                    }
+                    if frame_count == 0 {
+                        seq_response
+                            .on_disabled_hover_text("Todavía no hay fotogramas de la secuencia.");
+                    } else if busy {
+                        seq_response.on_disabled_hover_text("Ya se está generando la secuencia…");
+                    } else {
+                        seq_response.on_hover_text(MEDIA_TIP_SEQUENCE);
+                    }
+                }
                 let exporting = matches!(state.media_export, MediaExportState::Exporting);
                 let export_response = ui.add_enabled(
                     frame_count > 0 && !exporting,
@@ -10283,6 +10210,56 @@ mod tests {
     }
 
     #[test]
+    fn q4_repetir_resetea_playhead_y_retoma_sin_io() {
+        // Q4: "Repetir" = loop honesto con el player existente (sin
+        // re-generar, sin I/O/spawn). Sin media → false (el llamante
+        // explica, jamás mudo).
+        let context = egui::Context::default();
+        let state = AssistantPanelState::default();
+        assert!(!state.repeat_media(), "sin media no hay qué repetir");
+        let mut state = AssistantPanelState::default();
+        let frame = egui::ColorImage::new([2, 2], egui::Color32::WHITE);
+        state.set_media(
+            Some(AssistantMedia {
+                title: "una".into(),
+                frames: vec![frame],
+            }),
+            &context,
+        );
+        state.media_paused.set(true);
+        state.media_playhead_ms.set(1234);
+        assert!(state.repeat_media());
+        assert_eq!(state.media_playhead_ms.get(), 0);
+        assert!(!state.media_paused.get());
+        assert!(!state.media_is_playlist());
+        assert!(state.playlist_sequence_label().is_none());
+    }
+
+    #[test]
+    fn q4_playlist_estagia_flag_y_label_sin_io() {
+        // Q4: la playlist llega a la card como flag de conteo (la completa
+        // vive en el runtime de la app). `stage`/`clear` puros, headless.
+        let mut state = AssistantPanelState::default();
+        assert!(!state.media_is_playlist());
+        state.stage_media_playlist(0);
+        assert!(!state.media_is_playlist(), "0 pasos se ignora");
+        state.stage_media_playlist(2);
+        assert!(state.media_is_playlist());
+        assert_eq!(state.media_playlist_len(), Some(2));
+        assert_eq!(
+            state.playlist_sequence_label().as_deref(),
+            Some("Reproducir secuencia (2 pasos)")
+        );
+        state.clear_media_playlist();
+        assert!(!state.media_is_playlist());
+        assert!(state.playlist_sequence_label().is_none());
+        // Limpiar conversación también limpia la secuencia (sin replay rancio).
+        state.stage_media_playlist(3);
+        state.clear_conversation();
+        assert!(!state.media_is_playlist());
+    }
+
+    #[test]
     fn full_permission_defaults_to_automatic_remote_answers() {
         let state = AssistantPanelState::default();
         assert!(state.full_permission);
@@ -10972,83 +10949,6 @@ mod tests {
         let (number, text) = parse_ordered_list_item("12. Doceavo paso").expect("debe parsear");
         assert_eq!(number, 12);
         assert_eq!(text, "Doceavo paso");
-    }
-
-    #[test]
-    fn humanize_control_name_maps_existing_controls() {
-        // Bug 3: el modelo escribe `PlayPause` en la prosa.
-        assert_eq!(
-            humanize_control_name("PlayPause"),
-            Some("reproducción — la animación del chat se reproduce sola, sin botón")
-        );
-        assert_eq!(humanize_control_name("Slider"), Some("deslizador"));
-        assert_eq!(humanize_control_name("NoExiste"), None);
-    }
-
-    #[test]
-    fn humanize_prose_text_replaces_ids_without_breaking_utf8() {
-        // Ejemplo del screenshot: prosa con id crudo + tildes/emoji.
-        let human = humanize_prose_text("Usá el control de reproducción PlayPause ⏯️ para ver");
-        assert!(!human.contains("PlayPause"), "quedó crudo: {human}");
-        assert!(human.contains("reproducción"), "falta humano: {human}");
-        assert!(human.contains("⏯️"), "se rompió multibyte: {human}");
-        // Ids encadenados: longest-first, sin re-matcheo.
-        let both = humanize_prose_text("PlayPause y Play");
-        assert!(!both.contains("PlayPause"));
-        assert!(both.contains("reproducir"));
-    }
-
-    #[test]
-    fn humanize_prose_text_absorbe_parametro_sin_dejar_corchetes() {
-        // D2 bug del screenshot: "sin botón[a] sobre esa variable".
-        let human = humanize_prose_text("sin Button[a] sobre esa variable");
-        assert_eq!(human, "sin botón sobre esa variable", "prosa rota: {human}");
-        assert!(!human.contains('['), "quedó corchete: {human}");
-        assert!(!human.contains(']'), "quedó corchete: {human}");
-        assert!(!human.contains("Button"), "quedó crudo: {human}");
-        // Otros controles con parámetro GeoGebra también se absorben.
-        let play = humanize_prose_text("tocá PlayPause[a] para ver");
-        assert!(!play.contains('['), "quedó corchete: {play}");
-        assert!(!play.contains("PlayPause"), "quedó crudo: {play}");
-        let slider = humanize_prose_text("mové Slider[p, 0, 1] suave");
-        assert!(!slider.contains('['), "quedó corchete: {slider}");
-        assert!(slider.contains("deslizador"), "falta humano: {slider}");
-        // Sin cierre: jamás panic, jamás corchete inventado de más.
-        let broken = humanize_prose_text("sin Button[a sobre esa variable");
-        assert!(!broken.contains("Button"), "quedó crudo: {broken}");
-    }
-
-    #[test]
-    fn humanize_boton_humano_con_parametro_en_cualquier_caja() {
-        // N2: el instalado D2 cubría `Button[a]` pero el modelo escribe la
-        // palabra ya humana (`botón[a]`): seguía visible en la prosa.
-        for raw in [
-            "sin botón[a] sobre esa variable",
-            "sin Button[a] sobre esa variable",
-            "sin boton[a] sobre esa variable",
-            "sin BOTÓN[A] sobre esa variable",
-            "sin button[A] sobre esa variable",
-            "sin Boton[a] sobre esa variable",
-        ] {
-            let human = humanize_prose_text(raw);
-            assert_eq!(
-                human, "sin botón sobre esa variable",
-                "prosa rota: {raw} → {human}"
-            );
-            assert!(!human.contains('['), "quedó corchete: {human}");
-            assert!(!human.contains(']'), "quedó corchete: {human}");
-        }
-        // Sin parámetro también se normaliza la caja a `botón`.
-        assert_eq!(
-            humanize_prose_text("tocá Button para ver"),
-            "tocá botón para ver"
-        );
-        // Frontera honesta: el plural `botones` no se toca.
-        let plural = humanize_prose_text("hay 2 o 3 botones para elegir");
-        assert!(plural.contains("botones"), "rompió el plural: {plural}");
-        // Sin cierre: jamás panic.
-        let broken = humanize_prose_text("sin botón[a sobre esa variable");
-        assert!(broken.contains("botón"), "perdió la palabra: {broken}");
     }
 
     #[test]

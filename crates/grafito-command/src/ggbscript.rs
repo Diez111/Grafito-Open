@@ -330,12 +330,13 @@ pub fn check_script_allowlist(script: &str) -> Result<Vec<String>, String> {
             .iter()
             .any(|name| name.eq_ignore_ascii_case(canonical));
         if !allowed {
-            // P1b: `Group`/`Wait` no pasan silenciosos — error honesto "aún
-            // sin UI" con alternativa (nada aceptado-y-mudo). El resto sigue
-            // con el genérico fuera-del-subset.
+            // Q4: `Group`/`Wait` no pasan silenciosos — error honesto con
+            // alternativa en la card (P2 ya vive: "Repetir" + "Reproducir
+            // secuencia" ejecutan en orden con el transporte existente).
+            // El resto sigue con el genérico fuera-del-subset.
             if canonical.eq_ignore_ascii_case("Group") || canonical.eq_ignore_ascii_case("Wait") {
                 return Err(format!(
-                    "paso '{step}' usa '{canonical}', aún sin UI: la playlist con espera vive en la card de animación (P2); hoy usá Repeat/PlayPause como alternativa"
+                    "paso '{step}' usa '{canonical}': la secuencia con espera vive en la card de animación; usá «Repetir» o «Reproducir secuencia» ahí (o Repeat/PlayPause como alternativa)"
                 ));
             }
             return Err(format!(
@@ -1702,8 +1703,9 @@ mod tests {
 
     #[test]
     fn group_y_wait_fallan_honesto_aun_sin_ui() {
-        // P1b: nada aceptado-y-mudo — `Group`/`Wait` devuelven "aún sin UI"
-        // con alternativa, jamás silencio ni ejecución parcial.
+        // Q4: nada aceptado-y-mudo — `Group`/`Wait` devuelven error honesto
+        // con alternativa en la card ("Repetir" / "Reproducir secuencia"),
+        // jamás silencio ni ejecución parcial.
         for cmd in [
             "Group[Show[A]]",
             "Wait[1000]",
@@ -1712,11 +1714,13 @@ mod tests {
         ] {
             let err = check_script_allowlist(cmd).expect_err("debe rechazar");
             assert!(
-                err.contains("aún sin UI"),
-                "{cmd} debe avisar sin-UI, fue: {err}"
+                err.contains("card de animación"),
+                "{cmd} debe apuntar a la card, fue: {err}"
             );
             assert!(
-                err.contains("Repeat") || err.contains("PlayPause"),
+                err.contains("Repetir")
+                    || err.contains("Reproducir secuencia")
+                    || err.contains("Repeat"),
                 "{cmd} debe sugerir alternativa, fue: {err}"
             );
         }

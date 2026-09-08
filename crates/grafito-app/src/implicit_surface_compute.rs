@@ -34,6 +34,50 @@ pub type ImplicitField = Arc<dyn Fn(f64, f64, f64) -> Option<f64> + Send + Sync 
 /// Celdas por eje por defecto (igual que `ImplicitSurface` sin `res`).
 pub const IMPLICIT_SURFACE_DEFAULT_CELLS: usize = 16;
 
+/// Q4: tope del grueso de vista previa (`min(cells,12)` en
+/// `maybe_submit_implicit_slot`). Más allá la superficie se considera de
+/// "cells altas" y el Inspector ofrece "Vista previa rápida".
+pub const IMPLICIT_QUICK_PREVIEW_CELLS: usize = 12;
+
+/// Q4: ¿la superficie pide vista previa rápida? (`cells` altas).
+///
+/// Pura, testeable headless: `true` si `cells` excede el grueso del slot.
+/// El Inspector la usa para mostrar el botón sin adivinar umbrales.
+pub fn should_offer_quick_preview(cells: usize) -> bool {
+    cells > IMPLICIT_QUICK_PREVIEW_CELLS
+}
+
+/// Q4: estado legible del slot para el Inspector (rioplatense, jamás mudo).
+///
+/// Pura, testeable headless. `tri_count` = triángulos del `last_valid` si
+/// lo hay. El overlay progresivo vive en `render_3d.rs` (dibuja ese
+/// `last_valid` mientras hay `Pending`); acá solo el texto.
+pub fn implicit_preview_status(
+    has_pending: bool,
+    has_valid: bool,
+    pending_cells: usize,
+    tri_count: Option<usize>,
+) -> &'static str {
+    match (has_pending, has_valid) {
+        (true, true) => {
+            let _ = pending_cells;
+            let _ = tri_count;
+            "Refinando… mostrando vista previa"
+        }
+        (true, false) => {
+            let _ = tri_count;
+            let _ = pending_cells;
+            "Generando vista previa…"
+        }
+        (false, true) => {
+            let _ = pending_cells;
+            let _ = tri_count;
+            "Vista previa lista"
+        }
+        (false, false) => "Sin vista previa",
+    }
+}
+
 /// Pedido `owned` de superficie implícita, listo para cruzar al worker.
 #[derive(Clone)]
 pub struct ImplicitSurfaceRequest {
@@ -383,5 +427,30 @@ mod tests {
         );
         assert!(!slot.has_pending(), "sin job residual tras Ready");
         assert_eq!(slot.pending_cells(), 0, "sin celdas residuales tras Ready");
+    }
+
+    #[test]
+    fn q4_quick_preview_solo_cells_altas_y_status_nunca_mudo() {
+        // Q4: helpers puros del Inspector, headless.
+        assert!(!should_offer_quick_preview(8));
+        assert!(!should_offer_quick_preview(IMPLICIT_QUICK_PREVIEW_CELLS));
+        assert!(should_offer_quick_preview(IMPLICIT_QUICK_PREVIEW_CELLS + 1));
+        assert!(should_offer_quick_preview(32));
+        assert_eq!(
+            implicit_preview_status(false, false, 0, None),
+            "Sin vista previa"
+        );
+        assert_eq!(
+            implicit_preview_status(true, false, 12, None),
+            "Generando vista previa…"
+        );
+        assert_eq!(
+            implicit_preview_status(true, true, 12, Some(100)),
+            "Refinando… mostrando vista previa"
+        );
+        assert_eq!(
+            implicit_preview_status(false, true, 0, Some(100)),
+            "Vista previa lista"
+        );
     }
 }

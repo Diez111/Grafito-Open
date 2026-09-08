@@ -9,6 +9,7 @@ use grafito_geometry::{Color, Point2};
 use serde::{Deserialize, Serialize};
 
 use crate::id::ObjectId;
+use crate::object::LineStyle;
 
 /// Máxima cantidad de puntos que puede retener un trazo a mano alzada.
 pub const MAX_PENCIL_POINTS: usize = 8_192;
@@ -37,6 +38,8 @@ pub struct PencilObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub line_style: LineStyle,
     /// Ausente para un trazo libre; presente para una trayectoria geométrica
     /// que debe seguir actualizándose con el documento.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +57,7 @@ impl PencilObj {
             color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
+            line_style: LineStyle::default(),
             locus_binding: None,
         }
     }

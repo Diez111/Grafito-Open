@@ -456,6 +456,17 @@ pub fn validate_document(doc: &Document) -> Result<(), String> {
         }
     }
 
+    // Capas Q2: fail-closed ante JSON editado a mano (el único escritor
+    // válido es `Document::set_layer`, que ya acota a 0..=255).
+    for (id, layer) in doc.layers() {
+        if *layer > crate::symbolic::exchange::MAX_LAYERS {
+            return Err(format!(
+                "Layer {layer} for object {id} exceeds maximum {}",
+                crate::symbolic::exchange::MAX_LAYERS
+            ));
+        }
+    }
+
     // Check canonical topology before algorithm-specific semantics so a cycle
     // or duplicate creator cannot be masked by an unrelated algorithm name.
     doc.constraints

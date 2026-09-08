@@ -143,6 +143,32 @@ mod tests {
     }
 
     #[test]
+    fn document_layer_beats_type_layer_in_paint_order() {
+        // Q2: un punto (Marker) en capa 0 se pinta antes que una curva en
+        // capa 1 aunque el orden por tipo diga lo contrario; dentro de la
+        // misma capa vale el orden histórico (tipo, id).
+        let mut document = Document::new();
+        let curve = document.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+        )));
+        let marker = document.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+        document.set_layer(curve, 1).expect("capa válida");
+        let ordered: Vec<_> = crate::ordered_visible_2d_objects(&document)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ordered, vec![marker, curve]);
+        // Misma capa → orden histórico por tipo (curva antes que marcador).
+        document.set_layer(curve, 0).expect("capa 0");
+        let ordered: Vec<_> = crate::ordered_visible_2d_objects(&document)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ordered, vec![curve, marker]);
+    }
+
+    #[test]
     fn second_fractal_is_a_partial_scene_when_geometry_capacity_is_exhausted() {
         let mut fractal = Fractal2DObj::mandelbrot();
         fractal.resolution = 400;
