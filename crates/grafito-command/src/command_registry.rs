@@ -3913,6 +3913,493 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("Eliminate[polinomios, variables, eliminar]"; "polinomios": Expression required, "variables": ParameterList required, "eliminar": ParameterList required)
         ]
     ),
+    // Oleada 1 P2: solo S (aliases/wrappers de motor existente, cero math duplicada).
+    // Puros aliases vía dispatch_key al handler base (sin brazo nuevo en commands.rs).
+    CommandSpec {
+        dispatch_key: "FitLinear",
+        ..command!(
+            "statistics.fit-line",
+            "FitLine",
+            [],
+            "Estadística",
+            "Ajusta una recta a una tabla local (alias de FitLinear con RMSE y R²).",
+            CreatesObject,
+            Medium,
+            true,
+            "FitLine",
+            [signature!("FitLine[tabla]"; "tabla": Object required)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "FitLinear",
+        ..command!(
+            "statistics.fit-short",
+            "Fit",
+            [],
+            "Estadística",
+            "Ajusta una recta a una tabla local (alias corto de FitLinear).",
+            CreatesObject,
+            Medium,
+            true,
+            "Fit",
+            [signature!("Fit[tabla]"; "tabla": Object required)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "FitLinear",
+        ..command!(
+            "statistics.fit-line-x",
+            "FitLineX",
+            [],
+            "Estadística",
+            "Ajusta una recta a una tabla local (alias de FitLinear).",
+            CreatesObject,
+            Medium,
+            true,
+            "FitLineX",
+            [signature!("FitLineX[tabla]"; "tabla": Object required)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Integral",
+        ..command!(
+            "cas.integral-between",
+            "IntegralBetween",
+            [],
+            "CAS",
+            "Calcula una integral definida entre límites (alias de Integral).",
+            CreatesObject,
+            Medium,
+            true,
+            "IntegralBetween",
+            [
+                signature!("IntegralBetween[expr, a, b]"; "expr": Expression required, "a": Number required, "b": Number required),
+                signature!("IntegralBetween[expr, variable, a, b]"; "expr": Expression required, "variable": Variable required, "a": Number required, "b": Number required)
+            ]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "RischInt",
+        ..command!(
+            "cas.integral-symbolic",
+            "IntegralSymbolic",
+            [],
+            "CAS",
+            "Integra por Risch-Norman (alias de RischInt con formas indefinida y definida).",
+            ReadOnly,
+            Low,
+            true,
+            "IntegralSymbolic",
+            [
+                signature!("IntegralSymbolic[expr]"; "expr": Expression required),
+                signature!("IntegralSymbolic[expr, variable]"; "expr": Expression required, "variable": Variable required),
+                signature!("IntegralSymbolic[expr, variable, a, b]"; "expr": Expression required, "variable": Variable required, "a": Number required, "b": Number required)
+            ]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Taylor",
+        ..command!(
+            "cas.taylor-polynomial",
+            "TaylorPolynomial",
+            [],
+            "CAS",
+            "Construye una serie de Taylor finita (alias de Taylor).",
+            CreatesObject,
+            Medium,
+            true,
+            "TaylorPolynomial",
+            [signature!("TaylorPolynomial[expr, variable, centro, orden]"; "expr": Expression required, "variable": Variable required, "centro": Number optional, "orden": Integer optional)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Nper",
+        ..command!(
+            "finance.periods",
+            "Periods",
+            [],
+            "Financiera",
+            "Calcula número de periodos TVM (alias de Nper con exp/log).",
+            ReadOnly,
+            Low,
+            true,
+            "Periods",
+            [signature!("Periods[rate, pmt, pv, fv]"; "rate": Number required, "pmt": Number required, "pv": Number required, "fv": Number required)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Transpose",
+        ..command!(
+            "matrix.transpose",
+            "Transpose",
+            ["transpuesta"],
+            "Matrices",
+            "Calcula la transpuesta de una matriz.",
+            ReadOnly,
+            Medium,
+            true,
+            "Transpose",
+            [signature!("Transpose[[a, b], [c, d]]"; "matriz": Matrix required)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Inverse",
+        ..command!(
+            "matrix.invert",
+            "Invert",
+            [],
+            "Matrices",
+            "Calcula una matriz inversa (alias de Inverse).",
+            ReadOnly,
+            Medium,
+            true,
+            "Invert",
+            [signature!("Invert[[a, b], [c, d]]"; "matriz": Matrix required)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Inverse",
+        ..command!(
+            "matrix.ninvert",
+            "NInvert",
+            [],
+            "Matrices",
+            "Calcula una matriz inversa numérica (alias de Inverse).",
+            ReadOnly,
+            Medium,
+            true,
+            "NInvert",
+            [signature!("NInvert[[a, b], [c, d]]"; "matriz": Matrix required)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Solve",
+        ..command!(
+            "cas.solve-cubic",
+            "SolveCubic",
+            [],
+            "CAS",
+            "Resuelve una ecuación cúbrica en la variable indicada (vía motor Solve).",
+            CreatesObject,
+            Medium,
+            true,
+            "SolveCubic",
+            [signature!("SolveCubic[expr, variable]"; "expr": Expression required, "variable": Variable optional)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Solve",
+        ..command!(
+            "cas.solve-quartic",
+            "SolveQuartic",
+            [],
+            "CAS",
+            "Resuelve una ecuación cuártica en la variable indicada (vía motor Solve).",
+            CreatesObject,
+            Medium,
+            true,
+            "SolveQuartic",
+            [signature!("SolveQuartic[expr, variable]"; "expr": Expression required, "variable": Variable optional)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "CurvatureAt",
+        ..command!(
+            "analysis.curvature",
+            "Curvature",
+            [],
+            "Análisis",
+            "Calcula la curvatura de y=f(x) en x0 (alias de CurvatureAt).",
+            ReadOnly,
+            Medium,
+            true,
+            "Curvature",
+            [signature!("Curvature[expr, x0]"; "expr": Expression required, "x0": Number required)]
+        )
+    },
+    CommandSpec {
+        dispatch_key: "Integral",
+        ..command!(
+            "cas.nintegral",
+            "NIntegral",
+            [],
+            "CAS",
+            "Calcula una integral definida numérica (alias de Integral con límites).",
+            CreatesObject,
+            Medium,
+            true,
+            "NIntegral",
+            [
+                signature!("NIntegral[expr, a, b]"; "expr": Expression required, "a": Number required, "b": Number required),
+                signature!("NIntegral[expr, variable, a, b]"; "expr": Expression required, "variable": Variable required, "a": Number required, "b": Number required)
+            ]
+        )
+    },
+    // Oleada 1 P2: wrappers con brazo nuevo en commands.rs (reusan helpers, sin math duplicada).
+    command!(
+        "matrix.dot",
+        "Dot",
+        [],
+        "Matrices",
+        "Calcula el producto punto de dos vectores de igual dimensión.",
+        ReadOnly,
+        Low,
+        true,
+        "Dot",
+        [signature!("Dot[u, v]"; "u": Vector required, "v": Vector required)]
+    ),
+    command!(
+        "matrix.cross",
+        "Cross",
+        [],
+        "Matrices",
+        "Calcula el producto cruz de dos vectores 3D.",
+        ReadOnly,
+        Low,
+        true,
+        "Cross",
+        [signature!("Cross[u, v]"; "u": Vector required, "v": Vector required)]
+    ),
+    command!(
+        "matrix.unit-vector",
+        "UnitVector",
+        [],
+        "Matrices",
+        "Normaliza un vector no nulo a longitud unitaria.",
+        ReadOnly,
+        Low,
+        true,
+        "UnitVector",
+        [signature!("UnitVector[v]"; "v": Vector required)]
+    ),
+    command!(
+        "matrix.apply",
+        "ApplyMatrix",
+        [],
+        "Matrices",
+        "Aplica una matriz a un vector o matriz compatible vía multiplicación.",
+        ReadOnly,
+        Medium,
+        true,
+        "ApplyMatrix",
+        [signature!("ApplyMatrix[M, v]"; "M": Matrix required, "v": Vector required)]
+    ),
+    command!(
+        "cas.nderivative",
+        "NDerivative",
+        [],
+        "CAS",
+        "Deriva numéricamente por diferencias centrales en un punto.",
+        ReadOnly,
+        Low,
+        true,
+        "NDerivative",
+        [signature!("NDerivative[expr, variable, x0]"; "expr": Expression required, "variable": Variable required, "x0": Number required)]
+    ),
+    command!(
+        "cas.is-defined",
+        "IsDefined",
+        [],
+        "CAS",
+        "Indica si un nombre es variable u objeto definido en el documento.",
+        ReadOnly,
+        Low,
+        true,
+        "IsDefined",
+        [signature!("IsDefined[nombre]"; "nombre": Expression required)]
+    ),
+    command!(
+        "cas.is-integer",
+        "IsInteger",
+        [],
+        "CAS",
+        "Indica si un valor numérico finito es entero.",
+        ReadOnly,
+        Low,
+        true,
+        "IsInteger",
+        [signature!("IsInteger[valor]"; "valor": Expression required)]
+    ),
+    command!(
+        "cas.is-prime",
+        "IsPrime",
+        [],
+        "CAS",
+        "Indica si un entero entre 2 y 1e12 es primo (vía PrimeFactors).",
+        ReadOnly,
+        Low,
+        true,
+        "IsPrime",
+        [signature!("IsPrime[n]"; "n": Integer required)]
+    ),
+    command!(
+        "cas.is-in-region",
+        "IsInRegion",
+        [],
+        "CAS",
+        "Indica si un punto está dentro de un círculo o polígono del documento.",
+        ReadOnly,
+        Low,
+        true,
+        "IsInRegion",
+        [signature!("IsInRegion[punto, region]"; "punto": Expression required, "region": ObjectLabel required)]
+    ),
+    command!(
+        "text.formula",
+        "FormulaText",
+        [],
+        "Texto",
+        "Crea un texto con la fórmula literal dada.",
+        CreatesObject,
+        Low,
+        true,
+        "FormulaText",
+        [signature!("FormulaText[expr]"; "expr": Expression required)]
+    ),
+    command!(
+        "text.scientific",
+        "ScientificText",
+        [],
+        "Texto",
+        "Crea un texto con el valor en notación científica.",
+        CreatesObject,
+        Low,
+        true,
+        "ScientificText",
+        [signature!("ScientificText[valor]"; "valor": Number required)]
+    ),
+    command!(
+        "text.mixed-number",
+        "MixedNumber",
+        [],
+        "Texto",
+        "Crea un texto con número mixto: MixedNumber[2.5] -> 2 1/2.",
+        CreatesObject,
+        Low,
+        true,
+        "MixedNumber",
+        [signature!("MixedNumber[valor]"; "valor": Number required)]
+    ),
+    command!(
+        "text.ordinal",
+        "Ordinal",
+        [],
+        "Texto",
+        "Crea un texto con ordinal español: Ordinal[1] -> 1.º.",
+        CreatesObject,
+        Low,
+        true,
+        "Ordinal",
+        [signature!("Ordinal[n]"; "n": Integer required)]
+    ),
+    command!(
+        "scripting.set-color",
+        "SetColor",
+        [],
+        "Dinámica",
+        "Cambia el color de trazo de un objeto existente y lo refleja en el canvas.",
+        TransformsObject,
+        Low,
+        true,
+        "SetColor",
+        [signature!("SetColor[objeto, color]"; "objeto": ObjectLabel required, "color": Expression required)]
+    ),
+    command!(
+        "scripting.set-coords",
+        "SetCoords",
+        [],
+        "Dinámica",
+        "Mueve un punto libre a nuevas coordenadas y lo refleja en el canvas.",
+        TransformsObject,
+        Low,
+        true,
+        "SetCoords",
+        [signature!("SetCoords[objeto, coords]"; "objeto": ObjectLabel required, "coords": Point required)]
+    ),
+    command!(
+        "scripting.set-visible",
+        "SetVisible",
+        [],
+        "Dinámica",
+        "Cambia la visibilidad de un objeto (true/false) y lo refleja en el canvas.",
+        TransformsObject,
+        Low,
+        true,
+        "SetVisible",
+        [signature!("SetVisible[objeto, visible]"; "objeto": ObjectLabel required, "visible": Expression required)]
+    ),
+    command!(
+        "3d.surface-measure",
+        "Surface",
+        [],
+        "3D",
+        "Muestra el área exacta de un sólido 3D del documento.",
+        ReadOnly,
+        Low,
+        true,
+        "Surface",
+        [signature!("Surface[objeto]"; "objeto": ObjectLabel required)]
+    ),
+    command!(
+        "3d.volume-measure",
+        "Volume",
+        [],
+        "3D",
+        "Muestra el volumen exacto de un sólido 3D del documento.",
+        ReadOnly,
+        Low,
+        true,
+        "Volume",
+        [signature!("Volume[objeto]"; "objeto": ObjectLabel required)]
+    ),
+    command!(
+        "analysis.osculating-circle",
+        "OsculatingCircle",
+        [],
+        "Análisis",
+        "Crea el círculo osculador a y=f(x) en x0 desde la curvatura existente.",
+        CreatesObject,
+        Medium,
+        true,
+        "OsculatingCircle",
+        [signature!("OsculatingCircle[expr, x0]"; "expr": Expression required, "x0": Number required)]
+    ),
+    command!(
+        "statistics.cell",
+        "Cell",
+        [],
+        "Estadística",
+        "Lee una celda de la planilla por etiqueta A1.",
+        ReadOnly,
+        Low,
+        true,
+        "Cell",
+        [signature!("Cell[celda]"; "celda": Expression required)]
+    ),
+    command!(
+        "statistics.column",
+        "Column",
+        [],
+        "Estadística",
+        "Lee una columna de la planilla por letra o índice.",
+        ReadOnly,
+        Low,
+        true,
+        "Column",
+        [signature!("Column[col]"; "col": Expression required)]
+    ),
+    command!(
+        "statistics.row",
+        "Row",
+        [],
+        "Estadística",
+        "Lee una fila de la planilla por número.",
+        ReadOnly,
+        Low,
+        true,
+        "Row",
+        [signature!("Row[fila]"; "fila": Integer required)]
+    ),
     ];
 
 /// Returns every registered stable text command.
@@ -4446,6 +4933,30 @@ mod registry_tests {
             "EraseAll",
             "ImplicitCurve",
             "Tangent",
+            // Oleada 1 P2: handlers nuevos + Transpose (huérfano legacy con spec nueva).
+            "Transpose",
+            "Dot",
+            "Cross",
+            "UnitVector",
+            "ApplyMatrix",
+            "NDerivative",
+            "IsDefined",
+            "IsInteger",
+            "IsPrime",
+            "IsInRegion",
+            "FormulaText",
+            "ScientificText",
+            "MixedNumber",
+            "Ordinal",
+            "SetColor",
+            "SetCoords",
+            "SetVisible",
+            "Surface",
+            "Volume",
+            "OsculatingCircle",
+            "Cell",
+            "Column",
+            "Row",
         ];
         let mut set = HashSet::new();
         for h in static_handlers {
@@ -4783,13 +5294,17 @@ mod registry_tests {
         // Frente W-C: +FunctionStudy (recorrido + tabla de signos, visible).
         // RiemannSum NO se duplicó: se extendió (trapecio/Simpson); Taylor
         // NO se duplicó (TaylorPoly sería fantasma: Taylor ya crea el objeto).
-        // FitLine/FillDown/ChiSquareTest/InverseChiSquare NO se agregaron:
+        // FitLine/FillDown/ChiSquareTest/InverseChiSquare NO se agregaron antes:
         // duplicarían FitLinear/FillColumn/ChiSqTest/InverseChiSquared.
-        assert_eq!(all().len(), 273, "COMMANDS registrados (docs §8)");
+        // Oleada 1 P2 (f10-plan-total): +36 visibles S (14 aliases puros vía
+        // dispatch_key sin brazo nuevo + 22 wrappers con brazo delegante en
+        // commands.rs). PROHIBIDO tocar architecture.md en esta oleada: el sync
+        // §8/§13 queda pendiente y se reporta como BLOCKER.
+        assert_eq!(all().len(), 309, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            227,
-            "comandos visibles en paleta (docs §8: 227 + 14 UI = 241)"
+            263,
+            "comandos visibles en paleta (docs §8: 263 + 14 UI = 277)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

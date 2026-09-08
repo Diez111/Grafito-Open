@@ -363,6 +363,70 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `LaplaceInt[f]`: Laplace de integral L{∫₀ᵗ f} = L{f}/s: LaplaceInt[f] o LaplaceInt[f, t, s]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LaplaceInt[f, t, s]`. Alias: `integrallaplace`.
 - `GroebnerOrdered[polinomios, variables, orden]`: Base de Groebner con orden monomial explícito (mismas cotas que GroebnerBasis): GroebnerOrdered[polinomios, variables, orden] con orden lex|grlex|grevlex. Útil para eliminación. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebnerorden`, `baseordenada`.
 - `Eliminate[polinomios, variables, eliminar]`: Elimina variables por Groebner lexicográfico (intersecciones): Eliminate[polinomios, variables, eliminar]. Fuera de cota da ResourceLimit honesto. Mutacion: solo consulta. Riesgo: bajo. Alias: `elimina`, `eliminacion`.
+## Estadística
+
+- `FitLine[tabla]`: Ajusta una recta a una tabla local (alias de FitLinear con RMSE y R²). Mutacion: crea objetos. Riesgo: medio.
+- `Fit[tabla]`: Ajusta una recta a una tabla local (alias corto de FitLinear). Mutacion: crea objetos. Riesgo: medio.
+- `FitLineX[tabla]`: Ajusta una recta a una tabla local (alias de FitLinear). Mutacion: crea objetos. Riesgo: medio.
+## CAS
+
+- `IntegralBetween[expr, a, b]`: Calcula una integral definida entre límites (alias de Integral). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `IntegralBetween[expr, variable, a, b]`.
+- `IntegralSymbolic[expr]`: Integra por Risch-Norman (alias de RischInt con formas indefinida y definida). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `IntegralSymbolic[expr, variable]`, `IntegralSymbolic[expr, variable, a, b]`.
+- `TaylorPolynomial[expr, variable, centro, orden]`: Construye una serie de Taylor finita (alias de Taylor). Mutacion: crea objetos. Riesgo: medio.
+## Financiera
+
+- `Periods[rate, pmt, pv, fv]`: Calcula número de periodos TVM (alias de Nper con exp/log). Mutacion: solo consulta. Riesgo: bajo.
+## Matrices
+
+- `Transpose[[a, b], [c, d]]`: Calcula la transpuesta de una matriz. Mutacion: solo consulta. Riesgo: medio. Alias: `transpuesta`.
+- `Invert[[a, b], [c, d]]`: Calcula una matriz inversa (alias de Inverse). Mutacion: solo consulta. Riesgo: medio.
+- `NInvert[[a, b], [c, d]]`: Calcula una matriz inversa numérica (alias de Inverse). Mutacion: solo consulta. Riesgo: medio.
+## CAS
+
+- `SolveCubic[expr, variable]`: Resuelve una ecuación cúbrica en la variable indicada (vía motor Solve). Mutacion: crea objetos. Riesgo: medio.
+- `SolveQuartic[expr, variable]`: Resuelve una ecuación cuártica en la variable indicada (vía motor Solve). Mutacion: crea objetos. Riesgo: medio.
+## Análisis
+
+- `Curvature[expr, x0]`: Calcula la curvatura de y=f(x) en x0 (alias de CurvatureAt). Mutacion: solo consulta. Riesgo: medio.
+## CAS
+
+- `NIntegral[expr, a, b]`: Calcula una integral definida numérica (alias de Integral con límites). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `NIntegral[expr, variable, a, b]`.
+## Matrices
+
+- `Dot[u, v]`: Calcula el producto punto de dos vectores de igual dimensión. Mutacion: solo consulta. Riesgo: bajo.
+- `Cross[u, v]`: Calcula el producto cruz de dos vectores 3D. Mutacion: solo consulta. Riesgo: bajo.
+- `UnitVector[v]`: Normaliza un vector no nulo a longitud unitaria. Mutacion: solo consulta. Riesgo: bajo.
+- `ApplyMatrix[M, v]`: Aplica una matriz a un vector o matriz compatible vía multiplicación. Mutacion: solo consulta. Riesgo: medio.
+## CAS
+
+- `NDerivative[expr, variable, x0]`: Deriva numéricamente por diferencias centrales en un punto. Mutacion: solo consulta. Riesgo: bajo.
+- `IsDefined[nombre]`: Indica si un nombre es variable u objeto definido en el documento. Mutacion: solo consulta. Riesgo: bajo.
+- `IsInteger[valor]`: Indica si un valor numérico finito es entero. Mutacion: solo consulta. Riesgo: bajo.
+- `IsPrime[n]`: Indica si un entero entre 2 y 1e12 es primo (vía PrimeFactors). Mutacion: solo consulta. Riesgo: bajo.
+- `IsInRegion[punto, region]`: Indica si un punto está dentro de un círculo o polígono del documento. Mutacion: solo consulta. Riesgo: bajo.
+## Texto
+
+- `FormulaText[expr]`: Crea un texto con la fórmula literal dada. Mutacion: crea objetos. Riesgo: bajo.
+- `ScientificText[valor]`: Crea un texto con el valor en notación científica. Mutacion: crea objetos. Riesgo: bajo.
+- `MixedNumber[valor]`: Crea un texto con número mixto: MixedNumber[2.5] -> 2 1/2. Mutacion: crea objetos. Riesgo: bajo.
+- `Ordinal[n]`: Crea un texto con ordinal español: Ordinal[1] -> 1.º. Mutacion: crea objetos. Riesgo: bajo.
+## Dinámica
+
+- `SetColor[objeto, color]`: Cambia el color de trazo de un objeto existente y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetCoords[objeto, coords]`: Mueve un punto libre a nuevas coordenadas y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetVisible[objeto, visible]`: Cambia la visibilidad de un objeto (true/false) y lo refleja en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
+## 3D
+
+- `Surface[objeto]`: Muestra el área exacta de un sólido 3D del documento. Mutacion: solo consulta. Riesgo: bajo.
+- `Volume[objeto]`: Muestra el volumen exacto de un sólido 3D del documento. Mutacion: solo consulta. Riesgo: bajo.
+## Análisis
+
+- `OsculatingCircle[expr, x0]`: Crea el círculo osculador a y=f(x) en x0 desde la curvatura existente. Mutacion: crea objetos. Riesgo: medio.
+## Estadística
+
+- `Cell[celda]`: Lee una celda de la planilla por etiqueta A1. Mutacion: solo consulta. Riesgo: bajo.
+- `Column[col]`: Lee una columna de la planilla por letra o índice. Mutacion: solo consulta. Riesgo: bajo.
+- `Row[fila]`: Lee una fila de la planilla por número. Mutacion: solo consulta. Riesgo: bajo.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 

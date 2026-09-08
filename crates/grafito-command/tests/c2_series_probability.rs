@@ -182,8 +182,11 @@ fn inverse_commands_match_textbook_quantiles() {
 #[test]
 fn c2_does_not_duplicate_existing_commands() {
     // Canónicos existentes que el frente pidió verificar: no se agregaron
-    // alias duplicados (FitLine→FitLinear, FillDown→FillColumn,
-    // ChiSquareTest→ChiSqTest, InverseChiSquare→InverseChiSquared).
+    // alias duplicados (FillDown→FillColumn, ChiSquareTest→ChiSqTest,
+    // InverseChiSquare→InverseChiSquared).
+    // Oleada 1 P2 EXCEPTÚA FitLine/Fit/FitLineX: ahora son S visibles con
+    // dispatch_key FitLinear + brazo delegante + e2e (tests/oleada1.rs),
+    // no fantasmas (ver registry_counts 309/263).
     for existing in [
         "FitLinear",
         "FillColumn",
@@ -200,7 +203,7 @@ fn c2_does_not_duplicate_existing_commands() {
             "{existing} debe seguir registrado"
         );
     }
-    for duplicate in ["FitLine", "FillDown", "ChiSquareTest", "InverseChiSquare"] {
+    for duplicate in ["FillDown", "ChiSquareTest", "InverseChiSquare"] {
         assert!(
             command_registry::resolve(duplicate).is_none(),
             "{duplicate} sería un duplicado fantasma"

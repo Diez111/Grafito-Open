@@ -8778,6 +8778,724 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Message(format!("Transpose:\n{}", matrix.transpose()));
         }
+        // Oleada 1 P2: wrappers S (reusan helpers del motor, cero math duplicada).
+        "Dot" if cmd.args.len() == 2 => {
+            let eval_vec = |s: &str| -> Result<Vec<f64>, String> {
+                let exprs = parse_expression_vector_arg(s)?;
+                let mut out = Vec::with_capacity(exprs.len());
+                for e in exprs {
+                    let v = parse_numeric_arg(e.trim(), &document.variables)
+                        .map_err(|_| format!("entrada numérica inválida '{e}'"))?;
+                    if !v.is_finite() {
+                        return Err(format!("entrada no finita '{e}'"));
+                    }
+                    out.push(v);
+                }
+                Ok(out)
+            };
+            let a = match eval_vec(&cmd.args[0]) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("Dot: {e}")),
+            };
+            let b = match eval_vec(&cmd.args[1]) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("Dot: {e}")),
+            };
+            if a.is_empty() || a.len() != b.len() {
+                return CommandOutcome::Error(
+                    "Dot: los vectores deben tener igual dimensión no vacía".into(),
+                );
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("Dot = {}", fmt_scalar(dot(&a, &b))));
+        }
+        "Cross" if cmd.args.len() == 2 => {
+            let eval_vec = |s: &str| -> Result<Vec<f64>, String> {
+                let exprs = parse_expression_vector_arg(s)?;
+                let mut out = Vec::with_capacity(exprs.len());
+                for e in exprs {
+                    let v = parse_numeric_arg(e.trim(), &document.variables)
+                        .map_err(|_| format!("entrada numérica inválida '{e}'"))?;
+                    if !v.is_finite() {
+                        return Err(format!("entrada no finita '{e}'"));
+                    }
+                    out.push(v);
+                }
+                Ok(out)
+            };
+            let a = match eval_vec(&cmd.args[0]) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("Cross: {e}")),
+            };
+            let b = match eval_vec(&cmd.args[1]) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("Cross: {e}")),
+            };
+            if a.len() != 3 || b.len() != 3 {
+                return CommandOutcome::Error(
+                    "Cross: ambos vectores deben ser 3D ([x, y, z])".into(),
+                );
+            }
+            let c = cross(&a, &b);
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "Cross = [{}, {}, {}]",
+                fmt_scalar(c[0]),
+                fmt_scalar(c[1]),
+                fmt_scalar(c[2])
+            ));
+        }
+        "UnitVector" if cmd.args.len() == 1 => {
+            let exprs = match parse_expression_vector_arg(&cmd.args[0]) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("UnitVector: {e}")),
+            };
+            let mut vals = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                let v = match parse_numeric_arg(e.trim(), &document.variables) {
+                    Ok(v) if v.is_finite() => v,
+                    _ => {
+                        return CommandOutcome::Error(format!(
+                            "UnitVector: entrada inválida '{e}'"
+                        ));
+                    }
+                };
+                vals.push(v);
+            }
+            if vals.is_empty() {
+                return CommandOutcome::Error("UnitVector: vector vacío".into());
+            }
+            let n = norm(&vals);
+            if !n.is_finite() || n < 1e-12 {
+                return CommandOutcome::Error(
+                    "UnitVector: el vector debe ser no nulo y finito".into(),
+                );
+            }
+            let unit: Vec<String> = vals.iter().map(|v| fmt_scalar(v / n)).collect();
+            input_text.clear();
+            return CommandOutcome::Message(format!("UnitVector = [{}]", unit.join(", ")));
+        }
+        "ApplyMatrix" if cmd.args.len() == 2 => {
+            let m = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                Ok(m) => m,
+                Err(e) => return CommandOutcome::Error(format!("ApplyMatrix: {e}")),
+            };
+            let v = match parse_vector_or_matrix_arg(&cmd.args[1], &document.variables) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("ApplyMatrix: {e}")),
+            };
+            match m.mul(&v) {
+                Some(out) if out.to_string().len() <= 4096 => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!("ApplyMatrix:\n{out}"));
+                }
+                Some(_) => {
+                    return CommandOutcome::Error("ApplyMatrix: resultado excede cota".into());
+                }
+                None => {
+                    return CommandOutcome::Error("ApplyMatrix: dimensiones incompatibles".into());
+                }
+            }
+        }
+        "NDerivative" if cmd.args.len() == 3 => {
+            let expr = cmd.args[0].trim();
+            let var = cmd.args[1].trim();
+            if !is_math_identifier(var) {
+                return CommandOutcome::Error(
+                    "NDerivative: se requiere una variable válida".into(),
+                );
+            }
+            let x0 = match parse_numeric_arg(&cmd.args[2], &document.variables) {
+                Ok(v) if v.is_finite() => v,
+                _ => {
+                    return CommandOutcome::Error("NDerivative: x0 debe ser finito".into());
+                }
+            };
+            if expr.is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+                return CommandOutcome::Error("NDerivative: expresión inválida o muy larga".into());
+            }
+            let vars_base = document.variables.clone();
+            let f = |t: f64| {
+                let mut vals: Vec<(String, f64)> =
+                    vars_base.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                vals.push((var.to_string(), t));
+                evaluate(expr, &vals).unwrap_or(f64::NAN)
+            };
+            let h = (x0.abs().max(1.0) * 1e-6).max(1e-9);
+            let (fp, fm) = (f(x0 + h), f(x0 - h));
+            if !fp.is_finite() || !fm.is_finite() {
+                return CommandOutcome::Error(
+                    "NDerivative: la función no es evaluable en el entorno de x0".into(),
+                );
+            }
+            let deriv = (fp - fm) / (2.0 * h);
+            if !deriv.is_finite() {
+                return CommandOutcome::Error("NDerivative: resultado no finito".into());
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("NDerivative = {}", fmt_scalar(deriv)));
+        }
+        "IsDefined" if cmd.args.len() == 1 => {
+            let name = cmd.args[0]
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .trim();
+            if name.is_empty() {
+                return CommandOutcome::Error("IsDefined: nombre vacío".into());
+            }
+            let base = name.split('(').next().unwrap_or(name).trim();
+            let defined = document.variables.contains_key(base)
+                || document.variables.contains_key(name)
+                || find_object_by_label(document, base).is_some()
+                || find_object_by_label(document, name).is_some();
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "IsDefined[{name}] = {}",
+                if defined { "true" } else { "false" }
+            ));
+        }
+        "IsInteger" if cmd.args.len() == 1 => {
+            let v = match parse_numeric_arg(&cmd.args[0], &document.variables) {
+                Ok(v) if v.is_finite() => v,
+                _ => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "IsInteger[{}] = false",
+                        cmd.args[0].trim()
+                    ));
+                }
+            };
+            let is_int = v.fract() == 0.0;
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "IsInteger[{}] = {}",
+                cmd.args[0].trim(),
+                if is_int { "true" } else { "false" }
+            ));
+        }
+        "IsPrime" if cmd.args.len() == 1 => {
+            let raw = cmd.args[0].trim();
+            let v = match parse_numeric_arg(raw, &document.variables) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("IsPrime: {e}")),
+            };
+            if !v.is_finite() || v.fract() != 0.0 || !(2.0..=1e12).contains(&v) {
+                input_text.clear();
+                return CommandOutcome::Message(format!("IsPrime[{raw}] = false"));
+            }
+            let n_int = v.round();
+            let n_str = format!("{:.0}", n_int);
+            let factors = match symbolic::prime_factors(&n_str) {
+                Ok(s) => s,
+                Err(_) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!("IsPrime[{raw}] = false"));
+                }
+            };
+            let is_prime = factors.trim() == n_str;
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "IsPrime[{raw}] = {}",
+                if is_prime { "true" } else { "false" }
+            ));
+        }
+        "IsInRegion" if cmd.args.len() == 2 => {
+            let (pt, _) = match resolve_point_arg(document, &cmd.args[0]) {
+                Ok(r) => r,
+                Err(e) => return CommandOutcome::Error(format!("IsInRegion: {e}")),
+            };
+            let region_label = cmd.args[1].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(rid) = find_object_by_label(document, region_label) else {
+                return CommandOutcome::Error(format!(
+                    "IsInRegion: región '{region_label}' no encontrada"
+                ));
+            };
+            let inside = match document.get_object(rid) {
+                Some(GeoObject::Circle(c)) => {
+                    let dx = pt.x - c.center.x;
+                    let dy = pt.y - c.center.y;
+                    dx * dx + dy * dy <= c.radius * c.radius + 1e-9
+                }
+                Some(GeoObject::Polygon(p)) => {
+                    let verts = &p.vertices;
+                    if verts.len() < 3 {
+                        false
+                    } else {
+                        let mut inside = false;
+                        let mut j = verts.len() - 1;
+                        for i in 0..verts.len() {
+                            let xi = verts[i].x;
+                            let yi = verts[i].y;
+                            let xj = verts[j].x;
+                            let yj = verts[j].y;
+                            if (yi > pt.y) != (yj > pt.y)
+                                && pt.x < (xj - xi) * (pt.y - yi) / (yj - yi + 1e-18) + xi
+                            {
+                                inside = !inside;
+                            }
+                            j = i;
+                        }
+                        inside
+                    }
+                }
+                Some(_) => {
+                    return CommandOutcome::Error(
+                        "IsInRegion: la región debe ser círculo o polígono".into(),
+                    );
+                }
+                None => {
+                    return CommandOutcome::Error("IsInRegion: región no encontrada".into());
+                }
+            };
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "IsInRegion = {}",
+                if inside { "true" } else { "false" }
+            ));
+        }
+        "FormulaText" if cmd.args.len() == 1 => {
+            let content = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            if content.is_empty() {
+                return CommandOutcome::Error("FormulaText: expresión vacía".into());
+            }
+            if content.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+                return CommandOutcome::Error("FormulaText: expresión muy larga".into());
+            }
+            insert_command_object!(
+                document,
+                GeoObject::Text(grafito_core::TextObj::new(
+                    content.to_string(),
+                    Point2::new(0.0, 0.0)
+                ))
+            );
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "ScientificText" if cmd.args.len() == 1 || cmd.args.len() == 2 => {
+            let value = match parse_numeric_arg(&cmd.args[0], &document.variables) {
+                Ok(v) if v.is_finite() => v,
+                _ => return CommandOutcome::Error("ScientificText: valor no finito".into()),
+            };
+            let text = format!("{value:.6e}");
+            let position = if cmd.args.len() == 2 {
+                match parse_finite_point_arg(&cmd.args[1], &document.variables) {
+                    Ok(p) => p,
+                    Err(error) => {
+                        return CommandOutcome::Error(format!("ScientificText: {error}"));
+                    }
+                }
+            } else {
+                Point2::new(0.0, 0.0)
+            };
+            insert_command_object!(
+                document,
+                GeoObject::Text(grafito_core::TextObj::new(text, position))
+            );
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "MixedNumber" if cmd.args.len() == 1 || cmd.args.len() == 2 => {
+            let value = match parse_numeric_arg(&cmd.args[0], &document.variables) {
+                Ok(v) if v.is_finite() => v,
+                _ => return CommandOutcome::Error("MixedNumber: valor no finito".into()),
+            };
+            let sign = if value < 0.0 { "-" } else { "" };
+            let abs_val = value.abs();
+            let whole = abs_val.floor();
+            let frac = abs_val - whole;
+            let text = if frac < 1e-9 {
+                format!("{sign}{:.0}", whole)
+            } else {
+                let frac_text = format_fraction_text(frac);
+                if whole < 1e-9 {
+                    format!("{sign}{frac_text}")
+                } else {
+                    format!("{sign}{:.0} {frac_text}", whole)
+                }
+            };
+            let position = if cmd.args.len() == 2 {
+                match parse_finite_point_arg(&cmd.args[1], &document.variables) {
+                    Ok(p) => p,
+                    Err(error) => {
+                        return CommandOutcome::Error(format!("MixedNumber: {error}"));
+                    }
+                }
+            } else {
+                Point2::new(0.0, 0.0)
+            };
+            insert_command_object!(
+                document,
+                GeoObject::Text(grafito_core::TextObj::new(text, position))
+            );
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "Ordinal" if cmd.args.len() == 1 || cmd.args.len() == 2 => {
+            let value = match parse_numeric_arg(&cmd.args[0], &document.variables) {
+                Ok(v) if v.is_finite() => v,
+                _ => return CommandOutcome::Error("Ordinal: valor no finito".into()),
+            };
+            if value.fract() != 0.0 {
+                return CommandOutcome::Error("Ordinal: se requiere un entero".into());
+            }
+            let text = format!("{:.0}.º", value);
+            let position = if cmd.args.len() == 2 {
+                match parse_finite_point_arg(&cmd.args[1], &document.variables) {
+                    Ok(p) => p,
+                    Err(error) => return CommandOutcome::Error(format!("Ordinal: {error}")),
+                }
+            } else {
+                Point2::new(0.0, 0.0)
+            };
+            insert_command_object!(
+                document,
+                GeoObject::Text(grafito_core::TextObj::new(text, position))
+            );
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "SetColor" if cmd.args.len() == 2 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!("SetColor: objeto '{label}' no encontrado"));
+            };
+            let color_name = cmd.args[1]
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .to_ascii_lowercase();
+            let color = match color_name.as_str() {
+                "red" | "rojo" | "roja" => Color::RED,
+                "green" | "verde" => Color::GREEN,
+                "blue" | "azul" => Color::BLUE,
+                "black" | "negro" | "negra" => Color::BLACK,
+                "white" | "blanco" | "blanca" => Color::WHITE,
+                "gray" | "grey" | "gris" => Color::GRAY,
+                _ => {
+                    return CommandOutcome::Error(
+                        "SetColor: color no soportado (usa red/blue/green/black/white/gray)".into(),
+                    );
+                }
+            };
+            match document.get_object_mut(id) {
+                Some(obj) => obj.set_color(color),
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "SetColor: objeto '{label}' no encontrado"
+                    ));
+                }
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("SetColor: '{label}' actualizado"));
+        }
+        "SetCoords" if cmd.args.len() == 2 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!("SetCoords: objeto '{label}' no encontrado"));
+            };
+            let raw = cmd.args[1].trim();
+            let inner = raw
+                .strip_prefix('(')
+                .and_then(|v| v.strip_suffix(')'))
+                .unwrap_or(raw);
+            let parts = split_args(inner);
+            if parts.len() == 2 {
+                let pt = match parse_finite_point_arg(&cmd.args[1], &document.variables) {
+                    Ok(p) => p,
+                    Err(e) => return CommandOutcome::Error(format!("SetCoords: {e}")),
+                };
+                match document.get_object_mut(id) {
+                    Some(GeoObject::Point(p)) => {
+                        p.position = pt;
+                        p.x_expr = None;
+                        p.y_expr = None;
+                    }
+                    Some(_) => {
+                        return CommandOutcome::Error(
+                            "SetCoords: el objeto no es un punto 2D libre".into(),
+                        );
+                    }
+                    None => {
+                        return CommandOutcome::Error(format!(
+                            "SetCoords: objeto '{label}' no encontrado"
+                        ));
+                    }
+                }
+            } else if parts.len() == 3 {
+                let mut coords = Vec::with_capacity(3);
+                for part in &parts {
+                    match parse_numeric_arg(part.trim(), &document.variables) {
+                        Ok(v) if v.is_finite() => coords.push(v),
+                        _ => {
+                            return CommandOutcome::Error(
+                                "SetCoords: coordenadas no finitas".into(),
+                            );
+                        }
+                    }
+                }
+                match document.get_object_mut(id) {
+                    Some(GeoObject::Point3D(p)) => {
+                        p.position = Point3D::new(coords[0], coords[1], coords[2]);
+                    }
+                    Some(_) => {
+                        return CommandOutcome::Error(
+                            "SetCoords: el objeto no es un punto 3D".into(),
+                        );
+                    }
+                    None => {
+                        return CommandOutcome::Error(format!(
+                            "SetCoords: objeto '{label}' no encontrado"
+                        ));
+                    }
+                }
+            } else {
+                return CommandOutcome::Error("SetCoords: usa (x, y) o (x, y, z)".into());
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("SetCoords: '{label}' movido"));
+        }
+        "SetVisible" if cmd.args.len() == 2 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!(
+                    "SetVisible: objeto '{label}' no encontrado"
+                ));
+            };
+            let flag = cmd.args[1].trim().to_ascii_lowercase();
+            let visible = match flag.as_str() {
+                "true" | "1" | "visible" | "mostrar" | "show" => true,
+                "false" | "0" | "oculto" | "ocultar" | "hide" => false,
+                _ => {
+                    return CommandOutcome::Error("SetVisible: usa true/false (o 1/0)".into());
+                }
+            };
+            match document.get_object_mut(id) {
+                Some(obj) => obj.set_visible(visible),
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "SetVisible: objeto '{label}' no encontrado"
+                    ));
+                }
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "SetVisible: '{label}' {}",
+                if visible { "visible" } else { "oculto" }
+            ));
+        }
+        "Surface" if cmd.args.len() == 1 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!("Surface: objeto '{label}' no encontrado"));
+            };
+            let obj = match document.get_object(id) {
+                Some(o) => o.clone(),
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "Surface: objeto '{label}' no encontrado"
+                    ));
+                }
+            };
+            match grafito_core::symbolic::solid_area(&obj) {
+                Some(area) if area.is_finite() => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "Surface({label}) = {}",
+                        fmt_scalar(area)
+                    ));
+                }
+                _ => {
+                    return CommandOutcome::Error(format!(
+                        "Surface: '{label}' no es un sólido medible"
+                    ));
+                }
+            }
+        }
+        "Volume" if cmd.args.len() == 1 => {
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!("Volume: objeto '{label}' no encontrado"));
+            };
+            let obj = match document.get_object(id) {
+                Some(o) => o.clone(),
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "Volume: objeto '{label}' no encontrado"
+                    ));
+                }
+            };
+            match grafito_core::symbolic::solid_volume(&obj) {
+                Some(vol) if vol.is_finite() => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "Volume({label}) = {}",
+                        fmt_scalar(vol)
+                    ));
+                }
+                _ => {
+                    return CommandOutcome::Error(format!(
+                        "Volume: '{label}' no es un sólido medible"
+                    ));
+                }
+            }
+        }
+        "OsculatingCircle" if cmd.args.len() == 2 => {
+            let expr = cmd.args[0].trim().to_string();
+            let x0 = match parse_numeric_arg(&cmd.args[1], &document.variables) {
+                Ok(v) if v.is_finite() => v,
+                _ => {
+                    return CommandOutcome::Error("OsculatingCircle: x0 debe ser finito".into());
+                }
+            };
+            if expr.is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+                return CommandOutcome::Error("OsculatingCircle: expresión inválida".into());
+            }
+            let kappa = match curvature_at(&expr, x0) {
+                Ok(k) if k.is_finite() => k,
+                _ => {
+                    return CommandOutcome::Error(
+                        "OsculatingCircle: curvatura no finita en x0".into(),
+                    );
+                }
+            };
+            if kappa.abs() < 1e-12 {
+                return CommandOutcome::Error(
+                    "OsculatingCircle: curvatura nula (recta, radio infinito)".into(),
+                );
+            }
+            let radius = 1.0 / kappa.abs();
+            if !radius.is_finite() || radius <= 0.0 {
+                return CommandOutcome::Error("OsculatingCircle: radio no finito".into());
+            }
+            let mut vars: Vec<(String, f64)> = document
+                .variables
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            vars.push(("x".to_string(), x0));
+            let fx = match evaluate(&expr, &vars) {
+                Ok(v) if v.is_finite() => v,
+                _ => {
+                    return CommandOutcome::Error(
+                        "OsculatingCircle: no se pudo evaluar f(x0)".into(),
+                    );
+                }
+            };
+            let (_tx, _tfx, slope) = match tangent_line_at(&expr, x0) {
+                Ok(t) => t,
+                Err(e) => return CommandOutcome::Error(format!("OsculatingCircle: {e}")),
+            };
+            let (nx, ny) = if slope.is_finite() {
+                let inv = 1.0 / (1.0 + slope * slope).sqrt();
+                (-slope * inv, inv)
+            } else {
+                (1.0, 0.0)
+            };
+            let sign = if kappa >= 0.0 { 1.0 } else { -1.0 };
+            let center = Point2::new(x0 + sign * nx * radius, fx + sign * ny * radius);
+            if !center.x.is_finite() || !center.y.is_finite() {
+                return CommandOutcome::Error("OsculatingCircle: centro no finito".into());
+            }
+            insert_command_object!(document, GeoObject::Circle(CircleObj::new(center, radius)));
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "OsculatingCircle: κ = {}, R = {}",
+                fmt_scalar(kappa),
+                fmt_scalar(radius)
+            ));
+        }
+        "Cell" if cmd.args.len() == 1 => {
+            let (row, col) = match parse_cell_label_to_indices(&cmd.args[0]) {
+                Some(rc) => rc,
+                None => return CommandOutcome::Error("Cell: usa etiqueta A1".into()),
+            };
+            let raw = document.get_spreadsheet_cell(row, col);
+            let value = if !raw.trim().is_empty() {
+                raw
+            } else {
+                match document.eval_spreadsheet_cell(row, col) {
+                    Some(v) if v.is_finite() => fmt_scalar(v),
+                    _ => "vacía".to_string(),
+                }
+            };
+            input_text.clear();
+            return CommandOutcome::Message(format!("Cell = {value}"));
+        }
+        "Column" if cmd.args.len() == 1 => {
+            let arg = cmd.args[0]
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .to_ascii_uppercase();
+            let col = if let Ok(n) = arg.parse::<usize>() {
+                if n == 0 || n > Document::MAX_SPREADSHEET_COLS {
+                    return CommandOutcome::Error("Column: índice fuera de rango".into());
+                }
+                n - 1
+            } else {
+                let probe = format!("{arg}1");
+                match parse_cell_label_to_indices(&probe) {
+                    Some((_, c)) => c,
+                    None => {
+                        return CommandOutcome::Error("Column: usa letra (A) o índice (1)".into());
+                    }
+                }
+            };
+            let mut values: Vec<String> = Vec::new();
+            for row in 0..Document::MAX_SPREADSHEET_ROWS {
+                let raw = document.get_spreadsheet_cell(row, col);
+                let has_raw = !raw.trim().is_empty();
+                let num = document.eval_spreadsheet_cell(row, col);
+                if has_raw || num.is_some_and(|v| v.is_finite()) {
+                    if let Some(v) = num.filter(|v| v.is_finite()) {
+                        values.push(fmt_scalar(v));
+                    } else {
+                        values.push(raw);
+                    }
+                }
+                if values.len() >= 64 {
+                    break;
+                }
+                if row >= 64 && values.is_empty() {
+                    break;
+                }
+            }
+            if values.is_empty() {
+                return CommandOutcome::Error("Column: columna vacía".into());
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("Column = {{{}}}", values.join(", ")));
+        }
+        "Row" if cmd.args.len() == 1 => {
+            let arg = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let n: usize = match arg.parse::<usize>() {
+                Ok(n) if (1..=Document::MAX_SPREADSHEET_ROWS).contains(&n) => n,
+                _ => return CommandOutcome::Error("Row: usa número de fila 1..400".into()),
+            };
+            let row = n - 1;
+            let mut values: Vec<String> = Vec::new();
+            for col in 0..Document::MAX_SPREADSHEET_COLS {
+                let raw = document.get_spreadsheet_cell(row, col);
+                let has_raw = !raw.trim().is_empty();
+                let num = document.eval_spreadsheet_cell(row, col);
+                if has_raw || num.is_some_and(|v| v.is_finite()) {
+                    if let Some(v) = num.filter(|v| v.is_finite()) {
+                        values.push(fmt_scalar(v));
+                    } else {
+                        values.push(raw);
+                    }
+                }
+                if values.len() >= 64 {
+                    break;
+                }
+                if col >= 64 && values.is_empty() {
+                    break;
+                }
+            }
+            if values.is_empty() {
+                return CommandOutcome::Error("Row: fila vacía".into());
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("Row = {{{}}}", values.join(", ")));
+        }
         "Trace" if !cmd.args.is_empty() => {
             let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
                 Ok(m) => m,
