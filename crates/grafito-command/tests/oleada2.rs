@@ -132,8 +132,9 @@ fn oleada2_todos_visibles_en_paleta() {
     ] {
         palette_must_be_visible(canonical);
     }
-    assert_eq!(command_registry::palette_commands().count(), 287);
-    assert_eq!(command_registry::all().len(), 333);
+    // Frente trig+racionalización (+4 visibles S): 287 → 291, 333 → 337.
+    assert_eq!(command_registry::palette_commands().count(), 291);
+    assert_eq!(command_registry::all().len(), 337);
 }
 
 #[test]

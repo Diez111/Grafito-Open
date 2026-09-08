@@ -712,3 +712,143 @@ fn w1_new_names_do_not_shadow_laplace_distribution_or_numeric_ode() {
         Some("ODESystem2")
     );
 }
+
+// Frente trigonométricas + racionalización: puerta simbólica cableada a paleta
+// (ida/vuelta spec→brazo→test). Cada comando delega al motor extendido en
+// geometry::symbolic (sin duplicar Simplify); el `Err` nombra el límite.
+#[test]
+fn trig_symbolic_gate_specs_resolve_and_match_handlers() {
+    for (canonical, aliases, counts) in [
+        ("TrigExpand", &["expandirTrig"][..], &[1][..]),
+        ("TrigCombine", &["combinarTrig"][..], &[1][..]),
+        ("TrigSimplify", &["simplificarTrig"][..], &[1][..]),
+        ("Rationalize", &["racionalizar"][..], &[1][..]),
+    ] {
+        let spec = command_registry::resolve(canonical)
+            .unwrap_or_else(|| panic!("{canonical} must have stable metadata"));
+        assert!(spec.palette_visible, "{canonical} must be palette-visible");
+        assert_eq!(spec.dispatch_key, canonical);
+        assert_eq!(spec.category, "CAS");
+        for count in counts {
+            assert!(
+                spec.accepts_argument_count(*count),
+                "{canonical} arity {count} must remain registered"
+            );
+        }
+        for alias in aliases {
+            assert_eq!(
+                command_registry::canonicalize(alias),
+                Some(canonical),
+                "alias {alias} must resolve to {canonical}"
+            );
+            assert_eq!(
+                parse_cas_command(&format!("{alias}[x]"))
+                    .expect("registered aliases parse")
+                    .command,
+                canonical
+            );
+        }
+        // El canónico también parsea por registry (sin tocar cas_parse.rs).
+        assert_eq!(
+            parse_cas_command(&format!("{canonical}[x]"))
+                .expect("canonical parses")
+                .command,
+            canonical
+        );
+    }
+    // Sin formas fantasma: aridad 0 y 2 se rechazan en el gate.
+    for canonical in ["TrigExpand", "TrigCombine", "TrigSimplify", "Rationalize"] {
+        let spec = command_registry::resolve(canonical).expect("registered");
+        assert!(!spec.accepts_argument_count(0), "{canonical} arity 0");
+        assert!(!spec.accepts_argument_count(2), "{canonical} arity 2");
+    }
+}
+
+#[test]
+fn trig_symbolic_gate_handlers_delegate_to_motor() {
+    fn run(command: &str) -> CommandOutcome {
+        let mut document = Document::new();
+        let mut input = command.to_owned();
+        process_input(&mut document, &mut input)
+    }
+    for (command, needle) in [
+        ("TrigExpand[sin(x+y)]", "sin(x) * cos(y)"),
+        ("TrigExpand[cos(2*x)]", "cos(x) * cos(x) - sin(x) * sin(x)"),
+        ("TrigExpand[sin(x)^2]", "cos(2 * x)"),
+        ("TrigCombine[sin(x)*cos(x)]", "sin(2 * x) / 2"),
+        ("TrigCombine[cos(x)*cos(y)]", "cos(x - y)"),
+        ("TrigSimplify[sin(x)^2+cos(x)^2]", "= 1"),
+        ("TrigSimplify[1+tan(x)^2]", "sec(x) ^ 2"),
+        ("Rationalize[1/sqrt(2)]", "sqrt(2) / 2"),
+        ("Rationalize[3/(2+sqrt(x))]", "2 - sqrt(x)"),
+        // Aliases ES delegan al mismo brazo.
+        ("expandirTrig[sin(x+y)]", "sin(x) * cos(y)"),
+        ("combinarTrig[sin(x)*cos(x)]", "sin(2 * x)"),
+        ("simplificarTrig[sin(x)^2+cos(x)^2]", "= 1"),
+        ("racionalizar[1/sqrt(2)]", "sqrt(2) / 2"),
+    ] {
+        match run(command) {
+            CommandOutcome::Message(message) => assert!(
+                message.contains(needle),
+                "{command} → {message} (esperaba '{needle}')"
+            ),
+            other => panic!("{command} debe dar Message, dio {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn trig_symbolic_gate_errors_are_honest_with_subset_limits() {
+    fn run(command: &str) -> CommandOutcome {
+        let mut document = Document::new();
+        let mut input = command.to_owned();
+        process_input(&mut document, &mut input)
+    }
+    let cases: Vec<(&str, Vec<&str>)> = vec![
+        ("TrigExpand[tan(x+y)]", vec!["TrigExpand"]),
+        ("TrigExpand[sin(x)^3]", vec!["TrigExpand"]),
+        ("TrigCombine[sin(x)+cos(x)]", vec!["TrigCombine"]),
+        ("TrigCombine[tan(x)*cos(x)]", vec!["TrigCombine"]),
+        ("TrigSimplify[x+1]", vec!["TrigSimplify"]),
+        ("Rationalize[x+1]", vec!["Rationalize"]),
+        ("Rationalize[1/sqrt(0)]", vec!["Rationalize", "nulo"]),
+        ("Rationalize[cbrt(8)]", vec!["Rationalize"]),
+    ];
+    for (command, needles) in cases {
+        match run(command) {
+            CommandOutcome::Error(message) => {
+                for needle in needles {
+                    assert!(
+                        message.contains(needle),
+                        "{command} → {message} (esperaba '{needle}')"
+                    );
+                }
+            }
+            other => panic!("{command} debe dar Error honesto, dio {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn trig_symbolic_gate_validates_max_expr_length_budget() {
+    fn run(command: &str) -> CommandOutcome {
+        let mut document = Document::new();
+        let mut input = command.to_owned();
+        process_input(&mut document, &mut input)
+    }
+    let big = "x".repeat(2001);
+    for command in [
+        format!("TrigExpand[{big}]"),
+        format!("TrigCombine[{big}]"),
+        format!("TrigSimplify[{big}]"),
+        format!("Rationalize[{big}]"),
+    ] {
+        match run(&command) {
+            CommandOutcome::Error(message) => assert!(
+                message.contains("MAX_EXPR_LENGTH"),
+                "{message} debe citar el presupuesto"
+            ),
+            other => panic!("entrada >2000 debe dar Error, dio {other:?}"),
+        }
+    }
+}

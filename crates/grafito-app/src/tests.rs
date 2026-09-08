@@ -1955,6 +1955,40 @@ fn statistics_panel_has_vertical_scroll_and_persistent_validation_feedback() {
 }
 
 #[test]
+fn statistics_panel_tiene_entrada_visible() {
+    use crate::{LeftPanelContent, Perspective};
+    // Onda 2, regla visible ⇒ botón: toda perspectiva que declara Stats
+    // tiene que estar cableada al panel (helper) y el panel tiene que ser
+    // alcanzable desde el dispatch y desde el menú Paneles.
+    for perspective in Perspective::ALL {
+        let declara_stats = perspective.layout().left_panel == LeftPanelContent::Stats;
+        assert_eq!(
+            crate::uses_statistics_panel(perspective),
+            declara_stats,
+            "uses_statistics_panel debe coincidir con LeftPanelContent::Stats para {:?}",
+            perspective
+        );
+    }
+    assert!(crate::uses_statistics_panel(Perspective::Statistics));
+    assert!(crate::uses_statistics_panel(Perspective::Probability));
+    assert!(crate::uses_statistics_panel(Perspective::DataAnalysis));
+    assert!(!crate::uses_statistics_panel(Perspective::Geometry2D));
+    assert!(!crate::uses_statistics_panel(Perspective::Complex));
+
+    let app_source = include_str!("app.rs");
+    assert!(
+        app_source.contains("uses_statistics_panel(self.perspective)")
+            && app_source.contains("draw_statistics_panel(self, ctx)"),
+        "el drawer izquierdo debe rutear a draw_statistics_panel vía uses_statistics_panel"
+    );
+    let ui_source = include_str!("ui.rs");
+    assert!(
+        ui_source.contains("\"Estadística\"") && ui_source.contains("Perspective::Statistics"),
+        "el menú Paneles debe exponer la entrada «Estadística»"
+    );
+}
+
+#[test]
 fn idle_object_panel_edit_does_not_change_document_version() {
     use grafito_core::{Attractor3DObj, Cube3DObj, GeoObject};
     use grafito_geometry::Point3D;

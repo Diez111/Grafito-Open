@@ -5317,6 +5317,19 @@ mod tests {
     }
 
     #[test]
+    fn export_budgets_pin_user_facing_caps() {
+        // Onda 2: pinnea los topes user-facing de exportación (dimensión,
+        // píxeles, escena, bytes de salida y estilo).
+        assert_eq!(MAX_PNG_DIMENSION, 8_192);
+        assert_eq!(MAX_PNG_PIXELS, 16_777_216);
+        assert_eq!(MAX_EXPORT_DIMENSION, 8_192);
+        assert_eq!(MAX_EXPORT_PIXELS, 16_777_216);
+        assert_eq!(MAX_EXPORT_SCENE_UNITS, 250_000);
+        assert_eq!(MAX_EXPORT_OUTPUT_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_EXPORT_STYLE_PIXELS, 4_096.0);
+    }
+
+    #[test]
     fn png_rejects_oversized_dimensions() {
         assert!(validate_png_dimensions(MAX_PNG_DIMENSION + 1, 1).is_err());
     }

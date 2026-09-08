@@ -125,13 +125,12 @@ const ASSISTANT_PANEL_NARROW_WIDTH: f32 = 360.0;
 const ASSISTANT_SHORT_VIEWPORT_HEIGHT: f32 = 600.0;
 /// Alto del editor colapsado: 1 línea (28 = base 4).
 const ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT: f32 = 28.0;
-#[allow(dead_code)] // TODO P2: remover cuando se use header dedicado en panel compacto (reservado para layout 780px)
-const ASSISTANT_HEADER_HEIGHT: f32 = 40.0;
 const ASSISTANT_REVEAL_BASE_SECONDS: f64 = 0.28;
 const ASSISTANT_REVEAL_PER_BLOCK_SECONDS: f64 = 0.18;
 const ASSISTANT_REVEAL_MAX_SECONDS: f64 = 1.5;
 const MAX_FOCUSED_CONTEXT_PREVIEW_CHARS: usize = 160;
-#[allow(dead_code)] // TODO: remover MORA_NAME legacy (ahora avatar blob, usado en tests de prompt)
+/// Nombre legacy del asistente, solo-tests (prod usa el avatar configurable).
+#[cfg(test)]
 const MORA_NAME: &str = "Mili";
 const MORA_ACCESSIBLE_LABEL: &str = "Mili, asistente matemático";
 // Fusión recomendada: **DeepSeek Flash** para TODO razonamiento lógico
@@ -538,7 +537,6 @@ pub struct PluginRow {
 /// el fallback es mostrarlo como bloque de código con validación local (Exercise::validate).
 /// TODO F5: si se requiere ExerciseInline interactivo (input + check), mapear este struct a
 /// un widget con TextEdit + botón Validar que llame a FeedbackEngine.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantExerciseCard {
     pub prompt: String,
@@ -546,7 +544,6 @@ pub struct AssistantExerciseCard {
     pub difficulty: String,
 }
 
-#[allow(dead_code)]
 impl AssistantExerciseCard {
     pub fn new(
         prompt: impl Into<String>,
@@ -4083,12 +4080,6 @@ fn draw_personality_settings_contents(
     action
 }
 
-/// Alto útil de la ventana (máximo para el scroll del panel de configuración).
-#[allow(dead_code)] // TODO P2: activar ui_viewport_height en ventana config scroll acotado (usado en tests de viewport)
-fn ui_viewport_height(ctx: &egui::Context) -> f32 {
-    (ctx.screen_rect().height() * 0.8).min(560.0)
-}
-
 fn draw_assistant_settings_contents(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
@@ -4412,147 +4403,6 @@ fn draw_assistant_settings_contents(
     if let Some(error) = &state.error {
         ui.label(egui::RichText::new(error).color(theme.danger).size(TYPE_XS));
     }
-    action
-}
-
-/// Mini-gráfico de evolución de dominio (0..=1) de la rama más trabajada.
-#[allow(dead_code)] // TODO P2: activar sparkline en tutor card (reservado para telemetría dominio)
-fn draw_domain_sparkline(ui: &mut egui::Ui, samples: &[f32], theme: &crate::theme::Theme) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
-    if samples.len() < 2 {
-        return;
-    }
-    let painter = ui.painter();
-    let min_x = rect.left() + 2.0;
-    let max_x = rect.right() - 2.0;
-    let step = (max_x - min_x) / (samples.len() - 1) as f32;
-    let baseline = rect.bottom();
-    let to_y = |value: f32| baseline - value.clamp(0.0, 0.9) * rect.height();
-    let points: Vec<egui::Pos2> = samples
-        .iter()
-        .enumerate()
-        .map(|(index, value)| egui::pos2(min_x + step * index as f32, to_y(*value)))
-        .collect();
-    let last = points.last().copied();
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new(2.0, theme.accent),
-    ));
-    if let Some(last) = last {
-        painter.circle_filled(last, 2.5, theme.accent);
-    }
-}
-
-/// Tarjeta de progreso del tutor (memoria del usuario) con la siguiente
-/// recomendación y feedback ✓/✗ de la última explicación.
-#[allow(dead_code)] // TODO P2: activar draw_tutor_card en panel asistente (actualmente render alternativo)
-fn draw_tutor_card(
-    ui: &mut egui::Ui,
-    state: &mut AssistantPanelState,
-) -> Option<AssistantUiAction> {
-    let theme = current_theme(ui.ctx());
-    let mut action = None;
-    let pct = if state.tutor_total > 0 {
-        state.tutor_covered as f32 / state.tutor_total as f32 * 100.0
-    } else {
-        0.0
-    };
-    egui::Frame::none()
-        .fill(theme.input_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
-        .rounding(RADIUS_MD)
-        .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Tutor · Nivel ")
-                        .color(theme.accent)
-                        .size(TYPE_SM)
-                        .strong(),
-                );
-                ui.label(
-                    egui::RichText::new(state.tutor_level.to_string())
-                        .color(theme.accent)
-                        .size(TYPE_SM)
-                        .strong(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{:.0}% ramas", pct))
-                            .color(theme.text_secondary)
-                            .size(TYPE_XS),
-                    );
-                    if state.tutor_streak > 1 {
-                        ui.label(
-                            egui::RichText::new(format!("Racha {}", state.tutor_streak))
-                                .color(theme.accent)
-                                .size(TYPE_XS)
-                                .strong(),
-                        );
-                    }
-                });
-            });
-            if !state.tutor_next.is_empty() {
-                ui.add_space(SPACE_XS);
-                // Botones en su propia fila; la recomendación aparte y envuelta
-                // para que no desborde en paneles angostos (fix de overflow).
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new("¿Qué sigo estudiando?").small())
-                        .clicked()
-                    {
-                        action = Some(AssistantUiAction::AskNextTopic);
-                    }
-                    if ui
-                        .add(egui::Button::new("Examen +3").small())
-                        .on_hover_text("Mini-examen de 3 preguntas de la rama recomendada")
-                        .clicked()
-                    {
-                        action = Some(AssistantUiAction::RunMiniExam);
-                    }
-                });
-                let next = if state.tutor_last_activity.is_empty() {
-                    format!("Próximo: {}", state.tutor_next)
-                } else {
-                    format!(
-                        "Próximo: {} · última: {}",
-                        state.tutor_next, state.tutor_last_activity
-                    )
-                };
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(next)
-                            .color(theme.text_secondary)
-                            .size(TYPE_XS),
-                    )
-                    .wrap(),
-                );
-            }
-            if state.tutor_domain_samples.len() >= 2 {
-                ui.add_space(SPACE_SM);
-                draw_domain_sparkline(ui, &state.tutor_domain_samples, theme);
-            }
-            ui.add_space(SPACE_XS);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("¿Te sirvió la explicación?")
-                        .color(theme.text_tertiary)
-                        .size(TYPE_XS),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if action_icon_button(ui, Icon::Close, theme.text_secondary, "No sirvió")
-                        .clicked()
-                    {
-                        action = Some(AssistantUiAction::LearnIncorrect);
-                    }
-                    if action_icon_button(ui, Icon::Check, theme.accent, "Sí, entendí").clicked()
-                    {
-                        action = Some(AssistantUiAction::LearnCorrect);
-                    }
-                });
-            });
-        });
     action
 }
 
@@ -6349,7 +6199,6 @@ fn draw_assistant_composer(
     action
 }
 
-#[allow(dead_code)] // TODO P2: activar ConversationTurnAppearance tipado en render editorial (reservado)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ConversationTurnAppearance {
     fill: egui::Color32,
@@ -6367,7 +6216,6 @@ struct AssistantProposalRenderState<'a> {
     correction_available: bool,
 }
 
-#[allow(dead_code)] // TODO P2: activar conversation_turn_appearance en refactor editorial (reservado)
 fn conversation_turn_appearance(
     theme: &crate::theme::Theme,
     is_user: bool,
@@ -8758,51 +8606,6 @@ fn provider_label(provider: ProviderProfile) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // TODO P2: activar suggestion_prompts en estado vacío (usado en tests de prompt vacío)
-fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 5] {
-    if has_focus {
-        [
-            (
-                "Analizar",
-                "Analizá la función seleccionada: dominio, raíces, extremos y comportamiento.",
-            ),
-            (
-                "Derivar",
-                "Derivá la función seleccionada y explicá qué representa.",
-            ),
-            (
-                "Integrar",
-                "Integrá la función seleccionada y mostrá el resultado paso a paso.",
-            ),
-            (
-                "Interpretar",
-                "Explicá cómo leer el gráfico de la función seleccionada.",
-            ),
-            (
-                "Aclarar",
-                "Explícame con un ejemplo qué significa la pendiente en esta función.",
-            ),
-        ]
-    } else {
-        [
-            ("Resolver", "Ayudame a resolver este problema paso a paso."),
-            ("Graficar", "Decime qué función debería graficar y por qué."),
-            (
-                "Derivar",
-                "derivar x^3 + 2*x · explicame la regla y qué representa la derivada",
-            ),
-            (
-                "Límite",
-                "Calculá el límite de sin(x)/x cuando x tiende a 0 y explicámelo",
-            ),
-            (
-                "Aclarar",
-                "No sé qué analizar todavía. Haceme una pregunta para orientar el problema.",
-            ),
-        ]
-    }
-}
-
 /// Cota del resumen de respuesta para la live-region (evita nodos gigantes).
 const ASSISTANT_LIVE_RESPONSE_CHARS: usize = 200;
 
@@ -10850,6 +10653,14 @@ mod tests {
             options: Vec::new(),
         };
         assert!(matches!(staged, AssistantUiAction::AskClarification { .. }));
+    }
+
+    #[test]
+    fn clarification_budgets_pin_user_facing_caps() {
+        // Onda 2: pinnea los topes user-facing de la tarjeta de clarificación.
+        assert_eq!(MAX_CLARIFICATION_QUESTION_CHARS, 300);
+        assert_eq!(MAX_CLARIFICATION_OPTIONS, 4);
+        assert_eq!(MAX_CLARIFICATION_OPTION_CHARS, 64);
     }
 
     #[test]

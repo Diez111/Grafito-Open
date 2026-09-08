@@ -14639,6 +14639,78 @@ fn execute_cas_command_typed(
                 Err(e) => Some(Err(format!("Simplify error: {}", e))),
             }
         }
+        "TrigExpand" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: TrigExpand requiere TrigExpand[expr]".into()));
+            }
+            let expr = expand_all_cas(cmd.args.first()?.trim(), document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: TrigExpand requiere una expresión no vacía".into()
+                ));
+            }
+            if let Err(error) = check_w1_budget("TrigExpand", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match symbolic::trig_expand(&expr) {
+                Ok(expanded) => Some(Ok(format!("{} = {}", expr, expanded))),
+                Err(e) => Some(Err(format!("TrigExpand: {e}"))),
+            }
+        }
+        "TrigCombine" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: TrigCombine requiere TrigCombine[expr]".into()));
+            }
+            let expr = expand_all_cas(cmd.args.first()?.trim(), document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: TrigCombine requiere una expresión no vacía".into()
+                ));
+            }
+            if let Err(error) = check_w1_budget("TrigCombine", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match symbolic::trig_combine(&expr) {
+                Ok(combined) => Some(Ok(format!("{} = {}", expr, combined))),
+                Err(e) => Some(Err(format!("TrigCombine: {e}"))),
+            }
+        }
+        "TrigSimplify" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: TrigSimplify requiere TrigSimplify[expr]".into()));
+            }
+            let expr = expand_all_cas(cmd.args.first()?.trim(), document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: TrigSimplify requiere una expresión no vacía".into()
+                ));
+            }
+            if let Err(error) = check_w1_budget("TrigSimplify", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match symbolic::trig_simplify(&expr) {
+                Ok(simplified) => Some(Ok(format!("{} = {}", expr, simplified))),
+                Err(e) => Some(Err(format!("TrigSimplify: {e}"))),
+            }
+        }
+        "Rationalize" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Rationalize requiere Rationalize[expr]".into()));
+            }
+            let expr = expand_all_cas(cmd.args.first()?.trim(), document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: Rationalize requiere una expresión no vacía".into()
+                ));
+            }
+            if let Err(error) = check_w1_budget("Rationalize", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match symbolic::rationalize(&expr) {
+                Ok(rationalized) => Some(Ok(format!("{} = {}", expr, rationalized))),
+                Err(e) => Some(Err(format!("Rationalize: {e}"))),
+            }
+        }
         "TangentAt" => {
             let expr_raw = cmd.args.first()?.trim();
             let x = match finite_arg(1, "x") {

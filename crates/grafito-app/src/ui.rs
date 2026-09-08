@@ -374,6 +374,19 @@ fn draw_panels_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                 ui.close_menu();
             }
         }
+        // Onda 2: entrada visible del panel de estadística (regla visible ⇒
+        // botón). Lleva a la perspectiva Estadística, cuyo tab 0 dibuja
+        // `draw_statistics_panel` (ver `uses_statistics_panel`).
+        {
+            let stats_selected =
+                crate::uses_statistics_panel(app.perspective) && app.compact_drawer_open;
+            if ui.selectable_label(stats_selected, "Estadística").clicked() {
+                let _ = app.try_set_perspective(Perspective::Statistics);
+                app.sidebar_tab = 0;
+                app.compact_drawer_open = true;
+                ui.close_menu();
+            }
+        }
         if app.perspective == Perspective::Geometry3D {
             ui.separator();
             let inspector_selected = app.compact_geometry_utility_open
@@ -1834,5 +1847,21 @@ mod status_hint_tests {
                 "{tool:?} debe mencionar '{word}': {hint}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod autocomplete_budget_tests {
+    use super::{
+        MAX_AUTOCOMPLETE_SUGGESTIONS, MAX_AUTOCOMPLETE_TOKEN_CHARS,
+        MAX_DOCUMENT_AUTOCOMPLETE_CANDIDATES,
+    };
+
+    #[test]
+    fn autocomplete_budgets_pin_user_facing_caps() {
+        // Onda 2: pinnea los topes user-facing del autocompletado de la paleta.
+        assert_eq!(MAX_AUTOCOMPLETE_TOKEN_CHARS, 256);
+        assert_eq!(MAX_AUTOCOMPLETE_SUGGESTIONS, 8);
+        assert_eq!(MAX_DOCUMENT_AUTOCOMPLETE_CANDIDATES, 64);
     }
 }

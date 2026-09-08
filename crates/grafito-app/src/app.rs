@@ -6094,10 +6094,18 @@ impl eframe::App for GrafitoApp {
                     self.sidebar_tab = 0;
                 }
                 match self.sidebar_tab {
-                    0 => match self.perspective {
-                        Perspective::Complex => crate::panels::draw_complex_panel(self, ctx),
-                        _ => crate::algebra::draw_algebra_panel(self, ctx),
-                    },
+                    0 => {
+                        if crate::uses_statistics_panel(self.perspective) {
+                            crate::panels::draw_statistics_panel(self, ctx);
+                        } else {
+                            match self.perspective {
+                                Perspective::Complex => {
+                                    crate::panels::draw_complex_panel(self, ctx);
+                                }
+                                _ => crate::algebra::draw_algebra_panel(self, ctx),
+                            }
+                        }
+                    }
                     1 => match self.perspective {
                         Perspective::Dynamics => crate::panels::draw_attractor_panel(self, ctx),
                         _ => crate::tools_panel::draw_tools_panel(self, ctx),

@@ -1339,6 +1339,54 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("Simplify[expr]"; "expr": Expression required)]
     ),
     command!(
+        "cas.trig-expand",
+        "TrigExpand",
+        ["expandirTrig"],
+        "CAS",
+        "Expande sin/cos de suma o resta, doble ángulo 2·u y potencias sin²/cos² a (1±cos(2u))/2; tan, potencias ≠2 y resto exigen motor general.",
+        ReadOnly,
+        Low,
+        true,
+        "TrigExpand",
+        [signature!("TrigExpand[expr]"; "expr": Expression required)]
+    ),
+    command!(
+        "cas.trig-combine",
+        "TrigCombine",
+        ["combinarTrig"],
+        "CAS",
+        "Combina productos sin·sin, sin·cos y cos·cos en suma o diferencia (factor constante opcional); fuera de eso informa el límite.",
+        ReadOnly,
+        Low,
+        true,
+        "TrigCombine",
+        [signature!("TrigCombine[expr]"; "expr": Expression required)]
+    ),
+    command!(
+        "cas.trig-simplify",
+        "TrigSimplify",
+        ["simplificarTrig"],
+        "CAS",
+        "Simplifica con pitagóricas (sin²+cos²→1, 1+tan²→sec²) más expansión y combinación en loop acotado de 8 pasos con mejor forma; si oscila, corta por cota.",
+        ReadOnly,
+        Low,
+        true,
+        "TrigSimplify",
+        [signature!("TrigSimplify[expr]"; "expr": Expression required)]
+    ),
+    command!(
+        "cas.rationalize",
+        "Rationalize",
+        ["racionalizar"],
+        "CAS",
+        "Quita radicales del denominador: 1/sqrt(d), a/(k·sqrt(c)) y a/(b±sqrt(c)) por conjugada; cbrt y resto exigen motor general.",
+        ReadOnly,
+        Low,
+        true,
+        "Rationalize",
+        [signature!("Rationalize[expr]"; "expr": Expression required)]
+    ),
+    command!(
         "cas.taylor",
         "Taylor",
         [],
@@ -5109,6 +5157,10 @@ mod registry_tests {
             "Factor",
             "Expand",
             "Simplify",
+            "TrigExpand",
+            "TrigCombine",
+            "TrigSimplify",
+            "Rationalize",
             "Taylor",
             "CompleteSquare",
             "PrimeFactors",
@@ -5646,11 +5698,16 @@ mod registry_tests {
         // normaldist→Normal) +1 firma Normal[mu,sigma,x] con brazo PDF/CDF vía
         // statistics + desambiguación Laplace en help LaplaceT; docs/commands.md
         // regenerado vía markdown_reference_is_the_registry_projection.
-        assert_eq!(all().len(), 333, "COMMANDS registrados (docs §8)");
+        // Frente trig+racionalización (f10-plan-total): +4 visibles S
+        // (TrigExpand/TrigCombine/TrigSimplify/Rationalize, todos CAS con
+        // brazo delegante en commands.rs al motor extendido en
+        // geometry::symbolic sin duplicar Simplify; architecture.md §8/§13
+        // queda BLOCKER como en P2/Onda 1 por PROHIBIDO-resto del frente).
+        assert_eq!(all().len(), 337, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            287,
-            "comandos visibles en paleta (docs §8: 287 + 14 UI = 301)"
+            291,
+            "comandos visibles en paleta (docs §8: 291 + 14 UI = 305)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

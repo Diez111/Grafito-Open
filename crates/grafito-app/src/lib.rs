@@ -505,6 +505,19 @@ impl LeftPanelContent {
     }
 }
 
+/// Perspectivas cuyo tab 0 dibuja el panel de estadística
+/// (`panels::draw_statistics_panel`) en vez del panel de álgebra.
+///
+/// Onda 2: pinnea la entrada visible del panel — si una perspectiva declara
+/// `LeftPanelContent::Stats`, esta función debe devolver `true` para ella
+/// (regla visible ⇒ botón, test `statistics_panel_tiene_entrada_visible`).
+pub(crate) const fn uses_statistics_panel(perspective: Perspective) -> bool {
+    matches!(
+        perspective,
+        Perspective::Statistics | Perspective::Probability | Perspective::DataAnalysis
+    )
+}
+
 /// Contenido del panel derecho según la perspectiva.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightPanelContent {

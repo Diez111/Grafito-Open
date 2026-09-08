@@ -59,7 +59,6 @@ pub(crate) struct LocalXYTable {
     pub ys: Vec<f64>,
 }
 
-#[allow(dead_code)] // TODO P2: Panel de estadística sin entrada en la UI (reactivar).
 pub(crate) fn parse_statistics_input(input: &str) -> Result<Vec<f64>, String> {
     let input = input.trim();
     if input.is_empty() {
@@ -347,6 +346,12 @@ mod local_data_import_tests {
     }
 
     #[test]
+    fn local_data_import_cap_pins_2mb() {
+        // Onda 2: pinnea el presupuesto user-facing de importación CSV/TSV.
+        assert_eq!(MAX_LOCAL_DATA_IMPORT_BYTES, 2_000_000);
+    }
+
+    #[test]
     fn local_data_import_enforces_bounds_and_commits_table_and_scatter_once() {
         let path = std::env::temp_dir().join(format!(
             "grafito-local-data-{}-{}.csv",
@@ -394,7 +399,6 @@ mod local_data_import_tests {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // TODO P2: Panel de estadística sin entrada en la UI.
 pub(crate) struct StatisticsSummary {
     pub sum: Option<f64>,
     pub mean: f64,
@@ -409,7 +413,6 @@ pub(crate) struct StatisticsSummary {
     pub iqr: f64,
 }
 
-#[allow(dead_code)] // TODO P2: Solo usado por el panel de estadística (sin UI activa).
 fn stable_interpolate(a: f64, b: f64, fraction: f64) -> f64 {
     if fraction <= 0.0 || a == b {
         return a;
@@ -427,7 +430,6 @@ fn stable_interpolate(a: f64, b: f64, fraction: f64) -> f64 {
     }
 }
 
-#[allow(dead_code)] // TODO P2: Solo usado por el panel de estadística (sin UI activa).
 pub(crate) fn statistics_summary(data: &[f64]) -> Result<StatisticsSummary, String> {
     if data.is_empty() {
         return Err("Estadística: se requiere al menos un dato".to_string());
@@ -2717,7 +2719,6 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Panel izquierdo de Estadística. Permite ingresar datos y ver resumen.
-#[allow(dead_code)] // TODO P2: Panel sin entrada en la UI desde que se quitó la pestaña «Datos».
 pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let (_is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 

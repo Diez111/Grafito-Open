@@ -124,6 +124,10 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Factor[expr, variable]`: Factoriza polinomios equivalentes. Mutacion: solo consulta. Riesgo: bajo. Alias: `factorizar`.
 - `Expand[expr]`: Expande productos y potencias algebraicas. Mutacion: solo consulta. Riesgo: bajo. Alias: `expandir`.
 - `Simplify[expr]`: Simplifica una expresion mediante reglas seguras. Mutacion: solo consulta. Riesgo: bajo. Alias: `simplificar`.
+- `TrigExpand[expr]`: Expande sin/cos de suma o resta, doble ángulo 2·u y potencias sin²/cos² a (1±cos(2u))/2; tan, potencias ≠2 y resto exigen motor general. Mutacion: solo consulta. Riesgo: bajo. Alias: `expandirTrig`.
+- `TrigCombine[expr]`: Combina productos sin·sin, sin·cos y cos·cos en suma o diferencia (factor constante opcional); fuera de eso informa el límite. Mutacion: solo consulta. Riesgo: bajo. Alias: `combinarTrig`.
+- `TrigSimplify[expr]`: Simplifica con pitagóricas (sin²+cos²→1, 1+tan²→sec²) más expansión y combinación en loop acotado de 8 pasos con mejor forma; si oscila, corta por cota. Mutacion: solo consulta. Riesgo: bajo. Alias: `simplificarTrig`.
+- `Rationalize[expr]`: Quita radicales del denominador: 1/sqrt(d), a/(k·sqrt(c)) y a/(b±sqrt(c)) por conjugada; cbrt y resto exigen motor general. Mutacion: solo consulta. Riesgo: bajo. Alias: `racionalizar`.
 - `Taylor[expr, variable, centro, orden]`: Construye una serie de Taylor finita. Mutacion: crea objetos. Riesgo: medio.
 - `CompleteSquare[expr, variable]`: Completa cuadrado: convierte a*x^2+b*x+c a a*(x+b/2a)^2 + (c - b^2/4a). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CompleteSquare[expr]`. Alias: `complete_square`, `completarCuadrado`, `completar_cuadrado`.
 - `PrimeFactors[n]`: Factoriza un entero n (2 <= n <= 1e12) en primos por trial division. Mutacion: solo consulta. Riesgo: bajo. Alias: `prime_factors`, `factoresPrimos`, `factores_primos`.

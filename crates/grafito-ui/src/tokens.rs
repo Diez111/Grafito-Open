@@ -311,11 +311,14 @@ pub fn aula_font_size(base: f32) -> f32 {
 }
 
 #[cfg(test)]
+// Onda 2: un solo allow a nivel módulo en vez de 11 por test. Estos tests
+// pinnean relaciones entre constantes a propósito (p. ej. `TYPE_XS < TYPE_SM`),
+// así que `clippy::assertions_on_constants` es un falso positivo aquí.
+#[allow(clippy::assertions_on_constants)]
 mod tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn type_scale_is_monotonic() {
         // TYPE_2XS == TYPE_XS == 11.0: piso mínimo, ya no estrictamente menor.
         assert!(TYPE_2XS <= TYPE_XS);
@@ -335,7 +338,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn spacing_scale_is_monotonic() {
         assert!(SPACE_XS < SPACE_SM);
         assert!(SPACE_SM < SPACE_MD);
@@ -375,7 +377,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn micro_interaction_timing_stays_between_fast_and_normal_feedback() {
         assert!(ANIM_FAST < ANIM_MICRO);
         assert!(ANIM_MICRO < ANIM_NORMAL);
@@ -394,7 +395,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn panel_left_relationships_hold() {
         assert!(PANEL_LEFT_MIN < PANEL_LEFT_DEFAULT);
         assert_eq!(PANEL_LEFT_DEFAULT, 260.0);
@@ -412,7 +412,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn drawer_right_relationships_hold() {
         assert!(DRAWER_RIGHT_MIN < DRAWER_RIGHT_DEFAULT);
         assert!(DRAWER_RIGHT_DEFAULT < DRAWER_RIGHT_MAX);
@@ -434,7 +433,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn alphas_match_scandinavian_quiet() {
         assert_eq!(ALPHA_SHADOW, 8);
         assert_eq!(SHADOW_ALPHA, ALPHA_SHADOW);
@@ -456,7 +454,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn spacing_uses_base_4() {
         for v in [
             SPACE_XS,
@@ -478,7 +475,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn type_scale_ratio_stays_near_1_25() {
         // Ratio 1.25 Major Third — verificar que la progresión no se rompa.
         // No exacto por redondeo Scandinavian (12/15/19), pero cercano.
@@ -498,14 +494,12 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn text_gamma_floor_preserves_contrast() {
         assert_eq!(TEXT_GAMMA_FLOOR, 0.85);
         assert!(TEXT_GAMMA_FLOOR > 0.0 && TEXT_GAMMA_FLOOR <= 1.0);
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn hit_targets_meet_wcag_sizes() {
         assert_eq!(HIT_TARGET_MIN, 24.0);
         assert_eq!(HIT_TARGET_AULA, 44.0);
@@ -527,7 +521,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn toast_durations_give_reading_time_and_persistent_errors() {
         assert_eq!(TOAST_DURATION_DEFAULT, 7.0);
         assert!(TOAST_DURATION_ERROR.is_infinite());

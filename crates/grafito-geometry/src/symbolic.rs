@@ -2642,29 +2642,77 @@ fn yun_squarefree(f: &[f64]) -> Vec<(Vec<f64>, usize)> {
 }
 
 // --- Trig Fu-TR simplificación subset TR0..TR13 ---
+// Frente trigonométricas + racionalización (subset honesto S): `trig_sum_step`,
+// `trig_double_step` y `trig_pow_step` son las reglas de expansión (antes inline
+// en `trig_simplify_once`, ahora compartidas sin duplicar con los comandos
+// TrigExpand/TrigCombine/TrigSimplify); `trig_pythag_step` suma la pitagórica
+// legacy más 1+tan²→sec²; `trig_combine_step` es producto→suma.
 
-fn trig_simplify_once(expr: &Expr) -> Option<Expr> {
-    use Expr::*;
-    // TR0: sin²x + cos²x ->1  (y variantes conmutadas)
-    if let Add(left, right) = expr {
-        let is_sin2 = |e: &Expr| matches!(e, Pow(b, exp) if matches!(b.as_ref(), Sin(_)) && matches!(exp.as_ref(), Const(v) if (*v - 2.0).abs() < 1e-12));
-        let is_cos2 = |e: &Expr| matches!(e, Pow(b, exp) if matches!(b.as_ref(), Cos(_)) && matches!(exp.as_ref(), Const(v) if (*v - 2.0).abs() < 1e-12));
-        let arg_of = |e: &Expr| -> Option<Expr> {
-            if let Pow(b, _) = e {
-                if let Sin(a) | Cos(a) = b.as_ref() {
-                    return Some((**a).clone());
-                }
-            }
-            None
-        };
-        if (is_sin2(left) && is_cos2(right)) || (is_cos2(left) && is_sin2(right)) {
-            if let (Some(a1), Some(a2)) = (arg_of(left), arg_of(right)) {
-                if a1.structurally_eq(&a2) {
-                    return Some(Const(1.0));
-                }
-            }
-        }
+/// Pasos máximos del fixpoint trigonométrico (presupuesto anti-loop).
+const MAX_TRIG_REWRITE_STEPS: usize = 8;
+/// Entrada máxima en caracteres. Espeja
+/// `grafito_core::validation::MAX_EXPR_LENGTH` (geometry no depende de core;
+/// el brazo repite el chequeo: defensa en profundidad).
+const MAX_TRIG_INPUT_CHARS: usize = 2_000;
+/// Salida máxima en bytes (igual que `MAX_EXPAND_OUTPUT_BYTES`).
+const MAX_TRIG_OUTPUT_BYTES: usize = 100_000;
+/// Tolerancia para constantes del subset (2·u, potencias ², unos).
+const TRIG_CONST_TOL: f64 = 1e-12;
+
+fn trig_is_const(expr: &Expr, want: f64) -> bool {
+    matches!(expr, Expr::Const(value) if (*value - want).abs() < TRIG_CONST_TOL)
+}
+
+fn trig_const(expr: &Expr) -> Option<f64> {
+    if let Expr::Const(value) = expr {
+        Some(*value)
+    } else {
+        None
     }
+}
+
+// Constructores con plegado mínimo (solo Const op Const finito y neutros
+// seguros; 0·f NO se pliega para no borrar dominio, como `simplify_once`).
+fn trig_mk_add(left: Expr, right: Expr) -> Expr {
+    match (&left, &right) {
+        (Expr::Const(a), Expr::Const(b)) if a.is_finite() && b.is_finite() => Expr::Const(a + b),
+        (Expr::Const(a), _) if *a == 0.0 => right,
+        (_, Expr::Const(b)) if *b == 0.0 => left,
+        _ => Expr::Add(Box::new(left), Box::new(right)),
+    }
+}
+
+fn trig_mk_sub(left: Expr, right: Expr) -> Expr {
+    match (&left, &right) {
+        (Expr::Const(a), Expr::Const(b)) if a.is_finite() && b.is_finite() => Expr::Const(a - b),
+        (_, Expr::Const(b)) if *b == 0.0 => left,
+        _ => Expr::Sub(Box::new(left), Box::new(right)),
+    }
+}
+
+fn trig_mk_mul(left: Expr, right: Expr) -> Expr {
+    match (&left, &right) {
+        (Expr::Const(a), Expr::Const(b)) if a.is_finite() && b.is_finite() => Expr::Const(a * b),
+        (Expr::Const(a), _) if *a == 1.0 => right,
+        (_, Expr::Const(b)) if *b == 1.0 => left,
+        _ => Expr::Mul(Box::new(left), Box::new(right)),
+    }
+}
+
+fn trig_mk_div(num: Expr, den: Expr) -> Expr {
+    match (&num, &den) {
+        (Expr::Const(a), Expr::Const(b)) if a.is_finite() && b.is_finite() && b.abs() > 1e-300 => {
+            Expr::Const(a / b)
+        }
+        (_, Expr::Const(b)) if *b == 1.0 => num,
+        (inner, Expr::Const(b)) if *b == -1.0 => Expr::Neg(Box::new(inner.clone())),
+        _ => Expr::Div(Box::new(num), Box::new(den)),
+    }
+}
+
+/// Suma/diferencia de ángulos para sin/cos (regla legacy, ahora compartida).
+fn trig_sum_step(expr: &Expr) -> Option<Expr> {
+    use Expr::*;
     // TR: sin(x+y) expansión, cos(x+y)
     if let Sin(arg) = expr {
         if let Add(a, b) = arg.as_ref() {
@@ -2708,10 +2756,60 @@ fn trig_simplify_once(expr: &Expr) -> Option<Expr> {
             return Some(Add(Box::new(term1), Box::new(term2)));
         }
     }
-    // TR potencia: sin²x -> (1 - cos(2x))/2 , cos²x -> (1+cos(2x))/2
+    None
+}
+
+/// Doble ángulo: sin(2·u)→2·sin u·cos u, cos(2·u)→cos²u−sin²u.
+/// Solo coeficiente exactamente 2; otro múltiplo exige motor general.
+fn trig_double_step(expr: &Expr) -> Option<Expr> {
+    use Expr::*;
+    // Extrae u si el argumento es 2·u (cualquier orden).
+    fn double_arg(arg: &Expr) -> Option<Expr> {
+        if let Expr::Mul(left, right) = arg {
+            if trig_is_const(left, 2.0) {
+                return Some((**right).clone());
+            }
+            if trig_is_const(right, 2.0) {
+                return Some((**left).clone());
+            }
+        }
+        None
+    }
+    match expr {
+        Sin(arg) => {
+            let u = double_arg(arg)?;
+            Some(trig_mk_mul(
+                Const(2.0),
+                Mul(
+                    Box::new(Sin(Box::new(u.clone()))),
+                    Box::new(Cos(Box::new(u))),
+                ),
+            ))
+        }
+        Cos(arg) => {
+            let u = double_arg(arg)?;
+            Some(trig_mk_sub(
+                Mul(
+                    Box::new(Cos(Box::new(u.clone()))),
+                    Box::new(Cos(Box::new(u.clone()))),
+                ),
+                Mul(
+                    Box::new(Sin(Box::new(u.clone()))),
+                    Box::new(Sin(Box::new(u))),
+                ),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Potencias cuadráticas: sin²x -> (1 - cos(2x))/2, cos²x -> (1+cos(2x))/2
+/// (regla legacy, ahora compartida).
+fn trig_pow_step(expr: &Expr) -> Option<Expr> {
+    use Expr::*;
     if let Pow(base, exp) = expr {
         if let Const(v) = exp.as_ref() {
-            if (*v - 2.0).abs() < 1e-12 {
+            if (*v - 2.0).abs() < TRIG_CONST_TOL {
                 if let Sin(arg) = base.as_ref() {
                     let two = Mul(Box::new(Const(2.0)), arg.clone());
                     let c2 = Cos(Box::new(two));
@@ -2729,6 +2827,544 @@ fn trig_simplify_once(expr: &Expr) -> Option<Expr> {
         }
     }
     None
+}
+
+/// Toda expansión trigonométrica del subset (suma/dif + doble + potencias).
+fn trig_expand_step(expr: &Expr) -> Option<Expr> {
+    trig_sum_step(expr)
+        .or_else(|| trig_double_step(expr))
+        .or_else(|| trig_pow_step(expr))
+}
+
+/// Pitagóricas: sin²x + cos²x -> 1 (legacy, ambos órdenes) más 1+tan²u ->
+/// sec²u (ambos órdenes; vale donde tan está definida, que es el dominio
+/// donde sec existe).
+fn trig_pythag_step(expr: &Expr) -> Option<Expr> {
+    use Expr::*;
+    if let Add(left, right) = expr {
+        // TR0 legacy: sin²x + cos²x ->1 (y variantes conmutadas).
+        let is_sin2 = |e: &Expr| matches!(e, Pow(b, exp) if matches!(b.as_ref(), Sin(_)) && matches!(exp.as_ref(), Const(v) if (*v - 2.0).abs() < TRIG_CONST_TOL));
+        let is_cos2 = |e: &Expr| matches!(e, Pow(b, exp) if matches!(b.as_ref(), Cos(_)) && matches!(exp.as_ref(), Const(v) if (*v - 2.0).abs() < TRIG_CONST_TOL));
+        let arg_of = |e: &Expr| -> Option<Expr> {
+            if let Pow(b, _) = e {
+                if let Sin(a) | Cos(a) = b.as_ref() {
+                    return Some((**a).clone());
+                }
+            }
+            None
+        };
+        if (is_sin2(left) && is_cos2(right)) || (is_cos2(left) && is_sin2(right)) {
+            if let (Some(a1), Some(a2)) = (arg_of(left), arg_of(right)) {
+                if a1.structurally_eq(&a2) {
+                    return Some(Const(1.0));
+                }
+            }
+        }
+        // 1+tan²u -> sec²u (ambos órdenes).
+        let is_tan2 = |e: &Expr| matches!(e, Pow(b, exp) if matches!(b.as_ref(), Tan(_)) && matches!(exp.as_ref(), Const(v) if (*v - 2.0).abs() < TRIG_CONST_TOL));
+        let tan_arg_of = |e: &Expr| -> Option<Expr> {
+            if let Pow(b, _) = e {
+                if let Tan(a) = b.as_ref() {
+                    return Some((**a).clone());
+                }
+            }
+            None
+        };
+        let one_left = trig_is_const(left, 1.0) && is_tan2(right);
+        let one_right = trig_is_const(right, 1.0) && is_tan2(left);
+        if one_left || one_right {
+            let tan_expr = if one_left { right } else { left };
+            if let Some(u) = tan_arg_of(tan_expr) {
+                // 1+tan²u = sec²u (cuadrado, no sec simple).
+                return Some(Pow(Box::new(Sec(Box::new(u))), Box::new(Const(2.0))));
+            }
+        }
+    }
+    None
+}
+
+/// Separa un producto en (factor constante total, factores simbólicos) en
+/// orden textual, aplanando `Mul` anidados con cota. Las consts no finitas
+/// van a factores (no al coef). Si se agota la cota devuelve `None`.
+fn trig_split_product(expr: &Expr) -> Option<(f64, Vec<Expr>)> {
+    const MAX_TRIG_FACTORS: usize = 32;
+    fn collect(node: &Expr, coef: &mut f64, out: &mut Vec<Expr>, budget: &mut usize) -> bool {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        match node {
+            Expr::Mul(a, b) => collect(a, coef, out, budget) && collect(b, coef, out, budget),
+            Expr::Const(v) if v.is_finite() => {
+                *coef *= v;
+                true
+            }
+            _ => {
+                out.push(node.clone());
+                true
+            }
+        }
+    }
+    let mut coef = 1.0;
+    let mut factors = Vec::new();
+    let mut budget = MAX_TRIG_FACTORS;
+    if collect(expr, &mut coef, &mut factors, &mut budget) {
+        Some((coef, factors))
+    } else {
+        None
+    }
+}
+
+/// Combinación producto→suma con un factor constante externo opcional:
+/// sin·cos→(sin(a+b)+sin(a−b))/2, cos·cos→(cos(a−b)+cos(a+b))/2,
+/// sin·sin→(cos(a−b)−cos(a+b))/2. Con argumentos iguales colapsa al doble
+/// ángulo inverso (sin(2a)/2, (1±cos(2a))/2) para no oscilar con la expansión.
+fn trig_combine_step(expr: &Expr) -> Option<Expr> {
+    use Expr::*;
+    // Separa factor constante total y factores simbólicos (cualquier
+    // asociatividad: 2·sin·cos parsea left-assoc). Solo dos trigs puros.
+    let (coef, factors) = trig_split_product(expr)?;
+    if factors.len() != 2 {
+        return None;
+    }
+    let (left, right) = (&factors[0], &factors[1]);
+    // Familia de cada lado: 0 = sin, 1 = cos.
+    let fam = |e: &Expr| -> Option<(u8, Expr)> {
+        if let Sin(a) = e {
+            Some((0, (**a).clone()))
+        } else if let Cos(a) = e {
+            Some((1, (**a).clone()))
+        } else {
+            None
+        }
+    };
+    let (f1, a) = fam(left)?;
+    let (f2, b) = fam(right)?;
+    let double = |u: Expr| trig_mk_mul(Const(2.0), u);
+    let unscaled = match (f1, f2) {
+        (0, 0) => {
+            if a.structurally_eq(&b) {
+                trig_mk_sub(Const(1.0), Cos(Box::new(double(a))))
+            } else {
+                trig_mk_sub(
+                    Cos(Box::new(trig_mk_sub(a.clone(), b.clone()))),
+                    Cos(Box::new(trig_mk_add(a, b))),
+                )
+            }
+        }
+        (1, 1) => {
+            if a.structurally_eq(&b) {
+                trig_mk_add(Const(1.0), Cos(Box::new(double(a))))
+            } else {
+                trig_mk_add(
+                    Cos(Box::new(trig_mk_sub(a.clone(), b.clone()))),
+                    Cos(Box::new(trig_mk_add(a, b))),
+                )
+            }
+        }
+        // sin·cos en cualquier orden.
+        _ => {
+            let (s, c) = if f1 == 0 { (a, b) } else { (b, a) };
+            if s.structurally_eq(&c) {
+                Sin(Box::new(double(s)))
+            } else {
+                trig_mk_add(
+                    Sin(Box::new(trig_mk_add(s.clone(), c.clone()))),
+                    Sin(Box::new(trig_mk_sub(s, c))),
+                )
+            }
+        }
+    };
+    // Reaplica el factor externo: k=1 → forma/2, k=2 → forma directa.
+    if (coef - 1.0).abs() < TRIG_CONST_TOL {
+        Some(trig_mk_div(unscaled, Const(2.0)))
+    } else if (coef - 2.0).abs() < TRIG_CONST_TOL {
+        Some(unscaled)
+    } else {
+        Some(trig_mk_mul(Const(coef / 2.0), unscaled))
+    }
+}
+
+fn trig_simplify_once(expr: &Expr) -> Option<Expr> {
+    // TR0 + 1+tan² primero (reducen), luego expansión (delega sin duplicar).
+    if let Some(next) = trig_pythag_step(expr) {
+        return Some(next);
+    }
+    trig_expand_step(expr)
+}
+
+/// Una pasada bottom-up: reescribe hijos primero y luego aplica `rule` al
+/// nodo reconstruido (los nodos recién creados no se revisitan en la pasada).
+fn trig_rewrite_bottom_up(
+    expr: &Expr,
+    rule: &dyn Fn(&Expr) -> Result<Option<Expr>, String>,
+) -> Result<(Expr, bool), String> {
+    trig_pass_bottom_up(expr, rule)
+}
+
+fn trig_pass_bottom_up(
+    expr: &Expr,
+    rule: &dyn Fn(&Expr) -> Result<Option<Expr>, String>,
+) -> Result<(Expr, bool), String> {
+    let rec = |child: &Expr| trig_pass_bottom_up(child, rule);
+    let (rebuilt, child_changed) = trig_map_children(expr, &rec)?;
+    if let Some(next) = rule(&rebuilt)? {
+        return Ok((next, true));
+    }
+    Ok((rebuilt, child_changed))
+}
+
+/// Una pasada top-down con reintento: aplica `rule` al nodo antes de bajar;
+/// si el nodo no matcheó pero algún hijo cambió, reintenta en el reconstruido.
+/// Así la pitagórica (padre) gana a la expansión (hijos).
+fn trig_pass_top_down(
+    expr: &Expr,
+    rule: &dyn Fn(&Expr) -> Result<Option<Expr>, String>,
+) -> Result<(Expr, bool), String> {
+    if let Some(next) = rule(expr)? {
+        return Ok((next, true));
+    }
+    let rec = |child: &Expr| trig_pass_top_down(child, rule);
+    let (rebuilt, child_changed) = trig_map_children(expr, &rec)?;
+    if child_changed {
+        if let Some(next) = rule(&rebuilt)? {
+            return Ok((next, true));
+        }
+        return Ok((rebuilt, true));
+    }
+    Ok((rebuilt, false))
+}
+
+fn trig_map_children(
+    expr: &Expr,
+    rec: &dyn Fn(&Expr) -> Result<(Expr, bool), String>,
+) -> Result<(Expr, bool), String> {
+    use Expr::*;
+    let mut child_changed = false;
+    let mut one = |child: &Expr| -> Result<Box<Expr>, String> {
+        let (next, changed) = rec(child)?;
+        child_changed |= changed;
+        Ok(Box::new(next))
+    };
+    match expr {
+        Const(_) | Var(_) => Ok((expr.clone(), false)),
+        Neg(a) => Ok((Neg(one(a)?), child_changed)),
+        Sin(a) => Ok((Sin(one(a)?), child_changed)),
+        Cos(a) => Ok((Cos(one(a)?), child_changed)),
+        Tan(a) => Ok((Tan(one(a)?), child_changed)),
+        Asin(a) => Ok((Asin(one(a)?), child_changed)),
+        Acos(a) => Ok((Acos(one(a)?), child_changed)),
+        Atan(a) => Ok((Atan(one(a)?), child_changed)),
+        Exp(a) => Ok((Exp(one(a)?), child_changed)),
+        Ln(a) => Ok((Ln(one(a)?), child_changed)),
+        Log(a) => Ok((Log(one(a)?), child_changed)),
+        Sqrt(a) => Ok((Sqrt(one(a)?), child_changed)),
+        Abs(a) => Ok((Abs(one(a)?), child_changed)),
+        Sinh(a) => Ok((Sinh(one(a)?), child_changed)),
+        Cosh(a) => Ok((Cosh(one(a)?), child_changed)),
+        Tanh(a) => Ok((Tanh(one(a)?), child_changed)),
+        Floor(a) => Ok((Floor(one(a)?), child_changed)),
+        Ceil(a) => Ok((Ceil(one(a)?), child_changed)),
+        Round(a) => Ok((Round(one(a)?), child_changed)),
+        Sec(a) => Ok((Sec(one(a)?), child_changed)),
+        Csc(a) => Ok((Csc(one(a)?), child_changed)),
+        Cot(a) => Ok((Cot(one(a)?), child_changed)),
+        Asinh(a) => Ok((Asinh(one(a)?), child_changed)),
+        Acosh(a) => Ok((Acosh(one(a)?), child_changed)),
+        Atanh(a) => Ok((Atanh(one(a)?), child_changed)),
+        Sign(a) => Ok((Sign(one(a)?), child_changed)),
+        Heaviside(a) => Ok((Heaviside(one(a)?), child_changed)),
+        Cbrt(a) => Ok((Cbrt(one(a)?), child_changed)),
+        Re(a) => Ok((Re(one(a)?), child_changed)),
+        Im(a) => Ok((Im(one(a)?), child_changed)),
+        Arg(a) => Ok((Arg(one(a)?), child_changed)),
+        Conj(a) => Ok((Conj(one(a)?), child_changed)),
+        Erf(a) => Ok((Erf(one(a)?), child_changed)),
+        Erfc(a) => Ok((Erfc(one(a)?), child_changed)),
+        Gamma(a) => Ok((Gamma(one(a)?), child_changed)),
+        LnGamma(a) => Ok((LnGamma(one(a)?), child_changed)),
+        Digamma(a) => Ok((Digamma(one(a)?), child_changed)),
+        Trigamma(a) => Ok((Trigamma(one(a)?), child_changed)),
+        Add(a, b) => Ok((Add(one(a)?, one(b)?), child_changed)),
+        Sub(a, b) => Ok((Sub(one(a)?, one(b)?), child_changed)),
+        Mul(a, b) => Ok((Mul(one(a)?, one(b)?), child_changed)),
+        Div(a, b) => Ok((Div(one(a)?, one(b)?), child_changed)),
+        Pow(a, b) => Ok((Pow(one(a)?, one(b)?), child_changed)),
+        Atan2(a, b) => Ok((Atan2(one(a)?, one(b)?), child_changed)),
+        Modulo(a, b) => Ok((Modulo(one(a)?, one(b)?), child_changed)),
+        Min(a, b) => Ok((Min(one(a)?, one(b)?), child_changed)),
+        Max(a, b) => Ok((Max(one(a)?, one(b)?), child_changed)),
+        Beta(a, b) => Ok((Beta(one(a)?, one(b)?), child_changed)),
+        BesselJ(a, b) => Ok((BesselJ(one(a)?, one(b)?), child_changed)),
+        BesselY(a, b) => Ok((BesselY(one(a)?, one(b)?), child_changed)),
+        BesselI(a, b) => Ok((BesselI(one(a)?, one(b)?), child_changed)),
+        Lt(a, b) => Ok((Lt(one(a)?, one(b)?), child_changed)),
+        Gt(a, b) => Ok((Gt(one(a)?, one(b)?), child_changed)),
+        Le(a, b) => Ok((Le(one(a)?, one(b)?), child_changed)),
+        Ge(a, b) => Ok((Ge(one(a)?, one(b)?), child_changed)),
+        Eq(a, b) => Ok((Eq(one(a)?, one(b)?), child_changed)),
+        Ne(a, b) => Ok((Ne(one(a)?, one(b)?), child_changed)),
+        Clamp(a, b, c) => Ok((Clamp(one(a)?, one(b)?, one(c)?), child_changed)),
+        Sum(body, var, start, end) => Ok((
+            Sum(one(body)?, var.clone(), one(start)?, one(end)?),
+            child_changed,
+        )),
+        Product(body, var, start, end) => Ok((
+            Product(one(body)?, var.clone(), one(start)?, one(end)?),
+            child_changed,
+        )),
+        Piecewise(pieces, default) => {
+            let mut next_pieces = Vec::with_capacity(pieces.len());
+            for (cond, value) in pieces {
+                next_pieces.push((one(cond)?, one(value)?));
+            }
+            Ok((Piecewise(next_pieces, one(default)?), child_changed))
+        }
+    }
+}
+
+/// Itera pasadas bottom-up hasta punto fijo o `max_steps`. Devuelve la forma
+/// alcanzada y si convergió (solo para reglas que convergen, como suma/dif).
+fn trig_fixpoint(
+    expr: &Expr,
+    rule: &dyn Fn(&Expr) -> Result<Option<Expr>, String>,
+    max_steps: usize,
+) -> Result<(Expr, bool), String> {
+    let mut current = expr.clone();
+    for _ in 0..max_steps {
+        let (next, changed) = trig_rewrite_bottom_up(&current, rule)?;
+        if !changed {
+            return Ok((next, true));
+        }
+        current = next;
+    }
+    Ok((current, false))
+}
+
+/// Itera pasadas top-down y devuelve la MEJOR forma vista (menor
+/// `node_count`, primera en caso de empate) más si convergió. Así el loop
+/// mixto de `trig_simplify` nunca devuelve una forma peor que un intermedio:
+/// si expandir/combinar oscilan, corta por cota con la forma más compacta.
+fn trig_fixpoint_best(
+    expr: &Expr,
+    rule: &dyn Fn(&Expr) -> Result<Option<Expr>, String>,
+    max_steps: usize,
+) -> Result<(Expr, bool), String> {
+    let mut current = expr.clone();
+    let mut best: Option<Expr> = None;
+    let mut best_size = usize::MAX;
+    let mut converged = false;
+    for _ in 0..max_steps {
+        let (next, changed) = trig_pass_top_down(&current, rule)?;
+        if !changed {
+            let size = current.node_count();
+            if size < best_size {
+                best = Some(current.clone());
+            }
+            converged = true;
+            break;
+        }
+        let size = next.node_count();
+        if size < best_size {
+            best_size = size;
+            best = Some(next.clone());
+        }
+        current = next;
+    }
+    if let Some(best) = best {
+        Ok((best, converged))
+    } else {
+        Ok((current, true))
+    }
+}
+
+fn parse_trig_input(cmd: &str, expr: &str) -> Result<Expr, String> {
+    if expr.len() > MAX_TRIG_INPUT_CHARS {
+        return Err(format!(
+            "{cmd}: la expresión excede el máximo {MAX_TRIG_INPUT_CHARS} (presupuesto MAX_EXPR_LENGTH)"
+        ));
+    }
+    let compact = expr.replace(' ', "");
+    parse_ast(&compact)
+        .map_err(|reason| format!("{cmd}: no se pudo interpretar '{expr}': {reason}"))
+}
+
+fn finish_trig_output(cmd: &str, expr: Expr) -> Result<String, String> {
+    let out = expr.to_expr_string();
+    if out.len() > MAX_TRIG_OUTPUT_BYTES {
+        return Err(format!(
+            "{cmd}: la salida excede el máximo {MAX_TRIG_OUTPUT_BYTES} (presupuesto de expansión)"
+        ));
+    }
+    Ok(out)
+}
+
+/// Expande identidades del subset en fases ordenadas: doble ángulo (una
+/// pasada), suma/diferencia (punto fijo: achica argumentos, converge) y
+/// potencias cuadráticas (una pasada; lo creado no se revisita).
+/// Ejemplos: sin(a+b)→sin a·cos b+cos a·sin b, cos(2x)→cos²x−sin²x,
+/// sin²x→(1−cos(2x))/2. Fuera del subset (tan, potencias ≠2) → `Err` honesto.
+pub fn trig_expand(expr: &str) -> Result<String, String> {
+    const CMD: &str = "TrigExpand";
+    let ast = parse_trig_input(CMD, expr)?;
+    let expand_sum = |node: &Expr| Ok(trig_sum_step(node));
+    let expand_double = |node: &Expr| Ok(trig_double_step(node));
+    let expand_pow = |node: &Expr| Ok(trig_pow_step(node));
+    let (pass1, changed_double) = trig_rewrite_bottom_up(&ast, &expand_double)?;
+    let (pass2, _) = trig_fixpoint(&pass1, &expand_sum, MAX_TRIG_REWRITE_STEPS)?;
+    let (pass3, changed_pow) = trig_rewrite_bottom_up(&pass2, &expand_pow)?;
+    if !changed_double && pass2.structurally_eq(&pass1) && !changed_pow {
+        return Err(format!(
+            "{CMD}: fuera del subset (solo sin/cos de suma o resta, doble ángulo 2·u y potencias cuadráticas sin²/cos²; tan, sec y potencias ≠2 exigen motor general)"
+        ));
+    }
+    finish_trig_output(CMD, pass3)
+}
+
+/// Combina productos del subset en suma o diferencia (una pasada bottom-up;
+/// lo creado no se revisita). Fuera del subset → `Err` honesto.
+pub fn trig_combine(expr: &str) -> Result<String, String> {
+    const CMD: &str = "TrigCombine";
+    let ast = parse_trig_input(CMD, expr)?;
+    let combine = |node: &Expr| Ok(trig_combine_step(node));
+    let (out, changed) = trig_rewrite_bottom_up(&ast, &combine)?;
+    if !changed {
+        return Err(format!(
+            "{CMD}: fuera del subset (solo productos sin·sin, sin·cos y cos·cos, con un factor constante opcional)"
+        ));
+    }
+    finish_trig_output(CMD, out)
+}
+
+/// Simplifica con pitagóricas (sin²+cos²→1, 1+tan²→sec²) más expansión y
+/// combinación en loop acotado de 8 pasos con pasada top-down (el padre gana
+/// a los hijos) y devolviendo la MEJOR forma vista. Si la forma oscila entre
+/// expandida y combinada, corta por cota con la más compacta (determinista).
+/// Sin identidad aplicable → `Err` honesto.
+pub fn trig_simplify(expr: &str) -> Result<String, String> {
+    const CMD: &str = "TrigSimplify";
+    let ast = parse_trig_input(CMD, expr)?;
+    let all = |node: &Expr| -> Result<Option<Expr>, String> {
+        if let Some(next) = trig_pythag_step(node) {
+            return Ok(Some(next));
+        }
+        if let Some(next) = trig_combine_step(node) {
+            return Ok(Some(next));
+        }
+        Ok(trig_expand_step(node))
+    };
+    let (out, _) = trig_fixpoint_best(&ast, &all, MAX_TRIG_REWRITE_STEPS)?;
+    if out.structurally_eq(&ast) {
+        return Err(format!(
+            "{CMD}: no se encontró identidad del subset (pitagóricas sin²+cos²→1 y 1+tan²→sec², expansión de suma/doble/potencias o combinación producto→suma)"
+        ));
+    }
+    finish_trig_output(CMD, out)
+}
+
+/// Cuadrado simbólico: (√x)² = x; resto E² = E·E (con plegado de consts).
+fn trig_square(expr: Expr) -> Expr {
+    if let Expr::Sqrt(inner) = expr {
+        (*inner).clone()
+    } else {
+        let other = expr.clone();
+        trig_mk_mul(expr, other)
+    }
+}
+
+fn trig_has_direct_sqrt(expr: &Expr) -> bool {
+    matches!(expr, Expr::Sqrt(_))
+}
+
+/// Una regla de racionalización sobre un `Div`: 1/√d → √d/d, a/(k·√c) →
+/// a·√c/(k·c) y binomio a/(b±√c) → a·(b∓√c)/(b²−c) por conjugada (también
+/// √a±√b → /(a−b)). Denominador nulo constante → `Err`; resto → `None`.
+fn rationalize_step(expr: &Expr) -> Result<Option<Expr>, String> {
+    use Expr::*;
+    const CMD: &str = "Rationalize";
+    let Div(num, den) = expr else {
+        return Ok(None);
+    };
+    // Caso 1/√d → √d/d.
+    if let Sqrt(radicand) = den.as_ref() {
+        if matches!(radicand.as_ref(), Const(v) if *v == 0.0) {
+            return Err(format!(
+                "{CMD}: denominador nulo (1/sqrt(0) no está definido)"
+            ));
+        }
+        return Ok(Some(trig_mk_div(
+            Sqrt(radicand.clone()),
+            (**radicand).clone(),
+        )));
+    }
+    // Caso a/(k·√c) → a·√c/(k·c), con factor constante un nivel.
+    if let Mul(a, b) = den.as_ref() {
+        let factor = match (trig_const(a), trig_const(b)) {
+            (Some(k), None) if k.is_finite() => Some((k, b.as_ref())),
+            (None, Some(k)) if k.is_finite() => Some((k, a.as_ref())),
+            _ => None,
+        };
+        if let Some((k, root)) = factor {
+            if let Sqrt(radicand) = root {
+                if k == 0.0 {
+                    return Err(format!("{CMD}: denominador nulo (factor 0·sqrt(c))"));
+                }
+                if matches!(radicand.as_ref(), Const(v) if *v == 0.0) {
+                    return Err(format!(
+                        "{CMD}: denominador nulo (sqrt(0) en el denominador)"
+                    ));
+                }
+                let new_den = trig_mk_mul(Const(k), (**radicand).clone());
+                if matches!(new_den, Const(v) if v == 0.0) {
+                    return Err(format!("{CMD}: denominador nulo tras racionalizar"));
+                }
+                return Ok(Some(trig_mk_div(
+                    trig_mk_mul((**num).clone(), Sqrt(radicand.clone())),
+                    new_den,
+                )));
+            }
+        }
+        return Ok(None);
+    }
+    // Caso binomio: a/(L±R) con al menos una raíz directa → conjugada.
+    // (L+R)(L−R) = L²−R² con (√x)² = x.
+    if let Add(l, r) | Sub(l, r) = den.as_ref() {
+        if !trig_has_direct_sqrt(l) && !trig_has_direct_sqrt(r) {
+            return Ok(None);
+        }
+        let conj = if matches!(den.as_ref(), Add(..)) {
+            Sub(l.clone(), r.clone())
+        } else {
+            Add(l.clone(), r.clone())
+        };
+        let new_den = trig_mk_sub(trig_square((**l).clone()), trig_square((**r).clone()));
+        if matches!(new_den, Const(v) if v == 0.0) {
+            return Err(format!(
+                "{CMD}: denominador nulo tras conjugada (b²=c, división por cero)"
+            ));
+        }
+        return Ok(Some(trig_mk_div(
+            trig_mk_mul((**num).clone(), conj),
+            new_den,
+        )));
+    }
+    Ok(None)
+}
+
+/// Quita radicales cuadráticos del denominador (una pasada; lo creado no se
+/// revisita): 1/√d, a/(k·√c) y binomios por conjugada. Resto (cbrt,
+/// radicales fuera del binomio) → `Err` honesto.
+pub fn rationalize(expr: &str) -> Result<String, String> {
+    const CMD: &str = "Rationalize";
+    let ast = parse_trig_input(CMD, expr)?;
+    let rat = |node: &Expr| rationalize_step(node);
+    let (out, changed) = trig_rewrite_bottom_up(&ast, &rat)?;
+    if !changed {
+        return Err(format!(
+            "{CMD}: fuera del subset (solo 1/sqrt(d), a/(k·sqrt(c)) y a/(b±sqrt(c)) con radical cuadrático; cbrt y resto exigen motor general)"
+        ));
+    }
+    finish_trig_output(CMD, out)
 }
 
 // --- Hermite / Rothstein-Trager helpers ---
@@ -8077,5 +8713,195 @@ mod tests {
             limit_infinite_typed("x", "x", true),
             MathResult::DomainError(MathError::LimitDoesNotExist { .. })
         ));
+    }
+
+    // Frente trigonométricas + racionalización (subset honesto S): cada regla
+    // con test de equivalencia NUMÉRICA (ambos lados en 5 puntos).
+    fn assert_trig_equiv(original: &str, rewritten: &str, var: &str, points: &[f64]) {
+        assert_eq!(points.len(), 5, "el subset exige 5 puntos");
+        for point in points {
+            let left = eval_result(original, var, *point);
+            let right = eval_result(rewritten, var, *point);
+            assert!(
+                left.is_finite() && right.is_finite(),
+                "punto no finito en {original} = {rewritten} ({var}={point}): {left} vs {right}"
+            );
+            let tol = 1e-9 * 1.0_f64.max(left.abs()).max(right.abs());
+            assert!(
+                (left - right).abs() <= tol,
+                "difieren en {original} = {rewritten} ({var}={point}): {left} vs {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn trig_expand_sum_sin_and_cos() {
+        let out = trig_expand("sin(x+y)").unwrap();
+        assert_eq!(out, "sin(x) * cos(y) + cos(x) * sin(y)");
+        // Con una variable libre (y=1 fijo) la equivalencia se evalúa en x.
+        let left = parse_ast("sin(x+1)").unwrap();
+        let right = parse_ast(&trig_expand("sin(x+1)").unwrap()).unwrap();
+        for point in [0.1, 0.7, 1.3, 2.1, 3.0] {
+            let (l, r) = (left.eval_at("x", point), right.eval_at("x", point));
+            assert!((l - r).abs() < 1e-9, "sin(x+1) en {point}: {l} vs {r}");
+        }
+        let out = trig_expand("cos(x-y)").unwrap();
+        assert_eq!(out, "cos(x) * cos(y) + sin(x) * sin(y)");
+        assert_trig_equiv(
+            "cos(2*x)",
+            &trig_expand("cos(2*x)").unwrap(),
+            "x",
+            &[0.1, 0.7, 1.3, 2.1, 3.0],
+        );
+    }
+
+    #[test]
+    fn trig_expand_double_angle() {
+        let out = trig_expand("sin(2*x)").unwrap();
+        assert_eq!(out, "2 * (sin(x) * cos(x))");
+        assert_trig_equiv("sin(2*x)", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+        let out = trig_expand("cos(2*x)").unwrap();
+        assert_eq!(out, "cos(x) * cos(x) - sin(x) * sin(x)");
+        assert_trig_equiv("cos(2*x)", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+    }
+
+    #[test]
+    fn trig_expand_square_powers() {
+        let out = trig_expand("sin(x)^2").unwrap();
+        assert_eq!(out, "(1 - cos(2 * x)) * 0.5");
+        assert_trig_equiv("sin(x)^2", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+        let out = trig_expand("cos(x)^2").unwrap();
+        assert_eq!(out, "(1 + cos(2 * x)) * 0.5");
+        assert_trig_equiv("cos(x)^2", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+    }
+
+    #[test]
+    fn trig_expand_rejects_outside_subset() {
+        for expr in ["tan(x+y)", "sin(x)^3", "sec(2*x)", "x+1"] {
+            let err = trig_expand(expr).expect_err(&format!("{expr} debe ser Err honesto"));
+            assert!(err.contains("TrigExpand"), "fue: {err}");
+        }
+    }
+
+    #[test]
+    fn trig_combine_products_to_sums() {
+        let out = trig_combine("sin(x)*cos(x)").unwrap();
+        assert_eq!(out, "sin(2 * x) / 2");
+        assert_trig_equiv("sin(x)*cos(x)", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+        let out = trig_combine("cos(x)*cos(y)").unwrap();
+        assert_eq!(out, "(cos(x - y) + cos(x + y)) / 2");
+        let left = parse_ast("cos(x)*cos(2)").unwrap();
+        let right = parse_ast(&trig_combine("cos(x)*cos(2)").unwrap()).unwrap();
+        for point in [0.1, 0.7, 1.3, 2.1, 3.0] {
+            let (l, r) = (left.eval_at("x", point), right.eval_at("x", point));
+            assert!((l - r).abs() < 1e-9, "cos(x)*cos(2) en {point}: {l} vs {r}");
+        }
+        let out = trig_combine("sin(x)*sin(x)").unwrap();
+        assert_eq!(out, "(1 - cos(2 * x)) / 2");
+        assert_trig_equiv("sin(x)*sin(x)", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+        // Factor constante externo: 2·sin·cos → sin(2x) directo.
+        let out = trig_combine("2*sin(x)*cos(x)").unwrap();
+        assert_eq!(out, "sin(2 * x)");
+        assert_trig_equiv("2*sin(x)*cos(x)", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+    }
+
+    #[test]
+    fn trig_combine_rejects_outside_subset() {
+        for expr in ["sin(x)+cos(x)", "tan(x)*cos(x)", "sin(x)", "x*y"] {
+            let err = trig_combine(expr).expect_err(&format!("{expr} debe ser Err honesto"));
+            assert!(err.contains("TrigCombine"), "fue: {err}");
+        }
+    }
+
+    #[test]
+    fn trig_simplify_pythagoras_and_tan() {
+        let out = trig_simplify("sin(x)^2+cos(x)^2").unwrap();
+        assert_eq!(out, "1");
+        let out = trig_simplify("cos(x)^2+sin(x)^2").unwrap();
+        assert_eq!(out, "1");
+        let out = trig_simplify("1+tan(x)^2").unwrap();
+        assert_eq!(out, "sec(x) ^ 2");
+        assert_trig_equiv("1+tan(x)^2", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+        // Potencia sola también reduce por el loop (estable, sin oscilar).
+        let out = trig_simplify("sin(x)^2").unwrap();
+        assert_trig_equiv("sin(x)^2", &out, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+    }
+
+    #[test]
+    fn trig_simplify_fixpoint_is_bounded() {
+        // La pitagórica pura converge a 1 por la vía pública.
+        assert_eq!(trig_simplify("sin(x)^2+cos(x)^2").unwrap(), "1");
+        // El caso oscilante (combinar crea lo que expandir deshace) termina
+        // por cota, determinista y equivalente numéricamente.
+        let first = trig_simplify("sin(x)*cos(x)").unwrap();
+        let second = trig_simplify("sin(x)*cos(x)").unwrap();
+        assert_eq!(first, second, "el corte por cota debe ser determinista");
+        assert_trig_equiv("sin(x)*cos(x)", &first, "x", &[0.1, 0.7, 1.3, 2.1, 3.0]);
+        // La maquinaria interna converge en casos estables.
+        let ast = parse_ast("sin(x)^2+cos(x)^2").unwrap();
+        let all = |node: &Expr| -> Result<Option<Expr>, String> {
+            if let Some(next) = trig_pythag_step(node) {
+                return Ok(Some(next));
+            }
+            if let Some(next) = trig_combine_step(node) {
+                return Ok(Some(next));
+            }
+            Ok(trig_expand_step(node))
+        };
+        let (out, converged) = trig_fixpoint_best(&ast, &all, MAX_TRIG_REWRITE_STEPS).unwrap();
+        assert!(converged, "pitagórica pura debe converger");
+        assert_eq!(out.to_expr_string(), "1");
+        let err = trig_simplify("x+1").expect_err("sin identidad debe ser Err honesto");
+        assert!(err.contains("TrigSimplify"), "fue: {err}");
+    }
+
+    #[test]
+    fn rationalize_denominators() {
+        let out = rationalize("1/sqrt(2)").unwrap();
+        assert_eq!(out, "sqrt(2) / 2");
+        let out = rationalize("1/sqrt(x)").unwrap();
+        assert_eq!(out, "sqrt(x) / x");
+        assert_trig_equiv("1/sqrt(x)", &out, "x", &[0.5, 1.0, 2.0, 3.7, 10.0]);
+        let out = rationalize("3/(2+sqrt(x))").unwrap();
+        assert_trig_equiv("3/(2+sqrt(x))", &out, "x", &[0.5, 1.0, 2.0, 3.7, 10.0]);
+        assert!(
+            out.contains("2 - sqrt(x)"),
+            "conjugada esperada, fue: {out}"
+        );
+        let out = rationalize("1/(2*sqrt(3))").unwrap();
+        assert_trig_equiv("1/(2*sqrt(3))", &out, "x", &[0.5, 1.0, 2.0, 3.7, 10.0]);
+    }
+
+    #[test]
+    fn rationalize_rejects_outside_subset() {
+        let err = rationalize("x+1").expect_err("sin radical debe ser Err");
+        assert!(err.contains("Rationalize"), "fue: {err}");
+        let err = rationalize("cbrt(8)").expect_err("cúbica debe ser Err");
+        assert!(err.contains("Rationalize"), "fue: {err}");
+        let err = rationalize("1/sqrt(0)").expect_err("nulo debe ser Err");
+        assert!(err.contains("nulo"), "fue: {err}");
+        let err = rationalize("1/(2-sqrt(4))").expect_err("b²=c debe ser Err");
+        assert!(err.contains("nulo"), "fue: {err}");
+    }
+
+    #[test]
+    fn trig_front_respects_input_budget() {
+        let big = "x".repeat(MAX_TRIG_INPUT_CHARS + 1);
+        for result in [
+            trig_expand(&big),
+            trig_combine(&big),
+            trig_simplify(&big),
+            rationalize(&big),
+        ] {
+            let err = result.expect_err("sobre-presupuesto debe ser Err");
+            assert!(err.contains("MAX_EXPR_LENGTH"), "fue: {err}");
+        }
+    }
+
+    #[test]
+    fn trig_legacy_simplify_keeps_working() {
+        // El refactor delega sin cambiar el legacy: pitagórica y potencias.
+        assert_eq!(simplify("sin(x)^2+cos(x)^2").unwrap(), "1");
+        assert!(simplify("sin(x+1)").unwrap().contains("sin(x)"));
     }
 }

@@ -2134,6 +2134,14 @@ pub fn draw_teaching_overlay(
 mod tests {
     use super::*;
 
+    #[test]
+    fn presupuestos_texto_pedagogico_pinneados() {
+        // Onda 2: pinnea los topes user-facing de la tarjeta de ejercicio
+        // (enunciado/opción) para que la tarjeta no desborde.
+        assert_eq!(MAX_ENUNCIADO_CHARS, 280);
+        assert_eq!(MAX_OPCION_CHARS, 120);
+    }
+
     fn pista_de_sesion(texto: &str) -> String {
         let sesion = TeachingSession::for_topic(texto);
         sesion

@@ -134,7 +134,8 @@ fn oleada1_todos_visibles_en_paleta() {
         palette_must_be_visible(canonical);
     }
     // Total actualizado por Q2 (+3 visibles S): 284 → 287.
-    assert_eq!(command_registry::palette_commands().count(), 287);
+    // Frente trig+racionalización (+4 visibles S): 287 → 291.
+    assert_eq!(command_registry::palette_commands().count(), 291);
 }
 
 #[test]
