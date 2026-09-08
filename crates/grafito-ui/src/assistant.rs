@@ -287,7 +287,10 @@ impl AssistantBlocksCache {
     const MAX_ENTRIES: usize = 8;
 
     /// Devuelve los bloques de `content`, reutilizando el cache si ya se parseó.
-    fn blocks(&mut self, content: &str) -> Vec<AssistantMessageBlock> {
+    ///
+    /// P3 (H5): es el punto de medición del bench `assistant_blocks` — el
+    /// transcript por frame pasa por acá, así que un hit evita re-parsear.
+    pub fn blocks(&mut self, content: &str) -> Vec<AssistantMessageBlock> {
         if let Some(entry) = self
             .entries
             .iter()
@@ -1879,7 +1882,7 @@ fn should_draw_empty_state(state: &AssistantPanelState) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum AssistantMessageBlock {
+pub enum AssistantMessageBlock {
     Heading {
         level: usize,
         text: String,

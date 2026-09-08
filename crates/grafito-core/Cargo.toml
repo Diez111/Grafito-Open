@@ -40,5 +40,9 @@ harness = false
 name = "document_scenarios"
 harness = false
 
+[[bench]]
+name = "p3_implicit_mesh"
+harness = false
+
 [lints]
 workspace = true

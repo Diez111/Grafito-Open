@@ -11,8 +11,18 @@
 //!
 //! Gate B4: implementar AST cache en `render_2d.rs` solo si
 //! `prepare_ast_10x / cold_10_funcs >= 15%`.
+//!
+//! Frente P3 (H3): `ImplicitCurveObj::get_cached_asts` clona ambos AST por
+//! objeto por frame + hashea exprs y variables en cada llamada.
+//!
+//! - `h3_asts_cache_miss`: primer acceso (parsea).
+//! - `h3_asts_cache_hit`: misma clave repetida (hash + clones, sin parseo).
+//!
+//! Gate P3: pasar a `Arc` + hash solo en cambio de versión solo si
+//! `(miss - hit)` no explica el costo y el `hit` por sí solo es ≥10% del
+//! frame (medido contra `cold_10_funcs` como referencia de orden).
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use grafito_core::{Document, FunctionObj, GeoObject};
+use grafito_core::{Document, FunctionObj, GeoObject, ImplicitCurveObj, RelationOperator};
 use grafito_geometry::ViewTransform;
 use grafito_render::Renderer;
 use std::collections::HashMap;
@@ -57,5 +67,42 @@ fn bench_prepare_ast_10x(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_cold_10_funcs, bench_prepare_ast_10x);
+fn curve_obj() -> ImplicitCurveObj {
+    ImplicitCurveObj::new("sin(x)*cos(y)+x*y", "x*x+y*y-1", RelationOperator::Eq)
+}
+
+fn bench_h3_asts_cache_miss(c: &mut Criterion) {
+    let variables: HashMap<String, f64> = HashMap::new();
+    c.bench_function("h3_asts_cache_miss", |b| {
+        b.iter(|| {
+            let obj = curve_obj();
+            let pair = obj
+                .get_cached_asts(black_box(&variables), &["x", "y"])
+                .unwrap();
+            black_box(pair);
+        })
+    });
+}
+
+fn bench_h3_asts_cache_hit(c: &mut Criterion) {
+    let variables: HashMap<String, f64> = HashMap::new();
+    let obj = curve_obj();
+    let _ = obj.get_cached_asts(&variables, &["x", "y"]).unwrap();
+    c.bench_function("h3_asts_cache_hit", |b| {
+        b.iter(|| {
+            let pair = obj
+                .get_cached_asts(black_box(&variables), &["x", "y"])
+                .unwrap();
+            black_box(pair);
+        })
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_cold_10_funcs,
+    bench_prepare_ast_10x,
+    bench_h3_asts_cache_miss,
+    bench_h3_asts_cache_hit
+);
 criterion_main!(benches);

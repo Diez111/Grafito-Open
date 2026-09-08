@@ -9,7 +9,7 @@ use grafito_geometry::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 /// A geometric object in the document (2D and 3D).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -619,8 +619,7 @@ impl GeoObject {
                     o.cached_asts = Default::default();
                 }
                 GeoObject::ImplicitSurface3D(o) => {
-                    o.mesh = Default::default();
-                    o.mesh_key = RwLock::new(None);
+                    o.mesh_slots = RwLock::new(Vec::new());
                 }
                 GeoObject::Transformed(o) => pending.push(o.inner.as_mut()),
                 _ => {}
@@ -1704,16 +1703,21 @@ impl Quadric3DObj {
 // eje (1..=32, el comando exige 8..=32). La malla se deriva con
 // `prepare_function_ast(expr, vars, &["x","y","z"])` + `finite_clamp`: un nodo
 // no finito aborta con `FieldUndefined` honesto (cero triángulos).
-// `mesh` es caché write-once (`OnceLock`): el primer cómputo exitoso queda
-// fijado y `mesh_key` guarda su clave (expr+cotas+cells+variables). Si las
-// variables cambian, `mesh_snapshot` recomputa en fresco sin envenenar la
-// caché (correcto aunque menos rápido durante animaciones).
+// `mesh_slots` es caché multi-slot (P3/H1): guarda hasta
+// `IMPLICIT_SURFACE_MESH_SLOTS` mallas por clave (expr+cotas+cells+variables).
+// El frame estable hittea el slot; la oscilación A/B entre dos claves también
+// hittea en vez de re-marchar. Claves siempre nuevas (animación continua)
+// recomputan en fresco sin envenenar los slots.
 /// Resolución por defecto del comando `ImplicitSurface` (16³ celdas).
 pub const IMPLICIT_SURFACE_DEFAULT_CELLS: usize = 16;
 /// Resolución mínima que acepta el comando `ImplicitSurface`.
 pub const IMPLICIT_SURFACE_MIN_CELLS: usize = 8;
 /// Resolución máxima (igual que `GB_MAX_MARCHING_CELLS_PER_AXIS`: 32³ celdas).
 pub const IMPLICIT_SURFACE_MAX_CELLS: usize = 32;
+/// Slots de la caché de malla (P3/H1): 2 cubren frame estable + oscilación
+/// A/B. Cada slot retiene una malla completa; subirlo multiplica memoria
+/// (malla 32³ ≈ cientos de KiB) sin hit extra en animación continua.
+pub const IMPLICIT_SURFACE_MESH_SLOTS: usize = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ImplicitSurface3DObj {
@@ -1731,12 +1735,11 @@ pub struct ImplicitSurface3DObj {
     pub visible: bool,
     pub width: f32,
     pub fill_color: Option<Color>,
-    /// Malla derivada (write-once). Se ignora en `Clone`/`PartialEq`/serde.
+    /// Mallas derivadas por clave, hasta `IMPLICIT_SURFACE_MESH_SLOTS`
+    /// (orden de inserción; se expulsa la más vieja). Se ignora en
+    /// `Clone`/`PartialEq`/serde.
     #[serde(skip)]
-    pub mesh: OnceLock<grafito_geometry::TriangleMesh3D>,
-    /// Clave del cómputo fijado en `mesh` (`None` si aún no se computó).
-    #[serde(skip)]
-    pub mesh_key: RwLock<Option<u64>>,
+    pub mesh_slots: RwLock<Vec<(u64, grafito_geometry::TriangleMesh3D)>>,
 }
 
 impl Clone for ImplicitSurface3DObj {
@@ -1757,8 +1760,7 @@ impl Clone for ImplicitSurface3DObj {
             width: self.width,
             fill_color: self.fill_color,
             // Caché runtime: se empieza vacía (el clon recomputa con su clave).
-            mesh: OnceLock::new(),
-            mesh_key: RwLock::new(None),
+            mesh_slots: RwLock::new(Vec::new()),
         }
     }
 }
@@ -1803,8 +1805,7 @@ impl ImplicitSurface3DObj {
             visible: true,
             width: 1.5,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.4)),
-            mesh: OnceLock::new(),
-            mesh_key: RwLock::new(None),
+            mesh_slots: RwLock::new(Vec::new()),
         }
     }
 
@@ -1871,40 +1872,44 @@ impl ImplicitSurface3DObj {
         )
     }
 
-    /// Malla para render: reutiliza la caché si la clave coincide; si las
-    /// variables cambiaron recomputa en fresco sin tocar la caché fijada.
-    /// Un `Err` (`FieldUndefined`, cotas, presupuesto) es honesto: el
-    /// llamador dibuja cero triángulos.
+    /// Malla para render: reutiliza el slot si la clave coincide (frame
+    /// estable u oscilación A/B); ante clave nueva recomputa en fresco y la
+    /// guarda expulsando el slot más viejo. Un `Err` (`FieldUndefined`,
+    /// cotas, presupuesto) es honesto: el llamador dibuja cero triángulos.
     pub fn mesh_snapshot(
         &self,
         variables: &HashMap<String, f64>,
     ) -> Result<grafito_geometry::TriangleMesh3D, grafito_geometry::MeshError> {
         let key = self.cache_key(variables);
-        let cached_key = self.mesh_key.read().map(|guard| *guard).unwrap_or(None);
-        if cached_key == Some(key) {
-            if let Some(mesh) = self.mesh.get() {
+        if let Ok(guard) = self.mesh_slots.read() {
+            if let Some((_, mesh)) = guard.iter().find(|(slot_key, _)| *slot_key == key) {
                 return Ok(mesh.clone());
             }
         }
         let fresh = self.compute_mesh(variables)?;
-        if self.mesh.get().is_none() {
-            let _ = self.mesh.set(fresh.clone());
-            if let Ok(mut guard) = self.mesh_key.write() {
-                *guard = Some(key);
+        if let Ok(mut guard) = self.mesh_slots.write() {
+            if let Some((_, mesh)) = guard.iter().find(|(slot_key, _)| *slot_key == key) {
+                return Ok(mesh.clone());
             }
+            if guard.len() >= IMPLICIT_SURFACE_MESH_SLOTS {
+                guard.remove(0);
+            }
+            guard.push((key, fresh.clone()));
         }
         Ok(fresh)
     }
 
-    /// Referencia a la malla fijada, si ya se computó con éxito.
-    pub fn cached_mesh(&self) -> Option<&grafito_geometry::TriangleMesh3D> {
-        self.mesh.get()
+    /// Malla más reciente, si ya se computó alguna con éxito.
+    pub fn cached_mesh(&self) -> Option<grafito_geometry::TriangleMesh3D> {
+        self.mesh_slots
+            .read()
+            .ok()
+            .and_then(|guard| guard.last().map(|(_, mesh)| mesh.clone()))
     }
 
-    /// `OnceLock` es write-once y no admite limpieza con `&self`; la
-    /// invalidación real ocurre en `detach_runtime_caches` (`&mut`). Las
-    /// variables cambiantes se manejan por clave en `mesh_snapshot`, así que
-    /// este no-op nunca miente (sirve mesh fresca ante clave distinta).
+    /// Los slots se auto-invalidan por clave en `mesh_snapshot`, así que este
+    /// no-op nunca miente (sirve mesh fresca ante clave distinta). La limpieza
+    /// real ocurre en `detach_runtime_caches` (`&mut`).
     pub fn invalidate_cache(&self) {}
 }
 
@@ -5015,10 +5020,53 @@ mod tests {
             (area - expected).abs() / expected < 0.08,
             "área={area} (esperada {expected} ±8%)"
         );
-        // La caché write-once sirve la misma malla ante la misma clave.
+        // La caché multi-slot sirve la misma malla ante la misma clave.
         let snapshot = surface.mesh_snapshot(&vars).expect("snapshot");
         assert_eq!(snapshot.triangle_count(), mesh.triangle_count());
         assert!(surface.cached_mesh().is_some());
+    }
+
+    #[test]
+    fn implicit_surface_mesh_slots_cover_ab_oscillation_and_evict_oldest() {
+        // P3/H1: oscilar A/B debe hittear (sin re-marching); una tercera
+        // clave expulsa el slot más viejo y la caché sigue acotada.
+        let surface =
+            ImplicitSurface3DObj::new("x*x+y*y+z*z-a", (-2.0, 2.0, -2.0, 2.0, -2.0, 2.0), 8);
+        let vars_a = HashMap::from([("a".to_string(), 0.25)]);
+        let vars_b = HashMap::from([("a".to_string(), 1.0)]);
+        let vars_c = HashMap::from([("a".to_string(), 4.0)]);
+        let mesh_a = surface.mesh_snapshot(&vars_a).expect("malla A");
+        let mesh_b = surface.mesh_snapshot(&vars_b).expect("malla B");
+        assert_ne!(mesh_a.triangle_count(), 0);
+        assert_ne!(mesh_b.triangle_count(), 0);
+        // A sigue en slots: mismo conteo y 2 slots ocupados.
+        let mesh_a_again = surface.mesh_snapshot(&vars_a).expect("malla A otra vez");
+        assert_eq!(mesh_a.triangle_count(), mesh_a_again.triangle_count());
+        assert_eq!(
+            surface
+                .mesh_slots
+                .read()
+                .map(|guard| guard.len())
+                .unwrap_or(0),
+            IMPLICIT_SURFACE_MESH_SLOTS
+        );
+        // Tercera clave: expulsa el slot más viejo (A), la caché sigue acotada.
+        let mesh_c = surface.mesh_snapshot(&vars_c).expect("malla C");
+        assert_ne!(mesh_c.triangle_count(), 0);
+        assert_eq!(
+            surface
+                .mesh_slots
+                .read()
+                .map(|guard| guard.len())
+                .unwrap_or(0),
+            IMPLICIT_SURFACE_MESH_SLOTS
+        );
+        let guarded = surface.mesh_slots.read().map(|guard| {
+            guard
+                .iter()
+                .any(|(_, mesh)| mesh.triangle_count() == mesh_c.triangle_count())
+        });
+        assert!(guarded.unwrap_or(false), "C debe quedar en slots");
     }
 
     #[test]

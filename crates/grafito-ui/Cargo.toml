@@ -23,3 +23,10 @@ once_cell.workspace = true
 [lints]
 workspace = true
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "assistant_blocks"
+harness = false
+

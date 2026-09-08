@@ -1688,20 +1688,37 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
     // F17: la pizarra hace early-return en `GrafitoApp::update`, así que el
     // scheduler unificado no corre en este modo; este es su scheduler local,
     // coalescido vía presupuesto y aplicado una sola vez al final del overlay.
-    // TODO(F17): el idle 100ms solo alimenta `ctx.animate_bool` de la paleta;
-    // egui ya repinta automáticamente durante animaciones → evaluar quitarlo.
-    app.repaint_budget
-        .request(std::time::Duration::from_millis(if busy {
-            16
-        } else {
-            100
-        }));
+    // P3/H12: en idle no se pide wake (0 wakes/s vs 10/s a 100ms). La paleta
+    // sigue animando porque `ctx.animate_bool` repinta solo mientras anima
+    // (verificado en egui 0.29 `context.rs::animate_value_with_time`).
+    if let Some(delay) = whiteboard_repaint_delay(busy) {
+        app.repaint_budget.request(delay);
+    }
     app.repaint_budget.apply(ctx);
+}
+
+/// Retraso de repintado del overlay de pizarra (P3/H12, pura y testeable).
+///
+/// `busy` (pointer abajo) → 16ms (60Hz trazo). Idle → `None`: sin wake
+/// periódico; `ctx.animate_bool` de la paleta ya repinta mientras anima e
+/// interacciones/undo repintan por evento.
+pub fn whiteboard_repaint_delay(busy: bool) -> Option<std::time::Duration> {
+    busy.then(|| std::time::Duration::from_millis(16))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whiteboard_idle_requests_no_repaint_wake() {
+        // P3/H12: idle → 0 wakes/s (antes 10/s a 100ms); busy → 16ms.
+        assert_eq!(whiteboard_repaint_delay(false), None);
+        assert_eq!(
+            whiteboard_repaint_delay(true),
+            Some(std::time::Duration::from_millis(16))
+        );
+    }
 
     #[test]
     fn whiteboard_creates_a_normalized_rectangle_from_a_drag() {
