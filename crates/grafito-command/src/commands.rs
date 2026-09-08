@@ -23,7 +23,7 @@ use grafito_core::{
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
-    tangent_line_at, volume_of_revolution, AnalysisFeature, IntersectionCurve,
+    tangent_line_at, volume_of_revolution, AnalysisFeature, AnalysisResult, IntersectionCurve,
 };
 use grafito_geometry::boolean::polygon_to_geo;
 use grafito_geometry::exact as conic_exact;
@@ -1907,6 +1907,7 @@ fn validate_command_label_ambiguity(document: &Document, command: &CasCmd) -> Re
         | "XIntercept"
         | "Centroid"
         | "Analyze"
+        | "FunctionStudy"
         | "Area"
         | "Circumference"
         | "Center"
@@ -2524,6 +2525,9 @@ fn handle_simple_analysis_commands(
             &default_analysis_features(),
             "Análisis",
         )),
+        "FunctionStudy" | "EstudioFuncion" if cmd.args.len() == 1 => Some(
+            run_function_study_command(document, input_text, cmd.args[0].trim()),
+        ),
         _ => None,
     }
 }
@@ -3925,6 +3929,9 @@ fn handle_remaining_cas_commands(
                 &default_analysis_features(),
                 "Análisis",
             );
+        }
+        "FunctionStudy" | "EstudioFuncion" if cmd.args.len() == 1 => {
+            return run_function_study_command(document, input_text, cmd.args[0].trim());
         }
         "Intersect" if cmd.args.len() == 2 => {
             let id1 = find_object_by_label(document, cmd.args[0].trim());
@@ -14823,6 +14830,262 @@ fn run_analysis_command(
     CommandOutcome::Error(format!("{}: requiere un objeto válido", feature_name))
 }
 
+/// W-C T1 — estudio de función paso-a-paso visual (moat donde GeoGebra
+/// es débil: tabla de signos + puntos marcados en canvas).
+///
+/// Reúsa `analyzable::analyze_object` (el mismo motor que `Analyze`) con
+/// el subset útil para el recorrido: ceros, intersección Y, máximos,
+/// mínimos, inflexiones y asíntotas verticales. Los puntos se crean con
+/// los mismos colores/tamaños que `run_analysis_command` y el mensaje
+/// agrega la tabla de signos por intervalos entre cortes.
+///
+/// Todo acotado: como máximo 64 cortes; signos no finitos salen como
+/// `?` honesto en vez de inventarse. Sin `unwrap`, sin matemática nueva.
+fn run_function_study_command(
+    document: &mut Document,
+    input_text: &mut String,
+    label: &str,
+) -> CommandOutcome {
+    let base_label = label
+        .split_once('(')
+        .map(|(id, _)| id.trim())
+        .unwrap_or(label);
+    let Some(id) = find_object_by_label(document, label)
+        .or_else(|| find_object_by_label(document, base_label))
+    else {
+        return CommandOutcome::Error("FunctionStudy: requiere un objeto válido".into());
+    };
+    let Some(GeoObject::Function(fun)) = document.get_object(id).cloned() else {
+        return CommandOutcome::Error(
+            "FunctionStudy: requiere una función (creala con Function[...])".into(),
+        );
+    };
+    let view = *document.view();
+    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+    let world_br = view.screen_to_world(glam::Vec2::new(view.screen_size.x, view.screen_size.y));
+    let view_bounds = (
+        world_tl.x.min(world_br.x),
+        world_tl.x.max(world_br.x),
+        world_tl.y.min(world_br.y),
+        world_tl.y.max(world_br.y),
+    );
+    let vars = document.variables.clone();
+    let features = [
+        AnalysisFeature::Root,
+        AnalysisFeature::YIntercept,
+        AnalysisFeature::LocalMaximum,
+        AnalysisFeature::LocalMinimum,
+        AnalysisFeature::Inflection,
+        AnalysisFeature::VerticalAsymptote,
+    ];
+    let probe = GeoObject::Function(fun.clone());
+    let results = analyzable::analyze_object(&probe, view_bounds, &vars, &features);
+    for r in &results {
+        let (color, size) = match r.feature {
+            AnalysisFeature::Root => (Color::new(1.0, 0.2, 0.2, 1.0), 8.0),
+            AnalysisFeature::YIntercept => (Color::new(0.2, 0.5, 1.0, 1.0), 8.0),
+            AnalysisFeature::LocalMaximum => (Color::new(0.2, 0.8, 0.4, 1.0), 7.0),
+            AnalysisFeature::LocalMinimum => (Color::new(0.2, 0.8, 0.9, 1.0), 7.0),
+            AnalysisFeature::Inflection => (Color::new(1.0, 0.6, 0.2, 1.0), 7.0),
+            AnalysisFeature::VerticalAsymptote
+            | AnalysisFeature::HorizontalAsymptote
+            | AnalysisFeature::ObliqueAsymptote => (Color::new(0.8, 0.3, 0.8, 1.0), 6.0),
+            _ => (Color::new(0.5, 0.5, 0.5, 1.0), 6.0),
+        };
+        let mut p = PointObj::new(r.point).with_label(&r.label);
+        p.color = color;
+        p.size = size;
+        insert_command_object!(document, GeoObject::Point(p));
+    }
+    let table = function_sign_table(&fun.expr, &vars, &results);
+    input_text.clear();
+    CommandOutcome::Message(format!(
+        "FunctionStudy {}: {} punto(s) · {table}",
+        fun.label,
+        results.len()
+    ))
+}
+
+/// Cortes ordenados para la tabla de signos: x de ceros + asíntotas
+/// verticales, con dedup 1e-9 y cota de 64 (presupuesto W-C).
+pub(crate) fn function_study_cuts(results: &[AnalysisResult]) -> Vec<f64> {
+    let mut cuts: Vec<f64> = results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.feature,
+                AnalysisFeature::Root | AnalysisFeature::VerticalAsymptote
+            )
+        })
+        .map(|r| r.point.x)
+        .filter(|x| x.is_finite())
+        .collect();
+    cuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut dedup: Vec<f64> = Vec::with_capacity(cuts.len().min(64));
+    for x in cuts {
+        let fresh = dedup
+            .last()
+            .is_none_or(|last: &f64| (x - *last).abs() > 1e-9);
+        if fresh {
+            dedup.push(x);
+        }
+        if dedup.len() >= 64 {
+            break;
+        }
+    }
+    dedup
+}
+
+/// Signo de `expr` en `x`: `Some(1)`/`Some(-1)`/`Some(0)` (|y| ≤ 1e-12 es
+/// cero), `None` si no se puede evaluar o no es finito. Puro, sin `unwrap`.
+pub(crate) fn function_sign_at(expr: &str, vars: &HashMap<String, f64>, x: f64) -> Option<i8> {
+    if !x.is_finite() {
+        return None;
+    }
+    let y = grafito_geometry::expr::eval_function_with_vars(expr, x, vars).ok()?;
+    if !y.is_finite() {
+        return None;
+    }
+    if y.abs() <= 1e-12 {
+        Some(0)
+    } else if y > 0.0 {
+        Some(1)
+    } else {
+        Some(-1)
+    }
+}
+
+/// Tabla de signos por intervalos entre cortes, más resumen de ceros,
+/// extremos y asíntotas verticales. Formato compacto de una línea para
+/// la celda del worksheet (la card del panel la muestra monoespaciada).
+///
+/// Ejemplo: `ceros [1.00] · AV [−] · signos: (-inf,1.00):- | (1.00,+inf):+`.
+/// Cortes vacíos → `signos: R:+/-/?` global en x=0 (o `?` si no evalúa).
+pub(crate) fn function_sign_table(
+    expr: &str,
+    vars: &HashMap<String, f64>,
+    results: &[AnalysisResult],
+) -> String {
+    fn fmt_x(x: f64) -> String {
+        format!("{x:.2}")
+    }
+    let mut zeros: Vec<String> = Vec::new();
+    let mut maxima: Vec<String> = Vec::new();
+    let mut minima: Vec<String> = Vec::new();
+    let mut av: Vec<String> = Vec::new();
+    for r in results {
+        match r.feature {
+            AnalysisFeature::Root => zeros.push(fmt_x(r.point.x)),
+            AnalysisFeature::LocalMaximum => maxima.push(fmt_x(r.point.x)),
+            AnalysisFeature::LocalMinimum => minima.push(fmt_x(r.point.x)),
+            AnalysisFeature::VerticalAsymptote => av.push(fmt_x(r.point.x)),
+            _ => {}
+        }
+    }
+    let cuts = function_study_cuts(results);
+    let sign_glyph = |s: Option<i8>| match s {
+        Some(1) => "+",
+        Some(-1) => "-",
+        Some(0) => "0",
+        _ => "?",
+    };
+    let mut bands: Vec<String> = Vec::new();
+    if cuts.is_empty() {
+        bands.push(format!(
+            "R:{}",
+            sign_glyph(function_sign_at(expr, vars, 0.0))
+        ));
+    } else {
+        let first = cuts[0];
+        bands.push(format!(
+            "(-inf,{}):{}",
+            fmt_x(first),
+            sign_glyph(function_sign_at(expr, vars, first - 1.0))
+        ));
+        for pair in cuts.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            bands.push(format!(
+                "({},{:}):{}",
+                fmt_x(a),
+                fmt_x(b),
+                sign_glyph(function_sign_at(expr, vars, a + (b - a) * 0.5))
+            ));
+        }
+        let last = cuts[cuts.len() - 1];
+        bands.push(format!(
+            "({last},+inf):{sign}",
+            last = fmt_x(last),
+            sign = sign_glyph(function_sign_at(expr, vars, last + 1.0))
+        ));
+    }
+    format!(
+        "ceros [{}] · máx [{}] · mín [{}] · AV [{}] · signos: {}",
+        zeros.join(", "),
+        maxima.join(", "),
+        minima.join(", "),
+        av.join(", "),
+        bands.join(" | ")
+    )
+}
+
+/// W-C T3 — resto de Taylor observado con el motor existente, cero
+/// matemática nueva.
+///
+/// `P_n(x)` sale de `symbolic::taylor_series` (el mismo que el comando
+/// `Taylor`) y tanto `P_n(x)` como `f(x)` se evalúan con
+/// `eval_multivar_expr` (el mismo que `RiemannSum`). El resto observado es
+/// `|f(x) − P_n(x)|` y el término siguiente es `|P_{n+1}(x) − P_n(x)|`
+/// (se reporta como término siguiente, honesto, no como cota garantizada
+/// de Lagrange: la cota real exigiría acotar `f^(n+1)` en todo el tramo).
+/// Todo `Option`: `None` si algo no evalúa o no es finito. Sin `unwrap`.
+/// El panel W-C lo usa para el slider de orden 1..=10.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TaylorRemainder {
+    pub approx: f64,
+    pub exact: f64,
+    pub resto_observado: f64,
+    pub termino_siguiente: Option<f64>,
+}
+
+pub fn taylor_remainder_observed(
+    expr: &str,
+    var: &str,
+    center: f64,
+    order: usize,
+    x: f64,
+    vars: &HashMap<String, f64>,
+) -> Option<TaylorRemainder> {
+    if !center.is_finite() || !x.is_finite() || order > MAX_TAYLOR_ORDER {
+        return None;
+    }
+    let var = var.trim();
+    if var.is_empty() {
+        return None;
+    }
+    let poly_n = symbolic::taylor_series(expr, var, center, order).ok()?;
+    let approx = eval_multivar_expr(&poly_n, vars, &[(var, x)]).ok()?;
+    let exact = eval_multivar_expr(expr, vars, &[(var, x)]).ok()?;
+    let resto_observado = (exact - approx).abs();
+    if !resto_observado.is_finite() {
+        return None;
+    }
+    let termino_siguiente = if order < MAX_TAYLOR_ORDER {
+        symbolic::taylor_series(expr, var, center, order + 1)
+            .ok()
+            .and_then(|poly_next| eval_multivar_expr(&poly_next, vars, &[(var, x)]).ok())
+            .map(|approx_next| (approx_next - approx).abs())
+            .filter(|t| t.is_finite())
+    } else {
+        None
+    };
+    Some(TaylorRemainder {
+        approx,
+        exact,
+        resto_observado,
+        termino_siguiente,
+    })
+}
+
 fn resolve_two_polygons(
     document: &Document,
     label_a: &str,
@@ -17632,11 +17895,33 @@ fn run_riemann_sum_command(args: &[String], document: &Document) -> CommandOutco
         .get(5)
         .map(|s| s.trim().to_lowercase())
         .unwrap_or("midpoint".into());
-    if !matches!(
-        method.as_str(),
-        "left" | "izquierda" | "right" | "derecha" | "midpoint" | "medio"
-    ) {
-        return CommandOutcome::Error(format!("RiemannSum: método desconocido '{method}'"));
+    // W-C T2: además de left/right/midpoint, trapecio y Simpson usan los
+    // mismos n+1 nodos equiespaciados (cero matemática nueva: fórmulas
+    // cerradas clásicas). Simpson exige n par (honesto, no redondea).
+    let quadrature = match method.as_str() {
+        "left" | "izquierda" => "left",
+        "right" | "derecha" => "right",
+        "trapezoid" | "trapecio" | "trapezoidal" | "trapecios" => "trapezoid",
+        "simpson" => "simpson",
+        "midpoint" | "medio" | "punto-medio" | "puntomedio" => "midpoint",
+        _ => {
+            return CommandOutcome::Error(format!("RiemannSum: método desconocido '{method}'"));
+        }
+    };
+    if quadrature == "simpson" && n % 2 == 1 {
+        return CommandOutcome::Error("RiemannSum: Simpson requiere n par".into());
+    }
+    if matches!(quadrature, "trapezoid" | "simpson") {
+        return run_trapezoid_simpson_command(
+            &expr,
+            &var,
+            a,
+            b,
+            n,
+            quadrature,
+            &method,
+            &document.variables,
+        );
     }
     let dx = (b - a) / n as f64;
     let mut total = 0.0;
@@ -17659,6 +17944,62 @@ fn run_riemann_sum_command(args: &[String], document: &Document) -> CommandOutco
     if total.is_finite() {
         CommandOutcome::Message(format!(
             "RiemannSum({method}, n={n}) ≈ {}",
+            fmt_scalar(total)
+        ))
+    } else {
+        CommandOutcome::Error("RiemannSum: el resultado no es finito".into())
+    }
+}
+
+/// W-C T2: trapecio compuesto + Simpson compuesto sobre los mismos
+/// `n+1` nodos equiespaciados que Riemann. `quadrature` ya validado
+/// (`"trapezoid"` o `"simpson"` con n par). Nodos no finitos o errores
+/// de evaluación abortan honesto, como el Riemann clásico.
+/// `variables` es el mapa del documento (inyectable para tests).
+/// 8 args a propósito (mismos que el Riemann clásico + `quadrature`): el
+/// gate es `-D warnings` y esto lo documenta en vez de reagrupar.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_trapezoid_simpson_command(
+    expr: &str,
+    var: &str,
+    a: f64,
+    b: f64,
+    n: usize,
+    quadrature: &str,
+    method_label: &str,
+    variables: &HashMap<String, f64>,
+) -> CommandOutcome {
+    let dx = (b - a) / n as f64;
+    if !dx.is_finite() {
+        return CommandOutcome::Error("RiemannSum: intervalo no finito".into());
+    }
+    let mut ys: Vec<f64> = Vec::new();
+    for i in 0..=n {
+        let x = a + i as f64 * dx;
+        match eval_multivar_expr(expr, variables, &[(var, x)]) {
+            Ok(v) if v.is_finite() => ys.push(v),
+            Ok(_) => {
+                return CommandOutcome::Error("RiemannSum: el resultado no es finito".into());
+            }
+            Err(e) => return CommandOutcome::Error(format!("RiemannSum: {e}")),
+        }
+    }
+    let total = if quadrature == "simpson" {
+        let mut s = ys[0] + ys[n];
+        for (i, y) in ys.iter().enumerate().take(n).skip(1) {
+            s += if i % 2 == 1 { 4.0 * y } else { 2.0 * y };
+        }
+        s * dx / 3.0
+    } else {
+        let mut s = (ys[0] + ys[n]) * 0.5;
+        for y in ys.iter().take(n).skip(1) {
+            s += y;
+        }
+        s * dx
+    };
+    if total.is_finite() {
+        CommandOutcome::Message(format!(
+            "RiemannSum({method_label}, n={n}) ≈ {}",
             fmt_scalar(total)
         ))
     } else {
@@ -20105,6 +20446,159 @@ fn matrix_from_columns(cols: &[Vec<f64>]) -> Option<Matrix> {
 mod tests {
     use super::*;
     use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
+
+    #[test]
+    fn wc_function_sign_table_marca_signos_entre_cortes() {
+        use grafito_geometry::analysis::{AnalysisFeature, AnalysisResult};
+        use grafito_geometry::Point2;
+        let vars = HashMap::new();
+        let root = |x: f64| AnalysisResult {
+            feature: AnalysisFeature::Root,
+            point: Point2::new(x, 0.0),
+            value: None,
+            secondary: None,
+            label: "cero".to_string(),
+        };
+        // x²-1: ceros en ±1 → + | - | +.
+        let table = function_sign_table("x^2-1", &vars, &[root(-1.0), root(1.0)]);
+        assert!(
+            table.contains("ceros [-1.00, 1.00]"),
+            "ceros listados: {table}"
+        );
+        assert!(
+            table.contains("(-inf,-1.00):+")
+                && table.contains("(-1.00,1.00):-")
+                && table.contains("(1.00,+inf):+"),
+            "bandas +|-|+: {table}"
+        );
+        // Sin cortes: signo global en x=0 (x²+1 siempre +).
+        let table = function_sign_table("x^2+1", &vars, &[]);
+        assert!(table.contains("R:+"), "global +: {table}");
+        // No evaluable en el punto global: `?` honesto, no invento.
+        let table = function_sign_table("1/x", &vars, &[]);
+        assert!(table.contains("R:?"), "no finito → ?: {table}");
+    }
+
+    #[test]
+    fn wc_function_study_e2e_crea_puntos_y_tabla() {
+        // T1: FunctionStudy[f] marca puntos en el canvas y devuelve la tabla.
+        let mut doc = Document::new();
+        let mut input = "Function[x^2-1]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(matches!(out, CommandOutcome::Message(_)), "crea f: {out:?}");
+        let label = doc
+            .objects_iter()
+            .find_map(|(_, obj)| match obj {
+                GeoObject::Function(f) => Some(f.label.clone()),
+                _ => None,
+            })
+            .expect("la función existe");
+        let before = doc.objects_iter().count();
+        let mut input = format!("FunctionStudy[{label}]");
+        let out = process_input(&mut doc, &mut input);
+        match out {
+            CommandOutcome::Message(m) => {
+                assert!(m.contains("ceros"), "tabla con ceros: {m}");
+                assert!(m.contains("signos:"), "tabla con signos: {m}");
+            }
+            other => panic!("FunctionStudy debe responder Message: {other:?}"),
+        }
+        assert!(
+            doc.objects_iter().count() > before,
+            "marca puntos en el canvas"
+        );
+        // Sin objeto válido: error honesto, cero fantasma.
+        let mut input = "FunctionStudy[no_existe]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "objeto inexistente: {out:?}"
+        );
+    }
+
+    #[test]
+    fn wc_riemann_trapecio_simpson_aproximan_un_tercio() {
+        // T2: x² en [0,1] = 1/3. Trapecio n=100 → 0.333367, Simpson → 0.333333.
+        let vars = HashMap::new();
+        let out = run_trapezoid_simpson_command(
+            "x^2",
+            "x",
+            0.0,
+            1.0,
+            100,
+            "trapezoid",
+            "trapecio",
+            &vars,
+        );
+        match out {
+            CommandOutcome::Message(m) => {
+                assert!(m.contains("0.333350"), "trapecio n=100: {m}");
+            }
+            other => panic!("trapecio debe responder Message: {other:?}"),
+        }
+        let out =
+            run_trapezoid_simpson_command("x^2", "x", 0.0, 1.0, 100, "simpson", "simpson", &vars);
+        match out {
+            CommandOutcome::Message(m) => {
+                assert!(m.contains("0.333333"), "simpson n=100: {m}");
+            }
+            other => panic!("simpson debe responder Message: {other:?}"),
+        }
+        // Simpson con n impar: error honesto, no redondea.
+        let mut doc = Document::new();
+        let mut input = "RiemannSum[x^2, x, 0, 1, 99, simpson]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "simpson n impar: {out:?}"
+        );
+        // Método desconocido: error honesto.
+        let mut input = "RiemannSum[x^2, x, 0, 1, 10, inventado]".to_string();
+        let out = process_input(&mut doc, &mut input);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "método inventado: {out:?}"
+        );
+    }
+
+    #[test]
+    fn wc_taylor_remainder_observado_converge_y_falla_honesto() {
+        // T3: sin(x) en a=0, orden 5, x=0.5 → resto observado diminuto.
+        let vars = HashMap::new();
+        let r =
+            taylor_remainder_observed("sin(x)", "x", 0.0, 5, 0.5, &vars).expect("sin tiene Taylor");
+        assert!(
+            r.resto_observado < 2e-6,
+            "P5(0.5) casi exacto: resto={}",
+            r.resto_observado
+        );
+        assert!(
+            (r.exact - 0.5f64.sin()).abs() < 1e-12,
+            "exact evalúa sin(0.5)"
+        );
+        let siguiente = r.termino_siguiente.expect("hay término siguiente");
+        assert!(siguiente < 2e-6, "término 6 chico: {siguiente}");
+        // Orden 1 peor que orden 9: el resto observado lo muestra.
+        let r1 = taylor_remainder_observed("sin(x)", "x", 0.0, 1, 0.5, &vars).expect("P1");
+        let r9 = taylor_remainder_observed("sin(x)", "x", 0.0, 9, 0.5, &vars).expect("P9");
+        assert!(
+            r9.resto_observado < r1.resto_observado,
+            "P9 mejor que P1 ({} vs {})",
+            r9.resto_observado,
+            r1.resto_observado
+        );
+        // Orden tope 64: resto sí, término siguiente no (honesto).
+        let r64 = taylor_remainder_observed("sin(x)", "x", 0.0, 64, 0.5, &vars).expect("P64");
+        assert!(
+            r64.termino_siguiente.is_none(),
+            "en el tope no hay siguiente"
+        );
+        // Fallos honestos: orden >64, expr inválida, x no finito, var vacía.
+        assert!(taylor_remainder_observed("sin(x)", "x", 0.0, 65, 0.5, &vars).is_none());
+        assert!(taylor_remainder_observed("[[[", "x", 0.0, 5, 0.5, &vars).is_none());
+        assert!(taylor_remainder_observed("sin(x)", "x", 0.0, 5, f64::NAN, &vars).is_none());
+        assert!(taylor_remainder_observed("sin(x)", "", 0.0, 5, 0.5, &vars).is_none());
+    }
 
     #[test]
     fn bar_chart_creates_real_object_and_rejects_honestly() {

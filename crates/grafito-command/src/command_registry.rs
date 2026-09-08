@@ -1490,6 +1490,18 @@ const COMMANDS: &[CommandSpec] = &[
         "Analyze",
         [signature!("Analyze[f]"; "f": Object required)]
     ),
+    command!(
+        "analysis.function-study",
+        "FunctionStudy",
+        ["estudiofuncion", "estudio"],
+        "Análisis",
+        "Recorrido visual de f: ceros, extremos, AV y tabla de signos; marca puntos en el canvas.",
+        CreatesObject,
+        Medium,
+        true,
+        "FunctionStudy",
+        [signature!("FunctionStudy[f]"; "f": Object required)]
+    ),
     // Complejos y calculo multivariable
     command!(
         "complex.mapping",
@@ -4313,6 +4325,7 @@ mod registry_tests {
             "XIntercept",
             "Intersect",
             "Analyze",
+            "FunctionStudy",
             "ComplexMapping",
             "Gauss",
             "ComplexIntegral",
@@ -4767,13 +4780,16 @@ mod registry_tests {
         // Frente C1: +Polyline (abierta, no visible) +Pyramid (3D, no visible).
         // Frente C2: +FillSeries (serie lineal/geométrica 1D, visible).
         // Frente W-B: +MeasureDistance (texto vivo de distancia, visible).
+        // Frente W-C: +FunctionStudy (recorrido + tabla de signos, visible).
+        // RiemannSum NO se duplicó: se extendió (trapecio/Simpson); Taylor
+        // NO se duplicó (TaylorPoly sería fantasma: Taylor ya crea el objeto).
         // FitLine/FillDown/ChiSquareTest/InverseChiSquare NO se agregaron:
         // duplicarían FitLinear/FillColumn/ChiSqTest/InverseChiSquared.
-        assert_eq!(all().len(), 272, "COMMANDS registrados (docs §8)");
+        assert_eq!(all().len(), 273, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            226,
-            "comandos visibles en paleta (docs §8: 226 + 14 UI = 240)"
+            227,
+            "comandos visibles en paleta (docs §8: 227 + 14 UI = 241)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

@@ -1384,9 +1384,73 @@ fn render_taylor_frames_impl(
     height: u32,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
+    // Legacy intacto: orden 3 + etiqueta histórica (píxeles pineados).
+    render_taylor_frames_inner(width, height, 3, "taylor  sin(x)", on_frame)
+}
+
+/// Suma parcial de `sin(x)` a grado `grado` (solo impares aportan).
+/// Pura y acotada: `grado` se clampe a `1..=10` (el slider del panel W-C
+/// vive en ese rango; el factorial de 9! es exacto en f64, sin overflow).
+/// `taylor_partial_sum(3, x)` es exactamente `x - x³/6` (el histórico).
+pub(crate) fn taylor_partial_sum(grado: usize, x: f64) -> f64 {
+    let grado = grado.clamp(1, 10);
+    let mut suma = 0.0;
+    let mut k = 0usize;
+    loop {
+        let n = 2 * k + 1;
+        if n > grado {
+            break;
+        }
+        let mut fact = 1.0f64;
+        for i in 2..=n {
+            fact *= i as f64;
+        }
+        let termino = x.powi(n as i32) / fact;
+        if k.is_multiple_of(2) {
+            suma += termino;
+        } else {
+            suma -= termino;
+        }
+        k += 1;
+    }
+    suma
+}
+
+/// W-C T3: Taylor con orden vivo. `terms` en `1..=10` (def 3.0 = histórico:
+/// misma curva P3 que el legacy; la etiqueta sí suma el orden y por eso
+/// los píxeles difieren del legacy solo en el rótulo).
+/// La animación de convergencia la da el frame `t` (fade de aparición,
+/// como el legacy) + el slider del panel que re-renderiza por orden.
+pub fn render_taylor_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_taylor_frames_with_params_impl(width, height, params, &mut |_, _| {})
+}
+
+fn render_taylor_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let orden = scene_param_clamped(params, SCENE_PARAM_TERMS, 3.0, 1.0, 10.0) as usize;
+    let orden = orden.clamp(1, 10);
+    let etiqueta = format!("taylor sin(x) n={orden}");
+    render_taylor_frames_inner(width, height, orden, &etiqueta, on_frame)
+}
+
+fn render_taylor_frames_inner(
+    width: u32,
+    height: u32,
+    orden: usize,
+    etiqueta: &str,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let f = |x: f64| x.sin();
-    let taylor = |x: f64| x - x.powi(3) / 6.0;
+    let taylor = |x: f64| taylor_partial_sum(orden, x);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
@@ -1431,16 +1495,7 @@ fn render_taylor_frames_impl(
             c[3] = (alpha as f64 * w0.min(w1)) as u8;
             draw_line(&mut buf, w, h, a, b, c);
         }
-        draw_text_block(
-            &mut buf,
-            w,
-            h,
-            w / 14,
-            h / 12,
-            "taylor  sin(x)",
-            TEXT_COLOR,
-            1,
-        );
+        draw_text_block(&mut buf, w, h, w / 14, h / 12, etiqueta, TEXT_COLOR, 1);
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
@@ -1653,8 +1708,9 @@ fn resolve_native_template(template: &str, concept: &str) -> &'static str {
 
 /// Dispatcher con params vivos (v3): el scrub de la UI re-renderiza llamando
 /// aquí con el mapa vivo. Atienden params: `derivative-slope` (x0/span),
-/// `integral-area` (a/b), `euler`/`fourier` (terms). El resto IGNORA params
-/// por ahora (TODO honesto: taylor es fade de orden fijo; conformal/pitagoras/
+/// `integral-area` (a/b), `taylor-series` (terms = orden 1..=10, W-C T3),
+/// `euler`/`fourier` (terms). El resto IGNORA params
+/// por ahora (TODO honesto: conformal/pitagoras/
 /// logistic/gradient/mobius/universal aún no parametrizan) y delega al legacy.
 /// Firmas legacy intactas: ningún caller existente se rompe.
 pub fn render_anim_for_concept_with_params(
@@ -1685,6 +1741,7 @@ pub fn render_anim_with_progress(
 ) -> Vec<egui::ColorImage> {
     match resolve_native_template(template, concept) {
         "integral-area" => render_integral_frames_with_params_impl(width, height, params, on_frame),
+        "taylor-series" => render_taylor_frames_with_params_impl(width, height, params, on_frame),
         "derivative-slope" => {
             render_derivative_frames_with_params_impl(width, height, params, on_frame)
         }
@@ -3339,6 +3396,73 @@ mod tests {
             f1[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
             f6[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
             "terms debe cambiar fourier"
+        );
+    }
+
+    #[test]
+    fn wc_taylor_partial_sum_orden3_es_historico_y_converge() {
+        // Orden 3 reproduce el histórico exacto x - x³/6.
+        for x in [-2.0f64, -0.5, 0.0, 0.7, 2.5] {
+            let esperado = x - x.powi(3) / 6.0;
+            assert!(
+                (taylor_partial_sum(3, x) - esperado).abs() <= 1e-12,
+                "orden 3 debe ser x - x³/6 en x={x}"
+            );
+        }
+        // Orden par == anterior impar para sin (sin términos pares).
+        assert_eq!(taylor_partial_sum(4, 0.7), taylor_partial_sum(3, 0.7));
+        // Converge: P9 más cerca de sin(0.5) que P1.
+        let err1 = (taylor_partial_sum(1, 0.5) - 0.5f64.sin()).abs();
+        let err9 = (taylor_partial_sum(9, 0.5) - 0.5f64.sin()).abs();
+        assert!(
+            err9 < err1,
+            "P9 debe acercarse más que P1 (err9={err9}, err1={err1})"
+        );
+        assert!(err9 < 1e-9, "P9(0.5) casi exacto (err9={err9})");
+        // Clamp: 0 → 1, 99 → 10, sin panic.
+        assert_eq!(taylor_partial_sum(0, 0.5), taylor_partial_sum(1, 0.5));
+        assert_eq!(taylor_partial_sum(99, 0.5), taylor_partial_sum(10, 0.5));
+    }
+
+    #[test]
+    fn wc_taylor_with_params_orden_mueve_frames_y_es_determinista() {
+        // Determinismo con mapa vacío.
+        let a = render_taylor_frames_with_params(64, 64, &params_map(&[]));
+        let b = render_taylor_frames_with_params(64, 64, &params_map(&[]));
+        assert_eq!(a.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!(a[0].pixels, b[0].pixels, "mismo params → mismos píxeles");
+        // Orden 1 vs 10: el último frame difiere (curvas distintas).
+        let t1 = render_taylor_frames_with_params(64, 64, &params_map(&[("terms", 1.0)]));
+        let t10 = render_taylor_frames_with_params(64, 64, &params_map(&[("terms", 10.0)]));
+        assert_ne!(
+            t1[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            t10[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "terms debe cambiar taylor (orden 1 vs 10)"
+        );
+        // NaN → default (igual que vacío), sin panic.
+        let nan = render_taylor_frames_with_params(64, 64, &params_map(&[("terms", f64::NAN)]));
+        assert_eq!(a[0].pixels, nan[0].pixels, "NaN → defaults");
+        // Dispatcher con params atiende terms (W-C T3: slider re-renderiza).
+        let d1 = render_anim_with_progress(
+            "taylor-series",
+            "taylor",
+            64,
+            64,
+            &params_map(&[("terms", 1.0)]),
+            &mut |_, _| {},
+        );
+        let d10 = render_anim_with_progress(
+            "taylor-series",
+            "taylor",
+            64,
+            64,
+            &params_map(&[("terms", 10.0)]),
+            &mut |_, _| {},
+        );
+        assert_ne!(
+            d1[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            d10[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "dispatcher debe propagar terms a taylor"
         );
     }
 

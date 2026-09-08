@@ -138,6 +138,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `XIntercept[f]`: Calcula los interceptos con el eje X. Mutacion: crea objetos. Riesgo: medio. Alias: `interceptox`, `intercepto_x`.
 - `Intersect[a, b]`: Calcula intersecciones entre curvas. Mutacion: crea objetos. Riesgo: medio. Alias: `interseccion`.
 - `Analyze[f]`: Ejecuta el analisis disponible de una funcion. Mutacion: crea objetos. Riesgo: medio. Alias: `analizar`, `analisis`.
+- `FunctionStudy[f]`: Recorrido visual de f: ceros, extremos, AV y tabla de signos; marca puntos en el canvas. Mutacion: crea objetos. Riesgo: medio. Alias: `estudiofuncion`, `estudio`.
 ## Complejos
 
 - `ComplexMapping[expr_compleja, target]`: Aplica un mapeo complejo a un objetivo. Mutacion: crea objetos. Riesgo: alto. Alias: `complex_mapping`, `mapeocomplejo`.

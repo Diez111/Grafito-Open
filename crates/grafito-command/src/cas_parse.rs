@@ -634,6 +634,9 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
                 "yintercept" | "interceptoy" | "intercepto_y" => "YIntercept",
                 "xintercept" | "interceptox" | "intercepto_x" => "XIntercept",
                 "analyze" | "analizar" | "analisis" => "Analyze",
+                "functionstudy" | "estudiofuncion" | "estudiodefuncion" | "estudio" => {
+                    "FunctionStudy"
+                }
                 "angle" => "Angle",
                 "tangent" => "Tangent",
                 "coincident" => "Coincident",

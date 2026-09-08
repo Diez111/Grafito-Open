@@ -1149,6 +1149,305 @@ fn draw_object_cards_where(
     }
 }
 
+// ── Frente W-C: paso-a-paso visual (moat donde GeoGebra es débil) ─────────
+// Tres secciones del panel CAS que cablean UI a comandos reales existentes:
+// FunctionStudy (recorrido + tabla de signos), RiemannSum (slider n +
+// exacta para comparar) y Taylor (slider orden 1..=10 + resto observado).
+// El estado vive en la memoria temporal de egui como `LayerPanelState`:
+// sin campos nuevos en `GrafitoApp`, sin I/O. Cero fantasma: cada botón
+// arma `app.input_text` y llama a `submit_cas_worksheet_cell`, igual que
+// el botón Ejecutar del panel.
+
+/// Métodos de cuadratura del selector W-C: (comando, etiqueta visible).
+const WC_QUADRATURE_METHODS: [(&str, &str); 3] = [
+    ("midpoint", "Punto medio"),
+    ("trapecio", "Trapecio"),
+    ("simpson", "Simpson"),
+];
+
+/// Presupuesto UX del slider n (el comando banca hasta 1_000_000).
+const WC_RIEMANN_SLIDER_MAX: f32 = 10_000.0;
+
+/// Estado efímero de las 3 secciones W-C (temp egui; `Clone` para el
+/// get/insert de `IdTypeMap`, `Default` con ejemplos que evalúan).
+#[derive(Debug, Clone)]
+struct WcVisualState {
+    estudio_label: String,
+    integral_expr: String,
+    integral_a: String,
+    integral_b: String,
+    integral_n: f32,
+    integral_metodo: usize,
+    taylor_expr: String,
+    taylor_centro: String,
+    taylor_orden: i32,
+    taylor_x: String,
+}
+
+impl Default for WcVisualState {
+    fn default() -> Self {
+        Self {
+            estudio_label: "f".to_string(),
+            integral_expr: "x^2".to_string(),
+            integral_a: "0".to_string(),
+            integral_b: "1".to_string(),
+            integral_n: 100.0,
+            integral_metodo: 0,
+            taylor_expr: "sin(x)".to_string(),
+            taylor_centro: "0".to_string(),
+            taylor_orden: 5,
+            taylor_x: "0.5".to_string(),
+        }
+    }
+}
+
+/// Texto del comando T1 (`None` si la etiqueta está vacía). Puro, testeable.
+pub(crate) fn wc_study_command_text(label: &str) -> Option<String> {
+    let label = label.trim();
+    if label.is_empty() {
+        None
+    } else {
+        Some(format!("FunctionStudy[{label}]"))
+    }
+}
+
+/// Texto del comando T2 (`None` si falta tramo o n fuera de 1..=1_000_000).
+/// La variable es `x` (se dice en el hint de la sección). Puro, testeable.
+pub(crate) fn wc_riemann_command_text(
+    expr: &str,
+    a: &str,
+    b: &str,
+    n: f32,
+    metodo: &str,
+) -> Option<String> {
+    let (expr, a, b, metodo) = (expr.trim(), a.trim(), b.trim(), metodo.trim());
+    if expr.is_empty() || a.is_empty() || b.is_empty() || metodo.is_empty() {
+        return None;
+    }
+    if !n.is_finite() {
+        return None;
+    }
+    let n = n.round() as usize;
+    if !(1..=1_000_000).contains(&n) {
+        return None;
+    }
+    Some(format!("RiemannSum[{expr}, x, {a}, {b}, {n}, {metodo}]"))
+}
+
+/// Texto del comando de la integral exacta T2 (para comparar en la hoja).
+/// Puro, testeable.
+pub(crate) fn wc_exact_integral_command_text(expr: &str, a: &str, b: &str) -> Option<String> {
+    let (expr, a, b) = (expr.trim(), a.trim(), b.trim());
+    if expr.is_empty() || a.is_empty() || b.is_empty() {
+        None
+    } else {
+        Some(format!("Integral[{expr}, x, {a}, {b}]"))
+    }
+}
+
+/// Texto del comando T3 (`None` si la expresión no cierra o el orden sale
+/// del rango del slider 1..=10). Puro, testeable.
+pub(crate) fn wc_taylor_command_text(
+    expr: &str,
+    centro: &str,
+    orden: i32,
+    x: &str,
+) -> Option<String> {
+    let (expr, centro, x) = (expr.trim(), centro.trim(), x.trim());
+    if expr.is_empty() || centro.is_empty() || x.is_empty() {
+        return None;
+    }
+    if !(1..=10).contains(&orden) {
+        return None;
+    }
+    if centro.parse::<f64>().is_err() || x.parse::<f64>().is_err() {
+        return None;
+    }
+    Some(format!("Taylor[{expr}, x, {centro}, {orden}]"))
+}
+
+/// Línea de resto observado T3 con el motor existente. `None` honesto si
+/// algo no evalúa (la sección muestra "revisá la expresión").
+pub(crate) fn wc_taylor_remainder_line(
+    expr: &str,
+    centro: &str,
+    orden: i32,
+    x: &str,
+    vars: &HashMap<String, f64>,
+) -> Option<String> {
+    let centro: f64 = centro.trim().parse().ok()?;
+    let x: f64 = x.trim().parse().ok()?;
+    let orden_usize: usize = usize::try_from(orden).ok()?;
+    let r = grafito_command::commands::taylor_remainder_observed(
+        expr.trim(),
+        "x",
+        centro,
+        orden_usize,
+        x,
+        vars,
+    )?;
+    let siguiente = r
+        .termino_siguiente
+        .map(|t| format!("{t:.2e}"))
+        .unwrap_or_else(|| "—".to_string());
+    Some(format!(
+        "P{orden}({x}) ≈ {:.6} · f = {:.6} · resto {:.2e} · sig. {siguiente}",
+        r.approx, r.exact, r.resto_observado
+    ))
+}
+
+/// Ejecuta un comando W-C como si se escribiera en la Entrada: arma
+/// `input_text` y dispara la celda (cero fantasma, comando real).
+fn wc_submit(app: &mut GrafitoApp, ui: &egui::Ui, command: String) {
+    app.input_text = command;
+    app.submit_cas_worksheet_cell(ui.ctx().input(|i| i.time));
+}
+
+fn draw_wc_study_contents(app: &mut GrafitoApp, ui: &mut egui::Ui, wc: &mut WcVisualState) {
+    ui.horizontal(|ui| {
+        ui.label("Función:");
+        ui.text_edit_singleline(&mut wc.estudio_label);
+        if ui.small_button("Estudiar").clicked() {
+            if let Some(cmd) = wc_study_command_text(&wc.estudio_label) {
+                wc_submit(app, ui, cmd);
+            }
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "Ceros, extremos, asíntotas + tabla de signos. Marca puntos en el canvas.",
+        )
+        .color(current_theme(ui.ctx()).text_tertiary)
+        .size(TYPE_XS),
+    );
+}
+
+fn draw_wc_integral_contents(app: &mut GrafitoApp, ui: &mut egui::Ui, wc: &mut WcVisualState) {
+    ui.text_edit_singleline(&mut wc.integral_expr)
+        .on_hover_text("Integrando en x, ej. x^2");
+    ui.horizontal(|ui| {
+        ui.label("a:");
+        ui.text_edit_singleline(&mut wc.integral_a);
+        ui.label("b:");
+        ui.text_edit_singleline(&mut wc.integral_b);
+    });
+    ui.add(egui::Slider::new(&mut wc.integral_n, 1.0..=WC_RIEMANN_SLIDER_MAX).text("n"));
+    let metodo_idx = wc.integral_metodo.min(WC_QUADRATURE_METHODS.len() - 1);
+    wc.integral_metodo = metodo_idx;
+    egui::ComboBox::from_id_salt("wc_metodo")
+        .selected_text(WC_QUADRATURE_METHODS[metodo_idx].1)
+        .show_ui(ui, |ui| {
+            for (i, (_, nombre)) in WC_QUADRATURE_METHODS.iter().enumerate() {
+                ui.selectable_value(&mut wc.integral_metodo, i, *nombre);
+            }
+        });
+    let n = wc.integral_n.round() as usize;
+    if WC_QUADRATURE_METHODS[wc.integral_metodo].0 == "simpson" && n % 2 == 1 {
+        ui.label(
+            egui::RichText::new("Simpson requiere n par (el comando lo rechaza honesto).")
+                .color(current_theme(ui.ctx()).text_tertiary)
+                .size(TYPE_XS),
+        );
+    }
+    ui.horizontal(|ui| {
+        if ui.small_button("Aproximar").clicked() {
+            if let Some(cmd) = wc_riemann_command_text(
+                &wc.integral_expr,
+                &wc.integral_a,
+                &wc.integral_b,
+                wc.integral_n,
+                WC_QUADRATURE_METHODS[wc.integral_metodo].0,
+            ) {
+                wc_submit(app, ui, cmd);
+            }
+        }
+        if ui.small_button("Exacta").clicked() {
+            if let Some(cmd) =
+                wc_exact_integral_command_text(&wc.integral_expr, &wc.integral_a, &wc.integral_b)
+            {
+                wc_submit(app, ui, cmd);
+            }
+        }
+    });
+    ui.label(
+        egui::RichText::new("La hoja muestra ambas celdas: aproximado vs exacto.")
+            .color(current_theme(ui.ctx()).text_tertiary)
+            .size(TYPE_XS),
+    );
+}
+
+fn draw_wc_taylor_contents(app: &mut GrafitoApp, ui: &mut egui::Ui, wc: &mut WcVisualState) {
+    ui.text_edit_singleline(&mut wc.taylor_expr)
+        .on_hover_text("Función en x, ej. sin(x)");
+    ui.horizontal(|ui| {
+        ui.label("centro:");
+        ui.text_edit_singleline(&mut wc.taylor_centro);
+        ui.label("x:");
+        ui.text_edit_singleline(&mut wc.taylor_x);
+    });
+    ui.add(egui::Slider::new(&mut wc.taylor_orden, 1..=10).text("orden"));
+    if ui.small_button("Polinomio").clicked() {
+        if let Some(cmd) = wc_taylor_command_text(
+            &wc.taylor_expr,
+            &wc.taylor_centro,
+            wc.taylor_orden,
+            &wc.taylor_x,
+        ) {
+            wc_submit(app, ui, cmd);
+        }
+    }
+    match wc_taylor_remainder_line(
+        &wc.taylor_expr,
+        &wc.taylor_centro,
+        wc.taylor_orden,
+        &wc.taylor_x,
+        &app.document.variables,
+    ) {
+        Some(line) => {
+            ui.label(egui::RichText::new(line).monospace().size(TYPE_XS));
+        }
+        None => {
+            ui.label(
+                egui::RichText::new("Sin resto: revisá la expresión.")
+                    .color(current_theme(ui.ctx()).text_tertiary)
+                    .size(TYPE_XS),
+            );
+        }
+    }
+}
+
+/// Las 3 secciones W-C dentro del panel CAS (tras la Entrada, antes de la
+/// Hoja). Estado en temp egui; cada botón ejecuta un comando real.
+fn draw_wc_visual_sections(app: &mut GrafitoApp, ui: &mut egui::Ui) {
+    let state_id = ui.id().with("wc_visual");
+    let mut wc = ui.ctx().memory_mut(|m| {
+        m.data
+            .get_temp_mut_or_default::<WcVisualState>(state_id)
+            .clone()
+    });
+    draw_inspector_section(
+        ui,
+        "Recorrido de función",
+        "Paso a paso visual: signos, ceros, extremos, asíntotas.",
+        |ui| draw_wc_study_contents(app, ui, &mut wc),
+    );
+    ui.add_space(SPACE_MD);
+    draw_inspector_section(
+        ui,
+        "Integral numérica",
+        "Riemann, trapecio o Simpson con n barras.",
+        |ui| draw_wc_integral_contents(app, ui, &mut wc),
+    );
+    ui.add_space(SPACE_MD);
+    draw_inspector_section(
+        ui,
+        "Taylor visual",
+        "Orden 1..10 con resto observado.",
+        |ui| draw_wc_taylor_contents(app, ui, &mut wc),
+    );
+    ui.ctx().memory_mut(|m| m.data.insert_temp(state_id, wc));
+}
+
 #[allow(dead_code)]
 pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
@@ -1299,6 +1598,11 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         );
                                     });
                             });
+                            ui.add_space(SPACE_MD);
+
+                            // Frente W-C: paso-a-paso visual (cablea a
+                            // comandos reales; cero fantasma).
+                            draw_wc_visual_sections(&mut *app, ui);
                             ui.add_space(SPACE_MD);
 
                             // Hoja de trabajo — empty state sutil y celdas con estados
@@ -5979,10 +6283,13 @@ mod gc_piel_tests {
         chi_squared_quantile_honest, f_distribution_cdf, f_distribution_pdf, f_quantile_honest,
         normal_cdf, normal_pdf, normal_quantile_honest, parse_series_scalar, parse_slider_prompt,
         plot_df_or_fuera_de_cota, poisson_cdf, poisson_pmf, poisson_quantile_honest,
-        sheet_col_label, student_t_cdf, student_t_pdf, student_t_quantile_honest, MAX_BINOMIAL_N,
-        MAX_PANEL_DF, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
+        sheet_col_label, student_t_cdf, student_t_pdf, student_t_quantile_honest,
+        wc_exact_integral_command_text, wc_riemann_command_text, wc_study_command_text,
+        wc_taylor_command_text, wc_taylor_remainder_line, MAX_BINOMIAL_N, MAX_PANEL_DF,
+        SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
+    use std::collections::HashMap;
 
     #[test]
     fn normal_standard_values_are_honest() {
@@ -6177,5 +6484,75 @@ mod gc_piel_tests {
         assert!(parse_slider_prompt("100").is_err());
         assert!(parse_slider_prompt("verde").is_err());
         assert!(parse_slider_prompt("100 vueltas en 1 s").is_err());
+    }
+
+    #[test]
+    fn wc_command_texts_cablean_a_comandos_reales() {
+        // T1: FunctionStudy[f] existe en el registry (verificado en
+        // grafito-command); acá solo se pinnea el texto que arma el botón.
+        assert_eq!(
+            wc_study_command_text("f").as_deref(),
+            Some("FunctionStudy[f]")
+        );
+        assert_eq!(wc_study_command_text("  ").as_deref(), None);
+        // T2: RiemannSum con n redondeado + exacta definida.
+        assert_eq!(
+            wc_riemann_command_text("x^2", "0", "1", 100.0, "trapecio").as_deref(),
+            Some("RiemannSum[x^2, x, 0, 1, 100, trapecio]")
+        );
+        assert_eq!(
+            wc_riemann_command_text("x^2", "0", "1", 99.6, "simpson").as_deref(),
+            Some("RiemannSum[x^2, x, 0, 1, 100, simpson]")
+        );
+        assert_eq!(
+            wc_riemann_command_text("", "0", "1", 100.0, "trapecio").as_deref(),
+            None
+        );
+        assert_eq!(
+            wc_riemann_command_text("x^2", "0", "1", f32::NAN, "trapecio").as_deref(),
+            None
+        );
+        assert_eq!(
+            wc_riemann_command_text("x^2", "0", "1", 0.4, "trapecio").as_deref(),
+            None
+        );
+        assert_eq!(
+            wc_exact_integral_command_text("x^2", "0", "1").as_deref(),
+            Some("Integral[x^2, x, 0, 1]")
+        );
+        assert_eq!(
+            wc_exact_integral_command_text("", "0", "1").as_deref(),
+            None
+        );
+        // T3: Taylor[expr, x, centro, orden] existe; orden del slider 1..=10.
+        assert_eq!(
+            wc_taylor_command_text("sin(x)", "0", 5, "0.5").as_deref(),
+            Some("Taylor[sin(x), x, 0, 5]")
+        );
+        assert_eq!(
+            wc_taylor_command_text("sin(x)", "0", 0, "0.5").as_deref(),
+            None
+        );
+        assert_eq!(
+            wc_taylor_command_text("sin(x)", "0", 11, "0.5").as_deref(),
+            None
+        );
+        assert_eq!(
+            wc_taylor_command_text("sin(x)", "c", 5, "0.5").as_deref(),
+            None
+        );
+        assert_eq!(wc_taylor_command_text("", "0", 5, "0.5").as_deref(), None);
+    }
+
+    #[test]
+    fn wc_taylor_remainder_line_muestra_resto_y_falla_honesto() {
+        let vars = HashMap::new();
+        let line = wc_taylor_remainder_line("sin(x)", "0", 5, "0.5", &vars).expect("resto");
+        assert!(line.contains("P5(0.5)"), "rotula orden y punto: {line}");
+        assert!(line.contains("resto"), "muestra resto: {line}");
+        assert!(line.contains("sig."), "muestra término siguiente: {line}");
+        // Expresión inválida o punto no numérico: None honesto.
+        assert!(wc_taylor_remainder_line("[[[", "0", 5, "0.5", &vars).is_none());
+        assert!(wc_taylor_remainder_line("sin(x)", "0", 5, "c", &vars).is_none());
     }
 }
