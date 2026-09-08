@@ -5633,7 +5633,6 @@ fn draw_assistant_empty_state(
     _visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
-    let assistant_name = state.avatar.assistant_name_or_default();
     let time = ui.input(|i| i.time);
     let hover_pos = ui.input(|i| i.pointer.hover_pos());
     // B7 — CTA de vacío: si ya hay borrador se usa como tema, si no el
@@ -5644,7 +5643,8 @@ fn draw_assistant_empty_state(
         state.problem.trim().chars().take(60).collect()
     };
     let mut action = None;
-    // Minimalista — avatar protagonista, texto escaso, centrado
+    // Minimalista — solo avatar chico + caminos (chip y Andamiar); el
+    // header ya dice quién habla, acá nada decorativo.
     let avail = ui.available_height();
     // Centrar verticalmente el bloque completo
     if avail > 200.0 {
@@ -5653,8 +5653,9 @@ fn draw_assistant_empty_state(
         ui.add_space(crate::tokens::SPACE_LG);
     }
     ui.vertical_centered(|ui| {
-        // Avatar grande protagonista
-        let size = 112.0;
+        // Avatar chico (68px): marca sin duplicar el título del header,
+        // que ya dice quién habla.
+        let size = 68.0;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);
@@ -5670,30 +5671,10 @@ fn draw_assistant_empty_state(
                 size * 0.5,
                 egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
             );
-            let inner = rect.shrink(10.0);
+            let inner = rect.shrink(6.0);
             crate::avatar::draw_avatar(&painter, inner, &state.avatar, time, hover_pos);
         }
         ui.add_space(crate::tokens::SPACE_MD);
-        ui.label(
-            egui::RichText::new(assistant_name.clone())
-                .color(theme.text_primary)
-                .size(crate::tokens::TYPE_LG)
-                .strong(),
-        );
-        ui.label(
-            egui::RichText::new("Asistente matemático")
-                .color(theme.text_tertiary)
-                .size(crate::tokens::TYPE_XS)
-                .weak(),
-        );
-        ui.add_space(crate::tokens::SPACE_SM);
-        ui.label(
-            egui::RichText::new("Escribí tu pregunta")
-                .color(theme.text_secondary.gamma_multiply(0.70))
-                .size(crate::tokens::TYPE_SM)
-                .weak(),
-        );
-        ui.add_space(crate::tokens::SPACE_XS);
         // W3 — vacío con camino: chip que envía el texto al turno.
         // Piel pura: setea el borrador y emite `Submit`; la app decide.
         if ui
@@ -5841,11 +5822,9 @@ fn draw_assistant_composer(
         ASSISTANT_COMPOSER_EDITOR_HEIGHT
     };
     let editor_rows = if collapsed { 1 } else { 2 };
-    let editor_hint = if collapsed {
-        "Pedí algo, ej. \"graficá y=x²\"…"
-    } else {
-        "Pedí algo, ej. \"graficá y=x²\"… · Enter envía"
-    };
+    // El hint del composer es la única invitación a escribir; los atajos
+    // viven en el caption estático bajo el composer, nunca en un tooltip.
+    let editor_hint = "Pedí algo, ej. \"graficá y=x²\"…";
 
     if let Some(focus) = &state.focus {
         egui::Frame::none()
@@ -5898,8 +5877,7 @@ fn draw_assistant_composer(
                                 .margin(egui::vec2(4.0, 6.0)),
                         )
                     })
-                    .inner
-                    .on_hover_text("Enter para enviar · Shift+Enter para salto de línea");
+                    .inner;
                 let submit_on_enter = should_submit_on_enter(
                     editor.has_focus(),
                     ui.input(|input| input.key_pressed(egui::Key::Enter)),
@@ -5940,6 +5918,8 @@ fn draw_assistant_composer(
                     if attach_response.clicked() {
                         action = Some(AssistantUiAction::AttachImage);
                     }
+                    // Respiro por tokens: el botón nunca queda pegado al contador.
+                    ui.add_space(crate::tokens::SPACE_SM);
                     if !state.attachments.is_empty() {
                         ui.label(
                             egui::RichText::new(format!(
@@ -5966,9 +5946,7 @@ fn draw_assistant_composer(
                         )
                         .truncate(),
                     )
-                    .on_hover_text(
-                        "Caracteres usados del límite de entrada · Enter envía, Shift+Enter salta",
-                    );
+                    .on_hover_text("Caracteres usados del límite de entrada");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if state.is_pending {
                             if state.is_cancelling {
@@ -6020,49 +5998,51 @@ fn draw_assistant_composer(
                             }
                         }
                     });
-                    if state.is_pending {
-                        ui.add_space(crate::tokens::SPACE_XS);
-                        let pending_resp = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(
-                                    "Estoy pensando… esperá que termine para mandar otra pregunta.",
-                                )
-                                .color(theme.text_secondary)
-                                .size(crate::tokens::TYPE_XS),
-                            )
-                            .wrap(),
-                        );
-                        // A11Y live-region sobre la respuesta existente.
-                        if let Some(live) = assistant_live_text(state) {
-                            crate::toolbar::tag_live_region(&pending_resp, live);
-                        }
-                    } else if over_budget {
-                        ui.add_space(crate::tokens::SPACE_XS);
-                        let budget_resp = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(over_budget_hint(budget))
-                                    .color(theme.danger)
-                                    .size(crate::tokens::TYPE_XS),
-                            )
-                            .wrap(),
-                        );
-                        // A11Y live-region (D1): el límite excedido es error y anuncia.
-                        crate::toolbar::tag_live_region(
-                            &budget_resp,
-                            format!("Asistente: error. {}", over_budget_hint(budget)),
-                        );
-                    } else if state.problem.trim().is_empty() {
-                        ui.add_space(crate::tokens::SPACE_XS);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new("Escribí algo para activar Enviar.")
-                                    .color(theme.text_tertiary)
-                                    .size(crate::tokens::TYPE_XS),
-                            )
-                            .wrap(),
-                        );
-                    }
                 });
+                // Estado del composer a ancho completo bajo la fila: en la
+                // fila quedaba aplastado a ~6px y envolvía en vertical.
+                if state.is_pending {
+                    ui.add_space(crate::tokens::SPACE_XS);
+                    let pending_resp = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(
+                                "Estoy pensando… esperá que termine para mandar otra pregunta.",
+                            )
+                            .color(theme.text_secondary)
+                            .size(crate::tokens::TYPE_XS),
+                        )
+                        .wrap(),
+                    );
+                    // A11Y live-region sobre la respuesta existente.
+                    if let Some(live) = assistant_live_text(state) {
+                        crate::toolbar::tag_live_region(&pending_resp, live);
+                    }
+                } else if over_budget {
+                    ui.add_space(crate::tokens::SPACE_XS);
+                    let budget_resp = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(over_budget_hint(budget))
+                                .color(theme.danger)
+                                .size(crate::tokens::TYPE_XS),
+                        )
+                        .wrap(),
+                    );
+                    // A11Y live-region (D1): el límite excedido es error y anuncia.
+                    crate::toolbar::tag_live_region(
+                        &budget_resp,
+                        format!("Asistente: error. {}", over_budget_hint(budget)),
+                    );
+                } else if state.problem.trim().is_empty() {
+                    ui.add_space(crate::tokens::SPACE_XS);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("Escribí algo para activar Enviar.")
+                                .color(theme.text_tertiary)
+                                .size(crate::tokens::TYPE_XS),
+                        )
+                        .wrap(),
+                    );
+                }
             });
         });
     // A11Y: foco visible en el composer (anillo 2px del tema) cuando el
@@ -6070,6 +6050,18 @@ fn draw_assistant_composer(
     if editor_had_focus {
         theme.paint_focus_ring(ui.painter(), composer_frame.response.rect);
     }
+
+    // Caption estático de atajos: una línea tiny dim en flujo bajo el
+    // composer, sin píldora ni fondo — jamás tapa contenido interactivo.
+    ui.add_space(crate::tokens::SPACE_XS);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new("Enter envía · Shift+Enter salto de línea")
+                .color(theme.text_tertiary.gamma_multiply(0.75))
+                .size(crate::tokens::TYPE_2XS),
+        )
+        .truncate(),
+    );
 
     if !state.attachments.is_empty() {
         ui.add_space(SPACE_XS);
@@ -9976,6 +9968,118 @@ mod tests {
         let mut with_turn = state;
         with_turn.begin_request("2 + 2".into());
         assert!(!should_draw_empty_state(&with_turn));
+    }
+
+    #[test]
+    fn assistant_panel_has_no_absolute_overlays() {
+        // Auditoría de overlays: ningún área flotante con posición fija
+        // ni colocación absoluta en este archivo — todo el panel fluye en
+        // layout y nada tapa contenido interactivo. Patrones armados con
+        // `concat!` para que este mismo test no dispare la búsqueda.
+        let source = include_str!("assistant.rs");
+        for banned in [
+            concat!("Area", "::new"),
+            concat!("fixed", "_pos"),
+            concat!(".", "put", "("),
+        ] {
+            assert!(
+                !source.contains(banned),
+                "overlay absoluto prohibido en el panel del asistente"
+            );
+        }
+    }
+
+    fn collect_text_shapes(
+        shapes: &[egui::epaint::ClippedShape],
+        out: &mut Vec<(egui::Rect, String)>,
+    ) {
+        for clipped in shapes {
+            collect_text_shapes_in_shape(&clipped.shape, out);
+        }
+    }
+
+    fn collect_text_shapes_in_shape(
+        shape: &egui::epaint::Shape,
+        out: &mut Vec<(egui::Rect, String)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                out.push((shape.visual_bounding_rect(), text.galley.text().to_string()));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text_shapes_in_shape(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn panel_input_360x480() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(360.0, 480.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_state_text_blocks_never_overlap_each_other() {
+        // Anti-overlap: ningún bloque de texto del empty-state intersecta
+        // a otro (el chip contiene su propio texto por diseño; acá solo se
+        // comparan bloques de texto hermanos apilados en flujo).
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        let output = context.run(panel_input_360x480(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let _ = draw_assistant_empty_state(ui, &mut state, AssistantVisuals::default());
+            });
+        });
+
+        let mut texts = Vec::new();
+        collect_text_shapes(&output.shapes, &mut texts);
+        // El empty minimalista conserva caminos con texto (chip + Andamiar).
+        assert!(texts.len() >= 2);
+        texts.sort_by(|a, b| {
+            a.0.min
+                .y
+                .partial_cmp(&b.0.min.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for pair in texts.windows(2) {
+            let upper = pair[0].0.shrink(0.5);
+            let lower = pair[1].0.shrink(0.5);
+            assert!(
+                !upper.intersects(lower),
+                "dos bloques de texto del empty-state se intersectan"
+            );
+        }
+    }
+
+    #[test]
+    fn composer_shortcut_hint_is_a_static_single_line_caption() {
+        // La píldora flotante de atajos ahora es caption estático: existe
+        // en flujo bajo el composer, tiny (menos de dos líneas de alto).
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        let output = context.run(panel_input_360x480(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let _ = draw_assistant_composer(ui, &mut state, false);
+            });
+        });
+
+        let mut texts = Vec::new();
+        collect_text_shapes(&output.shapes, &mut texts);
+        let caption = texts.iter().find(|(_, text)| text.contains("Shift+Enter"));
+        let Some((rect, _)) = caption else {
+            panic!("el caption estático de atajos falta bajo el composer");
+        };
+        assert!(
+            rect.height() < crate::tokens::TYPE_2XS * 2.0,
+            "el caption de atajos debe ser una sola línea tiny"
+        );
     }
 
     #[test]
