@@ -35,6 +35,7 @@ grafito-ui = { path = "crates/grafito-ui" }
 grafito-assistant = { path = "crates/grafito-assistant", default-features = false }
 grafito-assistant-types = { path = "crates/grafito-assistant-types" }
 grafito-whiteboard = { path = "crates/grafito-whiteboard" }
+grafito-classroom = { path = "crates/grafito-classroom" }
 
 # Window & GPU
 eframe = "0.29"

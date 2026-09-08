@@ -1260,9 +1260,59 @@ impl GrafitoApp {
         self.refresh_plugin_snapshot();
     }
 
+    /// Panel del asistente bloqueado por examen (D2): ocupa el mismo lugar,
+    /// muestra el motivo y no ofrece ninguna acción (fail-closed visual).
+    fn draw_exam_locked_assistant(&mut self, ctx: &egui::Context, _reserved_bottom_height: f32) {
+        let theme = grafito_ui::theme::current_theme(ctx);
+        egui::SidePanel::right("assistant_exam_locked")
+            .default_width(400.0)
+            .min_width(300.0)
+            .max_width(520.0)
+            .show(ctx, |ui| {
+                ui.add_space(grafito_ui::tokens::SPACE_MD);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Asistente bloqueado en modo examen")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .strong()
+                            .color(theme.text_primary),
+                    );
+                    ui.label(
+                        egui::RichText::new("Salí del examen para volver a usarlo, che.")
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_secondary),
+                    );
+                });
+            });
+    }
+
+    /// Contenido bloqueado para el dock (misma honestidad, sin panel propio).
+    fn draw_exam_locked_contents(&mut self, ui: &mut egui::Ui) {
+        let theme = grafito_ui::theme::current_theme(ui.ctx());
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("Asistente bloqueado en modo examen")
+                    .size(grafito_ui::tokens::TYPE_SM)
+                    .strong()
+                    .color(theme.text_primary),
+            );
+            ui.label(
+                egui::RichText::new("Salí del examen para volver a usarlo, che.")
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(theme.text_secondary),
+            );
+        });
+    }
+
     /// Dibuja el asistente como panel independiente fuera del workspace 3D.
     pub(crate) fn draw_assistant(&mut self, ctx: &egui::Context, reserved_bottom_height: f32) {
         self.sync_assistant_for_frame(ctx);
+        // D2 lockdown: panel visible pero bloqueado (banner + sin acciones).
+        if self.exam_mode {
+            self.draw_exam_locked_assistant(ctx, reserved_bottom_height);
+            self.cancel_stale_model_request();
+            return;
+        }
         if !self.assistant_visible {
             self.cancel_stale_model_request();
             return;
@@ -1287,6 +1337,12 @@ impl GrafitoApp {
         ctx: &egui::Context,
         ui: &mut egui::Ui,
     ) {
+        // D2 lockdown: contenido bloqueado (sin acciones, sin ejercicio).
+        if self.exam_mode {
+            self.draw_exam_locked_contents(ui);
+            self.cancel_stale_model_request();
+            return;
+        }
         if !self.assistant_visible {
             ui.label(
                 egui::RichText::new("El asistente esta oculto.")
@@ -1327,6 +1383,11 @@ impl GrafitoApp {
                 }
             }
         }
+        // D2 "Mi plan": próximos 3 del scheduler + racha, siempre visible en
+        // el host del tutor (el `recommend_next` ya llegaba a la tarjeta;
+        // esto lo vuelve plan visible sin romper la UI).
+        let plan = crate::teaching_ui::plan_resumen(&self.profile);
+        crate::teaching_ui::draw_mi_plan(ui, &plan);
         self.cancel_stale_model_request();
     }
 
@@ -2487,6 +2548,10 @@ impl GrafitoApp {
     }
 
     fn start_remote_assistant_job(&mut self, ctx: &egui::Context, launch: AssistantRemoteLaunch) {
+        // D2 lockdown: en examen no sale nada a internet.
+        if self.exam_blocks("Internet") {
+            return;
+        }
         let AssistantRemoteLaunch {
             settings,
             request,
@@ -2562,6 +2627,10 @@ impl GrafitoApp {
     /// Lanza el modo agente (loop con herramientas seguras) en un hilo y
     /// enruta sus eventos de actividad + resultado hacia la UI.
     fn start_agent_assistant_job(&mut self, ctx: &egui::Context, launch: AssistantRemoteLaunch) {
+        // D2 lockdown: en examen no sale nada a internet.
+        if self.exam_blocks("Internet") {
+            return;
+        }
         let settings = launch.settings;
         let request = launch.request;
         let api_key = launch.api_key;
@@ -2674,6 +2743,10 @@ impl GrafitoApp {
     /// B7 — Arranca el ciclo de ejercicio: tema crudo → concepto → job en
     /// background → tarjeta visible bajo el chat. Sin I/O en la UI.
     fn iniciar_ejercicio(&mut self, ctx: &egui::Context, tema_crudo: &str) {
+        // D2 lockdown: el tutor también es ayuda en examen.
+        if self.exam_blocks("Ejercicios") {
+            return;
+        }
         let tema = extract_concept(tema_crudo).unwrap_or_else(|| {
             let recorte: String = tema_crudo
                 .trim()
@@ -2880,6 +2953,10 @@ impl GrafitoApp {
     ///   avisa la ruta al terminar; el delay sale de la velocidad de la card
     ///   (`gif_delay_for_rate` sobre `GIF_EXPORT_DELAY_CS`).
     fn export_assistant_media(&mut self, ctx: &egui::Context) {
+        // D2 lockdown: en examen no sale nada del documento.
+        if self.exam_blocks("Export") {
+            return;
+        }
         use grafito_ui::assistant::MediaExportState;
         if self.assistant_runtime.gif_export_job.is_some() {
             self.notify("Ya se está exportando la animación.", ToastKind::Info);
@@ -3373,6 +3450,10 @@ impl GrafitoApp {
         ctx: &egui::Context,
         launch: AssistantProposalLaunch,
     ) {
+        // D2 lockdown: en examen no sale nada a internet.
+        if self.exam_blocks("Internet") {
+            return;
+        }
         let AssistantProposalLaunch {
             id,
             provider,
@@ -3493,6 +3574,10 @@ impl GrafitoApp {
     }
 
     pub(crate) fn start_local_assistant_request(&mut self, ctx: &egui::Context) {
+        // D2 lockdown: el asistente (incluso local) queda bloqueado en examen.
+        if self.exam_blocks("Asistente") {
+            return;
+        }
         if self.assistant.is_pending || !self.assistant_runtime.remote_request_slot_is_free() {
             return;
         }

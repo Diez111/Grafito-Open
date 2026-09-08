@@ -253,7 +253,8 @@ fn draw_view_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula")
             .changed();
         ui.separator();
-        ui.checkbox(&mut app.exam_mode, "Modo examen");
+        // D2: salida de examen con confirmación (nunca directo).
+        app.exam_mode_checkbox(ui);
         ui.checkbox(&mut app.document.view_mut().x_log, "Eje X log");
         ui.checkbox(&mut app.document.view_mut().y_log, "Eje Y log");
         ui.separator();

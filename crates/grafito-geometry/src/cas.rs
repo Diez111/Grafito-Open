@@ -621,6 +621,8 @@ pub enum GruntzMethod {
     LHopital,
     /// Jerarquía de crecimiento exp/log/potencia (límites en ±∞).
     Hierarchy,
+    /// Reescritura a cociente + `ln` (`0·∞`, `∞−∞`, `1^∞`, `0⁰`, `∞⁰`).
+    LogRewrite,
     /// Richardson bilateral heredado de `symbolic`.
     Richardson,
 }
@@ -655,7 +657,10 @@ fn classify_quotient(num_at: f64, den_at: f64) -> LimitForm {
 /// Límite finito `lim_{var→at} expr` estilo Gruntz.
 ///
 /// 0/0 y ∞/∞ se intentan por L'Hôpital acotado (`MAX_GRUNTZ_STEPS` 8);
-/// el resto cae a Richardson bilateral. Referencia GeoGebra: `Limit`.
+/// `1^∞`/`0⁰`/`∞⁰` (B2) se reescriben por `ln` ANTES de la directa (IEEE
+/// evalúa `1^∞ = 1`, falso); `0·∞`/`∞−∞` van a cociente + `ln`; la
+/// oscilación (`sin(1/x)`) es `LimitDoesNotExist` honesto; el resto cae a
+/// Richardson bilateral. Referencia GeoGebra: `Limit`.
 pub fn gruntz_limit(expr: &str, var: &str, at: f64) -> Result<GruntzOutcome, CasError> {
     let valid_expr = ValidExpr::try_new(expr)?;
     let valid_var = ValidVar::try_new(var)?;
@@ -665,6 +670,17 @@ pub fn gruntz_limit(expr: &str, var: &str, at: f64) -> Result<GruntzOutcome, Cas
     let var = valid_var.as_str();
     let ast = parse_validated(&valid_expr)?;
 
+    // B2: potencias indeterminadas primero (la directa IEEE miente).
+    if let crate::ast::Expr::Pow(base, exp) = &ast {
+        if let Some(out) = gruntz_pow_limit(base, exp, var, at)? {
+            return Ok(out);
+        }
+    }
+    // B2: oscilación honesta antes que Richardson.
+    if let Some(detail) = gruntz_oscillation(&ast, var, at) {
+        return Err(CasError::LimitDoesNotExist { detail });
+    }
+
     let direct = ast.eval_at(var, at);
     if direct.is_finite() {
         return Ok(GruntzOutcome {
@@ -673,6 +689,19 @@ pub fn gruntz_limit(expr: &str, var: &str, at: f64) -> Result<GruntzOutcome, Cas
             method: GruntzMethod::Direct,
             steps_used: 0,
         });
+    }
+
+    // B2: `0·∞` por rewrite a cociente + L'Hôpital.
+    if let crate::ast::Expr::Mul(a, b) = &ast {
+        if let Some(out) = gruntz_mul_zero_inf(a, b, var, at) {
+            return Ok(out);
+        }
+    }
+    // B2: `∞−∞` canónico (`ln−ln`, mismo denominador).
+    if let crate::ast::Expr::Sub(a, b) = &ast {
+        if let Some(out) = gruntz_sub_inf_minus_inf(a, b, var, at, &valid_expr) {
+            return Ok(out);
+        }
     }
 
     if let crate::ast::Expr::Div(num, den) = &ast {
@@ -706,7 +735,310 @@ pub fn gruntz_limit(expr: &str, var: &str, at: f64) -> Result<GruntzOutcome, Cas
     richardson_fallback(&valid_expr, var, at, LimitForm::Other)
 }
 
-/// Itera L'Hôpital hasta `MAX_GRUNTZ_STEPS`; `None` si no resuelve.
+// ---------------------------------------------------------------------------
+// Frente B2: Gruntz pragmático (`0·∞`, `∞−∞`, `1^∞`, `0⁰`, `∞⁰`, oscilación).
+//
+// Rewrites escolares a cociente + `ln`; la oscilación esencial
+// (`sin/cos(1/x)`) es `LimitDoesNotExist` honesto. Presupuesto heredado:
+// `MAX_GRUNTZ_STEPS` 8 para cada L'Hôpital interno.
+// ---------------------------------------------------------------------------
+
+/// `lim f^g` cuando `(f→1, g→∞)`, `(0,0)` o `(∞,0)`: `exp(lim g·ln f)`.
+///
+/// Nota B2: el `eval` de Grafito devuelve `NaN` (no `∞`) ante `1/0`
+/// (`Div` con guarda `1e-300`), y encima `1^NaN = 1` por IEEE; por eso un
+/// polo se detecta como `is_infinite() || is_nan()`. `Ok(None)` si no es
+/// indeterminada (la directa decide); `Err` honesto si el `ln`-límite no
+/// existe o `exp` desborda.
+fn gruntz_pow_limit(
+    base: &crate::ast::Expr,
+    exp: &crate::ast::Expr,
+    var: &str,
+    at: f64,
+) -> Result<Option<GruntzOutcome>, CasError> {
+    use crate::ast::Expr;
+    let (f_at, g_at) = (base.eval_at(var, at), exp.eval_at(var, at));
+    // Polo = infinito o `NaN` por división por cero (no por oscilación:
+    // el llamador ya filtró `gruntz_oscillation` antes).
+    let g_pole = g_at.is_infinite() || g_at.is_nan();
+    let f_pole = f_at.is_infinite() || f_at.is_nan();
+    let indeterminate = (f_at.is_finite() && (f_at - 1.0).abs() < 1e-12 && g_pole)
+        || (f_at == 0.0 && g_at == 0.0)
+        || (f_pole && g_at == 0.0);
+    if !indeterminate {
+        return Ok(None);
+    }
+    // `L = lim g·ln(f)` como `0·∞` → cociente.
+    let log_f = Expr::Ln(Box::new(base.clone()));
+    let product = Expr::Mul(Box::new(exp.clone()), Box::new(log_f));
+    let inner = match gruntz_product_to_quotient(&product, var, at) {
+        Some(out) => out.value,
+        None => {
+            return Err(CasError::LimitDoesNotExist {
+                detail: format!("ln-límite de la potencia sin convergencia en {var}→{at}"),
+            });
+        }
+    };
+    if !inner.is_finite() {
+        return Err(CasError::LimitDoesNotExist {
+            detail: format!("ln-límite infinito no principal en {var}→{at}"),
+        });
+    }
+    let value = inner.exp();
+    if !value.is_finite() || value == 0.0 {
+        return Err(CasError::LimitDoesNotExist {
+            detail: format!("exp del ln-límite no finito en {var}→{at}"),
+        });
+    }
+    Ok(Some(GruntzOutcome {
+        value,
+        form: LimitForm::Other,
+        method: GruntzMethod::LogRewrite,
+        steps_used: 0,
+    }))
+}
+
+/// `lim h1·h2` con `(0, polo)`: `inf/(1/cero)` por L'Hôpital.
+///
+/// El factor infinito va al numerador (`ln(x)/(1/x)` cierra en 1 iteración;
+/// al revés diverge). Polo = `∞` o `NaN` por `Div` con guarda. Si L'Hôpital
+/// no cierra (derivadas con polo en el punto), Richardson bilateral sobre
+/// el cociente y, en última instancia, unilateral si un solo lado tiene
+/// dominio (`x·ln(x) → 0⁺`). `None` si no aplica o no converge.
+fn gruntz_product_to_quotient(
+    product: &crate::ast::Expr,
+    var: &str,
+    at: f64,
+) -> Option<GruntzOutcome> {
+    use crate::ast::Expr;
+    let (a, b) = match product {
+        Expr::Mul(x, y) => (x.as_ref(), y.as_ref()),
+        _ => return None,
+    };
+    let (va, vb) = (a.eval_at(var, at), b.eval_at(var, at));
+    let is_zero = |v: f64| v == 0.0;
+    let is_pole = |v: f64| v.is_infinite() || v.is_nan();
+    // Ordena `(cero, polo)`; el polo va al numerador.
+    let (zero, inf) = if is_zero(va) && is_pole(vb) {
+        (a, b)
+    } else if is_zero(vb) && is_pole(va) {
+        (b, a)
+    } else {
+        return None;
+    };
+    // Oscilación del lado polo (`sin(1/x)`): no reescribir, no existe.
+    if gruntz_oscillation(inf, var, at).is_some() {
+        return None;
+    }
+    let one = Expr::Const(1.0);
+    let num = inf.clone();
+    let den = Expr::Div(Box::new(one), Box::new(zero.clone()));
+    if let Some((value, steps)) = lhopital_numeric_loop(&num, &den, var, at) {
+        return Some(GruntzOutcome {
+            value,
+            form: LimitForm::Other,
+            method: GruntzMethod::LogRewrite,
+            steps_used: steps,
+        });
+    }
+    None
+}
+
+/// L'Hôpital con evaluación numérica del cociente derivado (B2).
+///
+/// Deriva hasta `MAX_GRUNTZ_STEPS` veces; en cada paso prueba el valor
+/// puntual y luego Richardson (bilateral + unilateral) sobre el cociente
+/// derivado. Necesario porque en el polo las derivadas siguen siendo `NaN`
+/// puntuales (`Div` con guarda `1e-300`) aunque el cociente converja en el
+/// entorno (`(1/x)/(−1/x²) = −x → 0`). No toca `lhopital_loop` clásico.
+fn lhopital_numeric_loop(
+    num: &crate::ast::Expr,
+    den: &crate::ast::Expr,
+    var: &str,
+    at: f64,
+) -> Option<(f64, usize)> {
+    use crate::ast::Expr;
+    let mut cur_n = num.clone();
+    let mut cur_d = den.clone();
+    for step in 1..=MAX_GRUNTZ_STEPS {
+        cur_n = cur_n.diff(var).simplify();
+        cur_d = cur_d.diff(var).simplify();
+        if matches!(&cur_n, Expr::Const(v) if v.is_nan())
+            || matches!(&cur_d, Expr::Const(v) if v.is_nan())
+        {
+            return None;
+        }
+        let (nv, dv) = (cur_n.eval_at(var, at), cur_d.eval_at(var, at));
+        match classify_quotient(nv, dv) {
+            LimitForm::Direct => {
+                if dv != 0.0 {
+                    let value = nv / dv;
+                    if value.is_finite() {
+                        return Some((value, step));
+                    }
+                }
+            }
+            LimitForm::ZeroOverZero | LimitForm::InfOverInf => {}
+            LimitForm::Other => {
+                if dv != 0.0 && (nv / dv).is_finite() {
+                    return Some((nv / dv, step));
+                }
+            }
+        }
+        // Cociente derivado en el entorno (polo puntual honesto).
+        let q = Expr::Div(Box::new(cur_n.clone()), Box::new(cur_d.clone()));
+        let Ok(text) = ValidExpr::try_new(&q.to_expr_string()) else {
+            continue;
+        };
+        if let Some(value) = gruntz_richardson_any_side(text.as_str(), var, at) {
+            return Some((value, step));
+        }
+    }
+    None
+}
+
+/// Richardson bilateral y, si un solo lado tiene dominio, unilateral.
+///
+/// Ambos lados convergen y acuerdan → ese valor; solo uno converge (el otro
+/// es error de dominio) → el convergente; desacuerdo o nada → `None`.
+fn gruntz_richardson_any_side(expr: &str, var: &str, at: f64) -> Option<f64> {
+    use crate::outcome::MathResult;
+    let finite = |r: MathResult<f64>| match r {
+        MathResult::Approximate { value, .. } | MathResult::Exact(value) => {
+            value.is_finite().then_some(value)
+        }
+        _ => None,
+    };
+    let both = finite(crate::symbolic::limit_typed(expr, var, at));
+    if both.is_some() {
+        return both;
+    }
+    let above = finite(crate::symbolic::limit_above_typed(expr, var, at));
+    let below = finite(crate::symbolic::limit_below_typed(expr, var, at));
+    match (above, below) {
+        (Some(a), Some(b)) => {
+            let scale = a.abs().max(b.abs()).max(1.0);
+            ((a - b).abs() <= 1e-7 * scale).then_some((a + b) * 0.5)
+        }
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
+/// `lim a·b` con forma `0·∞` (B2): rewrite + L'Hôpital/Richardson.
+fn gruntz_mul_zero_inf(
+    a: &crate::ast::Expr,
+    b: &crate::ast::Expr,
+    var: &str,
+    at: f64,
+) -> Option<GruntzOutcome> {
+    use crate::ast::Expr;
+    let product = Expr::Mul(Box::new(a.clone()), Box::new(b.clone()));
+    gruntz_product_to_quotient(&product, var, at)
+}
+
+/// `lim (a−b)` con `a,b → ±∞`: `ln−ln → ln(a/b)` y mismo denominador.
+///
+/// `None` si no es `∞−∞` canónico (cae a Richardson, honesto).
+fn gruntz_sub_inf_minus_inf(
+    a: &crate::ast::Expr,
+    b: &crate::ast::Expr,
+    var: &str,
+    at: f64,
+    _valid: &ValidExpr,
+) -> Option<GruntzOutcome> {
+    use crate::ast::Expr;
+    let (va, vb) = (a.eval_at(var, at), b.eval_at(var, at));
+    if !va.is_infinite() || !vb.is_infinite() {
+        return None;
+    }
+    // `ln(F) − ln(G) = ln(F/G)`: un solo límite del cociente.
+    if let (Expr::Ln(f), Expr::Ln(g)) = (a, b) {
+        let ratio = Expr::Div(Box::new((**f).clone()), Box::new((**g).clone()));
+        let text = ValidExpr::try_new(&ratio.to_expr_string()).ok()?;
+        let ast = parse_validated(&text).ok()?;
+        let r_at = ast.eval_at(var, at);
+        if r_at.is_finite() && r_at > 0.0 {
+            return Some(GruntzOutcome {
+                value: r_at.ln(),
+                form: LimitForm::Other,
+                method: GruntzMethod::LogRewrite,
+                steps_used: 0,
+            });
+        }
+        // Cociente indeterminado: L'Hôpital numérico si es `Div`.
+        if let Expr::Div(num, den) = &ast {
+            if let Some((value, steps)) = lhopital_numeric_loop(num, den, var, at) {
+                if value.is_finite() && value > 0.0 {
+                    return Some(GruntzOutcome {
+                        value: value.ln(),
+                        form: LimitForm::Other,
+                        method: GruntzMethod::LogRewrite,
+                        steps_used: steps,
+                    });
+                }
+            }
+        }
+        return None;
+    }
+    // Mismo denominador: `(n1−n2)/d` en una sola fracción.
+    if let (Expr::Div(n1, d1), Expr::Div(n2, d2)) = (a, b) {
+        if d1.structurally_eq(d2) {
+            let num = Expr::Sub(Box::new((**n1).clone()), Box::new((**n2).clone()));
+            let single = Expr::Div(Box::new(num), Box::new((**d1).clone()));
+            let text = ValidExpr::try_new(&single.to_expr_string()).ok()?;
+            if let Ok(out) = gruntz_limit(text.as_str(), var, at) {
+                return Some(GruntzOutcome {
+                    form: LimitForm::Other,
+                    method: GruntzMethod::LogRewrite,
+                    ..out
+                });
+            }
+        }
+    }
+    None
+}
+/// Detecta oscilación esencial: `sin/cos/tan/cot/sec/csc` de argumento no
+/// acotado en el punto (`sin(1/x)` en 0 no existe).
+///
+/// El `eval` devuelve `NaN` (no `∞`) ante `1/0` por la guarda `Div`, así que
+/// además se muestrea el entorno: `|arg| > 1e6` en `at±h` confirma el polo
+/// (distingue de un `NaN` de dominio como `ln` de negativo).
+fn gruntz_oscillation(e: &crate::ast::Expr, var: &str, at: f64) -> Option<String> {
+    use crate::ast::Expr;
+    match e {
+        Expr::Sin(u) | Expr::Cos(u) | Expr::Tan(u) | Expr::Cot(u) | Expr::Sec(u) | Expr::Csc(u) => {
+            let direct = u.eval_at(var, at);
+            let mut unbounded = direct.is_infinite();
+            if !unbounded {
+                for h in [1e-3, 1e-5, 1e-7] {
+                    for side in [-1.0, 1.0] {
+                        let v = u.eval_at(var, at + side * h);
+                        if v.is_finite() && v.abs() > 1e6 {
+                            unbounded = true;
+                            break;
+                        }
+                    }
+                    if unbounded {
+                        break;
+                    }
+                }
+            }
+            if unbounded {
+                return Some(format!(
+                    "oscilación esencial de '{}' en {var}→{at}: laterales no acuerdan",
+                    e.to_expr_string()
+                ));
+            }
+            gruntz_oscillation(u, var, at)
+        }
+        Expr::Neg(u) => gruntz_oscillation(u, var, at),
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Pow(a, b) => {
+            gruntz_oscillation(a, var, at).or_else(|| gruntz_oscillation(b, var, at))
+        }
+        _ => None,
+    }
+}
 fn lhopital_loop(
     num: &crate::ast::Expr,
     den: &crate::ast::Expr,
@@ -1416,10 +1748,18 @@ fn expr_to_poly_map(
                 feature: "Groebner",
                 hint: "exponente no constante; Buchberger exige polinomios".to_string(),
             })?;
-            if n < 0.0 || n.fract() != 0.0 || n > MAX_BUCHBERGER_DEGREE as f64 {
+            if n < 0.0 || n.fract() != 0.0 {
                 return Err(CasError::Unsupported {
                     feature: "Groebner",
                     hint: "exponente no entero no negativo acotado".to_string(),
+                });
+            }
+            // B2.4: grado > 64 → `ResourceLimit→Eliminate` (spec).
+            if n > MAX_BUCHBERGER_DEGREE as f64 {
+                return Err(CasError::ResourceLimit {
+                    detail: format!(
+                        "grado {n} excede {MAX_BUCHBERGER_DEGREE}; usa Eliminate[...]"
+                    ),
                 });
             }
             let b = expr_to_poly_map(base, index_of, nvars)?;
@@ -1438,11 +1778,6 @@ fn expr_to_poly_map(
     }
 }
 
-/// Término líder lexicográfico (monomio mayor, coeficiente).
-fn leading_term(p: &PolyMap) -> Option<(Monom, f64)> {
-    p.iter().next_back().map(|(m, c)| (m.clone(), *c))
-}
-
 fn monom_divides(a: &Monom, b: &Monom) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x <= y)
 }
@@ -1458,58 +1793,6 @@ fn monom_lcm(a: &Monom, b: &Monom) -> Monom {
 fn monom_mul_poly(m: &Monom, scalar: f64, p: &PolyMap) -> Result<PolyMap, CasError> {
     let shift = PolyMap::from([(m.clone(), scalar)]);
     poly_mul_maps(&shift, p)
-}
-
-/// Reduce `p` con `basis`; devuelve el resto.
-fn reduce_poly(p: &PolyMap, basis: &[PolyMap]) -> Result<PolyMap, CasError> {
-    let mut work = p.clone();
-    let mut rest = PolyMap::new();
-    let mut steps = 0_usize;
-    while let Some((lm_w, lc_w)) = leading_term(&work) {
-        steps += 1;
-        if steps > MAX_REDUCE_STEPS {
-            return Err(CasError::ResourceLimit {
-                detail: format!("reducción excede {MAX_REDUCE_STEPS} pasos; usa Eliminate[...]"),
-            });
-        }
-        let mut reduced = false;
-        for b in basis {
-            if let Some((lm_b, lc_b)) = leading_term(b) {
-                if lc_b.abs() > 1e-12 && monom_divides(&lm_b, &lm_w) {
-                    let t = monom_sub(&lm_w, &lm_b);
-                    let factor = lc_w / lc_b;
-                    let sub = monom_mul_poly(&t, factor, b)?;
-                    poly_add_into(&mut work, &sub, -1.0);
-                    reduced = true;
-                    break;
-                }
-            }
-        }
-        if !reduced {
-            work.remove(&lm_w);
-            if lc_w.abs() > 1e-12 {
-                rest.insert(lm_w, lc_w);
-            }
-        }
-    }
-    Ok(rest)
-}
-
-/// S-polinomio `lc_g·x^{l−lm_f}·f − lc_f·x^{l−lm_g}·g` con `l = lcm`.
-fn s_polynomial(f: &PolyMap, g: &PolyMap) -> Result<PolyMap, CasError> {
-    let (lm_f, lc_f) = leading_term(f).ok_or_else(|| CasError::ResourceLimit {
-        detail: "S-polinomio de polinomio nulo".to_string(),
-    })?;
-    let (lm_g, lc_g) = leading_term(g).ok_or_else(|| CasError::ResourceLimit {
-        detail: "S-polinomio de polinomio nulo".to_string(),
-    })?;
-    let l = monom_lcm(&lm_f, &lm_g);
-    let t1 = monom_sub(&l, &lm_f);
-    let t2 = monom_sub(&l, &lm_g);
-    let mut s = monom_mul_poly(&t1, lc_g, f)?;
-    let second = monom_mul_poly(&t2, lc_f, g)?;
-    poly_add_into(&mut s, &second, -1.0);
-    Ok(s)
 }
 
 fn format_poly_map(p: &PolyMap, vars: &[String]) -> String {
@@ -1559,12 +1842,133 @@ fn format_poly_map(p: &PolyMap, vars: &[String]) -> String {
     out
 }
 
-/// Base de Groebner por Buchberger lexicográfico acotado.
-///
-/// `> MAX_GROEBNER_S_POLY` 128 S-polinomios, `> MAX_GROEBNER_POLYS` 8
-/// polinomios o entrada no polinómica devuelven `Err` honesto que deriva a
-/// `Eliminate[...]`. Referencia GeoGebra: `Groebner`.
-pub fn buchberger_basis(polys: &[String], vars: &[String]) -> Result<BuchbergerOutcome, CasError> {
+// ---------------------------------------------------------------------------
+// Frente B2: Buchberger real (órdenes + azúcar + eliminación).
+//
+// `MonomialOrder{lex,grlex,grevlex}` (B2.4): el término líder, la
+// reducción y el S-polinomio dependen del orden; la selección de pares
+// usa estrategia de azúcar (menor `max(sugar)`, desempate por grado del
+// `lcm`); `buchberger_eliminate` calcula intersecciones por el teorema de
+// eliminación (lex con las variables a eliminar como mayores).
+// Límites (B2.4): `> MAX_GROEBNER_POLYS` 8 polys, `> MAX_GROEBNER_VARS` 4
+// vars o grado `> MAX_BUCHBERGER_DEGREE` 64 → `ResourceLimit→Eliminate`;
+// `MAX_REDUCE_STEPS` 1024 por reducción (heredado).
+// ---------------------------------------------------------------------------
+
+/// Orden monomial de Buchberger (B2.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonomialOrder {
+    /// Lexicográfico (`x₀ > x₁ > …`, el de eliminación).
+    Lex,
+    /// Grado total y desempate lexicográfico.
+    GrLex,
+    /// Grado total y desempate lexicográfico inverso.
+    GrRevLex,
+}
+
+/// Grado total de un monomio.
+fn monom_total_deg(m: &Monom) -> u32 {
+    m.iter().sum()
+}
+
+/// Compara monomios según el orden (mayor = líder).
+fn monom_cmp(a: &Monom, b: &Monom, order: MonomialOrder) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match order {
+        MonomialOrder::Lex => a.cmp(b),
+        MonomialOrder::GrLex => monom_total_deg(a)
+            .cmp(&monom_total_deg(b))
+            .then_with(|| a.cmp(b)),
+        MonomialOrder::GrRevLex => monom_total_deg(a).cmp(&monom_total_deg(b)).then_with(|| {
+            // Desempate inverso: menor exponente en la ÚLTIMA variable que
+            // difiere gana (es mayor en grevlex).
+            for (x, y) in a.iter().zip(b.iter()).rev() {
+                match x.cmp(y) {
+                    Ordering::Less => return Ordering::Greater,
+                    Ordering::Greater => return Ordering::Less,
+                    Ordering::Equal => {}
+                }
+            }
+            Ordering::Equal
+        }),
+    }
+}
+
+/// Término líder según el orden (monomio mayor, coeficiente).
+fn leading_term_ordered(p: &PolyMap, order: MonomialOrder) -> Option<(Monom, f64)> {
+    p.iter()
+        .max_by(|(a, _), (b, _)| monom_cmp(a, b, order))
+        .map(|(m, c)| (m.clone(), *c))
+}
+
+/// Reduce `p` con `basis` según el orden; devuelve el resto.
+fn reduce_poly_ordered(
+    p: &PolyMap,
+    basis: &[PolyMap],
+    order: MonomialOrder,
+) -> Result<PolyMap, CasError> {
+    let mut work = p.clone();
+    let mut rest = PolyMap::new();
+    let mut steps = 0_usize;
+    loop {
+        let Some((lm_w, lc_w)) = leading_term_ordered(&work, order) else {
+            break;
+        };
+        steps += 1;
+        if steps > MAX_REDUCE_STEPS {
+            return Err(CasError::ResourceLimit {
+                detail: format!("reducción excede {MAX_REDUCE_STEPS} pasos; usa Eliminate[...]"),
+            });
+        }
+        let mut reduced = false;
+        for b in basis {
+            if let Some((lm_b, lc_b)) = leading_term_ordered(b, order) {
+                if lc_b.abs() > 1e-12 && monom_divides(&lm_b, &lm_w) {
+                    let t = monom_sub(&lm_w, &lm_b);
+                    let factor = lc_w / lc_b;
+                    let sub = monom_mul_poly(&t, factor, b)?;
+                    poly_add_into(&mut work, &sub, -1.0);
+                    reduced = true;
+                    break;
+                }
+            }
+        }
+        if !reduced {
+            work.remove(&lm_w);
+            if lc_w.abs() > 1e-12 {
+                rest.insert(lm_w, lc_w);
+            }
+        }
+    }
+    Ok(rest)
+}
+
+/// S-polinomio según el orden (`l = lcm` de los líderes).
+fn s_polynomial_ordered(
+    f: &PolyMap,
+    g: &PolyMap,
+    order: MonomialOrder,
+) -> Result<PolyMap, CasError> {
+    let (lm_f, lc_f) = leading_term_ordered(f, order).ok_or_else(|| CasError::ResourceLimit {
+        detail: "S-polinomio de polinomio nulo".to_string(),
+    })?;
+    let (lm_g, lc_g) = leading_term_ordered(g, order).ok_or_else(|| CasError::ResourceLimit {
+        detail: "S-polinomio de polinomio nulo".to_string(),
+    })?;
+    let l = monom_lcm(&lm_f, &lm_g);
+    let t1 = monom_sub(&l, &lm_f);
+    let t2 = monom_sub(&l, &lm_g);
+    let mut s = monom_mul_poly(&t1, lc_g, f)?;
+    let second = monom_mul_poly(&t2, lc_f, g)?;
+    poly_add_into(&mut s, &second, -1.0);
+    Ok(s)
+}
+
+/// Valida y convierte `polys/vars` a mapas monomiales (cotas B2.4).
+fn parse_buchberger_input(
+    polys: &[String],
+    vars: &[String],
+) -> Result<(Vec<PolyMap>, Vec<String>), CasError> {
     if polys.is_empty() || polys.len() > MAX_GROEBNER_POLYS {
         return Err(CasError::ResourceLimit {
             detail: format!(
@@ -1601,8 +2005,7 @@ pub fn buchberger_basis(polys: &[String], vars: &[String]) -> Result<BuchbergerO
         .map(|(i, v)| (v.clone(), i))
         .collect();
     let nvars = clean_vars.len();
-
-    let mut basis: Vec<PolyMap> = Vec::new();
+    let mut maps = Vec::with_capacity(polys.len());
     for p in polys {
         let valid = ValidExpr::try_new(p)?;
         let ast = parse_validated(&valid)?;
@@ -1610,8 +2013,32 @@ pub fn buchberger_basis(polys: &[String], vars: &[String]) -> Result<BuchbergerO
         if map.is_empty() {
             continue;
         }
-        let rest = reduce_poly(&map, &basis)?;
+        maps.push(map);
+    }
+    if maps.is_empty() {
+        return Err(CasError::Unsupported {
+            feature: "Groebner",
+            hint: "sistema nulo o vacío; nada que triangular".to_string(),
+        });
+    }
+    Ok((maps, clean_vars))
+}
+
+/// Núcleo de Buchberger con orden y selección por azúcar.
+///
+/// `sugar(S(f,g)) = max(sugar(f)+deg(lcm)−deg(lm f), …)`; cada iteración
+/// toma el par de menor `(max_sugar, deg_lcm)`. Devuelve `(base, s_usados)`.
+fn buchberger_run(
+    maps: Vec<PolyMap>,
+    order: MonomialOrder,
+) -> Result<(Vec<PolyMap>, usize), CasError> {
+    let total_deg_of = |p: &PolyMap| -> u32 { p.keys().map(monom_total_deg).max().unwrap_or(0) };
+    let mut basis: Vec<PolyMap> = Vec::new();
+    let mut sugars: Vec<u32> = Vec::new();
+    for m in maps {
+        let rest = reduce_poly_ordered(&m, &basis, order)?;
         if !rest.is_empty() {
+            sugars.push(total_deg_of(&rest));
             basis.push(rest);
         }
     }
@@ -1621,22 +2048,48 @@ pub fn buchberger_basis(polys: &[String], vars: &[String]) -> Result<BuchbergerO
             hint: "sistema nulo o vacío; nada que triangular".to_string(),
         });
     }
-
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for i in 0..basis.len() {
         for j in (i + 1)..basis.len() {
             pairs.push((i, j));
         }
     }
+    let pair_key = |basis: &[PolyMap], sugars: &[u32], i: usize, j: usize| -> (u32, u32) {
+        let (lm_f, _) = leading_term_ordered(&basis[i], order).unwrap_or((vec![], 0.0));
+        let (lm_g, _) = leading_term_ordered(&basis[j], order).unwrap_or((vec![], 0.0));
+        let l = monom_lcm(&lm_f, &lm_g);
+        let deg_l = monom_total_deg(&l);
+        let deg_f = monom_total_deg(&lm_f);
+        let deg_g = monom_total_deg(&lm_g);
+        let s_f = sugars.get(i).copied().unwrap_or(0) + deg_l.saturating_sub(deg_f);
+        let s_g = sugars.get(j).copied().unwrap_or(0) + deg_l.saturating_sub(deg_g);
+        (s_f.max(s_g), deg_l)
+    };
     let mut s_used = 0_usize;
-    while let Some((i, j)) = pairs.pop() {
+    while !pairs.is_empty() {
+        // Selección por azúcar (mínimo `(max_sugar, deg_lcm)`).
+        let mut best = 0_usize;
+        let mut best_key = pair_key(&basis, &sugars, pairs[0].0, pairs[0].1);
+        for (k, &(i, j)) in pairs.iter().enumerate().skip(1) {
+            if i >= basis.len() || j >= basis.len() {
+                continue;
+            }
+            let key = pair_key(&basis, &sugars, i, j);
+            if key < best_key {
+                best = k;
+                best_key = key;
+            }
+        }
+        let (i, j) = pairs.swap_remove(best);
         if i >= basis.len() || j >= basis.len() {
             continue;
         }
         let (f, g) = (basis[i].clone(), basis[j].clone());
-        // Criterio de Buchberger: si los términos líderes son primos
-        // relativos (lcm = producto), el S-polinomio reduce a cero.
-        if let (Some((lm_f, _)), Some((lm_g, _))) = (leading_term(&f), leading_term(&g)) {
+        // Criterio de Buchberger: líderes primos relativos → reduce a cero.
+        if let (Some((lm_f, _)), Some((lm_g, _))) = (
+            leading_term_ordered(&f, order),
+            leading_term_ordered(&g, order),
+        ) {
             let l = monom_lcm(&lm_f, &lm_g);
             let disjoint = lm_f
                 .iter()
@@ -1658,30 +2111,137 @@ pub fn buchberger_basis(polys: &[String], vars: &[String]) -> Result<BuchbergerO
                 ),
             });
         }
-        let s = s_polynomial(&f, &g)?;
-        let rest = reduce_poly(&s, &basis)?;
+        let s = s_polynomial_ordered(&f, &g, order)?;
+        // Azúcar del S-polinomio para futuras selecciones.
+        let (lm_f, _) = leading_term_ordered(&f, order).unwrap_or((vec![], 0.0));
+        let (lm_g, _) = leading_term_ordered(&g, order).unwrap_or((vec![], 0.0));
+        let l = monom_lcm(&lm_f, &lm_g);
+        let deg_l = monom_total_deg(&l);
+        let new_sugar = (sugars[i] + deg_l.saturating_sub(monom_total_deg(&lm_f)))
+            .max(sugars[j] + deg_l.saturating_sub(monom_total_deg(&lm_g)));
+        let rest = reduce_poly_ordered(&s, &basis, order)?;
         if !rest.is_empty() {
             let n = basis.len();
             for k in 0..n {
                 pairs.push((k, n));
             }
+            sugars.push(new_sugar.max(total_deg_of(&rest)));
             basis.push(rest);
         }
     }
+    Ok((basis, s_used))
+}
 
-    let mut basis_strs: Vec<String> = basis
+/// Formatea una base a strings ordenados sin duplicados.
+fn format_buchberger_basis(basis: &[PolyMap], var_names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = basis
         .iter()
-        .map(|p| format_poly_map(p, &clean_vars))
+        .map(|p| format_poly_map(p, var_names))
         .filter(|s| s != "0" && !s.is_empty())
         .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Base de Groebner por Buchberger lexicográfico acotado.
+///
+/// `> MAX_GROEBNER_S_POLY` 128 S-polinomios, `> MAX_GROEBNER_POLYS` 8
+/// polinomios o entrada no polinómica devuelven `Err` honesto que deriva a
+/// `Eliminate[...]`. Referencia GeoGebra: `Groebner`.
+pub fn buchberger_basis(polys: &[String], vars: &[String]) -> Result<BuchbergerOutcome, CasError> {
+    buchberger_basis_ordered(polys, vars, MonomialOrder::Lex)
+}
+
+/// Base de Groebner con orden monomial explícito (B2.4).
+///
+/// `lex` es el histórico (eliminación); `grlex`/`grevlex` suelen dar bases
+/// más compactas para el mismo ideal. Referencia GeoGebra: `Groebner`.
+pub fn buchberger_basis_ordered(
+    polys: &[String],
+    vars: &[String],
+    order: MonomialOrder,
+) -> Result<BuchbergerOutcome, CasError> {
+    let (maps, clean_vars) = parse_buchberger_input(polys, vars)?;
+    let (basis, s_used) = buchberger_run(maps, order)?;
+    let basis_strs = format_buchberger_basis(&basis, &clean_vars);
     if basis_strs.is_empty() {
         return Err(CasError::Unsupported {
             feature: "Groebner",
             hint: "base vacía tras reducción".to_string(),
         });
     }
-    basis_strs.sort();
-    basis_strs.dedup();
+    Ok(BuchbergerOutcome {
+        basis: basis_strs,
+        s_polys_used: s_used,
+    })
+}
+
+/// Elimina `elim` del sistema: ideal de eliminación `I ∩ k[keep]` (B2.4).
+///
+/// Ordena `lex` con las variables a eliminar como mayores y filtra los
+/// polinomios solo en `keep` (intersecciones de curvas, p. ej.). Si la
+/// intersección es vacía o total → `Err` honesto.
+pub fn buchberger_eliminate(
+    polys: &[String],
+    vars: &[String],
+    elim: &[String],
+) -> Result<BuchbergerOutcome, CasError> {
+    if elim.is_empty() {
+        return Err(CasError::Unsupported {
+            feature: "Eliminate",
+            hint: "nada que eliminar; usa Groebner[...]".to_string(),
+        });
+    }
+    let mut clean_elim = Vec::with_capacity(elim.len());
+    for v in elim {
+        let name = v.trim().trim_matches('"').trim_matches('\'');
+        clean_elim.push(ValidVar::try_new(name)?.as_str().to_string());
+    }
+    let (_, clean_vars) = parse_buchberger_input(polys, vars)?;
+    for e in &clean_elim {
+        if !clean_vars.contains(e) {
+            return Err(CasError::Unsupported {
+                feature: "Eliminate",
+                hint: format!("variable '{e}' fuera del sistema"),
+            });
+        }
+    }
+    let keep: Vec<String> = clean_vars
+        .iter()
+        .filter(|v| !clean_elim.contains(v))
+        .cloned()
+        .collect();
+    if keep.is_empty() {
+        return Err(CasError::Unsupported {
+            feature: "Eliminate",
+            hint: "eliminar todo deja constantes: la intersección es {0} o total".to_string(),
+        });
+    }
+    // Lex con eliminadas como mayores: `[elim.., keep..]`.
+    let ordered_names: Vec<String> = clean_elim.iter().chain(keep.iter()).cloned().collect();
+    let ordered_refs: Vec<String> = ordered_names.clone();
+    let (maps, _) = parse_buchberger_input(polys, &ordered_refs)?;
+    let (basis, s_used) = buchberger_run(maps, MonomialOrder::Lex)?;
+    let n_elim = clean_elim.len();
+    let elim_free: Vec<PolyMap> = basis
+        .into_iter()
+        .filter(|p| p.keys().all(|m| m.iter().take(n_elim).all(|e| *e == 0)))
+        .collect();
+    if elim_free.is_empty() {
+        return Err(CasError::Unsupported {
+            feature: "Eliminate",
+            hint: "intersección vacía en este orden (ideal total o sin polinomio solo en keep)"
+                .to_string(),
+        });
+    }
+    let basis_strs = format_buchberger_basis(&elim_free, &ordered_names);
+    if basis_strs.is_empty() {
+        return Err(CasError::Unsupported {
+            feature: "Eliminate",
+            hint: "base vacía tras reducción".to_string(),
+        });
+    }
     Ok(BuchbergerOutcome {
         basis: basis_strs,
         s_polys_used: s_used,
@@ -1692,6 +2252,59 @@ pub fn buchberger_basis(polys: &[String], vars: &[String]) -> Result<BuchbergerO
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // --- Frente B2: Gruntz pragmático (aceptación 1:1 con la spec) ---
+
+    #[test]
+    fn b2_pow_one_to_inf_is_e() {
+        // Aceptación: `(1+x)^(1/x) → e` (la directa IEEE diría 1).
+        let out = gruntz_limit("(1+x)^(1/x)", "x", 0.0).expect("1^∞");
+        assert_eq!(out.method, GruntzMethod::LogRewrite);
+        assert!(
+            (out.value - std::f64::consts::E).abs() < 1e-6,
+            "got {}",
+            out.value
+        );
+    }
+
+    #[test]
+    fn b2_pow_zero_zero_and_inf_zero() {
+        let z = gruntz_limit("x^x", "x", 0.0).expect("0⁰");
+        assert!((z.value - 1.0).abs() < 1e-6, "got {}", z.value);
+        // `(1+1/x)^x → e` en +∞ (jerarquía o rewrite).
+        let inf = gruntz_limit_infinite("(1+1/x)^x", "x", true).expect("e en ∞");
+        assert!(
+            (inf.value - std::f64::consts::E).abs() < 1e-4,
+            "got {}",
+            inf.value
+        );
+    }
+
+    #[test]
+    fn b2_mul_zero_times_inf() {
+        // `x·ln(x) → 0` y `(1/x)·... ` por cociente.
+        let out = gruntz_limit("x*ln(x)", "x", 0.0).expect("0·∞");
+        assert!(out.value.abs() < 1e-6, "got {}", out.value);
+        assert_eq!(out.method, GruntzMethod::LogRewrite);
+    }
+
+    #[test]
+    fn b2_sub_inf_minus_inf_ln() {
+        // `ln(2x) − ln(x) → ln 2`.
+        let out = gruntz_limit("ln(2*x)-ln(x)", "x", 0.0).expect("∞−∞");
+        assert!((out.value - 2.0_f64.ln()).abs() < 1e-9, "got {}", out.value);
+    }
+
+    #[test]
+    fn b2_oscillation_does_not_exist() {
+        // `sin(1/x)` en 0: no existe, honesto y explícito.
+        let err = gruntz_limit("sin(1/x)", "x", 0.0).expect_err("oscila");
+        assert!(
+            matches!(err, CasError::LimitDoesNotExist { .. }),
+            "got {err}"
+        );
+        assert!(format!("{err}").contains("oscila"), "got {err}");
+    }
 
     #[test]
     fn hardening_find_root_rejects_small_nonzero_constant() {
@@ -1901,5 +2514,97 @@ mod tests {
         let err = buchberger_basis(&polys, &vars).expect_err("cota");
         let msg = format!("{err}");
         assert!(msg.contains("Eliminate"), "got {msg}");
+    }
+
+    // --- Frente B2: Buchberger real (aceptación 1:1 con la spec) ---
+
+    /// Verifica que `basis` es base de Gröbner: todo S-par reduce a cero.
+    fn check_groebner_basis(polys: &[String], vars: &[String], order: MonomialOrder) {
+        let out = buchberger_basis_ordered(polys, vars, order).expect("base B2");
+        assert!(!out.basis.is_empty());
+        // Re-parsea la base y verifica la propiedad de Buchberger.
+        let (maps, _) = parse_buchberger_input(
+            &out.basis.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            vars,
+        )
+        .expect("re-parse base");
+        for i in 0..maps.len() {
+            for j in (i + 1)..maps.len() {
+                let s = s_polynomial_ordered(&maps[i], &maps[j], order).expect("S B2");
+                let rest = reduce_poly_ordered(&s, &maps, order).expect("reduce B2");
+                assert!(rest.is_empty(), "S({i},{j}) no reduce a cero: {rest:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn b2_buchberger_three_orders() {
+        let polys = vec!["x^2+y^2-25".to_string(), "x-y-1".to_string()];
+        let vars = vec!["x".to_string(), "y".to_string()];
+        for order in [
+            MonomialOrder::Lex,
+            MonomialOrder::GrLex,
+            MonomialOrder::GrRevLex,
+        ] {
+            check_groebner_basis(&polys, &vars, order);
+        }
+        // `grlex`/`grevlex` no colapsan a lo mismo que `lex` en general;
+        // basta que cada una sea base válida (verificado arriba).
+        let lex = buchberger_basis_ordered(&polys, &vars, MonomialOrder::Lex).expect("lex");
+        assert!(lex.s_polys_used <= MAX_GROEBNER_S_POLY);
+    }
+
+    #[test]
+    fn b2_buchberger_eliminate_intersection() {
+        // Círculo + recta, elimina `y`: univariante en `x` con raíces ±.
+        let polys = vec!["x^2+y^2-25".to_string(), "x-y-1".to_string()];
+        let vars = vec!["x".to_string(), "y".to_string()];
+        let elim = vec!["y".to_string()];
+        let out = buchberger_eliminate(&polys, &vars, &elim).expect("elimina y");
+        assert!(!out.basis.is_empty(), "sin polinomios en x");
+        for b in &out.basis {
+            assert!(!b.contains('y'), "quedó y en {b}");
+        }
+        // `2x²−2x−24 = 0` → `x ∈ {4, −3}`: evalúa cada base.
+        let mut found_roots = false;
+        for b in &out.basis {
+            let ast = crate::ast::parse_ast(&b.replace(' ', "")).expect("parse elim");
+            if ast.eval_at("x", 4.0).abs() < 1e-6 && ast.eval_at("x", -3.0).abs() < 1e-6 {
+                found_roots = true;
+            }
+        }
+        assert!(
+            found_roots,
+            "ninguna base tiene raíces 4,-3: {:?}",
+            out.basis
+        );
+    }
+
+    #[test]
+    fn b2_buchberger_limits_are_resource_errors() {
+        // > 8 polys, > 4 vars, grado > 64 → `ResourceLimit→Eliminate`.
+        let polys9: Vec<String> = (0..9).map(|i| format!("x + {i}")).collect();
+        let err = buchberger_basis_ordered(&polys9, &["x".to_string()], MonomialOrder::GrLex)
+            .expect_err(">8");
+        assert!(matches!(err, CasError::ResourceLimit { .. }), "got {err}");
+        let vars5: Vec<String> = ["x", "y", "z", "w", "v"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let err2 = buchberger_basis_ordered(&["x+y".to_string()], &vars5, MonomialOrder::Lex)
+            .expect_err(">4 vars");
+        assert!(matches!(err2, CasError::ResourceLimit { .. }), "got {err2}");
+        let err3 = buchberger_basis_ordered(
+            &["x^65+1".to_string()],
+            &["x".to_string()],
+            MonomialOrder::Lex,
+        )
+        .expect_err("grado>64");
+        assert!(matches!(err3, CasError::ResourceLimit { .. }), "got {err3}");
+        // Eliminar todo → honesto.
+        let all =
+            buchberger_eliminate(&["x-1".to_string()], &["x".to_string()], &["x".to_string()])
+                .expect_err("elim total");
+        assert!(matches!(all, CasError::Unsupported { .. }), "got {all}");
     }
 }

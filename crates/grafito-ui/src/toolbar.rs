@@ -667,6 +667,106 @@ fn key_activates_focused(ui: &Ui, response: &egui::Response) -> bool {
         })
 }
 
+/// Tecla de navegación dentro de un menú de herramientas. Puro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarMenuKey {
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+/// Índice siguiente dentro de un menú lineal, con wrap-around.
+/// Puro (`&usize`): sin I/O. `None` si el menú está vacío.
+pub fn toolbar_menu_nav(current: usize, len: usize, key: ToolbarMenuKey) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let last = len - 1;
+    let next = match key {
+        ToolbarMenuKey::Down => {
+            if current >= last {
+                0
+            } else {
+                current + 1
+            }
+        }
+        ToolbarMenuKey::Up => {
+            if current == 0 {
+                last
+            } else {
+                current - 1
+            }
+        }
+        ToolbarMenuKey::Home => 0,
+        ToolbarMenuKey::End => last,
+    };
+    Some(next)
+}
+
+/// Anillo de foco visible sobre un ítem de menú (2 px del tema).
+/// Render puro, sin I/O.
+fn paint_menu_item_focus(ui: &Ui, response: &egui::Response) {
+    if response.has_focus() {
+        current_theme(ui.ctx()).paint_focus_ring(ui.painter(), response.rect);
+    }
+}
+
+/// Ítem de menú de herramientas con foco visible. Render puro, sin I/O.
+/// Devuelve la respuesta para navegación por flechas + activación por teclado.
+fn tool_menu_item(
+    ui: &mut Ui,
+    width: f32,
+    display: &'static str,
+    shortcut: &str,
+    selected: bool,
+) -> egui::Response {
+    let response = ui
+        .add_sized(
+            [width, TOOL_MENU_ITEM_HEIGHT],
+            egui::Button::new(display)
+                .selected(selected)
+                .truncate()
+                .shortcut_text(shortcut),
+        )
+        .on_hover_text(display);
+    paint_menu_item_focus(ui, &response);
+    response
+}
+
+/// Mueve el foco por teclado entre los ítems visibles de un menú
+/// (flechas con wrap-around + Home/End; Tab lo da egui por orden de
+/// creación). La decisión del índice es pura (`toolbar_menu_nav`); el
+/// único efecto es pedir foco egui. Sin I/O ni spawn.
+fn move_menu_focus(ui: &Ui, items: &[egui::Response]) {
+    if items.is_empty() {
+        return;
+    }
+    let key = ui.input(|input| {
+        if input.key_pressed(egui::Key::ArrowDown) {
+            Some(ToolbarMenuKey::Down)
+        } else if input.key_pressed(egui::Key::ArrowUp) {
+            Some(ToolbarMenuKey::Up)
+        } else if input.key_pressed(egui::Key::Home) {
+            Some(ToolbarMenuKey::Home)
+        } else if input.key_pressed(egui::Key::End) {
+            Some(ToolbarMenuKey::End)
+        } else {
+            None
+        }
+    });
+    let Some(key) = key else {
+        return;
+    };
+    let current = items.iter().position(|item| item.has_focus()).unwrap_or(0);
+    // `len > 0` verificado arriba: el `Some` es total.
+    if let Some(next) = toolbar_menu_nav(current, items.len(), key) {
+        if let Some(target) = items.get(next) {
+            target.request_focus();
+        }
+    }
+}
+
 // ── Vector icon drawing functions ──
 
 fn icon_move(painter: &Painter, rect: Rect, color: Color32) {
@@ -1481,6 +1581,9 @@ fn show_compact_toolbar_overflow(
     let menu_width = tool_menu_width(ui.ctx().screen_rect().width());
     let menu_max_height = tool_menu_max_height(ui.ctx().screen_rect().height());
     let mut selected_tool = None;
+    // Ítems visibles para navegación por flechas (foco visible + Enter/Espacio
+    // en cada uno vía `tool_menu_item`; Tab lo da egui por orden de creación).
+    let mut items: Vec<egui::Response> = Vec::new();
     let response = egui::Area::new(popup_id.with("constrained_area"))
         .kind(egui::UiKind::Popup)
         .order(egui::Order::Foreground)
@@ -1504,16 +1607,17 @@ fn show_compact_toolbar_overflow(
                                 for (tool, name, key) in tools {
                                     let display = entry_display_name(*tool, name, locale);
                                     let selected = *current == *tool;
-                                    let response = ui.add_sized(
-                                        [menu_width - 12.0, TOOL_MENU_ITEM_HEIGHT],
-                                        egui::Button::new(display)
-                                            .selected(selected)
-                                            .truncate()
-                                            .shortcut_text(*key),
+                                    let item = tool_menu_item(
+                                        ui,
+                                        menu_width - 12.0,
+                                        display,
+                                        key,
+                                        selected,
                                     );
-                                    if response.on_hover_text(display).clicked() {
+                                    if item.clicked() || key_activates_focused(ui, &item) {
                                         selected_tool = Some(*tool);
                                     }
+                                    items.push(item);
                                 }
                             });
                         }
@@ -1526,6 +1630,8 @@ fn show_compact_toolbar_overflow(
         ui.memory_mut(|memory| memory.close_popup());
         return;
     }
+    // Flechas/Home/End entre ítems visibles; Esc cierra (persistente).
+    move_menu_focus(ui, &items);
     let clicked_outside = button.clicked_elsewhere() && response.response.clicked_elsewhere();
     if ui.input(|input| input.key_pressed(egui::Key::Escape)) || clicked_outside {
         ui.memory_mut(|memory| memory.close_popup());
@@ -1681,17 +1787,20 @@ fn tool_menu(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry], locale: Local
     egui::ScrollArea::vertical()
         .max_height(menu_max_height)
         .show(ui, |ui| {
+            let mut items: Vec<egui::Response> = Vec::with_capacity(tools.len());
             for (tool, name, key) in tools {
                 let display = entry_display_name(*tool, name, locale);
-                let response = ui.add_sized(
-                    [menu_width, TOOL_MENU_ITEM_HEIGHT],
-                    egui::Button::new(display).truncate().shortcut_text(*key),
-                );
-                if response.on_hover_text(display).clicked() {
+                let selected = *current == *tool;
+                let response = tool_menu_item(ui, menu_width, display, key, selected);
+                if response.clicked() || key_activates_focused(ui, &response) {
                     *current = *tool;
                     ui.memory_mut(|memory| memory.close_popup());
                 }
+                items.push(response);
             }
+            // Flechas/Home/End entre ítems (wrap-around); Esc lo cierra el
+            // nivel popup (`show_tool_group_menu`); Tab lo da egui.
+            move_menu_focus(ui, &items);
         });
 }
 
@@ -2174,6 +2283,80 @@ mod tests {
         assert_eq!(
             entry_display_name(Tool::Point, "Punto", Locale::Pt),
             "Punto"
+        );
+    }
+
+    // ── D1 A11Y resto: orden de foco del menú (puro + headless) ──
+
+    #[test]
+    fn menu_nav_wraps_and_jumps() {
+        // Vacío: sin índice (el foco se queda donde está).
+        assert_eq!(toolbar_menu_nav(0, 0, ToolbarMenuKey::Down), None);
+        // Un ítem: todo vuelve a 0.
+        assert_eq!(toolbar_menu_nav(0, 1, ToolbarMenuKey::Down), Some(0));
+        assert_eq!(toolbar_menu_nav(0, 1, ToolbarMenuKey::Up), Some(0));
+        // Paso simple.
+        assert_eq!(toolbar_menu_nav(0, 3, ToolbarMenuKey::Down), Some(1));
+        assert_eq!(toolbar_menu_nav(1, 3, ToolbarMenuKey::Up), Some(0));
+        // Wrap-around en los bordes.
+        assert_eq!(toolbar_menu_nav(2, 3, ToolbarMenuKey::Down), Some(0));
+        assert_eq!(toolbar_menu_nav(0, 3, ToolbarMenuKey::Up), Some(2));
+        // Home/End saltan a los extremos venga de donde venga.
+        assert_eq!(toolbar_menu_nav(1, 3, ToolbarMenuKey::Home), Some(0));
+        assert_eq!(toolbar_menu_nav(1, 3, ToolbarMenuKey::End), Some(2));
+        // Índice fuera de rango (foco perdido): Down arranca en 0.
+        assert_eq!(toolbar_menu_nav(9, 3, ToolbarMenuKey::Down), Some(0));
+    }
+
+    #[test]
+    fn arrow_down_moves_focus_between_menu_items_headless() {
+        use egui::{CentralPanel, Context, RawInput};
+        let ctx = Context::default();
+        // Frame 1: tres ítems estables + foco en el primero.
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                CentralPanel::default().show(ctx, |ui| {
+                    ui.push_id("d1_nav_test", |ui| {
+                        let items: Vec<egui::Response> = (0..3)
+                            .map(|i| ui.add(egui::Button::new(format!("Ítem {i}"))))
+                            .collect();
+                        items[0].request_focus();
+                    });
+                });
+            },
+        );
+        // Frame 2: flecha abajo → el foco pasa al segundo ítem.
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::ArrowDown,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                CentralPanel::default().show(ctx, |ui| {
+                    ui.push_id("d1_nav_test", |ui| {
+                        let items: Vec<egui::Response> = (0..3)
+                            .map(|i| ui.add(egui::Button::new(format!("Ítem {i}"))))
+                            .collect();
+                        assert!(items[0].has_focus(), "el foco arranca en el primer ítem");
+                        move_menu_focus(ui, &items);
+                        assert!(
+                            items[1].has_focus(),
+                            "flecha abajo mueve el foco al segundo"
+                        );
+                    });
+                });
+            },
         );
     }
 

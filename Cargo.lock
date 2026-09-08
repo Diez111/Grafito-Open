@@ -2004,6 +2004,7 @@ dependencies = [
  "grafito-anim",
  "grafito-assistant",
  "grafito-assistant-types",
+ "grafito-classroom",
  "grafito-command",
  "grafito-complex",
  "grafito-core",

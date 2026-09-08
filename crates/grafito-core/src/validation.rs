@@ -735,6 +735,24 @@ fn validate_geo_object_legacy_match(doc: &Document, obj: &GeoObject) -> Result<(
                 }
             }
         }
+        GeoObject::Polyline(o) => {
+            // Cadena abierta: al menos 2 puntos, sin chequeo de colinealidad
+            // (una recta quebrada recta es válida) ni de cierre.
+            if o.points.len() < 2 {
+                return Err("Polyline requires at least 2 points".to_string());
+            }
+            if o.points.len() > MAX_POLYGON_VERTICES {
+                return Err(format!(
+                    "Polyline points {} exceeds maximum {}",
+                    o.points.len(),
+                    MAX_POLYGON_VERTICES
+                ));
+            }
+            for (index, point) in o.points.iter().copied().enumerate() {
+                validate_point2(point, &format!("Polyline.points[{index}]"))?;
+            }
+            validate_positive_f32(o.width, "Polyline.width")?;
+        }
         GeoObject::Pencil(o) => {
             if o.points.len() > MAX_PENCIL_POINTS {
                 return Err(format!(

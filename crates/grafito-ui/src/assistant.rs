@@ -4912,7 +4912,7 @@ fn draw_animation_progress(
     let _ = visuals;
     let time = ui.input(|input| input.time);
     let mut action = None;
-    egui::Frame::none()
+    let progress_frame = egui::Frame::none()
         .fill(theme.input_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator))
         .rounding(RADIUS_MD)
@@ -4951,10 +4951,13 @@ fn draw_animation_progress(
                     .weak(),
             );
         });
+    // A11Y live-region (D1): el progreso de animación anuncia como load.
+    if let Some(live) = assistant_live_text(state) {
+        crate::toolbar::tag_live_region(&progress_frame.response, live);
+    }
     // F17: subsumido por el scheduler de app.rs (16ms) mientras is_pending.
     ui.ctx()
         .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
-    let _ = state;
     action
 }
 
@@ -6304,13 +6307,18 @@ fn draw_assistant_composer(
                         }
                     } else if over_budget {
                         ui.add_space(crate::tokens::SPACE_XS);
-                        ui.add(
+                        let budget_resp = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(over_budget_hint(budget))
                                     .color(theme.danger)
                                     .size(crate::tokens::TYPE_XS),
                             )
                             .wrap(),
+                        );
+                        // A11Y live-region (D1): el límite excedido es error y anuncia.
+                        crate::toolbar::tag_live_region(
+                            &budget_resp,
+                            format!("Asistente: error. {}", over_budget_hint(budget)),
                         );
                     } else if state.problem.trim().is_empty() {
                         ui.add_space(crate::tokens::SPACE_XS);
@@ -6723,7 +6731,7 @@ fn draw_conversation_turn(
         return action;
     }
     // Asistente — editorial input_bg elevado con hairline 8%
-    egui::Frame::none()
+    let turn_frame = egui::Frame::none()
         .fill(appearance.fill)
         .stroke(egui::Stroke::new(1.0, appearance.stroke))
         .rounding(crate::tokens::RADIUS_MD)
@@ -6837,6 +6845,17 @@ fn draw_conversation_turn(
                 });
             }
         });
+    // A11Y live-region (D1): anuncia la última respuesta del asistente sobre
+    // la respuesta existente (sin widgets nuevos). Error y turno en curso ya
+    // tienen su propia región; acá solo respuesta lista.
+    if is_last && state.error.is_none() && !state.is_pending {
+        if let Some(summary) = last_assistant_response_summary(state) {
+            crate::toolbar::tag_live_region(
+                &turn_frame.response,
+                format!("Asistente: respuesta lista. {summary}"),
+            );
+        }
+    }
     ui.add_space(crate::tokens::SPACE_MD);
     action
 }
@@ -6849,7 +6868,7 @@ fn draw_pending_indicator(
     let theme = current_theme(ui.ctx());
     let _ = conversation_turn_appearance(theme, false);
     // Editorial pending — hairline, left-aligned, sin burbuja
-    egui::Frame::none()
+    let pending_frame = egui::Frame::none()
         .fill(theme.input_bg.gamma_multiply(0.60))
         .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
         .rounding(crate::tokens::RADIUS_MD)
@@ -6947,6 +6966,10 @@ fn draw_pending_indicator(
                 ui.ctx().request_repaint();
             }
         });
+    // A11Y live-region (D1): el load anuncia sobre la respuesta existente.
+    if let Some(live) = assistant_live_text(state) {
+        crate::toolbar::tag_live_region(&pending_frame.response, live);
+    }
 }
 
 fn draw_assistant_response(
@@ -8835,8 +8858,11 @@ fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 5] {
     }
 }
 
+/// Cota del resumen de respuesta para la live-region (evita nodos gigantes).
+const ASSISTANT_LIVE_RESPONSE_CHARS: usize = 200;
+
 /// Texto polite para la live-region del lector. Puro (`&Estado`): error >
-/// turno en curso > silencio. Sin I/O ni spawn.
+/// turno en curso > última respuesta > silencio. Sin I/O ni spawn.
 pub fn assistant_live_text(state: &AssistantPanelState) -> Option<String> {
     if let Some(error) = state.error.as_ref() {
         return Some(format!("Asistente: error. {error}"));
@@ -8844,7 +8870,38 @@ pub fn assistant_live_text(state: &AssistantPanelState) -> Option<String> {
     if state.is_pending {
         return Some("Asistente pensando, esperá que termine.".to_owned());
     }
-    None
+    // Respuesta lista: anuncia la última del asistente (resumen puro).
+    last_assistant_response_summary(state)
+        .map(|summary| format!("Asistente: respuesta lista. {summary}"))
+}
+
+/// Resumen puro de la última respuesta del asistente para la live-region:
+/// primera línea no vacía, truncada a `ASSISTANT_LIVE_RESPONSE_CHARS` por
+/// caracteres (borde UTF-8 seguro con `chars`). Sin I/O ni spawn.
+pub fn last_assistant_response_summary(state: &AssistantPanelState) -> Option<String> {
+    let content = state
+        .conversation
+        .iter()
+        .rev()
+        .find(|turn| matches!(turn.role, ConversationRole::Assistant))?
+        .content
+        .as_str();
+    let first_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    if first_line.is_empty() {
+        return None;
+    }
+    let summary: String = first_line
+        .chars()
+        .take(ASSISTANT_LIVE_RESPONSE_CHARS)
+        .collect();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
 }
 
 /// Texto corto para anunciar Esc en el composer (live-region, render puro).
@@ -9441,6 +9498,67 @@ mod tests {
         failed.error = Some("corte de red".to_owned());
         let announced = assistant_live_text(&failed).expect("error anuncia");
         assert!(announced.contains("corte de red"));
+    }
+
+    // ── D1 A11Y resto: la respuesta lista también anuncia ──
+    #[test]
+    fn assistant_live_text_announces_last_response_when_idle() {
+        use grafito_assistant_types::{ConversationRole, ConversationTurn};
+        let state = AssistantPanelState {
+            conversation: vec![
+                ConversationTurn {
+                    role: ConversationRole::User,
+                    content: "graficá y=x²".to_owned(),
+                    origin: None,
+                },
+                ConversationTurn {
+                    role: ConversationRole::Assistant,
+                    content: "Listo: parábola con vértice en el origen.".to_owned(),
+                    origin: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let announced = assistant_live_text(&state).expect("respuesta anuncia");
+        assert!(announced.contains("respuesta lista"));
+        assert!(announced.contains("parábola"));
+        // Solo turnos del usuario: silencio (igual que idle).
+        let user_only = AssistantPanelState {
+            conversation: vec![ConversationTurn {
+                role: ConversationRole::User,
+                content: "hola".to_owned(),
+                origin: None,
+            }],
+            ..Default::default()
+        };
+        assert!(assistant_live_text(&user_only).is_none());
+    }
+
+    #[test]
+    fn response_summary_takes_first_line_and_truncates_utf8_safe() {
+        use grafito_assistant_types::{ConversationRole, ConversationTurn};
+        fn with_answer(content: &str) -> AssistantPanelState {
+            AssistantPanelState {
+                conversation: vec![ConversationTurn {
+                    role: ConversationRole::Assistant,
+                    content: content.to_owned(),
+                    origin: None,
+                }],
+                ..Default::default()
+            }
+        }
+        // Primera línea vacía se salta; el resumen usa la primera con texto.
+        let summary = last_assistant_response_summary(&with_answer(
+            "\n  \nRespuesta con eñes y tildes: parábola áéíóú.",
+        ))
+        .expect("hay primera línea no vacía");
+        assert!(summary.starts_with("Respuesta con eñes"));
+        // Respuesta larguísima: cota dura por caracteres, sin cortar UTF-8.
+        let summary =
+            last_assistant_response_summary(&with_answer(&"á".repeat(500))).expect("resume");
+        assert_eq!(summary.chars().count(), ASSISTANT_LIVE_RESPONSE_CHARS);
+        // Solo blancos: silencio.
+        assert!(last_assistant_response_summary(&with_answer("  \n \n")).is_none());
     }
 
     #[test]

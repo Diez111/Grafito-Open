@@ -79,6 +79,8 @@ pub fn analyze_object(
             analyze_vector_field2d(&v.expr_u, &v.expr_v, view_bounds, vars, features)
         }
         GeoObject::Pencil(_) => Vec::new(),
+        // Cadena abierta sin área: mismo trato honesto que el trazo libre.
+        GeoObject::Polyline(_) => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -97,42 +99,8 @@ pub fn evaluate_curve_at(
         }
         GeoObject::Circle(c) => Some(c.center.distance(&world) - c.radius),
         GeoObject::Line(l) => Some(l.distance_to_point(world)),
-        GeoObject::Pencil(p) => {
-            // Distancia con signo al segmento contiguo más cercano. Devuelve
-            // `Some(dist)` siempre que haya al menos un punto.
-            if p.points.is_empty() {
-                return None;
-            }
-            let mut best_d2 = f64::INFINITY;
-            for w in p.points.windows(2) {
-                let a = w[0];
-                let b = w[1];
-                let abx = b.x - a.x;
-                let aby = b.y - a.y;
-                let apx = world.x - a.x;
-                let apy = world.y - a.y;
-                let len2 = abx * abx + aby * aby;
-                if len2 < 1e-15 {
-                    let dx = apx;
-                    let dy = apy;
-                    let d2 = dx * dx + dy * dy;
-                    if d2 < best_d2 {
-                        best_d2 = d2;
-                    }
-                    continue;
-                }
-                let t = ((apx * abx + apy * aby) / len2).clamp(0.0, 1.0);
-                let cx = a.x + t * abx;
-                let cy = a.y + t * aby;
-                let dx = world.x - cx;
-                let dy = world.y - cy;
-                let d2 = dx * dx + dy * dy;
-                if d2 < best_d2 {
-                    best_d2 = d2;
-                }
-            }
-            Some(best_d2.sqrt())
-        }
+        GeoObject::Pencil(p) => distance_to_open_chain(&p.points, world),
+        GeoObject::Polyline(l) => distance_to_open_chain(&l.points, world),
         GeoObject::ParametricCurve2D(c) => {
             let n = 200;
             let (mut best_t, mut best_d2) = (c.t_min, f64::INFINITY);
@@ -156,6 +124,53 @@ pub fn evaluate_curve_at(
             Some(best_t)
         }
         _ => None,
+    }
+}
+
+/// Distancia al segmento contiguo más cercano de una cadena abierta.
+/// Devuelve `Some(dist)` siempre que haya al menos un punto; con un solo
+/// punto degenera a distancia euclídea (último `best_d2` queda infinito solo
+/// si no hay puntos → `None`).
+fn distance_to_open_chain(points: &[Point2], world: Point2) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut best_d2 = f64::INFINITY;
+    for w in points.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        let abx = b.x - a.x;
+        let aby = b.y - a.y;
+        let apx = world.x - a.x;
+        let apy = world.y - a.y;
+        let len2 = abx * abx + aby * aby;
+        if len2 < 1e-15 {
+            let d2 = apx * apx + apy * apy;
+            if d2 < best_d2 {
+                best_d2 = d2;
+            }
+            continue;
+        }
+        let t = ((apx * abx + apy * aby) / len2).clamp(0.0, 1.0);
+        let cx = a.x + t * abx;
+        let cy = a.y + t * aby;
+        let dx = world.x - cx;
+        let dy = world.y - cy;
+        let d2 = dx * dx + dy * dy;
+        if d2 < best_d2 {
+            best_d2 = d2;
+        }
+    }
+    if best_d2.is_finite() {
+        Some(best_d2.sqrt())
+    } else {
+        // Un solo punto: distancia al punto.
+        let d = (points[0].x - world.x).hypot(points[0].y - world.y);
+        if d.is_finite() {
+            Some(d)
+        } else {
+            None
+        }
     }
 }
 

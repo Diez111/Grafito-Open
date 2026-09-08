@@ -3189,6 +3189,10 @@ impl GrafitoApp {
                     style.width_scale = Some(0.7);
                     style.color_alpha_multiplier = Some(0.2);
                 }
+                GeoObject::Polyline(_) => {
+                    style.width_scale = Some(0.7);
+                    style.color_alpha_multiplier = Some(0.2);
+                }
                 _ => {}
             }
             self.draw_object_styled(&painter, canvas_rect, ghost, Some(style), false);
@@ -3828,6 +3832,39 @@ impl GrafitoApp {
                 if let Some(centroid) = centroid {
                     painter.text(
                         centroid,
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
+                        label_color,
+                    );
+                }
+            }
+            GeoObject::Polyline(line) if line.points.len() >= 2 => {
+                // Cadena abierta: mismo estilo que Polygon pero sin cierre
+                // ni relleno; cada par consecutivo es un segmento.
+                let width = get_width(line.width, style);
+                let color = to_color32(get_color(line.color, style));
+                let stroke = Stroke::new(width, color);
+                let mut screen: Vec<Pos2> = Vec::with_capacity(line.points.len());
+                for (i, w) in line.points.windows(2).enumerate() {
+                    let a = view.world_to_screen(w[0]);
+                    let b = view.world_to_screen(w[1]);
+                    let pa = canvas_rect.min + Vec2::new(a.x, a.y);
+                    let pb = canvas_rect.min + Vec2::new(b.x, b.y);
+                    screen.push(pa);
+                    if !overlay_only {
+                        painter.line_segment([pa, pb], stroke);
+                    }
+                    if i + 2 == line.points.len() {
+                        screen.push(pb);
+                    }
+                }
+                let label = get_label(&line.label, style);
+                if !label.is_empty() && !screen.is_empty() {
+                    let cx: f32 = screen.iter().map(|p| p.x).sum::<f32>() / screen.len() as f32;
+                    let cy: f32 = screen.iter().map(|p| p.y).sum::<f32>() / screen.len() as f32;
+                    painter.text(
+                        Pos2::new(cx, cy),
                         egui::Align2::CENTER_CENTER,
                         label,
                         egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
@@ -5309,6 +5346,11 @@ impl GrafitoApp {
                         }
                     }
                     GeoObject::Pencil(pencil) => pencil
+                        .points
+                        .iter()
+                        .map(|point| Complex64::new(point.x, point.y))
+                        .collect(),
+                    GeoObject::Polyline(line) => line
                         .points
                         .iter()
                         .map(|point| Complex64::new(point.x, point.y))

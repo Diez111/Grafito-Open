@@ -54,6 +54,24 @@ pub enum RewriteRule {
     LaplaceInverseRule,
     LimitRichardson,
     TaylorRule,
+    // Frente B1: Solve general (lineal/cuadrática/Sturm).
+    SolveLinearRule,
+    SolveQuadraticRule,
+    SolveSturmRule,
+    // Frente B2: Risch pragmático, Gruntz rewrite, EDO, Laplace cálculo,
+    // Buchberger con órdenes + eliminación.
+    RischTrigRule,
+    RischEulerSqrtRule,
+    RischPartsRule,
+    GruntzLogRewriteRule,
+    OscillationRule,
+    OdeNthOrderRule,
+    OdeEulerRule,
+    FrobeniusRule,
+    LaplaceCalculusRule,
+    LaplaceShiftRule,
+    GroebnerOrderRule,
+    EliminateRule,
     Generic,
 }
 
@@ -88,6 +106,21 @@ impl std::fmt::Display for RewriteRule {
             Self::LaplaceInverseRule => "LaplaceInverseRule",
             Self::LimitRichardson => "LimitRichardson",
             Self::TaylorRule => "TaylorRule",
+            Self::SolveLinearRule => "SolveLinearRule",
+            Self::SolveQuadraticRule => "SolveQuadraticRule",
+            Self::SolveSturmRule => "SolveSturmRule",
+            Self::RischTrigRule => "RischTrigRule",
+            Self::RischEulerSqrtRule => "RischEulerSqrtRule",
+            Self::RischPartsRule => "RischPartsRule",
+            Self::GruntzLogRewriteRule => "GruntzLogRewriteRule",
+            Self::OscillationRule => "OscillationRule",
+            Self::OdeNthOrderRule => "OdeNthOrderRule",
+            Self::OdeEulerRule => "OdeEulerRule",
+            Self::FrobeniusRule => "FrobeniusRule",
+            Self::LaplaceCalculusRule => "LaplaceCalculusRule",
+            Self::LaplaceShiftRule => "LaplaceShiftRule",
+            Self::GroebnerOrderRule => "GroebnerOrderRule",
+            Self::EliminateRule => "EliminateRule",
             Self::Generic => "Generic",
         };
         write!(f, "{s}")
@@ -129,6 +162,58 @@ pub enum CasOp {
         var: String,
         center: f64,
         order: usize,
+    },
+    /// Frente B1: `Solve[expr, var]` general (todas las raíces reales).
+    Solve {
+        expr: String,
+        var: String,
+    },
+    /// Frente B2: EDO orden-n constante (`coeffs = [aₙ..a₀]`).
+    OdeNthOrder {
+        coeffs: Vec<String>,
+        rhs: String,
+        x: String,
+    },
+    /// Frente B2: Euler `x²y''+a·x·y'+b·y = rhs`.
+    OdeEuler {
+        a: String,
+        b: String,
+        rhs: String,
+        x: String,
+    },
+    /// Frente B2: Frobenius `y''+p·y'+q·y = 0` en punto ordinario.
+    Frobenius {
+        p: String,
+        q: String,
+        x: String,
+        center: f64,
+        terms: usize,
+    },
+    /// Frente B2: `L{y⁽ⁿ⁾}` con iniciales.
+    LaplaceDerivative {
+        order: u32,
+        y: String,
+        t: String,
+        s: String,
+        initials: Vec<String>,
+    },
+    /// Frente B2: `L{∫₀ᵗ f} = L{f}/s`.
+    LaplaceIntegral {
+        f: String,
+        t: String,
+        s: String,
+    },
+    /// Frente B2: Groebner con orden (`lex|grlex|grevlex`).
+    GroebnerOrdered {
+        polys: Vec<String>,
+        vars: Vec<String>,
+        order: String,
+    },
+    /// Frente B2: `Eliminate[polys, vars, elim]`.
+    Eliminate {
+        polys: Vec<String>,
+        vars: Vec<String>,
+        elim: Vec<String>,
     },
 }
 
@@ -237,6 +322,60 @@ impl CasStepper {
                 validate_identifier(var).is_ok()
                     && validate_input_bytes(expr).is_ok()
                     && parse_ast(&expr.replace(' ', "")).is_ok()
+            }
+            CasOp::Solve { expr, var } => {
+                validate_identifier(var).is_ok()
+                    && validate_input_bytes(expr).is_ok()
+                    && parse_ast(&expr.replace(' ', "")).is_ok()
+            }
+            CasOp::OdeNthOrder { coeffs, rhs, x } => {
+                validate_identifier(x).is_ok()
+                    && validate_input_bytes(rhs).is_ok()
+                    && !coeffs.is_empty()
+                    && coeffs.len() <= crate::ode::MAX_ODE_NTH_ORDER + 1
+                    && coeffs.iter().all(|c| validate_input_bytes(c).is_ok())
+            }
+            CasOp::OdeEuler { a, b, rhs, x } => {
+                validate_identifier(x).is_ok()
+                    && validate_input_bytes(rhs).is_ok()
+                    && validate_input_bytes(a).is_ok()
+                    && validate_input_bytes(b).is_ok()
+            }
+            CasOp::Frobenius {
+                p,
+                q,
+                x,
+                center,
+                terms,
+            } => {
+                validate_identifier(x).is_ok()
+                    && validate_input_bytes(p).is_ok()
+                    && validate_input_bytes(q).is_ok()
+                    && center.is_finite()
+                    && (2..=crate::ode::MAX_FROBENIUS_TERMS).contains(terms)
+            }
+            CasOp::LaplaceDerivative {
+                y,
+                t,
+                s,
+                initials,
+                order,
+            } => {
+                validate_identifier(y).is_ok()
+                    && validate_identifier(t).is_ok()
+                    && validate_identifier(s).is_ok()
+                    && (*order as usize) == initials.len()
+                    && initials.iter().all(|c| validate_input_bytes(c).is_ok())
+            }
+            CasOp::LaplaceIntegral { f, t, s } => {
+                validate_identifier(t).is_ok()
+                    && validate_identifier(s).is_ok()
+                    && validate_input_bytes(f).is_ok()
+            }
+            CasOp::GroebnerOrdered { polys, vars, .. } | CasOp::Eliminate { polys, vars, .. } => {
+                polys.len() <= crate::cas::MAX_GROEBNER_POLYS
+                    && vars.len() <= crate::cas::MAX_GROEBNER_VARS
+                    && polys.iter().all(|p| validate_input_bytes(p).is_ok())
             }
             CasOp::Limit { expr, var, at } => {
                 if !at.is_finite() {
@@ -1437,6 +1576,28 @@ pub fn steps_for_op(op: &CasOp) -> Result<Vec<CasStep>, String> {
             center,
             order,
         } => steps_for_taylor(expr, var, *center, *order),
+        CasOp::Solve { expr, var } => steps_for_solve(expr, var),
+        CasOp::OdeNthOrder { coeffs, rhs, x } => steps_for_ode_nth_order(coeffs, rhs, x),
+        CasOp::OdeEuler { a, b, rhs, x } => steps_for_ode_euler(a, b, rhs, x),
+        CasOp::Frobenius {
+            p,
+            q,
+            x,
+            center,
+            terms,
+        } => steps_for_frobenius(p, q, x, *center, *terms),
+        CasOp::LaplaceDerivative {
+            order,
+            y,
+            t,
+            s,
+            initials,
+        } => steps_for_laplace_derivative(*order, y, t, s, initials),
+        CasOp::LaplaceIntegral { f, t, s } => steps_for_laplace_integral(f, t, s),
+        CasOp::GroebnerOrdered { polys, vars, order } => {
+            steps_for_groebner_ordered(polys, vars, order)
+        }
+        CasOp::Eliminate { polys, vars, elim } => steps_for_eliminate(polys, vars, elim),
     }
 }
 
@@ -1630,6 +1791,16 @@ pub fn steps_for_gruntz(expr: &str, var: &str, at: f64) -> Result<Vec<CasStep>, 
     }
     let outcome = crate::cas::gruntz_limit(expr, var, at)
         .map_err(|e| format!("Gruntz no resolvió '{expr}': {e}"))?;
+    // B2: el rewrite a cociente + `ln` deja traza con regla propia.
+    if outcome.method == crate::cas::GruntzMethod::LogRewrite {
+        push_ga_ruled_step(
+            &mut steps,
+            RewriteRule::GruntzLogRewriteRule,
+            &format!("lim({var}→{at}) {expr}"),
+            &format!("{:.8}", outcome.value),
+            "rewrite B2: 0·∞/∞−∞ a cociente, 1^∞/0⁰/∞⁰ por ln",
+        );
+    }
     push_ga_step(
         &mut steps,
         &format!("lim({var}→{at}) {expr}"),
@@ -1679,7 +1850,8 @@ pub fn steps_for_risch(expr: &str, var: &str) -> Result<Vec<CasStep>, String> {
             {
                 RewriteRule::IntegrationPartialFractions
             }
-            _ => RewriteRule::Generic,
+            // B2: trig, Euler-sqrt y partes tabulares con regla propia.
+            _ => risch_b2_rule(&prim, expr),
         }
     } else {
         RewriteRule::Generic
@@ -1855,7 +2027,7 @@ pub fn steps_for_laplace_direct(expr: &str, t: &str, s: &str) -> Result<Vec<CasS
     Ok(steps)
 }
 
-/// Traza Laplace inversa (racional propio grado ≤ 2).
+/// Traza Laplace inversa (racional propio grado ≤ 3 con raíz real, B2.3d).
 pub fn steps_for_laplace_inverse(expr: &str, s: &str, t: &str) -> Result<Vec<CasStep>, String> {
     validate_identifier(s)?;
     validate_identifier(t)?;
@@ -1868,7 +2040,7 @@ pub fn steps_for_laplace_inverse(expr: &str, s: &str, t: &str) -> Result<Vec<Cas
         RewriteRule::LaplaceInverseRule,
         &format!("L⁻¹{{{expr}}}({s} → {t})"),
         &out,
-        "parciales grado ≤ 2: K/(s−a), K/(s−a)², cuadrática (amortiguada)",
+        "parciales grado ≤ 3: K/(s−a), K/(s−a)², cuadrática, cúbica real (B2.3d)",
     );
     steps.truncate(MAX_CAS_STEPS);
     Ok(steps)
@@ -1938,6 +2110,311 @@ pub fn steps_for_groebner(polys: &[String], vars: &[String]) -> Result<Vec<CasSt
 }
 
 // ---------------------------------------------------------------------------
+// Frente B2: trazas de orden-n, Euler, Frobenius, Laplace cálculo,
+// Groebner con órdenes y eliminación.
+// ---------------------------------------------------------------------------
+
+/// Regla Risch B2 según la primitiva emitida.
+fn risch_b2_rule(prim: &str, expr: &str) -> RewriteRule {
+    if prim.contains("atan") {
+        RewriteRule::IntegrationArctanRule
+    } else if expr.contains("sin") || expr.contains("cos") || expr.contains("tan") {
+        RewriteRule::RischTrigRule
+    } else if expr.contains("sqrt") {
+        RewriteRule::RischEulerSqrtRule
+    } else if expr.contains("exp") || expr.contains("ln") {
+        RewriteRule::RischPartsRule
+    } else {
+        RewriteRule::Generic
+    }
+}
+
+/// Traza EDO orden-n constante por anulador + resonancia.
+pub fn steps_for_ode_nth_order(
+    coeffs: &[String],
+    rhs: &str,
+    x: &str,
+) -> Result<Vec<CasStep>, String> {
+    validate_identifier(x)?;
+    validate_input_bytes(rhs)?;
+    if coeffs.is_empty() || coeffs.len() > crate::ode::MAX_ODE_NTH_ORDER + 1 {
+        return Err("orden fuera de 1..=8".to_string());
+    }
+    let sol = crate::ode::solve_ode_nth_order_const(coeffs, rhs, x)
+        .map_err(|e| format!("EDO orden-n no resuelta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeNthOrderRule,
+        &format!("({})y = {rhs}", coeffs.join(", ")),
+        "característica: raíces racionales + resto cuadrático",
+        "anulador B2: pela lineales racionales, cierra con cuadrática",
+    );
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeNthOrderRule,
+        "característica factorizada",
+        &sol,
+        "homogénea exacta + particular por colocación (resonancia x^s)",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza Euler `x²y''+a·x·y'+b·y` vía `x = eᵗ`.
+pub fn steps_for_ode_euler(a: &str, b: &str, rhs: &str, x: &str) -> Result<Vec<CasStep>, String> {
+    validate_identifier(x)?;
+    for e in [a, b, rhs] {
+        validate_input_bytes(e)?;
+    }
+    let sol = crate::ode::solve_ode_euler_2nd(a, b, rhs, x)
+        .map_err(|e| format!("Euler no resuelta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeEulerRule,
+        &format!("x²y''+{a}·x·y'+{b}·y = {rhs}"),
+        "ecuación indicial r²+(a−1)r+b = 0",
+        "sustitución x = eᵗ: coeficientes constantes en t",
+    );
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::OdeEulerRule,
+        "indicial resuelta",
+        &sol,
+        "x^r / ln(x) resonante; particular término a término",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza Frobenius en punto ordinario (coeficientes verificables).
+pub fn steps_for_frobenius(
+    p: &str,
+    q: &str,
+    x: &str,
+    center: f64,
+    terms: usize,
+) -> Result<Vec<CasStep>, String> {
+    validate_identifier(x)?;
+    validate_input_bytes(p)?;
+    validate_input_bytes(q)?;
+    let out = crate::ode::frobenius_series_2nd(p, q, x, center, terms)
+        .map_err(|e| format!("Frobenius no calculado: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::FrobeniusRule,
+        &format!("y''+({p})y'+({q})y = 0 en {x} = {center}"),
+        &format!("recurrencia hasta a{}", out.terms - 1),
+        "punto ordinario (p,q polinomios): serie de potencias",
+    );
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::FrobeniusRule,
+        "recurrencia resuelta",
+        &crate::ode::format_frobenius_series(&out.y1, x, center),
+        "y₁ con a₀=1, a₁=0",
+    );
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::FrobeniusRule,
+        "recurrencia resuelta",
+        &crate::ode::format_frobenius_series(&out.y2, x, center),
+        "y₂ con a₀=0, a₁=1",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza `L{y⁽ⁿ⁾}` por regla con iniciales.
+pub fn steps_for_laplace_derivative(
+    order: u32,
+    y: &str,
+    t: &str,
+    s: &str,
+    initials: &[String],
+) -> Result<Vec<CasStep>, String> {
+    validate_identifier(y)?;
+    validate_identifier(t)?;
+    validate_identifier(s)?;
+    let out = crate::ode::laplace_derivative(order, y, t, s, initials)
+        .map_err(|e| format!("Laplace derivada no cubierta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::LaplaceCalculusRule,
+        &format!("L{{y^({order})}}"),
+        &out,
+        "regla sⁿ·Y − Σ s^{n−1−k}·y⁽ᵏ⁾(0)",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza `L{∫₀ᵗ f} = L{f}/s`.
+pub fn steps_for_laplace_integral(f: &str, t: &str, s: &str) -> Result<Vec<CasStep>, String> {
+    validate_identifier(t)?;
+    validate_identifier(s)?;
+    validate_input_bytes(f)?;
+    let out = crate::ode::laplace_integral_rule(f, t, s)
+        .map_err(|e| format!("Laplace integral no cubierta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::LaplaceCalculusRule,
+        &format!("L{{∫₀ {f}dt}}"),
+        &out,
+        "integra en t, divide por s",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza Groebner con orden monomial explícito.
+pub fn steps_for_groebner_ordered(
+    polys: &[String],
+    vars: &[String],
+    order: &str,
+) -> Result<Vec<CasStep>, String> {
+    if polys.len() > crate::cas::MAX_GROEBNER_POLYS || vars.len() > crate::cas::MAX_GROEBNER_VARS {
+        return Err("sistema excede las cotas de Buchberger; usa Eliminate".to_string());
+    }
+    let clean = order.trim().to_ascii_lowercase();
+    let ord = match clean.as_str() {
+        "lex" => crate::cas::MonomialOrder::Lex,
+        "grlex" => crate::cas::MonomialOrder::GrLex,
+        "grevlex" => crate::cas::MonomialOrder::GrRevLex,
+        _ => return Err(format!("orden '{order}' inválido (lex|grlex|grevlex)")),
+    };
+    let outcome = crate::cas::buchberger_basis_ordered(polys, vars, ord)
+        .map_err(|e| format!("Buchberger no convergió: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::GroebnerOrderRule,
+        &polys.join(", "),
+        &format!("{} S-polinomios (azúcar)", outcome.s_polys_used),
+        &format!("Buchberger {clean} con selección por azúcar"),
+    );
+    for (i, poly) in outcome.basis.iter().enumerate() {
+        if steps.len() >= MAX_CAS_STEPS {
+            break;
+        }
+        push_ga_ruled_step(
+            &mut steps,
+            RewriteRule::GroebnerOrderRule,
+            &format!("base[{i}]"),
+            poly,
+            &format!("polinomio {clean} {i}"),
+        );
+    }
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza `Eliminate`: lex con eliminadas mayores + filtrado.
+pub fn steps_for_eliminate(
+    polys: &[String],
+    vars: &[String],
+    elim: &[String],
+) -> Result<Vec<CasStep>, String> {
+    if polys.len() > crate::cas::MAX_GROEBNER_POLYS || vars.len() > crate::cas::MAX_GROEBNER_VARS {
+        return Err("sistema excede las cotas de Buchberger".to_string());
+    }
+    let outcome = crate::cas::buchberger_eliminate(polys, vars, elim)
+        .map_err(|e| format!("Eliminate no resolvió: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_ruled_step(
+        &mut steps,
+        RewriteRule::EliminateRule,
+        &polys.join(", "),
+        &format!("elimina {}", elim.join(", ")),
+        "lex con eliminadas como mayores (teorema de eliminación)",
+    );
+    for (i, poly) in outcome.basis.iter().enumerate() {
+        if steps.len() >= MAX_CAS_STEPS {
+            break;
+        }
+        push_ga_ruled_step(
+            &mut steps,
+            RewriteRule::EliminateRule,
+            &format!("intersección[{i}]"),
+            poly,
+            "polinomio solo en las variables restantes",
+        );
+    }
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+// ---------------------------------------------------------------------------
+// Frente B1: traza de `Solve[expr, var]` general
+// ---------------------------------------------------------------------------
+
+/// Pasos pedagógicos del Solve general (lineal/cuadrática/Sturm).
+pub fn steps_for_solve(expr: &str, var: &str) -> Result<Vec<CasStep>, String> {
+    validate_identifier(var)?;
+    validate_input_bytes(expr)?;
+    let outcome =
+        crate::solve::solve_all_real(expr, var).map_err(|e| format!("Solve sin traza: {e}"))?;
+    let mut steps = Vec::new();
+    let roots_s = crate::solve::format_real_roots(&outcome);
+    match outcome.method {
+        crate::solve::SolveMethod::LinearExact => {
+            push_ga_ruled_step(
+                &mut steps,
+                RewriteRule::SolveLinearRule,
+                &format!("{expr} = 0"),
+                &roots_s,
+                "despeje lineal a·x+b=0 → x=−b/a (Gauss 1×1)",
+            );
+        }
+        crate::solve::SolveMethod::QuadraticExact => {
+            push_ga_ruled_step(
+                &mut steps,
+                RewriteRule::SolveQuadraticRule,
+                &format!("{expr} = 0"),
+                "D = b²−4ac",
+                "discriminante cuadrático (forma estable)",
+            );
+            push_ga_ruled_step(
+                &mut steps,
+                RewriteRule::SolveQuadraticRule,
+                "D = b²−4ac",
+                &roots_s,
+                "fórmula x=(−b±√D)/2a; D<0 → {} + aviso complejo",
+            );
+        }
+        crate::solve::SolveMethod::SturmBisection => {
+            push_ga_ruled_step(
+                &mut steps,
+                RewriteRule::SolveSturmRule,
+                &format!("{expr} = 0"),
+                "intervalo de Cauchy",
+                "cota 1+max|aᵢ/aₙ|: todas las raíces reales adentro",
+            );
+            push_ga_ruled_step(
+                &mut steps,
+                RewriteRule::SolveSturmRule,
+                "intervalo de Cauchy",
+                &format!("{} intervalos con raíz", outcome.roots.len()),
+                "secuencia de Sturm: variaciones aíslan cada raíz real",
+            );
+            push_ga_ruled_step(
+                &mut steps,
+                RewriteRule::SolveSturmRule,
+                &format!("{} intervalos con raíz", outcome.roots.len()),
+                &roots_s,
+                "bisección 100 iters + Newton + verificación por residuo",
+            );
+        }
+    }
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+// ---------------------------------------------------------------------------
 // Tests genéricos
 // ---------------------------------------------------------------------------
 
@@ -1947,6 +2424,28 @@ mod tests {
 
     fn has_rule(steps: &[CasStep], rule: RewriteRule) -> bool {
         steps.iter().any(|s| s.rule == rule)
+    }
+
+    #[test]
+    fn solve_traces_linear_quadratic_sturm() {
+        let lin = steps_for_solve("2*x-6", "x").expect("traza lineal");
+        assert!(has_rule(&lin, RewriteRule::SolveLinearRule));
+        let quad = steps_for_solve("x^2-5*x+6", "x").expect("traza cuadrática");
+        assert!(has_rule(&quad, RewriteRule::SolveQuadraticRule));
+        let cubic = steps_for_solve("x^3-6*x^2+11*x-6", "x").expect("traza Sturm");
+        assert!(has_rule(&cubic, RewriteRule::SolveSturmRule));
+        assert!(cubic.iter().any(|s| s.after.contains("{1, 2, 3}")));
+        for s in lin.iter().chain(quad.iter()).chain(cubic.iter()) {
+            assert!(s.before.len() <= MAX_STEP_BYTES);
+            assert!(s.after.len() <= MAX_STEP_BYTES);
+        }
+        let op = CasOp::Solve {
+            expr: "x^2-4".to_string(),
+            var: "x".to_string(),
+        };
+        let via_op = steps_for_op(&op).expect("despacho Solve");
+        assert!(!via_op.is_empty());
+        assert!(steps_for_solve("sin(x)+x", "x").is_err());
     }
 
     #[test]
@@ -2357,7 +2856,10 @@ mod tests {
         let inverse = steps_for_laplace_inverse("1/(s+1)", "s", "t").expect("traza inversa");
         assert!(has_rule(&inverse, RewriteRule::LaplaceInverseRule));
         assert!(inverse[0].after.contains("exp"), "got {}", inverse[0].after);
-        assert!(steps_for_laplace_inverse("1/(s^3+1)", "s", "t").is_err());
+        // B2.3d: la cúbica con raíz real YA traza; grado 4 sigue honesto.
+        let cubic = steps_for_laplace_inverse("1/(s^3+1)", "s", "t").expect("traza cúbica");
+        assert!(cubic[0].after.contains("exp"), "got {}", cubic[0].after);
+        assert!(steps_for_laplace_inverse("1/(s^4+1)", "s", "t").is_err());
     }
 
     #[test]
@@ -2369,5 +2871,116 @@ mod tests {
         let tan_steps = steps_for_risch("tan(x)", "x").expect("traza tan");
         assert!(!tan_steps.is_empty());
         assert!(tan_steps.len() <= MAX_CAS_STEPS);
+    }
+
+    // --- Frente B2: trazas con regla propia + despacho `CasOp` ---
+
+    #[test]
+    fn b2_risch_trace_rules() {
+        let trig = steps_for_risch("sin(x)^2", "x").expect("traza trig");
+        assert!(has_rule(&trig, RewriteRule::RischTrigRule));
+        let euler = steps_for_risch("sqrt(x^2+1)", "x").expect("traza Euler");
+        assert!(has_rule(&euler, RewriteRule::RischEulerSqrtRule));
+        let parts = steps_for_risch("x^2*exp(x)", "x").expect("traza partes");
+        assert!(has_rule(&parts, RewriteRule::RischPartsRule));
+        for s in trig.iter().chain(euler.iter()).chain(parts.iter()) {
+            assert!(s.before.len() <= MAX_STEP_BYTES);
+            assert!(s.after.len() <= MAX_STEP_BYTES);
+        }
+    }
+
+    #[test]
+    fn b2_gruntz_rewrite_trace() {
+        let steps = steps_for_gruntz("(1+x)^(1/x)", "x", 0.0).expect("traza 1^∞");
+        assert!(has_rule(&steps, RewriteRule::GruntzLogRewriteRule));
+        assert!(steps.iter().any(|s| s.after.contains("2.718")));
+    }
+
+    #[test]
+    fn b2_ode_traces() {
+        let coeffs = ["1", "-6", "11", "-6"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let nth = steps_for_ode_nth_order(&coeffs, "0", "x").expect("traza orden-n");
+        assert!(has_rule(&nth, RewriteRule::OdeNthOrderRule));
+        let euler = steps_for_ode_euler("1", "-1", "0", "x").expect("traza Euler");
+        assert!(has_rule(&euler, RewriteRule::OdeEulerRule));
+        let frob = steps_for_frobenius("-2*x", "0", "x", 0.0, 6).expect("traza Frobenius");
+        assert!(has_rule(&frob, RewriteRule::FrobeniusRule));
+        assert_eq!(frob.len(), 3);
+        let deriv =
+            steps_for_laplace_derivative(2, "Y", "t", "s", &["y0".to_string(), "y1".to_string()])
+                .expect("traza derivada");
+        assert!(has_rule(&deriv, RewriteRule::LaplaceCalculusRule));
+        let integ = steps_for_laplace_integral("sin(t)", "t", "s").expect("traza integral");
+        assert!(has_rule(&integ, RewriteRule::LaplaceCalculusRule));
+    }
+
+    #[test]
+    fn b2_groebner_traces_and_dispatch() {
+        let polys = vec!["x^2+y^2-25".to_string(), "x-y-1".to_string()];
+        let vars = vec!["x".to_string(), "y".to_string()];
+        let ord = steps_for_groebner_ordered(&polys, &vars, "grlex").expect("traza orden");
+        assert!(has_rule(&ord, RewriteRule::GroebnerOrderRule));
+        assert!(steps_for_groebner_ordered(&polys, &vars, "invlex").is_err());
+        let elim = steps_for_eliminate(&polys, &vars, &["y".to_string()]).expect("traza elim");
+        assert!(has_rule(&elim, RewriteRule::EliminateRule));
+        // Despacho `CasOp` de las 7 operaciones B2.
+        let ops = [
+            CasOp::OdeNthOrder {
+                coeffs: ["1", "-3", "2"].iter().map(|s| s.to_string()).collect(),
+                rhs: "0".to_string(),
+                x: "x".to_string(),
+            },
+            CasOp::OdeEuler {
+                a: "1".to_string(),
+                b: "-1".to_string(),
+                rhs: "0".to_string(),
+                x: "x".to_string(),
+            },
+            CasOp::Frobenius {
+                p: "-2*x".to_string(),
+                q: "0".to_string(),
+                x: "x".to_string(),
+                center: 0.0,
+                terms: 6,
+            },
+            CasOp::LaplaceDerivative {
+                order: 1,
+                y: "Y".to_string(),
+                t: "t".to_string(),
+                s: "s".to_string(),
+                initials: vec!["0".to_string()],
+            },
+            CasOp::LaplaceIntegral {
+                f: "t".to_string(),
+                t: "t".to_string(),
+                s: "s".to_string(),
+            },
+            CasOp::GroebnerOrdered {
+                polys: polys.clone(),
+                vars: vars.clone(),
+                order: "lex".to_string(),
+            },
+            CasOp::Eliminate {
+                polys: polys.clone(),
+                vars: vars.clone(),
+                elim: vec!["y".to_string()],
+            },
+        ];
+        for op in &ops {
+            let steps = steps_for_op(op).expect("despacho B2");
+            assert!(!steps.is_empty());
+        }
+        // `CasStepper::run` valida (orden malo y términos de más fallan).
+        let mut stepper = CasStepper::new();
+        assert!(stepper
+            .run(&CasOp::GroebnerOrdered {
+                polys: vec!["x".to_string(); 20],
+                vars: vars.clone(),
+                order: "lex".to_string(),
+            })
+            .is_err());
     }
 }

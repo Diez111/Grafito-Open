@@ -152,6 +152,8 @@ impl CommandSpec {
     pub fn accepts_argument_count(&self, count: usize) -> bool {
         match self.id {
             "geometry.polygon" => return count >= 3,
+            // Polilínea abierta: mínimo 2 puntos, techo MAX_POLYGON_VERTICES 8192.
+            "geometry.polyline" => return (2..=8192).contains(&count),
             "geometry.bezier-curve" | "geometry.spline" => return count >= 2,
             "graph.piecewise" => return count >= 3,
             "graph.contour" => return count >= 6,
@@ -262,6 +264,18 @@ const COMMANDS: &[CommandSpec] = &[
         false,
         "Polygon",
         [signature!("Polygon[(x1, y1), ...]"; "vertices": Point required)]
+    ),
+    command!(
+        "geometry.polyline",
+        "Polyline",
+        ["polilinea"],
+        "Crear",
+        "Crea una polilinea abierta: cadena de segmentos sin cierre ni relleno (minimo 2 puntos, maximo 8192).",
+        CreatesObject,
+        Low,
+        false,
+        "Polyline",
+        [signature!("Polyline[P1, P2, ...]"; "P1": Point required, "P2": Point required)]
     ),
     command!(
         "geometry.function",
@@ -868,6 +882,21 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("FillRow[fila, inicio, fin, valor]"; "fila": Expression required, "inicio": Integer optional, "fin": Integer optional, "valor": Expression optional)
         ]
     ),
+    command!(
+        "spreadsheet.fill-series",
+        "FillSeries",
+        ["fill_series", "serie", "rellenar_serie"],
+        "Estadística",
+        "Autorrelleno con serie lineal (inicio+paso·i) o geométrica (inicio·paso^i) sobre un rango 1D; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE.",
+        CreatesObject,
+        Medium,
+        true,
+        "FillSeries",
+        [
+            signature!("FillSeries[rango, inicio, paso]"; "rango": Expression required, "inicio": Number required, "paso": Number required),
+            signature!("FillSeries[rango, inicio, paso, modo]"; "rango": Expression required, "inicio": Number required, "paso": Number required, "modo": Expression optional)
+        ]
+    ),
     // Restricciones, conicas y booleanas documentadas
     command!(
         "constraint.distance",
@@ -1132,7 +1161,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.solve",
         "Solve",
-        ["nsolve", "resolver"],
+        ["resolver"],
         "CAS",
         "Resuelve una ecuacion en la variable indicada.",
         CreatesObject,
@@ -1140,7 +1169,36 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "Solve",
         [
+            signature!("Solve[expr, variable]"; "expr": Expression required, "variable": Variable optional),
             signature!("Solve[expr, variable, minimo, maximo]"; "expr": Expression required, "variable": Variable optional, "minimo": Number optional, "maximo": Number optional)
+        ]
+    ),
+    command!(
+        "cas.nsolve",
+        "NSolve",
+        [],
+        "CAS",
+        "Aproxima una sola raíz numérica en el intervalo dado (1 raíz).",
+        CreatesObject,
+        Medium,
+        true,
+        "NSolve",
+        [
+            signature!("NSolve[expr, variable, minimo, maximo]"; "expr": Expression required, "variable": Variable optional, "minimo": Number optional, "maximo": Number optional)
+        ]
+    ),
+    command!(
+        "cas.solve-nl-system",
+        "SolveNlSystem",
+        ["sistema_nolineal"],
+        "CAS",
+        "Resuelve un sistema polinómico 2x2 por eliminación (puntos verificados).",
+        CreatesObject,
+        Medium,
+        true,
+        "SolveNlSystem",
+        [
+            signature!("SolveNlSystem[eq1, eq2, var1, var2]"; "eq1": Expression required, "eq2": Expression required, "var1": Variable required, "var2": Variable required)
         ]
     ),
     command!(
@@ -2635,6 +2693,18 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("Cone[x, y, z, radius, height]"; "x": Number required, "y": Number required, "z": Number required, "radius": Number required, "height": Number required)]
     ),
     command!(
+        "geometry.pyramid-3d",
+        "Pyramid",
+        ["piramide"],
+        "3D",
+        "Crea una piramide 3D de base cuadrada (base en (x,y,z), apice en (x,y+h,z)).",
+        CreatesObject,
+        Medium,
+        false,
+        "Pyramid",
+        [signature!("Pyramid[x, y, z, base_size, height]"; "x": Number required, "y": Number required, "z": Number required, "base_size": Number required, "height": Number required)]
+    ),
+    command!(
         "geometry.torus-3d",
         "Torus",
         [],
@@ -3714,6 +3784,111 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("GroebnerBasis[polinomios, variables]"; "polinomios": Expression required, "variables": ParameterList required)
         ]
     ),
+    // Frente B2: puertas del kernel pragmático (cas_motor). Nombres sin
+    // colisión: `Laplace` es distribución e `InvLaplaceT` ya existe.
+    command!(
+        "cas.solve-ode-n",
+        "SolveODEN",
+        ["edo_n"],
+        "CAS",
+        "Resolvé EDO lineal de orden n≤8 con coeficientes constantes por anulador + resonancia: SolveODEN[{a2,a1,a0}, rhs] o SolveODEN[{a2,a1,a0}, rhs, x]. Fuera del subset da error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "SolveODEN",
+        [
+            signature!("SolveODEN[coeficientes, rhs]"; "coeficientes": ParameterList required, "rhs": Expression required),
+            signature!("SolveODEN[coeficientes, rhs, variable]"; "coeficientes": ParameterList required, "rhs": Expression required, "variable": Variable optional)
+        ]
+    ),
+    command!(
+        "cas.euler-ode",
+        "EulerODE",
+        ["edoeuler", "euleredo"],
+        "CAS",
+        "Resolvé Euler x²·y''+a·x·y'+b·y=rhs vía x=e^t (x>0): EulerODE[a, b, rhs] o EulerODE[a, b, rhs, x]. Fuera del subset da error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "EulerODE",
+        [
+            signature!("EulerODE[a, b, rhs]"; "a": Expression required, "b": Expression required, "rhs": Expression required),
+            signature!("EulerODE[a, b, rhs, variable]"; "a": Expression required, "b": Expression required, "rhs": Expression required, "variable": Variable optional)
+        ]
+    ),
+    command!(
+        "cas.frobenius-series",
+        "FrobeniusSeries",
+        ["frobenius", "seriefrobenius"],
+        "CAS",
+        "Serie de Frobenius en punto ordinario (términos≤9): FrobeniusSeries[p, q] o FrobeniusSeries[p, q, x, x0, terminos]. Punto singular da error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "FrobeniusSeries",
+        [
+            signature!("FrobeniusSeries[p, q]"; "p": Expression required, "q": Expression required),
+            signature!("FrobeniusSeries[p, q, x, x0, terminos]"; "p": Expression required, "q": Expression required, "x": Variable optional, "x0": Number optional, "terminos": Integer optional)
+        ]
+    ),
+    command!(
+        "cas.laplace-deriv",
+        "LaplaceDeriv",
+        ["derivadalaplace"],
+        "CAS",
+        "Laplace de derivada L{y⁽ⁿ⁾} con iniciales (n≤8): LaplaceDeriv[n, y] o LaplaceDeriv[n, y, t, s, {y0, y1}]. Fuera del subset da error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "LaplaceDeriv",
+        [
+            signature!("LaplaceDeriv[n, y]"; "n": Integer required, "y": Expression required),
+            signature!("LaplaceDeriv[n, y, t, s, iniciales]"; "n": Integer required, "y": Expression required, "t": Variable optional, "s": Variable optional, "iniciales": ParameterList optional)
+        ]
+    ),
+    command!(
+        "cas.laplace-int",
+        "LaplaceInt",
+        ["integrallaplace"],
+        "CAS",
+        "Laplace de integral L{∫₀ᵗ f} = L{f}/s: LaplaceInt[f] o LaplaceInt[f, t, s]. Fuera del subset da error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "LaplaceInt",
+        [
+            signature!("LaplaceInt[f]"; "f": Expression required),
+            signature!("LaplaceInt[f, t, s]"; "f": Expression required, "t": Variable optional, "s": Variable optional)
+        ]
+    ),
+    command!(
+        "cas.groebner-ordered",
+        "GroebnerOrdered",
+        ["groebnerorden", "baseordenada"],
+        "CAS",
+        "Base de Groebner con orden monomial explícito (mismas cotas que GroebnerBasis): GroebnerOrdered[polinomios, variables, orden] con orden lex|grlex|grevlex. Útil para eliminación.",
+        ReadOnly,
+        Low,
+        true,
+        "GroebnerOrdered",
+        [
+            signature!("GroebnerOrdered[polinomios, variables, orden]"; "polinomios": Expression required, "variables": ParameterList required, "orden": Expression required)
+        ]
+    ),
+    command!(
+        "cas.eliminate",
+        "Eliminate",
+        ["elimina", "eliminacion"],
+        "CAS",
+        "Elimina variables por Groebner lexicográfico (intersecciones): Eliminate[polinomios, variables, eliminar]. Fuera de cota da ResourceLimit honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "Eliminate",
+        [
+            signature!("Eliminate[polinomios, variables, eliminar]"; "polinomios": Expression required, "variables": ParameterList required, "eliminar": ParameterList required)
+        ]
+    ),
     ];
 
 /// Returns every registered stable text command.
@@ -3961,6 +4136,7 @@ mod registry_tests {
             "Point",
             "Circle",
             "Polygon",
+            "Polyline",
             "Ellipse",
             "RegularPolygon",
             "Point3D",
@@ -3970,6 +4146,7 @@ mod registry_tests {
             "Tetrahedron",
             "Cylinder",
             "Cone",
+            "Pyramid",
             "Torus",
             "Moebius",
             "Surface3D",
@@ -4047,6 +4224,13 @@ mod registry_tests {
             "InvLaplaceT",
             "RischInt",
             "GroebnerBasis",
+            "SolveODEN",
+            "EulerODE",
+            "FrobeniusSeries",
+            "LaplaceDeriv",
+            "LaplaceInt",
+            "GroebnerOrdered",
+            "Eliminate",
             "PerpendicularBisector",
             "AngleBisector",
             "Midpoint",
@@ -4075,6 +4259,7 @@ mod registry_tests {
             "FillCells",
             "CellRange",
             "FillRow",
+            "FillSeries",
             "Distance",
             "Angle",
             "Coincident",
@@ -4093,6 +4278,8 @@ mod registry_tests {
             "Derivative",
             "Integral",
             "Solve",
+            "NSolve",
+            "SolveNlSystem",
             "Limit",
             "LimitAbove",
             "LimitBelow",
@@ -4559,11 +4746,20 @@ mod registry_tests {
     fn registry_counts_match_documented_architecture() {
         // Blindaje docs↔código (architecture.md §8/§13). Si agregás un
         // comando, actualizá ESTE test + architecture.md juntos.
-        assert_eq!(all().len(), 259, "COMMANDS registrados (docs §8)");
+        // Frente B1: +NSolve (1 raíz numérica) +SolveNlSystem (poli 2×2).
+        // `Solve` NO se duplicó: se extendió (firma sin intervalo = general);
+        // `SolveSystem` lineal existe (dispatch LinearSolve) y no se tocó.
+        // Frente B2: +SolveODEN/+EulerODE/+FrobeniusSeries/+LaplaceDeriv/
+        // +LaplaceInt/+GroebnerOrdered/+Eliminate (7, todos visibles).
+        // Frente C1: +Polyline (abierta, no visible) +Pyramid (3D, no visible).
+        // Frente C2: +FillSeries (serie lineal/geométrica 1D, visible).
+        // FitLine/FillDown/ChiSquareTest/InverseChiSquare NO se agregaron:
+        // duplicarían FitLinear/FillColumn/ChiSqTest/InverseChiSquared.
+        assert_eq!(all().len(), 271, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            215,
-            "comandos visibles en paleta (docs §8: 215 + 14 UI = 229)"
+            225,
+            "comandos visibles en paleta (docs §8: 225 + 14 UI = 239)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

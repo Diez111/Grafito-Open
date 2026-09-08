@@ -494,7 +494,7 @@ fn w1_symbolic_gate_errors_are_honest_with_subset_limits() {
         ),
         ("ODESystem2[t, 1, 0, 1]".to_string(), vec!["ODESystem2"]),
         ("LaplaceT[exp(t^2)]".to_string(), vec!["LaplaceT"]),
-        ("InvLaplaceT[1/(s^3+1)]".to_string(), vec!["InvLaplaceT"]),
+        ("InvLaplaceT[1/(s^4+1)]".to_string(), vec!["InvLaplaceT"]),
         ("RischInt[exp(x^2)]".to_string(), vec!["RischInt"]),
         (
             "GroebnerBasis[{sin(x)+y, x-y}, {x, y}]".to_string(),

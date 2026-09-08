@@ -2123,15 +2123,18 @@ pub fn solve_ode_first_order(rhs: &str, x: &str, y: &str) -> Result<String, OdeS
 // con resonancia simple/doble (`x^s`). Sistemas por traza/determinante:
 // reales distintas, repetido (Jordan con `t·e^λt` si defectivo),
 // complejo conjugado. Laplace directa por tabla + linealidad; inversa de
-// racionales propios con denominador grado ≤ 2.
+// racionales propios con denominador grado ≤ 2 (B2.3d: cúbica real).
 //
-// Fuera del subset → `Err` honesto que nombra el límite: orden ≥ 3,
-// coeficientes variables (incluida Euler), resonancias no cubiertas
-// (frecuencia nula, casi-resonancia), denominadores grado ≥ 3,
-// retardos/impulsos. Referencia GeoGebra: `SolveODE`, `Laplace`.
+// Fuera del subset → `Err` honesto que nombra el límite: orden ≥ 3
+// (B2.3a lo cubre hasta 8 con raíces racionales+cuadráticas),
+// coeficientes variables (B2.3b cubre Euler, B2.3c Frobenius en punto
+// ordinario), resonancias no cubiertas (frecuencia nula,
+// casi-resonancia), denominadores grado ≥ 4, retardos/impulsos (B2.3d
+// cubre Heaviside/Dirac en la directa). Referencia GeoGebra: `SolveODE`,
+// `Laplace`.
 // Presupuestos: entradas ≤ 2000 bytes, salida ≤ 8000,
 // polinomios RHS grado ≤ 8 (`MAX_ODE2_POLY_DEGREE`), potencias Laplace
-// `n ≤ 20`, denominador inverso grado ≤ 2.
+// `n ≤ 20`, denominador inverso grado ≤ 2 (B2: 3 con raíz real).
 // ---------------------------------------------------------------------------
 
 /// Grado máximo del RHS polinómico en 2º orden (muy por debajo de
@@ -2871,6 +2874,11 @@ pub fn laplace_direct(expr: &str, t: &str, s: &str) -> Result<String, OdeSymboli
         });
     }
     let clean = check_ode_bytes(expr)?;
+    // B2.3d: Dirac a nivel string (el AST no tiene nodo δ).
+    if let Some(shift) = parse_dirac_shorthand(&clean, &t) {
+        let c = shift?;
+        return Ok(dirac_exp_factor(c, &s));
+    }
     let ast = parse_normalized(&clean)?;
     let out = laplace_direct_ast(&ast, &t, &s)?;
     if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
@@ -2993,6 +3001,22 @@ fn laplace_direct_ast(e: &crate::ast::Expr, t: &str, s: &str) -> Result<String, 
             }
             Err(subset())
         }
+        // B2.3d: `H(t−c) → e^{−cs}/s` (pendiente 1; `K·H` por el brazo
+        // `Mul` con constante, que recursa aquí).
+        Expr::Heaviside(arg) => {
+            let (ha, hb) = crate::cas::cas_linear_coeff(arg, t).ok_or_else(subset)?;
+            if !ha.is_finite() || !hb.is_finite() || (ha.abs() - 1.0).abs() > 1e-9 {
+                return Err(subset());
+            }
+            let c = -hb / ha;
+            if !c.is_finite() {
+                return Err(subset());
+            }
+            if c.abs() < ODE2_EPS {
+                return Ok(format!("1/{s}"));
+            }
+            Ok(format!("{}/{s}", dirac_exp_factor(c, s)))
+        }
         _ => Err(subset()),
     }
 }
@@ -3024,7 +3048,8 @@ fn laplace_sin_cos(s: &str, w: f64, phi: f64, is_sin: bool) -> Option<String> {
     ))
 }
 
-/// `L⁻¹{F(s)}` de racionales propios con denominador grado ≤ 2.
+/// `L⁻¹{F(s)}` de racionales propios con denominador grado ≤ 2
+/// (B2.3d: grado 3 con raíz real por `laplace_inverse_cubic`).
 ///
 /// Tabla: `K/(s−a)`, `K/(s−a)²`, `(A·s+B)/(s²+…)` (reales distintas,
 /// doble, cuadrática irreducible → `e^{αt}` con `cos/sin`). Grado ≥ 3,
@@ -3053,22 +3078,22 @@ fn laplace_inverse_ast(e: &crate::ast::Expr, s: &str, t: &str) -> Result<String,
     let subset = || {
         OdeSymbolicError::NotSupported {
         hint: format!(
-            "Laplace inversa cubre racionales propios con denominador grado ≤ {MAX_LAPLACE_RATIONAL_DEGREE} (lineales reales, (s−a)², cuadrática irreducible); grado ≥ 3, impropias, retardos e impulsos fuera del subset F3c"
+            "Laplace inversa cubre racionales propios con denominador grado ≤ {MAX_LAPLACE_INVERSE_DEGREE} (lineales reales, (s−a)², cuadrática irreducible, cúbica con raíz real por B2.3d); grado ≥ 4, impropias, retardos e impulsos fuera del subset"
         ),
     }
     };
     let Expr::Div(num, den) = e else {
         return Err(subset());
     };
-    let p = crate::integral::poly_coeffs_bounded(num, s, MAX_LAPLACE_RATIONAL_DEGREE)
+    let p = crate::integral::poly_coeffs_bounded(num, s, MAX_LAPLACE_INVERSE_DEGREE)
         .ok_or_else(subset)?;
-    let q = crate::integral::poly_coeffs_bounded(den, s, MAX_LAPLACE_RATIONAL_DEGREE)
+    let q = crate::integral::poly_coeffs_bounded(den, s, MAX_LAPLACE_INVERSE_DEGREE)
         .ok_or_else(subset)?;
     let mut dq = q.len().saturating_sub(1);
     while dq > 0 && q.get(dq).is_some_and(|v| v.abs() < ODE2_EPS) {
         dq -= 1;
     }
-    if dq == 0 || dq > MAX_LAPLACE_RATIONAL_DEGREE {
+    if dq == 0 || dq > MAX_LAPLACE_INVERSE_DEGREE {
         return Err(subset());
     }
     let mut dp = p.len().saturating_sub(1);
@@ -3079,6 +3104,10 @@ fn laplace_inverse_ast(e: &crate::ast::Expr, s: &str, t: &str) -> Result<String,
         return Err(OdeSymbolicError::NotSupported {
             hint: "racional impropia (grado numerador ≥ denominador): divide primero o usa fracciones parciales; fuera del subset F3c".to_string(),
         });
+    }
+    // B2.3d: cúbica propia con raíz real por bisección + deflación.
+    if dq == MAX_LAPLACE_INVERSE_DEGREE {
+        return laplace_inverse_cubic(&p, &q, s, t);
     }
     if dq == 1 {
         let (d0, d1) = (q[0], q[1]);
@@ -3163,6 +3192,1056 @@ fn laplace_inverse_ast(e: &crate::ast::Expr, s: &str, t: &str) -> Result<String,
         return Ok("0".to_string());
     }
     Ok(join_sum_terms(&terms))
+}
+
+// ---------------------------------------------------------------------------
+// Frente B2: EDO pragmática 95% escolar (NO "EDO total").
+//
+// a) Orden-n constante por anulador + resonancia (M): característica con
+//    raíces racionales + cuadráticas, homogénea exacta, particular por
+//    coeficientes indeterminados con colocación (verificada por residuo).
+// b) Euler `x²y''+a·x·y'+b·y` vía `x=eᵗ` (S): indicial + `ln` resonante.
+// c) Frobenius en punto ordinario, serie hasta orden 8 (M): recurrencia
+//    sobre polinomios desplazados al centro.
+// d) Laplace (S): derivadas/integrales por regla, Heaviside `e^{−cs}/s`,
+//    Dirac a nivel string (el AST no tiene nodo δ), inversa cúbica con
+//    raíz real por bisección + deflación.
+//
+// Presupuestos B2: `MAX_ODE_NTH_ORDER` 8, `MAX_FROBENIUS_TERMS` 9,
+// `MAX_LAPLACE_INVERSE_DEGREE` 3, `MAX_LAPLACE_DERIV_ORDER` 8; el resto
+// hereda `MAX_ODE_SYMBOLIC_BYTES` 2000 y `MAX_ODE2_POLY_DEGREE` 8.
+// ---------------------------------------------------------------------------
+
+/// Orden máximo de una EDO lineal de coeficientes constantes (B2.3a).
+pub const MAX_ODE_NTH_ORDER: usize = 8;
+/// Grado máximo del denominador en Laplace inversa (B2.3d: cúbica real).
+pub const MAX_LAPLACE_INVERSE_DEGREE: usize = 3;
+/// Términos máximos de una serie de Frobenius (`a₀..a₈`, B2.3c).
+pub const MAX_FROBENIUS_TERMS: usize = 9;
+/// Orden máximo en la regla de Laplace de derivadas (B2.3d).
+pub const MAX_LAPLACE_DERIV_ORDER: usize = 8;
+
+/// Raíz característica con multiplicidad (B2.3a).
+#[derive(Debug, Clone, PartialEq)]
+enum NthRoot {
+    /// Real `r` con multiplicidad `m`.
+    Real(f64, usize),
+    /// Par `α±βi` (`β > 0`) con multiplicidad `m`.
+    Complex(f64, f64, usize),
+}
+
+fn ode_not_supported(hint: String) -> OdeSymbolicError {
+    OdeSymbolicError::NotSupported { hint }
+}
+
+/// División sintética por `(r−root)`; `None` si el resto no es ~cero.
+fn synth_divide(coeffs_desc: &[f64], root: f64) -> Option<Vec<f64>> {
+    if coeffs_desc.is_empty() {
+        return None;
+    }
+    let mut next = Vec::with_capacity(coeffs_desc.len() - 1);
+    let mut carry = 0.0;
+    for (i, c) in coeffs_desc.iter().enumerate() {
+        let v = c + carry;
+        if i + 1 == coeffs_desc.len() {
+            let scale = coeffs_desc.iter().map(|z| z.abs()).fold(1.0_f64, f64::max);
+            if v.abs() > 1e-6 * scale {
+                return None;
+            }
+        } else {
+            next.push(v);
+            carry = v * root;
+            if !carry.is_finite() {
+                return None;
+            }
+        }
+    }
+    Some(next)
+}
+
+/// Raíces de `Σ a_k·r^k` (`desc = [a_n..a_0]`, `a_n ≠ 0`).
+///
+/// Pela lineales racionales (coeficientes casi-enteros) y cierra con
+/// lineal/cuadrática; el resto (cúbica irreducible sin raíz racional,
+/// grado ≥ 5 no split) es `NotSupported` honesto que deriva a numérico.
+fn char_roots_nth(desc: &[f64]) -> Result<Vec<NthRoot>, OdeSymbolicError> {
+    let nosplit = |detail: String| {
+        ode_not_supported(format!(
+            "característica {detail}: solo raíces racionales + resto cuadrático (B2.3a); usa RKF45 numérico"
+        ))
+    };
+    if desc.len() < 2 || desc.len() > MAX_ODE_NTH_ORDER + 1 {
+        return Err(nosplit(format!(
+            "orden {} fuera de 1..={MAX_ODE_NTH_ORDER}",
+            desc.len().saturating_sub(1)
+        )));
+    }
+    let lead = desc[0];
+    if !lead.is_finite() || lead.abs() < ODE2_EPS {
+        return Err(nosplit("coeficiente líder nulo".to_string()));
+    }
+    // Normaliza a mónica para pelar con números estables.
+    let mut work: Vec<f64> = desc.iter().map(|c| c / lead).collect();
+    let mut reals: Vec<f64> = Vec::new();
+    // Candidatos racionales solo si todo es casi-entero acotado.
+    let rounded: Vec<f64> = work.iter().map(|c| c.round()).collect();
+    let integral = rounded
+        .iter()
+        .zip(work.iter())
+        .all(|(r, c)| c.is_finite() && (r - c).abs() < 1e-9 && r.abs() < 1e6);
+    if integral {
+        let ct = rounded.last().copied().unwrap_or(0.0).abs() as i64;
+        let mut cands: Vec<f64> = Vec::new();
+        if ct == 0 {
+            // `r = 0` raíz: pela directo por multiplicidad.
+            while work.len() > 1 && work.last().is_some_and(|v| v.abs() < 1e-9) {
+                work.pop();
+                reals.push(0.0);
+            }
+        } else {
+            let mut divs = Vec::new();
+            let mut k = 1_i64;
+            while k * k <= ct {
+                if ct % k == 0 {
+                    divs.push(k);
+                    if k * k != ct {
+                        divs.push(ct / k);
+                    }
+                }
+                k += 1;
+            }
+            for p in &divs {
+                for s in [-1.0, 1.0] {
+                    cands.push(s * *p as f64);
+                }
+            }
+            // Prueba cada candidato con multiplicidad (límite: orden).
+            for cand in cands {
+                while work.len() > 1 {
+                    match synth_divide(&work, cand) {
+                        Some(next) => {
+                            work = next;
+                            reals.push(cand);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+    // Cierre: resto grado 0/1/2; resto mayor → honesto.
+    let mut roots: Vec<NthRoot> = Vec::new();
+    let mut push_real = |r: f64| {
+        if let Some(NthRoot::Real(prev, m)) = roots.last_mut() {
+            if (*prev - r).abs() < 1e-9 {
+                *m += 1;
+                return;
+            }
+        }
+        roots.push(NthRoot::Real(r, 1));
+    };
+    reals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    for r in reals {
+        if !r.is_finite() {
+            return Err(nosplit("raíz no finita".to_string()));
+        }
+        push_real(r);
+    }
+    // El resto vive en `work` (mónica): grados 0, 1 o 2.
+    while work.len() > 1 && work.last().is_some_and(|v| v.abs() < 1e-9) {
+        work.pop();
+        push_real(0.0);
+    }
+    match work.len() {
+        1 => {}
+        2 => {
+            // `r + c = 0` (mónica).
+            if work[0].abs() < ODE2_EPS && work[1].abs() < ODE2_EPS {
+                return Err(nosplit("resto nulo".to_string()));
+            }
+            push_real(-work[1] / work[0]);
+        }
+        3 => {
+            let (a2, b1, c0) = (work[0], work[1], work[2]);
+            if a2.abs() < ODE2_EPS {
+                return Err(nosplit("resto degenerado".to_string()));
+            }
+            let disc = b1 * b1 - 4.0 * a2 * c0;
+            if disc >= -ODE2_EPS {
+                let s = disc.max(0.0).sqrt();
+                push_real((-b1 + s) / (2.0 * a2));
+                push_real((-b1 - s) / (2.0 * a2));
+            } else {
+                roots.push(NthRoot::Complex(
+                    -b1 / (2.0 * a2),
+                    (-disc).sqrt() / (2.0 * a2.abs()),
+                    1,
+                ));
+            }
+        }
+        _ => {
+            return Err(nosplit(format!(
+                "resto de grado {} sin raíz racional",
+                work.len() - 1
+            )));
+        }
+    }
+    // Ordena: reales primero, luego complejos (determinista).
+    roots.sort_by(|a, b| match (a, b) {
+        (NthRoot::Real(r1, _), NthRoot::Real(r2, _)) => {
+            r1.partial_cmp(r2).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (NthRoot::Real(..), NthRoot::Complex(..)) => std::cmp::Ordering::Less,
+        (NthRoot::Complex(..), NthRoot::Real(..)) => std::cmp::Ordering::Greater,
+        (NthRoot::Complex(a1, b1, _), NthRoot::Complex(a2, b2, _)) => (a1, b1)
+            .partial_cmp(&(a2, b2))
+            .unwrap_or(std::cmp::Ordering::Equal),
+    });
+    Ok(roots)
+}
+
+/// Multiplicidad de `target` como raíz (`None` si no es raíz).
+fn root_mult(roots: &[NthRoot], target: f64) -> usize {
+    for r in roots {
+        if let NthRoot::Real(v, m) = r {
+            if (*v - target).abs() < 1e-9 {
+                return *m;
+            }
+        }
+    }
+    0
+}
+
+/// Multiplicidad del par `±iw` (`0` si no es raíz).
+fn trig_mult(roots: &[NthRoot], w: f64) -> usize {
+    for r in roots {
+        if let NthRoot::Complex(a, b, m) = r {
+            if a.abs() < 1e-9 && (*b - w).abs() < 1e-9 {
+                return *m;
+            }
+        }
+    }
+    // `w = 0` resonante vive como raíz real `0` (caso polinómico).
+    0
+}
+
+/// Homogénea de orden-n con `C1..Cn` (`n` términos exactos).
+fn homogeneous_nth(roots: &[NthRoot], x: &str, mut counter: usize) -> (String, usize) {
+    let mut terms = Vec::new();
+    for r in roots {
+        match r {
+            NthRoot::Real(v, m) => {
+                for k in 0..*m {
+                    counter += 1;
+                    let c = format!("C{counter}");
+                    let xp = match k {
+                        0 => String::new(),
+                        1 => format!("*{x}"),
+                        _ => format!("*{x}^{k}"),
+                    };
+                    if v.abs() < ODE2_EPS {
+                        terms.push(format!("{c}{xp}"));
+                    } else {
+                        terms.push(format!("{c}{xp}*exp({}*{x})", fmt_num(*v)));
+                    }
+                }
+            }
+            NthRoot::Complex(al, be, m) => {
+                for k in 0..*m {
+                    counter += 1;
+                    let xp = match k {
+                        0 => String::new(),
+                        1 => format!("*{x}"),
+                        _ => format!("*{x}^{k}"),
+                    };
+                    counter += 1;
+                    terms.push(format!(
+                        "exp({}*{x})*{xp}*(C{}*cos({}*{x}) + C{}*sin({}*{x}))",
+                        fmt_num(*al),
+                        counter - 1,
+                        fmt_num(*be),
+                        counter,
+                        fmt_num(*be)
+                    ));
+                }
+            }
+        }
+    }
+    (join_sum_terms(&terms), counter)
+}
+
+/// Gaussiana densa con pivoteo (`n ≤ 32`); `None` si es singular.
+fn solve_dense_small(mat: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
+    let n = rhs.len();
+    if n == 0 || n > 32 || mat.len() != n || mat.iter().any(|r| r.len() != n) {
+        return None;
+    }
+    let mut aug: Vec<Vec<f64>> = mat
+        .iter()
+        .zip(rhs.iter())
+        .map(|(row, r)| {
+            let mut v = row.clone();
+            v.push(*r);
+            v
+        })
+        .collect();
+    for col in 0..n {
+        let mut piv = col;
+        for r in col..n {
+            if aug[r][col].abs() > aug[piv][col].abs() {
+                piv = r;
+            }
+        }
+        if !aug[piv][col].is_finite() || aug[piv][col].abs() < 1e-12 {
+            return None;
+        }
+        aug.swap(col, piv);
+        let diag = aug[col][col];
+        let pivot_row = aug[col].clone();
+        for (r, row) in aug.iter_mut().enumerate() {
+            if r == col {
+                continue;
+            }
+            let factor = row[col] / diag;
+            if !factor.is_finite() {
+                return None;
+            }
+            for (cell, pivot) in row[col..=n].iter_mut().zip(pivot_row[col..].iter()) {
+                *cell -= factor * pivot;
+            }
+        }
+    }
+    let mut out = vec![0.0; n];
+    for (i, row) in aug.iter().enumerate() {
+        if row[i].abs() < 1e-12 {
+            return None;
+        }
+        out[i] = row[n] / row[i];
+        if !out[i].is_finite() {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Evalúa `L[b] = Σ a_k·b^{(k)}` en `t` (derivadas simbólicas + `eval`).
+fn operator_at(basis_derivs: &[Vec<crate::ast::Expr>], asc: &[f64], x: &str, t: f64) -> Vec<f64> {
+    basis_derivs
+        .iter()
+        .map(|derivs| {
+            derivs
+                .iter()
+                .zip(asc.iter())
+                .map(|(d, a)| a * d.eval_at(x, t))
+                .sum()
+        })
+        .collect()
+}
+
+/// Particular por anulador + colocación (`asc = [a₀..aₙ]` del operador).
+///
+/// Ansatz `x^s·Q·e^{αx}` (o `sin/cos`) con `s` = resonancia; coeficientes
+/// por sistema cuadrado en puntos enteros, VERIFICADO por residuo en
+/// puntos extra. Devuelve `(yp_string, yp_ast)`.
+fn nth_particular(
+    asc: &[f64],
+    roots: &[NthRoot],
+    kind: &RhsKind,
+    rhs_ast: &crate::ast::Expr,
+    x: &str,
+) -> Result<(String, crate::ast::Expr), OdeSymbolicError> {
+    use crate::ast::Expr;
+    let fail = |d: &str| {
+        ode_not_supported(format!(
+            "particular {d}: anulador B2 cubre Poli/Exp/Trig/PoliExp del subset F3c; resto → numérico"
+        ))
+    };
+    // `(s, [(potencia_x, envolvente)])`: envolvente `E` (exp), `S`/`C`
+    // (trig) o unidad (poli).
+    enum Env {
+        One,
+        Exp(f64),
+        Sin,
+        Cos,
+    }
+    let (s, template): (usize, Vec<(usize, Env)>) = match kind {
+        RhsKind::Poly(p) => {
+            let m = p.len().saturating_sub(1);
+            (
+                root_mult(roots, 0.0),
+                (0..=m)
+                    .map(|j| (root_mult(roots, 0.0) + j, Env::One))
+                    .collect(),
+            )
+        }
+        RhsKind::Exp { a, .. } => {
+            let s = root_mult(roots, *a);
+            (s, vec![(s, Env::Exp(*a))])
+        }
+        RhsKind::Trig { w, .. } => {
+            let s = trig_mult(roots, *w);
+            (s, vec![(s, Env::Sin), (s, Env::Cos)])
+        }
+        RhsKind::PolyExp { poly, a, .. } => {
+            let m = poly.len().saturating_sub(1);
+            let s = root_mult(roots, *a);
+            (s, (0..=m).map(|j| (s + j, Env::Exp(*a))).collect())
+        }
+    };
+    let _ = s;
+    let n_basis = template.len();
+    if n_basis == 0 || n_basis > MAX_ODE_NTH_ORDER + MAX_ODE2_POLY_DEGREE + 2 {
+        return Err(fail("dimensión del ansatz"));
+    }
+    // ASTs base: `x^p`, `x^p·e^{ax}`, `x^s·sin/cos(wx)`.
+    let mut basis: Vec<Expr> = Vec::with_capacity(n_basis);
+    for (p, env) in &template {
+        let xp = if *p == 0 {
+            Expr::Const(1.0)
+        } else if *p == 1 {
+            Expr::Var(x.to_string())
+        } else {
+            Expr::Pow(
+                Box::new(Expr::Var(x.to_string())),
+                Box::new(Expr::Const(*p as f64)),
+            )
+        };
+        let b = match env {
+            Env::One => xp,
+            Env::Exp(a) => Expr::Mul(
+                Box::new(xp),
+                Box::new(Expr::Exp(Box::new(Expr::Mul(
+                    Box::new(Expr::Const(*a)),
+                    Box::new(Expr::Var(x.to_string())),
+                )))),
+            ),
+            Env::Sin => {
+                let (_, w) = trig_freq(kind).ok_or_else(|| fail("frecuencia"))?;
+                Expr::Mul(
+                    Box::new(xp),
+                    Box::new(Expr::Sin(Box::new(Expr::Mul(
+                        Box::new(Expr::Const(w)),
+                        Box::new(Expr::Var(x.to_string())),
+                    )))),
+                )
+            }
+            Env::Cos => {
+                let (_, w) = trig_freq(kind).ok_or_else(|| fail("frecuencia"))?;
+                Expr::Mul(
+                    Box::new(xp),
+                    Box::new(Expr::Cos(Box::new(Expr::Mul(
+                        Box::new(Expr::Const(w)),
+                        Box::new(Expr::Var(x.to_string())),
+                    )))),
+                )
+            }
+        };
+        basis.push(b);
+    }
+    let order = asc.len().saturating_sub(1);
+    let mut derivs: Vec<Vec<Expr>> = Vec::with_capacity(n_basis);
+    for b in &basis {
+        let mut row = vec![b.clone()];
+        for _ in 0..order {
+            let prev = row[row.len() - 1].clone();
+            row.push(prev.diff(x).simplify());
+        }
+        derivs.push(row);
+    }
+    // Colocación en `0..N` (funciones enteras: sin polos).
+    let mut mat = Vec::with_capacity(n_basis);
+    let mut rhs_v = Vec::with_capacity(n_basis);
+    for i in 0..n_basis {
+        let t = i as f64;
+        mat.push(operator_at(&derivs, asc, x, t));
+        rhs_v.push(rhs_ast.eval_at(x, t));
+    }
+    let coeffs = solve_dense_small(&mat, &rhs_v).ok_or_else(|| fail("sistema singular"))?;
+    // Verificación por residuo en puntos extra (no los de colocación).
+    let yp = coeffs
+        .iter()
+        .zip(basis.iter())
+        .filter(|(c, _)| c.is_finite() && c.abs() > 1e-9)
+        .map(|(c, b)| {
+            if matches!(b, Expr::Const(v) if (*v - 1.0).abs() < 1e-12) {
+                Expr::Const(*c)
+            } else {
+                Expr::Mul(Box::new(Expr::Const(*c)), Box::new(b.clone()))
+            }
+        })
+        .reduce(|a, b| Expr::Add(Box::new(a), Box::new(b)))
+        .unwrap_or(Expr::Const(0.0));
+    let mut yp_derivs = vec![yp.clone()];
+    for _ in 0..order {
+        let prev = yp_derivs[yp_derivs.len() - 1].clone();
+        yp_derivs.push(prev.diff(x).simplify());
+    }
+    let rhs_scale = [0.37, 1.13, -0.53, 2.0, 3.0]
+        .iter()
+        .map(|t| rhs_ast.eval_at(x, *t).abs())
+        .fold(1.0_f64, f64::max);
+    for t in [0.37, 1.13, -0.53, 2.0, 3.0] {
+        let lhs: f64 = yp_derivs
+            .iter()
+            .zip(asc.iter())
+            .map(|(d, a)| a * d.eval_at(x, t))
+            .sum();
+        let r = rhs_ast.eval_at(x, t);
+        if !lhs.is_finite() || !r.is_finite() || (lhs - r).abs() > 1e-6 * rhs_scale {
+            return Err(OdeSymbolicError::IntegrationFailed {
+                expr: format!("residuo no nulo en x={t}: L[yp]={lhs} ≠ RHS={r}"),
+            });
+        }
+    }
+    if matches!(yp, Expr::Const(v) if v.abs() < 1e-12) {
+        return Ok(("0".to_string(), yp));
+    }
+    Ok((yp.to_expr_string(), yp))
+}
+
+/// `(ks, w)` del RHS trigonométrico (canónico `ks·sin + kc·cos`).
+fn trig_freq(kind: &RhsKind) -> Option<(f64, f64)> {
+    if let RhsKind::Trig { ks, w, .. } = kind {
+        Some((*ks, *w))
+    } else {
+        None
+    }
+}
+
+/// `aₙy⁽ⁿ⁾+…+a₀y = rhs` con coeficientes constantes (B2.3a).
+///
+/// `coeffs = [aₙ..a₀]` como strings constantes; `n = len−1 ≤ 8`.
+/// Resonancia por anulador (`x^s` con `s` = multiplicidad); RHS del subset
+/// F3c (vía `classify_rhs`); resto → `NotSupported` honesto.
+pub fn solve_ode_nth_order_const(
+    coeffs: &[String],
+    rhs_expr: &str,
+    x: &str,
+) -> Result<String, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    if coeffs.len() < 2 || coeffs.len() > MAX_ODE_NTH_ORDER + 1 {
+        return Err(ode_not_supported(format!(
+            "orden {} fuera de 1..={MAX_ODE_NTH_ORDER}",
+            coeffs.len().saturating_sub(1)
+        )));
+    }
+    let mut desc = Vec::with_capacity(coeffs.len());
+    for (i, c) in coeffs.iter().enumerate() {
+        desc.push(const_coeff(c, &format!("a{}", coeffs.len() - 1 - i))?);
+    }
+    if !desc.iter().all(|c| c.is_finite()) {
+        return Err(ode_not_supported("coeficientes no finitos".to_string()));
+    }
+    if desc[0].abs() < ODE2_EPS {
+        return Err(ode_not_supported(
+            "líder nulo: el orden real es menor (redeclara sin el coeficiente)".to_string(),
+        ));
+    }
+    let order = desc.len() - 1;
+    let mut asc: Vec<f64> = desc.iter().rev().copied().collect();
+    for a in &mut asc {
+        *a /= desc[0];
+    }
+    let roots = char_roots_nth(&desc)?;
+    // Cuenta de constantes: debe cerrar `n` exacto.
+    let n_consts: usize = roots
+        .iter()
+        .map(|r| match r {
+            NthRoot::Real(_, m) => *m,
+            NthRoot::Complex(_, _, m) => 2 * m,
+        })
+        .sum();
+    if n_consts != order {
+        return Err(ode_not_supported(format!(
+            "constantes {n_consts} ≠ orden {order}; característica degenerada"
+        )));
+    }
+    let (hom, _) = homogeneous_nth(&roots, &x, 0);
+    let rhs_ast = parse_normalized(&check_ode_bytes(rhs_expr)?)?;
+    if crate::cas::cas_const_value(&rhs_ast).is_some_and(|v| v.abs() < ODE2_EPS) {
+        return Ok(format!("y = {hom}"));
+    }
+    let kind = classify_rhs(&rhs_ast, &x).map_err(|_| {
+        ode_not_supported(format!(
+            "RHS '{}' fuera del subset (Poli/Exp/Trig/PoliExp grado ≤ {MAX_ODE2_POLY_DEGREE})",
+            rhs_expr.replace(' ', "")
+        ))
+    })?;
+    let (yp, _) = nth_particular(&asc, &roots, &kind, &rhs_ast, &x)?;
+    let out = if yp == "0" {
+        format!("y = {hom}")
+    } else {
+        format!("y = {hom} + {yp}")
+    };
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "solución excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+// --- B2.3b: Euler `x²y''+a·x·y'+b·y = rhs` vía `x = eᵗ` ---
+
+/// Euler de 2º orden por sustitución `x = eᵗ` (B2.3b).
+///
+/// Indicial `r²+(a−1)r+b = 0`; homogénea en `x^r`/`ln(x)`; particular para
+/// RHS polinómico término a término (`x^m`, resonante con `ln`/`ln²`).
+/// `x ≤ 0` fuera de dominio real → la fórmula vale para `x > 0`.
+pub fn solve_ode_euler_2nd(
+    a_expr: &str,
+    b_expr: &str,
+    rhs_expr: &str,
+    x: &str,
+) -> Result<String, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let (a, b) = (const_coeff(a_expr, "a")?, const_coeff(b_expr, "b")?);
+    if !a.is_finite() || !b.is_finite() {
+        return Err(ode_not_supported(
+            "coeficientes de Euler no finitos".to_string(),
+        ));
+    }
+    // Indicial `r²+(a−1)r+b`.
+    let hom = match char_roots(1.0, a - 1.0, b) {
+        CharRoots::Real(r1, r2) => {
+            if (r1 - r2).abs() < ODE2_EPS {
+                format!("(C1 + C2*ln({x}))*{x}^{}", fmt_num(r1))
+            } else {
+                format!("C1*{x}^{} + C2*{x}^{}", fmt_num(r1), fmt_num(r2))
+            }
+        }
+        CharRoots::Double(r) => format!("(C1 + C2*ln({x}))*{x}^{}", fmt_num(r)),
+        CharRoots::Complex(al, be) => format!(
+            "{x}^{}*(C1*cos({}*ln({x})) + C2*sin({}*ln({x})))",
+            fmt_num(al),
+            fmt_num(be),
+            fmt_num(be)
+        ),
+    };
+    let rhs_ast = parse_normalized(&check_ode_bytes(rhs_expr)?)?;
+    if crate::cas::cas_const_value(&rhs_ast).is_some_and(|v| v.abs() < ODE2_EPS) {
+        return Ok(format!("y = {hom}"));
+    }
+    let poly = crate::integral::poly_coeffs_bounded(&rhs_ast, &x, MAX_ODE2_POLY_DEGREE)
+        .ok_or_else(|| {
+            ode_not_supported(format!(
+                "RHS de Euler '{rhs_expr}' no polinómico (grado ≤ {MAX_ODE2_POLY_DEGREE}); resto → numérico"
+            ))
+        })?;
+    // `P(m) = m(m−1)+a·m+b`; resonancia simple/doble por `P(m) = P'(m) = 0`.
+    let p_ind = |m: f64| m * (m - 1.0) + a * m + b;
+    let dp_ind = |m: f64| 2.0 * m - 1.0 + a;
+    let mut terms = Vec::new();
+    for (m, k) in poly.iter().enumerate() {
+        if k.abs() < ODE2_EPS || !k.is_finite() {
+            continue;
+        }
+        let mf = m as f64;
+        let denom = p_ind(mf);
+        let yp = if denom.abs() > ODE2_EPS {
+            format!("{}*{x}^{m}", fmt_num(k / denom))
+        } else if dp_ind(mf).abs() > ODE2_EPS {
+            // Raíz simple: `K·x^m·ln(x)/(2m+a−1)`.
+            format!("{}*{x}^{m}*ln({x})", fmt_num(k / dp_ind(mf)))
+        } else {
+            // Raíz doble (`P = P' = 0`, `P'' = 2`): `K·x^m·ln²(x)/2`.
+            format!("{}*{x}^{m}*ln({x})^2", fmt_num(k / 2.0))
+        };
+        terms.push(yp);
+    }
+    let out = if terms.is_empty() {
+        format!("y = {hom}")
+    } else {
+        format!("y = {hom} + {}", join_sum_terms(&terms))
+    };
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "solución de Euler excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+// --- B2.3c: Frobenius en punto ordinario (`y''+p·y'+q·y = 0`) ---
+
+/// Serie de Frobenius en punto ordinario (B2.3c).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrobeniusOutcome {
+    /// Coeficientes `a₀..` de `y₁` (`a₀=1, a₁=0`).
+    pub y1: Vec<f64>,
+    /// Coeficientes `a₀..` de `y₂` (`a₀=0, a₁=1`).
+    pub y2: Vec<f64>,
+    /// Centro del desarrollo.
+    pub center: f64,
+    /// Términos calculados (`≤ MAX_FROBENIUS_TERMS` 9).
+    pub terms: usize,
+}
+
+/// Desplaza un polinomio ascendente en `x` al centro `x0` (`u = x−x0`).
+fn shift_poly_center(coeffs: &[f64], x0: f64) -> Option<Vec<f64>> {
+    let n = coeffs.len().saturating_sub(1);
+    let mut out = vec![0.0; n + 1];
+    let mut binom_row = vec![1.0];
+    // `(u+x0)^k = Σ C(k,j)·u^j·x0^{k−j}` con fila binomial incremental.
+    for (k, ck) in coeffs.iter().enumerate() {
+        if k > 0 {
+            let mut next = vec![0.0; k + 1];
+            for (j, b) in binom_row.iter().enumerate() {
+                next[j] += b;
+                next[j + 1] += b;
+            }
+            binom_row = next;
+        }
+        for (j, b) in binom_row.iter().enumerate() {
+            let v = ck * b * x0.powi((k - j) as i32);
+            if !v.is_finite() {
+                return None;
+            }
+            out[j] += v;
+        }
+    }
+    Some(out)
+}
+
+/// `y''+p(x)y'+q(x)y = 0` con `p,q` polinomios: serie hasta `terms`.
+///
+/// Todo punto es ordinario (analiticidad global); `p/q` no polinómicos →
+/// `NotSupported` (punto singular: indicial de Frobenius pendiente).
+pub fn frobenius_series_2nd(
+    p_expr: &str,
+    q_expr: &str,
+    x: &str,
+    x0: f64,
+    terms: usize,
+) -> Result<FrobeniusOutcome, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    if !x0.is_finite() {
+        return Err(OdeSymbolicError::InvalidVariable {
+            variable: format!("centro {x0} no finito"),
+        });
+    }
+    if !(2..=MAX_FROBENIUS_TERMS).contains(&terms) {
+        return Err(ode_not_supported(format!(
+            "términos {terms} fuera de 2..={MAX_FROBENIUS_TERMS}"
+        )));
+    }
+    let p_ast = parse_normalized(&check_ode_bytes(p_expr)?)?;
+    let q_ast = parse_normalized(&check_ode_bytes(q_expr)?)?;
+    let p_c = crate::integral::poly_coeffs_bounded(&p_ast, &x, MAX_ODE2_POLY_DEGREE).ok_or_else(
+        || {
+            ode_not_supported(format!(
+                "p(x)='{p_expr}' no polinómica: punto singular, Frobenius con indicial pendiente"
+            ))
+        },
+    )?;
+    let q_c = crate::integral::poly_coeffs_bounded(&q_ast, &x, MAX_ODE2_POLY_DEGREE).ok_or_else(
+        || {
+            ode_not_supported(format!(
+                "q(x)='{q_expr}' no polinómica: punto singular, Frobenius con indicial pendiente"
+            ))
+        },
+    )?;
+    let (p_s, q_s) = (
+        shift_poly_center(&p_c, x0)
+            .ok_or_else(|| ode_not_supported("desplazamiento no finito".to_string()))?,
+        shift_poly_center(&q_c, x0)
+            .ok_or_else(|| ode_not_supported("desplazamiento no finito".to_string()))?,
+    );
+    // Recurrencia `(n+2)(n+1)a_{n+2} + Σ P_j(n−j+1)a_{n−j+1} + Σ Q_j·a_{n−j} = 0`.
+    let series = |a0: f64, a1: f64| -> Option<Vec<f64>> {
+        let mut a = vec![0.0; terms];
+        a[0] = a0;
+        if terms > 1 {
+            a[1] = a1;
+        }
+        for n in 0..terms.saturating_sub(2) {
+            let mut acc = 0.0;
+            for j in 0..=n {
+                let pj = p_s.get(j).copied().unwrap_or(0.0);
+                acc += pj * (n - j + 1) as f64 * a[n - j + 1];
+                acc += q_s.get(j).copied().unwrap_or(0.0) * a[n - j];
+            }
+            if !acc.is_finite() {
+                return None;
+            }
+            a[n + 2] = -acc / ((n + 2) as f64 * (n + 1) as f64);
+            if !a[n + 2].is_finite() {
+                return None;
+            }
+        }
+        Some(a)
+    };
+    let (y1, y2) = (
+        series(1.0, 0.0).ok_or_else(|| ode_not_supported("recurrencia no finita".to_string()))?,
+        series(0.0, 1.0).ok_or_else(|| ode_not_supported("recurrencia no finita".to_string()))?,
+    );
+    Ok(FrobeniusOutcome {
+        y1,
+        y2,
+        center: x0,
+        terms,
+    })
+}
+
+/// Formatea una serie `Σ c_k·(x−x0)^k` (términos `|c| > 1e-12`).
+pub fn format_frobenius_series(coeffs: &[f64], x: &str, x0: f64) -> String {
+    let base = if x0 == 0.0 {
+        x.to_string()
+    } else if x0 > 0.0 {
+        format!("({x}-{x0})")
+    } else {
+        format!("({x}+{})", fmt_num(-x0))
+    };
+    let mut terms = Vec::new();
+    for (k, c) in coeffs.iter().enumerate() {
+        if !c.is_finite() || c.abs() < 1e-12 {
+            continue;
+        }
+        let term = match k {
+            0 => fmt_num(*c),
+            1 => format!("{}*{base}", fmt_num(*c)),
+            _ => format!("{}*{base}^{k}", fmt_num(*c)),
+        };
+        terms.push(term);
+    }
+    if terms.is_empty() {
+        "0".to_string()
+    } else {
+        join_sum_terms(&terms)
+    }
+}
+
+// --- B2.3d: Laplace cálculo (derivadas/integrales), Heaviside, Dirac ---
+
+/// `L{y⁽ⁿ⁾} = sⁿ·Y − Σ s^{n−1−k}·y⁽ᵏ⁾(0)` (B2.3d).
+///
+/// `initials = [y(0)..y⁽ⁿ⁻¹⁾(0)]` como strings parseables; `n ≤ 8`.
+pub fn laplace_derivative(
+    order: u32,
+    y: &str,
+    t: &str,
+    s: &str,
+    initials: &[String],
+) -> Result<String, OdeSymbolicError> {
+    let (y, _t, s) = (
+        check_ode_identifier(y)?,
+        check_ode_identifier(t)?,
+        check_ode_identifier(s)?,
+    );
+    if order == 0 || order as usize > MAX_LAPLACE_DERIV_ORDER {
+        return Err(ode_not_supported(format!(
+            "orden {order} fuera de 1..={MAX_LAPLACE_DERIV_ORDER}"
+        )));
+    }
+    if initials.len() != order as usize {
+        return Err(ode_not_supported(format!(
+            "se esperaban {order} iniciales, llegaron {}",
+            initials.len()
+        )));
+    }
+    for init in initials {
+        parse_normalized(&check_ode_bytes(init)?)?;
+    }
+    let n = order as usize;
+    let mut rest = Vec::new();
+    for (k, init) in initials.iter().enumerate() {
+        let p = n - 1 - k;
+        let clean = init.replace(' ', "");
+        if clean == "0" {
+            continue;
+        }
+        let term = match p {
+            0 => format!("({clean})"),
+            1 => format!("{s}*({clean})"),
+            _ => format!("{s}^{p}*({clean})"),
+        };
+        rest.push(term);
+    }
+    let head = match n {
+        1 => format!("{s}*{y}"),
+        _ => format!("{s}^{n}*{y}"),
+    };
+    if rest.is_empty() {
+        return Ok(head);
+    }
+    Ok(format!("{} - ({})", head, join_sum_terms(&rest)))
+}
+
+/// `L{∫₀ᵗ f} = L{f}/s` (B2.3d): calcula `L{f}` y divide por `s`.
+pub fn laplace_integral_rule(f_expr: &str, t: &str, s: &str) -> Result<String, OdeSymbolicError> {
+    let (t, s) = (check_ode_identifier(t)?, check_ode_identifier(s)?);
+    if t == s {
+        return Err(OdeSymbolicError::InvalidVariable {
+            variable: format!("{t} == {s}"),
+        });
+    }
+    let clean = check_ode_bytes(f_expr)?;
+    let ast = parse_normalized(&clean)?;
+    let f = laplace_direct_ast(&ast, &t, &s).map_err(|_| {
+        ode_not_supported(format!(
+            "integrando '{f_expr}' fuera de la tabla directa; la regla integral lo hereda"
+        ))
+    })?;
+    Ok(format!("({f})/{s}"))
+}
+
+/// Parsea `dirac(a·t+b)` a nivel string (B2.3d).
+///
+/// El AST no tiene nodo δ: `L{δ(t−c)} = e^{−cs}`, `L{δ} = 1`.
+/// `None` si no es forma Dirac lineal.
+fn parse_dirac_shorthand(expr: &str, t: &str) -> Option<Result<f64, OdeSymbolicError>> {
+    let no_sp: String = expr.chars().filter(|c| !c.is_whitespace()).collect();
+    if !(no_sp.starts_with("dirac(") && no_sp.ends_with(')')) {
+        return None;
+    }
+    let inner = &no_sp["dirac(".len()..no_sp.len() - 1];
+    let clean = check_ode_bytes(inner).ok()?;
+    let ast = parse_normalized(&clean).ok()?;
+    let (a, b) = crate::cas::cas_linear_coeff(&ast, t)?;
+    if !a.is_finite() || !b.is_finite() || a.abs() < ODE2_EPS {
+        return Some(Err(ode_not_supported(
+            "Dirac con argumento no lineal; tabla δ pendiente".to_string(),
+        )));
+    }
+    if a.abs() < ODE2_EPS {
+        return Some(Err(ode_not_supported("Dirac degenerada".to_string())));
+    }
+    // `δ(a·t+b) = δ(t−c)/|a|` con `c = −b/a` (solo `|a| = 1` exacto).
+    if (a.abs() - 1.0).abs() > 1e-9 {
+        return Some(Err(ode_not_supported(
+            "δ(a·t+b) con |a| ≠ 1: escalado δ fuera de la tabla".to_string(),
+        )));
+    }
+    let c = -b / a;
+    if !c.is_finite() {
+        return Some(Err(ode_not_supported("retardo no finito".to_string())));
+    }
+    Some(Ok(c))
+}
+
+/// `e^{−c·s}` formateada (`c = 0` → `"1"`).
+fn dirac_exp_factor(c: f64, s: &str) -> String {
+    if c.abs() < ODE2_EPS {
+        "1".to_string()
+    } else {
+        format!("exp({}*{s})", fmt_num(-c))
+    }
+}
+
+/// Inversa de cúbica propia con raíz real (B2.3d).
+///
+/// Bisección sobre la cota de Cauchy (la cúbica real siempre tiene raíz),
+/// deflación a cuadrática y parciales `A/(s−r) + (Bs+C)/Q2` reutilizando
+/// `laplace_inverse` en cada término. Resto (sin raíz real flotante,
+/// impropia) → `Err` honesto.
+fn laplace_inverse_cubic(
+    p: &[f64],
+    q: &[f64],
+    s: &str,
+    t: &str,
+) -> Result<String, OdeSymbolicError> {
+    let subset = || {
+        ode_not_supported(format!(
+            "cúbica sin raíz real aislable o sistema singular; grado ≤ {MAX_LAPLACE_INVERSE_DEGREE} con raíz real"
+        ))
+    };
+    if q.len() != 4 {
+        return Err(subset());
+    }
+    let (q0, q1, q2, q3) = (q[0], q[1], q[2], q[3]);
+    if q3.abs() < ODE2_EPS {
+        return Err(subset());
+    }
+    let f = |v: f64| ((q3 * v + q2) * v + q1) * v + q0;
+    let bound = 1.0 + (q0.abs().max(q1.abs()).max(q2.abs()) / q3.abs());
+    if !bound.is_finite() {
+        return Err(subset());
+    }
+    let (mut lo, mut hi) = (-bound, bound);
+    if f(lo) * f(hi) > 0.0 {
+        return Err(subset());
+    }
+    for _ in 0..100 {
+        let mid = (lo + hi) * 0.5;
+        if mid == lo || mid == hi {
+            break;
+        }
+        if f(lo) * f(mid) <= 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let r = (lo + hi) * 0.5;
+    if !r.is_finite() || f(r).abs() > 1e-6 * bound.max(1.0) {
+        return Err(subset());
+    }
+    // Deflación: `Q = (s−r)(c2·s²+c1·s+c0)`.
+    let c2 = q3;
+    let c1 = q2 + q3 * r;
+    let c0 = q1 + c1 * r;
+    if ![c0, c1, c2].iter().all(|v| v.is_finite()) || c2.abs() < ODE2_EPS {
+        return Err(subset());
+    }
+    // Cover-up `A = P(r)/Q'(r)`, `Q'(r) = 3q3·r²+2q2·r+q1`.
+    let pv = p.first().copied().unwrap_or(0.0)
+        + p.get(1).copied().unwrap_or(0.0) * r
+        + p.get(2).copied().unwrap_or(0.0) * r * r;
+    let qp = (3.0 * q3 * r + 2.0 * q2) * r + q1;
+    if qp.abs() < ODE2_EPS || !pv.is_finite() || !qp.is_finite() {
+        return Err(subset());
+    }
+    let big_a = pv / qp;
+    // `(B·s+C) = (P − A·Q2)/(s−r)` por división exacta de grado ≤ 2/1.
+    let a_q0 = big_a * c0;
+    let a_q1 = big_a * c1;
+    let a_q2 = big_a * c2;
+    let (p0, p1, p2) = (
+        p.first().copied().unwrap_or(0.0),
+        p.get(1).copied().unwrap_or(0.0),
+        p.get(2).copied().unwrap_or(0.0),
+    );
+    // `P − A·Q2 = d2·s²+d1·s+d0` divisible por `(s−r)`: `B = d2`,
+    // `C = d1 + B·r` (verifica `d0 + C·r ≈ 0`).
+    let (d2, d1, d0) = (p2 - a_q2, p1 - a_q1, p0 - a_q0);
+    let big_b = d2;
+    let big_c = d1 + big_b * r;
+    if (d0 + big_c * r).abs() > 1e-6 * (p0.abs() + p1.abs() + p2.abs() + 1.0) {
+        return Err(subset());
+    }
+    let mut parts = Vec::new();
+    if big_a.abs() > ODE2_EPS {
+        let term = laplace_inverse(&format!("{}/({s}-({}))", fmt_num(big_a), fmt_num(r)), s, t)
+            .map_err(|_| subset())?;
+        parts.push(term);
+    }
+    if big_b.abs() > ODE2_EPS || big_c.abs() > ODE2_EPS {
+        let num = if big_b.abs() > ODE2_EPS {
+            format!("{}*{s}+({})", fmt_num(big_b), fmt_num(big_c))
+        } else {
+            fmt_num(big_c)
+        };
+        let den = format!(
+            "{}*{s}^2+{}*{s}+({})",
+            fmt_num(c2),
+            fmt_num(c1),
+            fmt_num(c0)
+        );
+        let term = laplace_inverse(&format!("({num})/({den})"), s, t).map_err(|_| subset())?;
+        parts.push(term);
+    }
+    if parts.is_empty() {
+        return Ok("0".to_string());
+    }
+    // OJO: cada parte puede ser una suma (`-P + Q`); unir con `join_sum_terms`
+    // corrompería signos (`-(P+Q)`). Se parentetiza cada parte posterior.
+    let mut out = parts[0].clone();
+    for p in &parts[1..] {
+        out.push_str(" + (");
+        out.push_str(p);
+        out.push(')');
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -3501,10 +4580,11 @@ mod ode_symbolic_tests {
 
     #[test]
     fn laplace_inverse_rejects_outside_subset() {
-        // Grado 3: honesto con el límite.
-        let err = laplace_inverse("1/(s^3+1)", "s", "t").expect_err("grado 3");
+        // B2.3d: grado 3 con raíz real YA se resuelve (ver b2_laplace_*).
+        // Grado 4: honesto con el límite.
+        let err = laplace_inverse("1/(s^4+1)", "s", "t").expect_err("grado 4");
         let msg = format!("{err}");
-        assert!(msg.contains("grado ≤ 2"), "got {msg}");
+        assert!(msg.contains("grado ≤ 3"), "got {msg}");
         // Impropia y no racional.
         assert!(matches!(
             laplace_inverse("s/(s+1)", "s", "t"),
@@ -3514,5 +4594,271 @@ mod ode_symbolic_tests {
             laplace_inverse("exp(-s)", "s", "t"),
             Err(OdeSymbolicError::NotSupported { .. })
         ));
+    }
+
+    // --- Frente B2: EDO pragmática (aceptación 1:1 con la spec) ---
+
+    /// Verifica `L[yp] = rhs` con el operador de coeficientes `asc`.
+    fn check_nth_residual(asc: &[f64], yp_s: &str, rhs: &str, x: &str) {
+        let yp = parse_normalized(yp_s).expect("yp parse B2");
+        let rhs_ast = parse_normalized(rhs).expect("rhs parse B2");
+        let order = asc.len() - 1;
+        let mut derivs = vec![yp];
+        for _ in 0..order {
+            let next = derivs.last().expect("yp").diff(x).simplify();
+            derivs.push(next);
+        }
+        // Extrae `yp` de `y = hom + yp` si viene la solución completa.
+        for at in [0.37, 1.13, -0.53, 2.0] {
+            let lhs: f64 = derivs
+                .iter()
+                .zip(asc.iter())
+                .map(|(d, a)| a * d.eval_at(x, at))
+                .sum();
+            let r = rhs_ast.eval_at(x, at);
+            assert!(
+                lhs.is_finite() && r.is_finite(),
+                "punto no finito en {at}: lhs={lhs} rhs={r}"
+            );
+            assert!(
+                (lhs - r).abs() < 1e-6,
+                "residuo en {at}: lhs={lhs} rhs={r} ({yp_s})"
+            );
+        }
+    }
+
+    #[test]
+    fn b2_nth_order_homogeneous() {
+        // `y'''−6y''+11y'−6y = 0` → `e^x, e^{2x}, e^{3x}`.
+        let sol = solve_ode_nth_order_const(
+            &[
+                "1".to_string(),
+                "-6".to_string(),
+                "11".to_string(),
+                "-6".to_string(),
+            ],
+            "0",
+            "x",
+        )
+        .expect("3er orden");
+        assert!(sol.contains("exp(1*x)"), "got {sol}");
+        assert!(sol.contains("exp(2*x)"), "got {sol}");
+        assert!(sol.contains("exp(3*x)"), "got {sol}");
+        // `y''''−y = 0` → `e^x, e^{−x}, cos, sin`.
+        let four = solve_ode_nth_order_const(
+            &[
+                "1".to_string(),
+                "0".to_string(),
+                "0".to_string(),
+                "0".to_string(),
+                "-1".to_string(),
+            ],
+            "0",
+            "x",
+        )
+        .expect("4º orden");
+        assert!(four.contains("cos"), "got {four}");
+        assert!(four.contains("sin"), "got {four}");
+    }
+
+    #[test]
+    fn b2_nth_order_particular_with_resonance() {
+        // `y'''-3y''+3y'-y = x` (raiz triple 1, poli no resonante).
+        // La particular se verifica directa (sin depender del formato `y =`).
+        let desc = [1.0, -3.0, 3.0, -1.0];
+        let asc = [-1.0, 3.0, -3.0, 1.0];
+        let roots = char_roots_nth(&desc).expect("raices");
+        let rhs_ast = parse_normalized("x").expect("rhs");
+        let kind = classify_rhs(&rhs_ast, "x").expect("kind");
+        let (yp_s, _) = nth_particular(&asc, &roots, &kind, &rhs_ast, "x").expect("yp");
+        check_nth_residual(&asc, &yp_s, "x", "x");
+        let sol = solve_ode_nth_order_const(
+            &[
+                "1".to_string(),
+                "-3".to_string(),
+                "3".to_string(),
+                "-1".to_string(),
+            ],
+            "x",
+            "x",
+        )
+        .expect("poli 3er");
+        assert!(sol.starts_with("y = "), "got {sol}");
+        // `y'''-6y''+11y'-6y = exp(x)` (raiz simple 1).
+        let desc2 = [1.0, -6.0, 11.0, -6.0];
+        let asc2 = [-6.0, 11.0, -6.0, 1.0];
+        let roots2 = char_roots_nth(&desc2).expect("raices");
+        let rhs2 = parse_normalized("exp(x)").expect("rhs");
+        let kind2 = classify_rhs(&rhs2, "x").expect("kind");
+        let (yp2_s, _) = nth_particular(&asc2, &roots2, &kind2, &rhs2, "x").expect("yp");
+        check_nth_residual(&asc2, &yp2_s, "exp(x)", "x");
+        let res = solve_ode_nth_order_const(
+            &[
+                "1".to_string(),
+                "-6".to_string(),
+                "11".to_string(),
+                "-6".to_string(),
+            ],
+            "exp(x)",
+            "x",
+        )
+        .expect("resonante 3er");
+        assert!(res.contains('x'), "got {res}");
+    }
+
+    #[test]
+    fn b2_nth_order_rejects_honestly() {
+        // Característica `r³−2` sin raíz racional → numérico.
+        let err = solve_ode_nth_order_const(
+            &[
+                "1".to_string(),
+                "0".to_string(),
+                "0".to_string(),
+                "-2".to_string(),
+            ],
+            "0",
+            "x",
+        )
+        .expect_err("cúbica irreducible");
+        assert!(
+            matches!(err, OdeSymbolicError::NotSupported { .. }),
+            "got {err}"
+        );
+        // Orden 9 > cota 8.
+        let big = vec!["1".to_string(); 10];
+        assert!(matches!(
+            solve_ode_nth_order_const(&big, "0", "x"),
+            Err(OdeSymbolicError::NotSupported { .. })
+        ));
+    }
+
+    #[test]
+    fn b2_euler_homogeneous_and_particular() {
+        // `x²y''+x·y'−y = 0` (indicial `r²−1`): `C1·x + C2·x^{−1}`.
+        let hom = solve_ode_euler_2nd("1", "-1", "0", "x").expect("Euler hom");
+        assert!(hom.contains("ln") || hom.contains("^"), "got {hom}");
+        // `x²y''−2x·y'+2y = x²`: indicial `r²−3r+2`, `m=2` raíz simple.
+        let sol = solve_ode_euler_2nd("−2".replace('−', "-").as_str(), "2", "x^2", "x")
+            .expect("Euler resonante");
+        assert!(sol.contains("ln(x)"), "got {sol}");
+        // Verifica por residuo con el operador de Euler en `x > 0`.
+        let hom_only = solve_ode_euler_2nd("-2", "2", "0", "x").expect("hom");
+        let yp = sol
+            .strip_prefix(&(hom_only + " + "))
+            .expect("prefijo homogenea B2");
+        let yp_ast = parse_normalized(yp).expect("yp Euler");
+        let rhs_ast = parse_normalized("x^2").expect("rhs Euler");
+        let d1 = yp_ast.diff("x");
+        let d2 = d1.diff("x");
+        for at in [0.5, 1.13, 2.0, 3.0] {
+            let lhs = at * at * d2.eval_at("x", at) - 2.0 * at * d1.eval_at("x", at)
+                + 2.0 * yp_ast.eval_at("x", at);
+            let r = rhs_ast.eval_at("x", at);
+            assert!(
+                (lhs - r).abs() < 1e-6,
+                "Euler residuo en {at}: {lhs} vs {r}"
+            );
+        }
+    }
+
+    #[test]
+    fn b2_frobenius_ordinary_point() {
+        // `y''−2x·y' = 0`: `y₁ = 1`, `y₂ = x + x³/3 + x⁵/10 + …`.
+        let out = frobenius_series_2nd("-2*x", "0", "x", 0.0, 9).expect("Frobenius");
+        assert_eq!(out.terms, 9);
+        assert!((out.y1[0] - 1.0).abs() < 1e-12);
+        assert!(out.y1[1].abs() < 1e-12);
+        assert!((out.y2[0]).abs() < 1e-12);
+        assert!((out.y2[1] - 1.0).abs() < 1e-12);
+        // `y₂'(x) = exp(x²) = 1 + x² + x⁴/2 + …`: `a₃ = 1/3`, `a₅ = 1/10`, `a₇ = 1/42`.
+        assert!((out.y2[3] - 1.0 / 3.0).abs() < 1e-9, "got {:?}", out.y2);
+        assert!((out.y2[5] - 0.1).abs() < 1e-9, "got {:?}", out.y2);
+        assert!((out.y2[7] - 1.0 / 42.0).abs() < 1e-9, "got {:?}", out.y2);
+        // Serie truncada verifica la EDO (resto O(x⁷): la serie impar con
+        // 9 términos es exacta hasta x⁶).
+        for (coeffs, skip) in [(&out.y1, 2), (&out.y2, 2)] {
+            for at in [0.2_f64, -0.3] {
+                let (mut y, mut yp, mut ypp) = (0.0, 0.0, 0.0);
+                for (k, c) in coeffs.iter().enumerate() {
+                    y += c * at.powi(k as i32);
+                    if k >= 1 {
+                        yp += c * k as f64 * at.powi(k as i32 - 1);
+                    }
+                    if k >= 2 {
+                        ypp += c * k as f64 * (k as f64 - 1.0) * at.powi(k as i32 - 2);
+                    }
+                }
+                let lhs = ypp - 2.0 * at * yp + 0.0 * y;
+                assert!(
+                    lhs.abs() < 1e-4,
+                    "Frobenius residuo en {at}: {lhs} ({skip})"
+                );
+            }
+        }
+        // `p` no polinómica → singular honesto.
+        assert!(matches!(
+            frobenius_series_2nd("1/x", "0", "x", 0.0, 6),
+            Err(OdeSymbolicError::NotSupported { .. })
+        ));
+    }
+
+    #[test]
+    fn b2_laplace_derivative_and_integral() {
+        // `L{y''} = s²Y − s·y(0) − y'(0)`.
+        let d2 = laplace_derivative(2, "Y", "t", "s", &["y0".to_string(), "y1".to_string()])
+            .expect("derivada 2");
+        assert!(d2.contains("s^2*Y"), "got {d2}");
+        assert!(d2.contains("y0") && d2.contains("y1"), "got {d2}");
+        // Iniciales nulas colapsan.
+        let d1 = laplace_derivative(1, "Y", "t", "s", &["0".to_string()]).expect("derivada 1");
+        assert_eq!(d1, "s*Y");
+        // `L{∫f} = L{f}/s`.
+        let integ = laplace_integral_rule("sin(t)", "t", "s").expect("integral");
+        assert!(integ.contains("/s"), "got {integ}");
+        assert!(integ.contains("s^2"), "got {integ}");
+        // Orden 9 > cota.
+        assert!(matches!(
+            laplace_derivative(9, "Y", "t", "s", &vec!["0".to_string(); 9]),
+            Err(OdeSymbolicError::NotSupported { .. })
+        ));
+    }
+
+    #[test]
+    fn b2_laplace_heaviside_and_dirac() {
+        // `H(t−2) → e^{−2s}/s`.
+        let h = laplace_direct("heaviside(t-2)", "t", "s").expect("Heaviside");
+        assert!(h.contains("exp(-2*s)"), "got {h}");
+        assert!(h.contains("/s"), "got {h}");
+        // `δ(t−3) → e^{−3s}`, `δ(t) → 1`.
+        let d3 = laplace_direct("dirac(t-3)", "t", "s").expect("Dirac");
+        assert!(d3.contains("exp(-3*s)"), "got {d3}");
+        let d0 = laplace_direct("dirac(t)", "t", "s").expect("Dirac 0");
+        assert_eq!(d0, "1");
+    }
+
+    #[test]
+    fn b2_laplace_inverse_cubic() {
+        // `1/(s³+1) = 1/((s+1)(s²−s+1))` → `e^{−t} + e^{t/2}(cos+sin)`.
+        let out = laplace_inverse("1/(s^3+1)", "s", "t").expect("cúbica");
+        assert!(out.contains("exp(-1*t)"), "got {out}");
+        assert!(out.contains("cos"), "got {out}");
+        // Roundtrip numérico `L{f}(2) = F(2)` por Simpson en `[0, 30]`.
+        let f_ast = crate::ast::parse_ast(&out.replace(' ', "")).expect("parse f(t)");
+        let expected = 1.0 / (8.0 + 1.0);
+        let (n, tmax, s0) = (4096_usize, 30.0, 2.0);
+        let h = tmax / n as f64;
+        let g = |i: usize| {
+            let tt = i as f64 * h;
+            f_ast.eval_at("t", tt) * (-s0 * tt).exp()
+        };
+        let mut acc = g(0) + g(n);
+        for i in 1..n {
+            acc += if i % 2 == 1 { 4.0 } else { 2.0 } * g(i);
+        }
+        let numeric = acc * h / 3.0;
+        assert!(
+            (numeric - expected).abs() < 1e-3,
+            "Simpson={numeric} vs F(2)={expected} (f={out})"
+        );
     }
 }

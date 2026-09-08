@@ -1477,6 +1477,9 @@ pub struct GrafitoApp {
     pub snap_to_grid: bool,
     pub snap_config: crate::snap::SnapConfig,
     pub exam_mode: bool,
+    /// Salida de examen pendiente de confirmación (modal D2, anti-toque).
+    /// `true` = mostrar modal; el lockdown sigue activo hasta confirmar.
+    pub exam_exit_confirm: bool,
     pub dark_mode: bool,
     pub pending_points: Vec<Point2>,
     pub pending_points_3d: Vec<Point3D>,
@@ -2195,6 +2198,7 @@ impl GrafitoApp {
             snap_to_grid: config.snap_to_grid,
             snap_config: config.snap,
             exam_mode: false,
+            exam_exit_confirm: false,
             dark_mode,
             pending_points: Vec::new(),
             pending_points_3d: Vec::new(),
@@ -2690,6 +2694,7 @@ impl GrafitoApp {
         let mut do_recover = false;
         let mut do_keep = false;
         let mut do_toggle_diff = false;
+        let mut do_postpone = false;
         // Copia solo para display dentro del closure (evita borrow prolongado).
         let (subtitle_text, diff_summary, show_diff) = {
             let Some(offer) = self.recovery_offer.as_ref() else {
@@ -2794,6 +2799,11 @@ impl GrafitoApp {
                 ui.add_space(grafito_ui::tokens::SPACE_XS);
             });
         // ── Acciones FUERA del closure de Ui (aquí sí se permite I/O breve) ──
+        // A11Y (D1): Esc pospone (opción segura: conserva el sidecar para el
+        // próximo arranque, igual que la X). No borra nada.
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            do_postpone = true;
+        }
         if do_toggle_diff {
             if let Some(offer) = self.recovery_offer.as_mut() {
                 offer.show_diff = !offer.show_diff;
@@ -2805,8 +2815,8 @@ impl GrafitoApp {
         } else if do_keep {
             // Seguir con guardado = descartar sidecar, quedarse con el main.
             self.dismiss_recovery_offer(true);
-        } else if !open {
-            // X = posponer esta sesión (se mantiene el archivo para el próximo arranque).
+        } else if do_postpone || !open {
+            // X o Esc = posponer esta sesión (se mantiene el archivo para el próximo arranque).
             self.dismiss_recovery_offer(false);
         }
     }
@@ -2891,8 +2901,9 @@ impl GrafitoApp {
             });
         if do_discard {
             self.dismiss_recovery_offer(true);
-        } else if do_keep || !open {
-            // `!open` (X) = posponer esta sesión: se mantiene el archivo.
+        } else if do_keep || !open || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            // `!open` (X) o Esc = posponer esta sesión: se mantiene el archivo.
+            // Esc nunca borra (opción segura).
             self.dismiss_recovery_offer(false);
         }
     }
@@ -3512,6 +3523,10 @@ impl GrafitoApp {
         format: crate::export::ExportFormat,
         ctx: Option<&egui::Context>,
     ) {
+        // D2 lockdown: en examen no sale nada del documento.
+        if self.exam_blocks("Export") {
+            return;
+        }
         let path = rfd::FileDialog::new()
             .add_filter(format.display_name(), &[format.extension()])
             .set_file_name(format!("grafito_export.{}", format.extension()))
@@ -3730,6 +3745,10 @@ impl GrafitoApp {
                     load_requested = ui.button("Cargar .ggt…").clicked();
                 });
             });
+        // A11Y (D1): Esc cierra el persistente sin guardar (igual que la X).
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
         if !open {
             self.show_custom_tool_dialog = false;
             return;
@@ -4366,6 +4385,108 @@ impl GrafitoApp {
         );
     }
 
+    /// D2 lockdown de examen: única vía para cambiar `exam_mode`.
+    ///
+    /// Encender es directo. Apagar NO apaga: abre el modal de confirmación
+    /// (`draw_exam_exit_modal`) y el lockdown sigue activo hasta confirmar.
+    /// Sin escape por cambio de perspectiva (`set_perspective` nunca apaga).
+    pub(crate) fn set_exam_mode(&mut self, on: bool) {
+        if on {
+            self.exam_mode = true;
+            self.exam_exit_confirm = false;
+        } else if self.exam_mode {
+            self.exam_exit_confirm = true;
+        }
+    }
+
+    /// Checkbox de modo examen con salida confirmada (anti-toque accidental).
+    ///
+    /// Reemplaza al `ui.checkbox(&mut app.exam_mode, …)` directo: desmarcar
+    /// abre el modal en vez de apagar el lockdown.
+    pub(crate) fn exam_mode_checkbox(&mut self, ui: &mut egui::Ui) {
+        let mut marcado = self.exam_mode;
+        ui.checkbox(&mut marcado, "Modo examen");
+        if marcado != self.exam_mode {
+            self.set_exam_mode(marcado);
+        }
+    }
+
+    /// ¿Bloquea el examen esta acción? (asistente, internet, export).
+    ///
+    /// Si el lockdown está activo, avisa con toast y retorna `true` para
+    /// que el caller haga early-return. Piel: solo toast, cero I/O.
+    pub(crate) fn exam_blocks(&mut self, que: &str) -> bool {
+        if !self.exam_mode {
+            return false;
+        }
+        self.notify(
+            format!("{que} bloqueado en modo examen, che."),
+            grafito_ui::toast::ToastKind::Error,
+        );
+        true
+    }
+
+    /// Modal de salida de examen (confirmación explícita, sin escape accidental).
+    ///
+    /// Piel pura: solo lee `exam_exit_confirm` y registra la decisión; el
+    /// lockdown sigue activo hasta que se confirma.
+    pub(crate) fn draw_exam_exit_modal(&mut self, ctx: &egui::Context) {
+        if !self.exam_exit_confirm {
+            return;
+        }
+        let mut confirmar = false;
+        let mut cancelar = false;
+        let mut abierto = true;
+        let theme = grafito_ui::theme::current_theme(ctx);
+        egui::Window::new("Salir del modo examen")
+            .id(egui::Id::new("exam_exit_modal"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .open(&mut abierto)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::symmetric(
+                        grafito_ui::tokens::SPACE_LG,
+                        grafito_ui::tokens::SPACE_MD,
+                    )),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.set_max_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "¿Seguro que querés salir? Se habilitan el asistente, internet y el export.",
+                        )
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .color(theme.text_primary),
+                    );
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.horizontal(|ui| {
+                    if ui.button("Sí, salir").clicked() {
+                        confirmar = true;
+                    }
+                    if ui.button("Seguir en examen").clicked() {
+                        cancelar = true;
+                    }
+                });
+            });
+        if confirmar {
+            self.exam_mode = false;
+            self.exam_exit_confirm = false;
+        } else if cancelar || !abierto {
+            // Cerrar con X también cancela: el lockdown sigue activo.
+            self.exam_exit_confirm = false;
+        }
+    }
+
     /// Cambia la perspectiva activa y sincroniza `current_view`, la herramienta
     /// por defecto y los paneles. La perspectiva es sólo una vista de trabajo:
     /// nunca debe borrar ni reemplazar el documento del usuario.
@@ -4444,11 +4565,13 @@ impl GrafitoApp {
         } else {
             crate::WorkspaceDockTab::Assistant
         };
-        // Exam mode: la perspectiva Examen es la única que fuerza exam_mode=true,
-        // las demás lo apagan (a menos que el usuario lo haya activado desde el
-        // menú Vista — en ese caso se respeta el flag manual via set_exam_mode
-        // externo). Aquí sólo sincronizamos el default de la perspective.
-        self.exam_mode = matches!(p, Perspective::Exam);
+        // Exam mode: la perspectiva Examen es la única que fuerza exam_mode=true.
+        // D2 lockdown: cambiar de perspectiva JAMÁS apaga el examen (sin escape
+        // por cambio de vista); la única salida es `set_exam_mode(false)` con
+        // confirmación en `draw_exam_exit_modal`.
+        if matches!(p, Perspective::Exam) {
+            self.exam_mode = true;
+        }
         // Siempre bump_version para invalidar caches GPU.
         self.document.bump_version();
         self.assert_view_invariant();
@@ -5468,6 +5591,11 @@ impl eframe::App for GrafitoApp {
         self.poll_background_jobs(ctx);
         // Aula: sincronizar opt-in (Piel pura, sin I/O) — campo classroom
         self.classroom.set_opt_in(self.advanced_red_opt_in);
+        // D2 outbox: aviso honesto de carga corrupta, una sola vez (el load
+        // fue en `ClassroomPanel::new`, arranque; acá solo se muestra).
+        if let Some(aviso) = self.classroom.take_outbox_notice() {
+            self.notify(aviso, grafito_ui::toast::ToastKind::Error);
+        }
         // Autosave tick (nunca en Ui::): escribe sidecar en background si debounce vencido
         self.tick_autosave(ctx);
         // A8 recovery (nunca I/O en Ui::): chequeo sidecar en background + poll.
@@ -6255,6 +6383,8 @@ impl eframe::App for GrafitoApp {
         // A8 recovery al arranque: modal si el sidecar es más nuevo que el main.
         // Piel pura (cero I/O en Ui::, el job ya cargó todo en background).
         self.draw_recovery_modal(ctx);
+        // D2 lockdown examen: salida solo con confirmación explícita.
+        self.draw_exam_exit_modal(ctx);
         // Configuración — ventana única (legado show_mascot_config delega a assistant.settings_open)
         if self.show_mascot_config {
             self.assistant.settings_open = true;
@@ -7242,10 +7372,15 @@ impl GrafitoApp {
             cfg.onboarding_completed = true;
             save_config(&cfg);
         }
+        // A11Y (D1): Esc solo cierra la vista (pospone, no persiste: la X es
+        // la que equivale a "No mostrar de nuevo").
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.show_onboarding = false;
+        }
     }
 
     /// Ventana "Acerca de Grafito" — resumida, Scandinavian quiet.
-    fn draw_about_window(&mut self, ctx: &egui::Context) {
+    pub(crate) fn draw_about_window(&mut self, ctx: &egui::Context) {
         let theme = grafito_ui::theme::current_theme(ctx);
         egui::Window::new("Acerca de Grafito")
             .id(egui::Id::new("about_window"))
@@ -7323,6 +7458,10 @@ impl GrafitoApp {
                     }
                 });
             });
+        // A11Y (D1): Esc cierra el persistente (igual que [Cerrar]).
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.show_about = false;
+        }
     }
 
     #[allow(dead_code)] // TODO: eliminar legado Pou window (compat, no usado en prod)
@@ -7721,6 +7860,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         snap_to_grid: true,
         snap_config: crate::snap::SnapConfig::default(),
         exam_mode: false,
+        exam_exit_confirm: false,
         dark_mode: false,
         pending_points: Vec::new(),
         pending_points_3d: Vec::new(),

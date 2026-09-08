@@ -148,6 +148,16 @@ pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
             };
             format!("{} vértices  P={:.3}  A={:.3}", n, perim, area)
         }
+        GeoObject::Polyline(l) => {
+            // Cadena abierta: longitud sin cerrar (sin último→primero).
+            let mut len = 0.0;
+            for w in l.points.windows(2) {
+                let dx = w[1].x - w[0].x;
+                let dy = w[1].y - w[0].y;
+                len += (dx * dx + dy * dy).sqrt();
+            }
+            format!("{} puntos  L={:.3}", l.points.len(), len)
+        }
         GeoObject::Pencil(p) if p.is_dynamic_locus() => {
             format!("Locus: {} puntos", p.points.len())
         }
@@ -186,6 +196,14 @@ pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
             let h = (dx * dx + dy * dy + dz * dz).sqrt();
             let vol = 1.0 / 3.0 * std::f64::consts::PI * co.radius * co.radius * h;
             format!("r={:.2} h={:.2}  V={:.3}", co.radius, h, vol)
+        }
+        GeoObject::Pyramid3D(py) => {
+            let dx = py.apex.x - py.base_center.x;
+            let dy = py.apex.y - py.base_center.y;
+            let dz = py.apex.z - py.base_center.z;
+            let h = (dx * dx + dy * dy + dz * dz).sqrt();
+            let vol = py.base_size * py.base_size * h / 3.0;
+            format!("b={:.2} h={:.2}  V={:.3}", py.base_size, h, vol)
         }
         GeoObject::Torus3D(t) => format!("R={:.2} r={:.2}", t.r_major, t.r_minor),
         GeoObject::ImplicitSurface3D(s) => {
@@ -627,6 +645,16 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             };
                             format!("{} vértices  P={:.3}  A={:.3}", n, perim, area)
                         }
+                        grafito_core::GeoObject::Polyline(l) => {
+                            // Cadena abierta: longitud sin cerrar.
+                            let mut len = 0.0;
+                            for w in l.points.windows(2) {
+                                let dx = w[1].x - w[0].x;
+                                let dy = w[1].y - w[0].y;
+                                len += (dx * dx + dy * dy).sqrt();
+                            }
+                            format!("{} puntos  L={:.3}", l.points.len(), len)
+                        }
                         grafito_core::GeoObject::Pencil(p) if p.is_dynamic_locus() => {
                             format!("Locus: {} puntos", p.points.len())
                         }
@@ -666,6 +694,14 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             let h = (dx * dx + dy * dy + dz * dz).sqrt();
                             let vol = 1.0 / 3.0 * std::f64::consts::PI * co.radius * co.radius * h;
                             format!("r={:.2} h={:.2}  V={:.3}", co.radius, h, vol)
+                        }
+                        grafito_core::GeoObject::Pyramid3D(py) => {
+                            let dx = py.apex.x - py.base_center.x;
+                            let dy = py.apex.y - py.base_center.y;
+                            let dz = py.apex.z - py.base_center.z;
+                            let h = (dx * dx + dy * dy + dz * dz).sqrt();
+                            let vol = py.base_size * py.base_size * h / 3.0;
+                            format!("b={:.2} h={:.2}  V={:.3}", py.base_size, h, vol)
                         }
                         grafito_core::GeoObject::Torus3D(t) => {
                             format!("R={:.2} r={:.2}", t.r_major, t.r_minor)
@@ -839,6 +875,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut poly.width, 0.5..=10.0).trailing_fill(true));
+                                            });
+                                        }
+                                        GeoObject::Polyline(line) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(SPACE_LG);
+                                                ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
+                                                ui.add(egui::Slider::new(&mut line.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Pencil(pencil) => {

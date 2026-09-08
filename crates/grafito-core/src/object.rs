@@ -20,6 +20,7 @@ pub enum GeoObject {
     Line(LineObj),
     Circle(CircleObj),
     Polygon(PolygonObj),
+    Polyline(PolylineObj),
     Pencil(PencilObj),
     Function(FunctionObj),
     Text(TextObj),
@@ -92,6 +93,7 @@ impl GeoObject {
             | GeoObject::Line(_)
             | GeoObject::Circle(_)
             | GeoObject::Polygon(_)
+            | GeoObject::Polyline(_)
             | GeoObject::Pencil(_)
             | GeoObject::Function(_)
             | GeoObject::Text(_)
@@ -154,6 +156,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.id,
             GeoObject::Circle(o) => o.id,
             GeoObject::Polygon(o) => o.id,
+            GeoObject::Polyline(o) => o.id,
             GeoObject::Function(o) => o.id,
             GeoObject::Text(o) => o.id,
             GeoObject::Ellipse(o) => o.id,
@@ -212,6 +215,7 @@ impl GeoObject {
             GeoObject::Line(o) => &o.label,
             GeoObject::Circle(o) => &o.label,
             GeoObject::Polygon(o) => &o.label,
+            GeoObject::Polyline(o) => &o.label,
             GeoObject::Function(o) => &o.label,
             GeoObject::Text(o) => &o.label,
             GeoObject::Ellipse(o) => &o.label,
@@ -270,6 +274,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.label = label,
             GeoObject::Circle(o) => o.label = label,
             GeoObject::Polygon(o) => o.label = label,
+            GeoObject::Polyline(o) => o.label = label,
             GeoObject::Function(o) => o.label = label,
             GeoObject::Text(o) => o.label = label,
             GeoObject::Ellipse(o) => o.label = label,
@@ -328,6 +333,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.color,
             GeoObject::Circle(o) => o.color,
             GeoObject::Polygon(o) => o.color,
+            GeoObject::Polyline(o) => o.color,
             GeoObject::Pencil(o) => o.color,
             GeoObject::Function(o) => o.color,
             GeoObject::Text(o) => o.color,
@@ -386,6 +392,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.color = color,
             GeoObject::Circle(o) => o.color = color,
             GeoObject::Polygon(o) => o.color = color,
+            GeoObject::Polyline(o) => o.color = color,
             GeoObject::Pencil(o) => o.color = color,
             GeoObject::Function(o) => o.color = color,
             GeoObject::Text(o) => o.color = color,
@@ -444,6 +451,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.visible,
             GeoObject::Circle(o) => o.visible,
             GeoObject::Polygon(o) => o.visible,
+            GeoObject::Polyline(o) => o.visible,
             GeoObject::Pencil(o) => o.visible,
             GeoObject::Function(o) => o.visible,
             GeoObject::Text(o) => o.visible,
@@ -504,6 +512,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.visible = visible,
             GeoObject::Circle(o) => o.visible = visible,
             GeoObject::Polygon(o) => o.visible = visible,
+            GeoObject::Polyline(o) => o.visible = visible,
             GeoObject::Pencil(o) => o.visible = visible,
             GeoObject::Function(o) => o.visible = visible,
             GeoObject::Text(o) => o.visible = visible,
@@ -667,6 +676,7 @@ impl GeoObject {
             GeoObject::Line(_) => "Line",
             GeoObject::Circle(_) => "Circle",
             GeoObject::Polygon(_) => "Polygon",
+            GeoObject::Polyline(_) => "Polyline",
             GeoObject::Pencil(pencil) if pencil.is_dynamic_locus() => "Locus",
             GeoObject::Pencil(_) => "Pencil",
             GeoObject::Function(_) => "Function",
@@ -943,6 +953,37 @@ impl PolygonObj {
         }
         self.x_exprs[index] = x;
         self.y_exprs[index] = y;
+    }
+}
+
+/// Polilínea abierta: cadena de puntos unidos por segmentos rectos, sin
+/// cierre y sin relleno (a diferencia de `Polygon`, que es cerrado).
+/// Mínimo 2 puntos; cota superior `MAX_POLYGON_VERTICES` (validation.rs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolylineObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub points: Vec<Point2>,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+}
+
+impl PolylineObj {
+    pub fn new(points: Vec<Point2>) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            points,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 2.0,
+        }
+    }
+
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
     }
 }
 

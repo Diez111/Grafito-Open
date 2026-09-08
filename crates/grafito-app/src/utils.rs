@@ -197,6 +197,8 @@ impl Default for AppConfig {
 
 pub(crate) const LEGACY_CONFIG_NAME: &str = "grafito_config.json";
 pub(crate) const LEGACY_PROFILE_NAME: &str = "grafito_profile.json";
+/// Outbox offline persistida (D2): JSON acotado 128×2048 en user-data dir.
+pub(crate) const OUTBOX_FILE_NAME: &str = "outbox.json";
 
 fn xdg_config_home() -> std::path::PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
@@ -313,6 +315,60 @@ pub(crate) fn load_profile() -> grafito_profile::StudentProfile {
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default()
+}
+
+/// Ruta de la outbox offline persistida (user-data dir, D2).
+pub(crate) fn outbox_path() -> std::path::PathBuf {
+    xdg_data_home().join("grafito").join(OUTBOX_FILE_NAME)
+}
+
+/// Lee la outbox desde una ruta explícita (sin tocar env global, testeable).
+///
+/// `Ok(outbox)` + aviso honesto si el archivo falta (primera corrida, sin
+/// aviso), está corrupto o excede el cap (se descarta, con aviso).
+/// El I/O lo hace el caller en background/arranque, jamás en `Ui::`.
+pub(crate) fn load_outbox_from_path(
+    path: &std::path::Path,
+) -> (grafito_classroom::OfflineOutbox, Option<String>) {
+    let json = match std::fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (grafito_classroom::OfflineOutbox::new(), None);
+        }
+        Err(err) => {
+            log::warn!("No se pudo leer {}: {err}", path.display());
+            return (
+                grafito_classroom::OfflineOutbox::new(),
+                Some(
+                    "No se pudo leer la cola offline guardada y se arrancó vacía, che.".to_string(),
+                ),
+            );
+        }
+    };
+    let loaded = grafito_classroom::decode_persist(&json);
+    let aviso = loaded.notice();
+    (loaded.outbox, aviso)
+}
+
+/// Carga la outbox persistida; ante cualquier error arranca vacía con aviso.
+pub(crate) fn load_outbox() -> (grafito_classroom::OfflineOutbox, Option<String>) {
+    load_outbox_from_path(&outbox_path())
+}
+
+/// Escribe la outbox en una ruta explícita (JSON acotado, crea el padre).
+///
+/// `Err` honesto con motivo; el caller la invoca en background thread.
+pub(crate) fn save_outbox_to_path(
+    outbox: &grafito_classroom::OfflineOutbox,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let json = outbox.encode_persist().map_err(|err| format!("{err:?}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("no se pudo crear {}: {err}", parent.display()))?;
+    }
+    std::fs::write(path, json)
+        .map_err(|err| format!("no se pudo escribir {}: {err}", path.display()))
 }
 
 /// Directorio de plugins del asistente (configurable por entorno).
@@ -725,5 +781,47 @@ mod tests {
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.locale, AppLocale::Pt);
         assert_eq!(back.locale.as_ui_locale(), grafito_ui::i18n::Locale::Pt);
+    }
+
+    /// Ruta única por test (sin tocar env global ni el outbox real).
+    fn outbox_sandbox(nombre: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "grafito-outbox-test-{}-{}",
+            std::process::id(),
+            nombre
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join(OUTBOX_FILE_NAME)
+    }
+
+    #[test]
+    fn outbox_store_ciclo_guardar_cargar_en_disco() {
+        let path = outbox_sandbox("ciclo");
+        let mut outbox = grafito_classroom::OfflineOutbox::new();
+        outbox.enqueue("chat", "hola", 7).unwrap();
+        save_outbox_to_path(&outbox, &path).unwrap();
+        let (cargada, aviso) = load_outbox_from_path(&path);
+        assert_eq!(cargada.len(), 1);
+        assert!(aviso.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn outbox_store_faltante_arranca_vacia_sin_aviso() {
+        let path = outbox_sandbox("faltante").join("no-existe.json");
+        let (cargada, aviso) = load_outbox_from_path(&path);
+        assert!(cargada.is_empty());
+        assert!(aviso.is_none());
+    }
+
+    #[test]
+    fn outbox_store_corrupto_descarta_honesto_con_aviso() {
+        let path = outbox_sandbox("corrupto");
+        std::fs::write(&path, "{no json").unwrap();
+        let (cargada, aviso) = load_outbox_from_path(&path);
+        assert!(cargada.is_empty());
+        assert!(aviso.is_some());
+        let _ = std::fs::remove_file(&path);
     }
 }

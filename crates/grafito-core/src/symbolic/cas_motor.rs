@@ -12,6 +12,7 @@ use super::exchange::ExchangeError;
 use grafito_geometry::cas as geo_cas;
 use grafito_geometry::integral as geo_integral;
 use grafito_geometry::ode as geo_ode;
+use grafito_geometry::solve as geo_solve;
 
 fn invalid(feature: &'static str, detail: String) -> ExchangeError {
     ExchangeError::InvalidData { feature, detail }
@@ -197,11 +198,121 @@ pub fn cas_laplace_direct(expr: &str, t: &str, s: &str) -> Result<String, Exchan
         .map_err(|err| map_ode("Laplace", err))
 }
 
-/// `Laplace⁻¹[F(s)]` de racionales propios grado ≤ 2.
+/// `Laplace⁻¹[F(s)]` de racionales propios grado ≤ 2 (B2.3d: 3 con raíz real).
 pub fn cas_laplace_inverse(expr: &str, s: &str, t: &str) -> Result<String, ExchangeError> {
     geo_ode::laplace_inverse(expr, s, t)
         .map(|out| format!("Laplace⁻¹[{expr}]({s}→{t}) = {out}"))
         .map_err(|err| map_ode("Laplace", err))
+}
+
+// ---------------------------------------------------------------------------
+// Frente B2: puertas ADITIVAS (no tocan las G-A/F3c/B1 existentes).
+// ---------------------------------------------------------------------------
+
+/// `SolveODE` orden-n constante por anulador + resonancia (B2.3a).
+///
+/// `coeffs = [aₙ..a₀]` constantes; `n = len−1 ≤ 8`.
+pub fn cas_solve_ode_nth_order(
+    coeffs: &[String],
+    rhs: &str,
+    x: &str,
+) -> Result<String, ExchangeError> {
+    geo_ode::solve_ode_nth_order_const(coeffs, rhs, x).map_err(|err| map_ode("SolveODE", err))
+}
+
+/// Euler `x²y''+a·x·y'+b·y = rhs` vía `x=eᵗ` (B2.3b, `x > 0`).
+pub fn cas_solve_ode_euler(a: &str, b: &str, rhs: &str, x: &str) -> Result<String, ExchangeError> {
+    geo_ode::solve_ode_euler_2nd(a, b, rhs, x).map_err(|err| map_ode("SolveODE", err))
+}
+
+/// Serie de Frobenius en punto ordinario (B2.3c, `terms ≤ 9`).
+pub fn cas_frobenius(
+    p: &str,
+    q: &str,
+    x: &str,
+    x0: f64,
+    terms: usize,
+) -> Result<String, ExchangeError> {
+    const FEATURE: &str = "Frobenius";
+    match geo_ode::frobenius_series_2nd(p, q, x, x0, terms) {
+        Ok(out) => Ok(format!(
+            "Frobenius[{p}, {q}, {x} = {x0}] y1 = {}; y2 = {}",
+            geo_ode::format_frobenius_series(&out.y1, x, x0),
+            geo_ode::format_frobenius_series(&out.y2, x, x0),
+        )),
+        Err(err) => Err(map_ode(FEATURE, err)),
+    }
+}
+
+/// `L{y⁽ⁿ⁾}` por regla con iniciales (B2.3d, `n ≤ 8`).
+pub fn cas_laplace_derivative(
+    order: u32,
+    y: &str,
+    t: &str,
+    s: &str,
+    initials: &[String],
+) -> Result<String, ExchangeError> {
+    geo_ode::laplace_derivative(order, y, t, s, initials)
+        .map(|out| format!("Laplace[d^{order}{y}/d{t}^{order}] = {out}"))
+        .map_err(|err| map_ode("Laplace", err))
+}
+
+/// `L{∫₀ᵗ f} = L{f}/s` (B2.3d).
+pub fn cas_laplace_integral(f: &str, t: &str, s: &str) -> Result<String, ExchangeError> {
+    geo_ode::laplace_integral_rule(f, t, s)
+        .map(|out| format!("Laplace[∫{f}dt]({t}→{s}) = {out}"))
+        .map_err(|err| map_ode("Laplace", err))
+}
+
+/// `Groebner` con orden monomial explícito (B2.4: `lex|grlex|grevlex`).
+pub fn cas_groebner_ordered(
+    polys: &[String],
+    vars: &[String],
+    order: &str,
+) -> Result<String, ExchangeError> {
+    const FEATURE: &str = "Groebner";
+    let clean = order.trim().to_ascii_lowercase();
+    let ord = match clean.as_str() {
+        "lex" => geo_cas::MonomialOrder::Lex,
+        "grlex" => geo_cas::MonomialOrder::GrLex,
+        "grevlex" => geo_cas::MonomialOrder::GrRevLex,
+        _ => {
+            return Err(invalid(
+                FEATURE,
+                format!("orden '{order}' inválido (lex|grlex|grevlex)"),
+            ));
+        }
+    };
+    match geo_cas::buchberger_basis_ordered(polys, vars, ord) {
+        Ok(out) => Ok(format!(
+            "Groebner[{{{}}}, {{{}}}, {clean}] = {{{}}} ({} S-polinomios)",
+            polys.join(", "),
+            vars.join(", "),
+            out.basis.join(", "),
+            out.s_polys_used
+        )),
+        Err(err) => Err(map_cas(FEATURE, err)),
+    }
+}
+
+/// `Eliminate[polys, vars, elim]` por lex + filtrado (B2.4, intersecciones).
+pub fn cas_eliminate(
+    polys: &[String],
+    vars: &[String],
+    elim: &[String],
+) -> Result<String, ExchangeError> {
+    const FEATURE: &str = "Eliminate";
+    match geo_cas::buchberger_eliminate(polys, vars, elim) {
+        Ok(out) => Ok(format!(
+            "Eliminate[{{{}}}, {{{}}}, {{{}}}] = {{{}}} ({} S-polinomios)",
+            polys.join(", "),
+            vars.join(", "),
+            elim.join(", "),
+            out.basis.join(", "),
+            out.s_polys_used
+        )),
+        Err(err) => Err(map_cas(FEATURE, err)),
+    }
 }
 
 /// `Residue[expr, var = at]` (polos simples + orden N ≤ 16).
@@ -246,6 +357,52 @@ pub fn cas_principal_part(
             ))
         }
         Err(err) => Err(map_cas(FEATURE, err)),
+    }
+}
+
+fn map_solve(feature: &'static str, err: geo_solve::SolveError) -> ExchangeError {
+    match err {
+        geo_solve::SolveError::InvalidInput { detail }
+        | geo_solve::SolveError::NotPolynomial { hint: detail } => invalid(feature, detail),
+        geo_solve::SolveError::DegreeExceeded { .. } => {
+            pending(feature, format!("{err}; usa NSolve[..] o Eliminate[..]"))
+        }
+        geo_solve::SolveError::Unsupported { hint } => pending(feature, hint),
+    }
+}
+
+/// `Solve[expr, var]` general (frente B1): todas las raíces reales.
+///
+/// Lineal/cuadrática exactas, resto por Sturm+bisección+Newton con cota de
+/// Cauchy; grado ≥ 5 solo numérico acotado, trascendentes → `NotImplemented`
+/// honesto que deriva a `NSolve`.
+pub fn cas_solve_all(expr: &str, var: &str) -> Result<String, ExchangeError> {
+    const FEATURE: &str = "Solve";
+    match geo_solve::solve_all_real(expr, var) {
+        Ok(roots) => Ok(format!(
+            "Solve[{expr}, {var}] = {}",
+            geo_solve::format_real_roots(&roots)
+        )),
+        Err(err) => Err(map_solve(FEATURE, err)),
+    }
+}
+
+/// Sistema polinómico 2×2 por eliminación (frente B1) → puntos verificados.
+///
+/// Fallos honestos derivan a `Groebner[..]`/`Eliminate[..]`.
+pub fn cas_solve_system_2x2(
+    eq1: &str,
+    eq2: &str,
+    x: &str,
+    y: &str,
+) -> Result<String, ExchangeError> {
+    const FEATURE: &str = "SolveNlSystem";
+    match geo_solve::solve_system_2x2(eq1, eq2, x, y) {
+        Ok(points) => Ok(format!(
+            "SolveNlSystem[{eq1}, {eq2}, {x}, {y}] = {}",
+            geo_solve::format_system_points(&points)
+        )),
+        Err(err) => Err(map_solve(FEATURE, err)),
     }
 }
 
@@ -319,6 +476,27 @@ mod tests {
     }
 
     #[test]
+    fn gate_solve_all_and_system_2x2() {
+        let cubic = cas_solve_all("x^3-6x^2+11x-6", "x").expect("puerta Solve B1");
+        assert!(cubic.contains("{1, 2, 3}"), "got {cubic}");
+        let no_real = cas_solve_all("x^2+1", "x").expect("puerta x^2+1");
+        assert!(no_real.contains("{}"), "got {no_real}");
+        assert!(no_real.contains("complej"), "got {no_real}");
+        let transcend = cas_solve_all("sin(x)+x", "x").expect_err("trascendente");
+        assert!(
+            matches!(transcend, ExchangeError::InvalidData { .. }),
+            "got {transcend}"
+        );
+        let pts = cas_solve_system_2x2("x^2+y^2-25", "x-y-1", "x", "y").expect("puerta sistema");
+        assert!(pts.contains("(4, 3)"), "got {pts}");
+        let dep = cas_solve_system_2x2("x+y-1", "2*x+2*y-2", "x", "y").expect_err("dependiente");
+        assert!(
+            matches!(dep, ExchangeError::NotImplemented { .. }),
+            "got {dep}"
+        );
+    }
+
+    #[test]
     fn gate_groebner_bounded() {
         let polys = vec!["x + y - 3".to_string(), "x - y - 1".to_string()];
         let vars = vec!["x".to_string(), "y".to_string()];
@@ -328,6 +506,68 @@ mod tests {
         let err = cas_groebner(&big, &["x".to_string()]).expect_err("cota");
         let msg = format!("{err}");
         assert!(msg.contains("Eliminate"), "got {msg}");
+    }
+
+    // --- Frente B2: puertas ADITIVAS (aceptación 1:1, sin commit) ---
+
+    #[test]
+    fn gate_b2_ode_nth_euler_frobenius() {
+        let coeffs = ["1", "-6", "11", "-6"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let nth = cas_solve_ode_nth_order(&coeffs, "0", "x").expect("puerta orden-n");
+        assert!(nth.contains("exp"), "got {nth}");
+        let euler = cas_solve_ode_euler("1", "-1", "0", "x").expect("puerta Euler");
+        assert!(euler.contains("y = "), "got {euler}");
+        let frob = cas_frobenius("-2*x", "0", "x", 0.0, 6).expect("puerta Frobenius");
+        assert!(frob.contains("y1 = "), "got {frob}");
+        let cubic = cas_solve_ode_nth_order(
+            &["1", "0", "0", "-2"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            "0",
+            "x",
+        )
+        .expect_err("cúbica sin raíz racional");
+        assert!(format!("{cubic}").contains("RKF45"), "got {cubic}");
+    }
+
+    #[test]
+    fn gate_b2_laplace_calculus() {
+        let d2 = cas_laplace_derivative(2, "Y", "t", "s", &["y0".to_string(), "y1".to_string()])
+            .expect("puerta derivada");
+        assert!(d2.contains("s^2*Y"), "got {d2}");
+        let integ = cas_laplace_integral("sin(t)", "t", "s").expect("puerta integral");
+        assert!(integ.contains("/s"), "got {integ}");
+        let heav = cas_laplace_direct("heaviside(t-2)", "t", "s").expect("puerta Heaviside");
+        assert!(heav.contains("exp(-2*s)"), "got {heav}");
+        let dirac = cas_laplace_direct("dirac(t-3)", "t", "s").expect("puerta Dirac");
+        assert!(dirac.contains("exp(-3*s)"), "got {dirac}");
+        let inv3 = cas_laplace_inverse("1/(s^3+1)", "s", "t").expect("puerta cúbica");
+        assert!(inv3.contains("exp"), "got {inv3}");
+    }
+
+    #[test]
+    fn gate_b2_groebner_ordered_eliminate() {
+        let polys = vec!["x^2+y^2-25".to_string(), "x-y-1".to_string()];
+        let vars = vec!["x".to_string(), "y".to_string()];
+        for order in ["lex", "grlex", "grevlex"] {
+            let out = cas_groebner_ordered(&polys, &vars, order).expect("puerta orden");
+            assert!(out.contains(order), "got {out}");
+        }
+        let bad = cas_groebner_ordered(&polys, &vars, "invlex").expect_err("orden malo");
+        assert!(
+            matches!(bad, ExchangeError::InvalidData { .. }),
+            "got {bad}"
+        );
+        let elim = cas_eliminate(&polys, &vars, &["y".to_string()]).expect("puerta Eliminate");
+        assert!(elim.contains("Eliminate"), "got {elim}");
+        assert!(
+            !elim.rsplit('=').next().unwrap_or("").contains('y'),
+            "got {elim}"
+        );
     }
 
     #[test]
@@ -373,7 +613,10 @@ mod tests {
         assert!(direct.contains("s^2+1"), "got {direct}");
         let inverse = cas_laplace_inverse("1/(s+1)", "s", "t").expect("puerta inversa");
         assert!(inverse.contains("exp(-1*t)"), "got {inverse}");
-        let err = cas_laplace_inverse("1/(s^3+1)", "s", "t").expect_err("grado 3");
+        // B2.3d: la cúbica con raíz real YA resuelve; grado 4 sigue honesto.
+        let cubic = cas_laplace_inverse("1/(s^3+1)", "s", "t").expect("puerta cúbica");
+        assert!(cubic.contains("exp(-1*t)"), "got {cubic}");
+        let err = cas_laplace_inverse("1/(s^4+1)", "s", "t").expect_err("grado 4");
         assert!(
             matches!(err, ExchangeError::NotImplemented { .. }),
             "got {err}"

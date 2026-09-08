@@ -147,6 +147,7 @@ pub fn object_cull_margin_world(obj: &GeoObject, scale: f64) -> f64 {
         GeoObject::Hyperbola(h) => h.width,
         GeoObject::BezierCurve(b) => b.width,
         GeoObject::Spline(s) => s.width,
+        GeoObject::Polyline(l) => l.width,
         GeoObject::Histogram(h) => h.width,
         GeoObject::BarChart(b) => b.width,
         GeoObject::PieChart(p) => p.width,
@@ -1844,6 +1845,30 @@ impl Renderer {
                         }
                     }
                 }
+                GeoObject::Polyline(line)
+                    if line.points.len() >= 2
+                        && polygon_geometry_is_within_limit(line.points.len()) =>
+                {
+                    // Cadena abierta: mismo trazo que Pencil, sin cierre ni relleno.
+                    for w in line.points.windows(2) {
+                        let a = w[0];
+                        let b = w[1];
+                        if let Some((clip_a, clip_b)) =
+                            grafito_geometry::clip_segment_to_rect(a, b, view_bounds)
+                        {
+                            let sa = view.world_to_screen(clip_a);
+                            let sb = view.world_to_screen(clip_b);
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                sa,
+                                sb,
+                                line.width,
+                                line.color,
+                            );
+                        }
+                    }
+                }
                 GeoObject::Function(fun) => {
                     Self::add_function_geometry(&mut vertices, &mut indices, document, view, fun);
                 }
@@ -2432,6 +2457,27 @@ impl Renderer {
                     poly.width,
                     poly.color,
                 );
+            }
+            GeoObject::Polyline(line)
+                if line.points.len() >= 2
+                    && polygon_geometry_is_within_limit(line.points.len()) =>
+            {
+                // Cadena abierta: solo trazo, sin cierre ni relleno.
+                let mut prev: Option<glam::Vec2> = None;
+                for v in &line.points {
+                    let cur = view.world_to_screen(*v);
+                    if let Some(prev) = prev {
+                        Self::add_line_segment(
+                            &mut vertices,
+                            &mut indices,
+                            prev,
+                            cur,
+                            line.width,
+                            line.color,
+                        );
+                    }
+                    prev = Some(cur);
+                }
             }
             GeoObject::Ellipse(el) => {
                 let n = 64;

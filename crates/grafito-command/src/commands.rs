@@ -4,6 +4,7 @@ pub use crate::cas_parse::{
 use crate::cas_parse::{looks_like_bracketed_command, sanitize_unicode_input};
 use geo::BooleanOps;
 use grafito_core::symbolic::cas_motor as cas_gate;
+use grafito_core::symbolic::series as spreadsheet_series;
 use grafito_core::{
     analyzable::{self, default_analysis_features},
     implicit_curve::validate_contour_levels,
@@ -14,10 +15,11 @@ use grafito_core::{
     ImplicitCurveObj, ImplicitSurface3DObj, Line3DObj, LineKind, LineObj, LiveSequenceBinding,
     MoebiusStripObj, ObjectId, ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj,
     PhasePortraitObj, PieChartObj, Plane3DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj,
-    Prism3DObj, Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
-    RelationOperator, ScatterPlotObj, SectorObj, Segment3DObj, Sphere3DObj, SplineObj,
-    Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta, VectorField2DObj, VectorField3DObj,
-    IMPLICIT_SURFACE_DEFAULT_CELLS, IMPLICIT_SURFACE_MAX_CELLS, IMPLICIT_SURFACE_MIN_CELLS,
+    PolylineObj, Prism3DObj, Pyramid3DObj, Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj,
+    RegularPolytopeNDObj, RelationOperator, ScatterPlotObj, SectorObj, Segment3DObj, Sphere3DObj,
+    SplineObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta, VectorField2DObj,
+    VectorField3DObj, IMPLICIT_SURFACE_DEFAULT_CELLS, IMPLICIT_SURFACE_MAX_CELLS,
+    IMPLICIT_SURFACE_MIN_CELLS,
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
@@ -2319,6 +2321,25 @@ fn handle_primitive_commands(
             input_text.clear();
             Some(CommandOutcome::Ok)
         }
+        "Polyline" if cmd.args.len() >= 2 => {
+            // Polilínea abierta: cadena de segmentos sin cierre ni relleno.
+            // Cota: mismo techo que Polygon (MAX_POLYGON_VERTICES 8192).
+            if cmd.args.len() > 8192 {
+                return Some(CommandOutcome::Error(
+                    "Polyline: demasiados puntos (máximo 8192)".into(),
+                ));
+            }
+            let mut points = Vec::with_capacity(cmd.args.len());
+            for argument in &cmd.args {
+                match parse_finite_point_arg(argument, &document.variables) {
+                    Ok(point) => points.push(point),
+                    Err(error) => return Some(CommandOutcome::Error(format!("Polyline: {error}"))),
+                }
+            }
+            insert_command_object_some!(document, GeoObject::Polyline(PolylineObj::new(points)));
+            input_text.clear();
+            Some(CommandOutcome::Ok)
+        }
         "Ellipse" if cmd.args.len() == 3 => {
             let center = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
                 Ok(p) => p,
@@ -3624,6 +3645,24 @@ fn handle_remaining_cas_commands(
                 }
             }
             insert_command_object!(document, GeoObject::Polygon(PolygonObj::new(vertices)));
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
+        "Polyline" if cmd.args.len() >= 2 => {
+            // Polilínea abierta: cadena de segmentos sin cierre ni relleno.
+            if cmd.args.len() > 8192 {
+                return CommandOutcome::Error("Polyline: demasiados puntos (máximo 8192)".into());
+            }
+            let mut points = Vec::with_capacity(cmd.args.len());
+            for argument in &cmd.args {
+                match parse_finite_point_arg(argument, &document.variables) {
+                    Ok(point) => points.push(point),
+                    Err(error) => {
+                        return CommandOutcome::Error(format!("Polyline: {error}"));
+                    }
+                }
+            }
+            insert_command_object!(document, GeoObject::Polyline(PolylineObj::new(points)));
             input_text.clear();
             return CommandOutcome::Ok;
         }
@@ -5141,6 +5180,38 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Ok;
         }
+        "Pyramid" if cmd.args.len() == 5 => {
+            // Pirámide de base cuadrada: misma convención vertical que Cone
+            // (base en (x,y,z), ápice en (x,y+h,z), lado base_size).
+            let values = cmd
+                .args
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    parse_finite_command_arg(
+                        "Pyramid",
+                        ["x", "y", "z", "base_size", "height"][index],
+                        value,
+                        &document.variables,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let values = command_result!(values);
+            let (x, y, z, base, h) = (values[0], values[1], values[2], values[3], values[4]);
+            if base <= 0.0 || h <= 0.0 {
+                return CommandOutcome::Error(
+                    "Pyramid: la base y la altura deben ser positivas.".into(),
+                );
+            }
+            let obj = GeoObject::Pyramid3D(Pyramid3DObj::new(
+                Point3D::new(x, y, z),
+                Point3D::new(x, y + h, z),
+                base,
+            ));
+            insert_command_object!(document, obj);
+            input_text.clear();
+            return CommandOutcome::Ok;
+        }
         "Torus" if cmd.args.len() == 5 => {
             if let (Ok(x), Ok(y), Ok(z), Ok(rmaj), Ok(rmin)) = (
                 parse_numeric_arg(&cmd.args[0], &document.variables),
@@ -5361,7 +5432,7 @@ fn handle_remaining_cas_commands(
             return run_solve_line_3d_parameters(&cmd.args, document);
         }
         "Point3D" | "Segment3D" | "Plane3D" | "Line3D" | "Sphere" | "Cube" | "Tetrahedron"
-        | "Cylinder" | "Cone" | "Torus" | "Moebius" | "Surface3D" => {
+        | "Cylinder" | "Cone" | "Pyramid" | "Torus" | "Moebius" | "Surface3D" => {
             return CommandOutcome::Error("Argumentos inválidos para comando 3D".into());
         }
         "Tangent" => {
@@ -6812,6 +6883,51 @@ fn handle_remaining_cas_commands(
                 }
                 Err(e) => return e,
             }
+        }
+        "FillSeries" => {
+            if cmd.args.len() != 3 && cmd.args.len() != 4 {
+                return CommandOutcome::Error(
+                    "FillSeries: usa FillSeries[rango, inicio, paso] o FillSeries[rango, inicio, paso, modo]"
+                        .into(),
+                );
+            }
+            let inicio = command_result!(require_finite(parse_numeric_arg(
+                &cmd.args[1],
+                &document.variables
+            ))
+            .map_err(|error| CommandOutcome::Error(format!("FillSeries: {error}"))));
+            let paso = command_result!(require_finite(parse_numeric_arg(
+                &cmd.args[2],
+                &document.variables
+            ))
+            .map_err(|error| CommandOutcome::Error(format!("FillSeries: {error}"))));
+            let kind = if cmd.args.len() == 4 {
+                command_result!(spreadsheet_series::parse_series_mode(&cmd.args[3])
+                    .map_err(CommandOutcome::Error))
+            } else {
+                spreadsheet_series::SeriesKind::Linear
+            };
+            let edits = command_result!(spreadsheet_series::build_fill_series(
+                &cmd.args[0],
+                inicio,
+                paso,
+                kind
+            )
+            .map_err(CommandOutcome::Error));
+            let count = edits.len();
+            let staged = command_result!(document
+                .stage_spreadsheet_cell_edits(&edits)
+                .map_err(CommandOutcome::Error));
+            *document = staged;
+            input_text.clear();
+            let mode_label = match kind {
+                spreadsheet_series::SeriesKind::Linear => "lineal",
+                spreadsheet_series::SeriesKind::Geometric => "geométrica",
+            };
+            return CommandOutcome::Message(format!(
+                "FillSeries: {count} celdas en {} ({mode_label}, inicio {inicio}, paso {paso})",
+                cmd.args[0].trim(),
+            ));
         }
         "FillCells" => {
             if cmd.args.len() < 2 || cmd.args.len() > 3 {
@@ -11436,6 +11552,27 @@ fn execute_cas_command_typed(
                 )));
             }
 
+            // Frente B1: sin intervalo explícito → Solve GENERAL (todas las
+            // raíces reales). Si no es polinomio acotado, cae al numérico
+            // legado con bounds por defecto (semántica NSolve de 1 raíz).
+            if cmd.args.len() <= 2 {
+                if let Ok(general) = grafito_geometry::solve::solve_all_real(&expr_clean, var) {
+                    for root in &general.roots {
+                        let root_label = unique_object_label(document, "Raíz");
+                        insert_typed_command_object!(
+                            document,
+                            GeoObject::Point(
+                                PointObj::new(Point2::new(*root, 0.0)).with_label(root_label),
+                            )
+                        );
+                    }
+                    let body = grafito_geometry::solve::format_real_roots(&general);
+                    return Some(Ok(format!(
+                        "Solve[{expr_clean}, {var}] = {body} → Graficado como {label}"
+                    )));
+                }
+            }
+
             let mut complex_roots_found = false;
             let mut strs = Vec::new();
 
@@ -11507,6 +11644,172 @@ fn execute_cas_command_typed(
                     strs.join(", "),
                     label
                 )))
+            }
+        }
+        "NSolve" => {
+            if cmd.args.is_empty() || cmd.args.len() > 4 {
+                return Some(Err(
+                    "Error: NSolve requiere NSolve[expresión, variable?, mínimo?, máximo?]".into(),
+                ));
+            }
+            let expr_raw = expand_all_cas(cmd.args.first()?, document);
+            let mut expr_clean = expr_raw.trim().to_string();
+            if expr_clean.is_empty() {
+                return Some(Err("Error: NSolve requiere una expresión no vacía".into()));
+            }
+            if let Some((lhs, rhs)) = split_on_standalone_eq(&expr_clean) {
+                expr_clean = format!("({lhs}) - ({rhs})");
+            }
+            let preprocessed = grafito_geometry::expr::preprocess_expr(&expr_clean);
+            let ast = match grafito_geometry::ast::parse_ast(&preprocessed) {
+                Ok(ast) => ast,
+                Err(error) => {
+                    return Some(Err(format!("Error en expresión de NSolve: {error}")));
+                }
+            };
+            let var = match cmd.args.get(1) {
+                Some(arg) if arg.trim().is_empty() => {
+                    return Some(Err("Error: NSolve requiere una variable no vacía".into()));
+                }
+                Some(arg) => arg.trim().to_string(),
+                None => {
+                    let mut variables = HashSet::new();
+                    ast.get_variables(&mut variables);
+                    variables.retain(|name| !document.variables.contains_key(name));
+                    if variables.len() > 1 {
+                        return Some(Err(
+                            "Error: NSolve requiere indicar la variable cuando hay varias incógnitas"
+                                .into(),
+                        ));
+                    }
+                    variables
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| "x".to_string())
+                }
+            };
+            if !is_math_identifier(&var) {
+                return Some(Err(format!(
+                    "Error: la variable de NSolve no es un identificador válido: '{var}'"
+                )));
+            }
+            let mut unresolved = HashSet::new();
+            ast.get_variables(&mut unresolved);
+            unresolved.remove(var.as_str());
+            unresolved.retain(|name| !document.variables.contains_key(name));
+            if !unresolved.is_empty() {
+                let mut unresolved: Vec<_> = unresolved.into_iter().collect();
+                unresolved.sort();
+                return Some(Err(format!(
+                    "Error: NSolve contiene símbolos no definidos: {}",
+                    unresolved.join(", ")
+                )));
+            }
+            let parse_bound = |index: usize, default: f64, name: &str| {
+                cmd.args.get(index).map_or(Ok(default), |argument| {
+                    require_finite(parse_numeric_arg(argument, &document.variables))
+                        .map_err(|error| format!("Error en límite {name} de NSolve: {error}"))
+                })
+            };
+            let a = match parse_bound(2, -20.0, "inferior") {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            };
+            let b = match parse_bound(3, 20.0, "superior") {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            };
+            if a >= b {
+                return Some(Err(format!(
+                    "Error: el límite inferior de NSolve ({a}) debe ser menor que el superior ({b})"
+                )));
+            }
+            let graph_expr = replace_variable(&expr_clean, &var, "x");
+            let label = next_function_label(document);
+            insert_typed_command_object!(
+                document,
+                GeoObject::Function(FunctionObj::new(&graph_expr).with_label(&label),)
+            );
+            match grafito_geometry::cas::solve_expression(
+                &graph_expr,
+                0.0,
+                &document.variables,
+                a,
+                b,
+            ) {
+                Ok(root) if root.is_finite() => {
+                    let root_label = unique_object_label(document, "Raíz");
+                    insert_typed_command_object!(
+                        document,
+                        GeoObject::Point(
+                            PointObj::new(Point2::new(root, 0.0)).with_label(root_label),
+                        )
+                    );
+                    Some(Ok(format!(
+                        "NSolve[{expr_clean}, {var}] ≈ {var} = {root:.6} → Graficado como {label}"
+                    )))
+                }
+                _ => Some(Err(format!(
+                    "Error: NSolve sin raíz en [{a:.1}, {b:.1}]; amplía el intervalo o usa Solve[..] general"
+                ))),
+            }
+        }
+        "SolveNlSystem" => {
+            if cmd.args.len() != 4 {
+                return Some(Err(
+                    "Error: SolveNlSystem requiere SolveNlSystem[eq1, eq2, var1, var2]".into(),
+                ));
+            }
+            let mut eqs = Vec::with_capacity(2);
+            for (index, raw) in cmd.args.iter().take(2).enumerate() {
+                let expanded = expand_all_cas(raw, document);
+                let trimmed = expanded.trim();
+                if trimmed.is_empty() {
+                    return Some(Err(format!(
+                        "Error: SolveNlSystem ecuación {} vacía",
+                        index + 1
+                    )));
+                }
+                if let Some((lhs, rhs)) = split_on_standalone_eq(trimmed) {
+                    eqs.push(format!("({lhs}) - ({rhs})"));
+                } else {
+                    eqs.push(trimmed.to_string());
+                }
+            }
+            let v1 = cmd.args[2].trim().to_string();
+            let v2 = cmd.args[3].trim().to_string();
+            for candidate in [&v1, &v2] {
+                if !is_math_identifier(candidate) {
+                    return Some(Err(format!(
+                        "Error: SolveNlSystem variable inválida: '{candidate}'"
+                    )));
+                }
+            }
+            if v1 == v2 {
+                return Some(Err(
+                    "Error: SolveNlSystem requiere dos incógnitas distintas".into(),
+                ));
+            }
+            match grafito_geometry::solve::solve_system_2x2(&eqs[0], &eqs[1], &v1, &v2) {
+                Ok(points) => {
+                    for (px, py) in &points {
+                        let root_label = unique_object_label(document, "Raíz");
+                        insert_typed_command_object!(
+                            document,
+                            GeoObject::Point(
+                                PointObj::new(Point2::new(*px, *py)).with_label(root_label),
+                            )
+                        );
+                    }
+                    Some(Ok(format!(
+                        "SolveNlSystem[{}, {}, {v1}, {v2}] = {} → {} puntos",
+                        eqs[0],
+                        eqs[1],
+                        grafito_geometry::solve::format_system_points(&points),
+                        points.len()
+                    )))
+                }
+                Err(error) => Some(Err(format!("Error: SolveNlSystem: {error}"))),
             }
         }
         "Taylor" => {
@@ -11996,6 +12299,263 @@ fn execute_cas_command_typed(
             match cas_gate::cas_groebner(&polys, &vars) {
                 Ok(out) => Some(Ok(out)),
                 Err(error) => Some(Err(format!("GroebnerBasis: {error}"))),
+            }
+        }
+        "SolveODEN" => {
+            if cmd.args.len() != 2 && cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: SolveODEN requiere SolveODEN[{a2,a1,a0}, rhs] o SolveODEN[{a2,a1,a0}, rhs, variable]"
+                        .into(),
+                ));
+            }
+            let coeffs = parse_w1_brace_list(&cmd.args[0]);
+            if coeffs.is_empty() {
+                return Some(Err(
+                    "Error: SolveODEN requiere al menos un coeficiente".into()
+                ));
+            }
+            let rhs = expand_all_cas(cmd.args[1].trim(), document);
+            for (i, value) in coeffs.iter().enumerate() {
+                if let Err(error) = check_w1_budget("SolveODEN", &format!("a{}", i), value) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            if let Err(error) = check_w1_budget("SolveODEN", "rhs", &rhs) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd
+                .args
+                .get(2)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: SolveODEN requiere una variable válida".into()));
+            }
+            match cas_gate::cas_solve_ode_nth_order(&coeffs, &rhs, var) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("SolveODEN: {error}"))),
+            }
+        }
+        "EulerODE" => {
+            if cmd.args.len() != 3 && cmd.args.len() != 4 {
+                return Some(Err(
+                    "Error: EulerODE requiere EulerODE[a, b, rhs] o EulerODE[a, b, rhs, variable]"
+                        .into(),
+                ));
+            }
+            let (a, b) = (
+                cmd.args[0].trim().to_string(),
+                cmd.args[1].trim().to_string(),
+            );
+            let rhs = expand_all_cas(cmd.args[2].trim(), document);
+            for (role, value) in [("a", &a), ("b", &b), ("rhs", &rhs)] {
+                if value.is_empty() {
+                    return Some(Err(format!("Error: EulerODE requiere {role} no vacío")));
+                }
+                if let Err(error) = check_w1_budget("EulerODE", role, value) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            let var = cmd
+                .args
+                .get(3)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: EulerODE requiere una variable válida".into()));
+            }
+            match cas_gate::cas_solve_ode_euler(&a, &b, &rhs, var) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("EulerODE: {error}"))),
+            }
+        }
+        "FrobeniusSeries" => {
+            if cmd.args.len() < 2 || cmd.args.len() > 5 {
+                return Some(Err(
+                    "Error: FrobeniusSeries requiere FrobeniusSeries[p, q] o FrobeniusSeries[p, q, x, x0, terminos]"
+                        .into(),
+                ));
+            }
+            let p = expand_all_cas(cmd.args[0].trim(), document);
+            let q = expand_all_cas(cmd.args[1].trim(), document);
+            for (role, value) in [("p", &p), ("q", &q)] {
+                if value.is_empty() {
+                    return Some(Err(format!(
+                        "Error: FrobeniusSeries requiere {role} no vacío"
+                    )));
+                }
+                if let Err(error) = check_w1_budget("FrobeniusSeries", role, value) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            let x = cmd
+                .args
+                .get(2)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(x) {
+                return Some(Err(
+                    "Error: FrobeniusSeries requiere una variable válida".into()
+                ));
+            }
+            let x0: f64 = match cmd.args.get(3) {
+                None => 0.0,
+                Some(raw) => match raw.trim().parse() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return Some(Err("Error: FrobeniusSeries requiere x0 numérico".into()))
+                    }
+                },
+            };
+            let terms: usize = match cmd.args.get(4) {
+                None => 9,
+                Some(raw) => match raw.trim().parse() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return Some(Err("Error: FrobeniusSeries requiere terminos entero".into()))
+                    }
+                },
+            };
+            match cas_gate::cas_frobenius(&p, &q, x, x0, terms) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("FrobeniusSeries: {error}"))),
+            }
+        }
+        "LaplaceDeriv" => {
+            if cmd.args.len() < 2 || cmd.args.len() > 5 {
+                return Some(Err(
+                    "Error: LaplaceDeriv requiere LaplaceDeriv[n, y] o LaplaceDeriv[n, y, t, s, iniciales]"
+                        .into(),
+                ));
+            }
+            let order: u32 = match cmd.args[0].trim().parse() {
+                Ok(value) => value,
+                Err(_) => {
+                    return Some(Err("Error: LaplaceDeriv requiere n entero".into()));
+                }
+            };
+            let y = expand_all_cas(cmd.args[1].trim(), document);
+            if y.is_empty() {
+                return Some(Err("Error: LaplaceDeriv requiere y no vacío".into()));
+            }
+            if let Err(error) = check_w1_budget("LaplaceDeriv", "y", &y) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let t = cmd
+                .args
+                .get(2)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("t");
+            let s = cmd
+                .args
+                .get(3)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("s");
+            if !is_math_identifier(t) || !is_math_identifier(s) {
+                return Some(Err("Error: LaplaceDeriv requiere variables válidas".into()));
+            }
+            let initials: Vec<String> = match cmd.args.get(4) {
+                None => Vec::new(),
+                Some(raw) => parse_w1_brace_list(raw),
+            };
+            match cas_gate::cas_laplace_derivative(order, &y, t, s, &initials) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("LaplaceDeriv: {error}"))),
+            }
+        }
+        "LaplaceInt" => {
+            if cmd.args.is_empty() || cmd.args.len() > 3 {
+                return Some(Err(
+                    "Error: LaplaceInt requiere LaplaceInt[f] o LaplaceInt[f, t, s]".into(),
+                ));
+            }
+            let f = expand_all_cas(cmd.args[0].trim(), document);
+            if f.trim().is_empty() {
+                return Some(Err(
+                    "Error: LaplaceInt requiere una expresión no vacía".into()
+                ));
+            }
+            if let Err(error) = check_w1_budget("LaplaceInt", "f", &f) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let t = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("t");
+            let s = cmd
+                .args
+                .get(2)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("s");
+            if !is_math_identifier(t) || !is_math_identifier(s) {
+                return Some(Err("Error: LaplaceInt requiere variables válidas".into()));
+            }
+            match cas_gate::cas_laplace_integral(&f, t, s) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("LaplaceInt: {error}"))),
+            }
+        }
+        "GroebnerOrdered" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: GroebnerOrdered requiere GroebnerOrdered[polinomios, variables, orden]"
+                        .into(),
+                ));
+            }
+            let polys = parse_w1_brace_list(&cmd.args[0]);
+            let vars = parse_w1_brace_list(&cmd.args[1]);
+            let order = cmd.args[2].trim().to_string();
+            if polys.is_empty() {
+                return Some(Err(
+                    "Error: GroebnerOrdered requiere al menos un polinomio".into()
+                ));
+            }
+            if vars.is_empty() {
+                return Some(Err(
+                    "Error: GroebnerOrdered requiere al menos una variable".into()
+                ));
+            }
+            for poly in &polys {
+                if let Err(error) = check_w1_budget("GroebnerOrdered", "polinomio", poly) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            match cas_gate::cas_groebner_ordered(&polys, &vars, &order) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("GroebnerOrdered: {error}"))),
+            }
+        }
+        "Eliminate" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: Eliminate requiere Eliminate[polinomios, variables, eliminar]".into(),
+                ));
+            }
+            let polys = parse_w1_brace_list(&cmd.args[0]);
+            let vars = parse_w1_brace_list(&cmd.args[1]);
+            let elim = parse_w1_brace_list(&cmd.args[2]);
+            if polys.is_empty() || vars.is_empty() || elim.is_empty() {
+                return Some(Err(
+                    "Error: Eliminate requiere polinomios, variables y lista a eliminar no vacíos"
+                        .into(),
+                ));
+            }
+            for poly in &polys {
+                if let Err(error) = check_w1_budget("Eliminate", "polinomio", poly) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            match cas_gate::cas_eliminate(&polys, &vars, &elim) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("Eliminate: {error}"))),
             }
         }
         "CompleteSquare" => {

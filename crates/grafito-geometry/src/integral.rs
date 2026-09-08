@@ -488,6 +488,17 @@ fn risch_expr(
             if let Some(parts) = risch_parts_x_exp(a, b, var, depth, terms)? {
                 return Ok(parts);
             }
+            // B2: trig `sinⁿ·cosᵐ/tanⁿ/sec·tan`, partes tabulares
+            // `P·exp/sin/cos` y `xⁿ·ln(x)`.
+            if let Some(trig) = risch_trig_product(a, b, var, terms)? {
+                return Ok(trig);
+            }
+            if let Some(tabular) = risch_poly_exp_trig(a, b, var, terms)? {
+                return Ok(tabular);
+            }
+            if let Some(xln) = risch_x_pow_ln(a, b, var)? {
+                return Ok(xln);
+            }
             Err(risch_unsupported(
                 "producto de dos funciones de x (fuera de x·exp(a·x+b)); Risch completo pendiente en Tasks.md F10.W5".to_string(),
             ))
@@ -572,12 +583,16 @@ fn risch_expr(
                     }
                 }
             }
+            // B2: potencias trig aisladas (`sinⁿ/cosⁿ/tanⁿ/csc²`).
+            // (`rec` muere en el bloque binomial: el préstamo termina aquí.)
+            if let Some(tp) = risch_trig_pow(base, exp, var, terms)? {
+                return Ok(tp);
+            }
             Err(risch_unsupported(
                 "potencia no monomial (p. ej. x^x o (f(x))^g(x)); Risch completo pendiente".to_string(),
             ))
         }
-        Expr::Div(num, den) => {
-            if let Expr::Var(name) = den.as_ref() {
+        Expr::Div(num, den) => {            if let Expr::Var(name) = den.as_ref() {
                 if name == var && !crate::cas::cas_contains_var(num, var) {
                     return Ok(Expr::Mul(
                         num.clone(),
@@ -612,6 +627,14 @@ fn risch_expr(
                     }
                 }
             }
+            // B2: no elementales honestas (`li`, elípticas) → cuadratura.
+            if let Some(hint) = risch_non_elementary_hint(num, den, var) {
+                return Err(risch_unsupported(hint));
+            }
+            // B2: `ln(x)/xᵐ` (el brazo `Mul` no ve cocientes).
+            if let Some(xln) = risch_ln_over_pow(num, den, var)? {
+                return Ok(xln);
+            }
             // F3c: racionales `P(x)/Q(x)` por fracciones parciales (grado ≤ 4);
             // resto → `Err` honesto con la factorización parcial lograda.
             match risch_rational(num, den, var, depth, terms) {
@@ -625,7 +648,7 @@ fn risch_expr(
         Expr::Exp(arg) => {
             let (a, _) = crate::cas::cas_linear_coeff(arg, var).ok_or_else(|| {
                 risch_unsupported(
-                    "exp(f(x)) con f no lineal (p. ej. exp(x^2)); Risch completo pendiente"
+                    "exp(f(x)) con f no lineal (p. ej. exp(x^2)), no elemental en general; usa la cuadratura híbrida"
                         .to_string(),
                 )
             })?;
@@ -711,26 +734,39 @@ fn risch_expr(
                 )))))),
             ))
         }
-        // F3c: `∫sqrt(a·x+b) dx = 2·(a·x+b)^(3/2)/(3·a)`.
+        // F3c: `∫sqrt(a·x+b) dx = 2·(a·x+b)^(3/2)/(3·a)`; B2 extiende a
+        // cuadrática por Euler (`risch_sqrt_quadratic`), grado ≥ 3 →
+        // elíptica honesta.
         Expr::Sqrt(arg) => {
-            let (a, b) = crate::cas::cas_linear_coeff(arg, var).ok_or_else(|| {
-                risch_unsupported("sqrt(f(x)) con f no lineal; Risch completo pendiente".to_string())
-            })?;
-            if a.abs() < 1e-12 {
-                return Err(risch_unsupported("sqrt(constante) degenerada".to_string()));
-            }
-            Ok(Expr::Mul(
-                Box::new(Expr::Const(2.0 / (3.0 * a))),
-                Box::new(Expr::Pow(
-                    Box::new(Expr::Add(
-                        Box::new(Expr::Mul(
-                            Box::new(Expr::Const(a)),
-                            Box::new(var_expr),
+            if let Some((a, b)) = crate::cas::cas_linear_coeff(arg, var) {
+                if a.abs() < 1e-12 {
+                    return Err(risch_unsupported("sqrt(constante) degenerada".to_string()));
+                }
+                return Ok(Expr::Mul(
+                    Box::new(Expr::Const(2.0 / (3.0 * a))),
+                    Box::new(Expr::Pow(
+                        Box::new(Expr::Add(
+                            Box::new(Expr::Mul(
+                                Box::new(Expr::Const(a)),
+                                Box::new(var_expr),
+                            )),
+                            Box::new(Expr::Const(b)),
                         )),
-                        Box::new(Expr::Const(b)),
+                        Box::new(Expr::Const(1.5)),
                     )),
-                    Box::new(Expr::Const(1.5)),
-                )),
+                ));
+            }
+            if let Some(prim) = risch_sqrt_quadratic(arg, var)? {
+                return Ok(prim);
+            }
+            if poly_coeffs_bounded(arg, var, 8).is_some_and(|c| c.len() > 3) {
+                return Err(risch_unsupported(
+                    "integral elíptica (sqrt de grado ≥ 3), no elemental; usa la cuadratura híbrida"
+                        .to_string(),
+                ));
+            }
+            Err(risch_unsupported(
+                "sqrt(f(x)) con f no lineal ni cuadrática; Risch completo pendiente".to_string(),
             ))
         }
         // F3c: `∫cbrt(a·x+b) dx = 3·(a·x+b)^(4/3)/(4·a)`.
@@ -753,6 +789,15 @@ fn risch_expr(
                     )),
                     Box::new(Expr::Const(4.0 / 3.0)),
                 )),
+            ))
+        }
+        // B2: `asin/acos/atan(a·x+b)` por partes (95% escolar).
+        Expr::Asin(_) | Expr::Acos(_) | Expr::Atan(_) => {
+            if let Some(prim) = risch_inverse_trig(e, var)? {
+                return Ok(prim);
+            }
+            Err(risch_unsupported(
+                "inversa trig de argumento no lineal; Risch completo pendiente".to_string(),
             ))
         }
         _ => Err(risch_unsupported(format!(
@@ -1351,9 +1396,23 @@ fn risch_rational(
             .reduce(|a, b| Expr::Add(Box::new(a), Box::new(b)));
         return acc.ok_or_else(|| risch_unsupported("cociente vacío".to_string()));
     }
-    // Grado 3–4: pela lineales reales; resto irreducible → `Err` parcial.
+    // Grado 3–4: pela lineales reales; resto cuadrático irreducible
+    // (raíces complejas, B2) por colocación `+ (B·x+C)/Q2`; resto mayor o
+    // cuadrática repetida → `Err` parcial (Hermite completo pendiente).
     let (roots, rest) = peel_rational_roots(&q_full);
     if rest.len() > 1 {
+        if let Some(mixed) = risch_quad_rest_partial(&rem_c, &q_full, &roots, &rest, var, terms)? {
+            if prim_parts.is_empty() {
+                return Ok(mixed);
+            }
+            let poly_sum = prim_parts
+                .into_iter()
+                .reduce(|a, b| Expr::Add(Box::new(a), Box::new(b)))
+                .ok_or_else(|| {
+                    risch_unsupported("parte polinómica vacía con resto propio".to_string())
+                })?;
+            return Ok(Expr::Add(Box::new(poly_sum), Box::new(mixed)));
+        }
         let partial: Vec<String> = roots.iter().map(|r| format!("(x−{r:.6})")).collect();
         return Err(risch_unsupported(format!(
             "denominador con factor irreducible de grado {} (parcial: {}); factoriza el resto en lineales reales o usa Hermite/Rothstein",
@@ -1403,28 +1462,20 @@ fn risch_rational(
         ));
     }
     // Base `Q(x)/(x−r)^k` por incógnita (orden: por raíz, k = 1..mult).
+    // B2: exponente exacto `(mult−k)` en la propia raíz (el `skip` por par
+    // `(r,k)` sobre-contaba al sumar `Σk2` con `mult ≥ 2`).
     let mut mat: Vec<Vec<f64>> = Vec::new();
     let mut rhs_v: Vec<f64> = Vec::new();
     for xv in &xs {
         let mut row = Vec::with_capacity(m);
-        for (r, mult) in &run {
+        for (i, (_r, mult)) in run.iter().enumerate() {
             for k in 1..=*mult {
                 let mut basis = lead_q;
-                for (r2, mult2) in &run {
-                    for k2 in 1..=*mult2 {
-                        if r2 == r && k2 == k {
-                            continue;
-                        }
-                        basis *= (xv - r2).powi(k2 as i32);
-                    }
+                for (j, (r2, mult2)) in run.iter().enumerate() {
+                    let e = if i == j { mult - k } else { *mult2 };
+                    basis *= (xv - r2).powi(e as i32);
                 }
-                // Potencia restante de la propia raíz.
-                let own = if mult - k > 0 {
-                    (xv - r).powi((mult - k) as i32)
-                } else {
-                    1.0
-                };
-                row.push(basis * own);
+                row.push(basis);
             }
         }
         mat.push(row);
@@ -1477,7 +1528,1090 @@ fn risch_rational(
     acc.ok_or_else(|| risch_unsupported("cociente vacío".to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Frente B2: Risch pragmático 95% escolar (NO "Risch total" — indecidible).
+//
+// a) Trigonométricas por Weierstrass en espíritu: `sinⁿ·cosᵐ` por paridad
+//    (sustitución `s = sin/cos`) y reducción a pares, `tanⁿ` por recurrencia,
+//    `sec·tan`/`csc·cot` directas, `asin/acos/atan` lineales por partes.
+// b) Racionales grado ≤ 4 con cuadrática irreducible (raíces complejas) por
+//    colocación `Σ A/(x−r) + (B·x+C)/Q2`; la parte racional de
+//    Hermite-Ostrogradsky vive en los términos `1/(x−r)^k` ya resueltos.
+// c) `sqrt(a·x²+b·x+c)` por Euler completando cuadrados (casos `a>0` con
+//    `ln`, `a<0` con `asin`); `cbrt` lineal ya cubierto en F3c.
+// d) `P(x)·exp/sin/cos` por partes tabulares iteradas (grado ≤ 8) y
+//    `xⁿ·ln(x)` (con `n = −1 → ln²/2`).
+// Imposible honesto: `∫dx/ln(x)` (li), elípticas (`sqrt` grado ≥ 3),
+// `exp(x²)` → `Unsupported` con derivación a cuadratura híbrida.
+//
+// Presupuestos B2: `MAX_RISCH_TRIG_DEGREE` 8 (n+m), `MAX_RISCH_PARTS_DEGREE`
+// 8 (tabular), resto hereda `MAX_RISCH_DEPTH` 32 / `MAX_RISCH_TERMS` 64.
+// ---------------------------------------------------------------------------
+
+/// Grado total máximo `n+m` en potencias trigonométricas.
+pub const MAX_RISCH_TRIG_DEGREE: usize = 8;
+/// Grado máximo del polinomio en partes tabulares `P·exp/sin/cos`.
+pub const MAX_RISCH_PARTS_DEGREE: usize = 8;
+
+/// Familia trigonométrica de un factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrigKind {
+    Sin,
+    Cos,
+    Tan,
+    Sec,
+    Csc,
+    Cot,
+}
+
+/// Un factor trigonométrico: `(familia, argumento, pendiente, exponente)`.
+type TrigFactor = (TrigKind, crate::ast::Expr, f64, i64);
+
+/// Extrae `(familia, argumento, (a, b))` si `e` es trig con arg lineal.
+fn as_trig_linear(e: &crate::ast::Expr, var: &str) -> Option<(TrigKind, crate::ast::Expr, f64)> {
+    use crate::ast::Expr;
+    let (kind, arg) = match e {
+        Expr::Sin(u) => (TrigKind::Sin, u),
+        Expr::Cos(u) => (TrigKind::Cos, u),
+        Expr::Tan(u) => (TrigKind::Tan, u),
+        Expr::Sec(u) => (TrigKind::Sec, u),
+        Expr::Csc(u) => (TrigKind::Csc, u),
+        Expr::Cot(u) => (TrigKind::Cot, u),
+        _ => return None,
+    };
+    let (a, _) = crate::cas::cas_linear_coeff(arg, var)?;
+    if !a.is_finite() || a.abs() < POLY_EPS {
+        return None;
+    }
+    Some((kind, arg.as_ref().clone(), a))
+}
+
+/// Extrae `(familia, argumento, pendiente, exponente)` de `Trig(u)` (`n=1`)
+/// o `Trig(u)^n` con `n` entero `0..=MAX_RISCH_TRIG_DEGREE`.
+fn as_trig_pow(e: &crate::ast::Expr, var: &str) -> Option<(TrigKind, crate::ast::Expr, f64, i64)> {
+    use crate::ast::Expr;
+    if let Some((kind, arg, a)) = as_trig_linear(e, var) {
+        return Some((kind, arg, a, 1));
+    }
+    if let Expr::Pow(base, exp) = e {
+        let n = crate::cas::cas_const_value(exp)?;
+        if !n.is_finite() || n < 0.0 || (n - n.round()).abs() > 1e-9 {
+            return None;
+        }
+        let ni = n.round() as i64;
+        if ni as usize > MAX_RISCH_TRIG_DEGREE {
+            return None;
+        }
+        let (kind, arg, a) = as_trig_linear(base, var)?;
+        return Some((kind, arg, a, ni));
+    }
+    None
+}
+
+/// Aplana `e` como `k·Π Trig(u)^n`; `None` si hay otro factor.
+fn collect_trig_product(e: &crate::ast::Expr, var: &str) -> Option<(f64, Vec<TrigFactor>)> {
+    use crate::ast::Expr;
+    match e {
+        Expr::Mul(a, b) => {
+            let (mut k1, mut f1) = collect_trig_product(a, var)?;
+            let (k2, mut f2) = collect_trig_product(b, var)?;
+            let k = k1 * k2;
+            if !k.is_finite() {
+                return None;
+            }
+            k1 = k;
+            f1.append(&mut f2);
+            Some((k1, f1))
+        }
+        _ => {
+            if let Some(k) = crate::cas::cas_const_value(e) {
+                if k.is_finite() {
+                    return Some((k, Vec::new()));
+                }
+                return None;
+            }
+            as_trig_pow(e, var).map(|t| (1.0, vec![t]))
+        }
+    }
+}
+
+/// Primitiva de `sin^m(u)` con `u = a·x+b` (reducción, `m ≤ 8`).
+fn trig_sin_pow_prim(
+    m: i64,
+    a: f64,
+    u: &crate::ast::Expr,
+    var: &str,
+    terms: &mut usize,
+) -> Result<crate::ast::Expr, RischError> {
+    use crate::ast::Expr;
+    *terms += 1;
+    if *terms > MAX_RISCH_TERMS {
+        return Err(RischError::ResourceLimit {
+            detail: format!("más de {MAX_RISCH_TERMS} términos"),
+        });
+    }
+    let x = Expr::Var(var.to_string());
+    if m == 0 {
+        return Ok(x);
+    }
+    if m == 1 {
+        return Ok(Expr::Mul(
+            Box::new(Expr::Const(-1.0 / a)),
+            Box::new(Expr::Cos(Box::new(u.clone()))),
+        ));
+    }
+    let s = Expr::Sin(Box::new(u.clone()));
+    let c = Expr::Cos(Box::new(u.clone()));
+    let first = Expr::Mul(
+        Box::new(Expr::Const(-1.0 / (a * m as f64))),
+        Box::new(Expr::Mul(
+            Box::new(Expr::Pow(
+                Box::new(s),
+                Box::new(Expr::Const((m - 1) as f64)),
+            )),
+            Box::new(c),
+        )),
+    );
+    let rest = trig_sin_pow_prim(m - 2, a, u, var, terms)?;
+    Ok(Expr::Add(
+        Box::new(first),
+        Box::new(Expr::Mul(
+            Box::new(Expr::Const((m - 1) as f64 / m as f64)),
+            Box::new(rest),
+        )),
+    ))
+}
+
+/// Primitiva de `cos^m(u)` con `u = a·x+b` (reducción, `m ≤ 8`).
+fn trig_cos_pow_prim(
+    m: i64,
+    a: f64,
+    u: &crate::ast::Expr,
+    var: &str,
+    terms: &mut usize,
+) -> Result<crate::ast::Expr, RischError> {
+    use crate::ast::Expr;
+    *terms += 1;
+    if *terms > MAX_RISCH_TERMS {
+        return Err(RischError::ResourceLimit {
+            detail: format!("más de {MAX_RISCH_TERMS} términos"),
+        });
+    }
+    let x = Expr::Var(var.to_string());
+    if m == 0 {
+        return Ok(x);
+    }
+    if m == 1 {
+        return Ok(Expr::Mul(
+            Box::new(Expr::Const(1.0 / a)),
+            Box::new(Expr::Sin(Box::new(u.clone()))),
+        ));
+    }
+    let s = Expr::Sin(Box::new(u.clone()));
+    let c = Expr::Cos(Box::new(u.clone()));
+    let first = Expr::Mul(
+        Box::new(Expr::Const(1.0 / (a * m as f64))),
+        Box::new(Expr::Mul(
+            Box::new(Expr::Pow(
+                Box::new(c),
+                Box::new(Expr::Const((m - 1) as f64)),
+            )),
+            Box::new(s),
+        )),
+    );
+    let rest = trig_cos_pow_prim(m - 2, a, u, var, terms)?;
+    Ok(Expr::Add(
+        Box::new(first),
+        Box::new(Expr::Mul(
+            Box::new(Expr::Const((m - 1) as f64 / m as f64)),
+            Box::new(rest),
+        )),
+    ))
+}
+
+/// Primitiva de `tan^n(u)`: `tan^{n−1}/(a(n−1)) − T(n−2)`.
+fn trig_tan_pow_prim(
+    n: i64,
+    a: f64,
+    u: &crate::ast::Expr,
+    var: &str,
+    terms: &mut usize,
+) -> Result<crate::ast::Expr, RischError> {
+    use crate::ast::Expr;
+    *terms += 1;
+    if *terms > MAX_RISCH_TERMS {
+        return Err(RischError::ResourceLimit {
+            detail: format!("más de {MAX_RISCH_TERMS} términos"),
+        });
+    }
+    if n == 0 {
+        return Ok(Expr::Var(var.to_string()));
+    }
+    if n == 1 {
+        return Ok(Expr::Mul(
+            Box::new(Expr::Const(-1.0 / a)),
+            Box::new(Expr::Ln(Box::new(Expr::Abs(Box::new(Expr::Cos(
+                Box::new(u.clone()),
+            )))))),
+        ));
+    }
+    let first = Expr::Mul(
+        Box::new(Expr::Const(1.0 / (a * (n - 1) as f64))),
+        Box::new(Expr::Pow(
+            Box::new(Expr::Tan(Box::new(u.clone()))),
+            Box::new(Expr::Const((n - 1) as f64)),
+        )),
+    );
+    let rest = trig_tan_pow_prim(n - 2, a, u, var, terms)?;
+    Ok(Expr::Sub(Box::new(first), Box::new(rest)))
+}
+
+/// Coeficientes ascendentes de `s^ms·(1−s²)^q` (`q ≤ 4`).
+fn one_minus_sq_pow(ms: usize, q: usize) -> Vec<f64> {
+    let mut base = vec![0.0; 2 * q + 1];
+    let mut binom = 1.0;
+    for j in 0..=q {
+        if j > 0 {
+            binom = binom * (q - j + 1) as f64 / j as f64;
+        }
+        base[2 * j] = binom * (if j % 2 == 0 { 1.0 } else { -1.0 });
+    }
+    let mut out = vec![0.0; ms + 2 * q + 1];
+    for (j, bj) in base.iter().enumerate() {
+        out[ms + j] = *bj;
+    }
+    out
+}
+
+/// Primitiva de `sin^ms(u)·cos^mc(u)` (`ms+mc ≤ 8`, mismo `u = a·x+b`).
+fn trig_sin_cos_prim(
+    ms: i64,
+    mc: i64,
+    a: f64,
+    u: &crate::ast::Expr,
+    var: &str,
+    terms: &mut usize,
+) -> Result<crate::ast::Expr, RischError> {
+    use crate::ast::Expr;
+    if ms < 0 || mc < 0 || ms + mc > MAX_RISCH_TRIG_DEGREE as i64 {
+        return Err(risch_unsupported(format!(
+            "sin^{ms}·cos^{mc} excede el grado {MAX_RISCH_TRIG_DEGREE}; Weierstrass completo pendiente"
+        )));
+    }
+    if mc == 0 {
+        return trig_sin_pow_prim(ms, a, u, var, terms);
+    }
+    if ms == 0 {
+        return trig_cos_pow_prim(mc, a, u, var, terms);
+    }
+    // Exponente impar: sustitución `s = sin(u)` o `c = cos(u)` → polinomio.
+    if mc % 2 == 1 {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let coeffs = one_minus_sq_pow(ms as usize, ((mc - 1) / 2) as usize);
+        return poly_in_trig_prim(&coeffs, &Expr::Sin(Box::new(u.clone())), a, terms);
+    }
+    if ms % 2 == 1 {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let coeffs = one_minus_sq_pow(mc as usize, ((ms - 1) / 2) as usize);
+        // `cos^mc·sin^{ms−1}` simétrico: se integra en `c = cos(u)` con
+        // signo menos (`dc = −sin(u)·a·dx`).
+        let mut prim = poly_in_trig_prim(&coeffs, &Expr::Cos(Box::new(u.clone())), a, terms)?;
+        prim = Expr::Neg(Box::new(prim));
+        return Ok(prim);
+    }
+    // Ambos pares (`mc ≥ 2`): `I(ms,mc) = s^{ms+1}c^{mc−1}/(a(ms+mc)) + (mc−1)/(ms+mc)·I(ms,mc−2)`.
+    *terms += 1;
+    if *terms > MAX_RISCH_TERMS {
+        return Err(RischError::ResourceLimit {
+            detail: format!("más de {MAX_RISCH_TERMS} términos"),
+        });
+    }
+    let total = (ms + mc) as f64;
+    let first = Expr::Mul(
+        Box::new(Expr::Const(1.0 / (a * total))),
+        Box::new(Expr::Mul(
+            Box::new(Expr::Pow(
+                Box::new(Expr::Sin(Box::new(u.clone()))),
+                Box::new(Expr::Const((ms + 1) as f64)),
+            )),
+            Box::new(Expr::Pow(
+                Box::new(Expr::Cos(Box::new(u.clone()))),
+                Box::new(Expr::Const((mc - 1) as f64)),
+            )),
+        )),
+    );
+    let rest = trig_sin_cos_prim(ms, mc - 2, a, u, var, terms)?;
+    Ok(Expr::Add(
+        Box::new(first),
+        Box::new(Expr::Mul(
+            Box::new(Expr::Const((mc - 1) as f64 / total)),
+            Box::new(rest),
+        )),
+    ))
+}
+
+/// `∫Σ c_j·T(u)^j dx = Σ c_j·T(u)^{j+1}/((j+1)·a)` con `T = sin/cos`.
+fn poly_in_trig_prim(
+    coeffs: &[f64],
+    t: &crate::ast::Expr,
+    a: f64,
+    terms: &mut usize,
+) -> Result<crate::ast::Expr, RischError> {
+    use crate::ast::Expr;
+    let mut acc: Option<Expr> = None;
+    for (j, cj) in coeffs.iter().enumerate() {
+        if cj.abs() < POLY_EPS {
+            continue;
+        }
+        *terms += 1;
+        if *terms > MAX_RISCH_TERMS {
+            return Err(RischError::ResourceLimit {
+                detail: format!("más de {MAX_RISCH_TERMS} términos"),
+            });
+        }
+        let e = (j + 1) as f64;
+        let term = Expr::Mul(
+            Box::new(Expr::Const(cj / (e * a))),
+            Box::new(Expr::Pow(Box::new(t.clone()), Box::new(Expr::Const(e)))),
+        );
+        acc = Some(match acc {
+            Some(prev) => Expr::Add(Box::new(prev), Box::new(term)),
+            None => term,
+        });
+    }
+    acc.ok_or_else(|| risch_unsupported("sustitución trig degenerada".to_string()))
+}
+
+/// Producto trigonométrico `k·Π Trig(u)^n` con el mismo `u` lineal.
+fn risch_trig_product(
+    a: &crate::ast::Expr,
+    b: &crate::ast::Expr,
+    var: &str,
+    terms: &mut usize,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    use crate::ast::Expr;
+    let combined = Expr::Mul(Box::new(a.clone()), Box::new(b.clone()));
+    let Some((k, factors)) = collect_trig_product(&combined, var) else {
+        return Ok(None);
+    };
+    if factors.is_empty() {
+        return Ok(None);
+    }
+    let (u0, a0) = (factors[0].1.clone(), factors[0].2);
+    if !factors
+        .iter()
+        .all(|(_, u, slope, _)| (*slope - a0).abs() < 1e-9 && u.structurally_eq(&u0))
+    {
+        return Ok(None);
+    }
+    let mut ms = 0_i64;
+    let mut mc = 0_i64;
+    let mut tan_n: Option<i64> = None;
+    for (kind, _, _, n) in &factors {
+        match kind {
+            TrigKind::Sin => ms += *n,
+            TrigKind::Cos => mc += *n,
+            TrigKind::Tan => {
+                if ms != 0 || mc != 0 || tan_n.is_some() {
+                    return Ok(None);
+                }
+                tan_n = Some(*n);
+            }
+            TrigKind::Sec if *n == 1 => {
+                // `sec·tan` → `sec/a` (y `sec²` ya vive en el brazo `Pow`).
+                let rest: Vec<_> = factors
+                    .iter()
+                    .filter(|(kd, _, _, _)| *kd != TrigKind::Sec)
+                    .collect();
+                if rest.len() == 1
+                    && rest[0].0 == TrigKind::Tan
+                    && rest[0].3 == 1
+                    && factors.len() == 2
+                {
+                    let prim = Expr::Mul(
+                        Box::new(Expr::Const(k / a0)),
+                        Box::new(Expr::Sec(Box::new(u0))),
+                    );
+                    return Ok(Some(prim));
+                }
+                return Ok(None);
+            }
+            TrigKind::Csc if *n == 1 => {
+                let rest: Vec<_> = factors
+                    .iter()
+                    .filter(|(kd, _, _, _)| *kd != TrigKind::Csc)
+                    .collect();
+                if rest.len() == 1
+                    && rest[0].0 == TrigKind::Cot
+                    && rest[0].3 == 1
+                    && factors.len() == 2
+                {
+                    let prim = Expr::Mul(
+                        Box::new(Expr::Const(-k / a0)),
+                        Box::new(Expr::Csc(Box::new(u0))),
+                    );
+                    return Ok(Some(prim));
+                }
+                return Ok(None);
+            }
+            _ => return Ok(None),
+        }
+    }
+    if let Some(n) = tan_n {
+        let prim = trig_tan_pow_prim(n, a0, &u0, var, terms)?;
+        return Ok(Some(scale_const(k, prim)));
+    }
+    if ms + mc > MAX_RISCH_TRIG_DEGREE as i64 {
+        return Err(risch_unsupported(format!(
+            "grado trig {ms}+{mc} excede {MAX_RISCH_TRIG_DEGREE}"
+        )));
+    }
+    let prim = trig_sin_cos_prim(ms, mc, a0, &u0, var, terms)?;
+    Ok(Some(scale_const(k, prim)))
+}
+
+/// Multiplica una primitiva por la constante externa `k` (`k = 1` intacta).
+fn scale_const(k: f64, prim: crate::ast::Expr) -> crate::ast::Expr {
+    use crate::ast::Expr;
+    if (k - 1.0).abs() < 1e-12 {
+        prim
+    } else {
+        Expr::Mul(Box::new(Expr::Const(k)), Box::new(prim))
+    }
+}
+
+/// Potencia trig aislada `Trig(u)^n` (`Pow`): `sin/cos/tan` + `csc²`.
+fn risch_trig_pow(
+    base: &crate::ast::Expr,
+    exp: &crate::ast::Expr,
+    var: &str,
+    terms: &mut usize,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    let n = match crate::cas::cas_const_value(exp) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    if !n.is_finite() || n < 0.0 || (n - n.round()).abs() > 1e-9 {
+        return Ok(None);
+    }
+    let ni = n.round() as i64;
+    if ni as usize > MAX_RISCH_TRIG_DEGREE {
+        return Err(risch_unsupported(format!(
+            "potencia trig {ni} excede {MAX_RISCH_TRIG_DEGREE}"
+        )));
+    }
+    let Some((kind, arg, a)) = as_trig_linear(base, var) else {
+        return Ok(None);
+    };
+    match kind {
+        TrigKind::Sin => Ok(Some(trig_sin_pow_prim(ni, a, &arg, var, terms)?)),
+        TrigKind::Cos => Ok(Some(trig_cos_pow_prim(ni, a, &arg, var, terms)?)),
+        TrigKind::Tan => Ok(Some(trig_tan_pow_prim(ni, a, &arg, var, terms)?)),
+        TrigKind::Csc if ni == 2 => {
+            use crate::ast::Expr;
+            Ok(Some(Expr::Mul(
+                Box::new(Expr::Const(-1.0 / a)),
+                Box::new(Expr::Cot(Box::new(arg))),
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `asin/acos/atan(a·x+b)` por partes (`x·f − ∫x·f'` con `f'` algebraica).
+fn risch_inverse_trig(
+    e: &crate::ast::Expr,
+    var: &str,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    use crate::ast::Expr;
+    let (is_asin, is_acos, arg) = match e {
+        Expr::Asin(u) => (true, false, u),
+        Expr::Acos(u) => (false, true, u),
+        Expr::Atan(u) => (false, false, u),
+        _ => return Ok(None),
+    };
+    let (a, b) = match crate::cas::cas_linear_coeff(arg, var) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    if !a.is_finite() || !b.is_finite() || a.abs() < POLY_EPS {
+        return Ok(None);
+    }
+    let x = Expr::Var(var.to_string());
+    let u = Expr::Add(
+        Box::new(Expr::Mul(Box::new(Expr::Const(a)), Box::new(x.clone()))),
+        Box::new(Expr::Const(b)),
+    );
+    let prim = if is_asin {
+        // `(u·asin(u) + sqrt(1−u²))/a`.
+        Expr::Div(
+            Box::new(Expr::Add(
+                Box::new(Expr::Mul(Box::new(u.clone()), Box::new(e.clone()))),
+                Box::new(Expr::Sqrt(Box::new(Expr::Sub(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(Expr::Pow(Box::new(u), Box::new(Expr::Const(2.0)))),
+                )))),
+            )),
+            Box::new(Expr::Const(a)),
+        )
+    } else if is_acos {
+        // `(u·acos(u) − sqrt(1−u²))/a`.
+        Expr::Div(
+            Box::new(Expr::Sub(
+                Box::new(Expr::Mul(Box::new(u.clone()), Box::new(e.clone()))),
+                Box::new(Expr::Sqrt(Box::new(Expr::Sub(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(Expr::Pow(Box::new(u), Box::new(Expr::Const(2.0)))),
+                )))),
+            )),
+            Box::new(Expr::Const(a)),
+        )
+    } else {
+        // `(u·atan(u) − ln(1+u²)/2)/a`.
+        Expr::Div(
+            Box::new(Expr::Sub(
+                Box::new(Expr::Mul(Box::new(u.clone()), Box::new(e.clone()))),
+                Box::new(Expr::Div(
+                    Box::new(Expr::Ln(Box::new(Expr::Add(
+                        Box::new(Expr::Const(1.0)),
+                        Box::new(Expr::Pow(Box::new(u), Box::new(Expr::Const(2.0)))),
+                    )))),
+                    Box::new(Expr::Const(2.0)),
+                )),
+            )),
+            Box::new(Expr::Const(a)),
+        )
+    };
+    Ok(Some(prim))
+}
+
+/// `sqrt(a·x²+b·x+c)` por Euler completando cuadrados.
+///
+/// `a > 0`: `(2ax+b)·S/(4a) + (4ac−b²)·ln|2√a·S+2ax+b|/(8a√a)`;
+/// `a < 0, q > 0`: `(2ax+b)·S/(4a) − q·asin((2ax+b)/√D)/(2√−a)`
+/// con `D = b²−4ac`. `None` si no es cuadrática; elípticas (grado ≥ 3)
+/// las rechaza el llamador con `Unsupported → cuadratura`.
+fn risch_sqrt_quadratic(
+    arg: &crate::ast::Expr,
+    var: &str,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    use crate::ast::Expr;
+    let coeffs = match poly_coeffs_bounded(arg, var, 2) {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    if coeffs.len() != 3 {
+        return Ok(None);
+    }
+    let (c0, c1, c2) = (coeffs[0], coeffs[1], coeffs[2]);
+    if !c0.is_finite() || !c1.is_finite() || !c2.is_finite() || c2.abs() < POLY_EPS {
+        return Ok(None);
+    }
+    let x = Expr::Var(var.to_string());
+    let lin = Expr::Add(
+        Box::new(Expr::Mul(
+            Box::new(Expr::Const(2.0 * c2)),
+            Box::new(x.clone()),
+        )),
+        Box::new(Expr::Const(c1)),
+    );
+    let s = Expr::Sqrt(Box::new(arg.clone()));
+    let first = Expr::Div(
+        Box::new(Expr::Mul(Box::new(lin.clone()), Box::new(s.clone()))),
+        Box::new(Expr::Const(4.0 * c2)),
+    );
+    if c2 > 0.0 {
+        // Euler hiperbólico: logaritmo (vale con `q` de cualquier signo).
+        let sq = c2.sqrt();
+        let log_arg = Expr::Add(
+            Box::new(Expr::Mul(Box::new(Expr::Const(2.0 * sq)), Box::new(s))),
+            Box::new(lin),
+        );
+        let k = (4.0 * c2 * c0 - c1 * c1) / (8.0 * c2 * sq);
+        if !k.is_finite() {
+            return Ok(None);
+        }
+        if k.abs() < POLY_EPS {
+            return Ok(Some(first));
+        }
+        return Ok(Some(Expr::Add(
+            Box::new(first),
+            Box::new(Expr::Mul(
+                Box::new(Expr::Const(k)),
+                Box::new(Expr::Ln(Box::new(Expr::Abs(Box::new(log_arg))))),
+            )),
+        )));
+    }
+    // `a < 0`: exige discriminante positivo (arco real no vacío).
+    let disc = c1 * c1 - 4.0 * c2 * c0;
+    if !disc.is_finite() || disc <= POLY_EPS {
+        return Err(risch_unsupported(
+            "sqrt de cuadrática cóncava sin interior real (o punto aislado); nada que integrar"
+                .to_string(),
+        ));
+    }
+    let q = (4.0 * c2 * c0 - c1 * c1) / (4.0 * c2);
+    let neg = (-c2).sqrt();
+    let k = -q / (2.0 * neg);
+    if !k.is_finite() {
+        return Ok(None);
+    }
+    let asin_arg = Expr::Div(Box::new(lin), Box::new(Expr::Const(disc.sqrt())));
+    Ok(Some(Expr::Add(
+        Box::new(first),
+        Box::new(Expr::Mul(
+            Box::new(Expr::Const(k)),
+            Box::new(Expr::Asin(Box::new(asin_arg))),
+        )),
+    )))
+}
+
+/// Derivadas sucesivas de un polinomio ascendente (`P, P', …, P^(m)`).
+fn poly_deriv_chain(p: &[f64]) -> Vec<Vec<f64>> {
+    let mut chain = vec![p.to_vec()];
+    loop {
+        let prev = chain[chain.len() - 1].clone();
+        if prev.len() <= 1 {
+            break;
+        }
+        let next: Vec<f64> = prev
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(j, cj)| j as f64 * cj)
+            .collect();
+        if next.iter().all(|v| v.abs() < POLY_EPS) {
+            break;
+        }
+        chain.push(next);
+    }
+    chain
+}
+
+/// AST suma `Σ c_j·x^j` desde coeficientes ascendentes.
+fn poly_ast_asc(coeffs: &[f64], var: &str) -> Option<crate::ast::Expr> {
+    use crate::ast::Expr;
+    let mut acc: Option<Expr> = None;
+    for (j, cj) in coeffs.iter().enumerate() {
+        if !cj.is_finite() || cj.abs() < POLY_EPS {
+            continue;
+        }
+        let term = if j == 0 {
+            Expr::Const(*cj)
+        } else if j == 1 {
+            Expr::Mul(
+                Box::new(Expr::Const(*cj)),
+                Box::new(Expr::Var(var.to_string())),
+            )
+        } else {
+            Expr::Mul(
+                Box::new(Expr::Const(*cj)),
+                Box::new(Expr::Pow(
+                    Box::new(Expr::Var(var.to_string())),
+                    Box::new(Expr::Const(j as f64)),
+                )),
+            )
+        };
+        acc = Some(match acc {
+            Some(prev) => Expr::Add(Box::new(prev), Box::new(term)),
+            None => term,
+        });
+    }
+    acc
+}
+
+/// `P(x)·exp/sin/cos(a·x+b)` por partes tabulares (`grado(P) ≤ 8`).
+///
+/// Tabular: `∫P·e^{ax} = e^{ax}·Σ(−1)^j·P^{(j)}/a^{j+1}`; para `sin/cos`
+/// el ciclo de 4 signos cancela `S'` contra el término anterior.
+fn risch_poly_exp_trig(
+    a: &crate::ast::Expr,
+    b: &crate::ast::Expr,
+    var: &str,
+    terms: &mut usize,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    use crate::ast::Expr;
+    for (poly_side, t_side) in [(a, b), (b, a)] {
+        let p = match poly_coeffs_bounded(poly_side, var, MAX_RISCH_PARTS_DEGREE) {
+            Some(c) => c,
+            None => continue,
+        };
+        if p.len() <= 1 || p.len() - 1 > MAX_RISCH_PARTS_DEGREE {
+            continue;
+        }
+        let (is_exp, is_sin, is_cos, arg) = match t_side {
+            Expr::Exp(u) => (true, false, false, u),
+            Expr::Sin(u) => (false, true, false, u),
+            Expr::Cos(u) => (false, false, true, u),
+            _ => continue,
+        };
+        let (slope, phase) = match crate::cas::cas_linear_coeff(arg, var) {
+            Some(v) => v,
+            None => continue,
+        };
+        if !slope.is_finite() || !phase.is_finite() || slope.abs() < POLY_EPS {
+            continue;
+        }
+        let chain = poly_deriv_chain(&p);
+        let mut acc: Option<Expr> = None;
+        for (j, pj) in chain.iter().enumerate() {
+            let Some(poly) = poly_ast_asc(pj, var) else {
+                continue;
+            };
+            *terms += 1;
+            if *terms > MAX_RISCH_TERMS {
+                return Err(RischError::ResourceLimit {
+                    detail: format!("más de {MAX_RISCH_TERMS} términos"),
+                });
+            }
+            let denom = slope.powi(j as i32 + 1);
+            if !denom.is_finite() || denom == 0.0 {
+                return Ok(None);
+            }
+            let term = if is_exp {
+                let sign = if j % 2 == 0 { 1.0 } else { -1.0 };
+                let base = Expr::Exp(arg.clone());
+                Expr::Mul(
+                    Box::new(Expr::Mul(
+                        Box::new(Expr::Const(sign / denom)),
+                        Box::new(poly),
+                    )),
+                    Box::new(base),
+                )
+            } else {
+                // Ciclo `sin`: j par → cos con `(−1)^{j/2+1}`, j impar → sin
+                // con `(−1)^{(j−1)/2}`; `cos`: j par → sin con `(−1)^{j/2}`,
+                // j impar → cos con `(−1)^{(j−1)/2}`.
+                let half = j / 2;
+                let sign = if half % 2 == 0 { 1.0 } else { -1.0 };
+                let trig = if (is_sin && j % 2 == 1) || (is_cos && j % 2 == 0) {
+                    Expr::Sin(arg.clone())
+                } else {
+                    Expr::Cos(arg.clone())
+                };
+                let signed = if is_sin {
+                    if j % 2 == 0 {
+                        -sign
+                    } else {
+                        sign
+                    }
+                } else {
+                    sign
+                };
+                Expr::Mul(
+                    Box::new(Expr::Mul(
+                        Box::new(Expr::Const(signed / denom)),
+                        Box::new(poly),
+                    )),
+                    Box::new(trig),
+                )
+            };
+            acc = Some(match acc {
+                Some(prev) => Expr::Add(Box::new(prev), Box::new(term)),
+                None => term,
+            });
+        }
+        return Ok(acc);
+    }
+    Ok(None)
+}
+
+/// Primitiva cerrada de `xⁿ·ln(x)` (`None` si `n` degenerada).
+fn x_pow_ln_prim(n: f64, var: &str) -> Option<crate::ast::Expr> {
+    use crate::ast::Expr;
+    if !n.is_finite() {
+        return None;
+    }
+    let x = Expr::Var(var.to_string());
+    let lnx = Expr::Ln(Box::new(x.clone()));
+    if (n + 1.0).abs() < 1e-12 {
+        // `∫ln(x)/x dx = ln²(x)/2`.
+        return Some(Expr::Mul(
+            Box::new(Expr::Const(0.5)),
+            Box::new(Expr::Pow(Box::new(lnx), Box::new(Expr::Const(2.0)))),
+        ));
+    }
+    let next = n + 1.0;
+    if !next.is_finite() || next == 0.0 {
+        return None;
+    }
+    let bracket = Expr::Sub(
+        Box::new(Expr::Mul(Box::new(Expr::Const(next)), Box::new(lnx))),
+        Box::new(Expr::Const(1.0)),
+    );
+    Some(Expr::Mul(
+        Box::new(Expr::Const(1.0 / (next * next))),
+        Box::new(Expr::Mul(
+            Box::new(Expr::Pow(Box::new(x), Box::new(Expr::Const(next)))),
+            Box::new(bracket),
+        )),
+    ))
+}
+
+/// `ln(x)/xᵐ` (`m = 1` pelado o `Pow`): `x^(−m)·ln(x)`.
+fn risch_ln_over_pow(
+    num: &crate::ast::Expr,
+    den: &crate::ast::Expr,
+    var: &str,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    use crate::ast::Expr;
+    if !matches!(num, Expr::Ln(inner) if matches!(inner.as_ref(), Expr::Var(name) if name == var)) {
+        return Ok(None);
+    }
+    if matches!(den, Expr::Var(name) if name == var) {
+        return Ok(x_pow_ln_prim(-1.0, var));
+    }
+    if let Expr::Pow(base, exp) = den {
+        if matches!(base.as_ref(), Expr::Var(name) if name == var) {
+            if let Some(m) = crate::cas::cas_const_value(exp) {
+                if m.is_finite() {
+                    return Ok(x_pow_ln_prim(-m, var));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+fn risch_x_pow_ln(
+    a: &crate::ast::Expr,
+    b: &crate::ast::Expr,
+    var: &str,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    use crate::ast::Expr;
+    for (pow_side, ln_side) in [(a, b), (b, a)] {
+        if !matches!(ln_side, Expr::Ln(inner) if matches!(inner.as_ref(), Expr::Var(name) if name == var))
+        {
+            continue;
+        }
+        let n = match pow_side {
+            Expr::Var(name) if name == var => 1.0,
+            Expr::Pow(base, exp) if matches!(base.as_ref(), Expr::Var(name) if name == var) => {
+                match crate::cas::cas_const_value(exp) {
+                    Some(v) if v.is_finite() => v,
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+        if let Some(prim) = x_pow_ln_prim(n, var) {
+            return Ok(Some(prim));
+        }
+    }
+    Ok(None)
+}
+
+/// Detecta integrandos no elementales: `1/ln(x)` (li), `sqrt` de grado ≥ 3
+/// (elípticas). Devuelve el `hint` honesto con derivación a cuadratura.
+fn risch_non_elementary_hint(
+    num: &crate::ast::Expr,
+    den: &crate::ast::Expr,
+    var: &str,
+) -> Option<String> {
+    use crate::ast::Expr;
+    // `K/ln(x)` o `K/ln(f(x))`: logaritmo integral, no elemental.
+    if let Expr::Ln(_) = den {
+        if crate::cas::cas_const_value(num).is_some() {
+            return Some("∫dx/ln(x) = li(x), no elemental; usa la cuadratura híbrida".to_string());
+        }
+    }
+    // Elípticas: `sqrt`/`cbrt` de grado ≥ 3 en numerador o denominador.
+    for side in [num, den] {
+        let mut stack = vec![side];
+        while let Some(e) = stack.pop() {
+            match e {
+                Expr::Sqrt(inner) | Expr::Cbrt(inner) => {
+                    if let Some(c) = poly_coeffs_bounded(inner, var, 8) {
+                        if c.len() > 3 {
+                            return Some(
+                                "integral elíptica (raíz de grado ≥ 3), no elemental; usa la cuadratura híbrida"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                Expr::Add(x, y)
+                | Expr::Sub(x, y)
+                | Expr::Mul(x, y)
+                | Expr::Div(x, y)
+                | Expr::Pow(x, y) => {
+                    stack.push(x);
+                    stack.push(y);
+                }
+                Expr::Neg(x) => stack.push(x),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Fracciones parciales con resto cuadrático irreducible (`B2.1b`).
+///
+/// Tras pelar `m` lineales reales queda `R(x)/(lc·Π(x−r)·Q2)` con `Q2`
+/// cuadrática mónica irreducible: incógnitas `A_j` + `(B, C)` resueltas por
+/// colocación en `m+2` puntos enteros; la parte `(B·x+C)/Q2` se integra con
+/// `primitive_irreducible_quadratic` (`ln + atan`: raíces complejas).
+/// Resto de grado ≥ 3 o cuadrática repetida → `Err` honesto (Hermite
+/// completo pendiente, deriva a `symbolic::integrate`).
+fn risch_quad_rest_partial(
+    rem_c: &[f64],
+    q_full: &[f64],
+    roots: &[f64],
+    rest: &[f64],
+    var: &str,
+    terms: &mut usize,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    use crate::ast::Expr;
+    if rest.len() != 3 {
+        return Ok(None);
+    }
+    let (r0, r1, r2) = (rest[0], rest[1], rest[2]);
+    if r2.abs() < POLY_EPS {
+        return Ok(None);
+    }
+    if r1 * r1 - 4.0 * r2 * r0 >= -POLY_EPS {
+        return Ok(None);
+    }
+    // Agrupa lineales con multiplicidad (ordenadas).
+    let mut run: Vec<(f64, usize)> = Vec::new();
+    let mut sorted = roots.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    for r in sorted {
+        match run.last_mut() {
+            Some(last) if (last.0 - r).abs() < 1e-9 => last.1 += 1,
+            _ => run.push((r, 1)),
+        }
+    }
+    let m: usize = run.iter().map(|(_, k)| k).sum();
+    let lead_q = q_full.last().copied().unwrap_or(1.0);
+    // Puntos de colocación enteros que evitan raíces y ceros de `Q2`.
+    let mut xs: Vec<f64> = Vec::new();
+    let mut cand: i64 = 0;
+    while xs.len() < m + 2 && cand < 128 {
+        for v in [cand as f64, -(cand as f64)] {
+            if xs.len() >= m + 2 {
+                break;
+            }
+            if run.iter().any(|(r, _)| (v - r).abs() < 1e-9) || xs.contains(&v) {
+                continue;
+            }
+            if (r2 * v * v + r1 * v + r0).abs() < 1e-9 {
+                continue;
+            }
+            xs.push(v);
+        }
+        cand += 1;
+    }
+    xs.truncate(m + 2);
+    if xs.len() < m + 2 {
+        return Ok(None);
+    }
+    // Base por incógnita: `Q(x)/(x−r)^k` para lineales, `Q(x)/Q2·x^j`
+    // (`j = 0, 1`) para `(B·x+C)`.
+    let mut mat: Vec<Vec<f64>> = Vec::new();
+    let mut rhs_v: Vec<f64> = Vec::new();
+    for xv in &xs {
+        let mut row = Vec::with_capacity(m + 2);
+        // Base exacta `Q(x)/(x−r)^k` (B2: exponente `mult−k`, ver arriba).
+        for (i, (_r, mult)) in run.iter().enumerate() {
+            for k in 1..=*mult {
+                let mut basis = lead_q * (r2 * xv * xv + r1 * xv + r0);
+                for (j, (r2b, mult2)) in run.iter().enumerate() {
+                    let e = if i == j { mult - k } else { *mult2 };
+                    basis *= (xv - r2b).powi(e as i32);
+                }
+                row.push(basis);
+            }
+        }
+        // Identidad ×Q(x): `R = Σ A·Q/(x−r)^k + (B·xv+C)·Q/Q2`, con
+        // `Q/Q2 = lead_q·Π(xv−r)^mult` (= `lin_basis`).
+        let mut lin_basis = lead_q;
+        for (r2b, mult2) in &run {
+            lin_basis *= (xv - r2b).powi(*mult2 as i32);
+        }
+        row.push(lin_basis);
+        row.push(lin_basis * xv);
+        mat.push(row);
+        rhs_v.push(eval_poly_asc(rem_c, *xv));
+    }
+    let coeffs = match solve_small_system(&mat, &rhs_v) {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    let x = Expr::Var(var.to_string());
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut idx = 0_usize;
+    for (r, mult) in &run {
+        for k in 1..=*mult {
+            let Some(c) = coeffs.get(idx).copied() else {
+                return Ok(None);
+            };
+            idx += 1;
+            if c.abs() < POLY_EPS {
+                continue;
+            }
+            *terms += 1;
+            if *terms > MAX_RISCH_TERMS {
+                return Err(RischError::ResourceLimit {
+                    detail: format!("más de {MAX_RISCH_TERMS} términos"),
+                });
+            }
+            let base = Expr::Sub(Box::new(x.clone()), Box::new(Expr::Const(*r)));
+            if k == 1 {
+                parts.push(Expr::Mul(
+                    Box::new(Expr::Const(c)),
+                    Box::new(Expr::Ln(Box::new(Expr::Abs(Box::new(base))))),
+                ));
+            } else {
+                parts.push(Expr::Div(
+                    Box::new(Expr::Const(c / (1.0 - k as f64))),
+                    Box::new(Expr::Pow(
+                        Box::new(base),
+                        Box::new(Expr::Const(k as f64 - 1.0)),
+                    )),
+                ));
+            }
+        }
+    }
+    // Incógnitas en orden: `A_j` lineales, luego `C` (base `lin_basis`)
+    // y `B` (base `lin_basis·x`) para `(B·x+C)/Q2`.
+    let (cc, cb) = (
+        coeffs.get(idx).copied().unwrap_or(0.0),
+        coeffs.get(idx + 1).copied().unwrap_or(0.0),
+    );
+    // Verifica el ajuste antes de emitir (colocación exacta, no mínimos).
+    let mut worst = 0.0_f64;
+    for (row, rhs) in mat.iter().zip(rhs_v.iter()) {
+        let got: f64 = row.iter().zip(coeffs.iter()).map(|(a, b)| a * b).sum();
+        worst = worst.max((got - rhs).abs());
+    }
+    let scale = rhs_v.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
+    if worst > 1e-6 * scale {
+        return Ok(None);
+    }
+    if cb.abs() > POLY_EPS || cc.abs() > POLY_EPS {
+        let q2 = vec![r0 / r2, r1 / r2, 1.0];
+        // `primitive_irreducible_quadratic` espera el resto sobre la
+        // cuadrática mónica: escala `(B·x+C)/r2`.
+        let p_lin = vec![cc / r2, cb / r2];
+        match primitive_irreducible_quadratic(&p_lin, &q2, var) {
+            Some(qprim) => parts.push(qprim),
+            None => return Ok(None),
+        }
+    }
+    // Si todo se anuló, la primitiva propia es cero (resto nulo real).
+    if parts.is_empty() {
+        return Ok(Some(Expr::Const(0.0)));
+    }
+    let acc = parts
+        .into_iter()
+        .reduce(|a, b| Expr::Add(Box::new(a), Box::new(b)));
+    Ok(acc)
+}
+
 /// Partes para `x·exp(a·x+b)`: `e^{ax+b}·(a·x−1)/a²`.
+///
+/// Caso lineal de `risch_poly_exp_trig` (B2 generaliza a grado ≤ 8).
 fn risch_parts_x_exp(
     a: &crate::ast::Expr,
     b: &crate::ast::Expr,
@@ -1863,15 +2997,29 @@ mod tests {
 
     #[test]
     fn risch_partial_beyond_subset_is_honest() {
-        // Cúbica con cuadrática irreducible: `Err` + factorización parcial.
-        let err =
-            risch_norman_integrate("1/(x^3-3*x^2+3*x-2)", "x").expect_err("resto irreducible");
-        let msg = format!("{err}");
-        assert!(matches!(err, RischError::Unsupported { .. }), "got {msg}");
-        assert!(msg.contains("(x−2"), "debe traer la parcial, got {msg}");
+        // B2.1b: cúbica con cuadrática irreducible `(x−2)(x²−x+1)` → `ln + atan`.
+        let mixed = risch_norman_integrate("1/(x^3-3*x^2+3*x-2)", "x").expect("lineal+compleja");
+        assert!(mixed.contains("ln"), "got {mixed}");
+        assert!(mixed.contains("atan"), "got {mixed}");
+        check_prim_by_derivative(
+            "1/(x^3-3*x^2+3*x-2)",
+            "x",
+            &mixed,
+            &[0.37, -0.53, 1.5, 3.71],
+        );
         // Grado 5 > cota 4: `Err` sin explosión.
         let err5 = risch_norman_integrate("1/(x^5+2*x+1)", "x").expect_err("grado 5");
         assert!(matches!(err5, RischError::Unsupported { .. }), "got {err5}");
+        // Cuadrática irreducible repetida `(x²+1)²`: Hermite completo
+        // pendiente → `Err` honesto que deriva a `symbolic::integrate`.
+        let rep = risch_norman_integrate("1/(x^4+2*x^2+1)", "x").expect_err("repetida compleja");
+        assert!(matches!(rep, RischError::Unsupported { .. }), "got {rep}");
+        // `x⁴+1` (dos cuadráticas sin lineales racionales): también honesto.
+        let two_quad = risch_norman_integrate("1/(x^4+1)", "x").expect_err("sin lineales");
+        assert!(
+            matches!(two_quad, RischError::Unsupported { .. }),
+            "got {two_quad}"
+        );
     }
 
     #[test]
@@ -1888,5 +3036,133 @@ mod tests {
             risch_norman_definite("1/x", "x", 0.0, 1.0),
             Err(RischError::BadInterval { .. })
         ));
+    }
+
+    // --- Frente B2: Risch pragmático (aceptación 1:1 con la spec) ---
+
+    #[test]
+    fn b2_trig_sin_cos_powers() {
+        // `sinⁿ·cosᵐ`: impares por sustitución, pares por reducción.
+        for expr in [
+            "sin(x)^2",
+            "sin(x)^3",
+            "cos(x)^2",
+            "cos(x)^3",
+            "sin(x)*cos(x)",
+            "sin(x)^2*cos(x)^2",
+            "sin(x)^3*cos(x)^2",
+            "sin(2*x+1)^2",
+            "cos(x)^4",
+        ] {
+            let prim = risch_norman_integrate(expr, "x").expect("trig B2");
+            check_prim_by_derivative(expr, "x", &prim, &F3C_POINTS);
+        }
+    }
+
+    #[test]
+    fn b2_trig_tan_pow_and_sec_tan() {
+        for expr in ["tan(x)^2", "tan(x)^3", "sec(x)*tan(x)", "csc(x)*cot(x)"] {
+            let prim = risch_norman_integrate(expr, "x").expect("tan/sec B2");
+            check_prim_by_derivative(expr, "x", &prim, &F3C_POINTS);
+        }
+        // `tan² = tan − x`: la primitiva contiene `tan`.
+        let t2 = risch_norman_integrate("tan(x)^2", "x").expect("tan²");
+        assert!(t2.contains("tan"), "got {t2}");
+        let st = risch_norman_integrate("sec(x)*tan(x)", "x").expect("sec·tan");
+        assert!(st.contains("sec"), "got {st}");
+    }
+
+    #[test]
+    fn b2_inverse_trig_linear() {
+        for (expr, points) in [
+            ("asin(x)", &[-0.5, 0.0, 0.37, 0.7][..]),
+            ("acos(x)", &[-0.5, 0.0, 0.37, 0.7][..]),
+            ("atan(x)", &F3C_POINTS[..]),
+            ("atan(2*x+1)", &F3C_POINTS[..]),
+        ] {
+            let prim = risch_norman_integrate(expr, "x").expect("inversa B2");
+            check_prim_by_derivative(expr, "x", &prim, points);
+        }
+    }
+
+    #[test]
+    fn b2_rational_complex_roots_degree4() {
+        // `(x−1)(x+1)(x²+1) = x⁴−1`, `(x−1)²(x²+1)` y `(x−1)³`.
+        for (expr, points) in [
+            ("1/(x^4-1)", &[0.37, 2.71, -0.53, 3.5][..]),
+            ("1/(x^4-2*x^3+2*x^2-2*x+1)", &[0.37, 2.71, -0.53, 3.5][..]),
+        ] {
+            let prim = risch_norman_integrate(expr, "x").expect("complejas grado 4");
+            assert!(prim.contains("ln"), "got {prim} para {expr}");
+            check_prim_by_derivative(expr, "x", &prim, points);
+        }
+        // Raíz triple `(x−1)³`: solo potencias, sin `ln`.
+        let triple = risch_norman_integrate("1/(x^3-3*x^2+3*x-1)", "x").expect("triple");
+        check_prim_by_derivative(
+            "1/(x^3-3*x^2+3*x-1)",
+            "x",
+            &triple,
+            &[0.37, 2.71, -0.53, 3.5],
+        );
+    }
+
+    #[test]
+    fn b2_sqrt_quadratic_euler() {
+        // Euler hiperbólico (`a > 0`) y arco (`a < 0`).
+        for (expr, points) in [
+            ("sqrt(x^2+1)", &[0.37, 1.13, 2.71][..]),
+            ("sqrt(x^2+2*x+2)", &[0.37, 1.13, 2.71][..]),
+            ("sqrt(1-x^2)", &[-0.5, 0.0, 0.37, 0.7][..]),
+            ("sqrt(2+2*x-x^2)", &[-0.5, 0.0, 0.37, 0.7][..]),
+        ] {
+            let prim = risch_norman_integrate(expr, "x").expect("Euler B2");
+            check_prim_by_derivative(expr, "x", &prim, points);
+        }
+    }
+
+    #[test]
+    fn b2_parts_iterated_poly_exp_trig() {
+        for expr in [
+            "x^2*exp(x)",
+            "x^2*exp(2*x+1)",
+            "x^3*exp(-x)",
+            "x*sin(x)",
+            "x^2*sin(x)",
+            "x*cos(x)",
+            "x^2*cos(2*x)",
+        ] {
+            let prim = risch_norman_integrate(expr, "x").expect("partes B2");
+            check_prim_by_derivative(expr, "x", &prim, &F3C_POINTS);
+        }
+    }
+
+    #[test]
+    fn b2_x_pow_ln() {
+        for (expr, points) in [
+            ("x*ln(x)", &[0.37, 1.13, 2.71, 4.0][..]),
+            ("x^2*ln(x)", &[0.37, 1.13, 2.71, 4.0][..]),
+            ("ln(x)/x", &[0.37, 1.13, 2.71, 4.0][..]),
+        ] {
+            let prim = risch_norman_integrate(expr, "x").expect("xⁿ·ln B2");
+            check_prim_by_derivative(expr, "x", &prim, points);
+        }
+        let sq = risch_norman_integrate("ln(x)/x", "x").expect("ln²/2");
+        assert!(sq.contains("ln"), "got {sq}");
+    }
+
+    #[test]
+    fn b2_impossible_is_honest_quadrature() {
+        // `li(x)`, elípticas y `exp(x²)`: `Unsupported → cuadratura`.
+        for expr in ["1/ln(x)", "sqrt(x^3+1)", "exp(x^2)"] {
+            let err = risch_norman_integrate(expr, "x").expect_err("imposible");
+            assert!(
+                matches!(err, RischError::Unsupported { .. }),
+                "{expr}: got {err}"
+            );
+            assert!(
+                format!("{err}").contains("cuadratura"),
+                "{expr} debe derivar a cuadratura, got {err}"
+            );
+        }
     }
 }

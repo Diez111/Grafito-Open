@@ -19,7 +19,9 @@
 //! - [`crdt::WhiteboardCrdt`]: CRDT `UUID+LWW` mínimo funcional en memoria
 //!   (conmutativo + idempotente + LWW, 5000 entradas, sin red).
 //! - [`offline::OfflineOutbox`]: cola offline-first volátil acotada (128×2048,
-//!   backoff exponencial, descarte honesto tras 5 intentos, sin disco).
+//!   backoff exponencial, descarte honesto tras 5 intentos) + codec persistente
+//!   acotado puro (`encode_persist` / [`offline::decode_persist`], 320 KiB;
+//!   el archivo vive en la app, I/O en background/arranque).
 //! - [`stubs`]: L honestos (iroh P2P, CRDT completo con `uuid`/HLC real,
 //!   sesiones cifradas y outbox persistente: solo diseño + `Err`).
 //!
@@ -40,8 +42,8 @@ pub use crdt::{
     MAX_CRDT_VALUE_BYTES,
 };
 pub use offline::{
-    OfflineEnvelope, OfflineOutbox, MAX_OFFLINE_ATTEMPTS, MAX_OFFLINE_BACKOFF_SECS,
-    MAX_OFFLINE_BODY_BYTES, MAX_OFFLINE_QUEUE,
+    decode_persist, OfflineEnvelope, OfflineOutbox, PersistLoad, MAX_OFFLINE_ATTEMPTS,
+    MAX_OFFLINE_BACKOFF_SECS, MAX_OFFLINE_BODY_BYTES, MAX_OFFLINE_PERSIST_BYTES, MAX_OFFLINE_QUEUE,
 };
 pub use session::{
     ClassroomCode, ClassroomError, ClassroomPhase, ClassroomSession, CodeTtlSecs, LearnerName,

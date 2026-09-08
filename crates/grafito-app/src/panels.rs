@@ -3,7 +3,7 @@
 use crate::export::{datatable_csv_text, sanitize_export_stem, spawn_csv_export, spawn_pdf_export};
 use crate::GrafitoApp;
 use egui::Color32;
-use grafito_core::symbolic::{clipboard_svg, LayerTable, MAX_LAYERS};
+use grafito_core::symbolic::{clipboard_svg, series as spreadsheet_series, LayerTable, MAX_LAYERS};
 use grafito_core::{
     CasWorksheetStatus, ChangeSet, DataTableObj, Document, GeoObject, ObjectId,
     RegularPolytopeNDObj, ScatterPlotObj,
@@ -707,6 +707,7 @@ pub(crate) fn inspector_type_caption(obj: &GeoObject) -> &'static str {
         GeoObject::Line(_) => "recta",
         GeoObject::Circle(_) => "círculo",
         GeoObject::Polygon(_) => "polígono",
+        GeoObject::Polyline(_) => "polilínea",
         GeoObject::Pencil(p) if p.is_dynamic_locus() => "lugar geométrico",
         GeoObject::Pencil(_) => "trazo",
         GeoObject::Function(_) => "función",
@@ -1489,7 +1490,8 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         }
                                     });
                                 ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
-                                ui.checkbox(&mut app.exam_mode, "Modo examen");
+                                // D2: salida de examen con confirmación (nunca directo).
+                                app.exam_mode_checkbox(ui);
                             });
                             ui.add_space(CARD_SPACING);
 
@@ -4301,7 +4303,7 @@ mod layer_panel_tests {
 // Frente G-C · Piel vs GeoGebra UI (2026-09-05) — ADITIVO
 // ══════════════════════════════════════════════════════════════════════════
 // Sliders Play + prompt auto, spreadsheet viva (lectura) y panel de
-// probabilidad (Normal/Binomial/Poisson con PDF/CDF honestos en f64).
+// probabilidad (Normal/Binomial/Poisson/T/Chi²/F con PDF/CDF honestos en f64).
 //
 // Reglas del frente: `fn render(&Estado) -> Frame` — estado efímero en
 // `ctx.data` (cero campos nuevos en `GrafitoApp`), cero I/O/spawn en Ui::
@@ -4321,10 +4323,11 @@ const MAX_SPREADSHEET_ROWS: usize = 50;
 /// Tablas visibles en la hoja viva: el resto se avisa.
 const MAX_SPREADSHEET_TABLES: usize = 8;
 
-/// Motor único de probabilidad (F3b): este panel NO duplica matemática.
-/// Delega en `grafito_geometry::statistics` —el mismo motor que usan los
-/// comandos `Normal`/`Binomial`/`Poisson`/`InverseNormal`— y solo agrega el
-/// `Err` honesto en español + las cotas de UI. `NaN` del motor ⇒ `Err`.
+/// Motor único de probabilidad (F3b, extendido a T/Chi²/F en C2): este
+/// panel NO duplica matemática. Delega en `grafito_geometry::statistics`
+/// —el mismo motor que usan los comandos `Normal`/`Binomial`/`Poisson`/
+/// `InverseNormal`/`InverseT`/`InverseChiSquared`/`InverseF`— y solo agrega
+/// el `Err` honesto en español + las cotas de UI. `NaN` del motor ⇒ `Err`.
 fn check_probability_point(value: f64, what: &str) -> Result<f64, String> {
     if !value.is_finite() {
         return Err(format!("{what} debe ser un número finito"));
@@ -4511,6 +4514,126 @@ pub(crate) fn poisson_quantile_honest(p: f64, lambda: f64) -> Result<u64, String
     Err("La cola supera la cota de 10 001 pasos en este panel".to_string())
 }
 
+/// Cota de grados de libertad en el panel (frente C2): el motor acepta
+/// cualquier gl > 0, pero la curva se dibuja con 61 muestras por frame.
+const MAX_PANEL_DF: f64 = 500.0;
+
+fn check_panel_df(value: f64, what: &str) -> Result<f64, String> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("{what} debe ser positivo y finito"));
+    }
+    if value > MAX_PANEL_DF {
+        return Err(format!(
+            "{what} ≤ {MAX_PANEL_DF} en este panel (cota de UI)"
+        ));
+    }
+    Ok(value)
+}
+
+fn check_quantile_p(p: f64) -> Result<f64, String> {
+    if p.is_finite() && 0.0 < p && p < 1.0 {
+        Ok(p)
+    } else {
+        Err("p debe estar en el intervalo (0, 1)".to_string())
+    }
+}
+
+/// Densidad t-Student(gl) en x. Mismo motor que `InverseT`.
+pub(crate) fn student_t_pdf(x: f64, df: f64) -> Result<f64, String> {
+    let x = check_probability_point(x, "x")?;
+    let df = check_panel_df(df, "gl")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::student_t_pdf(x, df),
+        "La densidad",
+    )
+}
+
+/// Acumulada t-Student(gl) en x: P(X ≤ x).
+pub(crate) fn student_t_cdf(x: f64, df: f64) -> Result<f64, String> {
+    let x = check_probability_point(x, "x")?;
+    let df = check_panel_df(df, "gl")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::student_t_cdf(x, df),
+        "La acumulada",
+    )
+}
+
+/// Cuantil t-Student: el x con P(X ≤ x) = p. Misma inversa que
+/// `InverseT[p, gl]` (bisección honesta del motor, sin duplicar).
+pub(crate) fn student_t_quantile_honest(p: f64, df: f64) -> Result<f64, String> {
+    let p = check_quantile_p(p)?;
+    let df = check_panel_df(df, "gl")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::student_t_quantile(p, df),
+        "El cuantil",
+    )
+}
+
+/// Densidad χ²(gl) en x. Mismo motor que `InverseChiSquared`.
+pub(crate) fn chi_squared_pdf(x: f64, df: f64) -> Result<f64, String> {
+    let x = check_probability_point(x, "x")?;
+    let df = check_panel_df(df, "gl")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::chi_squared_pdf(x, df),
+        "La densidad",
+    )
+}
+
+/// Acumulada χ²(gl) en x: P(X ≤ x).
+pub(crate) fn chi_squared_cdf(x: f64, df: f64) -> Result<f64, String> {
+    let x = check_probability_point(x, "x")?;
+    let df = check_panel_df(df, "gl")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::chi_squared_cdf(x, df),
+        "La acumulada",
+    )
+}
+
+/// Cuantil χ²: el x con P(X ≤ x) = p. Misma inversa que
+/// `InverseChiSquared[p, gl]`.
+pub(crate) fn chi_squared_quantile_honest(p: f64, df: f64) -> Result<f64, String> {
+    let p = check_quantile_p(p)?;
+    let df = check_panel_df(df, "gl")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::chi_squared_quantile(p, df),
+        "El cuantil",
+    )
+}
+
+/// Densidad F(gl1, gl2) en x. Mismo motor que `InverseF`.
+pub(crate) fn f_distribution_pdf(x: f64, df1: f64, df2: f64) -> Result<f64, String> {
+    let x = check_probability_point(x, "x")?;
+    let df1 = check_panel_df(df1, "gl1")?;
+    let df2 = check_panel_df(df2, "gl2")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::f_distribution_pdf(x, df1, df2),
+        "La densidad",
+    )
+}
+
+/// Acumulada F(gl1, gl2) en x: P(X ≤ x).
+pub(crate) fn f_distribution_cdf(x: f64, df1: f64, df2: f64) -> Result<f64, String> {
+    let x = check_probability_point(x, "x")?;
+    let df1 = check_panel_df(df1, "gl1")?;
+    let df2 = check_panel_df(df2, "gl2")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::f_distribution_cdf(x, df1, df2),
+        "La acumulada",
+    )
+}
+
+/// Cuantil F: el x con P(X ≤ x) = p. Misma inversa que
+/// `InverseF[p, gl1, gl2]`.
+pub(crate) fn f_quantile_honest(p: f64, df1: f64, df2: f64) -> Result<f64, String> {
+    let p = check_quantile_p(p)?;
+    let df1 = check_panel_df(df1, "gl1")?;
+    let df2 = check_panel_df(df2, "gl2")?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::f_quantile(p, df1, df2),
+        "El cuantil",
+    )
+}
+
 /// Prompt auto de velocidad para sliders Play. Acepta:
 /// número («1.5»), palabra («lento/medio/rápido») o «N vueltas en S s».
 /// Todo lo demás es `Err` honesto (nunca se inventa una velocidad).
@@ -4560,6 +4683,7 @@ pub(crate) fn parse_slider_prompt(input: &str) -> Result<f64, String> {
 }
 
 /// Estado efímero del panel de probabilidad (vive en `ctx.data`, sin I/O).
+/// `dist`: 0 Normal, 1 Binomial, 2 Poisson, 3 t-Student, 4 χ², 5 F (C2).
 #[derive(Debug, Clone)]
 struct ProbabilityPanelState {
     dist: u8,
@@ -4571,6 +4695,9 @@ struct ProbabilityPanelState {
     k: f64,
     lambda: f64,
     p_inv: f64,
+    df: f64,
+    df1: f64,
+    df2: f64,
 }
 
 impl Default for ProbabilityPanelState {
@@ -4585,6 +4712,9 @@ impl Default for ProbabilityPanelState {
             k: 5.0,
             lambda: 3.0,
             p_inv: 0.95,
+            df: 10.0,
+            df1: 5.0,
+            df2: 10.0,
         }
     }
 }
@@ -4596,9 +4726,89 @@ struct TrigPromptState {
     error: Option<String>,
 }
 
-/// Curva + área P(X ≤ x) del panel de probabilidad (F3b). Puro render sobre
-/// el estado efímero: sin I/O, sin spawn, loops acotados (≤61 muestras).
-/// Reusa `normal_pdf`/`binomial_pmf`/`poisson_pmf` (motor único, sin duplicar).
+/// Curva continua + área P(X ≤ x_sel) del panel de probabilidad (C2).
+/// Puro render: `density` viene del motor único; loop acotado (61 muestras).
+/// Lo usan Normal, t-Student, χ² y F con el mismo sombreado.
+#[allow(clippy::too_many_arguments)]
+fn paint_continuous_density(
+    painter: &egui::Painter,
+    plot: egui::Rect,
+    lo: f64,
+    hi: f64,
+    density: impl Fn(f64) -> f64,
+    x_sel: f64,
+    accent: egui::Color32,
+    txt_dim: egui::Color32,
+    right_label: String,
+) {
+    let plot_top = plot.min.y;
+    let plot_bot = plot.max.y - 14.0;
+    let plot_h = (plot_bot - plot_top).max(1.0);
+    let plot_w = plot.width().max(1.0);
+    const SAMPLES: usize = 61;
+    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(SAMPLES);
+    for i in 0..SAMPLES {
+        let x = lo + (hi - lo) * i as f64 / (SAMPLES - 1) as f64;
+        let y = density(x).max(0.0);
+        if y.is_finite() {
+            pts.push((x, y));
+        }
+    }
+    if pts.is_empty() {
+        return;
+    }
+    let shade = accent.gamma_multiply(0.25);
+    let ymax = pts
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(0.0f64, f64::max)
+        .max(1e-12);
+    let to_px = |x: f64| plot.min.x + ((x - lo) / (hi - lo)) as f32 * plot_w;
+    let to_py = |y: f64| plot_bot - (y / ymax) as f32 * plot_h;
+    for window in pts.windows(2) {
+        let [(x0, y0), (x1, y1)] = [window[0], window[1]];
+        if x1 <= x_sel {
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(to_px(x0), to_py(y0.max(y1))),
+                egui::pos2(to_px(x1), plot_bot),
+            );
+            painter.rect_filled(bar, 0.0, shade);
+        }
+        painter.line_segment(
+            [
+                egui::pos2(to_px(x0), to_py(y0)),
+                egui::pos2(to_px(x1), to_py(y1)),
+            ],
+            egui::Stroke::new(1.5, accent),
+        );
+    }
+    if x_sel.is_finite() && x_sel >= lo && x_sel <= hi {
+        let px = to_px(x_sel);
+        painter.line_segment(
+            [egui::pos2(px, plot_top), egui::pos2(px, plot_bot)],
+            egui::Stroke::new(1.0, accent.gamma_multiply(0.6)),
+        );
+    }
+    painter.text(
+        egui::pos2(plot.min.x, plot_bot + 2.0),
+        egui::Align2::LEFT_TOP,
+        format_statistic(lo),
+        egui::FontId::proportional(TYPE_XS),
+        txt_dim,
+    );
+    painter.text(
+        egui::pos2(plot.max.x, plot_bot + 2.0),
+        egui::Align2::RIGHT_TOP,
+        right_label,
+        egui::FontId::proportional(TYPE_XS),
+        txt_dim,
+    );
+}
+
+/// Curva + área P(X ≤ x) del panel de probabilidad (F3b, extendido a
+/// T/Chi²/F en C2). Puro render sobre el estado efímero: sin I/O, sin
+/// spawn, loops acotados (≤61 muestras continuas, ≤256 barras discretas).
+/// Reusa los wrappers de este archivo (motor único, sin duplicar).
 fn draw_probability_plot(
     ui: &mut egui::Ui,
     state: &ProbabilityPanelState,
@@ -4615,9 +4825,8 @@ fn draw_probability_plot(
     }
     let painter = ui.painter().with_clip_rect(rect);
     let plot = rect.shrink2(egui::vec2(2.0, 2.0));
-    let plot_top = plot.min.y;
     let plot_bot = plot.max.y - 14.0;
-    let plot_h = (plot_bot - plot_top).max(1.0);
+    let plot_h = (plot_bot - plot.min.y).max(1.0);
     let plot_w = plot.width().max(1.0);
     painter.line_segment(
         [
@@ -4626,7 +4835,6 @@ fn draw_probability_plot(
         ],
         egui::Stroke::new(1.0, txt_dim.gamma_multiply(0.35)),
     );
-    let shade = accent.gamma_multiply(0.25);
     match state.dist {
         0 => {
             if !state.mu.is_finite() || !state.sigma.is_finite() || state.sigma <= 0.0 {
@@ -4636,62 +4844,17 @@ fn draw_probability_plot(
             if !(lo.is_finite() && hi.is_finite() && hi > lo) {
                 return;
             }
-            const SAMPLES: usize = 61;
-            let mut pts: Vec<(f64, f64)> = Vec::with_capacity(SAMPLES);
-            for i in 0..SAMPLES {
-                let x = lo + (hi - lo) * i as f64 / (SAMPLES - 1) as f64;
-                let y = normal_pdf(x, state.mu, state.sigma).unwrap_or(0.0).max(0.0);
-                if y.is_finite() {
-                    pts.push((x, y));
-                }
-            }
-            if pts.is_empty() {
-                return;
-            }
-            let ymax = pts
-                .iter()
-                .map(|(_, y)| *y)
-                .fold(0.0f64, f64::max)
-                .max(1e-12);
-            let to_px = |x: f64| plot.min.x + ((x - lo) / (hi - lo)) as f32 * plot_w;
-            let to_py = |y: f64| plot_bot - (y / ymax) as f32 * plot_h;
-            for window in pts.windows(2) {
-                let [(x0, y0), (x1, y1)] = [window[0], window[1]];
-                if x1 <= state.x {
-                    let bar = egui::Rect::from_min_max(
-                        egui::pos2(to_px(x0), to_py(y0.max(y1))),
-                        egui::pos2(to_px(x1), plot_bot),
-                    );
-                    painter.rect_filled(bar, 0.0, shade);
-                }
-                painter.line_segment(
-                    [
-                        egui::pos2(to_px(x0), to_py(y0)),
-                        egui::pos2(to_px(x1), to_py(y1)),
-                    ],
-                    egui::Stroke::new(1.5, accent),
-                );
-            }
-            if state.x.is_finite() && state.x >= lo && state.x <= hi {
-                let px = to_px(state.x);
-                painter.line_segment(
-                    [egui::pos2(px, plot_top), egui::pos2(px, plot_bot)],
-                    egui::Stroke::new(1.0, accent.gamma_multiply(0.6)),
-                );
-            }
-            painter.text(
-                egui::pos2(plot.min.x, plot_bot + 2.0),
-                egui::Align2::LEFT_TOP,
-                format_statistic(lo),
-                egui::FontId::proportional(TYPE_XS),
+            let (mu, sigma) = (state.mu, state.sigma);
+            paint_continuous_density(
+                &painter,
+                plot,
+                lo,
+                hi,
+                |x| normal_pdf(x, mu, sigma).unwrap_or(0.0),
+                state.x,
+                accent,
                 txt_dim,
-            );
-            painter.text(
-                egui::pos2(plot.max.x, plot_bot + 2.0),
-                egui::Align2::RIGHT_TOP,
                 "P(X≤x) sombreada · μ±4σ".to_string(),
-                egui::FontId::proportional(TYPE_XS),
-                txt_dim,
             );
         }
         1 => {
@@ -4773,7 +4936,7 @@ fn draw_probability_plot(
                 txt_dim,
             );
         }
-        _ => {
+        2 => {
             let k_sel = state.k.round().max(0.0) as u64;
             let lambda = state.lambda;
             if !lambda.is_finite() || lambda <= 0.0 {
@@ -4828,12 +4991,80 @@ fn draw_probability_plot(
                 txt_dim,
             );
         }
+        3 => {
+            let df = state.df.clamp(1.0, MAX_PANEL_DF);
+            if !state.x.is_finite() {
+                return;
+            }
+            paint_continuous_density(
+                &painter,
+                plot,
+                -6.0,
+                6.0,
+                |x| student_t_pdf(x, df).unwrap_or(0.0),
+                state.x,
+                accent,
+                txt_dim,
+                format!("P(X≤x) sombreada · t(gl={}) ±6", format_statistic(df)),
+            );
+        }
+        4 => {
+            let df = state.df.clamp(1.0, MAX_PANEL_DF);
+            if !state.x.is_finite() {
+                return;
+            }
+            let hi = (df * 4.0 + 8.0).max(state.x).max(8.0);
+            if !hi.is_finite() {
+                return;
+            }
+            paint_continuous_density(
+                &painter,
+                plot,
+                0.0,
+                hi,
+                |x| chi_squared_pdf(x, df).unwrap_or(0.0),
+                state.x,
+                accent,
+                txt_dim,
+                format!("P(X≤x) sombreada · χ²(gl={})", format_statistic(df)),
+            );
+        }
+        5 => {
+            let (df1, df2) = (
+                state.df1.clamp(1.0, MAX_PANEL_DF),
+                state.df2.clamp(1.0, MAX_PANEL_DF),
+            );
+            if !state.x.is_finite() {
+                return;
+            }
+            let hi = 6.0f64.max(state.x).max(1.0);
+            if !hi.is_finite() {
+                return;
+            }
+            paint_continuous_density(
+                &painter,
+                plot,
+                0.0,
+                hi,
+                |x| f_distribution_pdf(x, df1, df2).unwrap_or(0.0),
+                state.x,
+                accent,
+                txt_dim,
+                format!(
+                    "P(X≤x) sombreada · F({},{})",
+                    format_statistic(df1),
+                    format_statistic(df2)
+                ),
+            );
+        }
+        _ => {}
     }
 }
 
-/// Sección Probabilidad: Normal / Binomial / Poisson con PDF/CDF honestos.
-/// Llamada desde el panel Vista (alcanzable) — sin botones mudos: el
-/// selector cambia la distribución y cada parámetro recalcula en vivo.
+/// Sección Probabilidad: Normal / Binomial / Poisson / t-Student / χ² / F
+/// con PDF/CDF honestos. Llamada desde el panel Vista (alcanzable) — sin
+/// botones mudos: el selector cambia la distribución y cada parámetro
+/// recalcula en vivo.
 pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
     let id = egui::Id::new("gc_probability_state");
     let mut state: ProbabilityPanelState = ctx
@@ -4847,11 +5078,18 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             .size(TYPE_SM)
             .strong(),
     );
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for (index, name, tip) in [
             (0u8, "Normal", "Gaussiana μ, σ: densidad y acumulada"),
             (1u8, "Binomial", "n ensayos, p éxito: P(X = k) y P(X ≤ k)"),
             (2u8, "Poisson", "Tasa λ: P(X = k) y P(X ≤ k)"),
+            (
+                3u8,
+                "t-Student",
+                "gl grados de libertad: densidad y acumulada",
+            ),
+            (4u8, "χ²", "gl grados de libertad: densidad y acumulada"),
+            (5u8, "F", "gl1, gl2: densidad y acumulada"),
         ] {
             let selected = state.dist == index;
             if ui
@@ -4878,13 +5116,26 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             ui.add(egui::Slider::new(&mut state.p, 0.0..=1.0).text("p éxito"));
             ui.add(egui::Slider::new(&mut state.k, 0.0..=MAX_BINOMIAL_N as f64).text("k éxitos"));
         }
-        _ => {
+        2 => {
             ui.add(
                 egui::Slider::new(&mut state.lambda, 0.1..=20.0)
                     .logarithmic(true)
                     .text("λ tasa"),
             );
             ui.add(egui::Slider::new(&mut state.k, 0.0..=50.0).text("k eventos"));
+        }
+        3 => {
+            ui.add(egui::Slider::new(&mut state.df, 1.0..=30.0).text("gl libertad"));
+            ui.add(egui::Slider::new(&mut state.x, -6.0..=6.0).text("x punto"));
+        }
+        4 => {
+            ui.add(egui::Slider::new(&mut state.df, 1.0..=30.0).text("gl libertad"));
+            ui.add(egui::Slider::new(&mut state.x, 0.0..=20.0).text("x punto"));
+        }
+        _ => {
+            ui.add(egui::Slider::new(&mut state.df1, 1.0..=30.0).text("gl1"));
+            ui.add(egui::Slider::new(&mut state.df2, 1.0..=30.0).text("gl2"));
+            ui.add(egui::Slider::new(&mut state.x, 0.0..=10.0).text("x punto"));
         }
     }
     ui.add_space(SPACE_XS);
@@ -4906,13 +5157,59 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                 let (pmf, cdf) = (binomial_pmf(k, n, state.p)?, binomial_cdf(k, n, state.p)?);
                 (pmf, cdf, format!("P(X = {k}) · n = {n}"))
             }
-            _ => {
+            2 => {
                 let k = state.k.round().max(0.0) as u64;
                 let (pmf, cdf) = (poisson_pmf(k, state.lambda)?, poisson_cdf(k, state.lambda)?);
                 (
                     pmf,
                     cdf,
                     format!("P(X = {k}) · λ = {}", format_statistic(state.lambda)),
+                )
+            }
+            3 => {
+                let (pdf, cdf) = (
+                    student_t_pdf(state.x, state.df)?,
+                    student_t_cdf(state.x, state.df)?,
+                );
+                (
+                    pdf,
+                    cdf,
+                    format!(
+                        "f({}) · t(gl={})",
+                        format_statistic(state.x),
+                        format_statistic(state.df)
+                    ),
+                )
+            }
+            4 => {
+                let (pdf, cdf) = (
+                    chi_squared_pdf(state.x, state.df)?,
+                    chi_squared_cdf(state.x, state.df)?,
+                );
+                (
+                    pdf,
+                    cdf,
+                    format!(
+                        "f({}) · χ²(gl={})",
+                        format_statistic(state.x),
+                        format_statistic(state.df)
+                    ),
+                )
+            }
+            _ => {
+                let (pdf, cdf) = (
+                    f_distribution_pdf(state.x, state.df1, state.df2)?,
+                    f_distribution_cdf(state.x, state.df1, state.df2)?,
+                );
+                (
+                    pdf,
+                    cdf,
+                    format!(
+                        "f({}) · F({},{})",
+                        format_statistic(state.x),
+                        format_statistic(state.df1),
+                        format_statistic(state.df2)
+                    ),
                 )
             }
         })
@@ -4933,10 +5230,10 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     );
                     ui.end_row();
                     ui.label(
-                        egui::RichText::new(if state.dist == 0 {
-                            "Densidad"
-                        } else {
+                        egui::RichText::new(if state.dist == 1 || state.dist == 2 {
                             "Puntual"
+                        } else {
+                            "Densidad"
                         })
                         .color(txt_dim)
                         .size(TYPE_SM),
@@ -5000,12 +5297,40 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                 let q = binomial_quantile_honest(state.p_inv, n, state.p)?;
                 format!("menor k con P(X≤k)≥{:.3} → {q} (n={n})", state.p_inv)
             }
-            _ => {
+            2 => {
                 let q = poisson_quantile_honest(state.p_inv, state.lambda)?;
                 format!(
                     "menor k con P(X≤k)≥{:.3} → {q} (λ={})",
                     state.p_inv,
                     format_statistic(state.lambda)
+                )
+            }
+            3 => {
+                let q = student_t_quantile_honest(state.p_inv, state.df)?;
+                format!(
+                    "x con P(X≤x)={:.3} → {} (gl={})",
+                    state.p_inv,
+                    format_statistic(q),
+                    format_statistic(state.df)
+                )
+            }
+            4 => {
+                let q = chi_squared_quantile_honest(state.p_inv, state.df)?;
+                format!(
+                    "x con P(X≤x)={:.3} → {} (gl={})",
+                    state.p_inv,
+                    format_statistic(q),
+                    format_statistic(state.df)
+                )
+            }
+            _ => {
+                let q = f_quantile_honest(state.p_inv, state.df1, state.df2)?;
+                format!(
+                    "x con P(X≤x)={:.3} → {} (gl1={}, gl2={})",
+                    state.p_inv,
+                    format_statistic(q),
+                    format_statistic(state.df1),
+                    format_statistic(state.df2)
                 )
             }
         })
@@ -5019,9 +5344,11 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     .strong(),
             );
             ui.label(
-                egui::RichText::new("Misma inversa que InverseNormal/InverseT… (motor único).")
-                    .color(txt_dim)
-                    .size(TYPE_XS),
+                egui::RichText::new(
+                    "Misma inversa que InverseNormal/InverseT/InverseChiSquared/InverseF (motor único).",
+                )
+                .color(txt_dim)
+                .size(TYPE_XS),
             );
         }
         Err(error) => {
@@ -5038,7 +5365,8 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
 /// Ventana visible de la hoja vinculada (F3b). La hoja real vive en el
 /// documento (`Document::MAX_SPREADSHEET_ROWS/COLS = 400×400`,
 /// `MAX_SPREADSHEET_RECOMPUTE_CELLS = 10_000`): la UI solo muestra esta
-/// ventana por rendimiento; el resto se edita con `FillColumn`/`FillCells`.
+/// ventana por rendimiento; el resto se edita con `FillColumn`/`FillCells`/
+/// `FillRow` o la serie de abajo (`FillSeries`, mismo motor).
 const SHEET_VIEW_COLS: usize = 6;
 const SHEET_VIEW_ROWS: usize = 8;
 
@@ -5234,6 +5562,136 @@ struct SheetTable {
     ys: Vec<f64>,
 }
 
+/// Estado efímero de la fila de autorrelleno por serie (vive en
+/// `ctx.data`, sin I/O): rango 1D + inicio/paso como texto + modo.
+#[derive(Debug, Clone)]
+struct SheetSeriesState {
+    range: String,
+    start: String,
+    step: String,
+    geometric: bool,
+    error: Option<String>,
+}
+
+impl Default for SheetSeriesState {
+    fn default() -> Self {
+        Self {
+            range: "A1:A8".to_string(),
+            start: "1".to_string(),
+            step: "1".to_string(),
+            geometric: false,
+            error: None,
+        }
+    }
+}
+
+/// Escalar numérico del formulario de serie (acepta coma decimal).
+/// `Err` honesto en español, nunca se inventa un valor.
+fn parse_series_scalar(text: &str, what: &str) -> Result<f64, String> {
+    let value: f64 = text
+        .trim()
+        .replace(',', ".")
+        .parse()
+        .map_err(|_| format!("Serie: {what} debe ser un número"))?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(format!("Serie: {what} debe ser finito"))
+    }
+}
+
+/// Fila de autorrelleno por serie (frente C2): mismo motor que el comando
+/// `FillSeries` (lineal `inicio+paso·i` o geométrica `inicio·pasoⁱ` sobre
+/// un rango 1D). Commit atómico con undo vía `stage_spreadsheet_cell_edits`;
+/// el error queda en la fila sin voltear la hoja.
+fn draw_sheet_series_row(ui: &mut egui::Ui, app: &mut GrafitoApp) {
+    let ctx = ui.ctx().clone();
+    let (_is_dark, _accent, _fill, _sep, _txt_col, txt_dim, _hdr_col) = panel_theme_local(&ctx);
+    let id = egui::Id::new("gc_sheet_series_state");
+    let mut series: SheetSeriesState = ctx
+        .data_mut(|data| data.get_temp::<SheetSeriesState>(id))
+        .unwrap_or_default();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new("Serie:")
+                .color(txt_dim)
+                .size(TYPE_XS)
+                .strong(),
+        );
+        ui.add_sized(
+            [72.0, 18.0],
+            egui::TextEdit::singleline(&mut series.range)
+                .hint_text("A1:A8")
+                .font(egui::FontId::proportional(TYPE_XS)),
+        );
+        ui.label(egui::RichText::new("inicio").color(txt_dim).size(TYPE_XS));
+        ui.add_sized(
+            [52.0, 18.0],
+            egui::TextEdit::singleline(&mut series.start)
+                .hint_text("1")
+                .font(egui::FontId::proportional(TYPE_XS)),
+        );
+        ui.label(egui::RichText::new("paso").color(txt_dim).size(TYPE_XS));
+        ui.add_sized(
+            [52.0, 18.0],
+            egui::TextEdit::singleline(&mut series.step)
+                .hint_text("1")
+                .font(egui::FontId::proportional(TYPE_XS)),
+        );
+        ui.checkbox(&mut series.geometric, "geom.");
+        let apply = ui
+            .small_button("Aplicar serie")
+            .on_hover_text(
+                "Rellena el rango con serie lineal (inicio+paso·i) o geométrica (inicio·pasoⁱ); mismo motor que FillSeries",
+            )
+            .clicked();
+        if apply {
+            series.error = None;
+            let outcome: Result<usize, String> = (|| {
+                let start = parse_series_scalar(&series.start, "inicio")?;
+                let step = parse_series_scalar(&series.step, "paso")?;
+                let kind = if series.geometric {
+                    spreadsheet_series::SeriesKind::Geometric
+                } else {
+                    spreadsheet_series::SeriesKind::Linear
+                };
+                let edits =
+                    spreadsheet_series::build_fill_series(&series.range, start, step, kind)?;
+                let count = edits.len();
+                let mut snapshot =
+                    crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
+                snapshot.capture(&app.document);
+                let staged = app.document.stage_spreadsheet_cell_edits(&edits)?;
+                app.document = staged;
+                snapshot.save_if_semantically_changed(
+                    &mut app.document,
+                    &mut app.undo_stack,
+                    &mut app.redo_stack,
+                );
+                Ok(count)
+            })();
+            match outcome {
+                Ok(count) => {
+                    app.cas_result =
+                        format!("Serie: {count} celda(s) rellenadas en {}", series.range.trim());
+                }
+                Err(error) => {
+                    series.error = Some(error);
+                }
+            }
+            ctx.request_repaint();
+        }
+    });
+    if let Some(error) = &series.error {
+        ui.label(
+            egui::RichText::new(error)
+                .color(current_theme(&ctx).danger)
+                .size(TYPE_XS),
+        );
+    }
+    ctx.data_mut(|data| data.insert_temp(id, series));
+}
+
 /// Sección Datos: hoja vinculada editable (celdas) + tablas en lectura.
 /// La hoja edita `Document.spreadsheet` con validación por celda; las tablas
 /// (`DataTable`) siguen en lectura con botón de ejemplo real (nunca mudo).
@@ -5254,6 +5712,8 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
         .size(TYPE_XS),
     );
     draw_sheet_editable_grid(ui, app);
+    ui.add_space(SPACE_XS);
+    draw_sheet_series_row(ui, app);
     ui.add_space(SPACE_XS);
 
     let tables: Vec<SheetTable> = app
@@ -5446,9 +5906,12 @@ pub(crate) fn draw_trig_speed_prompt(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 #[cfg(test)]
 mod gc_piel_tests {
     use super::{
-        binomial_cdf, binomial_pmf, binomial_quantile_honest, normal_cdf, normal_pdf,
-        normal_quantile_honest, parse_slider_prompt, poisson_cdf, poisson_pmf,
-        poisson_quantile_honest, sheet_col_label, MAX_BINOMIAL_N, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
+        binomial_cdf, binomial_pmf, binomial_quantile_honest, chi_squared_cdf, chi_squared_pdf,
+        chi_squared_quantile_honest, f_distribution_cdf, f_distribution_pdf, f_quantile_honest,
+        normal_cdf, normal_pdf, normal_quantile_honest, parse_series_scalar, parse_slider_prompt,
+        poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_col_label, student_t_cdf,
+        student_t_pdf, student_t_quantile_honest, MAX_BINOMIAL_N, MAX_PANEL_DF, SHEET_VIEW_COLS,
+        SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
 
@@ -5546,6 +6009,65 @@ mod gc_piel_tests {
         assert!(normal_quantile_honest(0.0, 0.0, 1.0).is_err());
         assert!(binomial_quantile_honest(1.0, 10, 0.5).is_err());
         assert!(poisson_quantile_honest(0.5, -1.0).is_err());
+    }
+
+    #[test]
+    fn c2_student_t_matches_textbook() {
+        // t(10): pdf(0) ≈ 0.3891, cdf(0) = 0.5, cuantil 97.5% ≈ 2.228.
+        let pdf = student_t_pdf(0.0, 10.0).expect("t válida");
+        assert!((pdf - 0.389_11).abs() < 1e-4, "pdf = {pdf}");
+        let cdf = student_t_cdf(0.0, 10.0).expect("cdf válida");
+        assert!((cdf - 0.5).abs() < 1e-9, "cdf = {cdf}");
+        let q = student_t_quantile_honest(0.975, 10.0).expect("cuantil t");
+        assert!((q - 2.228_14).abs() < 1e-3, "q = {q}");
+        let area = student_t_cdf(q, 10.0).expect("área en el cuantil");
+        assert!((area - 0.975).abs() < 1e-3, "área = {area}");
+    }
+
+    #[test]
+    fn c2_chi_squared_matches_textbook() {
+        // χ²(5): pdf(5) ≈ 0.1222, cuantil 95% ≈ 11.0705.
+        let pdf = chi_squared_pdf(5.0, 5.0).expect("chi² válida");
+        assert!((pdf - 0.122_2).abs() < 1e-3, "pdf = {pdf}");
+        let q = chi_squared_quantile_honest(0.95, 5.0).expect("cuantil chi²");
+        assert!((q - 11.070_5).abs() < 1e-2, "q = {q}");
+        let area = chi_squared_cdf(q, 5.0).expect("área en el cuantil");
+        assert!((area - 0.95).abs() < 1e-3, "área = {area}");
+    }
+
+    #[test]
+    fn c2_f_distribution_matches_textbook() {
+        // F(5,10): cuantil 95% ≈ 3.3258.
+        let q = f_quantile_honest(0.95, 5.0, 10.0).expect("cuantil F");
+        assert!((q - 3.325_8).abs() < 1e-2, "q = {q}");
+        let area = f_distribution_cdf(q, 5.0, 10.0).expect("área en el cuantil");
+        assert!((area - 0.95).abs() < 2e-3, "área = {area}");
+        let pdf = f_distribution_pdf(1.0, 5.0, 10.0).expect("pdf F");
+        assert!(pdf > 0.0 && pdf < 2.0, "pdf = {pdf}");
+    }
+
+    #[test]
+    fn c2_continuous_panels_reject_bad_params() {
+        assert!(student_t_pdf(0.0, 0.0).is_err());
+        assert!(student_t_pdf(0.0, -2.0).is_err());
+        assert!(student_t_pdf(f64::NAN, 10.0).is_err());
+        assert!(student_t_pdf(0.0, MAX_PANEL_DF + 1.0).is_err());
+        assert!(student_t_quantile_honest(0.0, 10.0).is_err());
+        assert!(student_t_quantile_honest(1.0, 10.0).is_err());
+        assert!(chi_squared_pdf(1.0, 0.0).is_err());
+        assert!(chi_squared_quantile_honest(0.95, f64::NAN).is_err());
+        assert!(f_distribution_pdf(1.0, 5.0, 0.0).is_err());
+        assert!(f_distribution_cdf(1.0, -1.0, 10.0).is_err());
+        assert!(f_quantile_honest(1.5, 5.0, 10.0).is_err());
+    }
+
+    #[test]
+    fn c2_series_scalar_parses_spanish_decimals() {
+        assert_eq!(parse_series_scalar("1,5", "inicio").expect("coma"), 1.5);
+        assert_eq!(parse_series_scalar(" -2 ", "paso").expect("espacios"), -2.0);
+        assert!(parse_series_scalar("abc", "inicio").is_err());
+        assert!(parse_series_scalar("", "paso").is_err());
+        assert!(parse_series_scalar("inf", "inicio").is_err());
     }
 
     #[test]

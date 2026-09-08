@@ -9,6 +9,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Point[(x, y)]`: Crea un punto libre. Mutacion: crea objetos. Riesgo: bajo.
 - `Circle[centro, radio]`: Crea una circunferencia. Mutacion: crea objetos. Riesgo: bajo.
 - `Polygon[(x1, y1), ...]`: Crea un poligono cerrado. Mutacion: crea objetos. Riesgo: bajo.
+- `Polyline[P1, P2, ...]`: Crea una polilinea abierta: cadena de segmentos sin cierre ni relleno (minimo 2 puntos, maximo 8192). Mutacion: crea objetos. Riesgo: bajo. Alias: `polilinea`.
 - `Function[expr]`: Grafica una funcion explicita. Mutacion: crea objetos. Riesgo: bajo. Alias: `func`.
 ## Dinámica
 
@@ -80,6 +81,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `FillCells[rango, valor]`: Rellena un rango rectangular de celdas con un valor; respeta presupuestos de spreadsheet. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillCells[a1, b2, valor]`. Alias: `fill_cells`, `rellenar`.
 - `CellRange[a1, b2]`: Resuelve un rango A1:B2 a array de valores evaluados; soporta A1:B2 o A1,B2. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CellRange[rango]`. Alias: `cell_range`, `rango`.
 - `FillRow[fila, valor]`: Rellena una fila de la hoja iterando columnas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillRow[fila, inicio, fin, valor]`. Alias: `fill_row`.
+- `FillSeries[rango, inicio, paso]`: Autorrelleno con serie lineal (inicio+paso·i) o geométrica (inicio·paso^i) sobre un rango 1D; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillSeries[rango, inicio, paso, modo]`. Alias: `fill_series`, `serie`, `rellenar_serie`.
 ## Restricciones
 
 - `Distance[A, B, valor]`: Impone una distancia entre objetos. Mutacion: agrega restricciones. Riesgo: medio. Alias: `dist`.
@@ -109,7 +111,9 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 
 - `Derivative[expr, variable]`: Deriva simbolicamente una expresion. Mutacion: crea objetos. Riesgo: bajo. Alias: `derivada`, `deriv`, `diff`.
 - `Integral[expr]`: Calcula una integral simbolica o definida. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Integral[expr, variable]`, `Integral[expr, a, b]`, `Integral[expr, variable, a, b]`. Alias: `integrar`, `int`.
-- `Solve[expr, variable, minimo, maximo]`: Resuelve una ecuacion en la variable indicada. Mutacion: crea objetos. Riesgo: medio. Alias: `nsolve`, `resolver`.
+- `Solve[expr, variable]`: Resuelve una ecuacion en la variable indicada. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Solve[expr, variable, minimo, maximo]`. Alias: `resolver`.
+- `NSolve[expr, variable, minimo, maximo]`: Aproxima una sola raíz numérica en el intervalo dado (1 raíz). Mutacion: crea objetos. Riesgo: medio.
+- `SolveNlSystem[eq1, eq2, var1, var2]`: Resuelve un sistema polinómico 2x2 por eliminación (puntos verificados). Mutacion: crea objetos. Riesgo: medio. Alias: `sistema_nolineal`.
 - `Limit[expr, variable, punto]`: Estima un limite bilateral finito. Mutacion: solo consulta. Riesgo: medio. Alias: `limite`, `lim`.
 - `LimitAbove[expr, variable, punto]`: Estima un límite lateral por la derecha (x→a⁺). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_superior`, `limite_derecho`.
 - `LimitBelow[expr, variable, punto]`: Estima un límite lateral por la izquierda (x→a⁻). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_inferior`, `limite_izquierdo`.
@@ -251,6 +255,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Tetrahedron[x, y, z, edge]`: Crea un tetraedro regular 3D sólido. Mutacion: crea objetos. Riesgo: medio.
 - `Cylinder[x, y, z, radius, height]`: Crea un cilindro 3D vertical. Mutacion: crea objetos. Riesgo: medio.
 - `Cone[x, y, z, radius, height]`: Crea un cono 3D vertical. Mutacion: crea objetos. Riesgo: medio.
+- `Pyramid[x, y, z, base_size, height]`: Crea una piramide 3D de base cuadrada (base en (x,y,z), apice en (x,y+h,z)). Mutacion: crea objetos. Riesgo: medio. Alias: `piramide`.
 - `Torus[x, y, z, major_radius, minor_radius]`: Crea un toro 3D. Mutacion: crea objetos. Riesgo: alto.
 - `Moebius[radius, width]`: Crea una banda de Moebius 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `mobius`.
 - `Curve3D[(x(t), y(t), z(t)), t, tmin, tmax]`: Crea una curva parametrica 3D. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `Curve3D[(x(t), y(t), z(t)), tmin, tmax]`.
@@ -259,7 +264,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Extrude[polygon_label, height]`: Extruye un poligono a un solido. Mutacion: crea objetos. Riesgo: alto.
 - `VectorField3D[u, v, w]`: Crea un campo vectorial 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `vectorfield`.
 - `Prism[poligono, altura]`: Crea un prisma extruyendo un polígono base por un vector (altura en Z o dx,dy,dz). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Prism[poligono, dx, dy, dz]`. Alias: `prisma`.
-- `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (diseno L + stub honesto: devuelve error explicativo, ver Tasks.md F10.W5). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Net[poliedro, escala]`. Alias: `desarrollo`, `desplegado`, `unwrap`.
+- `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (Cube/Tetrahedron/Pyramid/Prism vía PolyhedronNet::unfold; persiste una cara = un polígono 2D). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Net[poliedro, escala]`. Alias: `desarrollo`, `desplegado`, `unwrap`.
 - `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `cuadrica`, `cuádrica`.
 - `ImplicitSurface[expr, x0, x1, y0, y1, z0, z1, res]`: Crea una superficie implícita F(x,y,z)=0 en la caja dada (marching-tetra, res 8..=32, 16 por defecto). Mutacion: crea objetos. Riesgo: medio. Alias: `superficieimplicita`, `implicitsurface3d`.
 - `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
@@ -349,6 +354,13 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `InvLaplaceT[expr]`: Calculá la Laplace inversa de racionales propios con denominador de grado ≤2: InvLaplaceT[expr] o InvLaplaceT[expr, s, t]. Grado ≥3, impropias o retardos quedan fuera del subset y dan error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InvLaplaceT[expr, s]`, `InvLaplaceT[expr, s, t]`. Alias: `laplaceinversa`, `invlaplace_t`.
 - `RischInt[expr]`: Integrá por Risch-Norman (polinomios, exponenciales, logaritmos): RischInt[expr], RischInt[expr, variable] o definida RischInt[expr, variable, a, b] por FTC. Sin primitiva en el subset (p. ej. exp(x^2)) da error honesto que deriva a cuadratura. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `RischInt[expr, variable]`, `RischInt[expr, variable, a, b]`. Alias: `risch`, `risch_int`.
 - `GroebnerBasis[polinomios, variables]`: Calculá la base de Groebner por Buchberger acotado (hasta 8 polinomios en 4 variables, 128 S-polinomios; 3x3 lineal verificado): GroebnerBasis[polinomios, variables]. Fuera de cota o no polinómico da error honesto que deriva a Eliminate. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebner_basis`, `basegroebner`.
+- `SolveODEN[coeficientes, rhs]`: Resolvé EDO lineal de orden n≤8 con coeficientes constantes por anulador + resonancia: SolveODEN[{a2,a1,a0}, rhs] o SolveODEN[{a2,a1,a0}, rhs, x]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SolveODEN[coeficientes, rhs, variable]`. Alias: `edo_n`.
+- `EulerODE[a, b, rhs]`: Resolvé Euler x²·y''+a·x·y'+b·y=rhs vía x=e^t (x>0): EulerODE[a, b, rhs] o EulerODE[a, b, rhs, x]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `EulerODE[a, b, rhs, variable]`. Alias: `edoeuler`, `euleredo`.
+- `FrobeniusSeries[p, q]`: Serie de Frobenius en punto ordinario (términos≤9): FrobeniusSeries[p, q] o FrobeniusSeries[p, q, x, x0, terminos]. Punto singular da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `FrobeniusSeries[p, q, x, x0, terminos]`. Alias: `frobenius`, `seriefrobenius`.
+- `LaplaceDeriv[n, y]`: Laplace de derivada L{y⁽ⁿ⁾} con iniciales (n≤8): LaplaceDeriv[n, y] o LaplaceDeriv[n, y, t, s, {y0, y1}]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LaplaceDeriv[n, y, t, s, iniciales]`. Alias: `derivadalaplace`.
+- `LaplaceInt[f]`: Laplace de integral L{∫₀ᵗ f} = L{f}/s: LaplaceInt[f] o LaplaceInt[f, t, s]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LaplaceInt[f, t, s]`. Alias: `integrallaplace`.
+- `GroebnerOrdered[polinomios, variables, orden]`: Base de Groebner con orden monomial explícito (mismas cotas que GroebnerBasis): GroebnerOrdered[polinomios, variables, orden] con orden lex|grlex|grevlex. Útil para eliminación. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebnerorden`, `baseordenada`.
+- `Eliminate[polinomios, variables, eliminar]`: Elimina variables por Groebner lexicográfico (intersecciones): Eliminate[polinomios, variables, eliminar]. Fuera de cota da ResourceLimit honesto. Mutacion: solo consulta. Riesgo: bajo. Alias: `elimina`, `eliminacion`.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 

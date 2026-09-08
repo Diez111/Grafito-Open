@@ -3847,6 +3847,22 @@ impl Document {
                     }
                     (min_x, min_y, max_x, max_y)
                 }
+                GeoObject::Polyline(line) => {
+                    let mut min_x = f64::MAX;
+                    let mut min_y = f64::MAX;
+                    let mut max_x = f64::MIN;
+                    let mut max_y = f64::MIN;
+                    for v in line.points.iter() {
+                        min_x = min_x.min(v.x);
+                        min_y = min_y.min(v.y);
+                        max_x = max_x.max(v.x);
+                        max_y = max_y.max(v.y);
+                    }
+                    if line.points.is_empty() {
+                        continue;
+                    }
+                    (min_x, min_y, max_x, max_y)
+                }
                 GeoObject::Function(f) => {
                     let x_min =
                         self.resolve_expr(&f.domain_min_expr, f.domain_min.unwrap_or(-10.0));
@@ -6218,6 +6234,9 @@ impl Document {
                 .checked_add(o.control_points.len().checked_mul(16).unwrap_or(usize::MAX))
                 .unwrap_or(usize::MAX),
             GeoObject::Spline(o) => 128usize
+                .checked_add(o.points.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::Polyline(o) => 128usize
                 .checked_add(o.points.len().checked_mul(16).unwrap_or(usize::MAX))
                 .unwrap_or(usize::MAX),
             GeoObject::Point3D(_) => 256,

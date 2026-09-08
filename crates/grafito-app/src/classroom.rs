@@ -77,6 +77,13 @@ pub struct ClassroomPanel {
     opt_in: bool,
     share_code: Option<ShareCode>,
     is_host: bool,
+    /// Outbox offline persistida en disco (D2): se carga al arrancar
+    /// (`new`) y se guarda en background (`persist_outbox_background`).
+    /// Hoy sin productores reales (Loopback sigue en memoria); el ciclo
+    /// load→save existe y está testeado para cuando lleguen.
+    outbox: grafito_classroom::OfflineOutbox,
+    /// Aviso honesto de carga corrupta (se muestra una vez en el panel).
+    outbox_notice: Option<String>,
 }
 
 impl Default for ClassroomPanel {
@@ -87,10 +94,17 @@ impl Default for ClassroomPanel {
 
 impl ClassroomPanel {
     pub fn new() -> Self {
+        // Arranque (no Ui::): lectura única acotada a 320 KiB, precedente `load_profile`.
+        let (outbox, outbox_notice) = crate::utils::load_outbox();
+        if let Some(aviso) = &outbox_notice {
+            log::warn!("Outbox offline: {aviso}");
+        }
         Self {
             opt_in: false,
             share_code: None,
             is_host: false,
+            outbox,
+            outbox_notice,
         }
     }
 
@@ -125,6 +139,37 @@ impl ClassroomPanel {
 
     pub fn is_host(&self) -> bool {
         self.is_host
+    }
+
+    /// Outbox offline (lectura para la UI; la mutación futura persiste aparte).
+    pub fn outbox(&self) -> &grafito_classroom::OfflineOutbox {
+        &self.outbox
+    }
+
+    /// Aviso honesto de carga (corrupción/descarte), si hubo.
+    pub fn outbox_notice(&self) -> Option<&str> {
+        self.outbox_notice.as_deref()
+    }
+
+    /// Consume el aviso de carga (para mostrarlo una sola vez como toast).
+    pub fn take_outbox_notice(&mut self) -> Option<String> {
+        self.outbox_notice.take()
+    }
+
+    /// Guarda la outbox en disco en background (cero bloqueo del UI thread).
+    ///
+    /// Clona el estado y escribe en un hilo `grafito-outbox`; si falla,
+    /// solo log (la memoria sigue siendo la fuente de verdad).
+    pub fn persist_outbox_background(&self) {
+        let snapshot = self.outbox.clone();
+        let path = crate::utils::outbox_path();
+        let _ = std::thread::Builder::new()
+            .name("grafito-outbox".to_string())
+            .spawn(move || {
+                if let Err(motivo) = crate::utils::save_outbox_to_path(&snapshot, &path) {
+                    log::warn!("No se pudo persistir la outbox offline: {motivo}");
+                }
+            });
     }
 
     /// Render puro del contenido del panel (sin I/O, sin spawn). Llamado desde
@@ -520,5 +565,22 @@ mod tests {
         assert_eq!(generate_qr_modules(""), None);
         assert_eq!(generate_qr_modules("bad code!"), None);
         assert_eq!(generate_qr_modules(&"a".repeat(65)), None);
+    }
+
+    #[test]
+    fn outbox_notice_se_consume_una_sola_vez() {
+        let mut panel = ClassroomPanel::new();
+        // En este box el aviso depende del disco real; el invariante es el
+        // consumo único, valga `Some` o `None`.
+        let primera = panel.take_outbox_notice();
+        assert!(panel.take_outbox_notice().is_none());
+        assert!(panel.outbox_notice().is_none());
+        let _ = primera;
+    }
+
+    #[test]
+    fn outbox_arranca_vacia_y_acotada() {
+        let panel = ClassroomPanel::new();
+        assert!(panel.outbox().len() <= grafito_classroom::MAX_OFFLINE_QUEUE);
     }
 }

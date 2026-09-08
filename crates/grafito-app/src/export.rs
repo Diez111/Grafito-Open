@@ -79,6 +79,7 @@ impl ExportFormat {
             | ExportObjectKind::Line
             | ExportObjectKind::Circle
             | ExportObjectKind::Polygon
+            | ExportObjectKind::Polyline
             | ExportObjectKind::Pencil
             | ExportObjectKind::Function
             | ExportObjectKind::Text
@@ -180,6 +181,7 @@ pub(crate) enum ExportObjectKind {
     Line,
     Circle,
     Polygon,
+    Polyline,
     Pencil,
     Function,
     Text,
@@ -233,11 +235,12 @@ pub(crate) enum ExportObjectKind {
 
 impl ExportObjectKind {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 53] = [
+    pub(crate) const ALL: [Self; 54] = [
         Self::Point,
         Self::Line,
         Self::Circle,
         Self::Polygon,
+        Self::Polyline,
         Self::Pencil,
         Self::Function,
         Self::Text,
@@ -295,6 +298,7 @@ impl ExportObjectKind {
             Self::Line => "Line",
             Self::Circle => "Circle",
             Self::Polygon => "Polygon",
+            Self::Polyline => "Polyline",
             Self::Pencil => "Pencil",
             Self::Function => "Function",
             Self::Text => "Text",
@@ -353,6 +357,7 @@ impl ExportObjectKind {
             GeoObject::Line(_) => Self::Line,
             GeoObject::Circle(_) => Self::Circle,
             GeoObject::Polygon(_) => Self::Polygon,
+            GeoObject::Polyline(_) => Self::Polyline,
             GeoObject::Pencil(_) => Self::Pencil,
             GeoObject::Function(_) => Self::Function,
             GeoObject::Text(_) => Self::Text,
@@ -1761,6 +1766,36 @@ impl SceneBuilder<'_> {
                 let stroke = validate_stroke(self.format, item, polygon.width, polygon.color)?;
                 let fill = validate_fill(self.format, item, polygon.fill_color)?;
                 self.push_closed_world_shape(item, &mut primitives, &vertices, stroke, fill)?;
+            }
+            GeoObject::Polyline(line) => {
+                // Cadena abierta: sin cierre ni relleno (Pencil ya usa esta vía).
+                if line.points.len() < 2 {
+                    return Err(invalid_object(
+                        self.format,
+                        item,
+                        "una polilinea visible necesita al menos dos puntos",
+                    ));
+                }
+                if line
+                    .points
+                    .iter()
+                    .copied()
+                    .any(|point| !point_is_finite(point))
+                {
+                    return Err(invalid_object(
+                        self.format,
+                        item,
+                        "un punto evaluado no es finito",
+                    ));
+                }
+                let stroke = validate_stroke(self.format, item, line.width, line.color)?;
+                self.push_world_polyline(
+                    item,
+                    &mut primitives,
+                    line.points.iter().copied().map(Some),
+                    stroke,
+                    false,
+                )?;
             }
             GeoObject::Pencil(pencil) => {
                 if pencil.points.len() < 2 {
@@ -4995,8 +5030,8 @@ mod tests {
         use grafito_core::{
             BarChartObj, BoxPlotObj, CircleObj, EllipseObj, FunctionObj, HistogramObj,
             HyperbolaObj, ImplicitCurveObj, LineObj, ParabolaObj, ParametricCurve2DObj,
-            PhasePortraitObj, PieChartObj, PolarCurveObj, PolygonObj, RegressionLineObj,
-            ScatterPlotObj, TextObj, VectorField2DObj,
+            PhasePortraitObj, PieChartObj, PolarCurveObj, PolygonObj, PolylineObj,
+            RegressionLineObj, ScatterPlotObj, TextObj, VectorField2DObj,
         };
         use grafito_core::{PencilObj, RelationOperator};
 
@@ -5020,6 +5055,11 @@ mod tests {
                 Point2::new(-3.0, 0.0),
                 Point2::new(-2.0, 1.0),
                 Point2::new(-1.0, 0.0),
+            ])),
+            GeoObject::Polyline(PolylineObj::new(vec![
+                Point2::new(-3.0, -1.0),
+                Point2::new(-2.0, 0.0),
+                Point2::new(-1.0, -1.0),
             ])),
             GeoObject::Function(FunctionObj::new("x^2")),
             GeoObject::Text(TextObj::new("Grafito", Point2::new(0.0, 2.0))),
@@ -5106,6 +5146,7 @@ mod tests {
             "Line",
             "Circle",
             "Polygon",
+            "Polyline",
             "Pencil",
             "Function",
             "Text",
@@ -5146,8 +5187,8 @@ mod tests {
             let path = temp_export_path(format.extension());
             let report = export_document_with_options(&document, format, &path, options)
                 .expect("all common 2D families should export");
-            assert_eq!(report.exported_objects, 21);
-            assert_eq!(report.object_types.len(), 21);
+            assert_eq!(report.exported_objects, 22);
+            assert_eq!(report.object_types.len(), 22);
             assert!(report.primitive_count > 19);
 
             let bytes = std::fs::read(&path).expect("export should exist");
@@ -5590,7 +5631,7 @@ mod tests {
             ExportOptions::new(320, 240),
         )
         .expect("export sin pizarra");
-        assert_eq!(report.exported_objects, 21);
+        assert_eq!(report.exported_objects, 22);
         assert!(!report.object_types.contains_key("Whiteboard"));
         let _ = std::fs::remove_file(path);
     }

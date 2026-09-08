@@ -1,12 +1,15 @@
-//! Cola offline-first en memoria acotada (funcional, sin red ni disco).
+//! Cola offline-first en memoria acotada (funcional, sin red).
 //!
 //! Cerebro puro: sin I/O, sin spawn. `OfflineOutbox` es la outbox volátil que
 //! el Loopback usa cuando no hay P2P: encola hasta 128 envelopes de 2048 bytes
 //! con reintento exponencial acotado (5 intentos, backoff `2^attempts`, cap 1h).
 //! Al superar los intentos se descarta honesto (`false`, sin pánico).
 //!
-//! La outbox *persistente* (disco + reintento al reconectar) queda como L en
-//! [`crate::stubs::offline_queue_stub`]. PII siempre local: nada sale del proceso.
+//! Persistencia en disco (D2): este módulo aporta el codec acotado puro
+//! (`encode_persist` / `decode_persist`); el archivo vive en la app
+//! (`user-data dir/outbox.json`, I/O en background/arranque, jamás en `Ui::`).
+//! Corrupción o sobre-tamaño → outbox vacía + aviso honesto (`PersistLoad::notice`),
+//! nunca pánico ni dato a medias. PII siempre local: nada sale del proceso.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -23,6 +26,9 @@ pub const MAX_OFFLINE_KIND_LEN: usize = 64;
 pub const MAX_OFFLINE_ATTEMPTS: u8 = 5;
 /// Backoff máximo entre reintentos (1h, evita esperas eternas).
 pub const MAX_OFFLINE_BACKOFF_SECS: u64 = 3_600;
+/// Tope del JSON persistido en disco (128×2048 + holgura de framing ≈ 320 KiB).
+/// Fail-closed: lo que exceda se descarta honesto al cargar, jamás se trunca a medias.
+pub const MAX_OFFLINE_PERSIST_BYTES: usize = 327_680;
 
 /// Envelope offline: qué reintentar + cuándo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +149,121 @@ impl OfflineOutbox {
     /// Limpia todo (al cerrar el aula, PII no persiste).
     pub fn clear(&mut self) {
         self.queue.clear();
+    }
+
+    /// Serializa para disco (JSON acotado a `MAX_OFFLINE_PERSIST_BYTES`).
+    ///
+    /// Puro, sin I/O: el caller escribe el `String` donde corresponda.
+    /// `Err` si el JSON excede el cap (fail-closed; con los caps de
+    /// `enqueue` no debería pasar, pero se chequea igual).
+    pub fn encode_persist(&self) -> Result<String, ClassroomError> {
+        let json = serde_json::to_string(self)
+            .map_err(|_| ClassroomError::InvalidMessage("outbox no serializable".to_string()))?;
+        if json.len() > MAX_OFFLINE_PERSIST_BYTES {
+            return Err(ClassroomError::InvalidMessage(format!(
+                "outbox persistida excede {MAX_OFFLINE_PERSIST_BYTES} bytes"
+            )));
+        }
+        Ok(json)
+    }
+}
+
+/// Resultado honesto de cargar la outbox desde disco.
+///
+/// Nunca falla con `Err`: lo corrupto se descarta y se avisa
+/// (`notice()`), jamás se inventa un envelope.
+#[derive(Debug, Clone)]
+pub struct PersistLoad {
+    /// Outbox válida (vacía si todo estaba corrupto).
+    pub outbox: OfflineOutbox,
+    /// Envelopes individuales descartados por inválidos (el resto se conserva).
+    pub discarded: usize,
+    /// `true` si el documento entero era ilegible o excedía el cap.
+    pub corrupt: bool,
+}
+
+impl PersistLoad {
+    /// Aviso honesto para toast/panel, o `None` si la carga salió limpia.
+    #[must_use]
+    pub fn notice(&self) -> Option<String> {
+        if self.corrupt {
+            return Some(
+                "La cola offline guardada estaba corrupta y se descartó, che.".to_string(),
+            );
+        }
+        if self.discarded > 0 {
+            return Some(format!(
+                "Se descartaron {} mensajes offline inválidos al cargar, che.",
+                self.discarded
+            ));
+        }
+        None
+    }
+}
+
+/// Deserializa la outbox desde disco (puro, sin I/O).
+///
+/// Reglas fail-closed, en orden:
+/// 1. vacío/en blanco → outbox vacía limpia (primera corrida, sin aviso);
+/// 2. `len > MAX_OFFLINE_PERSIST_BYTES` → todo corrupto (vacía + `corrupt`);
+/// 3. JSON inválido → todo corrupto;
+/// 4. JSON válido → se revalida cada envelope (`kind`/`body` con las mismas
+///    reglas de `enqueue`); los inválidos se cuentan en `discarded` y el
+///    resto se conserva (cap 128, los de menor `id` primero);
+/// 5. `next_id` se recalcula como `max(id)+1` (mínimo 1) para no reusar ids.
+#[must_use]
+pub fn decode_persist(json: &str) -> PersistLoad {
+    if json.trim().is_empty() {
+        return PersistLoad {
+            outbox: OfflineOutbox::new(),
+            discarded: 0,
+            corrupt: false,
+        };
+    }
+    if json.len() > MAX_OFFLINE_PERSIST_BYTES {
+        return PersistLoad {
+            outbox: OfflineOutbox::new(),
+            discarded: 0,
+            corrupt: true,
+        };
+    }
+    let raw: OfflineOutbox = match serde_json::from_str(json) {
+        Ok(raw) => raw,
+        Err(_) => {
+            return PersistLoad {
+                outbox: OfflineOutbox::new(),
+                discarded: 0,
+                corrupt: true,
+            };
+        }
+    };
+    let mut kept: Vec<OfflineEnvelope> = Vec::new();
+    let mut discarded = 0_usize;
+    for envelope in raw.queue {
+        let kind_ok = sanitize_kind(&envelope.kind).is_ok();
+        let body_ok = validate_body(&envelope.body).is_ok();
+        if kind_ok && body_ok {
+            kept.push(envelope);
+        } else {
+            discarded = discarded.saturating_add(1);
+        }
+    }
+    kept.sort_by_key(|e| e.id);
+    kept.truncate(MAX_OFFLINE_QUEUE);
+    let next_id = kept
+        .iter()
+        .map(|e| e.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let next_id = if next_id == 0 { 1 } else { next_id };
+    PersistLoad {
+        outbox: OfflineOutbox {
+            queue: kept.into_iter().collect(),
+            next_id,
+        },
+        discarded,
+        corrupt: false,
     }
 }
 
@@ -279,5 +400,73 @@ mod tests {
         let json = serde_json::to_string(&outbox).expect("serialize");
         let back: OfflineOutbox = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.len(), 1);
+    }
+
+    #[test]
+    fn persist_roundtrip_conserva_cola_y_next_id() {
+        let mut outbox = OfflineOutbox::new();
+        outbox.enqueue("chat", "hola", 7).expect("enqueue");
+        outbox.enqueue("exercise", "x+2", 9).expect("enqueue");
+        let json = outbox.encode_persist().expect("encode");
+        assert!(json.len() <= MAX_OFFLINE_PERSIST_BYTES);
+        let loaded = decode_persist(&json);
+        assert!(!loaded.corrupt);
+        assert_eq!(loaded.discarded, 0);
+        assert!(loaded.notice().is_none());
+        assert_eq!(loaded.outbox.len(), 2);
+        // Los ids no se reusan tras recargar.
+        let mut back = loaded.outbox;
+        let id = back.enqueue("chat", "nuevo", 10).expect("enqueue");
+        assert!(id > 2);
+    }
+
+    #[test]
+    fn persist_vacio_es_primera_corrida_sin_aviso() {
+        for blank in ["", "   ", "\n\t "] {
+            let loaded = decode_persist(blank);
+            assert!(loaded.outbox.is_empty());
+            assert!(!loaded.corrupt);
+            assert!(loaded.notice().is_none());
+        }
+    }
+
+    #[test]
+    fn persist_corrupto_descarta_honesto_con_aviso() {
+        for bad in ["{no json", "{\"queue\": [", "null", "[1,2]", "\"hola\""] {
+            let loaded = decode_persist(bad);
+            assert!(loaded.outbox.is_empty(), " `{bad}` debe vaciar");
+            assert!(loaded.corrupt, " `{bad}` debe marcar corrupto");
+            assert!(loaded.notice().is_some(), " `{bad}` debe avisar");
+        }
+    }
+
+    #[test]
+    fn persist_sobretamano_descarta_honesto() {
+        let big = "x".repeat(MAX_OFFLINE_PERSIST_BYTES + 1);
+        let loaded = decode_persist(&big);
+        assert!(loaded.outbox.is_empty());
+        assert!(loaded.corrupt);
+        assert!(loaded.notice().is_some());
+    }
+
+    #[test]
+    fn persist_filtra_envelopes_invalidos_y_conserva_resto() {
+        let json = serde_json::json!({
+            "queue": [
+                {"id": 1, "kind": "chat", "body": "ok", "attempts": 0, "next_retry_epoch": 5},
+                {"id": 2, "kind": "mal kind!", "body": "x", "attempts": 0, "next_retry_epoch": 5},
+                {"id": 3, "kind": "chat", "body": "a\x00b", "attempts": 0, "next_retry_epoch": 5},
+            ],
+            "next_id": 4,
+        })
+        .to_string();
+        let loaded = decode_persist(&json);
+        assert!(!loaded.corrupt);
+        assert_eq!(loaded.discarded, 2);
+        assert_eq!(loaded.outbox.len(), 1);
+        assert!(loaded.notice().is_some());
+        let mut back = loaded.outbox;
+        let first = back.pop_ready(5);
+        assert_eq!(first.map(|e| e.id), Some(1));
     }
 }

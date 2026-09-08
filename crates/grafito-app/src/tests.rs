@@ -5056,6 +5056,130 @@ fn toolbar_and_panel_layout_constants_are_sane() {
     }
 }
 
+// ── D1 A11Y resto: cada overlay persistente cierra con Esc ────────────────
+
+#[cfg(test)]
+fn esc_raw_input() -> egui::RawInput {
+    egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 720.0),
+        )),
+        events: vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn d1_escape_closes_custom_tool_dialog_headless() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.show_custom_tool_dialog = true;
+    // Sin Esc: el diálogo sigue abierto.
+    let _ = ctx.run(headless_raw_input(), |ctx| {
+        app.draw_custom_tool_dialog(ctx);
+    });
+    assert!(app.show_custom_tool_dialog, "sin Esc el diálogo persiste");
+    // Con Esc: cierra sin guardar.
+    let _ = ctx.run(esc_raw_input(), |ctx| {
+        app.draw_custom_tool_dialog(ctx);
+    });
+    assert!(
+        !app.show_custom_tool_dialog,
+        "Esc cierra el diálogo custom-tool"
+    );
+}
+
+#[test]
+fn d1_escape_postpones_recovery_offer_without_deleting_headless() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir();
+    let main = dir.join(format!("grafito_d1_main_{}_{}.ggb", std::process::id(), id));
+    let sidecar = dir.join(format!(
+        "grafito_d1_sidecar_{}_{}.autosave",
+        std::process::id(),
+        id
+    ));
+    std::fs::write(&sidecar, b"sidecar d1").expect("sidecar temp");
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.recovery_offer = Some(crate::app::AutosaveRecoveryOffer {
+        main_path: main.clone(),
+        sidecar_path: sidecar.clone(),
+        document: grafito_core::document::Document::new(),
+        main_modified_epoch: None,
+        sidecar_modified_epoch: 1,
+        show_diff: false,
+    });
+    let _ = ctx.run(esc_raw_input(), |ctx| {
+        app.draw_recovery_modal(ctx);
+    });
+    assert!(app.recovery_offer.is_none(), "Esc pospone la oferta");
+    assert!(
+        sidecar.exists(),
+        "Esc no borra el sidecar (opción segura: posponer)"
+    );
+    let _ = std::fs::remove_file(&sidecar);
+    let _ = std::fs::remove_file(&main);
+}
+
+#[test]
+fn d1_escape_closes_corrupt_recovery_modal_headless() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.recovery_corrupt = Some(crate::app::AutosaveRecoveryCorrupt {
+        main_path: std::path::PathBuf::from("/tmp/grafito_d1_dummy.ggb"),
+        sidecar_path: std::path::PathBuf::from("/tmp/grafito_d1_dummy.autosave"),
+        error: "corte de prueba".to_owned(),
+    });
+    let _ = ctx.run(esc_raw_input(), |ctx| {
+        app.draw_recovery_modal(ctx);
+    });
+    assert!(
+        app.recovery_corrupt.is_none(),
+        "Esc cierra el modal corrupto sin borrar"
+    );
+}
+
+#[test]
+fn d1_escape_closes_about_and_onboarding_headless() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.show_about = true;
+    let _ = ctx.run(esc_raw_input(), |ctx| {
+        app.draw_about_window(ctx);
+    });
+    assert!(!app.show_about, "Esc cierra Acerca de");
+    app.show_onboarding = true;
+    let _ = ctx.run(esc_raw_input(), |ctx| {
+        app.draw_onboarding_window(ctx);
+    });
+    assert!(!app.show_onboarding, "Esc cierra el onboarding");
+}
+
+#[test]
+fn d1_palette_closes_on_escape_headless() {
+    // La paleta ya cerraba con Esc (`command_palette.rs`, fuera de targets):
+    // este test lo blinda contra regresiones desde app.
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.command_palette.open = true;
+    let _ = ctx.run(esc_raw_input(), |ctx| {
+        let _ = app
+            .command_palette
+            .show_localized(ctx, grafito_ui::i18n::Locale::Es);
+    });
+    assert!(!app.command_palette.open, "Esc cierra la paleta");
+}
+
 #[test]
 fn custom_tool_runs_steps_through_pipeline() {
     let ctx = egui::Context::default();
@@ -5088,4 +5212,43 @@ fn custom_tool_runs_steps_through_pipeline() {
     app.run_custom_tool("mitad", &ctx);
     let obj = app.document.objects().values().next().expect("objeto");
     assert!(!obj.is_visible());
+}
+
+#[test]
+fn exam_lockdown_bloquea_export_y_pide_confirm_para_salir() {
+    let mut app = crate::app::dummy_grafito_app();
+    assert!(!app.exam_mode);
+    // Sin examen: exam_blocks no frena nada.
+    assert!(!app.exam_blocks("Export"));
+    app.set_exam_mode(true);
+    assert!(app.exam_mode);
+    assert!(!app.exam_exit_confirm);
+    // Export bloqueado: no abre diálogo ni encola job (ctx None = vía legacy).
+    app.export_with_dialog(crate::export::ExportFormat::Svg, None);
+    assert!(app.pending_export_job.is_none());
+    assert!(app.exam_blocks("Asistente"));
+    assert!(app.exam_blocks("Internet"));
+    // Cambiar de perspectiva NO apaga el examen (sin escape por vista).
+    app.set_perspective(crate::Perspective::Geometry3D);
+    assert!(app.exam_mode, "cambiar de vista no apaga el examen");
+    // Salir pide confirmación: no apaga directo.
+    app.set_exam_mode(false);
+    assert!(app.exam_mode, "sin confirmar sigue el lockdown");
+    assert!(app.exam_exit_confirm, "se abrió el modal");
+    // El modal se dibuja sin pánico (headless) y mantiene el lockdown.
+    let ctx = egui::Context::default();
+    let _ = ctx.run(headless_raw_input(), |ctx| {
+        app.draw_exam_exit_modal(ctx);
+    });
+    assert!(app.exam_mode);
+}
+
+#[test]
+fn exam_lockdown_bloquea_asistente_local_sin_panico() {
+    let mut app = crate::app::dummy_grafito_app();
+    app.set_exam_mode(true);
+    let ctx = egui::Context::default();
+    // Early-return antes de tocar runtime/documento: no paniquea en headless.
+    app.start_local_assistant_request(&ctx);
+    assert!(!app.assistant.is_pending);
 }

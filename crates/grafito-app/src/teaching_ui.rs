@@ -16,6 +16,7 @@ use grafito_pedagogy::{
     Curriculum, Exercise, ExerciseGenerator, LearningObjective, PedagogicalLevel, TeachingSession,
     TeachingTopic,
 };
+use grafito_profile::StudentProfile;
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_whiteboard::WhiteboardDoc;
 use std::time::{Duration, Instant};
@@ -1352,6 +1353,81 @@ pub fn draw_panel_ejercicio(
     }
 }
 
+// ── Vista "Mi plan" (D2 moat tutor: próximos temas + racha) ──
+
+/// Cuántos próximos temas muestra "Mi plan" (top del scheduler BKT/Leitner).
+pub const MI_PLAN_TOP_N: usize = 3;
+
+/// Resumen del plan de estudio para la vista mínima (puro, testeable).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanResumen {
+    /// Nombres de los próximos temas (scheduler, a lo sumo `MI_PLAN_TOP_N`).
+    pub proximos: Vec<String>,
+    /// Racha actual de aciertos.
+    pub racha: u32,
+    /// Mejor racha histórica.
+    pub mejor_racha: u32,
+    /// Ramas aún sin cubrir.
+    pub pendientes: usize,
+}
+
+/// Arma el resumen desde el perfil (BKT/Leitner vía `recommend_next`, que ya
+/// alimenta la tarjeta en `asentar_respuesta_ejercicio`). Puro salvo el reloj
+/// interno de `recommend_next` (misma fuente que la tarjeta: consistente).
+#[must_use]
+pub fn plan_resumen(perfil: &StudentProfile) -> PlanResumen {
+    let proximos: Vec<String> = perfil
+        .recommend_next()
+        .into_iter()
+        .take(MI_PLAN_TOP_N)
+        .map(|rama| rama.name.clone())
+        .collect();
+    let pendientes = perfil.branches.iter().filter(|rama| !rama.covered).count();
+    PlanResumen {
+        proximos,
+        racha: perfil.streak,
+        mejor_racha: perfil.best_streak,
+        pendientes,
+    }
+}
+
+/// Dibuja "Mi plan": próximos 3 temas del scheduler + racha. Compacto (labels
+/// chicos, sin panel propio) para caber bajo la tarjeta sin romper la UI.
+/// Si no hay pendientes, mensaje honesto en vez de lista vacía.
+pub fn draw_mi_plan(ui: &mut egui::Ui, plan: &PlanResumen) {
+    let tema = grafito_ui::theme::current_theme(ui.ctx());
+    ui.add_space(grafito_ui::tokens::SPACE_XS);
+    ui.separator();
+    ui.label(
+        egui::RichText::new(format!(
+            "Mi plan · racha {} (récord {})",
+            plan.racha, plan.mejor_racha
+        ))
+        .size(grafito_ui::tokens::TYPE_XS)
+        .strong()
+        .color(tema.text_primary),
+    );
+    if plan.proximos.is_empty() {
+        ui.label(
+            egui::RichText::new("Sin pendientes: pedí un ejercicio para seguir, che.")
+                .size(grafito_ui::tokens::TYPE_XS)
+                .color(tema.text_secondary),
+        );
+        return;
+    }
+    for (indice, nombre) in plan.proximos.iter().enumerate() {
+        ui.label(
+            egui::RichText::new(format!(
+                "{}. {}",
+                indice.saturating_add(1),
+                acotar_texto(nombre, MAX_ENUNCIADO_CHARS)
+            ))
+            .size(grafito_ui::tokens::TYPE_XS)
+            .color(tema.text_secondary),
+        );
+    }
+}
+
 // ── Burbuja morph avatar→burbuja (pura + clamp a viewport) ──
 
 /// Ease-out cúbico del morph (ANIM_MICRO 180ms). Puro, sin I/O.
@@ -2418,5 +2494,50 @@ mod tests {
         fn is_vacio_o_libre(&self) -> bool {
             matches!(self, WhiteboardHint::Vacio | WhiteboardHint::Libre)
         }
+    }
+
+    #[test]
+    fn mi_plan_vacio_es_honesto() {
+        let perfil = StudentProfile::new("Sol");
+        let plan = plan_resumen(&perfil);
+        assert!(plan.proximos.is_empty());
+        assert_eq!(plan.racha, 0);
+        assert_eq!(plan.mejor_racha, 0);
+        assert_eq!(plan.pendientes, 0);
+        // El dibujado no paniquea ni en vacío (headless, dentro de `run`).
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_mi_plan(ui, &plan);
+            });
+        });
+    }
+
+    #[test]
+    fn mi_plan_top_3_mas_racha() {
+        let mut perfil = StudentProfile::new("Ana");
+        // 4 ramas pendientes (un fallo cada una: baja mastery, no cubre).
+        for (id, nombre) in [
+            ("alg", "Álgebra"),
+            ("calc", "Cálculo"),
+            ("geo", "Geometría"),
+            ("prob", "Probabilidad"),
+        ] {
+            perfil.record_outcome(id, nombre, 100, false);
+        }
+        // Racha de 2 en una rama extra (sigue pendiente si no cubre).
+        perfil.record_outcome("extra", "Extra", 100, true);
+        perfil.record_outcome("extra", "Extra", 101, true);
+        let plan = plan_resumen(&perfil);
+        assert!(plan.proximos.len() <= MI_PLAN_TOP_N, "a lo sumo 3");
+        assert_eq!(plan.racha, 2);
+        assert_eq!(plan.mejor_racha, 2);
+        assert!(plan.pendientes >= plan.proximos.len());
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_mi_plan(ui, &plan);
+            });
+        });
     }
 }
