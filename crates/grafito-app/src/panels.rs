@@ -1,6 +1,9 @@
 //! Paneles laterales removibles e inspectores (CAS, vista, estadística, propiedades).
 
-use crate::export::{datatable_csv_text, sanitize_export_stem, spawn_csv_export, spawn_pdf_export};
+use crate::export::{
+    copy_png_to_os_clipboard, datatable_csv_text, sanitize_export_stem, spawn_csv_export,
+    spawn_pdf_export,
+};
 use crate::GrafitoApp;
 use egui::Color32;
 use grafito_core::symbolic::{clipboard_svg, series as spreadsheet_series, LayerTable, MAX_LAYERS};
@@ -2140,7 +2143,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         }
                                     }
                                     if export_pill_button(ui, "Exportar PDF").on_hover_text(
-                                        "Interino de 1 página: conteo + etiquetas (vectorial con printpdf pendiente del lead)",
+                                        "Vectorial de 1 página: rectas, círculos, polígonos y texto (Helvetica)",
                                     ).clicked()
                                     {
                                         if let Some(path) = rfd::FileDialog::new()
@@ -2300,6 +2303,30 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                 crate::export::ExportFormat::Png,
                                                 Some(ui.ctx()),
                                             );
+                                        }
+                                        if ui
+                                            .small_button("Copiar PNG")
+                                            .on_hover_text(
+                                                "Copia el PNG real del lienzo al portapapeles del sistema (para Word/Moodle)",
+                                            )
+                                            .clicked()
+                                        {
+                                            match copy_png_to_os_clipboard(&app.document) {
+                                                Ok(summary) => {
+                                                    app.cas_result = summary.clone();
+                                                    app.notify(
+                                                        summary,
+                                                        grafito_ui::toast::ToastKind::Success,
+                                                    );
+                                                }
+                                                Err(error) => {
+                                                    app.cas_result = error.clone();
+                                                    app.notify(
+                                                        error,
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                            }
                                         }
                                     });
                                     // Texto (G-C): MathML / TikZ-eje / HTML puros al portapapeles.

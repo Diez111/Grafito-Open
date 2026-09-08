@@ -58,6 +58,10 @@ keyring = { workspace = true, optional = true }
 # F10-S: QR real escaneable del código de sala (qrcode 0.14 core, sin features
 # de imagen/svg; sólo `QrCode::new` + `to_colors` para la grid egui).
 qrcode = { workspace = true }
+# W-D: portapapeles PNG OS (arboard directa; egui-winit ya la trae transitiva)
+# + PDF vectorial (printpdf 0.12, antes solo workspace-dep sin cablear).
+arboard = { workspace = true }
+printpdf = { workspace = true }
 
 # This maintained profiler pair establishes the workspace Rust 1.92 minimum.
 puffin = { version = "=0.19.1", optional = true }

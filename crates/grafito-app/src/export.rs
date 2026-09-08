@@ -1,9 +1,7 @@
 //! File I/O: save/load documents and export images.
 
 use anyhow::{Context, Result as AnyResult};
-use grafito_core::symbolic::{
-    datatable_to_csv, document_to_pdf, ExchangeError, MAX_EXCHANGE_OBJECTS,
-};
+use grafito_core::symbolic::{datatable_to_csv, ExchangeError, MAX_EXCHANGE_OBJECTS};
 use grafito_core::{Document, GeoObject, LineKind, ObjectId, RelationOperator};
 use grafito_geometry::{Color, Point2, ViewTransform, AABB};
 use grafito_whiteboard::WhiteboardElement;
@@ -35,11 +33,11 @@ const MAX_PROJECTED_COORDINATE: f64 = 1.0e12;
 static NEXT_EXPORT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Formatos de exportacion profesional admitidos por la aplicacion.
-// NOTE(2026-09-05, OLEADA-M): PDF interino real de 1 página vía
-// `grafito_core::symbolic::document_to_pdf` (1.4 mínimo, conteo + hasta 40
-// etiquetas, sin geometría inventada). El vectorial con `printpdf` sigue
-// pendiente del lead (requiere alta en `Cargo.toml`, fuera de este frente;
-// `printpdf` hoy solo está como workspace-dep sin cablear a grafito-app).
+// NOTE(2026-09-08, W-D): PDF vectorial real de 1 página vía `printpdf 0.12`
+// (`serialize_pdf_vectorial` desde `build_export_scene`: rectas, círculos,
+// polígonos/polilíneas y texto con Helvetica integrada, sin geometría
+// inventada). El interino de conteo (`document_to_pdf` del core) queda como
+// referencia histórica sin usar en este frente.
 // `export_pdf` devuelve `(path, summary)` —el mismo tipo del canal de
 // `PendingExportJob`— a propósito: no se añade `ExportFormat::Pdf` para no
 // romper los `match` exhaustivos de `app.rs` ni inventar comandos de paleta.
@@ -4005,16 +4003,23 @@ fn map_core_exchange_error(context: &'static str, error: ExchangeError) -> Strin
     }
 }
 
-/// Exporta el PDF interino de 1 página (conteo + etiquetas, sin geometría
-/// inventada). Puro + escritura atómica: ningún error toca el destino.
+/// Exporta el PDF vectorial de 1 página desde `build_export_scene`
+/// (rectas/círculos/polígonos/polilíneas/texto, Helvetica integrada).
+/// Puro + escritura atómica: ningún error toca el destino.
 /// Devuelve `(path, summary)` como el canal de `PendingExportJob`.
+/// No se añade `ExportFormat::Pdf` a propósito (ver nota del módulo).
 pub(crate) fn export_pdf(
     document: &Document,
     path: impl AsRef<Path>,
 ) -> Result<(PathBuf, String), String> {
     let path = path.as_ref();
-    let bytes = document_to_pdf(document)
-        .map_err(|error| pdf_failure(map_core_exchange_error("PDF", error)))?;
+    // La escena vectorial es la misma que SVG (1px = 1pt); los errores se
+    // re-etiquetan a PDF para no mentir con el nombre del formato.
+    let options = ExportOptions::from_document(document, ExportFormat::Svg)
+        .map_err(map_export_error_to_pdf)?;
+    let scene = build_export_scene(document, ExportFormat::Svg, options)
+        .map_err(map_export_error_to_pdf)?;
+    let bytes = serialize_pdf_vectorial(&scene)?;
     if bytes.len() > MAX_EXPORT_OUTPUT_BYTES {
         return Err(pdf_failure(format!(
             "PDF no reemplazó el destino; {} bytes exceden el límite {MAX_EXPORT_OUTPUT_BYTES}",
@@ -4032,10 +4037,280 @@ pub(crate) fn export_pdf(
     Ok((
         path.to_path_buf(),
         format!(
-            "PDF exportado: {total} objetos ({hidden} ocultos) -> {}",
+            "PDF exportado: {total} objetos ({hidden} ocultos, {} primitivas vectoriales) -> {}",
+            scene.primitive_count(),
             path.display()
         ),
     ))
+}
+
+/// Re-etiqueta un `ExportError` de la escena (construida como SVG vectorial)
+/// a mensaje honesto de PDF, sin inventar variante `ExportFormat::Pdf`.
+fn map_export_error_to_pdf(error: ExportError) -> String {
+    match &error {
+        ExportError::UnsupportedObjects { objects, .. } => {
+            let list = objects
+                .iter()
+                .map(|object| format!("{} '{}'", object.object_type, object.display_label()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("PDF no reemplazó el destino; objetos visibles no compatibles: {list}")
+        }
+        ExportError::InvalidObject { object, reason, .. } => format!(
+            "PDF no reemplazó el destino; {} '{}': {reason}",
+            object.object_type,
+            object.display_label()
+        ),
+        ExportError::InvalidView { reason, .. } => {
+            format!("PDF no reemplazó el destino; vista invalida: {reason}")
+        }
+        ExportError::ResourceLimit {
+            resource,
+            attempted,
+            limit,
+            object,
+            ..
+        } => {
+            let mut message = format!(
+                "PDF no reemplazó el destino; {resource} {attempted} excede el limite {limit}"
+            );
+            if let Some(object) = object {
+                message.push_str(&format!(
+                    " en {} '{}'",
+                    object.object_type,
+                    object.display_label()
+                ));
+            }
+            message
+        }
+        ExportError::Encoding { reason, .. } => {
+            format!("PDF no reemplazó el destino; codificacion: {reason}")
+        }
+        ExportError::Io { path, source, .. } => {
+            format!("PDF no pudo escribir {}: {source}", path.display())
+        }
+    }
+}
+
+/// 1px de escena = 1pt PDF; `printpdf` pide `Mm` en la página.
+fn pdf_mm_from_px(px: f64) -> printpdf::Mm {
+    printpdf::Mm((px * 25.4 / 72.0) as f32)
+}
+
+fn pdf_color(color: Color) -> printpdf::Color {
+    printpdf::Color::Rgb(printpdf::Rgb::new(
+        color.r.clamp(0.0, 1.0),
+        color.g.clamp(0.0, 1.0),
+        color.b.clamp(0.0, 1.0),
+        None,
+    ))
+}
+
+/// La escena usa origen arriba-izquierda (y hacia abajo); PDF usa
+/// origen abajo-izquierda (y hacia arriba).
+fn pdf_point(x_px: f64, y_px: f64, page_h_px: f64) -> printpdf::Point {
+    printpdf::Point::new(pdf_mm_from_px(x_px), pdf_mm_from_px(page_h_px - y_px))
+}
+
+fn pdf_line_points(points: &[ScreenPoint], page_h_px: f64) -> Option<Vec<printpdf::LinePoint>> {
+    if points.len() < 2 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(points.len());
+    for point in points {
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return None;
+        }
+        out.push(printpdf::LinePoint {
+            p: pdf_point(point.x, point.y, page_h_px),
+            bezier: false,
+        });
+    }
+    Some(out)
+}
+
+/// Escena → PDF vectorial de 1 página (`printpdf 0.12`, Helvetica integrada).
+/// Puro en memoria; respeta `MAX_EXPORT_OUTPUT_BYTES`.
+fn serialize_pdf_vectorial(scene: &ExportScene) -> Result<Vec<u8>, String> {
+    if scene.width == 0 || scene.height == 0 {
+        return Err(
+            "PDF no reemplazó el destino; vista invalida: las dimensiones deben ser mayores que cero"
+                .to_string(),
+        );
+    }
+    let page_h = f64::from(scene.height);
+    let mut ops: Vec<printpdf::Op> = vec![
+        printpdf::Op::SetLineCapStyle {
+            cap: printpdf::LineCapStyle::Round,
+        },
+        printpdf::Op::SetLineJoinStyle {
+            join: printpdf::LineJoinStyle::Round,
+        },
+        // Fondo blanco explícito (igual que SVG/PNG).
+        printpdf::Op::SetFillColor {
+            col: printpdf::Color::Rgb(printpdf::Rgb::new(1.0, 1.0, 1.0, None)),
+        },
+        printpdf::Op::DrawPolygon {
+            polygon: printpdf::Polygon {
+                rings: vec![printpdf::PolygonRing {
+                    points: vec![
+                        printpdf::LinePoint {
+                            p: pdf_point(0.0, 0.0, page_h),
+                            bezier: false,
+                        },
+                        printpdf::LinePoint {
+                            p: pdf_point(f64::from(scene.width), 0.0, page_h),
+                            bezier: false,
+                        },
+                        printpdf::LinePoint {
+                            p: pdf_point(f64::from(scene.width), page_h, page_h),
+                            bezier: false,
+                        },
+                        printpdf::LinePoint {
+                            p: pdf_point(0.0, page_h, page_h),
+                            bezier: false,
+                        },
+                    ],
+                }],
+                mode: printpdf::PaintMode::Fill,
+                winding_order: printpdf::WindingOrder::NonZero,
+            },
+        },
+    ];
+
+    let mut text_runs: Vec<(ScreenPoint, String, f32, Color)> = Vec::new();
+    for object in &scene.objects {
+        for primitive in &object.primitives {
+            match primitive {
+                ScenePrimitive::Path {
+                    points,
+                    closed,
+                    stroke,
+                    fill,
+                } => {
+                    let Some(line_points) = pdf_line_points(points, page_h) else {
+                        continue;
+                    };
+                    if *closed || fill.is_some() {
+                        let mode = match (stroke, fill) {
+                            (Some(_), Some(_)) => printpdf::PaintMode::FillStroke,
+                            (Some(_), None) => printpdf::PaintMode::Stroke,
+                            (None, Some(_)) => printpdf::PaintMode::Fill,
+                            (None, None) => continue,
+                        };
+                        if let Some(fill) = fill {
+                            ops.push(printpdf::Op::SetFillColor {
+                                col: pdf_color(*fill),
+                            });
+                        }
+                        if let Some(stroke) = stroke {
+                            ops.push(printpdf::Op::SetOutlineColor {
+                                col: pdf_color(stroke.color),
+                            });
+                            ops.push(printpdf::Op::SetOutlineThickness {
+                                pt: printpdf::Pt(stroke.width.max(0.25)),
+                            });
+                        }
+                        ops.push(printpdf::Op::DrawPolygon {
+                            polygon: printpdf::Polygon {
+                                rings: vec![printpdf::PolygonRing {
+                                    points: line_points,
+                                }],
+                                mode,
+                                winding_order: printpdf::WindingOrder::NonZero,
+                            },
+                        });
+                    } else if let Some(stroke) = stroke {
+                        ops.push(printpdf::Op::SetOutlineColor {
+                            col: pdf_color(stroke.color),
+                        });
+                        ops.push(printpdf::Op::SetOutlineThickness {
+                            pt: printpdf::Pt(stroke.width.max(0.25)),
+                        });
+                        ops.push(printpdf::Op::DrawLine {
+                            line: printpdf::Line {
+                                points: line_points,
+                                is_closed: false,
+                            },
+                        });
+                    }
+                }
+                ScenePrimitive::Text {
+                    position,
+                    content,
+                    font_size,
+                    color,
+                } => {
+                    if content.trim().is_empty() {
+                        continue;
+                    }
+                    let size = font_size.clamp(4.0, 144.0);
+                    text_runs.push((*position, content.clone(), size, *color));
+                }
+            }
+        }
+    }
+    if !text_runs.is_empty() {
+        ops.push(printpdf::Op::StartTextSection);
+        for (position, content, size, color) in &text_runs {
+            ops.push(printpdf::Op::SetFillColor {
+                col: pdf_color(*color),
+            });
+            ops.push(printpdf::Op::SetTextCursor {
+                pos: pdf_point(position.x, position.y, page_h),
+            });
+            ops.push(printpdf::Op::SetLineHeight {
+                lh: printpdf::Pt(size * 1.2),
+            });
+            ops.push(printpdf::Op::SetFont {
+                font: printpdf::PdfFontHandle::Builtin(printpdf::BuiltinFont::Helvetica),
+                size: printpdf::Pt(*size),
+            });
+            let mut first = true;
+            for line in content.split(['\n', '\r']) {
+                if !first {
+                    ops.push(printpdf::Op::AddLineBreak);
+                }
+                first = false;
+                if line.is_empty() {
+                    continue;
+                }
+                // Helvetica integrada cubre WinAnsi; lo no codificable se
+                // degrada a `?` antes que romper el PDF.
+                let safe: String = line
+                    .chars()
+                    .map(|ch| {
+                        if ch.is_control() || ch == '\u{FEFF}' {
+                            '?'
+                        } else {
+                            ch
+                        }
+                    })
+                    .collect();
+                ops.push(printpdf::Op::ShowText {
+                    items: vec![printpdf::TextItem::Text(safe)],
+                });
+            }
+        }
+        ops.push(printpdf::Op::EndTextSection);
+    }
+
+    let mut document = printpdf::PdfDocument::new("Grafito");
+    let page = printpdf::PdfPage::new(
+        pdf_mm_from_px(f64::from(scene.width)),
+        pdf_mm_from_px(page_h),
+        ops,
+    );
+    document.with_pages(vec![page]);
+    let mut warnings = Vec::new();
+    let bytes = document.save(&printpdf::PdfSaveOptions::default(), &mut warnings);
+    if bytes.len() > MAX_EXPORT_OUTPUT_BYTES {
+        return Err(format!(
+            "PDF no reemplazó el destino; {} bytes exceden el límite {MAX_EXPORT_OUTPUT_BYTES}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Spawns PDF en background — mismo contrato que `spawn_export` en `app.rs`
@@ -4136,14 +4411,70 @@ pub(crate) fn sanitize_export_stem(raw: &str) -> String {
 /// de tiny-skia del export a archivo, sin motor nuevo ni framebuffer extra.
 ///
 /// El documento con solo 3D/soportes no compatibles falla honesto con
-/// `UnsupportedObjects` (igual que `export_png`); el copiado OS de imagen
-/// queda para el reducer (sin crate de clipboard en deps, ver BLOCKER W4) que
-/// cablea estos bytes al `Portapapeles PNG` de `panels.rs:1993` o a archivo.
-#[allow(dead_code)] // W4: wiring portapapeles PNG en panels.rs (P2, prohibido aquí).
+/// `UnsupportedObjects` (igual que `export_png`); el copiado OS lo hace
+/// [`copy_png_to_os_clipboard`] (arboard directo, W-D).
 pub(crate) fn clipboard_png_bytes(document: &Document) -> Result<Vec<u8>, ExportError> {
     let options = ExportOptions::from_document(document, ExportFormat::Png)?;
     let scene = build_export_scene(document, ExportFormat::Png, options)?;
     render_png(&scene, ExportFormat::Png)
+}
+
+/// Decodifica bytes PNG a RGBA8 para el portapapeles OS.
+/// Puro, sin I/O ni clipboard: el formato que `arboard::ImageData` necesita
+/// (ancho, alto, `w*h*4` bytes RGBA fila-mayor). Falla honesto si los bytes
+/// no son PNG o exceden el presupuesto de salida.
+pub(crate) fn png_bytes_to_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    if bytes.is_empty() {
+        return Err("PNG no se copió al portapapeles; los bytes están vacíos".to_string());
+    }
+    if bytes.len() > MAX_EXPORT_OUTPUT_BYTES {
+        return Err(format!(
+            "PNG no se copió al portapapeles; {} bytes exceden el límite {MAX_EXPORT_OUTPUT_BYTES}",
+            bytes.len()
+        ));
+    }
+    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("PNG no se copió al portapapeles; bytes inválidos: {error}"))?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    if width == 0 || height == 0 {
+        return Err("PNG no se copió al portapapeles; dimensiones nulas".to_string());
+    }
+    let raw = rgba.into_raw();
+    let expected = (u64::from(width))
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4));
+    if expected != Some(raw.len() as u64) {
+        return Err(
+            "PNG no se copió al portapapeles; el decodificado no es RGBA8 completo".to_string(),
+        );
+    }
+    Ok((width, height, raw))
+}
+
+/// Copia el PNG del lienzo al portapapeles OS (`arboard::Clipboard::set_image`).
+/// Headless honesto: sin servidor gráfico / Wayland sin data-control devuelve
+/// `Err` con la causa en vez de pánico; el llamador (panel) lo muestra en toast.
+/// Devuelve el resumen para `cas_result` en éxito.
+pub(crate) fn copy_png_to_os_clipboard(document: &Document) -> Result<String, String> {
+    let png = clipboard_png_bytes(document)
+        .map_err(|error| format!("PNG no se copió al portapapeles; {error}"))?;
+    let png_len = png.len();
+    let (width, height, rgba) = png_bytes_to_rgba(&png)?;
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| {
+        format!("PNG no se copió al portapapeles; portapapeles OS no disponible: {error}")
+    })?;
+    let image = arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Owned(rgba),
+    };
+    clipboard.set_image(image).map_err(|error| {
+        format!("PNG no se copió al portapapeles; el sistema lo rechazó: {error}")
+    })?;
+    Ok(format!(
+        "PNG copiado al portapapeles ({width}x{height}, {png_len} bytes)"
+    ))
 }
 
 pub(crate) fn write_text_atomic(path: impl AsRef<Path>, text: &str) -> io::Result<()> {
@@ -5755,19 +6086,76 @@ mod tests {
     }
 
     #[test]
-    fn pdf_interim_writes_one_page_and_reports_counts() {
+    fn pdf_vectorial_writes_valid_pdf_and_reports_counts() {
         let document = common_2d_document();
         let total = document.objects_iter_sorted().count();
         let path = temp_export_path("pdf");
-        let (written, summary) = export_pdf(&document, &path).expect("PDF interino fixture");
+        let (written, summary) = export_pdf(&document, &path).expect("PDF vectorial fixture");
         assert_eq!(written, path);
         assert!(
             summary.contains(&format!("{total} objetos")),
             "summary honesto esperado, fue: {summary}"
         );
+        assert!(
+            summary.contains("primitivas vectoriales"),
+            "summary vectorial esperado, fue: {summary}"
+        );
         let bytes = std::fs::read(&path).expect("pdf escrito");
-        assert!(bytes.starts_with(b"%PDF-1.4"));
+        // PDF válido que abre: magic %PDF, tabla xref y cierre %%EOF.
+        assert!(bytes.starts_with(b"%PDF"), "magic %PDF esperado");
+        assert!(
+            bytes.windows(4).any(|w| w == b"xref"),
+            "tabla xref esperada en PDF vectorial"
+        );
         assert!(bytes.windows(5).any(|w| w == b"%%EOF"));
+        assert!(bytes.len() <= MAX_EXPORT_OUTPUT_BYTES);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pdf_vectorial_serializes_scene_geometry_without_io() {
+        let document = common_2d_document();
+        let options = ExportOptions::new(320, 240);
+        let scene = build_export_scene(&document, ExportFormat::Svg, options)
+            .expect("escena vectorial fixture");
+        assert!(scene.primitive_count() > 0);
+        let bytes = serialize_pdf_vectorial(&scene).expect("pdf en memoria");
+        assert!(bytes.starts_with(b"%PDF"), "magic %PDF esperado");
+        assert!(bytes.windows(4).any(|w| w == b"xref"));
+        assert!(bytes.windows(5).any(|w| w == b"%%EOF"));
+        // La escena trae punto/recta/círculo/polígono/texto: el PDF no es
+        // un cascarón vacío (página + fondo + geometría + cierre).
+        assert!(bytes.len() > 500, "PDF vectorial sospechosamente chico");
+    }
+
+    #[test]
+    fn pdf_point_flips_y_for_bottom_left_origin() {
+        let page_h = 240.0;
+        let top = pdf_point(10.0, 0.0, page_h);
+        let bottom = pdf_point(10.0, 240.0, page_h);
+        assert!(top.y.0 > bottom.y.0, "y debe invertirse a origen inferior");
+    }
+
+    #[test]
+    fn pdf_unsupported_preserves_destination() {
+        use grafito_core::Sphere3DObj;
+        use grafito_geometry::Point3D;
+        let mut document = Document::new();
+        document.view_mut().screen_size = glam::Vec2::new(320.0, 240.0);
+        document
+            .try_add_object(GeoObject::Sphere3D(Sphere3DObj::new(
+                Point3D::new(0.0, 0.0, 0.0),
+                1.0,
+            )))
+            .expect("esfera fixture");
+        let path = temp_export_path("pdf");
+        std::fs::write(&path, b"keep me").expect("write sentinel");
+        let error = export_pdf(&document, &path).expect_err("3D debe fallar honesto");
+        assert!(
+            error.contains("no compatibles"),
+            "error honesto esperado, fue: {error}"
+        );
+        assert_eq!(std::fs::read(&path).expect("sentinel remains"), b"keep me");
         let _ = std::fs::remove_file(path);
     }
 
@@ -5833,6 +6221,54 @@ mod tests {
         let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
             .expect("png decodificable");
         assert!(decoded.width() > 0 && decoded.height() > 0);
+    }
+
+    #[test]
+    fn png_bytes_to_rgba_roundtrip_matches_arboard_format() {
+        use grafito_core::PointObj;
+        let mut document = Document::new();
+        document.view_mut().screen_size = glam::Vec2::new(320.0, 240.0);
+        document
+            .try_add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))))
+            .expect("punto fixture");
+        let bytes = clipboard_png_bytes(&document).expect("png real sin I/O");
+        let (width, height, raw) = png_bytes_to_rgba(&bytes).expect("rgba para arboard");
+        assert!(width > 0 && height > 0);
+        // Formato que `arboard::ImageData` exige: RGBA8 fila-mayor.
+        assert_eq!(raw.len(), width as usize * height as usize * 4);
+        let image = arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: std::borrow::Cow::Borrowed(&raw),
+        };
+        assert_eq!(image.width as u32, width);
+        assert_eq!(image.height as u32, height);
+        assert_eq!(image.bytes.len(), raw.len());
+    }
+
+    #[test]
+    fn png_bytes_to_rgba_rejects_garbage_honestly() {
+        let error = png_bytes_to_rgba(b"no es un png").expect_err("basura debe fallar");
+        assert!(error.contains("no se copió"), "fue: {error}");
+        let empty = png_bytes_to_rgba(&[]).expect_err("vacío debe fallar");
+        assert!(empty.contains("vacíos"), "fue: {empty}");
+    }
+
+    #[test]
+    fn clipboard_png_unsupported_fails_honest_without_os_touch() {
+        use grafito_core::Sphere3DObj;
+        use grafito_geometry::Point3D;
+        let mut document = Document::new();
+        document.view_mut().screen_size = glam::Vec2::new(320.0, 240.0);
+        document
+            .try_add_object(GeoObject::Sphere3D(Sphere3DObj::new(
+                Point3D::new(0.0, 0.0, 0.0),
+                1.0,
+            )))
+            .expect("esfera fixture");
+        // Falla antes de tocar el portapapeles OS (sin flakiness headless).
+        let error = clipboard_png_bytes(&document).expect_err("3D debe fallar");
+        assert!(error.to_string().contains("no compatibles"), "fue: {error}");
     }
 }
 
