@@ -1471,6 +1471,15 @@ pub fn rect_burbuja_morph(
 }
 
 impl TeachingUiState {
+    /// Huella O(frames) de `anim_frames` para el cache de texturas.
+    ///
+    /// Frente hash O(píxeles): antes se hasheaba cada píxel de hasta 6
+    /// frames en CADA tick (`ensure_textures` corre por frame dibujado).
+    /// Ahora solo `len` + `size` + 4 esquinas por frame: el reemplazo (nuevo
+    /// set, distinto largo o tamaño) siempre cambia la huella; un cambio
+    /// solo-interior con mismas esquinas se re-subiría tarde como mucho un
+    /// set (los frames nuevos llegan con `clear_*`, que ya invalida el
+    /// cache). Sin `unwrap`: índices con `get`, nunca aritmética que desborde.
     fn anim_frames_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let Some(frames) = &self.anim_frames else {
@@ -1478,13 +1487,28 @@ impl TeachingUiState {
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         frames.len().hash(&mut hasher);
-        for frame in frames.iter().take(6) {
+        for frame in frames.iter() {
             frame.size.hash(&mut hasher);
-            for pixel in &frame.pixels {
-                pixel.r().hash(&mut hasher);
-                pixel.g().hash(&mut hasher);
-                pixel.b().hash(&mut hasher);
-                pixel.a().hash(&mut hasher);
+            let w = frame.size.first().copied().unwrap_or(0);
+            let h = frame.size.get(1).copied().unwrap_or(0);
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let ultima_fila = h.saturating_sub(1);
+            let ultima_col = w.saturating_sub(1);
+            for (x, y) in [
+                (0, 0),
+                (ultima_col, 0),
+                (0, ultima_fila),
+                (ultima_col, ultima_fila),
+            ] {
+                let indice = y.saturating_mul(w).saturating_add(x);
+                if let Some(pixel) = frame.pixels.get(indice) {
+                    pixel.r().hash(&mut hasher);
+                    pixel.g().hash(&mut hasher);
+                    pixel.b().hash(&mut hasher);
+                    pixel.a().hash(&mut hasher);
+                }
             }
         }
         hasher.finish()
@@ -2239,6 +2263,52 @@ mod tests {
             estado.retired_anim_textures.pending(),
             0,
             "nada retirado sin reemplazo"
+        );
+    }
+
+    #[test]
+    fn hash_esquinas_detecta_reemplazo_con_cota_o1() {
+        // Frente hash O(píxeles): la huella solo mira len+size+4 esquinas
+        // por frame — el tick por frame dibujado no recorre píxeles.
+        fn huella(frames: Vec<egui::ColorImage>) -> u64 {
+            TeachingUiState {
+                anim_frames: Some(frames),
+                ..Default::default()
+            }
+            .anim_frames_hash()
+        }
+        let mut grande_a = egui::ColorImage::new([64, 64], egui::Color32::RED);
+        let mut solo_interior = grande_a.clone();
+        // Cota: 4094 píxeles interiores distintos, mismas esquinas → la
+        // huella NO los mira (misma huella = trabajo acotado, no O(n)).
+        for (i, pixel) in solo_interior.pixels.iter_mut().enumerate() {
+            let w = 64;
+            let (x, y) = (i % w, i / w);
+            let es_esquina = (x == 0 || x == w - 1) && (y == 0 || y == w - 1);
+            if !es_esquina {
+                *pixel = egui::Color32::GREEN;
+            }
+        }
+        assert_eq!(
+            huella(vec![grande_a.clone()]),
+            huella(vec![solo_interior.clone()]),
+            "el interior no entra en la huella (cota O(1) por frame)"
+        );
+        // Reemplazo real (esquina distinta) sí cambia la huella.
+        grande_a.pixels[0] = egui::Color32::BLUE;
+        assert_ne!(
+            huella(vec![grande_a]),
+            huella(vec![solo_interior]),
+            "el reemplazo debe invalidar el cache"
+        );
+        // Largo distinto también (set nuevo, no re-subida tardía).
+        assert_ne!(
+            huella(vec![frame_solido(egui::Color32::RED)]),
+            huella(vec![
+                frame_solido(egui::Color32::RED),
+                frame_solido(egui::Color32::RED)
+            ]),
+            "distinto largo, distinta huella"
         );
     }
 

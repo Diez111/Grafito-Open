@@ -824,6 +824,17 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
 /// (canónica declarada sin función, explícita con función válida, `Err`
 /// honesto con función inválida).
 fn propose_parametric_tool(call_id: &str, pedido: &str) -> ToolResult {
+    // Mixto área+tangente ("área bajo la tangente"): no se elige una rama en
+    // silencio — la de área ganaba siempre por orden. Se pide desambiguar.
+    if grafito_anim::parametric::pedido_menciona_area(pedido)
+        && grafito_anim::parametric::pedido_menciona_tangente(pedido)
+    {
+        return ToolResult::text(
+            call_id,
+            false,
+            "el pedido menciona área y tangente a la vez: ¿querés el área bajo la curva o la recta tangente móvil? Reformulá con una sola idea, por ejemplo «área bajo f(x)=x^2 de 0 a 2» o «tangente móvil de f(x)=x^2»",
+        );
+    }
     if grafito_anim::parametric::pedido_menciona_area(pedido) {
         return propose_area_tool(call_id, pedido);
     }
@@ -3288,6 +3299,40 @@ mod tests {
         let value: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(value["kind"], "tangent");
         assert_eq!(value["kind_label"], "recta tangente móvil");
+    }
+
+    #[test]
+    fn generate_animation_pedido_mixto_area_tangente_pide_desambiguar() {
+        // Frente agente traga mixtos: "área bajo la tangente" matcheaba área
+        // y tangente; antes ganaba área en silencio, ahora es `Err` honesto.
+        let call = ToolCall {
+            id: "as4-mixto".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "mostrame el área bajo la tangente de f(x)=x^2"}),
+        };
+        assert!(
+            grafito_anim::parametric::pedido_menciona_area(
+                "mostrame el área bajo la tangente de f(x)=x^2"
+            ),
+            "el pedido debe mencionar área"
+        );
+        assert!(
+            grafito_anim::parametric::pedido_menciona_tangente(
+                "mostrame el área bajo la tangente de f(x)=x^2"
+            ),
+            "el pedido debe mencionar tangente"
+        );
+        let result = dispatch_safe_tool(&call);
+        assert!(
+            !result.ok,
+            "el mixto no debe elegir rama en silencio: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("desamb") || result.content.contains("una sola idea"),
+            "debe pedir desambiguar: {}",
+            result.content
+        );
     }
 
     #[test]

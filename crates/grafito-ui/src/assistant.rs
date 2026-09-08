@@ -442,6 +442,16 @@ struct RetiredMediaBatch {
 /// es `ancho * h/w` clampeado a este tope para no mover el scroll.
 const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 
+/// Upscale máximo del preview inline (frente upscale libre).
+///
+/// Decisión por nitidez (documentada): se capeó a 1.5× en vez de volver a
+/// `min(1.0)` porque los frames nativos salen a ~480px y los paneles miden
+/// 300..520 — el caso común escala ≤1.1× y `min(1.0)` dejaría bandas vacías
+/// en un layout que reserva todo el ancho. El cap solo muerde texturas
+/// chicas (tests/thumbnails), donde más de 1.5× pixela feo aun con filtrado
+/// lineal. "Ver grande" sigue disponible a tamaño real en el visor.
+pub const MAX_PREVIEW_UPSCALE: f32 = 1.5;
+
 /// Tooltips cortos de la toolbar única v3 (≤60 chars, sin cortes).
 const MEDIA_TIP_SPEED: &str = "Cambia la velocidad: 0.5x, 1x, 2x";
 const MEDIA_TIP_FULLSCREEN: &str = "Ver grande. Esc para cerrar";
@@ -2342,9 +2352,10 @@ pub use crate::prosa::{humanize_control_name, humanize_prose_text};
 /// Tamaño del preview inline de la card (D2, puro y testeable).
 ///
 /// Ocupa TODO el ancho disponible, aspecto preservado (`alto = ancho * h/w`),
-/// alto clampeado a `max_h` (tokens). SÍ permite upscale: la card pide llenar
-/// el ancho y el filtrado GPU suaviza frames chicos (los nativos salen a
-/// ~480px; solo texturas de test de 8px pixlearían, jamás contenido real).
+/// alto clampeado a `max_h` (tokens). El upscale se capea a
+/// [`MAX_PREVIEW_UPSCALE`] (1.5×): llenar el ancho con texturas chicas
+/// pixela feo aun con filtrado GPU (los nativos salen a ~480px; solo
+/// texturas de test de 8px lo notarían, jamás contenido real).
 /// El llamador usa el tamaño del primer frame para que el bloque sea estable
 /// entre fotogramas.
 ///
@@ -2373,8 +2384,9 @@ pub fn media_preview_size(frame_w: f32, frame_h: f32, avail_w: f32, max_h: f32) 
     } else {
         MEDIA_CARD_MAX_PREVIEW_H
     };
-    // Llena el ancho (upscale incluido) y deriva el alto por aspecto.
-    let scale = avail / fw;
+    // Ancho hasta llenar, con upscale capeado a 1.5× por nitidez; el alto
+    // deriva del aspecto.
+    let scale = (avail / fw).min(MAX_PREVIEW_UPSCALE);
     let mut w = (fw * scale).ceil();
     let mut h = (fh * scale).ceil();
     if h > cap {
@@ -4927,8 +4939,9 @@ pub fn media_header_status(generating: bool, export: &MediaExportState) -> Strin
 }
 
 /// Tamaño del preview en el overlay (N2): llena `min(ancho, alto-disponible)`
-/// respetando aspecto. Igual que la card inline permite upscale: "ver grande"
-/// lo pide y el usuario lo abrió a propósito. Puro, sin `unwrap`.
+/// respetando aspecto. A diferencia de la card inline (cap 1.5× por nitidez),
+/// el overlay permite upscale libre: "ver grande" lo pide y el usuario lo
+/// abrió a propósito. Puro, sin `unwrap`.
 pub fn media_overlay_preview_size(
     frame_w: f32,
     frame_h: f32,
@@ -10961,9 +10974,8 @@ mod tests {
 
     #[test]
     fn media_preview_size_usa_todo_el_ancho_y_preserva_aspecto() {
-        // D2 + frente layout: ancho total SIEMPRE (upscale incluido), alto =
-        // ancho * h/w clampeado a max_h. La card pide llenar el ancho; el
-        // filtrado GPU suaviza frames chicos.
+        // D2 + frente layout: ancho total (con upscale capeado a 1.5× por
+        // nitidez), alto = ancho * h/w clampeado a max_h.
         let (w, h) = media_preview_size(400.0, 200.0, 340.0, 280.0);
         assert_eq!((w, h), (340.0, 170.0), "debe usar todo el ancho");
         // Retrato gigante: el alto se clampa sin cambiar el ancho de reserva
@@ -10971,13 +10983,30 @@ mod tests {
         let (w2, h2) = media_preview_size(200.0, 800.0, 340.0, 280.0);
         assert!(h2 <= 280.0, "alto sin clampear: {h2}");
         assert!(w2 <= 340.0, "ancho desbordado: {w2}");
-        // Textura chica: también llena el ancho (aspecto preservado).
+        // Textura chica: upscale capeado a 1.5× (aspecto preservado, sin
+        // pixelar de más).
         let (w3, h3) = media_preview_size(100.0, 50.0, 340.0, 280.0);
-        assert_eq!((w3, h3), (340.0, 170.0), "debe llenar: {w3}x{h3}");
+        assert_eq!((w3, h3), (150.0, 75.0), "cap 1.5×: {w3}x{h3}");
         // Estable entre frames: mismo ref da misma reserva siempre.
         let a = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
         let b = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
         assert_eq!(a, b, "la reserva debe ser estable");
+    }
+
+    #[test]
+    fn media_preview_upscale_pinnea_en_1_5x() {
+        // Frente upscale libre: `media_preview_size(100,50,340,280)` pinneado
+        // al cap (antes 340×170 = 3.4×, pixelado). La escala jamás supera el
+        // cap en ningún tamaño.
+        assert_eq!(MAX_PREVIEW_UPSCALE, 1.5);
+        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (150.0, 75.0));
+        for (fw, fh) in [(8.0, 8.0), (100.0, 50.0), (480.0, 360.0)] {
+            let (w, _) = media_preview_size(fw, fh, 340.0, 280.0);
+            assert!(
+                w <= (fw * MAX_PREVIEW_UPSCALE).ceil() + f32::EPSILON,
+                "upscale con cap en {fw}x{fh}: {w}"
+            );
+        }
     }
 
     #[test]

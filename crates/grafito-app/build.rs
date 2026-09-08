@@ -36,8 +36,21 @@ fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed={}", icon_source.display());
 
     // Hash del commit para "Acerca de" (prueba de versión visible).
-    // `rerun-if-changed` sobre HEAD: se re-emite en cada commit.
+    // `HEAD` solo cambia al saltar de rama; el ref real (`refs/heads/...`)
+    // cambia por commit: se emiten ambos para no servir un hash rancio.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    {
+        let git_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.git");
+        let head_path = git_dir.join("HEAD");
+        if let Ok(head) = fs::read_to_string(&head_path) {
+            let head = head.trim();
+            if let Some(ref_path) = head.strip_prefix("ref: ") {
+                let ref_file = git_dir.join(ref_path);
+                println!("cargo:rerun-if-changed=../../{ref_path}");
+                let _ = ref_file;
+            }
+        }
+    }
     let hash = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -45,7 +58,7 @@ fn main() -> io::Result<()> {
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "local".to_string());
+        .unwrap_or_else(|| format!("dev-{}", env!("CARGO_PKG_VERSION")));
     println!("cargo:rustc-env=GRAFITO_BUILD_HASH={hash}");
 
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "windows" {

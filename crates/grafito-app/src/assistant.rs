@@ -128,6 +128,94 @@ pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
     crate::anim_native::detect_template_for_concept(pedido)
 }
 
+/// Título curado de la card de animación (punto único, puro y testeable).
+///
+/// Las 3 vías (paramétrica, nativa, externa) lo comparten: jamás eco crudo
+/// del pedido (venía con typos como "integrela" y sufijos "(nativa)"
+/// duplicados). Con `anim` titula por kind; sin ella, por plantilla
+/// conocida; `universal`/desconocida cura el concepto (menciona
+/// integral/área → canónica integral, si no concepto recortado sin sufijo).
+/// Devuelve la base SIN " (nativa)": la vía nativa lo agrega al mostrar.
+pub(crate) fn titulo_curado(
+    template: &str,
+    concept: &str,
+    anim: Option<&grafito_anim::parametric::ParametricAnim>,
+) -> String {
+    if let Some(anim) = anim {
+        return match anim.kind {
+            grafito_anim::parametric::ParametricKind::Tangent => {
+                format!("Tangente móvil · {}", anim.expr_a)
+            }
+            grafito_anim::parametric::ParametricKind::Area => {
+                format!("Área acumulada · {} [{},{}]", anim.expr_a, anim.p0, anim.p1)
+            }
+            grafito_anim::parametric::ParametricKind::Sweep => {
+                format!("Barrido · {} ({})", anim.expr_a, anim.param.as_str())
+            }
+            grafito_anim::parametric::ParametricKind::Trace => {
+                format!("Traza · {}", anim.expr_a)
+            }
+            grafito_anim::parametric::ParametricKind::Morph => "Transición".to_string(),
+            grafito_anim::parametric::ParametricKind::Locus => "Lugar geométrico".to_string(),
+        };
+    }
+    match template.trim().to_lowercase().as_str() {
+        "integral-area" => "Integral — área bajo la curva".to_string(),
+        "derivative-slope" => "Derivada como pendiente".to_string(),
+        "pitagoras" | "pythagoras" => "Teorema de Pitágoras".to_string(),
+        "taylor-series" => "Serie de Taylor".to_string(),
+        "conformal-map" => "Mapeo conforme".to_string(),
+        _ => titulo_desde_concepto(concept),
+    }
+}
+
+/// Cura un concepto libre a título (sin eco crudo del pedido).
+///
+/// - Menciona integral/área (fuzzy: "integrela" también) → canónica integral
+///   (el typo jamás se muestra).
+/// - Menciona tangente/derivada → pendiente; Pitágoras/Taylor/conforme por
+///   nombre.
+/// - Resto: recortado a 80 chars, sin sufijos "(nativa)" repetidos; vacío →
+///   "Animación". Sin `unwrap`: índices por chars, nunca slicing por bytes.
+fn titulo_desde_concepto(concept: &str) -> String {
+    if grafito_anim::parametric::pedido_menciona_area(concept) {
+        return "Integral — área bajo la curva".to_string();
+    }
+    if grafito_anim::parametric::pedido_menciona_tangente(concept) {
+        return "Derivada como pendiente".to_string();
+    }
+    let lower = concept.to_lowercase();
+    if lower.contains("pitagoras") || lower.contains("pitágoras") {
+        return "Teorema de Pitágoras".to_string();
+    }
+    if lower.contains("taylor") {
+        return "Serie de Taylor".to_string();
+    }
+    if lower.contains("conforme") || lower.contains("conformal") {
+        return "Mapeo conforme".to_string();
+    }
+    let mut curado = concept.trim().to_string();
+    loop {
+        let recortado = curado.trim_end();
+        if recortado.len() >= "(nativa)".len() && recortado.to_lowercase().ends_with("(nativa)") {
+            let sin_sufijo = recortado.chars().count() - "(nativa)".chars().count();
+            curado = recortado.chars().take(sin_sufijo).collect();
+        } else {
+            curado = recortado.to_string();
+            break;
+        }
+    }
+    if curado.is_empty() {
+        return "Animación".to_string();
+    }
+    const MAX_TITULO_CHARS: usize = 80;
+    if curado.chars().count() > MAX_TITULO_CHARS {
+        curado.chars().take(MAX_TITULO_CHARS).collect()
+    } else {
+        curado
+    }
+}
+
 /// Parte un pedido playlist "X y después Y" (puro, sin I/O ni spawn).
 ///
 /// Solo el conector "y después"/"y despues" (insensible a mayúsculas y al
@@ -3199,35 +3287,10 @@ impl GrafitoApp {
                         }
                         match rendered {
                             Ok(frames) => {
-                                // Título curado por kind (no eco crudo del pedido:
-                                // venía con typos y sufijos contradictorios).
-                                let title = match anim.kind {
-                                    grafito_anim::parametric::ParametricKind::Tangent => {
-                                        format!("Tangente móvil · {}", anim.expr_a)
-                                    }
-                                    grafito_anim::parametric::ParametricKind::Area => {
-                                        format!(
-                                            "Área acumulada · {} [{},{}]",
-                                            anim.expr_a, anim.p0, anim.p1
-                                        )
-                                    }
-                                    grafito_anim::parametric::ParametricKind::Sweep => {
-                                        format!(
-                                            "Barrido · {} ({})",
-                                            anim.expr_a,
-                                            anim.param.as_str()
-                                        )
-                                    }
-                                    grafito_anim::parametric::ParametricKind::Trace => {
-                                        format!("Traza · {}", anim.expr_a)
-                                    }
-                                    grafito_anim::parametric::ParametricKind::Morph => {
-                                        "Transición".to_string()
-                                    }
-                                    grafito_anim::parametric::ParametricKind::Locus => {
-                                        "Lugar geométrico".to_string()
-                                    }
-                                };
+                                // Título curado por el punto único (no eco
+                                // crudo: venía con typos y sufijos).
+                                let title =
+                                    titulo_curado(&template_owned, &concept_owned, Some(&anim));
                                 Ok(grafito_ui::assistant::AssistantMedia { title, frames })
                             }
                             Err(error) => Err(error.to_string()),
@@ -3252,19 +3315,15 @@ impl GrafitoApp {
                             );
                         }
                         if frames.is_empty() {
-                            return Err("el motor nativo no produjo fotogramas".to_string());
+                            return Err(crate::anim_native::error_sin_fotogramas(
+                                "el motor nativo",
+                            ));
                         }
-                        let title = match template_owned.as_str() {
-                            "integral-area" => "Integral — área bajo la curva (nativa)".to_string(),
-                            "derivative-slope" => "Derivada como pendiente (nativa)".to_string(),
-                            "pitagoras" | "pythagoras" => {
-                                "Teorema de Pitágoras (nativa)".to_string()
-                            }
-                            "taylor-series" => "Serie de Taylor (nativa)".to_string(),
-                            "conformal-map" => "Mapeo conforme (nativa)".to_string(),
-                            "universal" => format!("{} (nativa)", concept_owned),
-                            _ => format!("{} (nativa)", concept_owned),
-                        };
+                        // Punto único: base curada + sufijo nativo (una vez).
+                        let title = format!(
+                            "{} (nativa)",
+                            titulo_curado(&template_owned, &concept_owned, None)
+                        );
                         Ok(grafito_ui::assistant::AssistantMedia { title, frames })
                     }
                 };
@@ -3293,18 +3352,9 @@ impl GrafitoApp {
                                     Err("La generación se canceló antes de completarse."
                                         .to_string())
                                 } else {
-                                    let title = match template_owned.as_str() {
-                                        "integral-area" => {
-                                            "Integral — área bajo la curva".to_string()
-                                        }
-                                        "derivative-slope" => "Derivada como pendiente".to_string(),
-                                        "pitagoras" | "pythagoras" => {
-                                            "Teorema de Pitágoras".to_string()
-                                        }
-                                        "taylor-series" => "Serie de Taylor".to_string(),
-                                        "conformal-map" => "Mapeo conforme".to_string(),
-                                        _ => concept_owned.clone(),
-                                    };
+                                    // Punto único (vía externa: base sin sufijo).
+                                    let title =
+                                        titulo_curado(&template_owned, &concept_owned, None);
                                     Ok(grafito_ui::assistant::AssistantMedia { title, frames })
                                 }
                             }
@@ -3439,7 +3489,9 @@ impl GrafitoApp {
                     return;
                 }
                 if frames.is_empty() {
-                    let _ = sender.send(Err("el motor nativo no produjo fotogramas".to_string()));
+                    let _ = sender.send(Err(crate::anim_native::error_sin_fotogramas(
+                        "el motor nativo",
+                    )));
                     repaint.request_repaint();
                     return;
                 }
@@ -5949,12 +6001,12 @@ mod tests {
         preflight_assistant_parameter, preflight_assistant_scene, prosa_integral_explicita,
         read_bounded_attachment, remote_error_message, should_fallback_agent_spark_to_deepseek,
         should_fallback_remote_spark_to_deepseek, socratic_guard_context, split_playlist_request,
-        stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
-        wants_exercise_request, AgentChannelMsg, AssistantAgentJob, AssistantAnimJob,
-        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
-        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
-        DecisionAnimacion, GifExportJob, IntegralPedido, LocalAssistantDisposition,
-        RemoteProposalVerification,
+        stage_assistant_parameter, titulo_curado, validate_assistant_command,
+        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AssistantAgentJob,
+        AssistantAnimJob, AssistantCommandInvocation, AssistantModelJob,
+        AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, GifExportJob, IntegralPedido,
+        LocalAssistantDisposition, RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
@@ -7148,6 +7200,37 @@ mod tests {
             "universal"
         );
         assert_eq!(plantilla_para_pedido(pedido), "integral-area");
+    }
+
+    #[test]
+    fn titulo_curado_universal_con_typo_no_muestra_typo() {
+        // Frente títulos a medias: las 3 vías comparten `titulo_curado`;
+        // `universal` + concepto con typo "integrela" no hace eco crudo.
+        let base = titulo_curado("universal", "una integrela (nativa)", None);
+        assert_eq!(base, "Integral — área bajo la curva");
+        assert!(
+            !base.to_lowercase().contains("integrela"),
+            "el typo no se muestra: {base}"
+        );
+        // La vía nativa agrega el sufijo una sola vez (sin duplicar).
+        assert_eq!(
+            format!("{base} (nativa)"),
+            "Integral — área bajo la curva (nativa)"
+        );
+        // La paramétrica titula por kind aunque el concepto venga sucio.
+        let anim = crate::anim_native::parametric_for_template("derivative-slope", "derivada")
+            .expect("derivative-slope es paramétrica");
+        assert_eq!(
+            titulo_curado("derivative-slope", "una derivadaa (nativa)", Some(&anim)),
+            "Tangente móvil · x^2"
+        );
+        // Concepto libre desconocido: curado sin sufijo duplicado.
+        assert_eq!(
+            titulo_curado("universal", "fractales raros (nativa)", None),
+            "fractales raros"
+        );
+        // Vacío: honesto, jamás título en blanco.
+        assert_eq!(titulo_curado("universal", "   ", None), "Animación");
     }
 
     #[test]

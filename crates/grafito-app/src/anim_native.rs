@@ -4534,6 +4534,17 @@ pub const MORPH_EASING_NAMES: [&str; 8] = [
     "ease_out_back",
 ];
 
+/// Guía accionable para los errores "sin fotogramas" (frente errs mudos):
+/// el mensaje siempre dice qué hacer, jamás solo qué falló. La comparten
+/// `render_morph_frames` y las vías del asistente (`assistant.rs`) vía
+/// [`error_sin_fotogramas`].
+pub const SIN_FOTOGRAMAS_GUIA: &str = "probá bajar la resolución o reintentá";
+
+/// Mensaje "sin fotogramas" con guía accionable (punto único testeable).
+pub fn error_sin_fotogramas(motor: &str) -> String {
+    format!("{motor} no produjo fotogramas; {SIN_FOTOGRAMAS_GUIA}")
+}
+
 /// Error tipado del render morph / concat (mensajes en español, sin pánicos).
 #[derive(Debug, Clone, PartialEq)]
 pub enum MorphRenderError {
@@ -4632,9 +4643,9 @@ pub fn render_morph_frames(
         .frames_puntos()
         .map_err(|e| MorphRenderError::InvalidShape(e.to_string()))?;
     if puntos.is_empty() {
-        return Err(MorphRenderError::InvalidShape(
-            "el morph no produjo fotogramas".to_string(),
-        ));
+        return Err(MorphRenderError::InvalidShape(error_sin_fotogramas(
+            "el morph",
+        )));
     }
     let n = puntos.len();
     // Viewport validado (clamp 64..=4096, nunca panic).
@@ -5185,5 +5196,19 @@ mod morph_playlist_f2b_tests {
         assert_eq!(strided_len(48, 2), 25);
         assert_eq!(strided_len(5, 2), 3);
         assert_eq!(strided_len(0, 2), 0);
+    }
+
+    #[test]
+    fn error_sin_fotogramas_dice_que_hacer() {
+        // Frente errs mudos: el punto único `error_sin_fotogramas` (lo usan
+        // el morph y las dos vías del asistente) siempre dice qué hacer.
+        for motor in ["el morph", "el motor nativo"] {
+            let err = error_sin_fotogramas(motor);
+            assert!(err.contains("no produjo fotogramas"), "qué falló: {err}");
+            assert!(err.contains("probá bajar"), "qué hacer: {err}");
+            assert!(err.contains("reintentá"), "qué hacer: {err}");
+        }
+        let display = MorphRenderError::InvalidShape(error_sin_fotogramas("el morph")).to_string();
+        assert!(display.contains("probá bajar"), "Display útil: {display}");
     }
 }

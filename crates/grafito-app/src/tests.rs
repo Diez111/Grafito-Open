@@ -5580,3 +5580,12 @@ fn exam_lockdown_bloquea_cambio_de_perspectiva() {
         .expect_err("ViewController debe gatear con exam_locked");
     assert!(err.contains("examen"), "fue: {err}");
 }
+
+#[test]
+fn build_hash_no_es_local_ni_vacio() {
+    // Frente build-hash rancio: el fallback es `dev-{version}`, jamás
+    // `"local"` (mudo). En repo con git es el short-hash del commit.
+    let hash = env!("GRAFITO_BUILD_HASH");
+    assert!(!hash.is_empty(), "el hash de build no debe ser vacío");
+    assert_ne!(hash, "local", "el binario no debe decir `local`: {hash}");
+}

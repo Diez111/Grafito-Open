@@ -1721,8 +1721,11 @@ fn tangent_anim(
     p1: f64,
     pedido_lower: &str,
 ) -> ParametricResult<ParametricAnim> {
+    // Sin rango explícito el parámetro es el canónico `p` (lo que la prosa
+    // promete: `Tangent x^2 p [-1.5,1.5]`). Adivinar por la expresión mentía;
+    // el nombre explícito se respeta.
     let param_nombre: String = if param_raw.trim().is_empty() {
-        guess_param_name(&expr, None).to_string()
+        TANGENT_CANONICAL_PARAM.to_string()
     } else {
         param_raw.to_string()
     };
@@ -1778,8 +1781,10 @@ pub fn infer_tangent_anim(pedido: &str) -> ParametricResult<TangentPedido> {
         )?;
         return Ok(TangentPedido::Canonica(anim));
     };
+    // Nombre del parámetro efectivo para validar la expresión: el canónico
+    // `p` cuando no hay rango explícito (espejo de `tangent_anim`).
     let param_efectivo: String = if param_raw.trim().is_empty() {
-        guess_param_name(&expr, None).to_string()
+        TANGENT_CANONICAL_PARAM.to_string()
     } else {
         param_raw.clone()
     };
@@ -2068,6 +2073,15 @@ mod tests {
         assert!(infer_tangent_anim("haceme una animación").is_err());
         assert!(infer_tangent_anim("").is_err());
         assert!(infer_tangent_anim("tangente de f(x)=foo(x)").is_err());
+    }
+
+    #[test]
+    fn tangente_sin_rango_usa_param_canonico_p() {
+        // Frente param mentiroso: sin `param_raw` el parámetro es el canónico
+        // `p` que la prosa promete, nunca lo adivinado de la expresión.
+        let res = infer_tangent_anim("derivada pelada").expect("menciona derivada");
+        assert_eq!(res.anim().param.as_str(), "p");
+        assert_eq!(res.anim().param.as_str(), TANGENT_CANONICAL_PARAM);
     }
 
     #[test]
