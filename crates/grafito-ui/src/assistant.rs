@@ -775,6 +775,9 @@ pub struct AssistantPanelState {
     /// scrolleó arriba a leer, el stream no lo mueve. Se actualiza desde el
     /// `ScrollAreaOutput` en cada frame; arranca clavado.
     pub transcript_at_bottom: bool,
+    /// W-E: el empty-state pidió (re)lanzar el tour guiado. Piel pura: la app
+    /// lo consume en su tick (`poll_guided_tour`) y arranca el tour.
+    pub tour_requested: bool,
 }
 
 impl Default for AssistantPanelState {
@@ -848,6 +851,7 @@ impl Default for AssistantPanelState {
             new_fact_draft: String::new(),
             working_memory: grafito_profile::WorkingMemory::default(),
             transcript_at_bottom: true,
+            tour_requested: false,
         }
     }
 }
@@ -5980,6 +5984,17 @@ fn draw_assistant_empty_state(
             }
         });
         ui.add_space(crate::tokens::SPACE_SM);
+        // W-E — relanzar el tour guiado sin duplicar chips: el paso 3 del
+        // tour usa los chips de arriba; este botón solo prende el flag que la
+        // app consume en su tick. Piel pura: memoria, sin I/O ni acción nueva.
+        if ui
+            .small_button("Hacer el tour guiado")
+            .on_hover_text("3 pasos: crear, arrastrar y pedir una pista")
+            .clicked()
+        {
+            state.tour_requested = true;
+        }
+        ui.add_space(crate::tokens::SPACE_XS);
         // B7 — entrada al ciclo de ejercicio sin conversación previa.
         if ui
             .button("Andamiar: practicá con un ejercicio")
@@ -9036,6 +9051,16 @@ mod tests {
             ..Default::default()
         };
         assert!(state.can_submit());
+    }
+
+    #[test]
+    fn we_tour_requested_arranca_apagado_para_el_handshake_con_la_app() {
+        // Contrato W-E: el empty-state solo prende el flag; la app lo
+        // consume en su tick y arranca el tour (sin acción nueva).
+        let mut state = AssistantPanelState::default();
+        assert!(!state.tour_requested);
+        state.tour_requested = true;
+        assert!(state.tour_requested);
     }
 
     #[test]

@@ -418,6 +418,11 @@ fn draw_help_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         if grafito_ui::toolbar::locale_selector(ui, &mut loc).changed() {
             app.set_locale(loc);
         }
+        ui.separator();
+        if ui.button("Hacer el tour guiado").clicked() {
+            app.start_guided_tour();
+            ui.close_menu();
+        }
     });
 }
 

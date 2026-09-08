@@ -1584,6 +1584,12 @@ pub struct GrafitoApp {
     /// Ventana onboarding Scandinavian 30s — true si `config.onboarding_completed` es false.
     /// Se muestra una vez con 3 pasos + [Probar ejemplo][Empezar vacío][No mostrar de nuevo].
     pub show_onboarding: bool,
+    /// Tour guiado W-E post-onboarding (3 coach marks con detección real).
+    /// El progreso persiste en `grafito_tour.json` (ver `GuidedTour`).
+    pub(crate) guided_tour: GuidedTour,
+    /// El `draw` del tour solo marca este flag; el flush persiste fuera del
+    /// closure (cero I/O en `Ui::`).
+    pub(crate) tour_dirty: bool,
     /// Jobs de I/O en background para no bloquear UI thread (60fps) — save/open/export.
     /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
     /// `None` = idle; `Some(receiver)` = polling con `try_recv` en `update`.
@@ -2271,6 +2277,8 @@ impl GrafitoApp {
             redo_stack: VecDeque::new(),
             undo_total_bytes: 0,
             show_onboarding: !config.onboarding_completed,
+            guided_tour: load_guided_tour(),
+            tour_dirty: false,
             pending_save_job: None,
             pending_open_job: None,
             startup_pending_doc,
@@ -6510,9 +6518,18 @@ impl eframe::App for GrafitoApp {
             self.draw_about_window(ctx);
         }
         // Onboarding 30s — gating `onboarding_completed` (utils.rs:46-48) con Window 420px
+        let onboarding_was_open = self.show_onboarding;
         if self.show_onboarding {
             self.draw_onboarding_window(ctx);
         }
+        // Tour guiado W-E: autostart solo post-onboarding en sesión fresca
+        // (el onboarding se acaba de cerrar y el tour nunca corrió), luego
+        // tick + coach mark. Nada modal-bloqueante.
+        if onboarding_was_open && !self.show_onboarding && self.guided_tour_is_fresh() {
+            self.start_guided_tour();
+        }
+        self.poll_guided_tour();
+        self.draw_guided_tour(ctx);
         // A8 recovery al arranque: modal si el sidecar es más nuevo que el main.
         // Piel pura (cero I/O en Ui::, el job ya cargó todo en background).
         self.draw_recovery_modal(ctx);
@@ -7388,6 +7405,211 @@ mod ggb_import_local_tests {
     }
 }
 
+/// Resultado de un tick del tour guiado W-E (puro, sin I/O).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TourAdvance {
+    /// Sin cambios (inactivo o sin evento detectable).
+    None,
+    /// Avanzó al paso indicado (1 o 2).
+    Step(u8),
+    /// Completó el paso 3: tour terminado.
+    Done,
+}
+
+/// Tour guiado W-E: 3 pasos post-onboarding con detección real.
+///
+/// `step`: 0 crear, 1 arrastrar, 2 pedir pista, 3 terminado. Las líneas de
+/// base viven solo en memoria (`#[serde(skip)]`): lo persistido es
+/// paso/activo/terminado/omitido —al reabrir, el paso sigue pero la base se
+/// recalibra con `start` o con el primer `poll` del paso vigente.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct GuidedTour {
+    /// Paso vigente (0..=3; 3 = terminado).
+    pub step: u8,
+    /// ¿Hay tour en curso?
+    pub active: bool,
+    /// ¿Completó los 3 pasos alguna vez?
+    pub completed: bool,
+    /// ¿El usuario lo saltó explícitamente?
+    pub skipped: bool,
+    /// Objetos al arrancar el paso 1 (detección: `object_count` crece).
+    #[serde(skip)]
+    pub baseline_objects: usize,
+    /// Turnos al entrar al paso 3 (detección: `conversation` crece).
+    #[serde(skip)]
+    pub baseline_turns: usize,
+}
+
+impl GuidedTour {
+    /// Títulos cortos de los 3 pasos (checks visibles del coach mark).
+    pub const STEP_TITLES: [&'static str; 3] = [
+        "Creá un punto y una recta",
+        "Arrastrá el punto",
+        "Pedile una pista al tutor",
+    ];
+
+    /// Cuerpo rioplatense de cada paso (1–2 líneas, hygge, sin jerga).
+    pub const STEP_BODIES: [&'static str; 3] = [
+        "Dibujá con la barra o la paleta (Ctrl+K): con 1 objeto nuevo alcanza.",
+        "Agarrá un punto libre y movelo: la figura te sigue (propagación).",
+        "Tocá un chip del asistente o escribile: el turno cuenta solo.",
+    ];
+
+    /// ¿El tour está en curso?
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// ¿Nunca corrió ni se omitió? Solo entonces autostartea post-onboarding.
+    pub fn is_fresh(&self) -> bool {
+        !self.active && !self.completed && !self.skipped
+    }
+
+    /// Arranca (o reinicia) con las líneas de base dadas.
+    pub fn start(&mut self, objects: usize, turns: usize) {
+        self.step = 0;
+        self.active = true;
+        self.completed = false;
+        self.skipped = false;
+        self.baseline_objects = objects;
+        self.baseline_turns = turns;
+    }
+
+    /// Omite el tour (no vuelve a autostartear; relanzable a mano).
+    pub fn skip(&mut self) {
+        self.active = false;
+        self.skipped = true;
+    }
+
+    /// Texto de progreso honesto ("Paso 2 de 3") o vacío si no hay tour.
+    pub fn progress_text(&self) -> String {
+        if self.active {
+            format!("Paso {} de 3", self.step.min(2) + 1)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Tick puro: detecta el evento del paso vigente y avanza. `pending`
+    /// cubre el turno remoto en vuelo; el local suma `turns` al instante.
+    pub fn poll(
+        &mut self,
+        objects: usize,
+        drag_mutated: bool,
+        turns: usize,
+        pending: bool,
+    ) -> TourAdvance {
+        if !self.active {
+            return TourAdvance::None;
+        }
+        match self.step {
+            0 => {
+                if objects > self.baseline_objects {
+                    self.step = 1;
+                    TourAdvance::Step(1)
+                } else {
+                    TourAdvance::None
+                }
+            }
+            1 => {
+                if drag_mutated {
+                    self.step = 2;
+                    self.baseline_turns = turns;
+                    TourAdvance::Step(2)
+                } else {
+                    TourAdvance::None
+                }
+            }
+            2 => {
+                if turns > self.baseline_turns || pending {
+                    self.step = 3;
+                    self.active = false;
+                    self.completed = true;
+                    TourAdvance::Done
+                } else {
+                    TourAdvance::None
+                }
+            }
+            _ => TourAdvance::None,
+        }
+    }
+}
+
+/// Nombre del archivo de progreso del tour (hermano de `grafito_config.json`).
+pub(crate) const TOUR_STATE_FILE_NAME: &str = "grafito_tour.json";
+
+/// Ruta del progreso del tour dado un `xdg_home` y un `home` explícitos
+/// (testeable sin tocar env global; mismo patrón que `utils::xdg_*_for`).
+#[cfg(test)]
+pub(crate) fn tour_state_path_for(
+    xdg_config_home: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let base = xdg_config_home
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut b = home
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            if b.as_os_str().is_empty() {
+                b = std::path::PathBuf::from(".");
+            }
+            b.push(".config");
+            b
+        });
+    base.join("grafito").join(TOUR_STATE_FILE_NAME)
+}
+
+/// Ruta real del progreso del tour (XDG o `~/.config`, best-effort).
+/// `GRAFITO_TOUR_STATE_PATH` la redirige (tests + depuración).
+pub(crate) fn tour_state_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("GRAFITO_TOUR_STATE_PATH") {
+        let path = std::path::PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            let mut b = std::path::PathBuf::from(home);
+            if b.as_os_str().is_empty() {
+                b = std::path::PathBuf::from(".");
+            }
+            b.push(".config");
+            b
+        });
+    base.join("grafito").join(TOUR_STATE_FILE_NAME)
+}
+
+/// Carga el progreso del tour; ante cualquier error arranca fresco.
+/// I/O solo en arranque (constructor), jamás en `Ui::`.
+pub(crate) fn load_guided_tour() -> GuidedTour {
+    std::fs::read_to_string(tour_state_path())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+/// Persiste el progreso del tour (best-effort, warn si falla).
+/// Se llama solo en transiciones discretas (start/skip/avance), jamás por
+/// frame: el `draw` solo marca `tour_dirty` y el flush vive fuera del closure.
+pub(crate) fn save_guided_tour(tour: &GuidedTour) {
+    let Ok(json) = serde_json::to_string_pretty(tour) else {
+        return;
+    };
+    let path = tour_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(err) = std::fs::write(&path, json) {
+        log::warn!("No se pudo guardar {}: {err}", path.display());
+    }
+}
+
 /// Elección del usuario ante el onboarding (W-A, pura y testeable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OnboardingChoice {
@@ -7562,6 +7784,190 @@ impl GrafitoApp {
     /// `onboarding_completed=true`; el resto solo oculta en sesión.
     pub(crate) fn onboarding_choice_persists(choice: OnboardingChoice) -> bool {
         matches!(choice, OnboardingChoice::NeverShow)
+    }
+
+    // ── Tour guiado W-E (post-onboarding, coach marks, nunca modal) ──
+    //
+    // 3 pasos accionables con detección real (no "Siguiente" ciego):
+    // 1) creá un punto y una recta (sube `document.object_count`),
+    // 2) arrastrá el punto (`point_drag_has_mutated`, con propagación W-B),
+    // 3) pedile una pista al tutor (crece `assistant.conversation`,
+    //    integrando el chip existente en vez de duplicarlo).
+    // Progreso persistido en `grafito_tour.json` (archivo propio: `AppConfig`
+    // vive en `utils.rs`, fuera del alcance de este frente). Arranca solo
+    // post-onboarding en sesión fresca; se relanza desde el empty-state del
+    // asistente (flag `tour_requested`, Piel pura) y —pendiente de scope—
+    // desde Ayuda (`draw_help_menu` en `ui.rs`: `app.start_guided_tour()`).
+
+    /// Arranca o reinicia el tour con las líneas de base actuales.
+    pub(crate) fn start_guided_tour(&mut self) {
+        let objects = self.document.object_count();
+        let turns = self.assistant.conversation.len();
+        self.guided_tour.start(objects, turns);
+        self.point_drag_has_mutated = false;
+        self.persist_guided_tour();
+    }
+
+    /// ¿El tour nunca corrió ni se omitió? Solo entonces autostartea.
+    pub(crate) fn guided_tour_is_fresh(&self) -> bool {
+        self.guided_tour.is_fresh()
+    }
+
+    /// Avance por frame (tick en `update`, nunca I/O acá salvo persistir el
+    /// cambio discreto —un JSON de ~100 bytes, como `apply_onboarding_choice`).
+    /// Atiende el pedido del empty-state, detecta cada paso y felicita al
+    /// completar. Puro estado en memoria + persistencia puntual.
+    pub(crate) fn poll_guided_tour(&mut self) {
+        if self.assistant.tour_requested {
+            self.assistant.tour_requested = false;
+            self.start_guided_tour();
+            return;
+        }
+        if !self.guided_tour.is_active() {
+            return;
+        }
+        let objects = self.document.object_count();
+        let drag_mutated = self.point_drag_has_mutated;
+        let turns = self.assistant.conversation.len();
+        let pending = self.assistant.is_pending;
+        let advanced = self.guided_tour.poll(objects, drag_mutated, turns, pending);
+        match advanced {
+            TourAdvance::None => {}
+            TourAdvance::Step(1) => {
+                // El flag puede venir de un gesto viejo: se limpia al entrar
+                // al paso 2 para que solo cuente un arrastre nuevo.
+                self.point_drag_has_mutated = false;
+                self.persist_guided_tour();
+            }
+            TourAdvance::Step(_) => self.persist_guided_tour(),
+            TourAdvance::Done => {
+                self.persist_guided_tour();
+                self.notify(
+                    "¡Tour completo! Ya sabés crear, arrastrar y pedir pistas.",
+                    grafito_ui::toast::ToastKind::Success,
+                );
+            }
+        }
+    }
+
+    /// Escribe el progreso del tour (best-effort, como `save_config`).
+    fn persist_guided_tour(&self) {
+        save_guided_tour(&self.guided_tour);
+    }
+
+    /// Coach mark del tour: tarjeta compacta abajo-izquierda, no modal, no
+    /// bloquea el lienzo. Cada paso muestra check visible + "Saltar tour".
+    /// Piel sobre estado: cero I/O, cero spawn; toda mutación es en memoria
+    /// (la persistencia la hace `poll_guided_tour` vía `tour_dirty`).
+    pub(crate) fn draw_guided_tour(&mut self, ctx: &egui::Context) {
+        if !self.guided_tour.is_active() || self.show_onboarding {
+            return;
+        }
+        let step = self.guided_tour.step.min(2);
+        let new_objects = self
+            .document
+            .object_count()
+            .saturating_sub(self.guided_tour.baseline_objects);
+        let tutor_turns = self
+            .assistant
+            .conversation
+            .len()
+            .saturating_sub(self.guided_tour.baseline_turns);
+        let theme = grafito_ui::theme::current_theme(ctx);
+        egui::Area::new(egui::Id::new("guided_tour_coach"))
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(300.0);
+                egui::Frame::none()
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .inner_margin(grafito_ui::tokens::SPACE_SM)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Tour guiado · {}",
+                                self.guided_tour.progress_text()
+                            ))
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .strong()
+                            .color(theme.text_primary),
+                        );
+                        ui.add_space(grafito_ui::tokens::SPACE_XS);
+                        for (index, title) in GuidedTour::STEP_TITLES.iter().enumerate() {
+                            let mark = if (index as u8) < step {
+                                "✓"
+                            } else if (index as u8) == step {
+                                "→"
+                            } else {
+                                "·"
+                            };
+                            ui.label(
+                                egui::RichText::new(format!("{mark} {title}"))
+                                    .size(grafito_ui::tokens::TYPE_XS)
+                                    .color(theme.text_secondary),
+                            );
+                        }
+                        ui.add_space(grafito_ui::tokens::SPACE_XS);
+                        ui.label(
+                            egui::RichText::new(GuidedTour::STEP_BODIES[step as usize])
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.text_primary),
+                        );
+                        let status = match step {
+                            0 => format!("Objetos nuevos: {new_objects} (con 1 alcanza)"),
+                            1 => {
+                                if self.point_drag_has_mutated {
+                                    "¡Arrastre detectado!".to_string()
+                                } else {
+                                    "Arrastrá un punto del lienzo".to_string()
+                                }
+                            }
+                            _ => {
+                                if tutor_turns > 0 || self.assistant.is_pending {
+                                    "¡Pista pedida!".to_string()
+                                } else {
+                                    "Usá un chip del asistente o escribile".to_string()
+                                }
+                            }
+                        };
+                        ui.label(
+                            egui::RichText::new(status)
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .weak()
+                                .color(theme.text_secondary),
+                        );
+                        ui.add_space(grafito_ui::tokens::SPACE_XS);
+                        ui.horizontal(|ui| {
+                            if step == 2
+                                && ui
+                                    .button("Abrir el tutor")
+                                    .on_hover_text("Muestra el asistente con una pista lista")
+                                    .clicked()
+                            {
+                                self.assistant_visible = true;
+                                if self.assistant.problem.trim().is_empty() {
+                                    self.assistant.problem =
+                                        "Dame una pista para empezar".to_string();
+                                }
+                            }
+                            if ui
+                                .small_button("Saltar tour")
+                                .on_hover_text("Cierra el tour; podés relanzarlo del asistente")
+                                .clicked()
+                            {
+                                // Solo memoria acá (cero I/O en Ui::): el
+                                // flush de abajo persiste fuera del closure.
+                                self.guided_tour.skip();
+                                self.tour_dirty = true;
+                            }
+                        });
+                    });
+            });
+        if self.tour_dirty {
+            self.tour_dirty = false;
+            self.persist_guided_tour();
+        }
     }
 
     /// Ventana "Acerca de Grafito" — resumida, Scandinavian quiet.
@@ -8092,6 +8498,8 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         redo_stack: VecDeque::new(),
         undo_total_bytes: 0,
         show_onboarding: false,
+        guided_tour: GuidedTour::default(),
+        tour_dirty: false,
         pending_save_job: None,
         pending_open_job: None,
         startup_pending_doc: None,

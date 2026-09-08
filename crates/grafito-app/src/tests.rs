@@ -5374,3 +5374,119 @@ fn exam_lockdown_bloquea_asistente_local_sin_panico() {
     app.start_local_assistant_request(&ctx);
     assert!(!app.assistant.is_pending);
 }
+
+#[test]
+fn we_tour_avanza_con_deteccion_real() {
+    use crate::app::{GuidedTour, TourAdvance};
+    assert_eq!(GuidedTour::STEP_TITLES.len(), 3);
+    assert_eq!(GuidedTour::STEP_BODIES.len(), 3);
+    let mut tour = GuidedTour::default();
+    assert!(tour.is_fresh());
+    assert!(!tour.is_active());
+    assert!(tour.progress_text().is_empty());
+    tour.start(2, 0);
+    assert!(tour.is_active());
+    assert!(!tour.is_fresh());
+    assert_eq!(tour.progress_text(), "Paso 1 de 3");
+    // Sin objetos nuevos no avanza.
+    assert_eq!(tour.poll(2, false, 0, false), TourAdvance::None);
+    assert!(tour.is_active());
+    // Paso 1: objeto creado (punto o recta).
+    assert_eq!(tour.poll(3, false, 0, false), TourAdvance::Step(1));
+    assert_eq!(tour.progress_text(), "Paso 2 de 3");
+    // Paso 2: sin arrastre no avanza; con arrastre sí.
+    assert_eq!(tour.poll(3, false, 0, false), TourAdvance::None);
+    assert_eq!(tour.poll(3, true, 0, false), TourAdvance::Step(2));
+    assert_eq!(tour.progress_text(), "Paso 3 de 3");
+    // Paso 3: sin turno no avanza; con pending remoto completa.
+    assert_eq!(tour.poll(3, false, 0, false), TourAdvance::None);
+    assert_eq!(tour.poll(3, false, 0, true), TourAdvance::Done);
+    assert!(!tour.is_active());
+    assert!(!tour.is_fresh());
+    assert!(tour.progress_text().is_empty());
+    // Done es estable: ticks extra no re-disparan.
+    assert_eq!(tour.poll(3, false, 5, true), TourAdvance::None);
+}
+
+#[test]
+fn we_tour_tercera_via_turno_y_relanza_tras_saltar() {
+    use crate::app::{GuidedTour, TourAdvance};
+    let mut tour = GuidedTour::default();
+    tour.start(0, 1);
+    assert_eq!(tour.poll(1, false, 1, false), TourAdvance::Step(1));
+    assert_eq!(tour.poll(1, true, 1, false), TourAdvance::Step(2));
+    // Tercera vía: el turno del tutor (no el pending).
+    assert_eq!(tour.poll(1, false, 2, false), TourAdvance::Done);
+    assert!(tour.completed);
+    // Relanzable a mano tras completar.
+    tour.start(5, 2);
+    assert!(tour.is_active());
+    assert_eq!(tour.step, 0);
+    assert!(!tour.completed);
+    // Saltar: no activo, no fresco, pero relanzable.
+    let mut skipped = GuidedTour::default();
+    skipped.start(0, 0);
+    skipped.skip();
+    assert!(!skipped.is_active());
+    assert!(skipped.skipped);
+    assert!(!skipped.is_fresh());
+    skipped.start(0, 0);
+    assert!(skipped.is_active());
+    assert!(!skipped.skipped);
+}
+
+#[test]
+fn we_tour_path_helper_y_app_handshake_con_persistencia() {
+    use crate::app::{load_guided_tour, save_guided_tour, tour_state_path_for};
+    // Helper puro: resuelve bajo XDG o HOME sin hacer I/O.
+    let xdg = std::path::Path::new("/tmp/xdg_tour");
+    let home = std::path::Path::new("/home/user");
+    assert_eq!(
+        tour_state_path_for(Some(xdg), Some(home)),
+        std::path::PathBuf::from("/tmp/xdg_tour/grafito/grafito_tour.json")
+    );
+    assert_eq!(
+        tour_state_path_for(None, Some(home)),
+        std::path::PathBuf::from("/home/user/.config/grafito/grafito_tour.json")
+    );
+    // Round-trip a disco en sandbox (único test que toca GRAFITO_TOUR_STATE_PATH).
+    let dir = std::env::temp_dir().join(format!(
+        "grafito-tour-test-{}-handshake",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let sandbox = dir.join("grafito_tour.json");
+    let _ = std::fs::remove_file(&sandbox);
+    std::env::set_var("GRAFITO_TOUR_STATE_PATH", &sandbox);
+    let mut app = crate::app::dummy_grafito_app();
+    assert!(app.guided_tour_is_fresh());
+    // Pedido del empty-state → el tick arranca el tour con bases reales.
+    app.assistant.tour_requested = true;
+    app.poll_guided_tour();
+    assert!(!app.assistant.tour_requested, "el flag se consume");
+    assert!(app.guided_tour.is_active());
+    assert_eq!(
+        app.guided_tour.baseline_objects,
+        app.document.object_count()
+    );
+    // El arranque persistió el paso 0.
+    let loaded = load_guided_tour();
+    assert!(loaded.active);
+    assert_eq!(loaded.step, 0);
+    // Saltar persiste la omisión.
+    app.guided_tour.skip();
+    crate::app::save_guided_tour(&app.guided_tour);
+    assert!(!app.guided_tour.is_active());
+    let reloaded = load_guided_tour();
+    assert!(!reloaded.active);
+    assert!(reloaded.skipped);
+    // save/load directo también hace round-trip.
+    let mut tour = reloaded;
+    tour.start(7, 3);
+    save_guided_tour(&tour);
+    let back = load_guided_tour();
+    assert!(back.active);
+    assert_eq!(back.step, 0);
+    let _ = std::fs::remove_file(&sandbox);
+    std::env::remove_var("GRAFITO_TOUR_STATE_PATH");
+}

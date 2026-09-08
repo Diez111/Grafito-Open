@@ -4986,6 +4986,102 @@ pub(crate) fn f_quantile_honest(p: f64, df1: f64, df2: f64) -> Result<f64, Strin
     )
 }
 
+/// Cota de `k` en Geométrica: el loop del cuantil es O(k).
+const MAX_GEOMETRIC_K: u64 = 100_000;
+
+fn check_geometric_args(k: u64, p: f64) -> Result<(f64, u32), String> {
+    if !p.is_finite() {
+        return Err("p debe ser un número finito".to_string());
+    }
+    if !(0.0 < p && p <= 1.0) {
+        return Err("p debe estar en el intervalo (0, 1]".to_string());
+    }
+    if k > MAX_GEOMETRIC_K {
+        return Err(format!("k ≤ {MAX_GEOMETRIC_K} en este panel (cota de UI)"));
+    }
+    let k32 =
+        u32::try_from(k.min(u64::from(u32::MAX))).map_err(|_| "k fuera de rango".to_string())?;
+    Ok((p, k32))
+}
+
+/// Masa Geométrica(p) en k: P(X = k), k = fallos antes del primer éxito.
+/// Delega en el motor (`geometric_pmf`), que no valida: el `Err` honesto
+/// en español + las cotas viven acá.
+pub(crate) fn geometric_pmf(k: u64, p: f64) -> Result<f64, String> {
+    let (p, k32) = check_geometric_args(k, p)?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::geometric_pmf(p, k32),
+        "La puntual",
+    )
+}
+
+/// Acumulada Geométrica(p) en k: P(X ≤ k). Delega en el motor.
+pub(crate) fn geometric_cdf(k: u64, p: f64) -> Result<f64, String> {
+    let (p, k32) = check_geometric_args(k, p)?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::geometric_cdf(p, k32),
+        "La acumulada",
+    )
+}
+
+/// Cuantil Geométrica: el menor k con P(X ≤ k) ≥ p. Acumula `pmf` con la
+/// misma cota del panel discreto; si no alcanza, `Err` honesto.
+pub(crate) fn geometric_quantile_honest(p: f64, prob: f64) -> Result<u64, String> {
+    let p = check_quantile_p(p)?;
+    if !(prob.is_finite() && 0.0 < prob && prob <= 1.0) {
+        return Err("p del modelo debe estar en el intervalo (0, 1]".to_string());
+    }
+    let cap = MAX_GEOMETRIC_K.min(10_000);
+    let mut acc = 0.0;
+    for k in 0..=cap {
+        acc += geometric_pmf(k, prob)?;
+        if acc >= p {
+            return Ok(k);
+        }
+    }
+    Err("La cola supera la cota de 10 001 pasos en este panel".to_string())
+}
+
+fn check_uniform_args(x: f64, a: f64, b: f64) -> Result<(f64, f64, f64), String> {
+    let x = check_probability_point(x, "x")?;
+    let a = check_probability_point(a, "a")?;
+    let b = check_probability_point(b, "b")?;
+    if a >= b {
+        return Err("se requiere a < b".to_string());
+    }
+    Ok((x, a, b))
+}
+
+/// Densidad Uniforme(a, b) en x: 1/(b−a) dentro de [a, b], 0 fuera.
+/// Delega en el motor; el `Err` honesto (a < b finitos) vive acá.
+pub(crate) fn uniform_pdf(x: f64, a: f64, b: f64) -> Result<f64, String> {
+    let (x, a, b) = check_uniform_args(x, a, b)?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::uniform_pdf(x, a, b),
+        "La densidad",
+    )
+}
+
+/// Acumulada Uniforme(a, b) en x: P(X ≤ x). Delega en el motor.
+pub(crate) fn uniform_cdf(x: f64, a: f64, b: f64) -> Result<f64, String> {
+    let (x, a, b) = check_uniform_args(x, a, b)?;
+    finish_probability_scalar(
+        grafito_geometry::statistics::uniform_cdf(x, a, b),
+        "La acumulada",
+    )
+}
+
+/// Cuantil Uniforme: forma cerrada a + p·(b−a), sin iterar.
+pub(crate) fn uniform_quantile_honest(p: f64, a: f64, b: f64) -> Result<f64, String> {
+    let p = check_quantile_p(p)?;
+    let a = check_probability_point(a, "a")?;
+    let b = check_probability_point(b, "b")?;
+    if a >= b {
+        return Err("se requiere a < b".to_string());
+    }
+    finish_probability_scalar(a + p * (b - a), "El cuantil")
+}
+
 /// Prompt auto de velocidad para sliders Play. Acepta:
 /// número («1.5»), palabra («lento/medio/rápido») o «N vueltas en S s».
 /// Todo lo demás es `Err` honesto (nunca se inventa una velocidad).
@@ -5035,7 +5131,8 @@ pub(crate) fn parse_slider_prompt(input: &str) -> Result<f64, String> {
 }
 
 /// Estado efímero del panel de probabilidad (vive en `ctx.data`, sin I/O).
-/// `dist`: 0 Normal, 1 Binomial, 2 Poisson, 3 t-Student, 4 χ², 5 F (C2).
+/// `dist`: 0 Normal, 1 Binomial, 2 Poisson, 3 t-Student, 4 χ², 5 F (C2),
+/// 6 Geométrica, 7 Uniforme (W-E: el motor ya las trae).
 #[derive(Debug, Clone)]
 struct ProbabilityPanelState {
     dist: u8,
@@ -5050,6 +5147,8 @@ struct ProbabilityPanelState {
     df: f64,
     df1: f64,
     df2: f64,
+    ua: f64,
+    ub: f64,
 }
 
 impl Default for ProbabilityPanelState {
@@ -5067,6 +5166,8 @@ impl Default for ProbabilityPanelState {
             df: 10.0,
             df1: 5.0,
             df2: 10.0,
+            ua: 0.0,
+            ub: 1.0,
         }
     }
 }
@@ -5457,12 +5558,94 @@ fn draw_probability_plot(
                 ),
             );
         }
+        6 => {
+            let k_sel = state.k.round().max(0.0) as u64;
+            let prob = state.p;
+            if !(prob.is_finite() && 0.0 < prob && prob <= 1.0) {
+                paint_plot_message(&painter, plot, "p debe estar en (0, 1]", txt_dim);
+                return;
+            }
+            let mean = (1.0 - prob) / prob;
+            let hi_default = (mean * 3.0 + 10.0).ceil().max(8.0) as u64;
+            let hi = hi_default.min(60).max(k_sel).min(MAX_GEOMETRIC_K);
+            let masses: Vec<(u64, f64)> = (0..=hi)
+                .filter_map(|k| {
+                    let pmf = geometric_pmf(k, prob).unwrap_or(0.0).max(0.0);
+                    pmf.is_finite().then_some((k, pmf))
+                })
+                .collect();
+            if masses.is_empty() {
+                return;
+            }
+            let ymax = masses
+                .iter()
+                .map(|(_, y)| *y)
+                .fold(0.0f64, f64::max)
+                .max(1e-12);
+            let bar_w = plot_w / masses.len() as f32;
+            for (i, (k, pmf)) in masses.iter().enumerate() {
+                let h = (*pmf / ymax) as f32 * plot_h;
+                let bar = egui::Rect::from_min_size(
+                    egui::pos2(plot.min.x + i as f32 * bar_w + 1.0, plot_bot - h),
+                    egui::vec2((bar_w - 2.0).max(1.0), h.max(1.0)),
+                );
+                let selected = *k <= k_sel;
+                painter.rect_filled(
+                    bar,
+                    2.0,
+                    if selected {
+                        accent
+                    } else {
+                        txt_dim.gamma_multiply(0.35)
+                    },
+                );
+            }
+            painter.text(
+                egui::pos2(plot.min.x, plot_bot + 2.0),
+                egui::Align2::LEFT_TOP,
+                "k=0".to_string(),
+                egui::FontId::proportional(TYPE_XS),
+                txt_dim,
+            );
+            painter.text(
+                egui::pos2(plot.max.x, plot_bot + 2.0),
+                egui::Align2::RIGHT_TOP,
+                format!("0..={hi} · ≤k sombreado"),
+                egui::FontId::proportional(TYPE_XS),
+                txt_dim,
+            );
+        }
+        7 => {
+            let (a, b) = (state.ua, state.ub);
+            if !(a.is_finite() && b.is_finite() && a < b) {
+                paint_plot_message(&painter, plot, "se requiere a < b", txt_dim);
+                return;
+            }
+            if !state.x.is_finite() {
+                return;
+            }
+            paint_continuous_density(
+                &painter,
+                plot,
+                a,
+                b,
+                |x| uniform_pdf(x, a, b).unwrap_or(f64::NAN),
+                state.x,
+                accent,
+                txt_dim,
+                format!(
+                    "P(X≤x) sombreada · U({},{})",
+                    format_statistic(a),
+                    format_statistic(b)
+                ),
+            );
+        }
         _ => {}
     }
 }
 
 /// Sección Probabilidad: Normal / Binomial / Poisson / t-Student / χ² / F
-/// con PDF/CDF honestos. Llamada desde el panel Vista (alcanzable) — sin
+/// / Geométrica / Uniforme con PDF/CDF honestos. Llamada desde el panel Vista (alcanzable) — sin
 /// botones mudos: el selector cambia la distribución y cada parámetro
 /// recalcula en vivo.
 pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -5490,6 +5673,12 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             ),
             (4u8, "χ²", "gl grados de libertad: densidad y acumulada"),
             (5u8, "F", "gl1, gl2: densidad y acumulada"),
+            (
+                6u8,
+                "Geométrica",
+                "p éxito: fallos antes del primer éxito, P(X = k) y P(X ≤ k)",
+            ),
+            (7u8, "Uniforme", "a, b: densidad 1/(b−a) y acumulada"),
         ] {
             let selected = state.dist == index;
             if ui
@@ -5532,10 +5721,19 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             ui.add(egui::Slider::new(&mut state.df, 1.0..=30.0).text("gl libertad"));
             ui.add(egui::Slider::new(&mut state.x, 0.0..=20.0).text("x punto"));
         }
-        _ => {
+        5 => {
             ui.add(egui::Slider::new(&mut state.df1, 1.0..=30.0).text("gl1"));
             ui.add(egui::Slider::new(&mut state.df2, 1.0..=30.0).text("gl2"));
             ui.add(egui::Slider::new(&mut state.x, 0.0..=10.0).text("x punto"));
+        }
+        6 => {
+            ui.add(egui::Slider::new(&mut state.p, 0.01..=1.0).text("p éxito"));
+            ui.add(egui::Slider::new(&mut state.k, 0.0..=50.0).text("k fallos"));
+        }
+        _ => {
+            ui.add(egui::Slider::new(&mut state.ua, -10.0..=10.0).text("a mínimo"));
+            ui.add(egui::Slider::new(&mut state.ub, -10.0..=10.0).text("b máximo"));
+            ui.add(egui::Slider::new(&mut state.x, -10.0..=10.0).text("x punto"));
         }
     }
     ui.add_space(SPACE_XS);
@@ -5596,7 +5794,7 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     ),
                 )
             }
-            _ => {
+            5 => {
                 let (pdf, cdf) = (
                     f_distribution_pdf(state.x, state.df1, state.df2)?,
                     f_distribution_cdf(state.x, state.df1, state.df2)?,
@@ -5609,6 +5807,31 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                         format_statistic(state.x),
                         format_statistic(state.df1),
                         format_statistic(state.df2)
+                    ),
+                )
+            }
+            6 => {
+                let k = state.k.round().max(0.0) as u64;
+                let (pmf, cdf) = (geometric_pmf(k, state.p)?, geometric_cdf(k, state.p)?);
+                (
+                    pmf,
+                    cdf,
+                    format!("P(X = {k}) · p = {}", format_statistic(state.p),),
+                )
+            }
+            _ => {
+                let (pdf, cdf) = (
+                    uniform_pdf(state.x, state.ua, state.ub)?,
+                    uniform_cdf(state.x, state.ua, state.ub)?,
+                );
+                (
+                    pdf,
+                    cdf,
+                    format!(
+                        "f({}) · U({},{})",
+                        format_statistic(state.x),
+                        format_statistic(state.ua),
+                        format_statistic(state.ub)
                     ),
                 )
             }
@@ -5630,11 +5853,13 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     );
                     ui.end_row();
                     ui.label(
-                        egui::RichText::new(if state.dist == 1 || state.dist == 2 {
-                            "Puntual"
-                        } else {
-                            "Densidad"
-                        })
+                        egui::RichText::new(
+                            if state.dist == 1 || state.dist == 2 || state.dist == 6 {
+                                "Puntual"
+                            } else {
+                                "Densidad"
+                            },
+                        )
                         .color(txt_dim)
                         .size(TYPE_SM),
                     );
@@ -5723,7 +5948,7 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     format_statistic(state.df)
                 )
             }
-            _ => {
+            5 => {
                 let q = f_quantile_honest(state.p_inv, state.df1, state.df2)?;
                 format!(
                     "x con P(X≤x)={:.3} → {} (gl1={}, gl2={})",
@@ -5731,6 +5956,24 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     format_statistic(q),
                     format_statistic(state.df1),
                     format_statistic(state.df2)
+                )
+            }
+            6 => {
+                let q = geometric_quantile_honest(state.p_inv, state.p)?;
+                format!(
+                    "menor k con P(X≤k)≥{:.3} → {q} (p={})",
+                    state.p_inv,
+                    format_statistic(state.p)
+                )
+            }
+            _ => {
+                let q = uniform_quantile_honest(state.p_inv, state.ua, state.ub)?;
+                format!(
+                    "x con P(X≤x)={:.3} → {} (a={}, b={})",
+                    state.p_inv,
+                    format_statistic(q),
+                    format_statistic(state.ua),
+                    format_statistic(state.ub)
                 )
             }
         })
@@ -5745,7 +5988,7 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             );
             ui.label(
                 egui::RichText::new(
-                    "Misma inversa que InverseNormal/InverseT/InverseChiSquared/InverseF (motor único).",
+                    "Misma inversa que InverseNormal/InverseT/InverseChiSquared/InverseF (motor único); Geométrica acumula pmf y Uniforme usa a+p·(b−a).",
                 )
                 .color(txt_dim)
                 .size(TYPE_XS),
@@ -6308,12 +6551,13 @@ mod gc_piel_tests {
     use super::{
         binomial_cdf, binomial_pmf, binomial_quantile_honest, chi_squared_cdf, chi_squared_pdf,
         chi_squared_quantile_honest, f_distribution_cdf, f_distribution_pdf, f_quantile_honest,
-        normal_cdf, normal_pdf, normal_quantile_honest, parse_series_scalar, parse_slider_prompt,
-        plot_df_or_fuera_de_cota, poisson_cdf, poisson_pmf, poisson_quantile_honest,
-        sheet_col_label, student_t_cdf, student_t_pdf, student_t_quantile_honest,
-        wc_exact_integral_command_text, wc_riemann_command_text, wc_study_command_text,
-        wc_taylor_command_text, wc_taylor_remainder_line, MAX_BINOMIAL_N, MAX_PANEL_DF,
-        SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
+        geometric_cdf, geometric_pmf, geometric_quantile_honest, normal_cdf, normal_pdf,
+        normal_quantile_honest, parse_series_scalar, parse_slider_prompt, plot_df_or_fuera_de_cota,
+        poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_col_label, student_t_cdf,
+        student_t_pdf, student_t_quantile_honest, uniform_cdf, uniform_pdf,
+        uniform_quantile_honest, wc_exact_integral_command_text, wc_riemann_command_text,
+        wc_study_command_text, wc_taylor_command_text, wc_taylor_remainder_line, MAX_BINOMIAL_N,
+        MAX_GEOMETRIC_K, MAX_PANEL_DF, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
     use std::collections::HashMap;
@@ -6462,6 +6706,46 @@ mod gc_piel_tests {
         assert!(f_distribution_pdf(1.0, 5.0, 0.0).is_err());
         assert!(f_distribution_cdf(1.0, -1.0, 10.0).is_err());
         assert!(f_quantile_honest(1.5, 5.0, 10.0).is_err());
+    }
+
+    #[test]
+    fn we_geometric_matches_textbook_and_rejects() {
+        // p=0.5: P(X=0)=0.5, P(X≤1)=0.75; cuantil 0.5 → 0, cuantil 0.9 → 3.
+        let pmf = geometric_pmf(0, 0.5).expect("geométrica válida");
+        assert!((pmf - 0.5).abs() < 1e-12, "pmf = {pmf}");
+        let cdf = geometric_cdf(1, 0.5).expect("cdf válida");
+        assert!((cdf - 0.75).abs() < 1e-12, "cdf = {cdf}");
+        assert_eq!(geometric_quantile_honest(0.5, 0.5).expect("cuantil"), 0);
+        assert_eq!(geometric_quantile_honest(0.9, 0.5).expect("cuantil"), 3);
+        // p=1 degenera honesto: todo el peso en k=0.
+        assert_eq!(geometric_pmf(0, 1.0).expect("p=1"), 1.0);
+        assert_eq!(geometric_cdf(0, 1.0).expect("p=1"), 1.0);
+        assert!(geometric_pmf(0, 0.0).is_err());
+        assert!(geometric_pmf(0, 1.5).is_err());
+        assert!(geometric_pmf(0, f64::NAN).is_err());
+        assert!(geometric_pmf(MAX_GEOMETRIC_K + 1, 0.5).is_err());
+        assert!(geometric_quantile_honest(0.0, 0.5).is_err());
+        assert!(geometric_quantile_honest(0.5, 0.0).is_err());
+    }
+
+    #[test]
+    fn we_uniform_matches_textbook_and_rejects() {
+        // U(0,10): f(5)=0.1, P(X≤5)=0.5, cuantil 0.25 → 2.5.
+        let pdf = uniform_pdf(5.0, 0.0, 10.0).expect("uniforme válida");
+        assert!((pdf - 0.1).abs() < 1e-12, "pdf = {pdf}");
+        assert_eq!(uniform_pdf(-1.0, 0.0, 10.0).expect("fuera"), 0.0);
+        let cdf = uniform_cdf(5.0, 0.0, 10.0).expect("cdf válida");
+        assert!((cdf - 0.5).abs() < 1e-12, "cdf = {cdf}");
+        let q = uniform_quantile_honest(0.25, 0.0, 10.0).expect("cuantil");
+        assert!((q - 2.5).abs() < 1e-12, "q = {q}");
+        // Round-trip: la acumulada en el cuantil vuelve a p.
+        let back = uniform_cdf(q, 0.0, 10.0).expect("área en el cuantil");
+        assert!((back - 0.25).abs() < 1e-12, "área = {back}");
+        assert!(uniform_pdf(5.0, 10.0, 0.0).is_err());
+        assert!(uniform_pdf(5.0, 3.0, 3.0).is_err());
+        assert!(uniform_cdf(f64::NAN, 0.0, 1.0).is_err());
+        assert!(uniform_quantile_honest(1.0, 0.0, 1.0).is_err());
+        assert!(uniform_quantile_honest(0.5, 2.0, 1.0).is_err());
     }
 
     #[test]
