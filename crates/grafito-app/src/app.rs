@@ -918,6 +918,39 @@ fn document_bytes_approx(doc: &Document) -> usize {
     doc.estimated_bytes()
 }
 
+/// Peso estimado de un `ChangeSet` de redo (`before+after`, `saturating_add`).
+/// Espejo de `DocumentController::redo_total_bytes` (controllers.rs).
+pub(crate) fn redo_changeset_bytes(changes: &ChangeSet) -> usize {
+    changes
+        .before
+        .estimated_bytes()
+        .saturating_add(changes.after.estimated_bytes())
+}
+
+/// Evicción de redo por `MAX_UNDO` (50) y `MAX_UNDO_BYTES` (50 MiB) con
+/// `pop_front` O(1) — espejo de `DocumentController::enforce_redo_budgets`
+/// (controllers.rs). Scan O(n≤50) solo en `undo()` (acción de usuario, no por
+/// frame). Guarda ≥1 entrada, igual que undo.
+pub(crate) fn enforce_redo_budgets(redo_stack: &mut VecDeque<ChangeSet>) {
+    while redo_stack.len() > MAX_UNDO {
+        if redo_stack.pop_front().is_none() {
+            break;
+        }
+    }
+    while redo_stack.len() > 1 {
+        let total: usize = redo_stack
+            .iter()
+            .map(redo_changeset_bytes)
+            .fold(0usize, |a, b| a.saturating_add(b));
+        if total <= MAX_UNDO_BYTES {
+            break;
+        }
+        if redo_stack.pop_front().is_none() {
+            break;
+        }
+    }
+}
+
 /// Enforce budgets O(1) con running counter — espejo de `DocumentController::enforce_budgets` (controllers.rs:173-201).
 /// Evicción por `MAX_UNDO` (50) y `MAX_UNDO_BYTES` (50 MiB) con `pop_front` O(1) y `saturating_sub`.
 fn enforce_undo_budgets(undo_stack: &mut VecDeque<Document>, total_bytes: &mut usize) {
@@ -1575,7 +1608,9 @@ pub struct GrafitoApp {
     /// Presupuesto vía `Document::estimated_bytes()`; ver `push_history_snapshot`.
     /// Evolución running counter O(1) en `crate::controllers::DocumentController`.
     pub undo_stack: VecDeque<Document>,
-    /// Historial de redo; limpiado en cada `push_history_snapshot`.
+    /// Historial de redo acotado igual que undo (`MAX_UNDO=50`,
+    /// `MAX_UNDO_BYTES=50MiB`, ver `enforce_redo_budgets`); limpiado en cada
+    /// `push_history_snapshot`.
     pub redo_stack: VecDeque<ChangeSet>,
     /// Contador running O(1) de bytes en undo_stack — evita scan O(n) por push.
     /// Se actualiza con saturating_add/sub en push/pop y se enforce con MAX_UNDO/BYTES.
@@ -4003,6 +4038,9 @@ impl GrafitoApp {
             match changes.undo(&mut self.document) {
                 Ok(()) => {
                     self.redo_stack.push_back(changes);
+                    // Cota de redo (auditoría: antes sin presupuesto) — espejo de
+                    // DocumentController::undo + enforce_redo_budgets (controllers.rs).
+                    enforce_redo_budgets(&mut self.redo_stack);
                     self.selected_object = None;
                 }
                 Err(error) => {

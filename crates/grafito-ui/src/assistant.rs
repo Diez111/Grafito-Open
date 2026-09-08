@@ -38,7 +38,11 @@ pub const MEDIA_PLAYBACK_REPAINT_INTERVAL: std::time::Duration =
 // Statem del asistente — hace imposibles los estados inválidos (rust-design)
 // ─────────────────────────────────────────────────────────────────────────────
 /// Ciclo de vida tipado del asistente. Cada transición es verificada; no hay
-/// submit sin Idle/Failed, no hay cancel sin Thinking/Verifying/Animating.
+/// submit sin Idle/Failed, no hay cancel sin Thinking/Animating.
+/// El preflight de propuestas corre síncrono dentro de `Thinking` (hilo
+/// worker, resultado vía `set_proposal_preflight_results`): no hay fase
+/// `Verifying` observable en la Piel, por eso no existe la variante
+/// (auditoría: variante muerta eliminada, no flag sin mapear).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssistantLifecycle {
     /// Listo para recibir una nueva pregunta.
@@ -49,8 +53,6 @@ pub enum AssistantLifecycle {
     Thinking,
     /// Esperando autorización para ir a la red.
     AwaitingAuthorization,
-    /// Verificando propuestas (preflight) antes de mostrar.
-    Verifying,
     /// Animando (job de animación en curso).
     Animating,
     /// Fallo tipado que requiere acción del usuario.
@@ -67,10 +69,7 @@ impl AssistantLifecycle {
         matches!(self, Self::Idle | Self::Composing | Self::Failed)
     }
     pub fn is_busy(self) -> bool {
-        matches!(
-            self,
-            Self::Thinking | Self::Verifying | Self::Animating | Self::Cancelling
-        )
+        matches!(self, Self::Thinking | Self::Animating | Self::Cancelling)
     }
 }
 
@@ -8833,6 +8832,77 @@ fn should_submit_on_enter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_sin_variantes_muertas() {
+        // Auditoría (ex-`Verifying` inalcanzable): cada variante del statem
+        // debe ser alcanzable desde flags reales. El preflight corre síncrono
+        // dentro de `Thinking`, así que la variante muerta se borró en vez de
+        // mapear un flag ficticio. Este test pinnea que no vuelva a aparecer
+        // una variante sin camino: barre todas las combinaciones y exige que
+        // cada `lifecycle()` observado sea una de las 7 vivas y que `is_busy`
+        // sea exactamente Thinking|Animating|Cancelling.
+        let mut vistos: Vec<AssistantLifecycle> = Vec::new();
+        for cancelling in [false, true] {
+            for anim in [false, true] {
+                for pending in [false, true] {
+                    for auth in [false, true] {
+                        for error in [false, true] {
+                            for composing in [false, true] {
+                                let mut estado = AssistantPanelState {
+                                    is_cancelling: cancelling,
+                                    anim_progress: anim,
+                                    is_pending: pending,
+                                    ..Default::default()
+                                };
+                                if auth {
+                                    estado.stage_remote_authorization(
+                                        "pregunta".to_string(),
+                                        "motivo".to_string(),
+                                    );
+                                }
+                                if error {
+                                    estado.error = Some("fallo".to_string());
+                                }
+                                if composing {
+                                    estado.problem = "derivada".to_string();
+                                }
+                                let ciclo = estado.lifecycle();
+                                assert!(
+                                    matches!(
+                                        ciclo,
+                                        AssistantLifecycle::Idle
+                                            | AssistantLifecycle::Composing
+                                            | AssistantLifecycle::Thinking
+                                            | AssistantLifecycle::AwaitingAuthorization
+                                            | AssistantLifecycle::Animating
+                                            | AssistantLifecycle::Failed
+                                            | AssistantLifecycle::Cancelling
+                                    ),
+                                    "variante sin camino: {ciclo:?}"
+                                );
+                                assert_eq!(
+                                    ciclo.is_busy(),
+                                    matches!(
+                                        ciclo,
+                                        AssistantLifecycle::Thinking
+                                            | AssistantLifecycle::Animating
+                                            | AssistantLifecycle::Cancelling
+                                    ),
+                                    "is_busy desalineado en {ciclo:?}"
+                                );
+                                if !vistos.contains(&ciclo) {
+                                    vistos.push(ciclo);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Las 7 vivas son alcanzables (ninguna muerta, ninguna faltante).
+        assert_eq!(vistos.len(), 7, "faltan variantes por cubrir: {vistos:?}");
+    }
 
     fn correction_context() -> AssistantCorrectionContext {
         let context = ImmutableDocumentContext::empty(0);

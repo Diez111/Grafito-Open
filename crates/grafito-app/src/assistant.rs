@@ -136,63 +136,100 @@ pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
 /// conocida; `universal`/desconocida cura el concepto (menciona
 /// integral/área → canónica integral, si no concepto recortado sin sufijo).
 /// Devuelve la base SIN " (nativa)": la vía nativa lo agrega al mostrar.
+/// Idioma actual del UI (ES); ver [`titulo_curado_localized`].
 pub(crate) fn titulo_curado(
     template: &str,
     concept: &str,
     anim: Option<&grafito_anim::parametric::ParametricAnim>,
 ) -> String {
+    titulo_curado_localized(template, concept, anim, grafito_ui::i18n::Locale::Es)
+}
+
+/// [`titulo_curado`] en el idioma pedido. Los literales viven en el catálogo
+/// i18n (`media.title.*`); acá solo `t()` + sustitución de `{expr}`/`{p0}`/
+/// `{p1}`/`{param}`. Puro, sin I/O.
+pub(crate) fn titulo_curado_localized(
+    template: &str,
+    concept: &str,
+    anim: Option<&grafito_anim::parametric::ParametricAnim>,
+    locale: grafito_ui::i18n::Locale,
+) -> String {
+    use grafito_ui::i18n::t;
     if let Some(anim) = anim {
         return match anim.kind {
             grafito_anim::parametric::ParametricKind::Tangent => {
-                format!("Tangente móvil · {}", anim.expr_a)
+                t("media.title.tangent", locale).replace("{expr}", &anim.expr_a)
             }
-            grafito_anim::parametric::ParametricKind::Area => {
-                format!("Área acumulada · {} [{},{}]", anim.expr_a, anim.p0, anim.p1)
-            }
-            grafito_anim::parametric::ParametricKind::Sweep => {
-                format!("Barrido · {} ({})", anim.expr_a, anim.param.as_str())
-            }
+            grafito_anim::parametric::ParametricKind::Area => t("media.title.area", locale)
+                .replace("{expr}", &anim.expr_a)
+                .replace("{p0}", &anim.p0.to_string())
+                .replace("{p1}", &anim.p1.to_string()),
+            grafito_anim::parametric::ParametricKind::Sweep => t("media.title.sweep", locale)
+                .replace("{expr}", &anim.expr_a)
+                .replace("{param}", anim.param.as_str()),
             grafito_anim::parametric::ParametricKind::Trace => {
-                format!("Traza · {}", anim.expr_a)
+                t("media.title.trace", locale).replace("{expr}", &anim.expr_a)
             }
-            grafito_anim::parametric::ParametricKind::Morph => "Transición".to_string(),
-            grafito_anim::parametric::ParametricKind::Locus => "Lugar geométrico".to_string(),
+            grafito_anim::parametric::ParametricKind::Morph => {
+                t("media.title.morph", locale).to_string()
+            }
+            grafito_anim::parametric::ParametricKind::Locus => {
+                t("media.title.locus", locale).to_string()
+            }
         };
     }
     match template.trim().to_lowercase().as_str() {
-        "integral-area" => "Integral — área bajo la curva".to_string(),
-        "derivative-slope" => "Derivada como pendiente".to_string(),
-        "pitagoras" | "pythagoras" => "Teorema de Pitágoras".to_string(),
-        "taylor-series" => "Serie de Taylor".to_string(),
-        "conformal-map" => "Mapeo conforme".to_string(),
-        _ => titulo_desde_concepto(concept),
+        "integral-area" => t("media.title.integral", locale).to_string(),
+        "derivative-slope" => t("media.title.derivative", locale).to_string(),
+        "pitagoras" | "pythagoras" => t("media.title.pitagoras", locale).to_string(),
+        "taylor-series" => t("media.title.taylor", locale).to_string(),
+        "conformal-map" => t("media.title.conformal", locale).to_string(),
+        _ => titulo_desde_concepto_localized(concept, locale),
     }
 }
 
-/// Cura un concepto libre a título (sin eco crudo del pedido).
+/// Cura un concepto libre a título en el idioma pedido (sin eco crudo del
+/// pedido). Normaliza UNA sola vez (`normaliza_para_match`: minúsculas sin
+/// tildes) y reusa para área/tangente/nombres — antes eran 3
+/// (2× `pedido_menciona_*` + 1× `to_lowercase`).
 ///
 /// - Menciona integral/área (fuzzy: "integrela" también) → canónica integral
 ///   (el typo jamás se muestra).
 /// - Menciona tangente/derivada → pendiente; Pitágoras/Taylor/conforme por
 ///   nombre.
 /// - Resto: recortado a 80 chars, sin sufijos "(nativa)" repetidos; vacío →
-///   "Animación". Sin `unwrap`: índices por chars, nunca slicing por bytes.
-fn titulo_desde_concepto(concept: &str) -> String {
-    if grafito_anim::parametric::pedido_menciona_area(concept) {
-        return "Integral — área bajo la curva".to_string();
+///   título por defecto del catálogo. Sin `unwrap`: índices por chars, nunca
+///   slicing por bytes.
+///
+/// Los checks de área/tangente espejan `pedido_menciona_area` y
+/// `pedido_menciona_tangente` sobre la cadena ya normalizada (paridad pineada
+/// en `titulo_normaliza_una_vez_con_paridad`).
+fn titulo_desde_concepto_localized(concept: &str, locale: grafito_ui::i18n::Locale) -> String {
+    use grafito_ui::i18n::t;
+    let norm = grafito_anim::parametric::normaliza_para_match(concept);
+    let menciona = |clave: &str| {
+        norm.split(|c: char| !c.is_alphabetic()).any(|token| {
+            token == clave || grafito_anim::parametric::token_matchea_clave(token, clave)
+        })
+    };
+    // "area" exacta por token (como `pedido_menciona_area`: evita "tarea"→área).
+    if norm.split(|c: char| !c.is_alphabetic()).any(|token| {
+        token == "area" || grafito_anim::parametric::token_matchea_clave(token, "integral")
+    }) {
+        return t("media.title.integral", locale).to_string();
     }
-    if grafito_anim::parametric::pedido_menciona_tangente(concept) {
-        return "Derivada como pendiente".to_string();
+    if menciona("tangente") || menciona("derivada") || menciona("pendiente") {
+        return t("media.title.derivative", locale).to_string();
     }
-    let lower = concept.to_lowercase();
-    if lower.contains("pitagoras") || lower.contains("pitágoras") {
-        return "Teorema de Pitágoras".to_string();
+    // `norm` ya va sin tildes: "pitágoras"→"pitagoras" en un solo contains.
+    if norm.contains("pitagoras") {
+        return t("media.title.pitagoras", locale).to_string();
     }
-    if lower.contains("taylor") {
-        return "Serie de Taylor".to_string();
+    if norm.contains("taylor") {
+        return t("media.title.taylor", locale).to_string();
     }
-    if lower.contains("conforme") || lower.contains("conformal") {
-        return "Mapeo conforme".to_string();
+    if norm.contains("conforme") || norm.contains("conformal") {
+        return t("media.title.conformal", locale).to_string();
     }
     let mut curado = concept.trim().to_string();
     loop {
@@ -206,7 +243,7 @@ fn titulo_desde_concepto(concept: &str) -> String {
         }
     }
     if curado.is_empty() {
-        return "Animación".to_string();
+        return t("media.title.default", locale).to_string();
     }
     const MAX_TITULO_CHARS: usize = 80;
     if curado.chars().count() > MAX_TITULO_CHARS {
@@ -216,32 +253,47 @@ fn titulo_desde_concepto(concept: &str) -> String {
     }
 }
 
-/// Parte un pedido playlist "X y después Y" (puro, sin I/O ni spawn).
+/// Parte un pedido playlist "X y después Y" / "X luego Y" / "X después Y"
+/// (puro, sin I/O ni spawn).
 ///
-/// Solo el conector "y después"/"y despues" (insensible a mayúsculas y al
-/// acento, exigido con espacios alrededor). El resto → `None` y el flujo
-/// single queda intacto. Ambos lados deben traer al menos 3 caracteres
-/// alfanuméricos y no puede haber un segundo conector (eso no es "X y
-/// después Y" y cae al single honesto en vez de armar 3 steps en silencio).
+/// Conectores (insensibles a mayúsculas y al acento, exigidos con espacios
+/// alrededor, del más específico al más corto): "y después"/"y despues",
+/// "luego", "después"/"despues". El resto → `None` y el flujo single queda
+/// intacto. Ambos lados deben traer al menos 3 caracteres alfanuméricos y no
+/// puede haber un segundo conector de ninguna forma (eso no es "X ... Y" y
+/// cae al single honesto en vez de armar 3 steps en silencio).
 /// Devuelve los lados recortados en su caso original. Nunca panic (índices
 /// por chars, jamás slicing por bytes).
 pub(crate) fn split_playlist_request(pedido: &str) -> Option<(String, String)> {
-    const CONECTOR: &str = " y despues ";
+    const CONECTORES: &[&str] = &[" y despues ", " luego ", " despues "];
     let norma = pedido.to_lowercase().replace("después", "despues");
-    let (izq_n, der_n) = norma.split_once(CONECTOR)?;
-    // Un solo conector: dos conectores no son "X y después Y".
-    if der_n.contains(CONECTOR) {
-        return None;
+    // Primer conector en orden de especificidad (el largo antes que el corto:
+    // " y despues " contiene a " despues " y debe ganar).
+    let mut hallado: Option<&str> = None;
+    for conector in CONECTORES {
+        if norma.contains(conector) {
+            hallado = Some(conector);
+            break;
+        }
     }
-    // Mapeo a caso original por conteo de chars (los conectores miden 11
-    // chars con o sin acento; `take`/`skip` por chars nunca hacen panic).
+    let conector = hallado?;
+    let (izq_n, der_n) = norma.split_once(conector)?;
+    // Un solo conector en total, de ninguna forma: dos conectores no son "X ... Y".
+    for otro in CONECTORES {
+        if der_n.contains(otro) || izq_n.contains(otro) {
+            return None;
+        }
+    }
+    // Mapeo a caso original por conteo de chars (con o sin acento el largo en
+    // chars es el mismo: "después" y "despues" miden 7; `take` por chars nunca
+    // hace panic).
     let n_izq = izq_n.chars().count();
-    let n_conector = CONECTOR.chars().count();
+    let n_conector = conector.chars().count();
     let mut resto = pedido.chars();
     let izq: String = resto.by_ref().take(n_izq).collect();
     let puente: String = resto.by_ref().take(n_conector).collect();
     let der: String = resto.collect();
-    if puente.to_lowercase().replace("después", "despues") != CONECTOR {
+    if puente.to_lowercase().replace("después", "despues") != conector {
         return None;
     }
     let izq = izq.trim().to_string();
@@ -6001,10 +6053,10 @@ mod tests {
         preflight_assistant_parameter, preflight_assistant_scene, prosa_integral_explicita,
         read_bounded_attachment, remote_error_message, should_fallback_agent_spark_to_deepseek,
         should_fallback_remote_spark_to_deepseek, socratic_guard_context, split_playlist_request,
-        stage_assistant_parameter, titulo_curado, validate_assistant_command,
-        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AssistantAgentJob,
-        AssistantAnimJob, AssistantCommandInvocation, AssistantModelJob,
-        AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        stage_assistant_parameter, titulo_curado, titulo_curado_localized,
+        validate_assistant_command, verified_remote_proposals, wants_exercise_request,
+        AgentChannelMsg, AssistantAgentJob, AssistantAnimJob, AssistantCommandInvocation,
+        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
         AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, GifExportJob, IntegralPedido,
         LocalAssistantDisposition, RemoteProposalVerification,
     };
@@ -6914,6 +6966,19 @@ mod tests {
     }
 
     #[test]
+    fn playlist_luego_y_despues_solos_tambien_separan() {
+        // Red-first (auditoría): "derivada luego integral" debe partir en
+        // (a,b) igual que "y después". Antes SOLO "y después" valía.
+        let (a, b) = split_playlist_request("derivada luego integral").expect("luego separa");
+        assert_eq!(a, "derivada");
+        assert_eq!(b, "integral");
+        let (c, d) =
+            split_playlist_request("derivada después integral").expect("después solo separa");
+        assert_eq!(c, "derivada");
+        assert_eq!(d, "integral");
+    }
+
+    #[test]
     fn playlist_fuera_de_patron_cae_al_single_honesto() {
         // Sin conector, conector solo, lados vacíos o doble conector: None
         // (el llamante sigue el flujo single, jamás arma parcial).
@@ -6926,8 +6991,12 @@ mod tests {
         )
         .is_none());
         assert!(playlist_para_pedido("explica la derivada con animación").is_none());
-        // "luego" no es el conector (SOLO "y después").
-        assert!(split_playlist_request("derivada luego integral con animación").is_none());
+        // "luego"/"después" solos también separan (ver test dedicado arriba);
+        // acá se pinnea que el doble conector mixto sigue cayendo al single.
+        assert!(
+            split_playlist_request("derivada luego integral después taylor con animación")
+                .is_none()
+        );
     }
     #[test]
     fn playlist_concat_entra_en_presupuesto_y_titulo_nombra_ambos() {
@@ -7231,6 +7300,79 @@ mod tests {
         );
         // Vacío: honesto, jamás título en blanco.
         assert_eq!(titulo_curado("universal", "   ", None), "Animación");
+    }
+
+    #[test]
+    fn titulo_normaliza_una_vez_con_paridad() {
+        // Auditoría (triple normalización): el concepto se normaliza UNA vez
+        // y se reusa para área/tangente/nombres. El contador cuenta las
+        // llamadas en el fuente (aguja armada por partes para no autocontar
+        // este test en el `include_str!`).
+        let aguja = concat!("normaliza_para_match", "(concept)");
+        let fuente: &str = include_str!("assistant.rs");
+        assert_eq!(
+            fuente.matches(aguja).count(),
+            1,
+            "una sola normalización del concepto en assistant.rs"
+        );
+        // Paridad con los matchers canónicos: batería con typos, mayúsculas
+        // y tildes da los mismos títulos que antes del refactor.
+        for (concepto, esperado) in [
+            ("una integrela", "Integral — área bajo la curva"),
+            ("INTEGRAL de x", "Integral — área bajo la curva"),
+            ("el área bajo la curva", "Integral — área bajo la curva"),
+            ("derivadaa de x^2", "Derivada como pendiente"),
+            ("la tangente en x=1", "Derivada como pendiente"),
+            ("PITÁGORAS", "Teorema de Pitágoras"),
+            ("serie de taylor", "Serie de Taylor"),
+            ("mapeo conforme", "Mapeo conforme"),
+            ("conformal map", "Mapeo conforme"),
+            ("tarea pendiente", "Derivada como pendiente"),
+            ("fractales raros (nativa)", "fractales raros"),
+            ("   ", "Animación"),
+        ] {
+            assert_eq!(
+                titulo_curado("universal", concepto, None),
+                esperado,
+                "concepto: {concepto}"
+            );
+        }
+        // "tarea" sola NO es área (exacta por token, evita "tarea"→área).
+        assert_eq!(titulo_curado("universal", "la tarea", None), "la tarea");
+    }
+
+    #[test]
+    fn titulos_vienen_del_catalogo_i18n() {
+        // Auditoría: los literales ES viven en `MESSAGES` (`media.title.*`);
+        // acá solo `t()` + sustitución. EN/PT resuelven sin colgados.
+        use grafito_ui::i18n::{t, Locale};
+        assert_eq!(
+            titulo_curado("integral-area", "x", None),
+            t("media.title.integral", Locale::Es)
+        );
+        assert_eq!(
+            titulo_curado("pitagoras", "x", None),
+            t("media.title.pitagoras", Locale::Es)
+        );
+        let anim = crate::anim_native::parametric_for_template("derivative-slope", "derivada")
+            .expect("derivative-slope es paramétrica");
+        for locale in [Locale::Es, Locale::En, Locale::Pt] {
+            let base = titulo_curado_localized("universal", "una integrela", None, locale);
+            assert_eq!(base, t("media.title.integral", locale), "{locale:?}");
+            let por_kind = titulo_curado_localized("derivative-slope", "x", Some(&anim), locale);
+            assert!(
+                por_kind.contains("x^2"),
+                "el expr viaja en {locale:?}: {por_kind}"
+            );
+            for colgado in ["{expr}", "{p0}", "{p1}", "{param}"] {
+                assert!(
+                    !por_kind.contains(colgado),
+                    "sin placeholders colgados en {locale:?}: {por_kind}"
+                );
+            }
+        }
+        let en = titulo_curado_localized("universal", "una integrela", None, Locale::En);
+        assert_eq!(en, "Integral — area under the curve");
     }
 
     #[test]

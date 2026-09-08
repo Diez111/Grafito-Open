@@ -48,7 +48,9 @@ pub struct DocumentController {
     pub document: Document,
     /// Pila de undo acotada a `MAX_UNDO` (50), con `VecDeque` para `pop_front` O(1).
     pub undo_stack: VecDeque<Document>,
-    /// Pila de redo (sin presupuesto de bytes; se limpia en cada push).
+    /// Pila de redo acotada igual que undo (`MAX_UNDO` 50 + `MAX_UNDO_BYTES`
+    /// 50 MiB, contando `before+after` por `ChangeSet`): un `undo` masivo con
+    /// docs grandes no puede retener 100 docs en memoria. Se limpia en cada push.
     pub redo_stack: VecDeque<ChangeSet>,
     /// Suma running de `estimated_bytes` de `undo_stack` — O(1) por push/pop.
     undo_total_bytes: usize,
@@ -150,6 +152,7 @@ impl DocumentController {
         match changes.undo(&mut self.document) {
             Ok(()) => {
                 self.redo_stack.push_back(changes);
+                self.enforce_redo_budgets();
                 Ok(())
             }
             Err(error) => {
@@ -221,6 +224,36 @@ impl DocumentController {
             .iter()
             .map(|d| d.estimated_bytes())
             .fold(0usize, |a, b| a.saturating_add(b))
+    }
+
+    /// Suma estimada de `redo_stack` (`before+after` por `ChangeSet`).
+    /// Scan O(n≤50) — solo corre en `undo()` (acción de usuario, no por frame).
+    fn redo_total_bytes(&self) -> usize {
+        self.redo_stack
+            .iter()
+            .map(|c| {
+                c.before
+                    .estimated_bytes()
+                    .saturating_add(c.after.estimated_bytes())
+            })
+            .fold(0usize, |a, b| a.saturating_add(b))
+    }
+
+    /// Evicción de redo por `MAX_UNDO` (50) y `MAX_UNDO_BYTES` (50 MiB) con
+    /// `pop_front` O(1) — espejo de `enforce_budgets` para undo y de
+    /// `enforce_redo_budgets` en `app.rs`. Guarda ≥1 entrada (el redo más
+    /// reciente nunca se evicta por bytes, igual que undo).
+    fn enforce_redo_budgets(&mut self) {
+        while self.redo_stack.len() > MAX_UNDO {
+            if self.redo_stack.pop_front().is_none() {
+                break;
+            }
+        }
+        while self.redo_total_bytes() > MAX_UNDO_BYTES && self.redo_stack.len() > 1 {
+            if self.redo_stack.pop_front().is_none() {
+                break;
+            }
+        }
     }
 }
 
@@ -454,6 +487,49 @@ mod tests {
         }
         assert!(ctl.total_bytes() <= MAX_UNDO_BYTES || ctl.undo_len() == 1);
         assert_eq!(ctl.total_bytes(), ctl.recomputed_total_bytes());
+    }
+
+    #[test]
+    fn document_controller_redo_bounded_by_count_and_bytes() {
+        // Auditoría (undo/redo asimétrico): 60 pushes + 60 undos → redo
+        // acotado a MAX_UNDO (50) y MAX_UNDO_BYTES (50 MiB).
+        let mut ctl = DocumentController::new();
+        for i in 0..60 {
+            ctl.push_snapshot(ctl.document.clone());
+            let mut p = PointObj::new(Point2::new(i as f64, 0.0));
+            p.label = format!("R{i}");
+            let _ = ctl.document.try_add_object(GeoObject::Point(p));
+        }
+        assert_eq!(ctl.undo_len(), MAX_UNDO);
+        for _ in 0..60 {
+            let _ = ctl.undo();
+        }
+        assert!(
+            ctl.redo_len() <= MAX_UNDO,
+            "redo acotado por cantidad: {}",
+            ctl.redo_len()
+        );
+        // Presión por bytes: docs grandes (~100 pts c/u) → el redo no supera
+        // 50 MiB aunque haya lugar por cantidad.
+        let mut grande = DocumentController::new();
+        let big = doc_with_points(100);
+        let pushes = (MAX_UNDO_BYTES / big.estimated_bytes().max(1)) + 5;
+        for _ in 0..pushes {
+            grande.push_snapshot(big.clone());
+            let mut p = PointObj::new(Point2::new(0.0, 0.0));
+            p.label = "X".to_string();
+            let _ = grande.document.try_add_object(GeoObject::Point(p));
+        }
+        for _ in 0..pushes {
+            let _ = grande.undo();
+        }
+        assert!(
+            grande.redo_total_bytes() <= MAX_UNDO_BYTES || grande.redo_len() <= 1,
+            "redo acotado por bytes: {} bytes en {} entradas",
+            grande.redo_total_bytes(),
+            grande.redo_len()
+        );
+        assert!(grande.redo_len() <= MAX_UNDO);
     }
 
     #[test]

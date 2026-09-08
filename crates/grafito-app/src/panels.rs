@@ -4291,21 +4291,27 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
 
             if let Some(id) = mapping_id {
                 if let Some(GeoObject::ComplexMapping(cm)) = app.document.get_object(id) {
+                    // Títulos del catálogo i18n (`panel.conformal.*`, ES idéntico
+                    // al UI anterior; Oleada 3 cableará el ajuste de idioma).
+                    use grafito_ui::i18n::{t, Locale};
                     ui.add_space(14.0);
                     ui.separator();
                     ui.add_space(SPACE_SM);
                     ui.label(
-                        egui::RichText::new("Animación de Mapeo Conforme")
+                        egui::RichText::new(t("panel.conformal.title", Locale::Es))
                             .color(accent)
                             .strong(),
                     );
                     ui.add_space(SPACE_XS);
 
                     let mut anim = cm.animate_homotopy;
-                    ui.checkbox(&mut anim, "Animar deformación (homotopía)");
+                    ui.checkbox(&mut anim, t("panel.conformal.animate", Locale::Es));
 
                     let mut speed = cm.homotopy_speed;
-                    ui.add(egui::Slider::new(&mut speed, 0.2..=3.0).text("Velocidad"));
+                    ui.add(
+                        egui::Slider::new(&mut speed, 0.2..=3.0)
+                            .text(t("panel.conformal.speed", Locale::Es)),
+                    );
                     let _ = set_complex_mapping_animation(&mut app.document, id, anim, speed);
                 }
             }

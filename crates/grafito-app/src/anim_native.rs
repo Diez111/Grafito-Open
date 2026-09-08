@@ -4535,14 +4535,26 @@ pub const MORPH_EASING_NAMES: [&str; 8] = [
 ];
 
 /// Guía accionable para los errores "sin fotogramas" (frente errs mudos):
-/// el mensaje siempre dice qué hacer, jamás solo qué falló. La comparten
-/// `render_morph_frames` y las vías del asistente (`assistant.rs`) vía
-/// [`error_sin_fotogramas`].
-pub const SIN_FOTOGRAMAS_GUIA: &str = "probá bajar la resolución o reintentá";
+/// el mensaje siempre dice qué hacer, jamás solo qué falló. Vive en el
+/// catálogo i18n (`anim.empty.guide`); la comparten `render_morph_frames` y
+/// las vías del asistente (`assistant.rs`) vía [`error_sin_fotogramas`].
+/// Sin `Locale` a mano se usa ES (idioma actual del UI; Oleada 3 cableará el
+/// ajuste de idioma).
+pub fn sin_fotogramas_guia(locale: grafito_ui::i18n::Locale) -> &'static str {
+    grafito_ui::i18n::t("anim.empty.guide", locale)
+}
 
 /// Mensaje "sin fotogramas" con guía accionable (punto único testeable).
+/// Plantilla i18n (`anim.empty.message`, `{motor}`/`{guia}` sustituidos acá).
+pub fn error_sin_fotogramas_localized(motor: &str, locale: grafito_ui::i18n::Locale) -> String {
+    grafito_ui::i18n::t("anim.empty.message", locale)
+        .replace("{motor}", motor)
+        .replace("{guia}", sin_fotogramas_guia(locale))
+}
+
+/// Mensaje "sin fotogramas" en ES (idioma actual del UI).
 pub fn error_sin_fotogramas(motor: &str) -> String {
-    format!("{motor} no produjo fotogramas; {SIN_FOTOGRAMAS_GUIA}")
+    error_sin_fotogramas_localized(motor, grafito_ui::i18n::Locale::Es)
 }
 
 /// Error tipado del render morph / concat (mensajes en español, sin pánicos).
@@ -5210,5 +5222,31 @@ mod morph_playlist_f2b_tests {
         }
         let display = MorphRenderError::InvalidShape(error_sin_fotogramas("el morph")).to_string();
         assert!(display.contains("probá bajar"), "Display útil: {display}");
+    }
+
+    #[test]
+    fn error_sin_fotogramas_viene_del_catalogo_i18n() {
+        // Auditoría: el literal ES vive en `MESSAGES` (`anim.empty.*`), acá
+        // solo `t()` + sustitución. EN/PT resuelven sin placeholders colgados.
+        use grafito_ui::i18n::{t, Locale};
+        assert_eq!(
+            sin_fotogramas_guia(Locale::Es),
+            t("anim.empty.guide", Locale::Es)
+        );
+        assert_eq!(
+            error_sin_fotogramas("el morph"),
+            error_sin_fotogramas_localized("el morph", Locale::Es)
+        );
+        let en = error_sin_fotogramas_localized("morph", Locale::En);
+        assert!(en.contains("morph"), "motor: {en}");
+        assert!(
+            !en.contains("{motor}") && !en.contains("{guia}"),
+            "sin colgados: {en}"
+        );
+        let pt_msg = error_sin_fotogramas_localized("morph", Locale::Pt);
+        assert!(
+            !pt_msg.contains("{motor}") && !pt_msg.contains("{guia}"),
+            "PT: {pt_msg}"
+        );
     }
 }

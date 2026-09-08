@@ -82,11 +82,12 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 167;
+pub const MSG_COUNT: usize = 184;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
 /// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (18) +
-/// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) = 167.
+/// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) +
+/// `anim` (2) + `media.title` (12) + `panel.conformal` (3) = 184.
 pub static MESSAGES: &[Msg] = &[
     // ── toolbar.group (18) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
@@ -264,6 +265,29 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "panel.cas_empty", es: "Sin resultado — ejecuta un comando CAS", en: "No result — run a CAS command" },
     Msg { key: "common.cancel", es: "Cancelar", en: "Cancel" },
     Msg { key: "common.retry", es: "Reintentar", en: "Retry" },
+    // ── anim (2) — guía y mensaje "sin fotogramas" (antes en `anim_native.rs`).
+    // `{motor}`/`{guia}` se sustituyen en el call-site (igual que `{path}` en toast).
+    Msg { key: "anim.empty.guide", es: "probá bajar la resolución o reintentá", en: "try lowering the resolution or retry" },
+    Msg { key: "anim.empty.message", es: "{motor} no produjo fotogramas; {guia}", en: "{motor} produced no frames; {guia}" },
+    // ── media.title (12) — títulos curados de cards de animación (antes en
+    // `assistant.rs::titulo_curado`). `{expr}`/`{p0}`/`{p1}`/`{param}` se
+    // sustituyen en el call-site; las fijas viajan tal cual.
+    Msg { key: "media.title.tangent", es: "Tangente móvil · {expr}", en: "Moving tangent · {expr}" },
+    Msg { key: "media.title.area", es: "Área acumulada · {expr} [{p0},{p1}]", en: "Accumulated area · {expr} [{p0},{p1}]" },
+    Msg { key: "media.title.sweep", es: "Barrido · {expr} ({param})", en: "Sweep · {expr} ({param})" },
+    Msg { key: "media.title.trace", es: "Traza · {expr}", en: "Trace · {expr}" },
+    Msg { key: "media.title.morph", es: "Transición", en: "Transition" },
+    Msg { key: "media.title.locus", es: "Lugar geométrico", en: "Locus" },
+    Msg { key: "media.title.integral", es: "Integral — área bajo la curva", en: "Integral — area under the curve" },
+    Msg { key: "media.title.derivative", es: "Derivada como pendiente", en: "Derivative as slope" },
+    Msg { key: "media.title.pitagoras", es: "Teorema de Pitágoras", en: "Pythagorean theorem" },
+    Msg { key: "media.title.taylor", es: "Serie de Taylor", en: "Taylor series" },
+    Msg { key: "media.title.conformal", es: "Mapeo conforme", en: "Conformal map" },
+    Msg { key: "media.title.default", es: "Animación", en: "Animation" },
+    // ── panel.conformal (3) — sección de mapeo conforme en `panels.rs`.
+    Msg { key: "panel.conformal.title", es: "Animación de Mapeo Conforme", en: "Conformal mapping animation" },
+    Msg { key: "panel.conformal.animate", es: "Animar deformación (homotopía)", en: "Animate deformation (homotopy)" },
+    Msg { key: "panel.conformal.speed", es: "Velocidad", en: "Speed" },
 ];
 
 // ── Acceso ──
@@ -570,18 +594,69 @@ pub fn toast_msg(suffix: &'static str, locale: Locale) -> &'static str {
     }
 }
 
+/// Sufijos válidos de `media.title.*` (12).
+pub const MEDIA_TITLE_KEYS: &[&str; 12] = &[
+    "tangent",
+    "area",
+    "sweep",
+    "trace",
+    "morph",
+    "locus",
+    "integral",
+    "derivative",
+    "pitagoras",
+    "taylor",
+    "conformal",
+    "default",
+];
+
+/// Título de card de animación por sufijo (`{expr}`/`{p0}`/`{p1}`/`{param}`
+/// se sustituyen en el call-site con `str::replace`). Sufijo desconocido →
+/// el sufijo.
+pub fn media_title_msg(suffix: &'static str, locale: Locale) -> &'static str {
+    match suffix {
+        "tangent" => t("media.title.tangent", locale),
+        "area" => t("media.title.area", locale),
+        "sweep" => t("media.title.sweep", locale),
+        "trace" => t("media.title.trace", locale),
+        "morph" => t("media.title.morph", locale),
+        "locus" => t("media.title.locus", locale),
+        "integral" => t("media.title.integral", locale),
+        "derivative" => t("media.title.derivative", locale),
+        "pitagoras" => t("media.title.pitagoras", locale),
+        "taylor" => t("media.title.taylor", locale),
+        "conformal" => t("media.title.conformal", locale),
+        "default" => t("media.title.default", locale),
+        _ => suffix,
+    }
+}
+
+/// Sufijos válidos de `anim.*` (2).
+pub const ANIM_KEYS: &[&str; 2] = &["guide", "message"];
+
+/// Mensaje "sin fotogramas" por sufijo (`{motor}`/`{guia}` se sustituyen en
+/// el call-site). Sufijo desconocido → el sufijo.
+pub fn anim_msg(suffix: &'static str, locale: Locale) -> &'static str {
+    match suffix {
+        "guide" => t("anim.empty.guide", locale),
+        "message" => t("anim.empty.message", locale),
+        _ => suffix,
+    }
+}
+
 // ── Portugués: overlay parcial F3d, variante plena W2 ──
 //
 // F3d lo dejó como tabla parcial `clave → texto` con fallback al EN en el
 // call-site porque añadir la variante rompía matches exhaustivos fuera del
 // frente. W2 levanta esa restricción: `Locale::Pt` existe y `t(key, Pt)`
 // resuelve PT→ES→EN solo (ver `t`). El overlay sigue parcial a propósito:
-// 78 claves principales (18 grupos + 17 paleta + 11 onboarding + 10 cheat +
-// 10 toast + 12 app/misc); las 87 `toolbar.tool` caen a ES vía `Msg::get`.
+// 93 claves (18 grupos + 18 paleta + 11 onboarding + 10 cheat + 10 toast +
+// 12 app/misc + 2 anim + 12 media.title); las 87 `toolbar.tool` + 3
+// `panel.conformal` + `onboarding.bullet_tertiary` caen a ES vía `Msg::get`.
 // El lint `unwrap_used` sigue prohibido en prod: el fallback se escribe con
 // `match` o `if let`.
 //
-// Cobertura: 79/167 (47.3%). Medida real en el test `pt_covers_main_ui_keys`
+// Cobertura: 93/184 (50.5%). Medida real en el test `pt_covers_main_ui_keys`
 // (imprime el % por `--nocapture`).
 
 /// Una entrada del overlay portugués: clave del catálogo + texto PT.
@@ -594,7 +669,7 @@ pub struct PtMsg {
     pub pt: &'static str,
 }
 
-/// Claves principales de UI con traducción PT (78). Ordenado por dominio como
+/// Claves principales de UI con traducción PT (93). Ordenado por dominio como
 /// [`MESSAGES`]: grupos (18) + paleta (17) + onboarding (11) + cheat (10) +
 /// toast (10) + app/misc (12).
 pub static PT_MESSAGES: &[PtMsg] = &[
@@ -683,6 +758,22 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "panel.cas_empty", pt: "Sem resultado — execute um comando CAS" },
     PtMsg { key: "common.cancel", pt: "Cancelar" },
     PtMsg { key: "common.retry", pt: "Tentar de novo" },
+    // ── anim (2) ──
+    PtMsg { key: "anim.empty.guide", pt: "tente reduzir a resolução ou tentar de novo" },
+    PtMsg { key: "anim.empty.message", pt: "{motor} não produziu quadros; {guia}" },
+    // ── media.title (12) ──
+    PtMsg { key: "media.title.tangent", pt: "Tangente móvel · {expr}" },
+    PtMsg { key: "media.title.area", pt: "Área acumulada · {expr} [{p0},{p1}]" },
+    PtMsg { key: "media.title.sweep", pt: "Varredura · {expr} ({param})" },
+    PtMsg { key: "media.title.trace", pt: "Traço · {expr}" },
+    PtMsg { key: "media.title.morph", pt: "Transição" },
+    PtMsg { key: "media.title.locus", pt: "Lugar geométrico" },
+    PtMsg { key: "media.title.integral", pt: "Integral — área sob a curva" },
+    PtMsg { key: "media.title.derivative", pt: "Derivada como inclinação" },
+    PtMsg { key: "media.title.pitagoras", pt: "Teorema de Pitágoras" },
+    PtMsg { key: "media.title.taylor", pt: "Série de Taylor" },
+    PtMsg { key: "media.title.conformal", pt: "Mapeamento conforme" },
+    PtMsg { key: "media.title.default", pt: "Animação" },
 ];
 
 /// Texto PT de `key`, o `None` si la clave sigue en fallback ES/EN
@@ -700,7 +791,7 @@ pub fn pt(key: &'static str) -> Option<&'static str> {
 }
 
 /// Cobertura del overlay PT: `(cubiertas, total del catálogo)`.
-/// El numerador lo fija el test `pt_covers_main_ui_keys` en 78.
+/// El numerador lo fija el test `pt_covers_main_ui_keys` en 93.
 pub fn pt_coverage() -> (usize, usize) {
     (PT_MESSAGES.len(), MESSAGES.len())
 }
@@ -712,13 +803,13 @@ pub fn pt_coverage() -> (usize, usize) {
 /// llegar a 100%).
 pub const PT_PARTIAL_BADGE: &str = "Português parcial";
 
-/// `true` mientras el overlay PT no cubra el catálogo (hoy 79/167 ≈ 47%).
+/// `true` mientras el overlay PT no cubra el catálogo (hoy 93/184 ≈ 50.5%).
 pub fn pt_is_partial() -> bool {
     let (cubiertas, total) = pt_coverage();
     cubiertas < total
 }
 
-/// Texto del badge con conteo real, p. ej. `"Português parcial · 79/167"`.
+/// Texto del badge con conteo real, p. ej. `"Português parcial · 93/184"`.
 /// Puro, sin I/O: el selector lo muestra cuando `Locale::Pt` está activo.
 pub fn pt_partial_badge_text() -> String {
     let (cubiertas, total) = pt_coverage();
@@ -783,10 +874,11 @@ pub fn parse_number_tolerant(text: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cheat_sheet_msg, format_number, group_label, onboarding_msg, palette_action,
-        palette_footer, parse_number_tolerant, pt, pt_coverage, pt_is_partial,
-        pt_partial_badge_text, toast_msg, tool_label, Locale, CHEAT_KEYS, GROUP_SLUGS, MESSAGES,
-        MSG_COUNT, ONBOARDING_KEYS, PT_MESSAGES, PT_PARTIAL_BADGE, TOAST_KEYS,
+        anim_msg, cheat_sheet_msg, format_number, group_label, media_title_msg, onboarding_msg,
+        palette_action, palette_footer, parse_number_tolerant, pt, pt_coverage, pt_is_partial,
+        pt_partial_badge_text, toast_msg, tool_label, Locale, ANIM_KEYS, CHEAT_KEYS, GROUP_SLUGS,
+        MEDIA_TITLE_KEYS, MESSAGES, MSG_COUNT, ONBOARDING_KEYS, PT_MESSAGES, PT_PARTIAL_BADGE,
+        TOAST_KEYS,
     };
 
     #[test]
@@ -796,7 +888,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 167);
+        assert_eq!(MSG_COUNT, 184);
     }
 
     #[test]
@@ -944,6 +1036,8 @@ mod tests {
         assert_eq!(ONBOARDING_KEYS.len(), 11);
         assert_eq!(CHEAT_KEYS.len(), 10);
         assert_eq!(TOAST_KEYS.len(), 10);
+        assert_eq!(MEDIA_TITLE_KEYS.len(), 12);
+        assert_eq!(ANIM_KEYS.len(), 2);
         for k in ONBOARDING_KEYS {
             assert!(!onboarding_msg(k, Locale::Es).is_empty());
             assert!(!onboarding_msg(k, Locale::En).is_empty());
@@ -956,17 +1050,34 @@ mod tests {
             assert!(!toast_msg(k, Locale::Es).is_empty());
             assert!(!toast_msg(k, Locale::En).is_empty());
         }
+        for k in MEDIA_TITLE_KEYS {
+            assert!(!media_title_msg(k, Locale::Es).is_empty());
+            assert!(!media_title_msg(k, Locale::En).is_empty());
+        }
+        for k in ANIM_KEYS {
+            assert!(!anim_msg(k, Locale::Es).is_empty());
+            assert!(!anim_msg(k, Locale::En).is_empty());
+        }
         assert_eq!(onboarding_msg("btn_example", Locale::Es), "Probar ejemplo");
         assert_eq!(cheat_sheet_msg("save", Locale::En), "Save: Ctrl+S");
         assert_eq!(toast_msg("anim_ready", Locale::Es), "Animación lista.");
+        assert_eq!(
+            media_title_msg("integral", Locale::Es),
+            "Integral — área bajo la curva"
+        );
+        assert_eq!(media_title_msg("morph", Locale::En), "Transition");
+        assert_eq!(
+            anim_msg("guide", Locale::Es),
+            "probá bajar la resolución o reintentá"
+        );
     }
 
     #[test]
     fn pt_covers_main_ui_keys() {
-        // F3d: overlay parcial PT — 78 claves principales, sin duplicados ni vacíos,
+        // F3d: overlay parcial PT — 93 claves principales, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 79);
-        assert_eq!(pt_coverage(), (79, 167));
+        assert_eq!(PT_MESSAGES.len(), 93);
+        assert_eq!(pt_coverage(), (93, 184));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -1071,6 +1182,15 @@ mod tests {
             ("toast.load_error", "{err}"),
             ("toast.export_error", "{err}"),
             ("assistant.teaching_started", "{topic}"),
+            ("anim.empty.guide", "resolução"),
+            ("anim.empty.message", "{motor}"),
+            ("anim.empty.message", "{guia}"),
+            ("media.title.tangent", "{expr}"),
+            ("media.title.area", "{expr}"),
+            ("media.title.area", "{p0}"),
+            ("media.title.area", "{p1}"),
+            ("media.title.sweep", "{param}"),
+            ("media.title.trace", "{expr}"),
         ] {
             let text = pt(key).expect("clave principal con PT");
             assert!(
@@ -1078,6 +1198,34 @@ mod tests {
                 "{key} PT debe contener {marker}: {text}"
             );
         }
+    }
+
+    #[test]
+    fn pt_coverage_media() {
+        // Overlay puntual (auditoría): `media/title.*` + `anim/empty.*` tienen
+        // PT sin pedir fluent completo. Si se agrega una clave `media.*` o
+        // `anim.*` al catálogo, este test exige su PT acá también.
+        for m in MESSAGES {
+            if m.key.starts_with("media.title.") || m.key.starts_with("anim.empty.") {
+                assert!(pt(m.key).is_some(), "sin overlay PT puntual: {}", m.key);
+            }
+        }
+        assert_eq!(
+            pt("media.title.integral"),
+            Some("Integral — área sob a curva")
+        );
+        assert_eq!(pt("media.title.default"), Some("Animação"));
+        assert_eq!(
+            pt("anim.empty.guide"),
+            Some("tente reduzir a resolução ou tentar de novo")
+        );
+        // `panel.conformal.*` sigue en fallback ES honesto (fuera del overlay
+        // puntual): `pt()` da `None` y `t(key, Pt)` cae al ES, jamás vacío.
+        assert_eq!(pt("panel.conformal.title"), None);
+        assert_eq!(
+            super::t("panel.conformal.title", Locale::Pt),
+            "Animación de Mapeo Conforme"
+        );
     }
 
     #[test]
@@ -1135,25 +1283,27 @@ mod tests {
 
     #[test]
     fn pt_coverage_prints_real_percentage() {
-        // Cobertura PT medida: 79/167 ≈ 47.3%. Se imprime el % real con
+        // Cobertura PT medida: 93/184 ≈ 50.5%. Se imprime el % real con
         // `--nocapture`; el assert fija el numerador para que cualquier
         // agregado (o faltante) de PT rompa el test a propósito.
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (79, 167));
+        assert_eq!((covered, total), (93, 184));
         let pct = covered as f64 * 100.0 / total as f64;
-        eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (tools 0/87 en fallback ES)");
-        assert!((pct - 47.3).abs() < 0.1, "pct real: {pct}");
+        eprintln!(
+            "cobertura PT: {covered}/{total} = {pct:.1}% (87 tools + panel sin PT en fallback ES)"
+        );
+        assert!((pct - 50.5).abs() < 0.1, "pct real: {pct}");
     }
 
     #[test]
     fn pt_partial_badge_pinned() {
         // P1b: el PT parcial es visible en el selector (badge + conteo).
-        // Si sube la cobertura, actualizar (79, 167) Y el badge; al llegar a
+        // Si sube la cobertura, actualizar (93, 184) Y el badge; al llegar a
         // 100% remover el badge y este test.
-        assert!(pt_is_partial(), "hoy 79/167 < 100%: el badge debe existir");
+        assert!(pt_is_partial(), "hoy 93/184 < 100%: el badge debe existir");
         assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
-        assert_eq!(pt_partial_badge_text(), "Português parcial · 79/167");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 93/184");
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (79, 167));
+        assert_eq!((covered, total), (93, 184));
     }
 }

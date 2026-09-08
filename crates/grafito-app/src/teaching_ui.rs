@@ -1475,11 +1475,14 @@ impl TeachingUiState {
     ///
     /// Frente hash O(píxeles): antes se hasheaba cada píxel de hasta 6
     /// frames en CADA tick (`ensure_textures` corre por frame dibujado).
-    /// Ahora solo `len` + `size` + 4 esquinas por frame: el reemplazo (nuevo
-    /// set, distinto largo o tamaño) siempre cambia la huella; un cambio
-    /// solo-interior con mismas esquinas se re-subiría tarde como mucho un
-    /// set (los frames nuevos llegan con `clear_*`, que ya invalida el
-    /// cache). Sin `unwrap`: índices con `get`, nunca aritmética que desborde.
+    /// Ahora solo `len` + `size` + 4 esquinas + centro por frame: el reemplazo
+    /// (nuevo set, distinto largo o tamaño) siempre cambia la huella; un cambio
+    /// solo-interior fuera del centro se re-subiría tarde como mucho un set
+    /// (los frames nuevos llegan con `clear_*`, que ya invalida el cache).
+    /// El centro se muestrea porque el contenido vive ahí (una mutación del
+    /// píxel central cambia la huella); el resto del interior sigue fuera por
+    /// la cota O(1). Sin `unwrap`: índices con `get`, nunca aritmética que
+    /// desborde.
     fn anim_frames_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let Some(frames) = &self.anim_frames else {
@@ -1496,11 +1499,15 @@ impl TeachingUiState {
             }
             let ultima_fila = h.saturating_sub(1);
             let ultima_col = w.saturating_sub(1);
+            // 4 esquinas + centro (división entera; en marcos chicos puede
+            // coincidir con una esquina: hashear dos veces es determinista).
+            let centro = (w / 2, h / 2);
             for (x, y) in [
                 (0, 0),
                 (ultima_col, 0),
                 (0, ultima_fila),
                 (ultima_col, ultima_fila),
+                centro,
             ] {
                 let indice = y.saturating_mul(w).saturating_add(x);
                 if let Some(pixel) = frame.pixels.get(indice) {
@@ -2267,9 +2274,11 @@ mod tests {
     }
 
     #[test]
-    fn hash_esquinas_detecta_reemplazo_con_cota_o1() {
-        // Frente hash O(píxeles): la huella solo mira len+size+4 esquinas
-        // por frame — el tick por frame dibujado no recorre píxeles.
+    fn hash_esquinas_y_centro_detecta_reemplazo_con_cota_o1() {
+        // Frente hash O(píxeles): la huella solo mira len+size+4 esquinas+
+        // centro por frame — el tick por frame dibujado no recorre píxeles.
+        // Auditoría: el centro SE muestrea (el contenido vive ahí); el resto
+        // del interior sigue fuera por la cota O(1).
         fn huella(frames: Vec<egui::ColorImage>) -> u64 {
             TeachingUiState {
                 anim_frames: Some(frames),
@@ -2279,20 +2288,29 @@ mod tests {
         }
         let mut grande_a = egui::ColorImage::new([64, 64], egui::Color32::RED);
         let mut solo_interior = grande_a.clone();
-        // Cota: 4094 píxeles interiores distintos, mismas esquinas → la
-        // huella NO los mira (misma huella = trabajo acotado, no O(n)).
+        // Cota: píxeles interiores distintos fuera del centro, mismas
+        // esquinas+centro → la huella NO los mira (trabajo acotado, no O(n)).
         for (i, pixel) in solo_interior.pixels.iter_mut().enumerate() {
             let w = 64;
             let (x, y) = (i % w, i / w);
             let es_esquina = (x == 0 || x == w - 1) && (y == 0 || y == w - 1);
-            if !es_esquina {
+            let es_centro = (x, y) == (w / 2, w / 2);
+            if !es_esquina && !es_centro {
                 *pixel = egui::Color32::GREEN;
             }
         }
         assert_eq!(
             huella(vec![grande_a.clone()]),
             huella(vec![solo_interior.clone()]),
-            "el interior no entra en la huella (cota O(1) por frame)"
+            "el interior no muestreado no entra en la huella (cota O(1) por frame)"
+        );
+        // Mutar el centro SÍ cambia la huella (contenido real, no esquinas).
+        let mut centro_mutado = grande_a.clone();
+        centro_mutado.pixels[(64 / 2) * 64 + (64 / 2)] = egui::Color32::BLUE;
+        assert_ne!(
+            huella(vec![grande_a.clone()]),
+            huella(vec![centro_mutado]),
+            "mutar el centro debe cambiar la huella"
         );
         // Reemplazo real (esquina distinta) sí cambia la huella.
         grande_a.pixels[0] = egui::Color32::BLUE;

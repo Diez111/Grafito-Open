@@ -5582,10 +5582,64 @@ fn exam_lockdown_bloquea_cambio_de_perspectiva() {
 }
 
 #[test]
+fn redo_acotado_en_cantidad_y_bytes() {
+    // Auditoría (undo/redo asimétrico): 60 entradas en redo → acotado a
+    // MAX_UNDO (50) y MAX_UNDO_BYTES (50 MiB). Espejo del test del
+    // DocumentController (`controllers.rs`), sobre la función libre de app.
+    use crate::app::{enforce_redo_budgets, redo_changeset_bytes, MAX_UNDO, MAX_UNDO_BYTES};
+    use grafito_core::{ChangeSet, Document};
+    let mut redo: VecDeque<ChangeSet> = VecDeque::new();
+    for _ in 0..60 {
+        redo.push_back(ChangeSet {
+            before: Document::new(),
+            after: Document::new(),
+        });
+    }
+    enforce_redo_budgets(&mut redo);
+    assert!(
+        redo.len() <= MAX_UNDO,
+        "redo acotado por cantidad: {}",
+        redo.len()
+    );
+    let bytes: usize = redo
+        .iter()
+        .map(redo_changeset_bytes)
+        .fold(0usize, |a, b| a.saturating_add(b));
+    assert!(bytes <= MAX_UNDO_BYTES, "redo acotado por bytes: {bytes}");
+    // Un solo redo gigante se conserva (guardia len>1, igual que undo).
+    let mut uno: VecDeque<ChangeSet> = VecDeque::from([ChangeSet {
+        before: Document::new(),
+        after: Document::new(),
+    }]);
+    enforce_redo_budgets(&mut uno);
+    assert_eq!(uno.len(), 1);
+}
+
+#[test]
 fn build_hash_no_es_local_ni_vacio() {
     // Frente build-hash rancio: el fallback es `dev-{version}`, jamás
     // `"local"` (mudo). En repo con git es el short-hash del commit.
     let hash = env!("GRAFITO_BUILD_HASH");
     assert!(!hash.is_empty(), "el hash de build no debe ser vacío");
     assert_ne!(hash, "local", "el binario no debe decir `local`: {hash}");
+    // Fuerte: contra `git rev-parse --short HEAD` cuando hay repo; fuera de
+    // git (CI sin `.git`) se acepta el fallback `dev-` (tolerante, sin ignore).
+    let git_hash = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|salida| String::from_utf8(salida.stdout).ok())
+        .map(|texto| texto.trim().to_string())
+        .filter(|texto| !texto.is_empty());
+    if let Some(esperado) = git_hash {
+        assert_eq!(
+            hash, esperado,
+            "GRAFITO_BUILD_HASH debe ser el short-hash de git ({esperado}), fue: {hash}"
+        );
+    } else {
+        assert!(
+            hash.starts_with("dev-"),
+            "sin repo git el fallback debe ser `dev-{{versión}}`, fue: {hash}"
+        );
+    }
 }
