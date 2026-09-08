@@ -242,25 +242,86 @@ pub fn encode_frames_to_gif_bytes(
 ///
 /// Creación exclusiva (`create_new`, `O_EXCL`): si el destino ya existe —
 /// symlink plantado incluido — falla cerrado sin seguir ni truncar nada.
+///
+/// Atómico: codifica en memoria, vuelca a un hermano `.tmp.<pid>-<nanos>` y
+/// lo renombra al destino. En cualquier `Err` no queda ni archivo final ni
+/// `.tmp` huérfano (se borra best-effort).
 pub fn export_frames_to_gif_file(
     frames: &[egui::ColorImage],
     path: &Path,
     delay_cs: u16,
 ) -> Result<PathBuf, GifExportError> {
     let bytes = encode_frames_to_gif_bytes(frames, delay_cs)?;
-    let mut file = std::fs::OpenOptions::new()
+    write_gif_bytes_atomically(&bytes, path)
+}
+
+/// Hermano temporal para el vuelco atómico (mismo directorio = mismo
+/// filesystem, el `rename` es atómico). Sufijo con pid + nanos para no
+/// colisionar entre exports concurrentes. Puro, sin E/S.
+fn gif_tmp_sibling(path: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut os = path.as_os_str().to_owned();
+    os.push(format!(".tmp.{}-{stamp}", std::process::id()));
+    PathBuf::from(os)
+}
+
+/// Vuelca bytes ya codificados al destino de forma atómica (tmp + rename).
+///
+/// Si el destino existe (archivo, dir o symlink) falla cerrado antes de
+/// tocar disco; si el vuelco o el rename fallan, borra el `.tmp` y retorna
+/// `Err` sin dejar parcial final. Sin pánicos.
+fn write_gif_bytes_atomically(bytes: &[u8], path: &Path) -> Result<PathBuf, GifExportError> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(GifExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    let tmp = gif_tmp_sibling(path);
+    let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-        .map_err(|e| {
-            GifExportError::Io(format!(
+        .open(&tmp)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(GifExportError::Io(format!(
                 "no se pudo crear {} sin sobrescribir: {e}",
-                path.display()
-            ))
-        })?;
+                tmp.display()
+            )));
+        }
+    };
     use std::io::Write as _;
-    file.write_all(&bytes)
-        .map_err(|e| GifExportError::Io(format!("no se pudo escribir {}: {e}", path.display())))?;
+    if let Err(e) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(GifExportError::Io(format!(
+            "no se pudo escribir {}: {e}",
+            path.display()
+        )));
+    }
+    drop(file);
+    // Re-chequeo pre-rename: cierra la ventana entre el chequeo inicial y
+    // la publicación (si alguien plantó el destino en el medio, se aborta
+    // sin pisarlo y sin dejar el `.tmp`).
+    if std::fs::symlink_metadata(path).is_ok() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(GifExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(GifExportError::Io(format!(
+            "no se pudo publicar {}: {e}",
+            path.display()
+        )));
+    }
     Ok(path.to_path_buf())
 }
 
@@ -1818,6 +1879,36 @@ pub fn render_anim_for_export(
         height,
         params,
         true,
+        &mut |_, _| {},
+    )
+}
+
+/// ¿Este locale quema rótulo en el frame? Solo ES: los títulos quemados son
+/// literales ES históricos (`"derivada f'(x)"`, `"a^2 + b^2 = c^2"`,
+/// `"y=x^2"`, `"taylor sin(x)"`, `"bifurcacion r"`, ...). En otro locale el
+/// frame sale sin texto quemado (la card v3 ya titula localizado). Puro.
+pub fn con_rotulo_for_locale(locale: grafito_ui::i18n::Locale) -> bool {
+    matches!(locale, grafito_ui::i18n::Locale::Es)
+}
+
+/// Standalone / export GIF con locale: mismos 48 frames, pero el rótulo
+/// quemado ES solo sale en ES; en otro locale el frame sale limpio y la
+/// matemática queda intacta (banda media idéntica).
+pub fn render_anim_for_export_localized(
+    template: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    locale: grafito_ui::i18n::Locale,
+) -> Vec<egui::ColorImage> {
+    render_anim_with_progress_con_rotulo(
+        template,
+        concept,
+        width,
+        height,
+        params,
+        con_rotulo_for_locale(locale),
         &mut |_, _| {},
     )
 }
@@ -3494,6 +3585,48 @@ mod tests {
     }
 
     #[test]
+    fn export_localizado_pt_sin_texto_quemado() {
+        // Con locale Pt el frame no debe traer rótulo ES quemado (ni texto
+        // quemado directamente): la card v3 ya titula localizado. La
+        // matemática queda intacta (banda media idéntica al chat).
+        use grafito_ui::i18n::Locale;
+        assert!(
+            con_rotulo_for_locale(Locale::Es),
+            "ES mantiene el histórico"
+        );
+        assert!(!con_rotulo_for_locale(Locale::En), "EN sin quemado ES");
+        assert!(!con_rotulo_for_locale(Locale::Pt), "PT sin quemado ES");
+        let empty = params_map(&[]);
+        for tmpl in NATIVE_TEMPLATES {
+            let pt = render_anim_for_export_localized(
+                tmpl,
+                "conceito livre",
+                96,
+                72,
+                &empty,
+                Locale::Pt,
+            );
+            let chat =
+                render_anim_with_progress(tmpl, "conceito livre", 96, 72, &empty, &mut |_, _| {});
+            assert_eq!(pt.len(), NATIVE_ANIM_FRAME_COUNT, "{tmpl}: 48 pt");
+            assert_eq!(
+                cuenta_texto_quemado(&pt[0], 40),
+                0,
+                "{tmpl}: locale Pt no debe quemar rótulo ES"
+            );
+            assert_eq!(
+                cuenta_texto_quemado(&pt[NATIVE_ANIM_FRAME_COUNT - 1], 40),
+                0,
+                "{tmpl}: último frame Pt sin rótulo"
+            );
+            assert!(
+                banda_media_igual(&chat[0], &pt[0]),
+                "{tmpl}: la banda media no debe cambiar"
+            );
+        }
+    }
+
+    #[test]
     fn parametrica_chat_sin_rotulo_export_con_rotulo() {
         // Viewport 96x72 (como el dispatcher): el título (y≈6..13) queda en
         // la franja 0..40 y fuera de la banda media (la canónica de
@@ -4005,6 +4138,44 @@ mod tests {
             .file_type()
             .is_symlink());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gif_export_fallo_inyectado_no_deja_final_ni_tmp() {
+        // Fallo inyectado: 2º frame con otro tamaño → la codificación falla
+        // y no debe quedar ni archivo final ni `.tmp` huérfano en el dir.
+        let mut frames = synthetic_frames(2);
+        frames[1] = egui::ColorImage::new([4, 4], egui::Color32::RED);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("grafito_gif_atom_{}_{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("anim.gif");
+        let error = export_frames_to_gif_file(&frames, &path, GIF_EXPORT_DELAY_CS)
+            .expect_err("frames inconsistentes deben fallar");
+        assert!(!error.to_string().is_empty());
+        assert!(!path.exists(), "el fallo no debe dejar archivo final");
+        assert_sin_tmp_huerfanos(&dir);
+        // Éxito atómico: el final aparece con cabecera GIF real y sin `.tmp`.
+        let out = export_frames_to_gif_file(&synthetic_frames(2), &path, GIF_EXPORT_DELAY_CS)
+            .expect("export válido");
+        assert_eq!(out, path);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..6], b"GIF89a");
+        assert_sin_tmp_huerfanos(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Ningún `.tmp.<pid>-<nanos>` huérfano en el directorio.
+    fn assert_sin_tmp_huerfanos(dir: &std::path::Path) {
+        let entries: Vec<_> = std::fs::read_dir(dir).unwrap().collect();
+        for entry in entries {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(!name.contains(".tmp."), "quedó temporal huérfano: {name}");
+        }
     }
 
     #[test]

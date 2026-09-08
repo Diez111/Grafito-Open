@@ -716,6 +716,22 @@ impl GrafitoApp {
                         self.document.clear_selection();
                         self.document.select(id);
                         self.selected_object = Some(id);
+                        // El gesto puede mutar el objeto con el draft del
+                        // Inspector abierto: rebasea (`editing = false`) para
+                        // que el panel re-sincronice y jamás aplique sobre
+                        // rancio (gana-último-escritor).
+                        ui.ctx().memory_mut(|mem| {
+                            let key = egui::Id::new(("inspector_equation", id));
+                            if let Some(mut eq) = mem
+                                .data
+                                .get_temp::<crate::inspector_edit::InspectorEditState>(key)
+                            {
+                                if eq.editing {
+                                    eq.editing = false;
+                                    mem.data.insert_temp(key, eq);
+                                }
+                            }
+                        });
                     }
                 }
             }

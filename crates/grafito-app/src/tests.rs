@@ -5546,6 +5546,61 @@ fn exam_lockdown_bloquea_asistente_local_sin_panico() {
 }
 
 #[test]
+fn exam_bloquea_playlist_del_asistente() {
+    // Red-first: la playlist nativa ("X y después Y") no debe correr en
+    // examen: sería bypass del bloqueo del panel (`draw_assistant` retorna
+    // antes, pero el runner debe gatear igual al inicio).
+    let mut app = crate::app::dummy_grafito_app();
+    app.set_exam_mode(true);
+    let ctx = egui::Context::default();
+    let playlist = grafito_anim::protocol::Playlist::try_new(vec![
+        grafito_anim::protocol::PlaylistStep::pausa(500).expect("pausa válida"),
+    ])
+    .expect("playlist válida");
+    app.run_assistant_playlist_with(&ctx, playlist);
+    assert!(app.exam_mode, "el lockdown sigue activo");
+    assert!(
+        !app.assistant.anim_progress,
+        "en examen la playlist no debe arrancar animación"
+    );
+}
+
+#[test]
+fn exam_bloquea_custom_tool() {
+    // Red-first: las herramientas personalizadas mutan el documento por el
+    // pipeline de comandos: en examen deben frenar con early-return honesto.
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.execute_command_and_record_with_outcome("Point[(0,0)]", 0.0);
+    let label = app
+        .document
+        .objects()
+        .values()
+        .next()
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    assert!(!label.is_empty());
+    app.custom_tools
+        .define("parpadeo", &format!("Hide[{label}]; Show[{label}]"))
+        .expect("define válido");
+    app.set_exam_mode(true);
+    let before = serde_json::to_value(&app.document).expect("previo serializa");
+    let undo_antes = app.undo_stack.len();
+    app.run_custom_tool("parpadeo", &ctx);
+    assert!(app.exam_mode, "el lockdown sigue activo");
+    assert_eq!(
+        serde_json::to_value(&app.document).expect("posterior serializa"),
+        before,
+        "en examen la tool no debe mutar el documento"
+    );
+    assert_eq!(
+        app.undo_stack.len(),
+        undo_antes,
+        "en examen la tool no debe dejar undo"
+    );
+}
+
+#[test]
 fn exam_lockdown_bloquea_cambio_de_perspectiva() {
     // P1a-1 red-first: en examen el cambio de vista está bloqueado (sin bypass).
     let mut app = crate::app::dummy_grafito_app();

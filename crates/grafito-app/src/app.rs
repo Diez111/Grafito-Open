@@ -3765,6 +3765,10 @@ impl GrafitoApp {
     /// "(cambios revertidos)". Si todo ok, colapsa los N snapshots en uno
     /// solo para que un undo revierta la herramienta entera.
     pub(crate) fn run_custom_tool(&mut self, tool_name: &str, ctx: &egui::Context) {
+        // D2 lockdown: las tools mutan el documento por el pipeline normal.
+        if self.exam_blocks("Herramientas") {
+            return;
+        }
         let Some(def) = self.custom_tools.get(tool_name).cloned() else {
             self.notify(
                 format!("Herramienta '{tool_name}' no encontrada"),

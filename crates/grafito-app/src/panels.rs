@@ -3304,6 +3304,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                                                 draft: String::new(),
                                                 error: None,
                                                 editing: false,
+                                                base: String::new(),
                                             },
                                         )
                                     });
@@ -3314,6 +3315,11 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                                         eq_state = fresh;
                                     }
                                 }
+                                // El drag del canvas (u otro cambio externo) pudo
+                                // mover el objeto con el draft abierto: rebasea a
+                                // la canónica nueva en vez de aplicar sobre
+                                // rancio (con borrador fresco es no-op).
+                                let _ = ieq::rebase_if_stale(&mut eq_state, &live_now);
                                 ui.label(
                                     egui::RichText::new("Ecuación (editable)")
                                         .color(txt_dim)
@@ -3371,10 +3377,14 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                                 let enter_pressed = eq_resp.lost_focus()
                                     && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                 if apply_clicked || enter_pressed {
-                                    match ieq::commit_draft_with_previous(
+                                    // Con chequeo de rancio: si el objeto cambió
+                                    // desde que se abrió el borrador, falla
+                                    // honesto sin aplicar (el rebase de arriba
+                                    // ya refrescó lo visible por drag).
+                                    match ieq::commit_draft_stale_checked(
                                         &mut app.document,
                                         id,
-                                        &eq_state.draft,
+                                        &eq_state,
                                     ) {
                                         Ok(Some(before)) => {
                                             snapshot.capture_successful_replacement(before);

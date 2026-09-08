@@ -12,7 +12,10 @@ use grafito_command::inspector_equation;
 use grafito_core::{Document, GeoObject, ObjectId};
 
 /// Borrador de edición de la ecuación. `editing` distingue "mirando" de
-/// "editando" para que D1-bis no pise el texto mientras se escribe.
+/// "editando" para que D1-bis no pise el texto mientras se escribe. `base`
+/// es la canónica vigente al abrir el borrador: si el objeto cambia por
+/// fuera (p. ej. drag del canvas), el commit con `base` vieja falla honesto
+/// en vez de aplicar sobre rancio (gana-último-escritor).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectorEditState {
     /// Texto que ve y edita el usuario (arranca en la canónica).
@@ -21,11 +24,14 @@ pub struct InspectorEditState {
     pub error: Option<String>,
     /// `true` una vez que el usuario abrió el campo de edición.
     pub editing: bool,
+    /// Canónica vigente al abrir el borrador (detector de cambios externos).
+    pub base: String,
 }
 
 impl InspectorEditState {
     fn new(draft: String) -> Self {
         Self {
+            base: draft.clone(),
             draft,
             error: None,
             editing: false,
@@ -149,12 +155,52 @@ pub fn revalidate_state(state: &mut InspectorEditState, original: &GeoObject) ->
 
 /// Cancela la edición: vuelve al texto canónico y limpia el error.
 /// Si no hay canónica, deja el borrador como está pero sin error.
+/// La `base` se re-sincroniza con la canónica actual.
 pub fn cancel_edit(state: &mut InspectorEditState, obj: &GeoObject) {
     if let Some(canonical) = obj.canonical_equation_text() {
-        state.draft = canonical;
+        state.draft = canonical.clone();
+        state.base = canonical;
     }
     state.error = None;
     state.editing = false;
+}
+
+/// Rebasea el borrador si el objeto cambió por fuera del editor (drag del
+/// canvas, comando de Álgebra, etc.): refresca al canónico nuevo con
+/// `editing = false` y error limpio. Retorna `true` si rebaseó, `false` si
+/// el borrador sigue vigente (o el tipo no tiene canónica). Puro.
+pub fn rebase_if_stale(state: &mut InspectorEditState, current: &GeoObject) -> bool {
+    let Some(canonical) = current.canonical_equation_text() else {
+        return false;
+    };
+    if canonical == state.base {
+        return false;
+    }
+    state.draft = canonical.clone();
+    state.base = canonical;
+    state.error = None;
+    state.editing = false;
+    true
+}
+
+/// Como [`commit_draft_with_previous`] pero falla honesto si el objeto
+/// cambió desde que se abrió el borrador (`state.base` ≠ canónica actual):
+/// el documento queda intacto y el llamador debe rebasear
+/// ([`rebase_if_stale`]) y pedir confirmación antes de aplicar. Jamás aplica
+/// sobre rancio.
+pub fn commit_draft_stale_checked(
+    doc: &mut Document,
+    id: ObjectId,
+    state: &InspectorEditState,
+) -> Result<Option<Document>, String> {
+    let stale = doc
+        .get_object(id)
+        .and_then(|current| current.canonical_equation_text())
+        .is_some_and(|canonical| canonical != state.base);
+    if stale {
+        return Err("el objeto cambió mientras lo editabas (p. ej. lo moviste en el lienzo): revisá el borrador y aplicá de nuevo".to_string());
+    }
+    commit_draft_with_previous(doc, id, &state.draft)
 }
 
 #[cfg(test)]
@@ -245,6 +291,71 @@ mod tests {
         assert_eq!(st.draft, "y = x");
         assert_eq!(st.error, None);
         assert!(!st.editing);
+    }
+
+    #[test]
+    fn drag_con_draft_abierto_no_aplica_sobre_rancio() {
+        // Draft abierto sobre el punto, el drag del canvas lo mueve por
+        // fuera y el commit debe fallar honesto (o rebasear), jamás aplicar
+        // el texto rancio sobre la posición nueva.
+        let mut doc = Document::new();
+        let id = doc
+            .try_add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0))))
+            .expect("alta");
+        let obj = doc.get_object(id).cloned().expect("objeto");
+        let mut st = begin_edit(&obj).expect("editable");
+        assert!(!st.base.is_empty());
+        update_draft(&mut st, "(9, 9)");
+        assert!(st.editing);
+        // El drag mueve el punto por fuera del editor.
+        assert!(
+            doc.try_move_point_and_re_evaluate(id, Point2::new(5.0, 5.0))
+                .expect("drag mueve"),
+            "el punto libre debe moverse"
+        );
+        let canonica_nueva = doc
+            .get_object(id)
+            .and_then(|o| o.canonical_equation_text())
+            .expect("canónica nueva");
+        assert_ne!(canonica_nueva, st.base);
+        // 1) Rebase honesto: refresca al canónico nuevo, sin editar.
+        let mut rebased = st.clone();
+        assert!(rebase_if_stale(
+            &mut rebased,
+            &doc.get_object(id).cloned().expect("vive")
+        ));
+        assert!(!rebased.editing);
+        assert_eq!(rebased.draft, canonica_nueva);
+        assert_eq!(rebased.error, None);
+        // Sin cambios externos no rebasea (no-op).
+        assert!(!rebase_if_stale(
+            &mut rebased,
+            &doc.get_object(id).cloned().expect("vive")
+        ));
+        // 2) Commit con el estado rancio: falla honesto, documento intacto.
+        let err = commit_draft_stale_checked(&mut doc, id, &st).expect_err("rancio debe fallar");
+        assert!(
+            err.contains("cambió mientras"),
+            "mensaje honesto, fue: {err}"
+        );
+        assert_eq!(
+            doc.get_object(id)
+                .and_then(|o| o.canonical_equation_text())
+                .as_deref(),
+            Some(canonica_nueva.as_str()),
+            "el draft rancio jamás se aplica"
+        );
+        // 3) Tras rebasear, el estado fresco sí aplica.
+        update_draft(&mut rebased, "(7, 7)");
+        assert!(commit_draft_stale_checked(&mut doc, id, &rebased)
+            .expect("fresco aplica")
+            .is_some());
+        assert_eq!(
+            doc.get_object(id)
+                .and_then(|o| o.canonical_equation_text())
+                .as_deref(),
+            Some("(7, 7)")
+        );
     }
 
     #[test]

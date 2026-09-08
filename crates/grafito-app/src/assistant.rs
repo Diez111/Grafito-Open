@@ -3203,6 +3203,10 @@ impl GrafitoApp {
         template: &str,
         concept: &str,
     ) {
+        // Examen: ni siquiera la animación local corre (igual que playlist).
+        if self.exam_blocks("Asistente") {
+            return;
+        }
         // W-A: si hay una animación en curso, reemplazo EXPLÍCITO avisado
         // (antes era mudo). Cancel real (AS4): señala el token antes de
         // dropear, el hilo descarta. El toast dice "espero o reemplazo".
@@ -3463,6 +3467,11 @@ impl GrafitoApp {
         ctx: &egui::Context,
         playlist: grafito_anim::protocol::Playlist,
     ) {
+        // D2 lockdown: en examen la playlist no corre (bypass del bloqueo
+        // del panel, que ya retorna antes en `draw_assistant`).
+        if self.exam_blocks("Asistente") {
+            return;
+        }
         // Z3 trigger único: mismo reemplazo explícito que el single
         // (`anim_replace_message`, sin duplicar el texto).
         if self.assistant_runtime.cancel_anim_job() {
