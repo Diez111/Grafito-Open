@@ -5635,16 +5635,9 @@ fn draw_assistant_empty_state(
     let theme = current_theme(ui.ctx());
     let time = ui.input(|i| i.time);
     let hover_pos = ui.input(|i| i.pointer.hover_pos());
-    // B7 — CTA de vacío: si ya hay borrador se usa como tema, si no el
-    // tema por defecto (siempre resuelve a un ejercicio real).
-    let tema_cta = if state.problem.trim().is_empty() {
-        ANDAMIAR_DEFAULT_TOPIC.to_string()
-    } else {
-        state.problem.trim().chars().take(60).collect()
-    };
-    let mut action = None;
-    // Minimalista — solo avatar chico + caminos (chip y Andamiar); el
-    // header ya dice quién habla, acá nada decorativo.
+    let action = None;
+    // Minimalista — solo avatar chico; el header ya dice quién habla,
+    // el composer ya dice qué hacer. Cero botones, cero caminos.
     let avail = ui.available_height();
     // Centrar verticalmente el bloque completo
     if avail > 200.0 {
@@ -5675,31 +5668,6 @@ fn draw_assistant_empty_state(
             crate::avatar::draw_avatar(&painter, inner, &state.avatar, time, hover_pos);
         }
         ui.add_space(crate::tokens::SPACE_MD);
-        // W3 — vacío con camino: chip que envía el texto al turno.
-        // Piel pura: setea el borrador y emite `Submit`; la app decide.
-        if ui
-            .add_sized(
-                egui::vec2(ui.available_width(), 28.0),
-                egui::Button::new(egui::RichText::new("Graficá y=x²").size(crate::tokens::TYPE_XS))
-                    .rounding(crate::tokens::RADIUS_PILL)
-                    .fill(theme.accent.gamma_multiply(0.10))
-                    .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35))),
-            )
-            .on_hover_text("La dibujo en el lienzo")
-            .clicked()
-        {
-            state.problem = "Graficá y=x²".to_owned();
-            action = Some(AssistantUiAction::Submit);
-        }
-        ui.add_space(crate::tokens::SPACE_SM);
-        // B7 — entrada al ciclo de ejercicio sin conversación previa.
-        if ui
-            .button("Andamiar: practicá con un ejercicio")
-            .on_hover_text("Genero un ejercicio y lo corregimos juntos")
-            .clicked()
-        {
-            action = Some(AssistantUiAction::RequestExercise { topic: tema_cta });
-        }
     });
     action
 }
@@ -10040,8 +10008,9 @@ mod tests {
 
         let mut texts = Vec::new();
         collect_text_shapes(&output.shapes, &mut texts);
-        // El empty minimalista conserva caminos con texto (chip + Andamiar).
-        assert!(texts.len() >= 2);
+        // El empty minimalista no tiene botones ni textos apilados: con
+        // 0-1 bloques no hay nada que pueda solaparse (antes: chip + CTA).
+        assert!(texts.len() <= 1, "el vacío minimalista no apila textos");
         texts.sort_by(|a, b| {
             a.0.min
                 .y
