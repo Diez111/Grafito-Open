@@ -76,7 +76,16 @@ Locales (vía `skill` tool):
 - Default local: `opencode-mem` plugin + MCP `memory` oficial. Grafo: `kuzu-memory`/`cognee-mcp` bajo demanda.
 - PII siempre local. SaaS (`memory.store`/Mem0) solo hechos no-PII team.
 
-## MCP (verificados `opencode mcp list` 6/6 connected)
+## Control del equipo + memoria (E2E real)
+
+Skill `computer-control` (plugin global, en todos los proyectos):
+- Ver antes de actuar: `desktop_screenshot` → `/tmp/opencode/shots/`.
+- Video evidencia: `desktop_record start|stop` → `/tmp/opencode/clips/` (detener con SIGINT lo hace el plugin).
+- Apps nativas: `app_launch` (devuelve PID) + `app_quit`. Grafito se prueba así: lanzar → screenshot → `desktop_input` → screenshot → cerrar. Nada queda abierto al terminar.
+- Input: `desktop_input type|key|click|move|scroll` (ydotool). Avisos: `desktop_notify`.
+- Memoria: tool `memory` (project/all-projects, cruza sesiones verificado) + `memory-keeper` curra `MEMORY.md`/`.jspace` en `session.idle`.
+
+## MCP (verificados `opencode mcp list` 6/6 connected + `memory` global)
 
 Runtimes instalados user-local (sin sudo): bun 1.4.2 (`~/.bun/bin`), uv 0.12.10 (`~/.local/bin`). Comandos con paths absolutos (no dependen del PATH del shell) + `timeout: 30000`. `time` dado de baja (no hay paquete instalable; redundante con `date`); `fetch` va por `uvx mcp-server-fetch` (el `@modelcontextprotocol/server-fetch` da 404 en npm).
 

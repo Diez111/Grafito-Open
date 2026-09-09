@@ -128,6 +128,414 @@ pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
     crate::anim_native::detect_template_for_concept(pedido)
 }
 
+// ── W-B: la IA propone el SPEC, el motor solo renderiza lo validado ──────────
+//
+// Queja real: "cuando le pido derivada o integral me la tira al toque, la IA
+// ni bola, solo la tiene hecha de antes". Causa: el Submit renderizaba la
+// canónica instantánea sin consultar a nadie.
+// Política nueva: con IA disponible (remoto o agente, no solo local) el SPEC
+// (función, rango, kind, parámetros) lo propone la IA vía las tools existentes
+// (`propose_parametric/area/tangent_tool` + loop agente,
+// `anim_spec_json_para_hilo` en `grafito-assistant::agent`); el motor nativo
+// solo renderiza el spec validado con `infer_*`. Sin IA (offline, local sin
+// clave, error 400-429, timeout) → canónica local instantánea DECLARADA.
+//
+// Presupuesto: 1 request extra como máximo por turno de animación (el SPEC);
+// sin IA no hay request extra. Cero doble render: o IA o local, nunca ambos
+// (el desenlace es un solo enum y el Submit spawnea un solo worker).
+
+/// W-B — timeout para pedir SPEC a la IA: mitad del budget del turno.
+///
+/// `RequestBudget::default().timeout_ms` es 60s
+/// (`grafito-assistant-types` 8192/2048/8/60s); la mitad deja aire para
+/// validar con `infer_*` + renderizar sin pasar el budget.
+/// Peor caso documentado: 1 request extra (el SPEC) + render local.
+pub(crate) const ANIM_IA_SPEC_TIMEOUT_MS: u64 = 30_000;
+
+/// W-B — aviso de UNA línea ante fallback canónico (offline, timeout o error
+/// 400-429). Declara la canónica x² y ofrece otra; la prosa del turno usa la
+/// canónica declarada existente, este texto es el toast de una línea.
+pub(crate) const ANIM_SIN_IA_AVISO: &str = "sin conexión: te muestro x², pedime otra";
+
+/// W-B — SPEC validado venido de la IA (función, rango, kind/plantilla).
+/// El motor solo renderiza esto tras validar con `infer_*`; jamás basura.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SpecAnimIa {
+    pub expr: String,
+    pub p0: f64,
+    pub p1: f64,
+    pub plantilla: String,
+    pub param: String,
+}
+
+/// W-B — ¿Hay IA disponible para proponer el SPEC? (puro, sin I/O).
+///
+/// `agent_mode` (loop agente) o `remote_ready` (remoto con clave u Ollama
+/// local); jamás solo-local. `rate_limited` (pausa 429) y `exam_bloquea`
+/// fuerzan local para no quemar cuota ni violar examen.
+pub(crate) fn ia_disponible_para_anim(
+    agent_mode: bool,
+    remote_ready: bool,
+    rate_limited: bool,
+    exam_bloquea: bool,
+) -> bool {
+    (agent_mode || remote_ready) && !rate_limited && !exam_bloquea
+}
+
+/// W-B — prompt acotado para pedir SPEC a la IA (puro, sin I/O).
+///
+/// Pide UNA sola línea JSON con expr/p0/p1/plantilla; el parseo es estricto
+/// y la validación posterior usa `infer_*` (si la IA inventa, se descarta
+/// con `Err` honesto). Capado por chars para no pasar el budget.
+pub(crate) fn prompt_spec_anim_ia(pedido: &str) -> String {
+    let recortado: String = pedido.chars().take(500).collect();
+    format!(
+        "Devolvé SOLO una línea JSON para animar en Grafito: {{\"expr\": \"f(x)\", \"p0\": 0, \"p1\": 2, \"plantilla\": \"integral-area\"}}. Pedido: {recortado}"
+    )
+}
+
+/// W-B — salida del pedido de SPEC a la IA (inyectable para tests).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PedidoSpecIa {
+    /// La IA devolvió SPEC ya validado con `infer_*`.
+    Exito(SpecAnimIa),
+    /// La IA tardó más que `ANIM_IA_SPEC_TIMEOUT_MS`.
+    Timeout,
+    /// Fallo de transporte (offline, 400-429, red): va a fallback canónico.
+    Transporte(String),
+    /// La IA devolvió algo que no valida con `infer_*`: error honesto.
+    Invalido(String),
+}
+
+/// W-B — desenlace de un turno de animación (cero doble render: un solo valor).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DesenlaceAnimIa {
+    /// Renderizar el SPEC de la IA + prosa que lo nombra.
+    RenderIa { spec: SpecAnimIa, prosa: String },
+    /// Fallback canónico local + aviso de UNA línea.
+    FallbackCanonico { aviso: &'static str },
+    /// Error honesto sin frames (SPEC inválido que no valida).
+    ErrorHonesto(String),
+}
+
+/// W-B — resuelve el turno en puro (sin I/O ni spawn), para tests y wiring.
+///
+/// - Sin IA (`ia_disponible=false`) → canónica declarada + aviso.
+/// - Con IA + `Exito` → render IA con prosa que nombra función y rango.
+/// - Con IA + `Timeout`/`Transporte` → canónica + aviso (una línea).
+/// - Con IA + `Invalido` → error honesto, jamás basura en pantalla.
+///
+/// Un solo desenlace → el llamante renderiza una sola vez (o IA o local).
+pub(crate) fn resolver_turno_anim_ia(ia_disponible: bool, salida: PedidoSpecIa) -> DesenlaceAnimIa {
+    if !ia_disponible {
+        return DesenlaceAnimIa::FallbackCanonico {
+            aviso: ANIM_SIN_IA_AVISO,
+        };
+    }
+    match salida {
+        PedidoSpecIa::Exito(spec) => {
+            let prosa = prosa_para_spec_anim_ia(&spec);
+            DesenlaceAnimIa::RenderIa { spec, prosa }
+        }
+        PedidoSpecIa::Timeout | PedidoSpecIa::Transporte(_) => DesenlaceAnimIa::FallbackCanonico {
+            aviso: ANIM_SIN_IA_AVISO,
+        },
+        PedidoSpecIa::Invalido(detalle) => DesenlaceAnimIa::ErrorHonesto(detalle),
+    }
+}
+
+/// W-B — prosa del turno desde el SPEC validado (MUST nombrar función y rango).
+///
+/// Usa los valores venidos de la IA, no re-infiere (para que un spec con
+/// f=x³ se vea en prosa aunque el pedido original no la trajera).
+/// Rioplatense + frase de referencia de la media. Pura, sin I/O.
+pub(crate) fn prosa_para_spec_anim_ia(spec: &SpecAnimIa) -> String {
+    format!(
+        "te muestro con f(x)={} en [{},{}].\n\n{}",
+        spec.expr,
+        spec.p0,
+        spec.p1,
+        crate::anim_ui::animation_reference_sentence(),
+    )
+}
+
+/// W-B — valida un SPEC ya parseado con las puertas `infer_*` existentes.
+///
+/// Reconstruye un pedido sintético con la expr y el rango del SPEC y lo pasa
+/// por la puerta que toca según la plantilla (área/tangente/paramétrico).
+/// Si no valida, `Err` honesto (jamás renderizar basura). Pura, sin I/O.
+pub(crate) fn validar_spec_anim_ia(spec: &SpecAnimIa) -> Result<(), String> {
+    if spec.expr.trim().is_empty() {
+        return Err(
+            "el SPEC de la IA vino sin función: pedí una explícita, por ejemplo f(x)=x^3.".into(),
+        );
+    }
+    if spec.expr.chars().count() > 2000 {
+        return Err("el SPEC de la IA trae una función muy larga: pedila más corta.".into());
+    }
+    if !spec.p0.is_finite() || !spec.p1.is_finite() || spec.p0 >= spec.p1 {
+        return Err(format!(
+            "el SPEC de la IA trae un rango inválido [{},{}]: pedí uno válido, por ejemplo [0,2].",
+            spec.p0, spec.p1
+        ));
+    }
+    if grafito_anim::parametric::ParamName::try_new(&spec.param).is_err() {
+        return Err("el SPEC de la IA trae un parámetro inválido: pedí de nuevo.".into());
+    }
+    let plantilla = spec.plantilla.trim().to_lowercase();
+    if plantilla == "integral-area" {
+        let sintetico = format!(
+            "animacion de la integral de f(x)={} de {} a {} con animación",
+            spec.expr, spec.p0, spec.p1
+        );
+        match grafito_anim::parametric::infer_area_anim(&sintetico) {
+            Ok(resuelto) => {
+                let got = resuelto.anim().expr_a.trim();
+                if got == spec.expr.trim() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "el SPEC de la IA ({:?}) no valida como integral explícita: pedí de nuevo.",
+                        spec.expr
+                    ))
+                }
+            }
+            Err(error) => Err(format!("el SPEC de la IA no valida: {error}")),
+        }
+    } else if plantilla == "derivative-slope" {
+        let sintetico = format!(
+            "tangente movil de f(x)={} en [{},{}] con animación",
+            spec.expr, spec.p0, spec.p1
+        );
+        match grafito_anim::parametric::infer_tangent_anim(&sintetico) {
+            Ok(resuelto) => {
+                let got = resuelto.anim().expr_a.trim();
+                if got == spec.expr.trim() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "el SPEC de la IA ({:?}) no valida como tangente explícita: pedí de nuevo.",
+                        spec.expr
+                    ))
+                }
+            }
+            Err(error) => Err(format!("el SPEC de la IA no valida: {error}")),
+        }
+    } else {
+        let sintetico = format!(
+            "barrido de f(x)={} con {} en [{},{}] con animación",
+            spec.expr, spec.param, spec.p0, spec.p1
+        );
+        grafito_anim::parametric::infer_parametric_anim(&sintetico)
+            .map(|_| ())
+            .map_err(|error| format!("el SPEC de la IA no valida: {error}"))
+    }
+}
+
+/// W-B — parsea el JSON del SPEC venido de la IA y lo valida con `infer_*`.
+///
+/// Acepta `{"expr_a"|"expr", "range":[p0,p1] o "p0"/"p1",
+/// "plantilla"|"template"|"kind", "param"}`. Extrae el primer objeto `{…}`
+/// del texto (la IA a veces agrega prosa alrededor), valida topes
+/// (expr ≤2000 chars, rango finito con p0<p1, param ASCII) y re-valida con
+/// `validar_spec_anim_ia` (puertas `infer_*`). Sin `unwrap`, sin I/O.
+pub(crate) fn parsear_spec_anim_ia(
+    texto_ia: &str,
+    pedido_original: &str,
+) -> Result<SpecAnimIa, String> {
+    let inicio = texto_ia
+        .find('{')
+        .ok_or_else(|| "la IA no devolvió SPEC JSON: pedí de nuevo.".to_string())?;
+    let fin = texto_ia
+        .rfind('}')
+        .ok_or_else(|| "la IA no devolvió SPEC JSON: pedí de nuevo.".to_string())?;
+    if fin < inicio {
+        return Err("la IA no devolvió SPEC JSON: pedí de nuevo.".into());
+    }
+    let recorte = texto_ia
+        .get(inicio..=fin)
+        .ok_or_else(|| "la IA no devolvió SPEC JSON: pedí de nuevo.".to_string())?;
+    let valor: serde_json::Value = serde_json::from_str(recorte)
+        .map_err(|_| "la IA devolvió un SPEC que no es JSON válido: pedí de nuevo.".to_string())?;
+    let expr = valor
+        .get("expr_a")
+        .or_else(|| valor.get("expr"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|texto| !texto.is_empty())
+        .ok_or_else(|| "el SPEC de la IA vino sin función: pedí una explícita.".to_string())?;
+    if expr.chars().count() > 2000 {
+        return Err("el SPEC de la IA trae una función muy larga: pedila más corta.".into());
+    }
+    let (p0, p1) = if let Some(rango) = valor.get("range").and_then(|v| v.as_array()) {
+        if rango.len() != 2 {
+            return Err("el SPEC de la IA trae un rango inválido: pedí uno válido.".into());
+        }
+        let p0 = rango
+            .first()
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| {
+                "el SPEC de la IA trae un rango inválido: pedí uno válido.".to_string()
+            })?;
+        let p1 = rango
+            .get(1)
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| {
+                "el SPEC de la IA trae un rango inválido: pedí uno válido.".to_string()
+            })?;
+        (p0, p1)
+    } else {
+        let p0 = valor
+            .get("p0")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| "el SPEC de la IA vino sin rango: pedí uno válido.".to_string())?;
+        let p1 = valor
+            .get("p1")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| "el SPEC de la IA vino sin rango: pedí uno válido.".to_string())?;
+        (p0, p1)
+    };
+    if !p0.is_finite() || !p1.is_finite() || p0 >= p1 {
+        return Err(format!(
+            "el SPEC de la IA trae un rango inválido [{p0},{p1}]: pedí uno válido, por ejemplo [0,2]."
+        ));
+    }
+    let plantilla = valor
+        .get("plantilla")
+        .or_else(|| valor.get("template"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|texto| !texto.is_empty())
+        .map(|texto| texto.to_lowercase())
+        .unwrap_or_else(|| plantilla_para_pedido(pedido_original).to_string());
+    let param = valor
+        .get("param")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|texto| !texto.is_empty())
+        .unwrap_or("p")
+        .to_string();
+    let spec = SpecAnimIa {
+        expr: expr.to_string(),
+        p0,
+        p1,
+        plantilla,
+        param,
+    };
+    validar_spec_anim_ia(&spec)?;
+    Ok(spec)
+}
+
+/// W-B — espera el SPEC de la IA con timeout acotado (mitad del budget).
+///
+/// Solo tests: simula la espera del worker con `recv_timeout` (sin `unwrap`).
+/// Producción usa el timeout del transporte (`ANIM_IA_SPEC_TIMEOUT_MS`) dentro
+/// del worker IA-primero; este helper pinnea la semántica Timeout/Transporte.
+#[cfg(test)]
+pub(crate) fn esperar_spec_ia_con_timeout(
+    receiver: &std::sync::mpsc::Receiver<Result<SpecAnimIa, String>>,
+    timeout_ms: u64,
+) -> PedidoSpecIa {
+    match receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+        Ok(Ok(spec)) => match validar_spec_anim_ia(&spec) {
+            Ok(()) => PedidoSpecIa::Exito(spec),
+            Err(detalle) => PedidoSpecIa::Invalido(detalle),
+        },
+        Ok(Err(transporte)) => PedidoSpecIa::Transporte(transporte),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => PedidoSpecIa::Timeout,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            PedidoSpecIa::Transporte("el pedido de SPEC terminó sin responder.".into())
+        }
+    }
+}
+
+/// W-B — construye la animación paramétrica desde un SPEC validado.
+///
+/// Mapea la plantilla al kind (`integral-area`→Area, `derivative-slope`→
+/// Tangent, resto→Sweep) con 48 frames y viewport 640×480 (mismo presupuesto
+/// que la canónica). Si la plantilla no mapea, `Err` honesto. Pura, sin I/O.
+pub(crate) fn anim_desde_spec_ia(
+    spec: &SpecAnimIa,
+) -> Result<grafito_anim::parametric::ParametricAnim, String> {
+    use grafito_anim::parametric::{FrameCount, ParamName, ParametricAnim, ParametricKind};
+    let kind = match spec.plantilla.trim().to_lowercase().as_str() {
+        "integral-area" => ParametricKind::Area,
+        "derivative-slope" => ParametricKind::Tangent,
+        "taylor-series" => ParametricKind::Trace,
+        _ => ParametricKind::Sweep,
+    };
+    let param =
+        ParamName::try_new(&spec.param).map_err(|error| format!("SPEC inválido: {error}"))?;
+    let frames = FrameCount::try_new(crate::anim_native::NATIVE_ANIM_FRAME_COUNT)
+        .map_err(|error| format!("SPEC inválido: {error}"))?;
+    let viewport = grafito_anim::protocol::Resolution::try_new(640, 480)
+        .map_err(|error| format!("SPEC inválido: {error}"))?;
+    ParametricAnim::try_new(
+        kind,
+        spec.expr.clone(),
+        None,
+        param,
+        spec.p0,
+        spec.p1,
+        frames,
+        viewport,
+    )
+    .map_err(|error| format!("SPEC inválido: {error}"))
+}
+
+/// W-B — SPEC canónico para fallback local (sin IA, timeout o 400-429).
+///
+/// Espeja `parametric_for_template`: integral `x^2 [0,2]`, tangente
+/// `x^2 [-1.5,1.5]`; resto → integral honesta (jamás vacío).
+/// Pura, sin I/O. La prosa que lo declara vive en
+/// `INTEGRAL_CANONICAL_PROSA` / `TANGENT_CANONICAL_PROSA`.
+pub(crate) fn spec_canonico_para_fallback(plantilla: &str) -> SpecAnimIa {
+    match plantilla.trim().to_lowercase().as_str() {
+        "derivative-slope" => SpecAnimIa {
+            expr: grafito_anim::parametric::TANGENT_CANONICAL_EXPR.to_string(),
+            p0: grafito_anim::parametric::TANGENT_CANONICAL_P0,
+            p1: grafito_anim::parametric::TANGENT_CANONICAL_P1,
+            plantilla: "derivative-slope".to_string(),
+            param: grafito_anim::parametric::TANGENT_CANONICAL_PARAM.to_string(),
+        },
+        _ => SpecAnimIa {
+            expr: grafito_anim::parametric::INTEGRAL_CANONICAL_EXPR.to_string(),
+            p0: grafito_anim::parametric::INTEGRAL_CANONICAL_P0,
+            p1: grafito_anim::parametric::INTEGRAL_CANONICAL_P1,
+            plantilla: "integral-area".to_string(),
+            param: "p".to_string(),
+        },
+    }
+}
+
+/// W-B — renderiza la media desde un SPEC ya validado (un solo render).
+///
+/// Construye el `ParametricAnim` con `anim_desde_spec_ia` y renderiza con
+/// progreso cancelable (mismo presupuesto que la canónica: 48 frames).
+/// Título curado por el punto único (nombra la función del SPEC).
+/// Hilo background, sin tocar UI. Sin `unwrap`. Pura salvo el render.
+pub(crate) fn render_media_desde_spec_ia(
+    spec: &SpecAnimIa,
+    cancel: &CancellationToken,
+) -> Result<grafito_ui::assistant::AssistantMedia, String> {
+    let anim = anim_desde_spec_ia(spec)?;
+    let mut saw_cancel = false;
+    let frames = crate::anim_native::render_parametric_frames_with_progress(&anim, &mut |_, _| {
+        if cancel.is_cancelled() {
+            saw_cancel = true;
+        }
+    })
+    .map_err(|error| error.to_string())?;
+    if cancel.is_cancelled() || saw_cancel {
+        return Err("La generación se canceló antes de completarse.".to_string());
+    }
+    if frames.is_empty() {
+        return Err(crate::anim_native::error_sin_fotogramas("el motor nativo"));
+    }
+    let title = titulo_curado(&spec.plantilla, &spec.expr, Some(&anim));
+    Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+}
+
 /// Título curado de la card de animación (punto único, puro y testeable).
 ///
 /// Las 3 vías (paramétrica, nativa, externa) lo comparten: jamás eco crudo
@@ -458,6 +866,10 @@ pub(crate) struct AssistantRuntime {
     image_job: Option<AssistantImageJob>,
     agent_job: Option<AssistantAgentJob>,
     anim_job: Option<AssistantAnimJob>,
+    /// W-B: worker IA-primero (SPEC de la IA + render validado en un solo hilo).
+    /// Cero doble render: el Submit spawnea o `anim_job` (local) o este job
+    /// (IA-primero), nunca ambos (ambos se cancelan antes de spawnear).
+    anim_ia_job: Option<AssistantAnimIaJob>,
     /// Export a GIF de la card en vuelo (B5): `JoinHandle` de
     /// `spawn_gif_export` que `poll_gif_export_job` drena sin bloquear.
     gif_export_job: Option<GifExportJob>,
@@ -763,16 +1175,25 @@ impl AssistantRuntime {
     /// Headless y sin I/O: el hilo en vuelo observa el token entre frames
     /// (closure de progreso) y descarta el resultado rancio en vez de
     /// publicarlo. Retorna `true` si había job en vuelo.
+    /// W-B: también cancela el worker IA-primero (cero doble render: nunca
+    /// quedan dos renders en vuelo).
     pub(crate) fn cancel_anim_job(&mut self) -> bool {
         if let Some(job) = self.anim_job.as_ref() {
             job.cancellation.cancel();
         }
+        if let Some(job) = self.anim_ia_job.as_ref() {
+            job.cancellation.cancel();
+        }
+        let mut hubo = false;
         if self.anim_job.is_some() {
             self.anim_job = None;
-            true
-        } else {
-            false
+            hubo = true;
         }
+        if self.anim_ia_job.is_some() {
+            self.anim_ia_job = None;
+            hubo = true;
+        }
+        hubo
     }
 }
 
@@ -1042,6 +1463,25 @@ struct AssistantAnimJob {
     receiver: std::sync::mpsc::Receiver<Result<grafito_ui::assistant::AssistantMedia, String>>,
 }
 
+/// W-B — render listo desde el worker IA-primero (media + prosa coherentes).
+///
+/// `media` y `prosa` vienen del MISMO spec validado (o IA o canónico de
+/// fallback, nunca mezclados). `aviso` es `Some` solo en fallback (una línea
+/// para el toast). `spec` es el efectivamente renderizado (para tests).
+pub(crate) struct AnimIaRender {
+    pub media: grafito_ui::assistant::AssistantMedia,
+    pub prosa: String,
+    pub aviso: Option<&'static str>,
+}
+
+/// W-B — job del worker IA-primero (SPEC de la IA + render en un solo hilo).
+/// Mismo contrato de cancel que `AssistantAnimJob`: el hilo chequea el token
+/// entre frames y descarta rancio.
+struct AssistantAnimIaJob {
+    cancellation: CancellationToken,
+    receiver: std::sync::mpsc::Receiver<Result<AnimIaRender, String>>,
+}
+
 /// Export a GIF de la card en vuelo (B5).
 ///
 /// Guarda el `JoinHandle` de `spawn_gif_export` (hilo existente, reusable y
@@ -1268,6 +1708,59 @@ impl GrafitoApp {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     let was_cancelled = job.cancellation.is_cancelled();
                     self.assistant_runtime.anim_job = None;
+                    self.assistant.anim_progress = false;
+                    if !was_cancelled {
+                        self.assistant.set_media(None, ctx);
+                        self.show_assistant_error(
+                            "La generación terminó inesperadamente antes de responder.",
+                        );
+                    }
+                    ctx.request_repaint();
+                }
+            }
+        }
+        // W-B: drena el worker IA-primero (SPEC + un solo render, sin bloquear).
+        // La prosa y la media vienen del MISMO spec validado: se completan
+        // juntas para que nunca diverjan. Fallback trae aviso de una línea.
+        if let Some(job) = self.assistant_runtime.anim_ia_job.as_mut() {
+            match job.receiver.try_recv() {
+                Ok(Ok(render)) => {
+                    let was_cancelled = job.cancellation.is_cancelled();
+                    self.assistant_runtime.anim_ia_job = None;
+                    self.assistant.anim_progress = false;
+                    if was_cancelled {
+                        self.notify("Generación cancelada.", ToastKind::Info);
+                    } else {
+                        let humano = grafito_ui::assistant::humanize_prose_text(&render.prosa);
+                        self.assistant.complete_local_request(humano);
+                        self.assistant.set_media(Some(render.media), ctx);
+                        if let Some(aviso) = render.aviso {
+                            self.notify(aviso, ToastKind::Info);
+                        } else {
+                            self.notify("Animación lista.", ToastKind::Success);
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(Err(error)) => {
+                    let was_cancelled =
+                        job.cancellation.is_cancelled() || error.to_lowercase().contains("cancel");
+                    self.assistant_runtime.anim_ia_job = None;
+                    self.assistant.anim_progress = false;
+                    if was_cancelled {
+                        self.notify("Generación cancelada.", ToastKind::Info);
+                    } else {
+                        self.assistant.set_media(None, ctx);
+                        let message = format!("No se pudo generar la animación: {error}");
+                        self.notify(&message, ToastKind::Error);
+                        self.show_assistant_error(message);
+                    }
+                    ctx.request_repaint();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let was_cancelled = job.cancellation.is_cancelled();
+                    self.assistant_runtime.anim_ia_job = None;
                     self.assistant.anim_progress = false;
                     if !was_cancelled {
                         self.assistant.set_media(None, ctx);
@@ -1548,7 +2041,8 @@ impl GrafitoApp {
                 // Punto único de decisión honesto (`decide_animacion`): media
                 // sí/no + prosa coherente en un solo lugar. Antes había doble
                 // carril (hilo local + remoto Spark preguntón) que mostraba Y
-                // preguntaba a la vez. Ahora Render* es local-only sin remoto.
+                // preguntaba a la vez. Ahora integral/tangente es IA-primero
+                // (W-B) o local declarado; el resto de Render* sigue local.
                 let decision = decide_animacion(&problem_clone);
                 // Cancela animación previa si existe — evita crash al pedir otra cosa tras animación
                 // y evita "tomo una ya hecha" (stale derivative). Cancel real:
@@ -1640,9 +2134,49 @@ impl GrafitoApp {
                         spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
                     }
                 }
-                // Render* es local-only: turno propio que declara lo que la
-                // media muestra, SIN pasar por `start_local` (que estadía
-                // autorización remota y el Spark preguntón contradecía).
+                // Render* integral/tangente: IA-primero (W-B) o local declarado.
+                // Con IA disponible (remoto o agente, no solo local) el SPEC lo
+                // propone la IA con timeout acotado (`ANIM_IA_SPEC_TIMEOUT_MS`,
+                // mitad del budget, 1 request extra máx); sin IA/offline/429 o
+                // timeout → canónica local DECLARADA con aviso de una línea.
+                // Cero doble render: o IA o local, nunca ambos.
+                // El resto de RenderGenerico (taylor, pitágoras…) sigue local.
+                let ia_para_este_pedido = match &decision {
+                    DecisionAnimacion::RenderCanonico { .. }
+                    | DecisionAnimacion::RenderExplicito { .. } => true,
+                    DecisionAnimacion::RenderGenerico { plantilla, .. } => {
+                        plantilla.trim().to_lowercase() == "derivative-slope"
+                            && grafito_anim::parametric::pedido_menciona_tangente(&problem_clone)
+                    }
+                    _ => false,
+                };
+                if ia_para_este_pedido {
+                    let rate_limited = rate_limit_cooldown_remaining_secs().is_some();
+                    let remote_ready = self.remote_provider_ready();
+                    if ia_disponible_para_anim(
+                        self.assistant.agent_mode,
+                        remote_ready,
+                        rate_limited,
+                        self.exam_mode,
+                    ) {
+                        let plantilla_fallback = match &decision {
+                            DecisionAnimacion::RenderCanonico { plantilla, .. }
+                            | DecisionAnimacion::RenderExplicito { plantilla, .. }
+                            | DecisionAnimacion::RenderGenerico { plantilla, .. } => {
+                                plantilla.clone()
+                            }
+                            DecisionAnimacion::PreguntarSinMedia(_)
+                            | DecisionAnimacion::NoAnimacion => "integral-area".to_string(),
+                        };
+                        self.run_assistant_animation_ia_primero(
+                            ctx,
+                            problem_clone.clone(),
+                            plantilla_fallback,
+                        );
+                        ctx.request_repaint();
+                        return;
+                    }
+                }
                 match &decision {
                     DecisionAnimacion::RenderCanonico {
                         plantilla,
@@ -3197,6 +3731,244 @@ impl GrafitoApp {
         ctx.request_repaint();
     }
 
+    /// W-B — pide el SPEC a la IA de verdad (remoto o agente, 1 request extra).
+    ///
+    /// Hilo background (nunca UI): con `agent_mode` usa UNA llamada al
+    /// completador agente con la tool `generate_animation` (el LLM propone
+    /// args, `SafeGrafitoDispatcher` valida vía `propose_*` → `infer_*`);
+    /// sin agente usa UN chat remoto con prompt SPEC acotado.
+    /// Timeout = `ANIM_IA_SPEC_TIMEOUT_MS` (mitad del budget) en ambos casos;
+    /// 400-429/offline/red → `Transporte` (fallback canónico, no error).
+    /// SPEC inválido (no valida con `infer_*`) → `Invalido` (error honesto).
+    /// Sin `unwrap`, sin pánico.
+    fn pedir_spec_ia_de_verdad(
+        pedido: String,
+        settings: ProviderSettings,
+        api_key: Option<String>,
+        agent_mode: bool,
+        timeout_ms: u64,
+        cancel: CancellationToken,
+    ) -> PedidoSpecIa {
+        if cancel.is_cancelled() {
+            return PedidoSpecIa::Transporte("La generación se canceló.".into());
+        }
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        if agent_mode {
+            let completer = grafito_assistant::agent::RemoteAgentCompleter::new(settings, api_key);
+            let sistema = "Sos un generador de SPEC JSON para animaciones Grafito. Devolvé SOLO el resultado de la tool generate_animation, sin prosa extra.".to_string();
+            let mensajes = vec![
+                serde_json::json!({"role": "system", "content": sistema}),
+                serde_json::json!({"role": "user", "content": pedido}),
+            ];
+            let tools = vec![grafito_assistant::agent::generate_animation_tool_schema()];
+            let cancel_agent = grafito_agent::loop_engine::Cancellation::default();
+            match <grafito_assistant::agent::RemoteAgentCompleter as grafito_agent::loop_engine::AgentCompleter>::complete(
+                &completer, &mensajes, &tools, 512, timeout, &cancel_agent,
+            ) {
+                Ok(grafito_agent::loop_engine::AgentChatResponse::ToolCalls { calls }) => {
+                    let mut primero: Option<PedidoSpecIa> = None;
+                    for call in &calls {
+                        if call.name == "generate_animation" {
+                            let dispatcher = grafito_assistant::agent::SafeGrafitoDispatcher;
+                            use grafito_agent::loop_engine::ToolDispatcher;
+                            let resultado = dispatcher.dispatch(call);
+                            if resultado.ok {
+                                match parsear_spec_anim_ia(&resultado.content, &pedido) {
+                                    Ok(spec) => {
+                                        primero = Some(PedidoSpecIa::Exito(spec));
+                                        break;
+                                    }
+                                    Err(detalle) => {
+                                        primero = Some(PedidoSpecIa::Invalido(detalle));
+                                        break;
+                                    }
+                                }
+                            } else {
+                                primero = Some(PedidoSpecIa::Invalido(resultado.content));
+                                break;
+                            }
+                        }
+                    }
+                    primero.unwrap_or_else(|| {
+                        PedidoSpecIa::Invalido(
+                            "la IA no propuso animación: reformulá con función y rango.".into(),
+                        )
+                    })
+                }
+                Ok(grafito_agent::loop_engine::AgentChatResponse::Text { content, .. }) => {
+                    match parsear_spec_anim_ia(&content, &pedido) {
+                        Ok(spec) => PedidoSpecIa::Exito(spec),
+                        Err(detalle) => PedidoSpecIa::Invalido(detalle),
+                    }
+                }
+                Err(error) => PedidoSpecIa::Transporte(error),
+            }
+        } else {
+            let prompt = prompt_spec_anim_ia(&pedido);
+            let contexto = grafito_command::assistant_context::document_context(
+                &grafito_core::Document::default(),
+            );
+            let mut request = AssistantRequest::remote(prompt, contexto);
+            request.budget.timeout_ms = timeout_ms;
+            request.budget.max_output_chars = 512;
+            let handle = grafito_assistant::request_remote_with_api_key_on_worker(
+                settings,
+                request,
+                api_key,
+                cancel.clone(),
+            );
+            let inicio = std::time::Instant::now();
+            loop {
+                if cancel.is_cancelled() {
+                    return PedidoSpecIa::Transporte("La generación se canceló.".into());
+                }
+                if handle.is_finished() {
+                    break;
+                }
+                if inicio.elapsed() >= timeout {
+                    cancel.cancel();
+                    return PedidoSpecIa::Timeout;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            match handle.join() {
+                Ok(Ok(completado)) => match parsear_spec_anim_ia(&completado.text, &pedido) {
+                    Ok(spec) => PedidoSpecIa::Exito(spec),
+                    Err(detalle) => PedidoSpecIa::Invalido(detalle),
+                },
+                Ok(Err(error)) => PedidoSpecIa::Transporte(error),
+                Err(_) => {
+                    PedidoSpecIa::Transporte("el pedido de SPEC terminó sin responder.".into())
+                }
+            }
+        }
+    }
+
+    /// W-B — worker único IA-primero: SPEC de la IA + un solo render.
+    ///
+    /// Nunca UI (hilo background): pide el SPEC con timeout, valida con
+    /// `infer_*`, renderiza UNA vez (o IA o canónico de fallback, nunca ambos)
+    /// y manda `AnimIaRender` (media + prosa del MISMO spec) por el canal.
+    /// Timeout/error 400-429/offline → canónico + aviso de una línea.
+    /// SPEC inválido → `Err` honesto (jamás basura). Sin `unwrap`.
+    pub(crate) fn run_assistant_animation_ia_primero(
+        &mut self,
+        ctx: &egui::Context,
+        pedido_original: String,
+        plantilla_fallback: String,
+    ) {
+        if self.exam_blocks("Asistente") {
+            return;
+        }
+        if self.assistant_runtime.cancel_anim_job() {
+            self.assistant.anim_progress = false;
+            if let Some(message) = anim_replace_message(true) {
+                self.notify(message, ToastKind::Info);
+            }
+        }
+        let question = pedido_original.clone();
+        self.assistant.begin_request(question);
+        self.assistant.problem.clear();
+        self.assistant.set_media(None, ctx);
+        let agent_mode = self.assistant.agent_mode;
+        let settings = match self.assistant_provider_settings() {
+            Ok(settings) => settings,
+            Err(_) => {
+                let prosa = format!(
+                    "{}\n\n{}",
+                    crate::anim_ui::animation_reference_sentence(),
+                    grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
+                );
+                let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                self.assistant.complete_local_request(humano);
+                self.run_assistant_animation_with(ctx, &plantilla_fallback, &pedido_original);
+                ctx.request_repaint();
+                return;
+            }
+        };
+        let api_key = match self.assistant_api_key() {
+            Ok(key) => key,
+            Err(_) => {
+                let prosa = format!(
+                    "{}\n\n{}",
+                    crate::anim_ui::animation_reference_sentence(),
+                    grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
+                );
+                let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                self.assistant.complete_local_request(humano);
+                self.notify(ANIM_SIN_IA_AVISO, ToastKind::Info);
+                self.run_assistant_animation_with(ctx, &plantilla_fallback, &pedido_original);
+                ctx.request_repaint();
+                return;
+            }
+        };
+        let cancellation = CancellationToken::default();
+        let worker_cancel = cancellation.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let pedido_hilo = pedido_original.clone();
+        let plantilla_hilo = plantilla_fallback.clone();
+        std::thread::spawn(move || {
+            let salida = Self::pedir_spec_ia_de_verdad(
+                pedido_hilo.clone(),
+                settings,
+                api_key,
+                agent_mode,
+                ANIM_IA_SPEC_TIMEOUT_MS,
+                worker_cancel.clone(),
+            );
+            let desenlace = resolver_turno_anim_ia(true, salida);
+            let resultado = match desenlace {
+                DesenlaceAnimIa::RenderIa { spec, prosa } => {
+                    match render_media_desde_spec_ia(&spec, &worker_cancel) {
+                        Ok(media) => Ok(AnimIaRender {
+                            media,
+                            prosa,
+                            aviso: None,
+                        }),
+                        Err(error) => Err(error),
+                    }
+                }
+                DesenlaceAnimIa::FallbackCanonico { aviso } => {
+                    let canonico = spec_canonico_para_fallback(&plantilla_hilo);
+                    let prosa = if plantilla_hilo.trim().to_lowercase() == "derivative-slope" {
+                        format!(
+                            "{}\n\n{}",
+                            crate::anim_ui::animation_reference_sentence(),
+                            grafito_anim::parametric::TANGENT_CANONICAL_PROSA
+                        )
+                    } else {
+                        format!(
+                            "{}\n\n{}",
+                            crate::anim_ui::animation_reference_sentence(),
+                            grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
+                        )
+                    };
+                    match render_media_desde_spec_ia(&canonico, &worker_cancel) {
+                        Ok(media) => Ok(AnimIaRender {
+                            media,
+                            prosa,
+                            aviso: Some(aviso),
+                        }),
+                        Err(error) => Err(error),
+                    }
+                }
+                DesenlaceAnimIa::ErrorHonesto(detalle) => Err(detalle),
+            };
+            let resultado = if worker_cancel.is_cancelled() {
+                Err("La generación se canceló antes de completarse.".to_string())
+            } else {
+                resultado
+            };
+            let _ = sender.send(resultado);
+        });
+        self.assistant.anim_progress = true;
+        self.assistant_runtime.anim_ia_job = Some(AssistantAnimIaJob {
+            cancellation,
+            receiver,
+        });
+        ctx.request_repaint();
+    }
+
     pub(crate) fn run_assistant_animation_with(
         &mut self,
         ctx: &egui::Context,
@@ -4382,11 +5154,19 @@ impl GrafitoApp {
                                 &self.assistant.model,
                                 correction_attempt,
                             ) {
-                                eprintln!("grafito: session-fallback muse-spark [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
-                                self.notify(
-                                    "Muse Spark no respondió, reintentando con DeepSeek Flash; tu modelo sigue siendo Muse Spark.",
-                                    ToastKind::Info,
-                                );
+                                if is_session_or_account_error(&error) {
+                                    eprintln!("grafito: session-fallback muse-spark 400-sesion [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
+                                    self.notify(
+                                        "El tier gratuito de Spark pide sesión válida; sigo con DeepSeek Flash sin cambiar tu modelo.",
+                                        ToastKind::Info,
+                                    );
+                                } else {
+                                    eprintln!("grafito: session-fallback muse-spark [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
+                                    self.notify(
+                                        "Muse Spark no respondió, reintentando con DeepSeek Flash; tu modelo sigue siendo Muse Spark.",
+                                        ToastKind::Info,
+                                    );
+                                }
                                 // Reintentar la misma pregunta con el fallback, sin mostrar error
                                 self.start_remote_assistant_for(
                                     ctx,
@@ -4714,9 +5494,28 @@ fn should_fallback_agent_spark_to_deepseek(
         && !error.contains("429")
 }
 
-/// Fallback chat (no agente) sólo-sesión: Spark 500/timeout → deepseek.
+/// Detecta errores 400 de sesión/cuenta/clave del gateway Zen (2026-09-08).
+///
+/// El lector del transporte (`grafito-assistant::http_status_error` +
+/// `remote_error_category`) hoy NO parsea el campo `type` del cuerpo: sólo
+/// trunca a 500 chars y categoriza como `http`. Por eso se detecta por
+/// subcadena sobre el error ya formateado
+/// (`remote assistant returned HTTP 400: {"type":"error","error":{"type":"MissingSessionID",...}}`).
+/// Tipos cubiertos: `MissingSessionID|InvalidApiKey|ModelDisabled|AccountBlocked`.
+/// Puro, sin `unwrap`, sin I/O. No toca el wire (prohibido inventar `session_id`).
+fn is_session_or_account_error(error: &str) -> bool {
+    error.contains("MissingSessionID")
+        || error.contains("InvalidApiKey")
+        || error.contains("ModelDisabled")
+        || error.contains("AccountBlocked")
+}
+
+/// Fallback chat (no agente) sólo-sesión: Spark 500/timeout/400-sesión → deepseek.
 /// La preferencia guardada queda intacta; el próximo pedido reintenta spark.
 /// Nunca ante 429: cambiar de modelo no devuelve cuota y duplicaría el gasto.
+/// El 400 de sesión/cuenta (tier gratuito sin sesión válida) también reintenta
+/// una vez con deepseek, con aviso honesto de una línea (ver rama en
+/// `poll_assistant_jobs`).
 fn should_fallback_remote_spark_to_deepseek(
     error: &str,
     provider: ProviderProfile,
@@ -4724,7 +5523,8 @@ fn should_fallback_remote_spark_to_deepseek(
     correction_attempt: u8,
 ) -> bool {
     let slow_or_down = error.contains("500") || error.contains("timed out");
-    slow_or_down
+    let session_or_account = is_session_or_account_error(error);
+    (slow_or_down || session_or_account)
         && current_model.contains("muse-spark")
         && provider == ProviderProfile::OpenCodeGo
         && correction_attempt == 0
@@ -4771,6 +5571,13 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
         "No se pudo armar la consulta: la API key o el endpoint tienen caracteres inválidos. Reingresá la clave en Configuración avanzada (sin espacios ni saltos de línea).".into()
     } else if error.contains("Responses API") {
         "Este modelo usa la Responses API: el modo agente con herramientas aún no está soportado. Usá el chat simple o cambiá a deepseek-v4-flash.".into()
+    } else if is_session_or_account_error(error) {
+        // 400 de sesión/cuenta/clave (tier gratuito sin sesión válida, 2026-09-08):
+        // dice QUÉ pasa + qué hacer, sin el genérico "Revisá Configuración → Modelo".
+        // Si hubo fallback, el aviso de una línea ya dijo que se reintentó con
+        // deepseek; este mensaje es para cuando NO hubo fallback (corrección en
+        // curso, otro modelo, o reintento ya consumido).
+        "El proveedor pide sesión válida para el tier gratuito: revisá tu clave de Zen en Configuración o seguí con deepseek.".into()
     } else if error.contains("cancel") {
         "La consulta remota se canceló antes de completarse.".into()
     } else if error.contains("401") || error.contains("403") || error.contains("unauthorized") {
@@ -6053,21 +6860,25 @@ mod tests {
         append_canonical_integral_prose, apply_local_assistant_plan, assistant_graph_perspective,
         attachment_error_message, can_offer_assistant_proposal_correction,
         clasifica_pedido_integral, classify_local_assistant_response,
-        commit_assistant_graph_preflight, decide_animacion, inspect_remote_action_proposals,
-        inspect_remote_proposals, inspect_remote_proposals_cancellable,
-        is_agent_spark_responses_unsupported_error, is_socratic_repair_error,
-        limpiar_media_si_no_animacion, plantilla_para_pedido, playlist_para_pedido,
+        commit_assistant_graph_preflight, decide_animacion, esperar_spec_ia_con_timeout,
+        ia_disponible_para_anim, inspect_remote_action_proposals, inspect_remote_proposals,
+        inspect_remote_proposals_cancellable, is_agent_spark_responses_unsupported_error,
+        is_session_or_account_error, is_socratic_repair_error, limpiar_media_si_no_animacion,
+        parsear_spec_anim_ia, plantilla_para_pedido, playlist_para_pedido,
         pop_provisional_stream_turn, preflight_assistant_flower_scene,
         preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
         preflight_assistant_parameter, preflight_assistant_scene, prosa_integral_explicita,
-        read_bounded_attachment, remote_error_message, should_fallback_agent_spark_to_deepseek,
-        should_fallback_remote_spark_to_deepseek, socratic_guard_context, split_playlist_request,
-        stage_assistant_parameter, titulo_curado, titulo_curado_localized,
+        prosa_para_spec_anim_ia, read_bounded_attachment, remote_error_message,
+        render_media_desde_spec_ia, resolver_turno_anim_ia,
+        should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
+        socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
+        stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_spec_anim_ia,
         validate_assistant_command, verified_remote_proposals, wants_exercise_request,
         AgentChannelMsg, AssistantAgentJob, AssistantAnimJob, AssistantCommandInvocation,
         AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
-        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, GifExportJob, IntegralPedido,
-        LocalAssistantDisposition, RemoteProposalVerification,
+        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
+        IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
+        SpecAnimIa, ANIM_IA_SPEC_TIMEOUT_MS, ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
@@ -6622,6 +7433,86 @@ mod tests {
     }
 
     #[test]
+    fn spark_400_missing_session_falls_back_with_session_message() {
+        // Mock del gateway Zen 2026-09-08: el tier gratuito sin sesión válida
+        // devuelve 400 con `MissingSessionID` en el cuerpo.
+        let body_400 = r#"remote assistant returned HTTP 400: {"type":"error","error":{"type":"MissingSessionID","message":"session required"}}"#;
+        assert!(
+            is_session_or_account_error(body_400),
+            "el lector debe detectar MissingSessionID"
+        );
+        // Fallback automático a deepseek (patrón session-fallback existente).
+        assert!(should_fallback_remote_spark_to_deepseek(
+            body_400,
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor-free",
+            0,
+        ));
+        // Viejos IDs también caen en fallback ante el mismo 400.
+        assert!(should_fallback_remote_spark_to_deepseek(
+            body_400,
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
+        // Los otros tipos de sesión/cuenta/clave también disparan.
+        for tipo in ["InvalidApiKey", "ModelDisabled", "AccountBlocked"] {
+            let error = format!("remote assistant returned HTTP 400: {{\"type\":\"{tipo}\"}}");
+            assert!(
+                should_fallback_remote_spark_to_deepseek(
+                    &error,
+                    ProviderProfile::OpenCodeGo,
+                    "muse-spark-1.3",
+                    0,
+                ),
+                "tipo {tipo} debe disparar fallback"
+            );
+            let mensaje = remote_error_message(&error, "muse-spark-1.3");
+            assert!(
+                mensaje.contains("sesión válida") && mensaje.contains("clave de Zen"),
+                "mensaje rioplatense ante {tipo}: {mensaje}"
+            );
+            assert!(
+                !mensaje.contains("Revisá Configuración → Modelo"),
+                "nada de genérico ante {tipo}: {mensaje}"
+            );
+        }
+        // Mensaje ante el 400 real: qué pasa + qué hacer, sin genérico.
+        let mensaje = remote_error_message(body_400, "muse-spark-1.3-contributor-free");
+        assert!(
+            mensaje.contains("sesión válida") && mensaje.contains("clave de Zen"),
+            "mensaje rioplatense: {mensaje}"
+        );
+        assert!(
+            mensaje.contains("deepseek"),
+            "ofrece seguir con deepseek: {mensaje}"
+        );
+        assert!(
+            !mensaje.contains("Revisá Configuración → Modelo"),
+            "nada de genérico: {mensaje}"
+        );
+        // Guardas intactas: con corrección, otro modelo/proveedor o 429, no hay fallback.
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            body_400,
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor-free",
+            1,
+        ));
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            body_400,
+            ProviderProfile::OpenCodeGo,
+            "deepseek-v4-flash",
+            0,
+        ));
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            &format!("{body_400} 429"),
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor-free",
+            0,
+        ));
+    }
+
+    #[test]
     fn session_key_remember_trims_pasted_whitespace() {
         let mut runtime = AssistantRuntime::default();
         runtime.remember_key(ProviderProfile::OpenCodeGo, "  sk-grafito-123\n".into());
@@ -7096,6 +7987,139 @@ mod tests {
             clasifica_pedido_integral("explica la probabilidad con animación", "integral-area"),
             IntegralPedido::NoAplica
         );
+    }
+
+    #[test]
+    fn wb_timeout_es_mitad_del_budget_y_peor_caso_un_request() {
+        // Documenta el const: mitad del budget del turno (60s/2) y peor caso
+        // 1 request extra por turno de animación (el SPEC); sin IA cero.
+        assert_eq!(
+            ANIM_IA_SPEC_TIMEOUT_MS,
+            grafito_assistant_types::RequestBudget::default().timeout_ms / 2
+        );
+        assert_eq!(ANIM_IA_SPEC_TIMEOUT_MS, 30_000);
+    }
+
+    #[test]
+    fn wb_sin_ia_va_a_canonica_declarada_con_aviso_de_una_linea() {
+        // Sin IA (offline/local sin clave): ni remoto ni agente → false.
+        assert!(!ia_disponible_para_anim(false, false, false, false));
+        // Pausa 429 o examen también fuerzan local (no queman cuota).
+        assert!(!ia_disponible_para_anim(true, true, true, false));
+        assert!(!ia_disponible_para_anim(true, true, false, true));
+        assert!(!ia_disponible_para_anim(false, true, true, false));
+        // Remoto o agente solos sí hay IA.
+        assert!(ia_disponible_para_anim(false, true, false, false));
+        assert!(ia_disponible_para_anim(true, false, false, false));
+        // Sin IA el desenlace es canónica + aviso aunque viniera un SPEC
+        // (cero doble render: sin IA jamás se renderiza IA).
+        let spec_ignorado = SpecAnimIa {
+            expr: "x^3".to_string(),
+            p0: 0.0,
+            p1: 2.0,
+            plantilla: "integral-area".to_string(),
+            param: "p".to_string(),
+        };
+        match resolver_turno_anim_ia(false, PedidoSpecIa::Exito(spec_ignorado)) {
+            DesenlaceAnimIa::FallbackCanonico { aviso } => {
+                assert_eq!(aviso, ANIM_SIN_IA_AVISO);
+                assert!(aviso.contains("sin conexión"), "{aviso}");
+                assert!(aviso.contains("x²"), "{aviso}");
+                assert!(aviso.contains("pedime otra"), "{aviso}");
+                assert!(!aviso.contains('\n'), "UNA línea: {aviso}");
+            }
+            otro => panic!("sin IA debe ser fallback, fue {otro:?}"),
+        }
+        // La canónica de fallback es x² [0,2] y valida con las puertas.
+        let canonica = spec_canonico_para_fallback("integral-area");
+        assert_eq!(canonica.expr, "x^2");
+        assert_eq!((canonica.p0, canonica.p1), (0.0, 2.0));
+        assert!(validar_spec_anim_ia(&canonica).is_ok());
+        let tangente = spec_canonico_para_fallback("derivative-slope");
+        assert_eq!(tangente.expr, "x^2");
+        assert!(validar_spec_anim_ia(&tangente).is_ok());
+    }
+
+    #[test]
+    fn wb_con_ia_mock_spec_x3_se_refleja_en_prosa_y_frames() {
+        // Mock de IA: JSON con f=x³ (la IA propuso, el motor solo valida).
+        let texto_ia =
+            r#"{"expr_a": "x^3", "range": [0, 2], "plantilla": "integral-area", "param": "p"}"#;
+        let spec = parsear_spec_anim_ia(texto_ia, "animame la integral con animación")
+            .expect("x^3 valida");
+        assert_eq!(spec.expr, "x^3");
+        assert_eq!((spec.p0, spec.p1), (0.0, 2.0));
+        assert_eq!(spec.plantilla, "integral-area");
+        // La prosa del turno MUST nombrar función y rango venidos de la IA.
+        let prosa = prosa_para_spec_anim_ia(&spec);
+        assert!(prosa.contains("x^3"), "{prosa}");
+        assert!(prosa.contains("[0,2]"), "{prosa}");
+        assert!(prosa.contains("deslizador"), "{prosa}");
+        // El desenlace con IA es RenderIa (un solo render, el de la IA).
+        match resolver_turno_anim_ia(true, PedidoSpecIa::Exito(spec.clone())) {
+            DesenlaceAnimIa::RenderIa {
+                spec: render_spec,
+                prosa: render_prosa,
+            } => {
+                assert_eq!(render_spec.expr, "x^3");
+                assert!(render_prosa.contains("x^3"), "{render_prosa}");
+            }
+            otro => panic!("con IA válida debe renderizar IA, fue {otro:?}"),
+        }
+        // Los frames reflejan el SPEC (x³), no la canónica (x²): difieren.
+        let cancel = CancellationToken::default();
+        let media_ia = render_media_desde_spec_ia(&spec, &cancel).expect("render x^3");
+        assert!(!media_ia.frames.is_empty());
+        assert_ne!(
+            media_ia.frames.first().map(|f| &f.pixels),
+            media_ia.frames.last().map(|f| &f.pixels),
+            "los frames deben animar"
+        );
+        assert!(
+            media_ia.title.contains("x^3"),
+            "título nombra x³: {}",
+            media_ia.title
+        );
+        let canonica = spec_canonico_para_fallback("integral-area");
+        let media_canonica =
+            render_media_desde_spec_ia(&canonica, &cancel).expect("render canónico");
+        assert_ne!(
+            media_ia.frames[0].pixels, media_canonica.frames[0].pixels,
+            "el SPEC de la IA (x³) no es la canónica (x²)"
+        );
+        // SPEC inválido (foo) → Err honesto, jamás frames.
+        let basura = r#"{"expr": "foo(x)", "p0": 0, "p1": 2, "plantilla": "integral-area"}"#;
+        assert!(parsear_spec_anim_ia(basura, "integral con animación").is_err());
+        match resolver_turno_anim_ia(true, PedidoSpecIa::Invalido("la función no valida".into())) {
+            DesenlaceAnimIa::ErrorHonesto(detalle) => {
+                assert!(!detalle.is_empty());
+            }
+            otro => panic!("SPEC inválido debe ser error honesto, fue {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn wb_timeout_ia_va_a_fallback_con_aviso() {
+        // Timeout: canal vivo sin mensaje dentro del plazo → Timeout.
+        let (_tx, rx) = std::sync::mpsc::sync_channel::<Result<SpecAnimIa, String>>(1);
+        match esperar_spec_ia_con_timeout(&rx, 30) {
+            PedidoSpecIa::Timeout => {}
+            otra => panic!("debía dar Timeout, fue {otra:?}"),
+        }
+        // Error de transporte (400-429/offline) → fallback, no error.
+        for salida in [
+            PedidoSpecIa::Timeout,
+            PedidoSpecIa::Transporte("remote assistant returned HTTP 429".into()),
+            PedidoSpecIa::Transporte("MissingSessionID".into()),
+        ] {
+            match resolver_turno_anim_ia(true, salida) {
+                DesenlaceAnimIa::FallbackCanonico { aviso } => {
+                    assert_eq!(aviso, ANIM_SIN_IA_AVISO);
+                    assert!(!aviso.contains('\n'), "UNA línea: {aviso}");
+                }
+                otra => panic!("timeout/transporte debe ser fallback, fue {otra:?}"),
+            }
+        }
     }
 
     #[test]

@@ -6122,7 +6122,14 @@ impl eframe::App for GrafitoApp {
                 shell.width_class,
                 self.compact_geometry_utility_open,
             );
-            if shell.show_left_drawer {
+            // W-C: egui colapsa el SidePanel a `available` cuando el mínimo no
+            // entra (`clamp(...).at_most(available_rect)`): pintar texto del
+            // drawer en 0-60px deja slivers en el borde izquierdo. Debajo de
+            // PANEL_LEFT_MIN no se pinta el drawer; el rail sigue ofreciendo
+            // reapertura (ver `ui::left_drawer_content_visible`).
+            let left_drawer_fits =
+                crate::ui::left_drawer_content_visible(ctx.available_rect().width());
+            if shell.show_left_drawer && left_drawer_fits {
                 // Clamp Aula tab cuando no está habilitada
                 if !self.is_aula_tab_visible() && self.sidebar_tab == Self::AULA_TAB_INDEX {
                     self.sidebar_tab = 0;

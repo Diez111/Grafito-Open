@@ -48,8 +48,11 @@ target/
 /.opencode/skills/grafito-architecture/*
 !/.opencode/skills/grafito-architecture/SKILL.md
 !/.opencode/skills/profiling/
-/.opencode/skills/profiling/*
+!/.opencode/skills/profiling/*
 !/.opencode/skills/profiling/SKILL.md
+!/.opencode/skills/computer-control/
+!/.opencode/skills/computer-control/*
+!/.opencode/skills/computer-control/SKILL.md
 .commandcode/
 .megamemory/
 # AGENTS.md is required for CI MSRV check (1.88) — do not ignore

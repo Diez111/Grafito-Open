@@ -12,9 +12,9 @@ use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
     BREAKPOINT_COMPACT, DRAWER_RIGHT_DEFAULT, DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, ICON_MD,
-    RADIUS_LG, RADIUS_MD, RADIUS_PILL, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
-    SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS, TYPE_SM,
-    TYPE_XS,
+    PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM,
+    SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS,
+    TYPE_SM, TYPE_XS,
 };
 use grafito_ui::Tool;
 use std::collections::VecDeque;
@@ -36,6 +36,19 @@ pub(crate) const RAIL_LABEL_MIN_WIDTH: f32 = 40.0;
 
 pub(crate) fn rail_labels_visible(rect_width: f32) -> bool {
     rect_width >= RAIL_LABEL_MIN_WIDTH
+}
+
+/// Ancho mínimo del drawer izquierdo para pintar su contenido textual.
+///
+/// egui colapsa el `SidePanel` a `available` cuando el mínimo no entra
+/// (`panel.rs`: `clamp_to_range(width, width_range).at_most(available_rect)`):
+/// con 0-60px disponibles el contenido igual exige `min_width` y el clip
+/// deja slivers (fragmentos en zigzag) en el borde izquierdo. Debajo de
+/// `PANEL_LEFT_MIN` el layout no pinta el drawer; el rail sigue ofreciendo
+/// reapertura. Precedente: `RAIL_LABEL_MIN_WIDTH` para el rail. Puro y
+/// testeable headless.
+pub(crate) fn left_drawer_content_visible(available_width: f32) -> bool {
+    available_width >= PANEL_LEFT_MIN
 }
 
 pub(crate) fn top_chrome_uses_overflow(viewport_width: f32) -> bool {

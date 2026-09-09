@@ -1098,6 +1098,31 @@ pub fn all_safe_tool_schemas() -> Vec<ToolSchema> {
     schemas
 }
 
+/// W-B: SPEC JSON para el hilo de animación (puerta única, sin duplicar inferencia).
+///
+/// Puro, sin I/O ni motor: construye `generate_animation{pedido}` y lo despacha
+/// por `SafeGrafitoDispatcher` (que ya delega en
+/// `propose_parametric/area/tangent_tool` → `infer_*` de `grafito-anim`).
+/// `Ok` → JSON validado por las mismas puertas que el loop agente (el LLM
+/// propone args, las tools validan; acá el pedido va directo a la misma
+/// validación para el fallback local y para tests).
+/// `Err` → motivo honesto, jamás SPEC inventado.
+/// El hilo de la app (`grafito-app`) parsea este JSON y lo re-valida con
+/// `infer_*` antes de renderizar (doble puerta, cero basura en pantalla).
+pub fn anim_spec_json_para_hilo(pedido: &str) -> Result<String, String> {
+    let call = ToolCall {
+        id: "w-b-spec".to_string(),
+        name: "generate_animation".to_string(),
+        arguments: json!({ "pedido": pedido }),
+    };
+    let result = SafeGrafitoDispatcher.dispatch(&call);
+    if result.ok {
+        Ok(result.content)
+    } else {
+        Err(result.content)
+    }
+}
+
 /// Construye el payload OpenAI con la lista de herramientas del agente.
 fn build_agent_payload(
     settings: &ProviderSettings,
@@ -4180,5 +4205,25 @@ mod tests {
         let (explained, fix) = explain_invalid_proposal("", "integral");
         assert!(explained.explanation.contains("integral"));
         assert!(fix.is_none());
+    }
+
+    #[test]
+    fn spec_json_para_hilo_reusa_propose_sin_duplicar_inferencia() {
+        // W-B: la puerta única expone el mismo JSON que el loop agente
+        // (propose_area/tangent vía infer_*), sin reimplementar reglas.
+        // Explícita integral x^3 → JSON ok con expr y rango.
+        let json =
+            anim_spec_json_para_hilo("animacion de la integral de f(x)=x^3 de 0 a 2 con animación")
+                .expect("x^3 valida");
+        assert!(json.contains("x^3"), "el SPEC trae la función: {json}");
+        assert!(json.contains("\"kind\":\"area\""), "kind área: {json}");
+        // Tangente explícita también sale por la misma puerta.
+        let tangente =
+            anim_spec_json_para_hilo("tangente movil de f(x)=x^3 en [-2,2] con animación")
+                .expect("tangente x^3 valida");
+        assert!(tangente.contains("x^3"), "tangente trae x^3: {tangente}");
+        // Inválida → Err honesto, jamás JSON inventado.
+        assert!(anim_spec_json_para_hilo("haceme una animación").is_err());
+        assert!(anim_spec_json_para_hilo("").is_err());
     }
 }

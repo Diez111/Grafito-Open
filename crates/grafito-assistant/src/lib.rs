@@ -64,6 +64,10 @@ const OPENCODE_FUSION_MODEL: &str = "fusion";
 /// Muse Spark sólo responde por la Responses API (`POST {base}/responses`);
 /// por Chat Completions el proveedor devuelve 500 instantáneo con cualquier
 /// payload (verificado 2026-09-04 contra el endpoint real, 8 payloads).
+/// Vigentes 2026-09-08 (opencode.ai/docs/zen): `muse-spark-1.3`, `muse-spark-1.2`
+/// (pagos) y `muse-spark-1.3-contributor-free` (gratis, exige sesión válida;
+/// sin ella el gateway devuelve 400 `MissingSessionID`). Los `-contributor`
+/// viejos se conservan por compatibilidad.
 /// Se matchea por `contains` para cubrir futuras 1.x sin tocar el router.
 fn uses_responses_api(model: &str) -> bool {
     model.contains("muse-spark")
@@ -1055,8 +1059,10 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
 /// | `status:incomplete` / `stop:max_tokens` | N/A (`finish_reason` debe ser `stop`, si es `length` → schema error sin eco) | `RemoteCompletion{truncated:true}` con el texto parcial | `stop_reason:max_tokens` → `truncated:true` | se propaga `truncated` del audit final |
 ///
 /// Fallback de sesión (no en este crate): `grafito-app/src/assistant.rs`
-/// reintenta una vez `muse-spark --500/timeout--> deepseek-v4-flash` sin tocar
-/// la preferencia guardada. Modo agente con tools (`agent.rs`): sólo soporta
+/// reintenta una vez `muse-spark --500/timeout/400-sesión--> deepseek-v4-flash`
+/// sin tocar la preferencia guardada (400-sesión = `MissingSessionID`/
+/// `InvalidApiKey`/`ModelDisabled`/`AccountBlocked` del tier gratuito, W-A
+/// 2026-09-08). Modo agente con tools (`agent.rs`): sólo soporta
 /// `OpenAiChatCompletions`; Spark/Fusion devuelven error explícito que sugiere
 /// chat simple o deepseek; su `HTTP {status}` aún no incluye `Retry-After`
 /// (deuda documentada).
@@ -3880,11 +3886,28 @@ mod tests {
 
     #[test]
     fn spark_models_route_to_responses_api() {
+        // Vigentes 2026-09-08 + viejos por compatibilidad: todos rutean a Responses.
+        assert!(uses_responses_api("muse-spark-1.3"));
+        assert!(uses_responses_api("muse-spark-1.2"));
+        assert!(uses_responses_api("muse-spark-1.3-contributor-free"));
         assert!(uses_responses_api("muse-spark-1.3-contributor"));
         assert!(uses_responses_api("muse-spark-1.2-contributor"));
         assert!(!uses_responses_api("deepseek-v4-flash"));
         let spark = spark_settings();
         assert_eq!(remote_protocol(&spark), RemoteProtocol::OpenAiResponses);
+        // Los IDs vigentes también rutean a Responses (sin tocar el router).
+        for vigente in [
+            "muse-spark-1.3",
+            "muse-spark-1.2",
+            "muse-spark-1.3-contributor-free",
+        ] {
+            let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, vigente);
+            assert_eq!(
+                remote_protocol(&settings),
+                RemoteProtocol::OpenAiResponses,
+                "vigente {vigente} debe rutear a Responses"
+            );
+        }
         let deepseek =
             ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "deepseek-v4-flash");
         assert_eq!(

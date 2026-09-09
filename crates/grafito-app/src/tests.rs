@@ -3199,6 +3199,42 @@ fn collapsed_rail_shows_icons_only_without_text_slivers() {
 }
 
 #[test]
+fn narrow_left_drawer_skips_text_instead_of_painting_slivers() {
+    // Repro W-C: egui colapsa el SidePanel a `available` cuando el mínimo no
+    // entra (`clamp_to_range(width, min..max).at_most(available)`). Con 0-60px
+    // el ancho real cae bajo PANEL_LEFT_MIN (180) y el contenido —que exige
+    // `min_width`— se pinta clipado: slivers en x≈0-8px.
+    for narrow in [0.0, 1.0, 8.0, 60.0] {
+        let width_range_min = grafito_ui::tokens::PANEL_LEFT_MIN;
+        // Misma aritmética que egui `panel.rs`:
+        // `clamp_to_range(default, min..max).at_most(available)`.
+        let collapsed = 260.0_f32.clamp(width_range_min, f32::INFINITY).min(narrow);
+        assert!(
+            collapsed < width_range_min,
+            "con {narrow}px el panel colapsa bajo el mínimo"
+        );
+        assert!(
+            !crate::ui::left_drawer_content_visible(narrow),
+            "con {narrow}px el layout no debe pintar texto del drawer"
+        );
+    }
+    // Ancho sano (mínimo y default) → el drawer se pinta.
+    assert!(crate::ui::left_drawer_content_visible(
+        grafito_ui::tokens::PANEL_LEFT_MIN
+    ));
+    assert!(crate::ui::left_drawer_content_visible(
+        grafito_ui::tokens::PANEL_LEFT_DEFAULT
+    ));
+    // El gate vive en el layout (app.rs) y el helper en ui.rs.
+    let app_source = include_str!("app.rs");
+    assert!(app_source.contains("left_drawer_content_visible"));
+    assert!(app_source.contains("left_drawer_fits"));
+    let ui_source = include_str!("ui.rs");
+    assert!(ui_source.contains("fn left_drawer_content_visible"));
+    assert!(ui_source.contains("PANEL_LEFT_MIN"));
+}
+
+#[test]
 fn identity_card_and_rail_clip_text_honestly() {
     let panels = include_str!("panels.rs");
     assert!(panels.contains("inspector_label_text"));
