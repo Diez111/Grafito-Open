@@ -182,7 +182,7 @@ impl AnimJobState {
 
 // ── Statem v3 extendido (documentado + preparado para migración) ───────────
 // El statem v2 actual (AnimJobState) cubre el puente IPC. La extensión v3
-// expone progreso fino Queued/Rendering/Exporting/Retrying y duración.
+// expone progreso fino Queued/Rendering/Exporting y duración.
 // Si no se migra engine completo, este enum + trait permiten implementar
 // un motor v3 sin romper el API v2 — el engine v2 puede mapearse a v3.
 
@@ -205,13 +205,6 @@ pub enum AnimEngineState {
     /// Exportando al formato pedido (gif/mp4/png).
     Exporting {
         format: String,
-    },
-    /// Reintentando tras error transitorio: intento N con backoff.
-    /// NOTA v3: representación solamente — ningún código construye esta
-    /// variante ni reintenta automáticamente (ver doc de `submit`).
-    Retrying {
-        attempt: u32,
-        backoff_ms: u64,
     },
     /// Mapeo 1:1 a terminales de `AnimJobState` (para compat).
     Completed {
@@ -546,9 +539,10 @@ impl AnimEngine {
     ///
     /// NOTA v3 (honesta): NO hay cola FIFO — el engine atiende un solo job por
     /// vez; un segundo `submit` en `Running` se rechaza hasta que el actual
-    /// termine (`shutdown` + `spawn`/`wait_ready` de nuevo). `AnimEngineState`
-    /// expone `Retrying` solo como representación; no existe loop de reintento
-    /// automático. El test `submit_while_running_is_rejected_no_fifo_queue`
+    /// termine (`shutdown` + `spawn`/`wait_ready` de nuevo). NO hay reintento
+    /// automático: la ex variante `AnimEngineState::Retrying` se borró (M3-8,
+    /// representación muerta que ningún código construía). El test
+    /// `submit_while_running_is_rejected_no_fifo_queue`
     /// pinnea este comportamiento.
     pub fn submit(&mut self, request: AnimRequest) -> Result<AnimJobId, String> {
         if !self.state.can_submit() {
@@ -1080,8 +1074,10 @@ for line in sys.stdin:
         send({"type":"progress","job_id":jid,"step":"render","percent":50})
         out_dir = os.getcwd()
         path = os.path.join(out_dir, jid + ".png")
+        # M3-9: PNG 1x1 válido (67 B), no la firma de 8 B: el test
+        # `stub_png_decodifica_honesto` lo valida estructuralmente.
         with open(path, "wb") as fh:
-            fh.write(b"\x89PNG\r\n\x1a\n")
+            fh.write(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63000100000500010d0a2db40000000049454e44ae426082"))
         send({"type":"render_result","job_id":jid,"media_path":path,"frames":1,"duration_ms":120})
 "#;
 
@@ -1165,6 +1161,65 @@ for line in sys.stdin:
             config.working_dir.as_deref().unwrap(),
             &result.media_path
         ));
+        engine.shutdown().unwrap();
+    }
+
+    // ── M3-9: el stub escribe PNG válido (no 8 bytes) ────────────────────
+    /// Valida estructura PNG mínima sin deps nuevas: firma 8 B + chunk
+    /// IHDR (longitud 13 + tipo) + trailer IEND. Un stub de 8 bytes
+    /// (solo firma) falla honesto acá.
+    fn assert_png_estructural(bytes: &[u8]) {
+        const FIRMA: &[u8] = b"\x89PNG\r\n\x1a\n";
+        assert!(
+            bytes.len() > FIRMA.len(),
+            "PNG stub de {} bytes: solo firma, inválido",
+            bytes.len()
+        );
+        assert!(
+            bytes.starts_with(FIRMA),
+            "sin firma PNG: {:02x?}",
+            &bytes[..bytes.len().min(8)]
+        );
+        assert!(
+            bytes.len() >= 33,
+            "PNG de {} bytes: sin IHDR completo",
+            bytes.len()
+        );
+        let ihdr_len = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        assert_eq!(ihdr_len, 13, "primer chunk debe ser IHDR de 13 B");
+        assert_eq!(&bytes[12..16], b"IHDR", "primer chunk debe ser IHDR");
+        assert!(
+            bytes.windows(4).any(|w| w == b"IEND"),
+            "sin chunk IEND: PNG truncado"
+        );
+    }
+
+    #[test]
+    fn stub_png_decodifica_honesto() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let (_guard, config) = stub_engine();
+        let mut engine = AnimEngine::spawn(config.clone()).unwrap();
+        engine.wait_ready().unwrap();
+        let job_id = engine
+            .submit(derivada_request("derivada como pendiente"))
+            .unwrap();
+        let result = loop {
+            match engine.recv_event(Some(Duration::from_secs(10))).unwrap() {
+                Some(JobEvent::Progress(progress)) => {
+                    assert_eq!(progress.job_id, job_id);
+                }
+                Some(JobEvent::Result(anim_result)) => break anim_result,
+                Some(JobEvent::Error { code, message }) => {
+                    panic!("stub reported an error {code}: {message}")
+                }
+                None => {}
+            }
+        };
+        let bytes = fs::read(&result.media_path).expect("el stub debe dejar archivo leíble");
+        assert_png_estructural(&bytes);
         engine.shutdown().unwrap();
     }
 

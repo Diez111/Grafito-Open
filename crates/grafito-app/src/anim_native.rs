@@ -12,6 +12,7 @@ use grafito_anim::protocol::{
     contiene_palabra, scene_param_clamped, template_for_concept, SCENE_PARAM_A, SCENE_PARAM_B,
     SCENE_PARAM_SPAN, SCENE_PARAM_TERMS, SCENE_PARAM_X0,
 };
+use grafito_assistant::CancellationToken;
 use std::path::{Path, PathBuf};
 
 // ── Registro canónico nativo v4 (11 plantillas) ──────────────────────────
@@ -103,6 +104,8 @@ pub enum GifExportError {
     TooManyPixels {
         got: usize,
     },
+    /// Exportación cancelada vía `CancellationToken` (M3-6).
+    Cancelled,
     Encode(String),
     Io(String),
 }
@@ -134,6 +137,7 @@ impl std::fmt::Display for GifExportError {
                     "demasiados píxeles totales: {got} > {GIF_EXPORT_MAX_TOTAL_PIXELS}"
                 )
             }
+            Self::Cancelled => write!(f, "exportación cancelada"),
             Self::Encode(detail) => write!(f, "falló codificar el GIF: {detail}"),
             Self::Io(detail) => write!(f, "falló escribir el GIF: {detail}"),
         }
@@ -161,6 +165,17 @@ fn gif_dim(value: usize) -> Result<u16, GifExportError> {
 pub fn encode_frames_to_gif_bytes(
     frames: &[egui::ColorImage],
     delay_cs: u16,
+) -> Result<Vec<u8>, GifExportError> {
+    encode_frames_to_gif_bytes_cancelable(frames, delay_cs, &CancellationToken::default())
+}
+
+/// Idem cancelable (M3-6): chequea el token entre frames y aborta con
+/// `Cancelled` honesto sin dejar parcial (el buffer vive en memoria y se
+/// descarta con el `Err`). Puro, sin E/S.
+pub fn encode_frames_to_gif_bytes_cancelable(
+    frames: &[egui::ColorImage],
+    delay_cs: u16,
+    token: &CancellationToken,
 ) -> Result<Vec<u8>, GifExportError> {
     if frames.is_empty() {
         return Err(GifExportError::EmptyFrames);
@@ -198,6 +213,9 @@ pub fn encode_frames_to_gif_bytes(
             .set_repeat(gif::Repeat::Infinite)
             .map_err(|e| GifExportError::Encode(e.to_string()))?;
         for (index, frame) in frames.iter().enumerate() {
+            if token.is_cancelled() {
+                return Err(GifExportError::Cancelled);
+            }
             if frame.size != size {
                 return Err(GifExportError::InconsistentSize {
                     index,
@@ -251,7 +269,24 @@ pub fn export_frames_to_gif_file(
     path: &Path,
     delay_cs: u16,
 ) -> Result<PathBuf, GifExportError> {
-    let bytes = encode_frames_to_gif_bytes(frames, delay_cs)?;
+    export_frames_to_gif_file_cancelable(frames, path, delay_cs, &CancellationToken::default())
+}
+
+/// Idem cancelable (M3-6): chequea el token antes de codificar y entre
+/// frames; cancelado → `Cancelled` sin tocar disco (ni final ni `.tmp`).
+pub fn export_frames_to_gif_file_cancelable(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+) -> Result<PathBuf, GifExportError> {
+    if token.is_cancelled() {
+        return Err(GifExportError::Cancelled);
+    }
+    let bytes = encode_frames_to_gif_bytes_cancelable(frames, delay_cs, token)?;
+    if token.is_cancelled() {
+        return Err(GifExportError::Cancelled);
+    }
     write_gif_bytes_atomically(&bytes, path)
 }
 
@@ -343,12 +378,38 @@ pub fn prepare_anim_workdir_exclusive(work_dir: &Path) -> Result<(), String> {
 ///
 /// El lead lo dispara con los frames del estado + destino elegido por el
 /// usuario y al hacer `join` actualiza `media_path` / `status`.
+///
+/// M3-6: preflight de budget ANTES del trabajo pesado (dentro del hilo
+/// para no cambiar la firma): sobre-presupuesto → `Err` rápido sin
+/// codificar ni tocar disco. Para cancelación usar
+/// `spawn_gif_export_cancelable`.
 pub fn spawn_gif_export(
     frames: Vec<egui::ColorImage>,
     path: PathBuf,
     delay_cs: u16,
 ) -> std::thread::JoinHandle<Result<PathBuf, GifExportError>> {
-    std::thread::spawn(move || export_frames_to_gif_file(&frames, &path, delay_cs))
+    std::thread::spawn(move || {
+        check_gif_export_budget(&frames)?;
+        export_frames_to_gif_file(&frames, &path, delay_cs)
+    })
+}
+
+/// Idem cancelable (M3-6): el token se chequea pre-spawn (dentro del hilo,
+/// `Cancelled` inmediato sin archivo), entre frames y antes de escribir.
+/// Test: spawn→cancel→join rápido sin archivo.
+pub fn spawn_gif_export_cancelable(
+    frames: Vec<egui::ColorImage>,
+    path: PathBuf,
+    delay_cs: u16,
+    token: CancellationToken,
+) -> std::thread::JoinHandle<Result<PathBuf, GifExportError>> {
+    std::thread::spawn(move || {
+        if token.is_cancelled() {
+            return Err(GifExportError::Cancelled);
+        }
+        check_gif_export_budget(&frames)?;
+        export_frames_to_gif_file_cancelable(&frames, &path, delay_cs, &token)
+    })
 }
 
 /// Retardo por frame para una velocidad de la card (B5).
@@ -535,6 +596,13 @@ pub const NATIVE_BYTES_PER_PIXEL: usize = 4;
 pub const NATIVE_FRAME_BYTES_ESTIMADO_640X480: usize =
     640 * 480 * NATIVE_BYTES_PER_PIXEL * NATIVE_ANIM_FRAME_COUNT;
 
+/// Tope del set nativo en RAM (M3-5, paridad con `PARAMETRIC_MAX_BYTES`):
+/// 64 MiB. `4096×4096×48` RGBA son ≈3 GiB: sin preflight el render
+/// clásico lo intentaría reservar. Los `render_*` clásicos devuelven
+/// `Vec` (sin `Err`): ante exceso HACEN CLAMP documentado a este tope
+/// vía `resolve_native_size_budgeted` (nunca OOM, nunca panic).
+pub const NATIVE_MAX_SET_BYTES: usize = 64 * 1024 * 1024;
+
 /// Estima los bytes RGBA de un set (`w*h*4*count`). `None` si desborda
 /// (`checked_mul`, sin pánicos). Puro, sin I/O ni allocs.
 #[must_use]
@@ -561,6 +629,13 @@ pub(crate) enum NativeSizeError {
     AllocationFailed {
         bytes: usize,
     },
+    /// El set estimado excede `NATIVE_MAX_SET_BYTES` (M3-5): el llamador
+    /// clásico hace clamp vía `resolve_native_size_budgeted`.
+    OverBudget {
+        requested: (usize, usize),
+        clamped: (usize, usize),
+        bytes: usize,
+    },
 }
 
 impl std::fmt::Display for NativeSizeError {
@@ -581,6 +656,16 @@ impl std::fmt::Display for NativeSizeError {
             }
             Self::AllocationFailed { bytes } => {
                 write!(f, "no se pudo reservar {bytes} bytes (OOM guard)")
+            }
+            Self::OverBudget {
+                requested,
+                clamped,
+                bytes,
+            } => {
+                write!(
+                    f,
+                    "set {requested:?} ≈ {bytes} bytes excede el tope de {NATIVE_MAX_SET_BYTES}: clamped a {clamped:?}"
+                )
             }
         }
     }
@@ -630,6 +715,62 @@ pub(crate) fn resolve_native_size(
                 _ => (NATIVE_FALLBACK_W, NATIVE_FALLBACK_H),
             };
             (clamped, Some(e))
+        }
+    }
+}
+
+/// Resuelve + preflight de presupuesto del set (M3-5, llamado por TODOS
+/// los `render_*` clásicos): si `w*h*4*frames` excede
+/// `NATIVE_MAX_SET_BYTES`, reduce preservando aspecto hasta encajar
+/// (mínimo 64×64, que siempre encaja: 64×64×4×48 < 1 MiB) y reporta
+/// `OverBudget` con pedido vs clamped. Nunca panic, nunca OOM: el
+/// render clásico hace clamp documentado en vez de `Err` (devuelve
+/// `Vec`, no `Result`).
+pub(crate) fn resolve_native_size_budgeted(
+    width: u32,
+    height: u32,
+    frames: usize,
+) -> ((usize, usize), Option<NativeSizeError>) {
+    let ((w, h), prev) = resolve_native_size(width, height);
+    let frames = frames.max(1);
+    match estimate_frames_bytes(w, h, frames) {
+        Some(got) if got <= NATIVE_MAX_SET_BYTES => ((w, h), prev),
+        _ => {
+            let px_por_frame = NATIVE_MAX_SET_BYTES / (NATIVE_BYTES_PER_PIXEL * frames);
+            let px_actual = (w as u64).saturating_mul(h as u64).max(1);
+            // factor² = presupuesto/actual, en u64 sin flotantes gigantes.
+            let (mut cw, mut ch) = (w, h);
+            if px_actual > px_por_frame as u64 {
+                // Escala entera descendente preservando aspecto.
+                let mut escala = 2u64;
+                while escala <= 64 {
+                    let nw = (w as u64 / escala).max(NATIVE_MIN_DIM as u64) as usize;
+                    let nh = (h as u64 / escala).max(NATIVE_MIN_DIM as u64) as usize;
+                    match estimate_frames_bytes(nw, nh, frames) {
+                        Some(got) if got <= NATIVE_MAX_SET_BYTES => {
+                            cw = nw;
+                            ch = nh;
+                            break;
+                        }
+                        _ => {}
+                    }
+                    if nw <= NATIVE_MIN_DIM as usize && nh <= NATIVE_MIN_DIM as usize {
+                        cw = NATIVE_MIN_DIM as usize;
+                        ch = NATIVE_MIN_DIM as usize;
+                        break;
+                    }
+                    escala += 1;
+                }
+            }
+            let bytes = estimate_frames_bytes(cw, ch, frames).unwrap_or(usize::MAX);
+            (
+                (cw, ch),
+                Some(NativeSizeError::OverBudget {
+                    requested: (w, h),
+                    clamped: (cw, ch),
+                    bytes,
+                }),
+            )
         }
     }
 }
@@ -931,15 +1072,8 @@ fn draw_filled_rect(
     }
 }
 
-// ── Fuente bitmap 5x7 ultra-minimal (solo ASCII 32..126, mayus) ────────────
-// Cada char 5 columnas, 7 filas: bit 1 = pixel.
-const FONT5X7: [[u8; 7]; 95] = {
-    // generada proceduralmente: para este motor usaremos un estilo "block" simplificado:
-    // en lugar de almacenar glifos perfectos, dibujaremos un rectangulo con variacion
-    // por hash para que cualquier texto se vea nitido en modo placeholder.
-    // Para mantenerlo simple y robusto, usaremos rect blocks.
-    [[0; 7]; 95]
-};
+// M3-8: la ex `FONT5X7` ([[0; 7]; 95], todo ceros, jamás leída) se borró:
+// `draw_text_block` dibuja bloques 5x7 directos sin tabla de glifos.
 
 #[allow(clippy::too_many_arguments)]
 fn draw_text_block(
@@ -1118,7 +1252,7 @@ fn render_derivative_frames_with_params_impl(
 ) -> Vec<egui::ColorImage> {
     let center = scene_param_clamped(params, SCENE_PARAM_X0, 0.0, -3.0, 3.0);
     let span = scene_param_clamped(params, SCENE_PARAM_SPAN, 1.5, 0.25, 3.0);
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let parabola: Vec<(f64, f64)> = (-60..=60)
         .map(|i| {
             let x = i as f64 / 20.0;
@@ -1198,7 +1332,7 @@ fn render_pitagoras_frames_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).clamp(0.0, 1.0);
@@ -1357,7 +1491,7 @@ fn render_integral_frames_with_params_impl(
     let lo = scene_param_clamped(params, SCENE_PARAM_A, 0.0, -3.0, 3.0);
     let hi = scene_param_clamped(params, SCENE_PARAM_B, 2.0, -3.0, 3.0);
     let (a, b) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     // N1: la curva es FIJA (evaluada en el frame 0); solo el área acumulada
     // y la cota móvil dependen del frame. Huecos sin unir (honesto).
     let canon = integral_canonical_anim();
@@ -1522,7 +1656,7 @@ fn render_taylor_frames_inner(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let f = |x: f64| x.sin();
     let taylor = |x: f64| taylor_partial_sum(orden, x);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
@@ -1588,7 +1722,7 @@ fn render_conformal_frames_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
@@ -1682,7 +1816,7 @@ fn render_universal_youtube_frames_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let concept_norm = normalize_concept(concept);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
@@ -1913,8 +2047,11 @@ pub fn render_anim_for_export_localized(
     )
 }
 
-/// Rama legacy con progreso (mismo match que `render_anim_for_concept_legacy`,
-/// pero sobre los `*_impl` para emitir por frame).
+/// Rama legacy con progreso sobre los `*_impl` para emitir por frame.
+///
+/// M3-8: la ex `render_anim_for_concept_legacy` (duplicado sin params ni
+/// callers) se borró: esta es la única rama legacy y el dispatcher vivo
+/// (`render_anim_with_progress_con_rotulo`) la usa para lo no paramétrico.
 fn render_anim_for_concept_legacy_with_progress(
     tmpl: &str,
     concept: &str,
@@ -1952,29 +2089,6 @@ fn render_anim_for_concept_legacy_with_progress(
     }
 }
 
-/// Rama legacy del dispatcher (sin params): idéntica a la versión previa a v3.
-fn render_anim_for_concept_legacy(
-    tmpl: &str,
-    concept: &str,
-    width: u32,
-    height: u32,
-) -> Vec<egui::ColorImage> {
-    match tmpl {
-        "integral-area" => render_integral_frames(width, height),
-        "taylor-series" => render_taylor_frames(width, height),
-        "conformal-map" => render_conformal_frames(width, height),
-        "pitagoras" => render_pitagoras_frames(width, height),
-        "derivative-slope" => render_native_animation_frames(width, height),
-        "euler" => render_euler_frames(width, height),
-        "fourier" => render_fourier_frames(width, height),
-        "logistic-bifurcation" => render_logistic_bifurcation_frames(width, height),
-        "gradient-field" => render_gradient_field_frames(width, height),
-        "mobius-transform" => render_mobius_frames(width, height),
-        "universal" => render_universal_youtube_frames(concept, width, height),
-        _ => render_universal_youtube_frames(concept, width, height),
-    }
-}
-
 /// Stub Euler: serie e^x parciales con fondo nativo, <2s garantizado.
 /// Usa la misma paleta y grid para no romper estilo; animación determinista.
 pub fn render_euler_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
@@ -2000,7 +2114,7 @@ fn render_euler_frames_with_params_impl(
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let max_terms = scene_param_clamped(params, SCENE_PARAM_TERMS, 7.0, 1.0, 7.0) as usize;
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     // Partial sums of exp: S_n(x) = sum_{k=0..n} x^k/k!
     let start = std::time::Instant::now();
     let max_euler_ms: u128 = 1800;
@@ -2127,7 +2241,7 @@ fn render_fourier_frames_with_params_impl(
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let max_harm = scene_param_clamped(params, SCENE_PARAM_TERMS, 6.0, 1.0, 6.0) as usize;
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let start = std::time::Instant::now();
     let max_ms: u128 = 1800;
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
@@ -2232,7 +2346,7 @@ fn render_logistic_bifurcation_frames_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let start = std::time::Instant::now();
     let max_ms: u128 = 1800;
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
@@ -2356,7 +2470,7 @@ fn render_gradient_field_frames_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let start = std::time::Instant::now();
     let max_ms: u128 = 1800;
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
@@ -2464,7 +2578,7 @@ fn render_mobius_frames_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let ((w, h), _) = resolve_native_size(width, height);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let start = std::time::Instant::now();
     let max_ms: u128 = 1800;
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
@@ -3086,6 +3200,67 @@ mod tests {
         assert_eq!(estimate_frames_bytes(0, 480, 48), Some(0));
     }
 
+    // ── M3-5: preflight en TODOS los render_* clásicos ───────────────────
+    #[test]
+    fn preflight_4096_clampeado_sin_oom() {
+        // 4096×4096×48 RGBA ≈ 3 GiB > 64 MiB: el helper clampa con OverBudget.
+        let ((w, h), err) = resolve_native_size_budgeted(4096, 4096, NATIVE_ANIM_FRAME_COUNT);
+        // El pedido crudo excede; el clamped encaja (bytes = estimado clamped).
+        let pedido = estimate_frames_bytes(4096, 4096, NATIVE_ANIM_FRAME_COUNT)
+            .expect("3 GiB no desborda usize");
+        assert!(
+            pedido > NATIVE_MAX_SET_BYTES,
+            "4096²×48 = {pedido} debe exceder el tope"
+        );
+        match err {
+            Some(NativeSizeError::OverBudget {
+                requested,
+                clamped,
+                bytes,
+            }) => {
+                assert_eq!(requested, (4096, 4096));
+                assert_eq!(clamped, (w, h));
+                assert_eq!(
+                    bytes,
+                    estimate_frames_bytes(w, h, NATIVE_ANIM_FRAME_COUNT)
+                        .expect("clamped no desborda")
+                );
+            }
+            other => panic!("4096²×48 debe ser OverBudget, fue: {other:?}"),
+        }
+        let cabe =
+            estimate_frames_bytes(w, h, NATIVE_ANIM_FRAME_COUNT).expect("clamped no desborda");
+        assert!(
+            cabe <= NATIVE_MAX_SET_BYTES,
+            "clamped {w}x{h}×48 = {cabe} debe caber en {NATIVE_MAX_SET_BYTES}"
+        );
+        assert!(w >= NATIVE_MIN_DIM as usize && h >= NATIVE_MIN_DIM as usize);
+        // Pedido chico: sin clamp, sin error.
+        let ((w2, h2), err2) = resolve_native_size_budgeted(96, 72, NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!((w2, h2), (96, 72));
+        assert!(err2.is_none());
+        // Tope pineado: paridad con PARAMETRIC_MAX_BYTES.
+        assert_eq!(NATIVE_MAX_SET_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn preflight_render_gigante_devuelve_clamped_valido() {
+        // El render clásico a 4096 no intenta 3 GiB: clampa y devuelve 48
+        // frames válidos del tamaño clamped (sin `render_timed`: este test
+        // es guard OOM, no de perf).
+        let frames = render_universal_youtube_frames("concepto gigante", 4096, 4096);
+        assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+        let size = frames[0].size;
+        assert!(
+            size[0] * size[1] * 4 * NATIVE_ANIM_FRAME_COUNT <= NATIVE_MAX_SET_BYTES,
+            "set {size:?}×48 debe caber en el tope"
+        );
+        assert_ne!(size, [4096, 4096], "4096 debe clamparse, no reservarse");
+        for f in &frames {
+            assert_eq!(f.size, size);
+        }
+    }
+
     #[test]
     fn native_animation_generates_bounded_distinct_frames() {
         let frames = render_timed("derivative-slope", 96, 72, || {
@@ -3541,6 +3716,29 @@ mod tests {
                 let yy = i / w;
                 yy < y0 || yy >= y1 || x == y
             })
+    }
+
+    // ── M3-8: dispatcher único tras borrar el legacy duplicado ──────────
+    #[test]
+    fn dispatcher_unico_chat_es_vivo_sin_rama_duplicada() {
+        // `render_anim_for_concept` (atajo chat) y `render_anim_with_progress`
+        // con params vacíos deben dar los mismos píxeles: una sola rama viva
+        // (el duplicado `render_anim_for_concept_legacy` se borró).
+        let empty = params_map(&[]);
+        for tmpl in NATIVE_TEMPLATES {
+            let atajo = render_anim_for_concept(tmpl, "concepto libre", 64, 64);
+            let mut vistos = 0usize;
+            let vivo =
+                render_anim_with_progress(tmpl, "concepto libre", 64, 64, &empty, &mut |_, _| {
+                    vistos += 1
+                });
+            assert_eq!(atajo.len(), NATIVE_ANIM_FRAME_COUNT, "{tmpl}: 48 atajo");
+            assert_eq!(vivo.len(), NATIVE_ANIM_FRAME_COUNT, "{tmpl}: 48 vivo");
+            for (a, b) in atajo.iter().zip(vivo.iter()) {
+                assert_eq!(a.pixels, b.pixels, "{tmpl}: atajo == vivo");
+            }
+            assert_eq!(vistos, NATIVE_ANIM_FRAME_COUNT, "{tmpl}: progreso real");
+        }
     }
 
     #[test]
@@ -4045,6 +4243,88 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, NATIVE_ANIM_FRAME_COUNT);
+    }
+
+    // ── M3-6: GIF cancelable + budget pre-spawn ──────────────────────────
+    #[test]
+    fn gif_export_cancelable_spawn_cancel_join_rapido_sin_archivo() {
+        let frames = synthetic_frames(8);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("grafito_gif_cancel_{}_{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cancel.gif");
+        // Cancelado pre-spawn: determinista (el hilo ni codifica).
+        let token = CancellationToken::default();
+        token.cancel();
+        let inicio = std::time::Instant::now();
+        let handle = spawn_gif_export_cancelable(frames, path.clone(), GIF_EXPORT_DELAY_CS, token);
+        let salida = handle.join().expect("join del hilo exportador");
+        assert_eq!(salida, Err(GifExportError::Cancelled));
+        assert!(
+            inicio.elapsed() < std::time::Duration::from_secs(5),
+            "cancel→join debe ser rápido"
+        );
+        assert!(!path.exists(), "cancelado no deja archivo");
+        assert_eq!(
+            format!("{}", GifExportError::Cancelled),
+            "exportación cancelada"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gif_export_cancelable_sin_cancelar_escribe_real() {
+        let frames = synthetic_frames(4);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "grafito_gif_nocancel_{}_{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ok.gif");
+        let token = CancellationToken::default();
+        let handle = spawn_gif_export_cancelable(frames, path.clone(), GIF_EXPORT_DELAY_CS, token);
+        let salida = handle.join().expect("join").expect("sin cancelar exporta");
+        assert_eq!(salida, path);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..6], b"GIF89a");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gif_export_budget_pre_spawn_falla_rapido_sin_archivo() {
+        // 65 frames > tope 64: el hilo devuelve el budget sin codificar.
+        let many = synthetic_frames(GIF_EXPORT_MAX_FRAMES + 1);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("grafito_gif_budget_{}_{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gordo.gif");
+        let inicio = std::time::Instant::now();
+        let handle = spawn_gif_export(many, path.clone(), GIF_EXPORT_DELAY_CS);
+        let salida = handle.join().expect("join");
+        assert_eq!(
+            salida,
+            Err(GifExportError::TooManyFrames {
+                got: GIF_EXPORT_MAX_FRAMES + 1
+            })
+        );
+        assert!(
+            inicio.elapsed() < std::time::Duration::from_secs(5),
+            "budget pre-spawn debe ser rápido"
+        );
+        assert!(!path.exists(), "budget excedido no deja archivo");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -4831,8 +5111,10 @@ pub fn render_morph_frames(
         )));
     }
     let n = puntos.len();
-    // Viewport validado (clamp 64..=4096, nunca panic).
-    let ((w, h), _) = resolve_native_size(width, height);
+    // Viewport validado + preflight con el n real (clamp 64..=4096 + tope
+    // 64 MiB, nunca panic). El chequeo `Oom` de abajo queda como segunda
+    // barrera honesta con `Err` (esta fn sí devuelve `Result`).
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, n);
     match estimate_frames_bytes(w, h, n) {
         Some(got) if got <= PARAMETRIC_MAX_BYTES => {}
         other => {

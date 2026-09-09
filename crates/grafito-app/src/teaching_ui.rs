@@ -14,7 +14,6 @@ use crate::whiteboard_ui::WhiteboardSession;
 use egui::{Color32, Stroke};
 use grafito_pedagogy::{
     Curriculum, Exercise, ExerciseGenerator, LearningObjective, PedagogicalLevel, TeachingSession,
-    TeachingTopic,
 };
 use grafito_profile::StudentProfile;
 use grafito_ui::assistant::{humanize_prose_text, AssistantBlocksCache, AssistantMessageBlock};
@@ -792,69 +791,13 @@ pub(crate) fn whiteboard_elements_for_hint(
     elems
 }
 
-/// Mapeo puro tópico→pista sin strings (reemplazo del string-matching frágil).
-///
-/// No toca otros crates: vive en la Piel y sólo consume `TeachingTopic`.
-/// El dispatch por enum hace imposibles los errores de tipeo del `hint`
-/// (`hint_for_topic` queda como compat legacy para hints libres).
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
-pub fn pista_para_topico(topico: &TeachingTopic) -> WhiteboardHint {
-    match topico {
-        TeachingTopic::Derivada => WhiteboardHint::Secante,
-        TeachingTopic::Integral => WhiteboardHint::Area,
-        TeachingTopic::Limite => WhiteboardHint::Limite,
-        TeachingTopic::Funcion => WhiteboardHint::Funcion,
-        TeachingTopic::Pitagoras => WhiteboardHint::Pitagoras,
-        TeachingTopic::Fraccion => WhiteboardHint::Fraccion,
-        TeachingTopic::Vector => WhiteboardHint::Vector,
-        TeachingTopic::Matriz => WhiteboardHint::Matriz,
-        TeachingTopic::Probabilidad => WhiteboardHint::Probabilidad,
-        TeachingTopic::Serie => WhiteboardHint::Serie,
-        TeachingTopic::Ecuacion => WhiteboardHint::Ecuacion,
-        TeachingTopic::Trigonometria => WhiteboardHint::Trigonometria,
-        TeachingTopic::Conica => WhiteboardHint::Conica,
-        TeachingTopic::General(_) => WhiteboardHint::General,
-    }
-}
-
-/// Elementos de pizarra para un tópico (puro, sin I/O, sin strings).
-///
-/// Despacha por [`pista_para_topico`]; para `Ecuacion` usa la parábola base
-/// (la variante «dos rectas» sólo existe en el path legacy con hint textual).
-/// `General` devuelve un único texto acotado con el `label` del tópico.
-#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
-pub fn elementos_para_topico(topico: &TeachingTopic) -> Vec<grafito_whiteboard::WhiteboardElement> {
-    let mut elems = Vec::new();
-    match pista_para_topico(topico) {
-        WhiteboardHint::Vacio | WhiteboardHint::Libre => {}
-        WhiteboardHint::Secante => push_secante_hint(&mut elems),
-        WhiteboardHint::Fraccion => push_fraccion_hint(&mut elems),
-        WhiteboardHint::Vector => push_vector_hint(&mut elems),
-        WhiteboardHint::Matriz => push_matriz_hint(&mut elems),
-        WhiteboardHint::Probabilidad => push_probabilidad_hint(&mut elems),
-        WhiteboardHint::Serie => push_serie_hint(&mut elems),
-        WhiteboardHint::Trigonometria => push_trigonometria_hint(&mut elems),
-        WhiteboardHint::Conica => push_conica_hint(&mut elems),
-        WhiteboardHint::Ecuacion => {
-            push_ecuacion_hint(&mut elems, "");
-        }
-        WhiteboardHint::Limite => push_limite_hint(&mut elems),
-        WhiteboardHint::Funcion => push_funcion_hint(&mut elems),
-        WhiteboardHint::Area => push_area_hint(&mut elems),
-        WhiteboardHint::Pitagoras => push_pitagoras_hint(&mut elems),
-        WhiteboardHint::General => {
-            use grafito_whiteboard::WhiteboardElement;
-            let etiqueta: String = topico.label().chars().take(40).collect();
-            elems.push(WhiteboardElement::Text {
-                at: (-1.5, 0.0),
-                text: etiqueta,
-                size: 14.0,
-            });
-        }
-    }
-    elems
-}
-
+// M3-8: las ex `pista_para_topico` / `elementos_para_topico` (dispatch por
+// enum `TeachingTopic`, muerto con `#[allow(dead_code)]` + TODO) se
+// borraron: el único núcleo vivo es `whiteboard_elements_for_hint` (dispatch
+// por hint textual vía `hint_for_topic`, usado por `hidratar_pizarra` y
+// cubierto en `tests.rs::whiteboard_elements_for_hint_covers_all_teaching_topics`).
+// Si el enum tipado vuelve a hacer falta, reintroducirlo SOBRE este núcleo
+// (sin duplicar los `push_*`), no al lado.
 // ── Tarjeta de ejercicio inline (pura + dibujo acotado) ──
 
 /// Tope de caracteres del enunciado para que la tarjeta no desborde.
@@ -1813,6 +1756,9 @@ impl TeachingUiState {
     pub fn clear(&mut self) {
         let old = std::mem::take(&mut self.anim_textures);
         self.retired_anim_textures.retire_all(old);
+        // M3-7: avanzar un tick acá también (el `clear` suele correr sin
+        // draw posterior): la gracia no queda congelada si nadie dibuja.
+        let _ = self.retired_anim_textures.tick();
         self.cached_hash = 0;
         self.cached_len = 0;
         self.anim_frames = None;
@@ -1823,6 +1769,8 @@ impl TeachingUiState {
         // liberación real es el drop diferido vía la cola de retiro.
         let old = std::mem::take(&mut self.anim_textures);
         self.retired_anim_textures.retire_all(old);
+        // M3-7: idem `clear` (tick para no congelar la gracia).
+        let _ = self.retired_anim_textures.tick();
         self.cached_hash = 0;
         self.cached_len = 0;
         self.anim_frames = None;
@@ -1831,6 +1779,8 @@ impl TeachingUiState {
     fn clear_anim_textures_only(&mut self, _ctx: Option<&egui::Context>) {
         let old = std::mem::take(&mut self.anim_textures);
         self.retired_anim_textures.retire_all(old);
+        // M3-7: idem `clear` (tick para no congelar la gracia).
+        let _ = self.retired_anim_textures.tick();
         self.cached_hash = 0;
         self.cached_len = 0;
     }
@@ -2559,6 +2509,44 @@ mod tests {
     }
 
     #[test]
+    fn ensure_10_reemplazos_sin_dibujar_acota_retired() {
+        // M3-7: 10× `ensure` con frames nuevos y SIN `tick` (sin draw):
+        // cada reemplazo retira el set viejo pero `pending()` nunca supera
+        // el tope y el set visible sigue siendo el último.
+        use crate::anim_ui::RETENTION_MAX_PENDING;
+        let ctx = egui::Context::default();
+        let mut estado = TeachingUiState {
+            anim_frames: Some(vec![frame_solido(egui::Color32::RED)]),
+            ..Default::default()
+        };
+        estado.ensure_textures(&ctx);
+        assert_eq!(estado.retired_anim_textures.pending(), 0);
+        for ronda in 0..10u8 {
+            estado.anim_frames = Some(vec![frame_solido(egui::Color32::from_rgb(
+                ronda * 25,
+                100,
+                200,
+            ))]);
+            estado.ensure_textures(&ctx);
+            assert_eq!(estado.anim_textures.len(), 1);
+            assert!(
+                estado.retired_anim_textures.pending() <= RETENTION_MAX_PENDING,
+                "ronda {ronda}: pending sin cota"
+            );
+        }
+        assert_eq!(
+            estado.retired_anim_textures.pending(),
+            10,
+            "10 reemplazos sin tick = 10 retenidos (bajo el tope 96)"
+        );
+        // Y la gracia los drena sin dibujar de más.
+        for _ in 0..TEXTURE_GRACE_FRAMES {
+            estado.reap_retired_anim_textures();
+        }
+        assert_eq!(estado.retired_anim_textures.pending(), 0);
+    }
+
+    #[test]
     fn hash_esquinas_y_centro_detecta_reemplazo_con_cota_o1() {
         // Frente hash O(píxeles): la huella solo mira len+size+4 esquinas+
         // centro por frame — el tick por frame dibujado no recorre píxeles.
@@ -2615,94 +2603,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pista_para_topico_cubre_13_variantes_cerradas() {
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Derivada),
-            WhiteboardHint::Secante
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Integral),
-            WhiteboardHint::Area
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Limite),
-            WhiteboardHint::Limite
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Funcion),
-            WhiteboardHint::Funcion
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Pitagoras),
-            WhiteboardHint::Pitagoras
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Fraccion),
-            WhiteboardHint::Fraccion
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Vector),
-            WhiteboardHint::Vector
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Matriz),
-            WhiteboardHint::Matriz
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Probabilidad),
-            WhiteboardHint::Probabilidad
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Serie),
-            WhiteboardHint::Serie
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Ecuacion),
-            WhiteboardHint::Ecuacion
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Trigonometria),
-            WhiteboardHint::Trigonometria
-        );
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::Conica),
-            WhiteboardHint::Conica
-        );
-    }
-
-    #[test]
-    fn pista_para_topico_general_cae_en_general() {
-        assert_eq!(
-            pista_para_topico(&TeachingTopic::General("estrellas".into())),
-            WhiteboardHint::General
-        );
-    }
-
-    #[test]
-    fn elementos_para_topico_no_vacios_para_las_14_variantes() {
-        let topicos = [
-            TeachingTopic::Derivada,
-            TeachingTopic::Integral,
-            TeachingTopic::Limite,
-            TeachingTopic::Funcion,
-            TeachingTopic::Pitagoras,
-            TeachingTopic::Fraccion,
-            TeachingTopic::Vector,
-            TeachingTopic::Matriz,
-            TeachingTopic::Probabilidad,
-            TeachingTopic::Serie,
-            TeachingTopic::Ecuacion,
-            TeachingTopic::Trigonometria,
-            TeachingTopic::Conica,
-            TeachingTopic::General("origami".into()),
-        ];
-        for t in topicos {
-            let elems = elementos_para_topico(&t);
-            assert!(!elems.is_empty(), "tópico sin elementos: {t:?}");
-        }
-    }
-
+    // M3-8: los tests del dispatch tipado muerto se borraron con las fns;
+    // el núcleo vivo se cubre en `hint_legacy_*` + `tests.rs::whiteboard_*`.
     #[test]
     fn hint_legacy_derivada_da_secante_e_integral_da_area() {
         assert_eq!(

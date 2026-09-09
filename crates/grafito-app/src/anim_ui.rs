@@ -188,6 +188,12 @@ pub fn animation_reference_sentence() -> &'static str {
 /// `request_repaint`. Nunca bajar de 2.
 pub const TEXTURE_GRACE_FRAMES: u32 = 3;
 
+/// Tope de handles retenidos (M3-7): ráfagas de reemplazos sin dibujar
+/// (10× `ensure` sin `tick`) no pueden crecer sin cota. Al superar el
+/// tope, `retire` evicta el más viejo primero (el más próximo a expirar;
+/// best-effort bajo presión, documentado). 96 = 2 playlists completas.
+pub const RETENTION_MAX_PENDING: usize = 96;
+
 const _: () = assert!(TEXTURE_GRACE_FRAMES >= 2);
 
 #[derive(Debug)]
@@ -214,7 +220,14 @@ impl<T> RetentionQueue<T> {
     }
 
     /// Retira un handle: no se libera hasta `TEXTURE_GRACE_FRAMES` ticks.
+    ///
+    /// Acotado (M3-7): si ya hay `RETENTION_MAX_PENDING` retenidos, evicta
+    /// el más viejo (drop inmediato, best-effort bajo presión) para que
+    /// `pending()` nunca supere el tope.
     pub fn retire(&mut self, item: T) {
+        if self.entries.len() >= RETENTION_MAX_PENDING {
+            self.entries.remove(0);
+        }
         self.entries.push(RetentionEntry {
             item,
             frames_left: TEXTURE_GRACE_FRAMES,
@@ -405,5 +418,45 @@ mod tests {
         let listos = cola.tick();
         assert_eq!(listos.len(), 3);
         assert!(cola.is_empty());
+    }
+
+    // ── M3-7: cota pending<=96 ──────────────────────────────────────────
+    #[test]
+    fn retencion_acota_pending_96_y_drena_con_tick() {
+        assert_eq!(RETENTION_MAX_PENDING, 96);
+        let mut cola = RetentionQueue::new();
+        // Ráfaga sin dibujar: 200 retiros sin un solo tick.
+        for id in 0_u64..200 {
+            cola.retire(id);
+        }
+        assert_eq!(
+            cola.pending(),
+            RETENTION_MAX_PENDING,
+            "pending nunca supera el tope"
+        );
+        // Evicción del más viejo: sobreviven los últimos 96.
+        let mut vistos: Vec<u64> = Vec::new();
+        for _ in 0..TEXTURE_GRACE_FRAMES {
+            vistos.extend(cola.tick());
+        }
+        vistos.sort_unstable();
+        let esperados: Vec<u64> = (104_u64..200).collect();
+        assert_eq!(vistos, esperados, "evicta viejos, conserva recientes");
+        assert!(cola.is_empty());
+    }
+
+    #[test]
+    fn retencion_10_reemplazos_sin_tick_no_crece_sin_cota() {
+        // 10× reemplazo de set (48 thumbs) sin tick: 480 retiros.
+        let mut cola = RetentionQueue::new();
+        for ronda in 0_u64..10 {
+            cola.retire_all((0_u64..48).map(|i| ronda * 1000 + i).collect());
+            assert!(
+                cola.pending() <= RETENTION_MAX_PENDING,
+                "ronda {ronda}: pending {} > tope",
+                cola.pending()
+            );
+        }
+        assert_eq!(cola.pending(), RETENTION_MAX_PENDING);
     }
 }

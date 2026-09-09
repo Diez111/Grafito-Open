@@ -929,6 +929,24 @@ pub const CANONICAL_TEMPLATES: &[&str] = &[
     "universal",
 ];
 
+/// Plantillas que el worker Python SÍ renderiza (M3-10, espejo documentado
+/// de `ALLOW_TEMPLATE` en
+/// `crates/grafito-anim/engines/python/manim_engine/__main__.py`).
+///
+/// NO se puede generar desde `CANONICAL_TEMPLATES`: el worker es otro
+/// proceso con 6 renderers (sin euler/fourier/logistic/gradient/mobius,
+/// que solo existen en el nativo Rust). La divergencia queda pineada en
+/// `python_worker_divergencia_11_vs_6_documentada`: si el worker suma una
+/// plantilla, este const + el test Python `TestParidad11_6` gritan juntos.
+pub const PYTHON_WORKER_TEMPLATES: &[&str] = &[
+    "derivative-slope",
+    "integral-area",
+    "taylor-series",
+    "conformal-map",
+    "pitagoras",
+    "universal",
+];
+
 /// Sanitiza un template libre a uno conocido; si es desconocido, elige por concepto.
 pub fn sanitize_template(template: &str, concept: &str) -> String {
     let t = template.trim().to_lowercase();
@@ -1250,6 +1268,35 @@ mod universal_tests {
             sanitize_template("limit-epsilon", "derivada"),
             "derivative-slope"
         );
+    }
+
+    #[test]
+    fn python_worker_divergencia_11_vs_6_documentada() {
+        // M3-10: el worker Python no se genera desde CANONICAL (otro
+        // proceso, 6 renderers). La divergencia explícita es exactamente
+        // estas 5 nativo-solo; pedirlas al worker da `error unsupported`
+        // (ver `CANONICAL_SOLO_RUST` + `preparar_render` en `__main__.py`
+        // y `TestParidad11_6` del lado Python).
+        use std::collections::BTreeSet;
+        assert_eq!(PYTHON_WORKER_TEMPLATES.len(), 6);
+        let canon: BTreeSet<&&str> = CANONICAL_TEMPLATES.iter().collect();
+        let worker: BTreeSet<&&str> = PYTHON_WORKER_TEMPLATES.iter().collect();
+        assert!(
+            worker.is_subset(&canon),
+            "el worker no puede ofrecer fuera de CANONICAL"
+        );
+        let solo_rust: BTreeSet<&&str> = canon.difference(&worker).copied().collect();
+        let esperadas: BTreeSet<&str> = [
+            "euler",
+            "fourier",
+            "logistic-bifurcation",
+            "gradient-field",
+            "mobius-transform",
+        ]
+        .into_iter()
+        .collect();
+        let obtenidas: BTreeSet<&str> = solo_rust.into_iter().copied().collect();
+        assert_eq!(obtenidas, esperadas, "divergencia 11/6 pineada");
     }
 }
 
