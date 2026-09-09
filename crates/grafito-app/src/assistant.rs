@@ -3963,14 +3963,49 @@ impl GrafitoApp {
         self.assistant.working_memory = self.profile.working_memory.clone();
         // I/O en background thread para no bloquear UI (60fps)
         spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
-        // BKT en memoria (barato): próxima rama o texto honesto si no hay.
-        let proximo = self
-            .profile
-            .recommend_next()
-            .first()
-            .map(|rama| rama.name.clone());
-        let texto = match proximo {
-            Some(nombre) => format!("Próximo tema sugerido: {nombre}, che."),
+        // R5: próximo paso data-driven (BKT + scheduler + CAT) o texto honesto.
+        // `recommend_next` ya prioriza vencidas (due) y menor dominio; acá se
+        // enriquece con la etiqueta de calibración (N del historial) y el
+        // siguiente ítem CAT ponderado por entropía BKT. Sin datos de rama el
+        // selector delega en el CAT puro; sin ramas el fallback es el actual.
+        let proxima = self.profile.recommend_next().first().map(|rama| {
+            (
+                rama.id.clone(),
+                rama.name.clone(),
+                rama.bkt_p_known,
+                rama.next_review_epoch.is_some_and(|vence| vence <= epoch),
+            )
+        });
+        let texto = match proxima {
+            Some((id, nombre, p_known, due)) => {
+                let n = self
+                    .profile
+                    .history
+                    .iter()
+                    .filter(|ev| {
+                        ev.branch_id == id
+                            && matches!(
+                                ev.kind,
+                                grafito_profile::StudyEventKind::Correct
+                                    | grafito_profile::StudyEventKind::Incorrect
+                            )
+                    })
+                    .count();
+                let etiqueta = grafito_pedagogy::bkt::etiqueta_calibracion(n);
+                // theta 0.0 = prior EAP (el perfil no guarda θ CAT; honesto).
+                // Sin IDs administrados persistidos se parte de banco fresco.
+                let item =
+                    grafito_pedagogy::exam::cat_select_next_bkt(&id, &[], 0.0, Some(p_known), due);
+                match item {
+                    Some(it) => {
+                        let pregunta: String = it.question.chars().take(140).collect();
+                        format!(
+                            "Próximo tema sugerido: {nombre} ({etiqueta}). Para afianzar: {pregunta}"
+                        )
+                    }
+                    None => format!("Próximo tema sugerido: {nombre} ({etiqueta}), che."),
+                }
+            }
             None => {
                 "Seguí practicando este tema y pedí otro ejercicio cuando quieras, che.".to_string()
             }

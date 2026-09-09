@@ -521,6 +521,83 @@ pub fn cat_select_next(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// CAT + BKT + scheduler (R5): selección por máxima información ponderada
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Boost multiplicativo cuando el scheduler marca la rama como vencida (due).
+///
+/// Documentado y acotado: 1.5x prioriza el repaso sin ahogar la información
+/// del ítem (un ítem con info 0 sigue en 0).
+pub const CAT_DUE_BOOST: f64 = 1.5;
+
+/// Entropía binaria normalizada de `p_known` en 0..=1 (0 = certeza, 1 = duda
+/// máxima en p=0.5). Pura, NaN-safe: no finitos → 1.0 (máxima duda, honesto).
+///
+/// Mide cuánta incertidumbre le queda al BKT sobre la skill: cerca de 0 o 1
+/// ya sabemos; cerca de 0.5 el próximo ejercicio informa más.
+pub fn entropia_bkt(p_known: f64) -> f64 {
+    if !p_known.is_finite() {
+        return 1.0;
+    }
+    let p = p_known.clamp(0.0, 1.0);
+    if p <= f64::EPSILON || p >= 1.0 - f64::EPSILON {
+        return 0.0;
+    }
+    let h = -(p * p.ln() + (1.0 - p) * (1.0 - p).ln()) / std::f64::consts::LN_2;
+    h.clamp(0.0, 1.0)
+}
+
+/// Selecciona el próximo ítem no administrado por máxima información CAT
+/// ponderada con BKT y scheduler (R5, puro, sin I/O).
+///
+/// - `theta`: habilidad EAP actual (si no finita, usa 0.0 = prior).
+/// - `p_known`: `Some(P(sabe) BKT)` cuando hay datos de la rama; `None` si no
+///   hay datos → delega en `cat_select_next` puro (camino actual, sin regresión).
+/// - `due`: ¿el scheduler marca repaso vencido? Multiplica por `CAT_DUE_BOOST`.
+///
+/// Peso: `Fisher(θ) × (0.5 + entropía(p_known)) × (due ? 1.5 : 1.0)`.
+/// La entropía pesa la duda BKT pero nunca anula Fisher (piso 0.5): con
+/// certeza total igual se elige el ítem más informativo del CAT.
+///
+/// Retorna `None` si todo está administrado. Banco aún CAT-lite demo (ver
+/// encabezado): la ponderación es real, la calibración empírica N>200 sigue
+/// pendiente y se etiqueta vía `crate::bkt::etiqueta_calibracion`.
+pub fn cat_select_next_bkt(
+    branch_id: &str,
+    administered_ids: &[String],
+    theta: f64,
+    p_known: Option<f64>,
+    due: bool,
+) -> Option<IrtItem> {
+    let Some(p) = p_known else {
+        return cat_select_next(branch_id, administered_ids, theta);
+    };
+    if !p.is_finite() {
+        return cat_select_next(branch_id, administered_ids, theta);
+    }
+    let theta = if theta.is_finite() { theta } else { 0.0 };
+    let peso_bkt = 0.5 + entropia_bkt(p);
+    let boost = if due { CAT_DUE_BOOST } else { 1.0 };
+    let bank = cat_bank(branch_id);
+    let mut best: Option<(f64, IrtItem)> = None;
+    for item in bank {
+        if administered_ids.contains(&item.id) {
+            continue;
+        }
+        let score = irt_fisher(theta, item.a, item.b, item.c) * peso_bkt * boost;
+        match &best {
+            None => best = Some((score, item)),
+            Some((best_score, _)) => {
+                if score > *best_score {
+                    best = Some((score, item));
+                }
+            }
+        }
+    }
+    best.map(|(_, it)| it)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Stopping rule — error estándar de θ
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -767,5 +844,74 @@ mod tests {
         let all_c_same = bank.iter().all(|it| (it.c - 0.25).abs() < 1e-9);
         assert!(!all_a_same, "a no debe ser constante 1.2 (demo honesto)");
         assert!(!all_c_same, "c no debe ser constante 0.25");
+    }
+
+    #[test]
+    fn entropia_bkt_extremos_y_duda_maxima() {
+        // Certeza en los bordes, duda máxima en 0.5, honesto con NaN.
+        assert!((entropia_bkt(0.5) - 1.0).abs() < 1e-9);
+        assert!(entropia_bkt(0.0) < 1e-9);
+        assert!(entropia_bkt(1.0) < 1e-9);
+        assert!((entropia_bkt(f64::NAN) - 1.0).abs() < 1e-9);
+        assert!((entropia_bkt(f64::INFINITY) - 1.0).abs() < 1e-9);
+        // Simétrica y monótona hacia 0.5.
+        assert!((entropia_bkt(0.3) - entropia_bkt(0.7)).abs() < 1e-9);
+        assert!(entropia_bkt(0.3) > entropia_bkt(0.1));
+        assert!(entropia_bkt(0.7) > entropia_bkt(0.9));
+        assert_eq!(CAT_DUE_BOOST, 1.5);
+    }
+
+    #[test]
+    fn cat_bkt_sin_datos_delega_sin_regresion() {
+        // Sin BKT (None o no finito) el camino es idéntico al CAT puro.
+        for branch in ["algebra", "calculus", "general"] {
+            let puro = cat_select_next(branch, &[], 0.0).expect("banco no vacío");
+            let via_bkt_none = cat_select_next_bkt(branch, &[], 0.0, None, false).expect("delega");
+            assert_eq!(puro.id, via_bkt_none.id, "None debe delegar en {branch}");
+            let via_bkt_nan =
+                cat_select_next_bkt(branch, &[], 0.0, Some(f64::NAN), true).expect("delega");
+            assert_eq!(puro.id, via_bkt_nan.id, "NaN debe delegar en {branch}");
+        }
+        // Banco agotado -> None en ambos caminos.
+        let bank = cat_bank("stats");
+        let todos: Vec<String> = bank.iter().map(|it| it.id.clone()).collect();
+        assert!(cat_select_next("stats", &todos, 0.0).is_none());
+        assert!(cat_select_next_bkt("stats", &todos, 0.0, Some(0.5), true).is_none());
+    }
+
+    #[test]
+    fn cat_bkt_con_datos_pondera_maxima_informacion() {
+        // Con BKT el elegido maximiza Fisher × (0.5+entropía) × boost.
+        let branch = "calculus";
+        let theta = 0.3;
+        let p = 0.45;
+        let due = true;
+        let elegido = cat_select_next_bkt(branch, &[], theta, Some(p), due).expect("ítem");
+        let bank = cat_bank(branch);
+        let peso = 0.5 + entropia_bkt(p);
+        let mejor = bank
+            .iter()
+            .map(|it| irt_fisher(theta, it.a, it.b, it.c) * peso * CAT_DUE_BOOST)
+            .fold(0.0_f64, f64::max);
+        let score_elegido =
+            irt_fisher(theta, elegido.a, elegido.b, elegido.c) * peso * CAT_DUE_BOOST;
+        assert!(
+            (score_elegido - mejor).abs() < 1e-12,
+            "debe elegir máxima info ponderada: {score_elegido} vs {mejor}"
+        );
+        // Con certeza total (p=1) el piso 0.5 mantiene el mismo ganador que Fisher puro.
+        let puro = cat_select_next(branch, &[], theta).expect("puro");
+        let certeza = cat_select_next_bkt(branch, &[], theta, Some(1.0), false).expect("certeza");
+        assert_eq!(puro.id, certeza.id);
+        // No repite administrados.
+        let segundo = cat_select_next_bkt(
+            branch,
+            std::slice::from_ref(&elegido.id),
+            theta,
+            Some(p),
+            due,
+        )
+        .expect("segundo");
+        assert_ne!(elegido.id, segundo.id);
     }
 }

@@ -30,6 +30,23 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Cotas presupuestadas del EM offline (R5: todo en consts, cero mágicos).
+///
+/// - `MAX_EM_ITER`: tope de iteraciones Baum-Welch.
+/// - `MAX_EM_SKILLS`: tope de secuencias (skills/estudiantes) por ajuste.
+/// - `MAX_EM_SEQ_LEN`: tope de eventos por secuencia (suficiente para BKT;
+///   secuencias más largas se truncan determinísticamente por prefijo).
+/// - `MAX_EM_EVENTS`: tope total de eventos por ajuste (OOM-safe).
+pub const MAX_EM_ITER: usize = 50;
+pub const MAX_EM_SKILLS: usize = 128;
+pub const MAX_EM_SEQ_LEN: usize = 200;
+pub const MAX_EM_EVENTS: usize = 10_000;
+
+/// Mínimo muestral para promocionar un prior a "estimado" (espejo honesto de
+/// `grafito-profile::stubs::EM_MIN_SAMPLES`; const local para no crear ciclo
+/// pedagogy→profile).
+pub const EM_MIN_RESPUESTAS_CALIBRADO: usize = 200;
+
 /// Parámetros BKT por habilidad (idem `grafito-profile::BktParams` pero local para
 /// no crear ciclo pedagogy→profile).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,7 +186,11 @@ pub fn fit_params_em_priors_heuristico(params: &BktParams, tasa_acierto: f64) ->
 /// - `histories`: slice de secuencias, cada una `Vec<bool>` donde `true=correcto`.
 ///   Múltiples secuencias = múltiples estudiantes o sesiones del mismo LO.
 /// - `initial`: prior inicial (ej. `BktParams::default()` o por LO).
-/// - `max_iter`: tope de iteraciones (típico 20..50); corta antes si Δ<1e-4.
+/// - `max_iter`: tope de iteraciones (clamp 1..=`MAX_EM_ITER`); corta antes si Δ<1e-4.
+///
+/// Cotas R5 (deterministas, por prefijo): como máximo `MAX_EM_SKILLS`
+/// secuencias, `MAX_EM_SEQ_LEN` eventos por secuencia y `MAX_EM_EVENTS`
+/// eventos totales. El excedente se ignora (no error, no pánico).
 ///
 /// Retorna `BktParams` reestimados. Si `histories` vacío o todo vacío, retorna
 /// `initial` clonado sin cambios.
@@ -185,8 +206,25 @@ pub fn fit_params_em(histories: &[Vec<bool>], initial: &BktParams, max_iter: usi
     if histories.is_empty() {
         return initial.clone();
     }
-    let filtered: Vec<&Vec<bool>> = histories.iter().filter(|v| !v.is_empty()).collect();
-    if filtered.is_empty() {
+    // Cotas R5 por prefijo (determinista): skills, largo y eventos totales.
+    let mut capped: Vec<&[bool]> = Vec::new();
+    let mut eventos = 0usize;
+    for seq in histories
+        .iter()
+        .filter(|v| !v.is_empty())
+        .take(MAX_EM_SKILLS)
+    {
+        if eventos >= MAX_EM_EVENTS {
+            break;
+        }
+        let take = seq.len().min(MAX_EM_SEQ_LEN).min(MAX_EM_EVENTS - eventos);
+        if take == 0 {
+            continue;
+        }
+        capped.push(&seq[..take]);
+        eventos += take;
+    }
+    if capped.is_empty() {
         return initial.clone();
     }
     let mut params = initial.clone();
@@ -196,7 +234,7 @@ pub fn fit_params_em(histories: &[Vec<bool>], initial: &BktParams, max_iter: usi
     params.p_guess = params.p_guess.clamp(0.05, 0.95);
     params.p_slip = params.p_slip.clamp(0.05, 0.95);
 
-    let max_iter = max_iter.clamp(1, 100);
+    let max_iter = max_iter.clamp(1, MAX_EM_ITER);
 
     for _ in 0..max_iter {
         let mut num_init = 0.0_f64;
@@ -213,7 +251,7 @@ pub fn fit_params_em(histories: &[Vec<bool>], initial: &BktParams, max_iter: usi
         let p_guess = params.p_guess;
         let p_slip = params.p_slip;
 
-        for seq in &filtered {
+        for seq in &capped {
             let n = seq.len();
             // forward
             let mut alpha = vec![[0.0_f64; 2]; n];
@@ -330,6 +368,58 @@ pub fn fit_params_em(histories: &[Vec<bool>], initial: &BktParams, max_iter: usi
         params.p_slip = params.p_slip.clamp(0.05, 0.95);
     }
     params
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Procedencia honesta — prior vs estimado (R5)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Origen honesto de unos `BktParams`: prior heurístico o estimado con datos.
+///
+/// Nunca finge calibración: con menos de `EM_MIN_RESPUESTAS_CALIBRADO`
+/// respuestas el modelo es `Prior` aunque haya corrido EM encima.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrigenParams {
+    /// Prior heurístico por nivel (sin datos suficientes).
+    Prior,
+    /// Estimado por EM con `n_respuestas` respuestas reales (≥200).
+    Estimado { n_respuestas: usize },
+}
+
+impl OrigenParams {
+    /// Clasifica por cantidad de respuestas (puro, sin I/O).
+    #[must_use]
+    pub fn desde_n(n_respuestas: usize) -> Self {
+        if n_respuestas >= EM_MIN_RESPUESTAS_CALIBRADO {
+            Self::Estimado { n_respuestas }
+        } else {
+            Self::Prior
+        }
+    }
+
+    /// ¿Hay datos suficientes para hablar de calibración?
+    #[must_use]
+    pub fn calibrado(self) -> bool {
+        matches!(self, Self::Estimado { .. })
+    }
+
+    /// Etiqueta en español para UI y reportes. Nunca vacía.
+    #[must_use]
+    pub fn etiqueta(self) -> String {
+        match self {
+            Self::Estimado { n_respuestas } => {
+                format!("estimado con {n_respuestas} respuestas")
+            }
+            Self::Prior => "prior (sin calibrar)".to_string(),
+        }
+    }
+}
+
+/// Etiqueta honesta directa por conteo: `"estimado con N respuestas"` si
+/// `n >= EM_MIN_RESPUESTAS_CALIBRADO`, si no `"prior (sin calibrar)"`.
+#[must_use]
+pub fn etiqueta_calibracion(n_respuestas: usize) -> String {
+    OrigenParams::desde_n(n_respuestas).etiqueta()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -740,6 +830,113 @@ mod tests {
         assert!(expected_calibration_error(&[0.5], &[true], 0).is_none());
         // prob fuera rango
         assert!(expected_calibration_error(&[2.0], &[true], 5).is_none());
+    }
+
+    #[test]
+    fn em_respeta_cotas_consts() {
+        // R5: cotas públicas y con los valores presupuestados.
+        assert_eq!(MAX_EM_ITER, 50);
+        assert_eq!(MAX_EM_SKILLS, 128);
+        assert_eq!(MAX_EM_EVENTS, 10_000);
+        assert_eq!(MAX_EM_SEQ_LEN, 200);
+        assert_eq!(EM_MIN_RESPUESTAS_CALIBRADO, 200);
+        let initial = BktParams::default();
+
+        // max_iter gigante se clamp a MAX_EM_ITER (mismo resultado que 50).
+        let histories = sample_histories(
+            &BktParams {
+                p_init: 0.2,
+                p_learn: 0.5,
+                p_guess: 0.25,
+                p_slip: 0.15,
+            },
+            8,
+            10,
+            0xCAFE_F00D_1234_5678,
+        );
+        let con_tope = fit_params_em(&histories, &initial, 50);
+        let con_exceso = fit_params_em(&histories, &initial, 5000);
+        assert_eq!(con_tope, con_exceso);
+
+        // Secuencia larga se trunca a MAX_EM_SEQ_LEN (prefijo determinista).
+        let larga = vec![vec![true; 500]];
+        let recorte = vec![vec![true; MAX_EM_SEQ_LEN]];
+        assert_eq!(
+            fit_params_em(&larga, &initial, 10),
+            fit_params_em(&recorte, &initial, 10)
+        );
+
+        // Más skills que el tope: solo las primeras MAX_EM_SKILLS cuentan.
+        let muchas: Vec<Vec<bool>> = (0..200).map(|i| vec![i % 2 == 0; 5]).collect();
+        assert_eq!(
+            fit_params_em(&muchas, &initial, 10),
+            fit_params_em(&muchas[..MAX_EM_SKILLS], &initial, 10)
+        );
+
+        // Entrada enorme no cuelga y valida (determinista entre corridas).
+        let enorme: Vec<Vec<bool>> = (0..300).map(|i| vec![i % 3 == 0; 500]).collect();
+        let a = fit_params_em(&enorme, &initial, 50);
+        let b = fit_params_em(&enorme, &initial, 50);
+        assert_eq!(a, b);
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn origen_params_etiqueta_honesta() {
+        // Sin datos: prior, nunca finge calibración.
+        assert_eq!(OrigenParams::desde_n(0), OrigenParams::Prior);
+        assert_eq!(OrigenParams::desde_n(199), OrigenParams::Prior);
+        assert!(!OrigenParams::desde_n(50).calibrado());
+        assert_eq!(etiqueta_calibracion(50), "prior (sin calibrar)");
+        // Con N suficiente: estimado con N explícito.
+        assert!(OrigenParams::desde_n(200).calibrado());
+        assert_eq!(
+            OrigenParams::desde_n(200),
+            OrigenParams::Estimado { n_respuestas: 200 }
+        );
+        assert_eq!(etiqueta_calibracion(200), "estimado con 200 respuestas");
+        assert_eq!(etiqueta_calibracion(1500), "estimado con 1500 respuestas");
+        assert!(!etiqueta_calibracion(0).is_empty());
+    }
+
+    #[test]
+    fn em_converge_sintetico_con_params_conocidos() {
+        // R5: EM recupera params sintéticos conocidos dentro de ±0.15 con
+        // muestra grande (200 secuencias × 16 eventos = 3200 respuestas).
+        let truth = BktParams {
+            p_init: 0.25,
+            p_learn: 0.35,
+            p_guess: 0.20,
+            p_slip: 0.12,
+        };
+        let histories = sample_histories(&truth, 200, 16, 0xE515_7ED0_CA1B_1BAD);
+        let fitted = fit_params_em(&histories, &BktParams::default(), MAX_EM_ITER);
+        assert!(fitted.validate().is_ok());
+        const TOL: f64 = 0.15;
+        assert!(
+            (fitted.p_init - truth.p_init).abs() <= TOL,
+            "p_init {} vs truth {}",
+            fitted.p_init,
+            truth.p_init
+        );
+        assert!(
+            (fitted.p_learn - truth.p_learn).abs() <= TOL,
+            "p_learn {} vs truth {}",
+            fitted.p_learn,
+            truth.p_learn
+        );
+        assert!(
+            (fitted.p_guess - truth.p_guess).abs() <= TOL,
+            "p_guess {} vs truth {}",
+            fitted.p_guess,
+            truth.p_guess
+        );
+        assert!(
+            (fitted.p_slip - truth.p_slip).abs() <= TOL,
+            "p_slip {} vs truth {}",
+            fitted.p_slip,
+            truth.p_slip
+        );
     }
 
     #[test]
