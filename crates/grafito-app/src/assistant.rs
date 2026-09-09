@@ -5161,7 +5161,7 @@ impl GrafitoApp {
                                 if is_session_or_account_error(&error) {
                                     eprintln!("grafito: session-fallback muse-spark 400-sesion [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
                                     self.notify(
-                                        "El tier gratuito de Spark pide sesión válida; sigo con DeepSeek Flash sin cambiar tu modelo.",
+                                        "Spark gratis exige sesión del proveedor y no se pudo abrir (no es tu clave); sigo con DeepSeek Flash sin cambiar tu modelo.",
                                         ToastKind::Info,
                                     );
                                 } else {
@@ -5444,6 +5444,13 @@ impl GrafitoApp {
             return Ok(None);
         }
         if let Some(key) = self.assistant_runtime.key_for(self.assistant.provider) {
+            // Diagnóstico sin secretos: fuente + largo, jamás el contenido.
+            // Sirve para distinguir "clave no guardada" de "proveedor la rechaza".
+            eprintln!(
+                "grafito: clave {:?} desde sesión en memoria, largo {}",
+                self.assistant.provider,
+                key.len()
+            );
             return Ok(Some(key));
         }
         // Custom requiere clave propia (assistant-custom); no reutiliza OpenCodeGo.
@@ -5452,6 +5459,11 @@ impl GrafitoApp {
             Ok(Some(key)) => {
                 self.assistant.key_available = true;
                 self.assistant.key_status_checked = true;
+                eprintln!(
+                    "grafito: clave {:?} desde llavero/sistema, largo {}",
+                    self.assistant.provider,
+                    key.len()
+                );
                 self.assistant_runtime
                     .remember_key(self.assistant.provider, key.clone());
                 Ok(Some(key))
@@ -5581,10 +5593,16 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     } else if is_session_or_account_error(error) {
         // 400 de sesión/cuenta/clave (tier gratuito sin sesión válida, 2026-09-08):
         // dice QUÉ pasa + qué hacer, sin el genérico "Revisá Configuración → Modelo".
+        // OJO: MissingSessionID NO es tu clave (llega bien; lo exige el servidor
+        // para el tier gratuito). InvalidApiKey SÍ puede ser clave mala/expirada.
         // Si hubo fallback, el aviso de una línea ya dijo que se reintentó con
         // deepseek; este mensaje es para cuando NO hubo fallback (corrección en
         // curso, otro modelo, o reintento ya consumido).
-        "El proveedor pide sesión válida para el tier gratuito: revisá tu clave de Zen en Configuración o seguí con deepseek.".into()
+        if error.contains("MissingSessionID") {
+            "Spark gratis exige sesión del proveedor y no se pudo abrir (no es tu clave). Probá el modelo pago `muse-spark-1.3`, reintentá en un rato, o seguí con deepseek.".into()
+        } else {
+            "El proveedor rechazó la cuenta o la clave (revisá tu clave de Zen en Configuración) o seguí con deepseek.".into()
+        }
     } else if error.contains("cancel") {
         "La consulta remota se canceló antes de completarse.".into()
     } else if error.contains("401") || error.contains("403") || error.contains("unauthorized") {
@@ -7476,7 +7494,7 @@ mod tests {
             );
             let mensaje = remote_error_message(&error, "muse-spark-1.3");
             assert!(
-                mensaje.contains("sesión válida") && mensaje.contains("clave de Zen"),
+                mensaje.contains("clave") || mensaje.contains("deepseek"),
                 "mensaje rioplatense ante {tipo}: {mensaje}"
             );
             assert!(
@@ -7484,11 +7502,11 @@ mod tests {
                 "nada de genérico ante {tipo}: {mensaje}"
             );
         }
-        // Mensaje ante el 400 real: qué pasa + qué hacer, sin genérico.
+        // Mensaje ante el 400 real: no culpa a tu clave + qué hacer, sin genérico.
         let mensaje = remote_error_message(body_400, "muse-spark-1.3-contributor-free");
         assert!(
-            mensaje.contains("sesión válida") && mensaje.contains("clave de Zen"),
-            "mensaje rioplatense: {mensaje}"
+            mensaje.contains("no es tu clave"),
+            "no culpa a la clave: {mensaje}"
         );
         assert!(
             mensaje.contains("deepseek"),
