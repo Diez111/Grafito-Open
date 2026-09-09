@@ -12536,7 +12536,7 @@ fn handle_remaining_cas_commands(
                 Ok(v) => v,
                 Err(e) => return CommandOutcome::Error(format!("DelaunayTriangulation: {e}")),
             };
-            let tris = match grafito_geometry::discrete::delaunay_fan_triangulation(&points) {
+            let tris = match grafito_geometry::discrete::delaunay_triangulation(&points) {
                 Ok(t) => t,
                 Err(e) => return CommandOutcome::Error(format!("DelaunayTriangulation: {e}")),
             };
@@ -12548,7 +12548,7 @@ fn handle_remaining_cas_commands(
             }
             input_text.clear();
             return CommandOutcome::Message(format!(
-                "DelaunayTriangulation: {} triángulos (fan) creados",
+                "DelaunayTriangulation: {} triángulos creados",
                 count
             ));
         }
@@ -12557,14 +12557,15 @@ fn handle_remaining_cas_commands(
                 Ok(v) => v,
                 Err(e) => return CommandOutcome::Error(format!("Voronoi: {e}")),
             };
-            let cells = match grafito_geometry::discrete::voronoi_stub_cells(&points) {
+            let cells = match grafito_geometry::discrete::voronoi_cells(&points) {
                 Ok(c) => c,
                 Err(e) => return CommandOutcome::Error(format!("Voronoi: {e}")),
             };
-            // Stub: genera polígonos circulares aproximados y un punto en el sitio
+            // Dual real: un polígono por celda (recortada a la envolvente) y
+            // un punto visible en el sitio (si no existe ya)
             for (idx, ring) in cells.iter().enumerate() {
                 let center = points[idx];
-                // Crea un polígono que aproxima la celda
+                // Crea un polígono por celda
                 let poly = PolygonObj::new(ring.clone());
                 insert_command_object!(document, GeoObject::Polygon(poly));
                 // Además un punto visible en el sitio (si no existe ya)
@@ -12572,9 +12573,8 @@ fn handle_remaining_cas_commands(
             }
             input_text.clear();
             return CommandOutcome::Message(format!(
-                "Voronoi: {} celdas stub (círculos {} lados) creadas",
-                cells.len(),
-                cells.first().map(|c| c.len()).unwrap_or(0)
+                "Voronoi: {} celdas (dual de Delaunay, recortadas a la envolvente) creadas",
+                cells.len()
             ));
         }
         "MinimumSpanningTree" => {

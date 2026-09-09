@@ -304,8 +304,8 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Discreta
 
 - `ConvexHull[puntos]`: Calcula la envolvente convexa de un conjunto de puntos con monotone chain; respeta MAX_POLYGON_VERTICES 8192 y MAX_DISCRETE_COUNT 10000. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `ConvexHull[{p1, p2, ...}]`. Alias: `convex_hull`, `envolventeconvexa`, `envolvente`.
-- `DelaunayTriangulation[puntos]`: Triangulación Delaunay aproximada por abanico (fan) desde el primer punto; stub que no falla y respeta límites discretos. Mutacion: crea objetos. Riesgo: medio. Alias: `delaunay`, `triangulaciondelaunay`.
-- `Voronoi[puntos]`: Diagrama de Voronoi aproximado: genera círculos stub en cada sitio cuando no hay motor exacto disponible. Mutacion: crea objetos. Riesgo: medio. Alias: `cellsvoronoi`, `diagramaVoronoi`.
+- `DelaunayTriangulation[puntos]`: Triangulación de Delaunay real con predicados exactos (círculo vacío); crea un polígono por triángulo. Hasta 8192 puntos; duplicados o colineales dan error honesto. Mutacion: crea objetos. Riesgo: medio. Alias: `delaunay`, `triangulaciondelaunay`.
+- `Voronoi[puntos]`: Diagrama de Voronoi dual de la Delaunay real, con celdas recortadas a la envolvente de los sitios; crea un polígono por celda. Hasta 8192 puntos; duplicados o colineales dan error honesto. Mutacion: crea objetos. Riesgo: medio. Alias: `cellsvoronoi`, `diagramaVoronoi`.
 - `MinimumSpanningTree[puntos]`: Árbol de expansión mínima por Prim euclídeo O(n²); crea segmentos entre puntos. Mutacion: crea objetos. Riesgo: medio. Alias: `mst`, `arbolminimo`, `kruskal`.
 - `TravelingSalesman[puntos]`: Tour del viajante aproximado por vecino más cercano (greedy) empezando en el primer punto. Mutacion: crea objetos. Riesgo: medio. Alias: `tsp`, `viajante`, `travellingsalesman`.
 - `ShortestDistance[punto, objeto]`: Distancia euclídea mínima entre un punto y un objeto (punto/segmento/círculo/polígono). Valida finitud y límites. Mutacion: solo consulta. Riesgo: bajo. Alias: `distanciaminima`, `closestdistance`, `distanciamínima`.

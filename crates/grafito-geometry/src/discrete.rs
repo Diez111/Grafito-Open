@@ -13,6 +13,9 @@
 //! - Delaunay: triangulación de Delaunay real vía `spade` (`bulk_load`) con
 //!   predicados exactos; `spade` deduplica silencioso → se valida duplicado
 //!   exacto antes y se devuelve `Err` honesto.
+//! - Voronoi: dual exacto de la triangulación (`voronoi_faces` de `spade`);
+//!   celdas no acotadas recortadas a la envolvente de los sitios (Sutherland–
+//!   Hodgman); 1 punto → envolvente, 2 puntos → bisección, colineales → `Err`.
 
 // allow clippy uninlined for consistency with crate
 #![allow(clippy::uninlined_format_args)]
@@ -359,7 +362,7 @@ fn find_exact_duplicate(points: &[Point2]) -> Option<(usize, usize, Point2)> {
 /// Usa `spade::DelaunayTriangulation::bulk_load` (Hilbert sort + Bowyer-Watson
 /// con `robust::orient2d`/`incircle`) — O(n log n) esperado. MSRV ≤1.92
 /// verificado: `spade 2.10` / `robust 1.1` son `edition 2021` sin `rust-version`.
-pub fn delaunay_fan_triangulation(points: &[Point2]) -> Result<Vec<[Point2; 3]>, DiscreteError> {
+pub fn delaunay_triangulation(points: &[Point2]) -> Result<Vec<[Point2; 3]>, DiscreteError> {
     validate_finite_points(points)?;
     if points.len() < 3 {
         return Err(DiscreteError(
@@ -402,17 +405,119 @@ pub fn delaunay_fan_triangulation(points: &[Point2]) -> Result<Vec<[Point2; 3]>,
     Ok(tris)
 }
 
-/// Voronoi aproximado stub: para cada sitio genera un polígono circular
-/// (aprox. 16 lados) centrado en el punto con radio 10% de la extensión
-/// del conjunto o 0.5 si la extensión es nula.
-pub fn voronoi_stub_cells(points: &[Point2]) -> Result<Vec<Vec<Point2>>, DiscreteError> {
+/// Diagrama de Voronoi dual de la triangulación de Delaunay real.
+///
+/// Cada celda es el polígono de puntos más cercanos a su sitio; las celdas no
+/// acotadas se recortan a la envolvente axis-aligned de los sitios expandida
+/// un 10% (mínimo 0.1), así todo vértice devuelto es finito y dibujable como
+/// `Polygon`. La celda `i` corresponde al sitio `points[i]`.
+///
+/// # Casos y honestidad
+/// - 0 puntos → `Err`; 1 punto → su envolvente (cuadrado lado 1).
+/// - 2 puntos → la envolvente partida por el bisector exacto.
+/// - `n ≥ 3` colineales (0 caras internas en `spade`) → `Err` honesto.
+/// - Duplicados exactos o `n > 8192` → `Err` (igual que Delaunay).
+/// - Circuncentro no finito (configuración casi degenerada fuera de rango
+///   `f64`) → `Err` honesto en vez de polígono con `inf`.
+pub fn voronoi_cells(points: &[Point2]) -> Result<Vec<Vec<Point2>>, DiscreteError> {
     validate_finite_points(points)?;
     if points.is_empty() {
         return Err(DiscreteError(
             "Voronoi: se requieren al menos 1 punto".into(),
         ));
     }
-    // Radio heurístico.
+    if points.len() > MAX_POLYGON_VERTICES_LOCAL {
+        return Err(DiscreteError(format!(
+            "Voronoi: {} puntos excede el máximo {}",
+            points.len(),
+            MAX_POLYGON_VERTICES_LOCAL
+        )));
+    }
+    if let Some((ia, ib, p)) = find_exact_duplicate(points) {
+        return Err(DiscreteError(format!(
+            "Voronoi: puntos duplicados en índices {} y {} ({}, {})",
+            ia, ib, p.x, p.y
+        )));
+    }
+    let (bb_min, bb_max) = voronoi_clip_bbox(points);
+    if points.len() == 1 {
+        return Ok(vec![vec![
+            Point2::new(bb_min.x, bb_min.y),
+            Point2::new(bb_max.x, bb_min.y),
+            Point2::new(bb_max.x, bb_max.y),
+            Point2::new(bb_min.x, bb_max.y),
+        ]]);
+    }
+    if points.len() == 2 {
+        return voronoi_two_point_split(points[0], points[1], bb_min, bb_max);
+    }
+
+    let spade_pts: Vec<SpadePoint2<f64>> =
+        points.iter().map(|p| SpadePoint2::new(p.x, p.y)).collect();
+    let triangulation = DelaunayTriangulation::<SpadePoint2<f64>>::bulk_load(spade_pts)
+        .map_err(|e| DiscreteError(format!("Voronoi: error de inserción: {e:?}")))?;
+    if triangulation.num_inner_faces() == 0 {
+        return Err(DiscreteError(
+            "Voronoi: puntos colineales (sin área); probá ConvexHull o MinimumSpanningTree".into(),
+        ));
+    }
+    let mut cells: Vec<Option<Vec<Point2>>> = (0..points.len()).map(|_| None).collect();
+    // `voronoi_faces` va en orden DCEL interno, no en orden de entrada: se
+    // mapea cada cara a su sitio por coordenadas exactas (los vértices se
+    // almacenan tal cual; duplicados ya rechazados arriba).
+    let mut index_by_bits: std::collections::HashMap<(u64, u64), usize> =
+        std::collections::HashMap::with_capacity(points.len());
+    for (idx, p) in points.iter().enumerate() {
+        index_by_bits.insert((p.x.to_bits(), p.y.to_bits()), idx);
+    }
+    for face in triangulation.voronoi_faces() {
+        let site = face.as_delaunay_vertex().position();
+        let site = Point2::new(site.x, site.y);
+        let Some(&idx) = index_by_bits.get(&(site.x.to_bits(), site.y.to_bits())) else {
+            return Err(DiscreteError(format!(
+                "Voronoi: sitio ({}, {}) sin índice",
+                site.x, site.y
+            )));
+        };
+        let cell = voronoi_face_cell(&face, site, bb_min, bb_max)?;
+        if cell.len() < 3 {
+            return Err(DiscreteError(format!(
+                "Voronoi: celda degenerada en sitio ({}, {})",
+                site.x, site.y
+            )));
+        }
+        if cell.len() > MAX_POLYGON_VERTICES_LOCAL {
+            return Err(DiscreteError(format!(
+                "Voronoi: celda con {} vértices excede el máximo {}",
+                cell.len(),
+                MAX_POLYGON_VERTICES_LOCAL
+            )));
+        }
+        if cells[idx].is_some() {
+            return Err(DiscreteError(format!(
+                "Voronoi: sitio duplicado ({}, {})",
+                site.x, site.y
+            )));
+        }
+        cells[idx] = Some(cell);
+    }
+    let mut out: Vec<Vec<Point2>> = Vec::with_capacity(points.len());
+    for (idx, cell) in cells.into_iter().enumerate() {
+        match cell {
+            Some(c) => out.push(c),
+            None => {
+                return Err(DiscreteError(format!(
+                    "Voronoi: sin celda para el sitio índice {idx}"
+                )))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Envolvente de recorte: min/max de los sitios expandida un 10% del mayor
+/// lado (mínimo 0.1). Para 1 punto es un cuadrado de lado 1 centrado en él.
+fn voronoi_clip_bbox(points: &[Point2]) -> (Point2, Point2) {
     let mut min_x = points[0].x;
     let mut max_x = points[0].x;
     let mut min_y = points[0].y;
@@ -423,26 +528,490 @@ pub fn voronoi_stub_cells(points: &[Point2]) -> Result<Vec<Vec<Point2>>, Discret
         min_y = min_y.min(p.y);
         max_y = max_y.max(p.y);
     }
-    let span = (max_x - min_x).hypot(max_y - min_y);
-    let radius = if span.is_finite() && span > 1e-9 {
-        (span * 0.08).clamp(0.1, 5.0)
-    } else {
-        0.5
-    };
-    let sides = 16usize;
-    let mut cells: Vec<Vec<Point2>> = Vec::with_capacity(points.len());
-    for &center in points {
-        let mut ring: Vec<Point2> = Vec::with_capacity(sides);
-        for k in 0..sides {
-            let theta = 2.0 * std::f64::consts::PI * (k as f64) / (sides as f64);
-            ring.push(Point2::new(
-                center.x + radius * theta.cos(),
-                center.y + radius * theta.sin(),
-            ));
-        }
-        cells.push(ring);
+    let span = (max_x - min_x).max(max_y - min_y).max(1.0);
+    let margin = (span * 0.1).max(0.1);
+    // Entradas ya validadas finitas; el margen es finito por construcción.
+    (
+        Point2::new(min_x - margin, min_y - margin),
+        Point2::new(max_x + margin, max_y + margin),
+    )
+}
+
+/// Caso `n == 2`: parte la envolvente por el bisector del segmento `a–b`.
+fn voronoi_two_point_split(
+    a: Point2,
+    b: Point2,
+    bb_min: Point2,
+    bb_max: Point2,
+) -> Result<Vec<Vec<Point2>>, DiscreteError> {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len2 = dx * dx + dy * dy;
+    if !len2.is_finite() || len2 <= 0.0 {
+        return Err(DiscreteError(
+            "Voronoi: segmento degenerado en bisección".into(),
+        ));
     }
-    Ok(cells)
+    // Recta bisectriz: n·(p - m) = 0 con n = b - a, m = punto medio.
+    let mx = 0.5 * (a.x + b.x);
+    let my = 0.5 * (a.y + b.y);
+    let corners = [
+        Point2::new(bb_min.x, bb_min.y),
+        Point2::new(bb_max.x, bb_min.y),
+        Point2::new(bb_max.x, bb_max.y),
+        Point2::new(bb_min.x, bb_max.y),
+    ];
+    // Recorta el rectángulo contra cada semiplano por Sutherland–Hodgman con
+    // la recta como único borde: se implementa vía `clip_polygon_to_halfplane`.
+    let corner_vec = corners.to_vec();
+    let cell_a = clip_polygon_to_halfplane(&corner_vec, mx, my, dx, dy, true);
+    let cell_b = clip_polygon_to_halfplane(&corner_vec, mx, my, dx, dy, false);
+    for (cell, label) in [&cell_a, &cell_b].into_iter().zip(["a", "b"]) {
+        if cell.len() < 3 {
+            return Err(DiscreteError(format!(
+                "Voronoi: bisección degenerada en lado {label}"
+            )));
+        }
+    }
+    Ok(vec![cell_a, cell_b])
+}
+
+/// Recorta un polígono contra el semiplano `dx*(x-mx)+dy*(y-my) <= 0`
+/// (`keep_negative == true`) o `>= 0`. Aritmética `f64` directa: las
+/// entradas son finitas y la salida se valida finita en el llamante.
+fn clip_polygon_to_halfplane(
+    poly: &[Point2],
+    mx: f64,
+    my: f64,
+    dx: f64,
+    dy: f64,
+    keep_negative: bool,
+) -> Vec<Point2> {
+    let inside = |p: &Point2| {
+        let v = dx * (p.x - mx) + dy * (p.y - my);
+        if keep_negative {
+            v <= 0.0
+        } else {
+            v >= 0.0
+        }
+    };
+    let mut out: Vec<Point2> = Vec::with_capacity(poly.len() + 1);
+    if poly.is_empty() {
+        return out;
+    }
+    let mut prev = poly[poly.len() - 1];
+    let mut prev_in = inside(&prev);
+    for &cur in poly {
+        let cur_in = inside(&cur);
+        if cur_in {
+            if !prev_in {
+                // Entrada: intersección del segmento prev→cur con la recta.
+                let denom = dx * (cur.x - prev.x) + dy * (cur.y - prev.y);
+                if denom != 0.0 {
+                    let t = -(dx * (prev.x - mx) + dy * (prev.y - my)) / denom;
+                    out.push(Point2::new(
+                        prev.x + t * (cur.x - prev.x),
+                        prev.y + t * (cur.y - prev.y),
+                    ));
+                }
+            }
+            out.push(cur);
+        } else if prev_in {
+            // Salida: intersección del segmento prev→cur con la recta.
+            let denom = dx * (cur.x - prev.x) + dy * (cur.y - prev.y);
+            if denom != 0.0 {
+                let t = -(dx * (prev.x - mx) + dy * (prev.y - my)) / denom;
+                out.push(Point2::new(
+                    prev.x + t * (cur.x - prev.x),
+                    prev.y + t * (cur.y - prev.y),
+                ));
+            }
+        }
+        prev = cur;
+        prev_in = cur_in;
+    }
+    out
+}
+
+/// Construye la celda de una cara de Voronoi: cadena de circuncentros
+/// internos más, si la celda es no acotada, los 2 impactos de sus rayos en
+/// la envolvente; el conjunto se recorta a la envolvente (que inserta las
+/// esquinas necesarias).
+fn voronoi_face_cell(
+    face: &spade::handles::VoronoiFace<'_, SpadePoint2<f64>, (), (), ()>,
+    site: Point2,
+    bb_min: Point2,
+    bb_max: Point2,
+) -> Result<Vec<Point2>, DiscreteError> {
+    let edges: Vec<_> = face.adjacent_edges().collect();
+    if edges.is_empty() {
+        return Err(DiscreteError(format!(
+            "Voronoi: cara sin aristas en sitio ({}, {})",
+            site.x, site.y
+        )));
+    }
+    // Vértices internos en orden + rayos de borde (origen, dirección unitaria).
+    let mut ring: Vec<Point2> = Vec::with_capacity(edges.len() + 2);
+    // (origen, dirección): saliente con `to` exterior, entrante con `from` exterior.
+    let mut ray_out: Option<(Point2, Point2)> = None;
+    let mut ray_in: Option<(Point2, Point2)> = None;
+    for edge in &edges {
+        let from = edge.from().position();
+        let to = edge.to().position();
+        match (from, to) {
+            (Some(f), Some(_)) => {
+                let fp = Point2::new(f.x, f.y);
+                if !fp.x.is_finite() || !fp.y.is_finite() {
+                    return Err(DiscreteError(format!(
+                        "Voronoi: circuncentro no finito en sitio ({}, {})",
+                        site.x, site.y
+                    )));
+                }
+                if ring.last().is_none_or(|last: &Point2| *last != fp) {
+                    ring.push(fp);
+                }
+            }
+            (Some(f), None) => {
+                let origin = Point2::new(f.x, f.y);
+                let dir = voronoi_ray_dir(edge, site, origin)?;
+                if ring.last().is_none_or(|last: &Point2| *last != origin) {
+                    ring.push(origin);
+                }
+                ray_out = Some((origin, dir));
+            }
+            (None, Some(t)) => {
+                let end = Point2::new(t.x, t.y);
+                if !end.x.is_finite() || !end.y.is_finite() {
+                    return Err(DiscreteError(format!(
+                        "Voronoi: circuncentro no finito en sitio ({}, {})",
+                        site.x, site.y
+                    )));
+                }
+                // Dirección de viaje del rayo entrante (hacia `end`).
+                let dir = voronoi_ray_dir(edge, site, end)?;
+                ray_in = Some((end, dir));
+            }
+            (None, None) => {
+                // Solo si todos los sitios son colineales; ya rechazado arriba.
+                return Err(DiscreteError(format!(
+                    "Voronoi: arista totalmente no acotada en sitio ({}, {})",
+                    site.x, site.y
+                )));
+            }
+        }
+    }
+    // Cierra duplicado final == inicial (cara cerrada).
+    if ring.len() >= 2 {
+        if let (Some(first), Some(last)) = (ring.first(), ring.last()) {
+            if first == last {
+                ring.pop();
+            }
+        }
+    }
+    match (ray_out, ray_in) {
+        (None, None) => Ok(ring),
+        (Some((o_out, d_out)), Some((e_in, d_in))) => {
+            // El anillo es una rotación de la cadena entrada→salida: se rota
+            // para que empiece en la entrada y termine en la salida, así el
+            // polígono sigue el borde (…→salida→H_out→H_in→entrada→…).
+            if let Some(pos) = ring.iter().position(|v| *v == e_in) {
+                ring.rotate_left(pos);
+            } else {
+                return Err(DiscreteError(format!(
+                    "Voronoi: cadena rota en sitio ({}, {})",
+                    site.x, site.y
+                )));
+            }
+            if ring.last().is_none_or(|last| *last != o_out) {
+                return Err(DiscreteError(format!(
+                    "Voronoi: cadena rota en sitio ({}, {})",
+                    site.x, site.y
+                )));
+            }
+            let h_out = ray_bbox_hit(o_out, d_out, bb_min, bb_max).ok_or_else(|| {
+                DiscreteError(format!(
+                    "Voronoi: rayo sin impacto en sitio ({}, {})",
+                    site.x, site.y
+                ))
+            })?;
+            // El rayo entrante viaja en `d_in`; su punto lejano es `end - d_in*L`.
+            let neg = Point2::new(-d_in.x, -d_in.y);
+            let h_in = ray_bbox_hit(e_in, neg, bb_min, bb_max).ok_or_else(|| {
+                DiscreteError(format!(
+                    "Voronoi: rayo sin impacto en sitio ({}, {})",
+                    site.x, site.y
+                ))
+            })?;
+            // Anillo: cadena interna + impactos; entre ambos impactos se rutea
+            // por el borde de la envolvente (con las esquinas intermedias),
+            // y el recorte final solo pule polvo de coma flotante. Se prueban
+            // ambos sentidos del borde y se queda el que contiene al sitio.
+            let mut chosen: Option<Vec<Point2>> = None;
+            for ccw in [false, true] {
+                let mut poly: Vec<Point2> = Vec::with_capacity(ring.len() + 6);
+                poly.extend_from_slice(&ring);
+                poly.push(h_out);
+                poly.extend(bbox_path_corners(h_out, h_in, bb_min, bb_max, ccw).into_iter());
+                poly.push(h_in);
+                // Dedup consecutivos exactos + cierre.
+                let mut dedup: Vec<Point2> = Vec::with_capacity(poly.len());
+                for v in poly {
+                    if dedup.last().is_none_or(|last: &Point2| *last != v) {
+                        dedup.push(v);
+                    }
+                }
+                if dedup.len() >= 2 {
+                    if let (Some(first), Some(last)) = (dedup.first(), dedup.last()) {
+                        if first == last {
+                            dedup.pop();
+                        }
+                    }
+                }
+                let clipped = clip_polygon_to_bbox(&dedup, bb_min, bb_max);
+                if clipped.len() >= 3 && point_in_polygon(site, &clipped) {
+                    chosen = Some(clipped);
+                    break;
+                }
+            }
+            chosen.ok_or_else(|| {
+                DiscreteError(format!(
+                    "Voronoi: celda no cerrable en sitio ({}, {})",
+                    site.x, site.y
+                ))
+            })
+        }
+        _ => Err(DiscreteError(format!(
+            "Voronoi: celda con un solo rayo en sitio ({}, {})",
+            site.x, site.y
+        ))),
+    }
+}
+
+/// Dirección unitaria de viaje de un rayo de Voronoi no acotado.
+///
+/// `spade` ordena `adjacent_edges` en sentido horario: la cara queda a la
+/// derecha de sus aristas dirigidas; se elige el signo de `direction_vector`
+/// que deja al sitio a la derecha (`cross < 0`). Si el sitio es colineal
+/// con el rayo (`cross == 0`), se apunta lejos del sitio.
+fn voronoi_ray_dir(
+    edge: &spade::handles::DirectedVoronoiEdge<'_, SpadePoint2<f64>, (), (), ()>,
+    site: Point2,
+    origin: Point2,
+) -> Result<Point2, DiscreteError> {
+    let d = edge.direction_vector();
+    let len = d.x.hypot(d.y);
+    if !len.is_finite() || len <= 0.0 {
+        return Err(DiscreteError(format!(
+            "Voronoi: dirección degenerada en sitio ({}, {})",
+            site.x, site.y
+        )));
+    }
+    let ux = d.x / len;
+    let uy = d.y / len;
+    let sx = site.x - origin.x;
+    let sy = site.y - origin.y;
+    let cross = ux * sy - uy * sx;
+    if cross < 0.0 {
+        Ok(Point2::new(ux, uy))
+    } else if cross > 0.0 {
+        Ok(Point2::new(-ux, -uy))
+    } else {
+        // Colineal: lejos del sitio (o sentido base si coinciden).
+        let dot = ux * sx + uy * sy;
+        if dot < 0.0 {
+            Ok(Point2::new(ux, uy))
+        } else if dot > 0.0 {
+            Ok(Point2::new(-ux, -uy))
+        } else {
+            Ok(Point2::new(ux, uy))
+        }
+    }
+}
+
+/// Impacto de un rayo (origen estrictamente dentro de la envolvente,
+/// dirección finita no nula) con el borde de la envolvente (método de losas).
+fn ray_bbox_hit(origin: Point2, dir: Point2, bb_min: Point2, bb_max: Point2) -> Option<Point2> {
+    if !origin.x.is_finite() || !origin.y.is_finite() || !dir.x.is_finite() || !dir.y.is_finite() {
+        return None;
+    }
+    if dir.x == 0.0 && dir.y == 0.0 {
+        return None;
+    }
+    let mut t_min = f64::NEG_INFINITY;
+    let mut t_max = f64::INFINITY;
+    // Eje x.
+    if dir.x == 0.0 {
+        if origin.x < bb_min.x || origin.x > bb_max.x {
+            return None;
+        }
+    } else {
+        let t1 = (bb_min.x - origin.x) / dir.x;
+        let t2 = (bb_max.x - origin.x) / dir.x;
+        t_min = t_min.max(t1.min(t2));
+        t_max = t_max.min(t1.max(t2));
+    }
+    // Eje y.
+    if dir.y == 0.0 {
+        if origin.y < bb_min.y || origin.y > bb_max.y {
+            return None;
+        }
+    } else {
+        let t1 = (bb_min.y - origin.y) / dir.y;
+        let t2 = (bb_max.y - origin.y) / dir.y;
+        t_min = t_min.max(t1.min(t2));
+        t_max = t_max.min(t1.max(t2));
+    }
+    if t_max < t_min || t_max <= 0.0 {
+        return None;
+    }
+    let hit = Point2::new(origin.x + dir.x * t_max, origin.y + dir.y * t_max);
+    if !hit.x.is_finite() || !hit.y.is_finite() {
+        return None;
+    }
+    Some(hit)
+}
+
+/// Esquinas de la envolvente entre dos impactos que están en bordes
+/// distintos, recorriendo el borde en sentido antihorario (`ccw`) u horario.
+/// Bordes: 0 abajo, 1 derecha, 2 arriba, 3 izquierda. Si comparten borde, la
+/// cuerda directa basta y no hay esquinas.
+fn bbox_path_corners(
+    h_out: Point2,
+    h_in: Point2,
+    bb_min: Point2,
+    bb_max: Point2,
+    ccw: bool,
+) -> Vec<Point2> {
+    let eps = 1e-9;
+    let on = |v: f64, b: f64| (v - b).abs() <= eps;
+    let mut out_edges: Vec<u8> = Vec::new();
+    let mut in_edges: Vec<u8> = Vec::new();
+    if on(h_out.y, bb_min.y) {
+        out_edges.push(0);
+    }
+    if on(h_out.x, bb_max.x) {
+        out_edges.push(1);
+    }
+    if on(h_out.y, bb_max.y) {
+        out_edges.push(2);
+    }
+    if on(h_out.x, bb_min.x) {
+        out_edges.push(3);
+    }
+    if on(h_in.y, bb_min.y) {
+        in_edges.push(0);
+    }
+    if on(h_in.x, bb_max.x) {
+        in_edges.push(1);
+    }
+    if on(h_in.y, bb_max.y) {
+        in_edges.push(2);
+    }
+    if on(h_in.x, bb_min.x) {
+        in_edges.push(3);
+    }
+    if out_edges.iter().any(|e| in_edges.contains(e)) {
+        return Vec::new();
+    }
+    let Some(&start) = out_edges.first() else {
+        return Vec::new();
+    };
+    let Some(&end) = in_edges.first() else {
+        return Vec::new();
+    };
+    // Esquina entre el borde `e` y el siguiente CCW `(e+1)%4`.
+    let corner_between = |e: u8| -> Point2 {
+        match e {
+            0 => Point2::new(bb_max.x, bb_min.y),
+            1 => Point2::new(bb_max.x, bb_max.y),
+            2 => Point2::new(bb_min.x, bb_max.y),
+            _ => Point2::new(bb_min.x, bb_min.y),
+        }
+    };
+    let mut corners: Vec<Point2> = Vec::new();
+    if ccw {
+        let mut e = start;
+        while e != end {
+            corners.push(corner_between(e));
+            e = (e + 1) % 4;
+            if corners.len() > 4 {
+                break;
+            }
+        }
+    } else {
+        let mut e = start;
+        while e != end {
+            e = (e + 3) % 4;
+            corners.push(corner_between(e));
+            if corners.len() > 4 {
+                break;
+            }
+        }
+    }
+    // Evita duplicar impactos que caen justo en una esquina.
+    corners.retain(|c| {
+        (c.x - h_out.x).hypot(c.y - h_out.y) > eps && (c.x - h_in.x).hypot(c.y - h_in.y) > eps
+    });
+    corners
+}
+
+/// Recorte de Sutherland–Hodgman contra una envolvente axis-aligned.
+/// La región de recorte es convexa, así que el resultado es correcto aunque
+/// el sujeto sea cóncavo; si el sujeto es simple el resultado es simple.
+fn clip_polygon_to_bbox(poly: &[Point2], bb_min: Point2, bb_max: Point2) -> Vec<Point2> {
+    // Guarda qué lado conserva cada pasada: (borde, conserva-menor).
+    let stages: [(u8, bool); 4] = [(0, false), (0, true), (1, false), (1, true)];
+    let mut current: Vec<Point2> = poly.to_vec();
+    for (axis, keep_greater) in stages {
+        if current.is_empty() {
+            break;
+        }
+        let bound = if axis == 0 {
+            if keep_greater {
+                bb_min.x
+            } else {
+                bb_max.x
+            }
+        } else if keep_greater {
+            bb_min.y
+        } else {
+            bb_max.y
+        };
+        let inside = |p: &Point2| {
+            let v = if axis == 0 { p.x } else { p.y };
+            if keep_greater {
+                v >= bound
+            } else {
+                v <= bound
+            }
+        };
+        let intersect = |a: &Point2, b: &Point2| {
+            let denom = if axis == 0 { b.x - a.x } else { b.y - a.y };
+            if denom == 0.0 {
+                return *a;
+            }
+            let t = (bound - if axis == 0 { a.x } else { a.y }) / denom;
+            Point2::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
+        };
+        let mut next: Vec<Point2> = Vec::with_capacity(current.len() + 1);
+        let mut prev = current[current.len() - 1];
+        let mut prev_in = inside(&prev);
+        for &cur in &current {
+            let cur_in = inside(&cur);
+            if cur_in {
+                if !prev_in {
+                    next.push(intersect(&prev, &cur));
+                }
+                next.push(cur);
+            } else if prev_in {
+                next.push(intersect(&prev, &cur));
+            }
+            prev = cur;
+            prev_in = cur_in;
+        }
+        current = next;
+    }
+    current
 }
 
 // ---------------------------------------------------------------------------
@@ -718,7 +1287,7 @@ mod tests {
             Point2::new(1.0, 1.0),
             Point2::new(0.0, 1.0),
         ];
-        let tris = delaunay_fan_triangulation(&pts).expect("delaunay");
+        let tris = delaunay_triangulation(&pts).expect("delaunay");
         assert_eq!(tris.len(), 2, "cuadrado debe dar 2 triángulos");
         // Cada triángulo debe ser subconjunto de pts
         for tri in &tris {
@@ -777,7 +1346,7 @@ mod tests {
             Point2::new(0.0, 2.0),
             Point2::new(1.0, 1.0),
         ];
-        let tris = delaunay_fan_triangulation(&pts).expect("delaunay");
+        let tris = delaunay_triangulation(&pts).expect("delaunay");
         // Fórmula Euler: n=5, h=4 → t = 2n-2-h = 4
         assert_eq!(
             tris.len(),
@@ -830,7 +1399,7 @@ mod tests {
             Point2::new(0.5, 1.0),
             Point2::new(0.5, 1.0), // duplicado exacto
         ];
-        let res = delaunay_fan_triangulation(&pts);
+        let res = delaunay_triangulation(&pts);
         assert!(res.is_err(), "duplicado debe dar Err, got {res:?}");
         let msg = res.unwrap_err().to_string();
         assert!(
@@ -843,7 +1412,7 @@ mod tests {
             Point2::new(0.0, 0.0),
             Point2::new(1.0, 1.0),
         ];
-        assert!(delaunay_fan_triangulation(&pts2).is_err());
+        assert!(delaunay_triangulation(&pts2).is_err());
     }
 
     #[test]
@@ -856,13 +1425,13 @@ mod tests {
             Point2::new(0.0, 2.0),
             Point2::new(1.0, 1.0),
         ];
-        let tris_base = delaunay_fan_triangulation(&base).expect("base");
+        let tris_base = delaunay_triangulation(&base).expect("base");
         for &scale in &[1e-9_f64, 1e9_f64] {
             let scaled: Vec<Point2> = base
                 .iter()
                 .map(|p| Point2::new(p.x * scale, p.y * scale))
                 .collect();
-            let tris = delaunay_fan_triangulation(&scaled).expect("scaled");
+            let tris = delaunay_triangulation(&scaled).expect("scaled");
             assert_eq!(
                 tris.len(),
                 tris_base.len(),
@@ -899,11 +1468,167 @@ mod tests {
         }
     }
 
+    // ---- Voronoi dual ---------------------------------------------------
+
+    fn polygon_area(poly: &[Point2]) -> f64 {
+        if poly.len() < 3 {
+            return 0.0;
+        }
+        let mut acc = 0.0;
+        for i in 0..poly.len() {
+            let a = poly[i];
+            let b = poly[(i + 1) % poly.len()];
+            acc += a.x * b.y - b.x * a.y;
+        }
+        0.5 * acc.abs()
+    }
+
+    fn bbox_of(pts: &[Point2]) -> (Point2, Point2) {
+        voronoi_clip_bbox(pts)
+    }
+
     #[test]
-    fn voronoi_stub_generates_cells() {
-        let pts = vec![Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)];
-        let cells = voronoi_stub_cells(&pts).expect("voronoi");
+    fn voronoi_single_point_is_bbox() {
+        let pts = vec![Point2::new(3.0, -2.0)];
+        let cells = voronoi_cells(&pts).expect("voronoi 1pto");
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].len(), 4);
+        assert!(point_in_polygon(pts[0], &cells[0]));
+    }
+
+    #[test]
+    fn voronoi_two_points_bisector_split() {
+        let pts = vec![Point2::new(0.0, 0.0), Point2::new(2.0, 0.0)];
+        let cells = voronoi_cells(&pts).expect("voronoi 2ptos");
         assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0].len(), 16);
+        for (site, cell) in pts.iter().zip(cells.iter()) {
+            assert!(cell.len() >= 3);
+            assert!(
+                point_in_polygon(*site, cell),
+                "sitio {site:?} debe estar en su celda"
+            );
+            // El otro sitio no debe estar dentro (bisector exacto x=1).
+            let other = pts[(pts.iter().position(|p| p == site).unwrap_or(0) + 1) % 2];
+            assert!(
+                !point_in_polygon(other, cell),
+                "celda invadida por {other:?}"
+            );
+        }
+        // Partición exacta de la envolvente.
+        let (bb_min, bb_max) = bbox_of(&pts);
+        let bb_area = (bb_max.x - bb_min.x) * (bb_max.y - bb_min.y);
+        let sum: f64 = cells.iter().map(|c| polygon_area(c)).sum();
+        assert!(
+            (sum - bb_area).abs() < 1e-9,
+            "áreas {sum} vs envolvente {bb_area}"
+        );
+    }
+
+    #[test]
+    fn voronoi_square_center_dual_consistent() {
+        // Cuadrado + centro: Delaunay da 4 triángulos (test vecino); el dual
+        // debe dar 5 celdas que particionan la envolvente.
+        let pts = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(0.0, 2.0),
+            Point2::new(1.0, 1.0),
+        ];
+        let tris = delaunay_triangulation(&pts).expect("delaunay");
+        assert_eq!(tris.len(), 4);
+        let cells = voronoi_cells(&pts).expect("voronoi");
+        assert_eq!(cells.len(), 5, "5 sitios → 5 celdas, got {cells:?}");
+        // Cada celda contiene estrictamente a su sitio y a ningún otro.
+        for (idx, cell) in cells.iter().enumerate() {
+            assert!(cell.len() >= 3, "celda {idx} degenerada: {cell:?}");
+            assert!(
+                point_in_polygon(pts[idx], cell),
+                "celda {idx} no contiene a su sitio {:?}",
+                pts[idx]
+            );
+            for (jdx, other) in pts.iter().enumerate() {
+                if jdx != idx {
+                    assert!(
+                        !point_in_polygon(*other, cell),
+                        "celda {idx} invadida por sitio {jdx} {other:?}"
+                    );
+                }
+            }
+            // Todo vértice finito y dentro de la envolvente.
+            let (bb_min, bb_max) = bbox_of(&pts);
+            for v in cell {
+                assert!(
+                    v.x.is_finite() && v.y.is_finite(),
+                    "vértice no finito {v:?}"
+                );
+                assert!(
+                    v.x >= bb_min.x - 1e-9
+                        && v.x <= bb_max.x + 1e-9
+                        && v.y >= bb_min.y - 1e-9
+                        && v.y <= bb_max.y + 1e-9,
+                    "vértice {v:?} fuera de la envolvente"
+                );
+            }
+        }
+        // La celda del centro (índice 4) es acotada: diamante de 4 vértices
+        // en los circuncentros (1,0),(2,1),(1,2),(0,1).
+        let center_cell = &cells[4];
+        assert_eq!(
+            center_cell.len(),
+            4,
+            "celda central debe ser diamante, got {center_cell:?}"
+        );
+        for expected in [
+            Point2::new(1.0, 0.0),
+            Point2::new(2.0, 1.0),
+            Point2::new(1.0, 2.0),
+            Point2::new(0.0, 1.0),
+        ] {
+            assert!(
+                center_cell
+                    .iter()
+                    .any(|v| (v.x - expected.x).abs() < 1e-9 && (v.y - expected.y).abs() < 1e-9),
+                "falta circuncentro {expected:?} en {center_cell:?}"
+            );
+        }
+        // Partición exacta: suma de áreas = área de la envolvente.
+        let (bb_min, bb_max) = bbox_of(&pts);
+        let bb_area = (bb_max.x - bb_min.x) * (bb_max.y - bb_min.y);
+        let sum: f64 = cells.iter().map(|c| polygon_area(c)).sum();
+        assert!(
+            (sum - bb_area).abs() < 1e-6,
+            "áreas {sum} vs envolvente {bb_area}"
+        );
+    }
+
+    #[test]
+    fn voronoi_colinear_and_degenerate_are_honest_err() {
+        let colinear = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(3.0, 0.0),
+        ];
+        assert!(voronoi_cells(&colinear).is_err());
+        let dup = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(0.5, 1.0),
+            Point2::new(0.5, 1.0),
+        ];
+        let msg = voronoi_cells(&dup)
+            .expect_err("duplicado debe fallar")
+            .to_string();
+        assert!(msg.contains("duplicado"), "mensaje honesto, fue: {msg}");
+        assert!(voronoi_cells(&[]).is_err());
+        // Sobre el límite 8192 → Err honesto.
+        let big: Vec<Point2> = (0..8193u32)
+            .map(|i| Point2::new((i % 91) as f64 * 0.37, (i / 91) as f64 * 0.53))
+            .collect();
+        let msg = voronoi_cells(&big)
+            .expect_err("límite debe fallar")
+            .to_string();
+        assert!(msg.contains("8192"), "debe citar la cota, fue: {msg}");
     }
 }

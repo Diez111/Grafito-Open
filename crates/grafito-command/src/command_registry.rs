@@ -3287,7 +3287,7 @@ const COMMANDS: &[CommandSpec] = &[
         "DelaunayTriangulation",
         ["delaunay", "triangulaciondelaunay"],
         "Discreta",
-        "Triangulación Delaunay aproximada por abanico (fan) desde el primer punto; stub que no falla y respeta límites discretos.",
+        "Triangulación de Delaunay real con predicados exactos (círculo vacío); crea un polígono por triángulo. Hasta 8192 puntos; duplicados o colineales dan error honesto.",
         CreatesObject,
         Medium,
         true,
@@ -3299,7 +3299,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Voronoi",
         ["cellsvoronoi", "diagramaVoronoi"],
         "Discreta",
-        "Diagrama de Voronoi aproximado: genera círculos stub en cada sitio cuando no hay motor exacto disponible.",
+        "Diagrama de Voronoi dual de la Delaunay real, con celdas recortadas a la envolvente de los sitios; crea un polígono por celda. Hasta 8192 puntos; duplicados o colineales dan error honesto.",
         CreatesObject,
         Medium,
         true,
@@ -5712,6 +5712,9 @@ mod registry_tests {
         // Frente R3.1 (f10-plan-total): +1 visible S sin comando nuevo
         // (Rename pasa de stub oculto a real visible con brazo `run_rename`;
         // conteo total intacto 337, paleta 291→292).
+        // Frente R4 (f10-plan-total): +0 comandos (Delaunay ya era real vía
+        // spade; Voronoi stub→dual real con recorte a envolvente; solo helps
+        // + mensajes + docs/commands.md; conteos intactos 337/292/25).
         assert_eq!(all().len(), 337, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),

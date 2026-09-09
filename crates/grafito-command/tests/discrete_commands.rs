@@ -66,21 +66,73 @@ fn mst_creates_edges() {
 }
 
 #[test]
-fn voronoi_stub_creates_cells() {
+fn voronoi_dual_creates_cells() {
     let mut doc = Document::new();
     let mut inp = "Voronoi[{(0,0),(1,1)}]".to_string();
     let out = process_input(&mut doc, &mut inp);
-    assert!(matches!(out, CommandOutcome::Message(_)), "got {out:?}");
+    assert!(
+        matches!(out, CommandOutcome::Message(ref m) if m.contains("celdas")),
+        "got {out:?}"
+    );
     assert_eq!(count_kind(&doc, "Polygon"), 2);
 }
 
 #[test]
-fn delaunay_fan_creates_triangles() {
+fn delaunay_real_creates_triangles() {
     let mut doc = Document::new();
     let mut inp = "DelaunayTriangulation[{(0,0),(1,0),(0,1),(1,1)}]".to_string();
     let out = process_input(&mut doc, &mut inp);
-    assert!(matches!(out, CommandOutcome::Message(_)), "got {out:?}");
+    assert!(
+        matches!(out, CommandOutcome::Message(ref m) if m.contains("triángulos")),
+        "got {out:?}"
+    );
     assert_eq!(count_kind(&doc, "Polygon"), 2);
+}
+
+#[test]
+fn r4_square_center_dual_consistent() {
+    // Cuadrado + centro: Delaunay real da 4 triángulos (Euler 2n-2-h) y el
+    // Voronoi dual da 5 celdas; mensajes honestos sin "fan"/"stub".
+    let mut doc = Document::new();
+    let mut inp = "DelaunayTriangulation[{(0,0),(2,0),(2,2),(0,2),(1,1)}]".to_string();
+    let out = process_input(&mut doc, &mut inp);
+    match out {
+        CommandOutcome::Message(m) => {
+            assert!(m.contains("4 triángulos"), "fue: {m}");
+            assert!(!m.contains("fan"), "sin resto fan, fue: {m}");
+        }
+        other => panic!("Delaunay debe dar Message, dio {other:?}"),
+    }
+    assert_eq!(count_kind(&doc, "Polygon"), 4);
+    let mut doc2 = Document::new();
+    let mut inp2 = "Voronoi[{(0,0),(2,0),(2,2),(0,2),(1,1)}]".to_string();
+    let out2 = process_input(&mut doc2, &mut inp2);
+    match out2 {
+        CommandOutcome::Message(m) => {
+            assert!(m.contains("5 celdas"), "fue: {m}");
+            assert!(!m.contains("stub"), "sin resto stub, fue: {m}");
+        }
+        other => panic!("Voronoi debe dar Message, dio {other:?}"),
+    }
+    assert_eq!(count_kind(&doc2, "Polygon"), 5);
+}
+
+#[test]
+fn r4_degenerate_inputs_are_honest_errors() {
+    // Duplicados y colineales dan Error honesto, no geometría inventada.
+    for cmd in [
+        "DelaunayTriangulation[{(0,0),(1,0),(0.5,1),(0.5,1)}]",
+        "Voronoi[{(0,0),(1,0),(0.5,1),(0.5,1)}]",
+        "Voronoi[{(0,0),(1,0),(2,0),(3,0)}]",
+    ] {
+        let mut doc = Document::new();
+        let mut inp = cmd.to_string();
+        let out = process_input(&mut doc, &mut inp);
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "{cmd} debe dar Error honesto, dio {out:?}"
+        );
+    }
 }
 
 #[test]
