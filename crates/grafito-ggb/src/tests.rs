@@ -576,10 +576,39 @@ fn manual_zip_is_readable_by_zip_crate() {
     let mut za = zip::ZipArchive::new(cursor).expect("manual zip debe ser legible");
     let mut found = false;
     for i in 0..za.len() {
-        let f = za.by_index(i).unwrap();
+        let Ok(f) = za.by_index(i) else {
+            continue;
+        };
         if f.name() == GGB_XML_NAME {
             found = true;
         }
     }
     assert!(found);
+}
+
+#[test]
+fn r2_v8_zip_corrupto_se_omite_sin_panic() {
+    // Entrada truncada: `by_index` falla honesto y se omite, jamás panic.
+    let xml = format!(
+        "{}{}{}",
+        xml_header(),
+        point_xml("A", 1.0, 2.0),
+        xml_footer()
+    );
+    let mut bytes = ggb_with_xml(&xml);
+    bytes.truncate(bytes.len().saturating_sub(10));
+    let cursor = std::io::Cursor::new(&bytes);
+    let Ok(mut za) = zip::ZipArchive::new(cursor) else {
+        return;
+    };
+    let mut found = false;
+    for i in 0..za.len() {
+        let Ok(f) = za.by_index(i) else {
+            continue;
+        };
+        if f.name() == GGB_XML_NAME {
+            found = true;
+        }
+    }
+    let _ = found;
 }

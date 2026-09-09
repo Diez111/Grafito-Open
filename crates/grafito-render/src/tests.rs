@@ -553,4 +553,27 @@ mod tests {
         assert!(crate::quadric_ellipsoid_params(&vacia).is_none());
         assert!(crate::quadric_uses_placeholder(&vacia));
     }
+
+    #[test]
+    fn r2_v6_density_u32_max_da_none_sin_panic() {
+        assert!(crate::phase_portrait_capacity_for_density(u32::MAX).is_none());
+        assert_eq!(
+            crate::phase_portrait_capacity_for_density(40),
+            Some(41 * 41)
+        );
+        assert_eq!(crate::phase_portrait_capacity_for_density(5), Some(36));
+    }
+
+    #[test]
+    fn r2_v7_perm_corrupta_da_none_sin_panic() {
+        assert!(crate::apply_quadric_axis_permutation([5, 0, 0], [1.0, 2.0, 3.0]).is_none());
+        assert_eq!(
+            crate::apply_quadric_axis_permutation([0, 1, 2], [1.0, 2.0, 3.0]),
+            Some([1.0, 2.0, 3.0])
+        );
+        assert_eq!(
+            crate::apply_quadric_axis_permutation([2, 0, 1], [1.0, 2.0, 3.0]),
+            Some([2.0, 3.0, 1.0])
+        );
+    }
 }

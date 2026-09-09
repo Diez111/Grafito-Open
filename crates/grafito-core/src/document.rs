@@ -96,6 +96,12 @@ pub struct LiveSequenceBinding {
 /// Presupuestos para secuencias vivas.
 pub const MAX_LIVE_SEQUENCES: usize = 64;
 pub const MAX_LIVE_SEQUENCE_LENGTH: usize = 10_000;
+/// Presupuesto de tiempo por `recompute_live_sequences` (R2-V5, deadline).
+///
+/// Cota dura del loop `eval`: si la expresión es lenta y 10k pasos no
+/// terminan a tiempo, `Err` honesto en vez de colgar la UI. En const para
+/// que el test pinnee el presupuesto sin números mágicos.
+pub const MAX_LIVE_SEQUENCE_EVAL_MS: u64 = 1_000;
 
 /// Presupuestos del gesto de arrastre (frente W-B, geometría dinámica).
 /// Profundidad máxima de la cadena de dependencias re-evaluada por frame de
@@ -6063,7 +6069,18 @@ impl Document {
                     "LiveSequence {target}: start/end deben ser enteros finitos"
                 ));
             }
-            let len = (end_i - start_i).unsigned_abs() as usize + 1;
+            // R2-V5: `checked` + deadline (sin wrap ni hang).
+            // `end - start` con `checked_sub` (i64::MIN/MAX no wrappea),
+            // `unsigned_abs` + `checked_add(1)` + `try_from` a `usize`.
+            let diff = end_i
+                .checked_sub(start_i)
+                .ok_or_else(|| format!("LiveSequence {target}: rango con overflow"))?;
+            let len_u64 = diff
+                .unsigned_abs()
+                .checked_add(1)
+                .ok_or_else(|| format!("LiveSequence {target}: longitud con overflow"))?;
+            let len = usize::try_from(len_u64)
+                .map_err(|_| format!("LiveSequence {target}: longitud con overflow"))?;
             if len > MAX_LIVE_SEQUENCE_LENGTH {
                 return Err(format!(
                     "LiveSequence {target}: longitud {len} excede máximo {MAX_LIVE_SEQUENCE_LENGTH}"
@@ -6074,12 +6091,24 @@ impl Document {
                     "LiveSequence {target}: longitud {len} excede MAX_ARRAY_LENGTH"
                 ));
             }
-            // Genera nueva serie.
-            let mut xs: Vec<f64> = Vec::with_capacity(len);
-            let mut ys: Vec<f64> = Vec::with_capacity(len);
+            // Genera nueva serie (R2-V5: `try_reserve` + deadline 1s).
+            let mut xs: Vec<f64> = Vec::new();
+            xs.try_reserve(len)
+                .map_err(|_| format!("LiveSequence {target}: sin memoria para {len} puntos"))?;
+            let mut ys: Vec<f64> = Vec::new();
+            ys.try_reserve(len)
+                .map_err(|_| format!("LiveSequence {target}: sin memoria para {len} puntos"))?;
+            let deadline = std::time::Instant::now()
+                .checked_add(std::time::Duration::from_millis(MAX_LIVE_SEQUENCE_EVAL_MS))
+                .ok_or_else(|| format!("LiveSequence {target}: deadline con overflow"))?;
             let step: i64 = if end_i >= start_i { 1 } else { -1 };
             let mut current = start_i;
             loop {
+                if std::time::Instant::now() > deadline {
+                    return Err(format!(
+                        "LiveSequence {target}: tiempo excedido (>{MAX_LIVE_SEQUENCE_EVAL_MS} ms)"
+                    ));
+                }
                 let mut mapping: Vec<(String, f64)> = self
                     .variables
                     .iter()
@@ -6099,7 +6128,9 @@ impl Document {
                 if current == end_i {
                     break;
                 }
-                current += step;
+                current = current
+                    .checked_add(step)
+                    .ok_or_else(|| format!("LiveSequence {target}: paso con overflow"))?;
             }
             // Actualiza el DataTable asociado.
             if let Some(GeoObject::DataTable(table)) = self.objects.get_mut(&target) {
@@ -6353,8 +6384,25 @@ impl Document {
             self.variables.remove(label);
         }
 
-        let mut dependency_counts = vec![0usize; cells.len()];
-        let mut dependents = vec![Vec::new(); cells.len()];
+        // R2-V4: cap dura + `try_reserve` (OOM honesto, jamás panic).
+        // `cells.len()` ya viene acotado por `MAX_SPREADSHEET_RECOMPUTE_CELLS`
+        // en el escaneo, pero se re-chequea acá para prueba explícita.
+        if cells.len() > Self::MAX_SPREADSHEET_RECOMPUTE_CELLS {
+            return Err(format!(
+                "Spreadsheet exceeds the {} cell recomputation limit",
+                Self::MAX_SPREADSHEET_RECOMPUTE_CELLS
+            ));
+        }
+        let mut dependency_counts: Vec<usize> = Vec::new();
+        dependency_counts
+            .try_reserve(cells.len())
+            .map_err(|_| format!("Spreadsheet sin memoria para {} celdas", cells.len()))?;
+        dependency_counts.resize(cells.len(), 0);
+        let mut dependents: Vec<Vec<usize>> = Vec::new();
+        dependents
+            .try_reserve(cells.len())
+            .map_err(|_| format!("Spreadsheet sin memoria para {} celdas", cells.len()))?;
+        dependents.resize_with(cells.len(), Vec::new);
         for (index, (_, expression)) in cells.iter().enumerate() {
             let expr_for_deps = expression
                 .trim()
@@ -8111,5 +8159,58 @@ mod live_param_tests {
         let mut hacked = doc.clone();
         hacked.layers_mut_for_test(id, 999);
         assert!(crate::validation::validate_document(&hacked).is_err());
+    }
+
+    #[test]
+    fn r2_v4_10k_celdas_enlazadas_no_panica() {
+        // 10k celdas enlazadas en cadena: cap + `try_reserve`, jamás panic.
+        let mut doc = Document::new();
+        for i in 0..100 {
+            for j in 0..100 {
+                let val = if i == 0 && j == 0 {
+                    "1".to_string()
+                } else if j == 0 {
+                    format!("=A{}", i)
+                } else {
+                    "1".to_string()
+                };
+                // `set_spreadsheet_cell` valida cotas 400x400; 100x100 entra.
+                doc.set_spreadsheet_cell(i, j, val).expect("celda");
+            }
+        }
+        let res = doc.recompute_spreadsheet_variables();
+        let _ = res;
+    }
+
+    #[test]
+    fn r2_v5_len_200k_da_err_acotado() {
+        // `len=200k` excede `MAX_LIVE_SEQUENCE_LENGTH` (10k): `Err`, no OOM.
+        // Además pinnea el presupuesto de deadline en const.
+        assert_eq!(crate::document::MAX_LIVE_SEQUENCE_LENGTH, 10_000);
+        assert_eq!(crate::document::MAX_LIVE_SEQUENCE_EVAL_MS, 1_000);
+        let len_probe = 200_000_usize;
+        assert!(len_probe > crate::document::MAX_LIVE_SEQUENCE_LENGTH);
+        assert!(len_probe <= crate::validation::MAX_ARRAY_LENGTH);
+        let mut doc = Document::new();
+        let table_id = doc
+            .try_add_object(GeoObject::DataTable(crate::DataTableObj::new(
+                "x",
+                "y",
+                vec![0.0, 1.0],
+                vec![0.0, 1.0],
+            )))
+            .expect("tabla");
+        doc.try_add_live_sequence(
+            table_id,
+            LiveSequenceBinding {
+                expr: "k".to_string(),
+                var: "k".to_string(),
+                start_expr: "0".to_string(),
+                end_expr: "200000".to_string(),
+            },
+        )
+        .expect("binding");
+        let err = doc.recompute_live_sequences().expect_err("debe acotar");
+        assert!(err.contains("excede"), "err honesto: {err}");
     }
 }

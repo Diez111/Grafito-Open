@@ -470,6 +470,20 @@ fn evaluate_prepared_3d(
         })
 }
 
+/// Capacidad del retrato de fase para una densidad dada (R2-V6, puro).
+///
+/// `checked_add` + `checked_mul` + `try_from`: `u32::MAX` da `None` sin
+/// pánico ni wrap. El llamador (`sample_phase_portrait`) usa la misma
+/// aritmética sobre `usize` ya clampado (5..=40) y cae a `Vec` vacío si
+/// `try_reserve` falla (OOM honesto, jamás panic). Presupuesto en consts:
+/// la cota dura vive en validación (`MAX_DENSITY`), acá solo prueba de
+/// desborde.
+pub(crate) fn phase_portrait_capacity_for_density(density: u32) -> Option<usize> {
+    let d = usize::try_from(density).ok()?;
+    let side = d.checked_add(1)?;
+    side.checked_mul(side)
+}
+
 /// Muestrea un retrato de fase con las variables del documento y devuelve
 /// segmentos en coordenadas matemáticas `(x, y)`.
 pub fn sample_phase_portrait(
@@ -504,7 +518,16 @@ pub fn sample_phase_portrait(
     environment.push(("x".to_string(), 0.0));
     let y_index = environment.len();
     environment.push(("y".to_string(), 0.0));
-    let mut segments = Vec::with_capacity((density + 1) * (density + 1));
+    let Ok(density_u32) = u32::try_from(density) else {
+        return Vec::new();
+    };
+    let Some(capacity) = phase_portrait_capacity_for_density(density_u32) else {
+        return Vec::new();
+    };
+    let mut segments = Vec::new();
+    if segments.try_reserve(capacity).is_err() {
+        return Vec::new();
+    }
 
     for i in 0..=density {
         let x = portrait.x_min + i as f64 * dx;
@@ -728,6 +751,26 @@ pub fn quadric_uses_placeholder(quadric: &Quadric3DObj) -> bool {
     grafito_geometry::quadrics::classify_quadric(coeffs).is_err()
 }
 
+/// Aplica la permutación de ejes a los radios (R2-V7, puro, sin panic).
+///
+/// `perm[i]` es el slot mundo de `params[i]`: todo acceso vía `get`,
+/// `None` ante perm corrupta (`[5,0,0]`) o params cortos. El invariante
+/// real (`quadric_axis_permutation` solo da permutación 0..=2) se prueba
+/// aparte; acá defensa en profundidad para que un futuro cambio no
+/// paniquee en `radii[*p]`.
+pub(crate) fn apply_quadric_axis_permutation(
+    perm: [usize; 3],
+    params: [f64; 3],
+) -> Option<[f64; 3]> {
+    let mut radii = [0.0; 3];
+    for i in 0..3 {
+        let slot = *perm.get(i)?;
+        let param = *params.get(i)?;
+        *radii.get_mut(slot)? = param;
+    }
+    Some(radii)
+}
+
 /// Deriva el elipsoide de una cuádrica con clasificación real.
 ///
 /// Solo devuelve `Some` para esfera/elipsoide real con marco alineado a
@@ -749,10 +792,7 @@ pub fn quadric_ellipsoid_params(quadric: &Quadric3DObj) -> Option<QuadricEllipso
         return None;
     }
     let perm = grafito_geometry::quadrics::quadric_axis_permutation(&shape)?;
-    let mut radii = [0.0; 3];
-    for (i, p) in perm.iter().enumerate() {
-        radii[*p] = shape.params[i];
-    }
+    let radii = apply_quadric_axis_permutation(perm, shape.params)?;
     let center = Point3D::new(shape.center[0], shape.center[1], shape.center[2]);
     if !center.is_finite() {
         return None;

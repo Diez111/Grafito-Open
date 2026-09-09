@@ -1763,6 +1763,31 @@ enum AgentChannelMsg {
     Done(Result<grafito_agent::loop_engine::AgentOutcome, String>),
 }
 
+/// Envía un mensaje del agente sin bloquear (R2-V1, puro).
+///
+/// `try_send` + `CancellationToken`: si hay cancelación, no se envía;
+/// si el canal está lleno, se descarta el evento (best-effort, la UI ya
+/// tiene 128 pendientes y el `Done` final reserva su slot); si el receptor
+/// se dropeó, `false` para que el forwarder corte y el `join` sea <1s.
+/// Jamás `send` bloqueante en hilo (thread leak).
+///
+/// Retorna `Some(true)` si se envió, `Some(false)` si se descartó por lleno
+/// (seguir drenando), `None` si hay que cortar (cancelado o desconectado).
+fn send_agent_msg_nonblocking(
+    sender: &std::sync::mpsc::SyncSender<AgentChannelMsg>,
+    msg: AgentChannelMsg,
+    cancel: &grafito_agent::loop_engine::Cancellation,
+) -> Option<bool> {
+    if cancel.is_cancelled() {
+        return None;
+    }
+    match sender.try_send(msg) {
+        Ok(()) => Some(true),
+        Err(std::sync::mpsc::TrySendError::Full(_)) => Some(false),
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => None,
+    }
+}
+
 /// Parsea el `args_summary` de un `ToolStarted{ask_user}` a pendiente UI (S2).
 ///
 /// Puro y no bloqueante: `args_summary` es `arguments.to_string()` truncado a
@@ -3809,8 +3834,15 @@ impl GrafitoApp {
                                 }
                             }
                         }
-                        if sender.send(AgentChannelMsg::Event(event)).is_err() {
-                            break;
+                        // R2-V1: `try_send` + `CancellationToken` (jamás `send` bloqueante).
+                        // Lleno → se descarta el evento (best-effort); desconectado/cancelado → corta.
+                        match send_agent_msg_nonblocking(
+                            &sender,
+                            AgentChannelMsg::Event(event),
+                            &cancellation_forwarder,
+                        ) {
+                            Some(_) => {}
+                            None => break,
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -3830,7 +3862,26 @@ impl GrafitoApp {
             let outcome = outcome_handle
                 .join()
                 .unwrap_or_else(|_| Err("El agente terminó inesperadamente.".to_string()));
-            let _ = sender.send(AgentChannelMsg::Done(outcome));
+            // R2-V1: `Done` con `try_send` + reintento acotado (jamás `send` bloqueante).
+            // Si el buffer sigue lleno tras 200 ms o hay cancelación/desconexión,
+            // se descarta para que el `join` sea <1s (la UI ve `Disconnected` honesto).
+            let mut pending = Some(AgentChannelMsg::Done(outcome));
+            for _ in 0..20 {
+                if cancellation_forwarder.is_cancelled() {
+                    break;
+                }
+                let Some(msg) = pending.take() else {
+                    break;
+                };
+                match sender.try_send(msg) {
+                    Ok(()) => break,
+                    Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                        pending = Some(returned);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+                }
+            }
             repaint.request_repaint();
         });
         self.assistant_runtime.agent_job = Some(AssistantAgentJob {
@@ -4809,6 +4860,20 @@ impl GrafitoApp {
     /// (FIFO honesto); acá no se mezcla para no componer GIFs ajenos sin
     /// presupuesto. Ante cualquier fallo (incluida playlist de solo pausas)
     /// se publica `Err` honesto en la card, jamás media parcial en silencio.
+    ///
+    /// R2-V2 (puro, testeable): valida `len <= PLAYLIST_MAX_STEPS` (8) con
+    /// `Err` acotado. El worker la llama antes de renderizar para que el
+    /// struct literal con 64 steps no acumule OOM.
+    pub(crate) fn playlist_len_budget_ok(len: usize) -> Result<(), String> {
+        if len > grafito_anim::protocol::PLAYLIST_MAX_STEPS {
+            return Err(format!(
+                "la playlist trae {len} steps y excede el tope de {}: partila en dos",
+                grafito_anim::protocol::PLAYLIST_MAX_STEPS
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn run_assistant_playlist_with(
         &mut self,
         ctx: &egui::Context,
@@ -4836,7 +4901,21 @@ impl GrafitoApp {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let repaint = ctx.clone();
         std::thread::spawn(move || {
+            // R2-V2: cap dura `max_steps=8` + `total_pixels` (OOM honesto).
+            // `Playlist::try_new` valida 1..=8; el struct literal puede bypassear,
+            // así que se re-valida acá antes de renderizar nada.
+            if let Err(e) = Self::playlist_len_budget_ok(playlist.steps.len()) {
+                let _ = sender.send(Err(e));
+                repaint.request_repaint();
+                return;
+            }
             let mut partes: Vec<(Vec<egui::ColorImage>, u64)> = Vec::new();
+            if partes.try_reserve(playlist.steps.len()).is_err() {
+                let _ = sender.send(Err("sin memoria para la playlist".to_string()));
+                repaint.request_repaint();
+                return;
+            }
+            let mut total_pixels: usize = 0;
             // M1: cada lado titula por el punto único (`titulo_curado`,
             // jamás eco crudo del concepto).
             let mut bases: Vec<(String, String)> = Vec::new();
@@ -4909,6 +4988,31 @@ impl GrafitoApp {
                     let _ = sender.send(Err(crate::anim_native::error_sin_fotogramas(
                         "el motor nativo",
                     )));
+                    repaint.request_repaint();
+                    return;
+                }
+                // R2-V2: presupuesto `total_pixels` con `checked` (8M, paridad loader).
+                // Si un step ya excede, `Err` acotado antes de acumular OOM.
+                if let Some(first) = frames.first() {
+                    let per_frame = first.size[0].checked_mul(first.size[1]);
+                    let step_pixels = per_frame.and_then(|pc| pc.checked_mul(frames.len()));
+                    let next_total = step_pixels.and_then(|sp| total_pixels.checked_add(sp));
+                    match next_total {
+                        Some(next) if next <= crate::anim_native::GIF_EXPORT_MAX_TOTAL_PIXELS => {
+                            total_pixels = next;
+                        }
+                        _ => {
+                            let _ = sender.send(Err(format!(
+                                "la playlist excede el presupuesto de {} píxeles",
+                                crate::anim_native::GIF_EXPORT_MAX_TOTAL_PIXELS
+                            )));
+                            repaint.request_repaint();
+                            return;
+                        }
+                    }
+                }
+                if partes.try_reserve(1).is_err() {
+                    let _ = sender.send(Err("sin memoria para la playlist".to_string()));
                     repaint.request_repaint();
                     return;
                 }
@@ -6420,6 +6524,66 @@ mod domain_sparkline_tests {
         assert!(!samples.is_empty());
         assert!(samples.len() <= 14, "muestras acotadas");
         assert!(samples.iter().all(|value| (0.0..=1.0).contains(value)));
+    }
+}
+
+#[cfg(test)]
+mod r2_v2_playlist_tests {
+    #[test]
+    fn playlist_64_pasos_da_err_acotado() {
+        assert_eq!(grafito_anim::protocol::PLAYLIST_MAX_STEPS, 8);
+        assert!(crate::GrafitoApp::playlist_len_budget_ok(8).is_ok());
+        let err = crate::GrafitoApp::playlist_len_budget_ok(64).expect_err("64 excede");
+        assert!(err.contains("excede"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod r2_v1_thread_tests {
+    use super::send_agent_msg_nonblocking;
+    use super::AgentChannelMsg;
+
+    fn dummy_event() -> AgentChannelMsg {
+        AgentChannelMsg::Event(grafito_agent::AgentEvent::Finalized {
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn dropea_receiver_join_menor_1s() {
+        let cancel = grafito_agent::loop_engine::Cancellation::default();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AgentChannelMsg>(1);
+        drop(rx);
+        let start = std::time::Instant::now();
+        let h = std::thread::spawn(move || send_agent_msg_nonblocking(&tx, dummy_event(), &cancel));
+        let res = h.join().expect("join");
+        assert!(res.is_none(), "dropeado debe cortar");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "join <1s"
+        );
+    }
+
+    #[test]
+    fn buffer_lleno_no_bloquea() {
+        let cancel = grafito_agent::loop_engine::Cancellation::default();
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AgentChannelMsg>(1);
+        // Llena el buffer (1 slot) sin drenar.
+        assert!(send_agent_msg_nonblocking(&tx, dummy_event(), &cancel).is_some());
+        let start = std::time::Instant::now();
+        // Segundo envío con buffer lleno: `try_send` da `Some(false)` al instante,
+        // jamás bloquea como el `send` viejo (thread leak).
+        let res = send_agent_msg_nonblocking(&tx, dummy_event(), &cancel);
+        assert_eq!(res, Some(false), "lleno se descarta sin bloquear");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn cancelado_no_envia() {
+        let cancel = grafito_agent::loop_engine::Cancellation::default();
+        cancel.cancel();
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AgentChannelMsg>(1);
+        assert!(send_agent_msg_nonblocking(&tx, dummy_event(), &cancel).is_none());
     }
 }
 

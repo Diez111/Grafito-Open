@@ -23,6 +23,12 @@ pub(crate) const MAX_EXPORT_DIMENSION: u32 = MAX_PNG_DIMENSION;
 const MAX_EXPORT_PIXELS: u64 = MAX_PNG_PIXELS;
 const MAX_EXPORT_SCENE_UNITS: usize = 250_000;
 const MAX_EXPORT_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+/// Presupuesto SVG (R2-V3, en const): `try_reserve` + tope de bytes.
+///
+/// Igual que la salida binaria (64 MiB): el doc tope (5000 objs) da `Err`
+/// honesto en vez de OOM. Se chequea en `serialize_svg` por objeto y al
+/// final, jamás después de escribir a medias (`finish_export` re-chequea).
+pub(crate) const MAX_SVG_BYTES: usize = MAX_EXPORT_OUTPUT_BYTES;
 const MAX_EXPORT_STYLE_PIXELS: f32 = 4_096.0;
 const PARAMETRIC_EXPORT_STEPS: usize = 4_000;
 const CONIC_EXPORT_STEPS: usize = 256;
@@ -2799,10 +2805,27 @@ fn svg_color(color: Color) -> String {
     )
 }
 
-fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
+fn serialize_svg(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportError> {
     use std::fmt::Write as _;
 
-    let mut svg = String::with_capacity(scene.scene_units.saturating_mul(24).min(4_000_000));
+    // R2-V3: `try_reserve` + `MAX_SVG_BYTES` (OOM honesto, jamás panic).
+    let initial = scene.scene_units.saturating_mul(24).min(4_000_000);
+    let mut svg = String::new();
+    svg.try_reserve(initial)
+        .map_err(|_| ExportError::ResourceLimit {
+            format: ExportFormat::Svg,
+            resource: "bytes SVG",
+            attempted: initial as u64,
+            limit: MAX_SVG_BYTES as u64,
+            object: None,
+        })?;
+    let svg_budget_err = |attempted: usize| ExportError::ResourceLimit {
+        format: ExportFormat::Svg,
+        resource: "bytes SVG",
+        attempted: attempted as u64,
+        limit: MAX_SVG_BYTES as u64,
+        object: None,
+    };
     writeln!(
         svg,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">",
@@ -2841,7 +2864,10 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
                     stroke,
                     fill,
                 } => {
-                    let mut data = String::with_capacity(points.len() * 24);
+                    // R2-V3: `try_reserve` acotado (sin `with_capacity` que paniquea en OOM).
+                    let need = points.len().saturating_mul(24);
+                    let mut data = String::new();
+                    data.try_reserve(need).map_err(|_| svg_budget_err(need))?;
                     for (index, point) in points.iter().enumerate() {
                         if index > 0 {
                             data.push(' ');
@@ -2905,9 +2931,16 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
             }
         }
         svg.push_str("</g>\n");
+        // R2-V3: presupuesto por objeto (falla honesto antes de OOM).
+        if svg.len() > MAX_SVG_BYTES {
+            return Err(svg_budget_err(svg.len()));
+        }
     }
     svg.push_str("</g>\n</svg>\n");
-    svg.into_bytes()
+    if svg.len() > MAX_SVG_BYTES {
+        return Err(svg_budget_err(svg.len()));
+    }
+    Ok(svg.into_bytes())
 }
 
 fn escape_tikz(text: &str) -> String {
@@ -3945,7 +3978,7 @@ pub(crate) fn export_document_with_options(
     let path = path.as_ref();
     let scene = build_export_scene(document, format, options)?;
     let bytes = match format {
-        ExportFormat::Svg => serialize_svg(&scene),
+        ExportFormat::Svg => serialize_svg(&scene)?,
         ExportFormat::Png => render_png(&scene, format)?,
         ExportFormat::Tikz => serialize_tikz(&scene),
     };
@@ -5326,7 +5359,32 @@ mod tests {
         assert_eq!(MAX_EXPORT_PIXELS, 16_777_216);
         assert_eq!(MAX_EXPORT_SCENE_UNITS, 250_000);
         assert_eq!(MAX_EXPORT_OUTPUT_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_SVG_BYTES, 64 * 1024 * 1024);
         assert_eq!(MAX_EXPORT_STYLE_PIXELS, 4_096.0);
+    }
+
+    #[test]
+    fn r2_v3_doc_tope_svg_acotado_sin_oom() {
+        // Doc tope (5000 objs): jamás OOM/panic; `Err` honesto o bytes acotados.
+        let mut doc = Document::new();
+        for i in 0..5_000 {
+            let p = PointObj::new(grafito_geometry::Point2::new(i as f64 * 0.01, 0.0));
+            doc.add_object(GeoObject::Point(p));
+        }
+        let options = ExportOptions::from_document(&doc, ExportFormat::Svg).expect("opciones");
+        let scene_res = build_export_scene(&doc, ExportFormat::Svg, options);
+        match scene_res {
+            Err(_) => {}
+            Ok(scene) => match serialize_svg(&scene) {
+                Err(e) => {
+                    let msg = format!("{e}");
+                    assert!(msg.contains("SVG") || msg.contains("bytes"), "{msg}");
+                }
+                Ok(bytes) => {
+                    assert!(bytes.len() <= MAX_SVG_BYTES, "acotado");
+                }
+            },
+        }
     }
 
     #[test]
@@ -6563,8 +6621,10 @@ pub(crate) fn document_to_html(document: &Document) -> Result<String, String> {
         .map_err(|error| format!("HTML no se generó; {error}"))?;
     let scene = build_export_scene(document, ExportFormat::Svg, options)
         .map_err(|error| format!("HTML no se generó; {error}"))?;
-    let svg = String::from_utf8(serialize_svg(&scene))
-        .map_err(|error| format!("HTML no se generó; SVG no UTF-8: {error}"))?;
+    let svg = String::from_utf8(
+        serialize_svg(&scene).map_err(|error| format!("HTML no se generó; {error}"))?,
+    )
+    .map_err(|error| format!("HTML no se generó; SVG no UTF-8: {error}"))?;
     let mut out = String::from(
         "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
