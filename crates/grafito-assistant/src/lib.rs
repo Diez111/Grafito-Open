@@ -64,13 +64,51 @@ const OPENCODE_FUSION_MODEL: &str = "fusion";
 /// Muse Spark sólo responde por la Responses API (`POST {base}/responses`);
 /// por Chat Completions el proveedor devuelve 500 instantáneo con cualquier
 /// payload (verificado 2026-09-04 contra el endpoint real, 8 payloads).
-/// Vigentes 2026-09-08 (opencode.ai/docs/zen): `muse-spark-1.3`, `muse-spark-1.2`
-/// (pagos) y `muse-spark-1.3-contributor-free` (gratis, exige sesión válida;
-/// sin ella el gateway devuelve 400 `MissingSessionID`). Los `-contributor`
-/// viejos se conservan por compatibilidad.
+/// Go (suscripción, docs Go 2026-09-08): `-contributor`; Zen (custom):
+/// `muse-spark-1.3`/`1.2` pagos y `muse-spark-1.3-contributor-free` gratis
+/// (exige sesión válida; sin ella el gateway devuelve 400 `MissingSessionID`).
+/// Los `-contributor` viejos se conservan por compatibilidad.
 /// Se matchea por `contains` para cubrir futuras 1.x sin tocar el router.
 fn uses_responses_api(model: &str) -> bool {
     model.contains("muse-spark")
+}
+/// Header de sesión que EXIGE el gateway OpenCode Go (opencode.ai/docs/go,
+/// 2026-09-08): estable por conversación, para routing y prompt caching.
+/// Sin él el gateway devuelve 400 `MissingSessionID`. Nunca va en el body
+/// (prohibido inventar `session_id`): sólo header en los POST a Go.
+pub const GO_SESSION_HEADER: &str = "x-opencode-session";
+/// Tope del identificador de sesión Go: 128 chars (un UUID v4 son 36).
+/// Paridad con `MAX_CUSTOM_API_KEY_REFERENCE_LEN`; evita inyección de headers.
+pub const GO_SESSION_MAX_CHARS: usize = 128;
+/// User-Agent propio que exige Go en vez del genérico de reqwest
+/// (`grafito/x.y.z`, versión del workspace). Sólo se pisa para Go.
+pub fn go_user_agent() -> String {
+    format!("grafito/{}", env!("CARGO_PKG_VERSION"))
+}
+/// ¿Este endpoint es del gateway Go? (`opencode.ai`, path `/zen/go/v1` o
+/// derivado `/responses`, `/chat/completions`, `/messages`).
+/// Los mocks de tests (`127.0.0.1`) devuelven `false`: ahí el header viaja
+/// igual si la sesión es `Some` (la app sólo la pone para Go).
+#[allow(dead_code)]
+fn is_go_transport_endpoint(endpoint: &Url) -> bool {
+    endpoint.host_str() == Some("opencode.ai")
+}
+/// Sanea un session-id Go para header: `1..=128` chars ASCII visibles
+/// (`alnum` + `-_ .`, cubre UUID v4). `None` si vacío o inválido (el
+/// transporte omite el header y el servidor hará 400 → fallback honesto).
+pub fn sanitize_go_session_id(id: &str) -> Option<String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > GO_SESSION_MAX_CHARS {
+        return None;
+    }
+    let ok = trimmed
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if ok {
+        Some(trimmed.to_owned())
+    } else {
+        None
+    }
 }
 /// `max_output_tokens` mínimo que exige el servidor en `/responses`.
 const RESPONSES_MIN_OUTPUT_TOKENS: usize = 16;
@@ -899,6 +937,11 @@ pub struct ProviderSettings {
     pub api_key_env: Option<String>,
     /// Capacidades que deben verificarse antes de serializar adjuntos.
     pub capabilities: ProviderCapabilities,
+    /// Sesión Go estable por conversación (`x-opencode-session`).
+    /// La dueña es la app (`AssistantRuntime`): UUID v4 lazy, estable entre
+    /// turnos, nuevo al Limpiar. `None` = no-Go o aún no creada (el transporte
+    /// omite el header). Nunca va en el body.
+    pub go_session_id: Option<String>,
 }
 
 impl ProviderSettings {
@@ -916,6 +959,7 @@ impl ProviderSettings {
             model: model.into(),
             api_key_env: profile.api_key_env().map(str::to_owned),
             capabilities: profile.capabilities(),
+            go_session_id: None,
         }
     }
 
@@ -931,6 +975,7 @@ impl ProviderSettings {
             model: model.into(),
             api_key_env: Some(api_key_reference.into()),
             capabilities: ProviderProfile::CustomOpenAiCompatible.capabilities(),
+            go_session_id: None,
         };
         settings.validate()?;
         Ok(settings)
@@ -949,6 +994,22 @@ impl ProviderSettings {
         self
     }
 
+    /// Adjunta la sesión Go estable por conversación (`x-opencode-session`).
+    /// La app la genera (UUID v4) lazy y la rota al Limpiar; el transporte la
+    /// manda sólo como header en POST a Go, nunca en el body. `None` la quita.
+    /// Valida el formato (UUID: `1..=128` ASCII `alnum+-_.`); si es inválida
+    /// retorna `Err` sin mutar (fail-closed, sin `unwrap`).
+    pub fn with_go_session_id(mut self, go_session_id: Option<String>) -> Result<Self, String> {
+        if let Some(id) = go_session_id.as_deref() {
+            if sanitize_go_session_id(id).is_none() {
+                return Err("go session identifier is invalid".into());
+            }
+        }
+        self.go_session_id = go_session_id;
+        self.validate()?;
+        Ok(self)
+    }
+
     fn validate(&self) -> Result<(), String> {
         let endpoint = validate_endpoint(&self.endpoint)?;
         if self.model.trim().is_empty() || self.model.len() > 256 {
@@ -956,6 +1017,11 @@ impl ProviderSettings {
         }
         if !self.capabilities.openai_compatible {
             return Err("provider is not declared OpenAI-compatible".into());
+        }
+        if let Some(id) = self.go_session_id.as_deref() {
+            if sanitize_go_session_id(id).is_none() {
+                return Err("go session identifier is invalid".into());
+            }
         }
         let host = endpoint
             .host_str()
@@ -1061,8 +1127,8 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
 /// Fallback de sesión (no en este crate): `grafito-app/src/assistant.rs`
 /// reintenta una vez `muse-spark --500/timeout/400-sesión--> deepseek-v4-flash`
 /// sin tocar la preferencia guardada (400-sesión = `MissingSessionID`/
-/// `InvalidApiKey`/`ModelDisabled`/`AccountBlocked` del tier gratuito, W-A
-/// 2026-09-08). Modo agente con tools (`agent.rs`): sólo soporta
+/// `InvalidApiKey`/`ModelDisabled`/`AccountBlocked` del gateway Go, docs Go
+/// 2026-09-08; `MissingSessionID` con header también cae acá por región). Modo agente con tools (`agent.rs`): sólo soporta
 /// `OpenAiChatCompletions`; Spark/Fusion devuelven error explícito que sugiere
 /// chat simple o deepseek; su `HTTP {status}` aún no incluye `Retry-After`
 /// (deuda documentada).
@@ -1409,6 +1475,7 @@ enum SseStreamOutcome {
 ///
 /// Sin `assistant-net`: stub honesto que siempre retorna `Err(NoNetwork)`.
 #[cfg(feature = "assistant-net")]
+#[allow(clippy::too_many_arguments)]
 pub fn request_responses_completion_streaming(
     endpoint: Url,
     base_payload: Value,
@@ -1417,6 +1484,7 @@ pub fn request_responses_completion_streaming(
     timeout: Duration,
     max_output_chars: usize,
     progress: Option<&mut ResponsesProgressCallback<'_>>,
+    go_session_id: Option<&str>,
 ) -> Result<RemoteCompletion, String> {
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
@@ -1435,6 +1503,7 @@ pub fn request_responses_completion_streaming(
         .header("Accept", "text/event-stream")
         .json(&streaming_payload)
         .timeout(timeout);
+    call = apply_go_transport_headers(call, &endpoint, go_session_id);
     if let Some(key) = api_key {
         call = call.bearer_auth(sanitize_api_key(key)?);
     }
@@ -1482,6 +1551,7 @@ pub fn request_responses_completion_streaming(
                 cancellation,
                 remaining,
                 max_output_chars,
+                go_session_id,
             )
         }
     }
@@ -1497,6 +1567,7 @@ pub fn request_responses_completion_streaming(
     _timeout: Duration,
     _max_output_chars: usize,
     _progress: Option<&mut ResponsesProgressCallback<'_>>,
+    _go_session_id: Option<&str>,
 ) -> Result<RemoteCompletion, String> {
     Err(NO_NETWORK_MESSAGE.into())
 }
@@ -2485,6 +2556,7 @@ pub fn request_remote_streaming_with_api_key_on_worker(
         match protocol {
             RemoteProtocol::OpenAiResponses => {
                 let model = settings.model.clone();
+                let go_session = settings.go_session_id.clone();
                 let prepared = responses_endpoint(&settings).and_then(|endpoint| {
                     build_responses_payload(&settings, &request).map(|payload| (endpoint, payload))
                 });
@@ -2499,6 +2571,7 @@ pub fn request_remote_streaming_with_api_key_on_worker(
                             timeout,
                             max_output_chars,
                             Some(&mut on_progress),
+                            go_session.as_deref(),
                         )
                     }
                     Err(error) => Err(error),
@@ -2655,6 +2728,8 @@ fn request_remote(
         // Clamp 100ms..=120s: nunca 0 ni >120s (simple 60s default, agente
         // 30s/turno en grafito-agent/loop_engine.rs). Ver `effective_remote_timeout`.
         let timeout = effective_remote_timeout(request.budget.timeout_ms);
+        let go_session = settings.go_session_id.clone();
+        let go_session = go_session.as_deref();
         match protocol {
             RemoteProtocol::OpenAiChatCompletions => request_openai_completion(
                 chat_completion_endpoint(&settings)?,
@@ -2663,6 +2738,7 @@ fn request_remote(
                 &cancellation,
                 timeout,
                 request.budget.max_output_chars,
+                go_session,
             ),
             RemoteProtocol::OpenAiResponses => request_responses_completion(
                 responses_endpoint(&settings)?,
@@ -2671,6 +2747,7 @@ fn request_remote(
                 &cancellation,
                 timeout,
                 request.budget.max_output_chars,
+                go_session,
             ),
             RemoteProtocol::AnthropicMessages => request_anthropic_completion(
                 messages_endpoint(&settings)?,
@@ -2679,6 +2756,7 @@ fn request_remote(
                 &cancellation,
                 timeout,
                 request.budget.max_output_chars,
+                go_session,
             ),
             RemoteProtocol::Fusion => request_fusion_completion(
                 &settings,
@@ -2796,6 +2874,7 @@ fn request_fusion_completion_with_endpoints(
     draft_payload["max_tokens"] = json!(completion_token_limit_for_chars(draft_limit));
     let started = Instant::now();
     let draft_timeout = Duration::from_millis((timeout.as_millis() as u64 / 2).max(100));
+    let go_session = settings.go_session_id.as_deref();
     let draft = request_anthropic_completion(
         draft_endpoint,
         draft_payload,
@@ -2803,6 +2882,7 @@ fn request_fusion_completion_with_endpoints(
         cancellation,
         draft_timeout,
         draft_limit,
+        go_session,
     )
     .map_err(|error| {
         if cancellation.is_cancelled() {
@@ -2825,6 +2905,7 @@ fn request_fusion_completion_with_endpoints(
         cancellation,
         audit_timeout,
         request.budget.max_output_chars,
+        go_session,
     )
     .map_err(|_| {
         if cancellation.is_cancelled() {
@@ -2836,6 +2917,7 @@ fn request_fusion_completion_with_endpoints(
 }
 
 #[cfg(feature = "assistant-net")]
+#[allow(clippy::too_many_arguments)]
 fn request_openai_completion(
     endpoint: Url,
     payload: Value,
@@ -2843,9 +2925,14 @@ fn request_openai_completion(
     cancellation: &CancellationToken,
     timeout: Duration,
     max_output_chars: usize,
+    go_session_id: Option<&str>,
 ) -> Result<RemoteCompletion, String> {
     let client = shared_http_client()?;
-    let mut call = client.post(endpoint).json(&payload).timeout(timeout);
+    let mut call = client
+        .post(endpoint.clone())
+        .json(&payload)
+        .timeout(timeout);
+    call = apply_go_transport_headers(call, &endpoint, go_session_id);
     if let Some(key) = api_key {
         call = call.bearer_auth(sanitize_api_key(key)?);
     }
@@ -2855,6 +2942,7 @@ fn request_openai_completion(
 /// POST a la Responses API (`{base}/responses`) con Bearer saneado.
 /// La usa Muse Spark, que por Chat Completions devuelve 500 instantáneo.
 #[cfg(feature = "assistant-net")]
+#[allow(clippy::too_many_arguments)]
 fn request_responses_completion(
     endpoint: Url,
     payload: Value,
@@ -2862,9 +2950,14 @@ fn request_responses_completion(
     cancellation: &CancellationToken,
     timeout: Duration,
     max_output_chars: usize,
+    go_session_id: Option<&str>,
 ) -> Result<RemoteCompletion, String> {
     let client = shared_http_client()?;
-    let mut call = client.post(endpoint).json(&payload).timeout(timeout);
+    let mut call = client
+        .post(endpoint.clone())
+        .json(&payload)
+        .timeout(timeout);
+    call = apply_go_transport_headers(call, &endpoint, go_session_id);
     if let Some(key) = api_key {
         call = call.bearer_auth(sanitize_api_key(key)?);
     }
@@ -2963,6 +3056,7 @@ fn responses_completion_text(body: &Value) -> Result<(String, bool), String> {
 }
 
 #[cfg(feature = "assistant-net")]
+#[allow(clippy::too_many_arguments)]
 fn request_anthropic_completion(
     endpoint: Url,
     payload: Value,
@@ -2970,6 +3064,7 @@ fn request_anthropic_completion(
     cancellation: &CancellationToken,
     timeout: Duration,
     max_output_chars: usize,
+    go_session_id: Option<&str>,
 ) -> Result<RemoteCompletion, String> {
     let key = api_key
         .map(sanitize_api_key)
@@ -2977,12 +3072,13 @@ fn request_anthropic_completion(
         .filter(|key| !key.is_empty())
         .ok_or_else(|| "remote assistant API key is unavailable".to_string())?;
     let client = shared_http_client()?;
-    let call = client
-        .post(endpoint)
+    let mut call = client
+        .post(endpoint.clone())
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
         .json(&payload)
         .timeout(timeout);
+    call = apply_go_transport_headers(call, &endpoint, go_session_id);
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
@@ -3055,6 +3151,36 @@ pub(crate) fn sanitize_api_key(key: &str) -> Result<String, String> {
         return Err("remote assistant API key contains invalid characters (revisá espacios o saltos de línea al copiar la clave)".into());
     }
     Ok(trimmed.to_owned())
+}
+
+/// Aplica los headers Go a un POST (`x-opencode-session` + `User-Agent` propio).
+///
+/// - `User-Agent: grafito/x.y.z` viaja siempre que sea Go (host `opencode.ai`)
+///   o el llamante traiga sesión `Some` (mocks de tests en `127.0.0.1`: la app
+///   sólo pone sesión para Go, así que `Some` implica Go).
+/// - `x-opencode-session` sólo si la sesión sanea (UUID válido); si es `None`
+///   o inválida se omite y el servidor hará 400 → fallback honesto a deepseek.
+///
+/// Puro sobre el builder (sin `unwrap`, sin I/O).
+#[cfg(feature = "assistant-net")]
+pub(crate) fn apply_go_transport_headers(
+    builder: reqwest::blocking::RequestBuilder,
+    endpoint: &Url,
+    go_session_id: Option<&str>,
+) -> reqwest::blocking::RequestBuilder {
+    let sanitized = go_session_id.and_then(sanitize_go_session_id);
+    let is_go = is_go_transport_endpoint(endpoint) || sanitized.is_some();
+    let mut call = builder;
+    if is_go {
+        call = call.header(reqwest::header::USER_AGENT, go_user_agent());
+    }
+    if let Some(session) = sanitized {
+        // La app sólo pone sesión para Go (DeepSeek/Ollama/Custom no-Go traen
+        // `None`); en tests con mock local (`127.0.0.1`) también viaja para
+        // verificar el wire.
+        call = call.header(GO_SESSION_HEADER, session);
+    }
+    call
 }
 
 #[cfg(feature = "assistant-net")]
@@ -4101,6 +4227,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(1),
             64,
+            None,
         )
         .unwrap();
         server.join().unwrap();
@@ -4150,12 +4277,164 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(1),
             64,
+            None,
         )
         .unwrap();
         server.join().unwrap();
 
         assert_eq!(response.text, "listo");
         assert!(!response.truncated);
+    }
+
+    #[test]
+    fn go_session_id_sanitiza_uuid_y_rechaza_inyeccion() {
+        // UUID v4 pasa; vacío, largo e inyección de headers no.
+        assert_eq!(
+            sanitize_go_session_id("123e4567-e89b-42d3-a456-426614174000").as_deref(),
+            Some("123e4567-e89b-42d3-a456-426614174000")
+        );
+        assert!(sanitize_go_session_id("").is_none());
+        assert!(sanitize_go_session_id("   ").is_none());
+        assert!(sanitize_go_session_id("sesión con espacios").is_none());
+        assert!(sanitize_go_session_id("abc\r\nX-Injected: 1").is_none());
+        assert!(sanitize_go_session_id(&"x".repeat(129)).is_none());
+        assert!(sanitize_go_session_id(&"x".repeat(128)).is_some());
+        // Settings valida el formato (fail-closed, sin `unwrap`).
+        assert!(spark_settings()
+            .with_go_session_id(Some("123e4567-e89b-42d3-a456-426614174000".into()))
+            .is_ok());
+        assert!(spark_settings()
+            .with_go_session_id(Some("bad\r\nheader".into()))
+            .is_err());
+        // El UA propio es `grafito/x.y.z`, no el genérico de reqwest.
+        let ua = go_user_agent();
+        assert!(ua.starts_with("grafito/"), "{ua}");
+        assert!(!ua.contains("reqwest"), "{ua}");
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn go_headers_viajan_en_responses_y_chat_con_ua_propio() {
+        clear_rate_limit_for_tests();
+        let session = "123e4567-e89b-42d3-a456-426614174000";
+        // Responses.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/responses",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 8192];
+            let bytes = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..bytes]);
+            let lowered = request.to_ascii_lowercase();
+            assert!(
+                lowered.contains("x-opencode-session: 123e4567-e89b-42d3-a456-426614174000"),
+                "{lowered}"
+            );
+            assert!(lowered.contains("user-agent: grafito/"), "{lowered}");
+            assert!(!lowered.contains("reqwest"), "{lowered}");
+            let body = r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"listo"}]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let completion = request_responses_completion(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(1),
+            64,
+            Some(session),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(completion.text, "listo");
+
+        // Chat completions (mismo helper, otro path).
+        clear_rate_limit_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/chat/completions",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 8192];
+            let bytes = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..bytes]);
+            let lowered = request.to_ascii_lowercase();
+            assert!(
+                lowered.contains("x-opencode-session: 123e4567-e89b-42d3-a456-426614174000"),
+                "{lowered}"
+            );
+            assert!(lowered.contains("user-agent: grafito/"), "{lowered}");
+            let body = r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hola"}}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let completion = request_openai_completion(
+            endpoint,
+            json!({"model": "deepseek-v4-flash", "messages": []}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(1),
+            64,
+            Some(session),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(completion.text, "hola");
+
+        // Sin sesión no viaja el header (pero el payload sigue igual).
+        clear_rate_limit_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/responses",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 8192];
+            let bytes = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_ascii_lowercase();
+            assert!(!request.contains("x-opencode-session"), "{request}");
+            let body = r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"listo"}]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let completion = request_responses_completion(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(1),
+            64,
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(completion.text, "listo");
+        clear_rate_limit_for_tests();
     }
 
     #[cfg(feature = "assistant-net")]
@@ -4603,6 +4882,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(1),
             64,
+            None,
         )
         .unwrap_err();
         // Se limpia antes de los asserts: la pausa de ~7s no debe contaminar
@@ -4645,6 +4925,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(1),
             64,
+            None,
         )
         .unwrap_err();
         server.join().unwrap();
@@ -4690,6 +4971,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(1),
             64,
+            None,
         )
         .unwrap();
         server.join().unwrap();
@@ -4900,6 +5182,7 @@ mod tests {
             Some(&mut |accumulated: &str| {
                 snapshots.push(accumulated.to_owned());
             }),
+            None,
         )
         .unwrap();
         let requests = server.join().unwrap();
@@ -4938,6 +5221,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(5),
             64,
+            None,
             None,
         )
         .unwrap();
@@ -4986,6 +5270,7 @@ mod tests {
             Duration::from_secs(10),
             1_000_000,
             None,
+            None,
         )
         .unwrap();
         server.join().unwrap();
@@ -5014,6 +5299,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(10),
             1_000_000,
+            None,
             None,
         )
         .unwrap_err();
@@ -5044,6 +5330,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(10),
             2_000_000,
+            None,
         )
         .unwrap_err();
         server.join().unwrap();
@@ -5089,6 +5376,7 @@ mod tests {
             Some(&mut |accumulated: &str| {
                 snapshots.push(accumulated.len());
             }),
+            None,
         )
         .unwrap();
         server.join().unwrap();
@@ -5130,6 +5418,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(15),
             1_000_000,
+            None,
             None,
         )
         .unwrap();
@@ -5294,6 +5583,7 @@ mod tests {
             Some(&mut |accumulated: &str| {
                 snapshots.push(accumulated.to_owned());
             }),
+            None,
         )
         .unwrap();
         server.join().unwrap();
@@ -5463,6 +5753,7 @@ mod tests {
             &cancellation,
             Duration::from_secs(5),
             256,
+            None,
             None,
         );
         assert!(

@@ -54,6 +54,7 @@ serde.workspace = true
 rayon.workspace = true
 num-complex.workspace = true
 rfd.workspace = true
+uuid.workspace = true
 keyring = { workspace = true, optional = true }
 # F10-S: QR real escaneable del código de sala (qrcode 0.14 core, sin features
 # de imagen/svg; sólo `QrCode::new` + `to_colors` para la grid egui).

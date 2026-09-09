@@ -874,6 +874,11 @@ pub(crate) struct AssistantRuntime {
     /// `spawn_gif_export` que `poll_gif_export_job` drena sin bloquear.
     gif_export_job: Option<GifExportJob>,
     session_api_key: Option<SessionApiKey>,
+    /// Sesión Go estable por conversación (`x-opencode-session`, docs Go
+    /// 2026-09-08): UUID v4 lazy en el primer request Go, estable entre
+    /// turnos, nueva al Limpiar conversación. Sólo se adjunta a `ProviderSettings`
+    /// cuando el proveedor es Go; el resto trae `None` (sin header).
+    go_session_id: Option<String>,
 }
 
 struct SessionApiKey {
@@ -927,6 +932,28 @@ impl AssistantRuntime {
 
     fn forget_key(&mut self) {
         self.session_api_key = None;
+    }
+
+    /// Sesión Go estable por conversación (UUID v4 lazy).
+    /// La crea en el primer request Go y la conserva entre turnos; el botón
+    /// Limpiar la rota vía `rotate_go_session`. Pura memoria, sin I/O, sin
+    /// `unwrap`: `Uuid::new_v4` no falla.
+    fn ensure_go_session(&mut self) -> String {
+        if let Some(id) = self.go_session_id.clone() {
+            if grafito_assistant::sanitize_go_session_id(&id).is_some() {
+                return id;
+            }
+        }
+        let fresh = uuid::Uuid::new_v4().to_string();
+        self.go_session_id = Some(fresh.clone());
+        fresh
+    }
+
+    /// Rota la sesión Go (botón Limpiar conversación): la próxima consulta
+    /// abre una conversación nueva en el gateway (routing/caching frescos).
+    /// Genera el UUID ya (no lazy) para que los tests vean el cambio.
+    fn rotate_go_session(&mut self) {
+        self.go_session_id = Some(uuid::Uuid::new_v4().to_string());
     }
 
     fn remote_request_slot_is_free(&self) -> bool {
@@ -2469,6 +2496,9 @@ impl GrafitoApp {
             }
             AssistantUiAction::ClearConversation => {
                 self.assistant.clear_conversation();
+                // La conversación nueva abre sesión Go nueva (routing/caching
+                // frescos en el gateway); el próximo request Go la usa.
+                self.assistant_runtime.rotate_go_session();
             }
             AssistantUiAction::HidePanel => {
                 self.assistant_visible = false;
@@ -5161,7 +5191,7 @@ impl GrafitoApp {
                                 if is_session_or_account_error(&error) {
                                     eprintln!("grafito: session-fallback muse-spark 400-sesion [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
                                     self.notify(
-                                        "Spark gratis exige sesión del proveedor y no se pudo abrir (no es tu clave); sigo con DeepSeek Flash sin cambiar tu modelo.",
+                                        "Muse Spark rechazó la sesión Go (el header viaja solo; reintentá en un rato y si persiste verificá tu región o re-conectá tu clave Go). Sigo con DeepSeek Flash sin cambiar tu modelo.",
                                         ToastKind::Info,
                                     );
                                 } else {
@@ -5382,11 +5412,11 @@ impl GrafitoApp {
         }
     }
 
-    fn assistant_provider_settings(&self) -> Result<ProviderSettings, String> {
+    fn assistant_provider_settings(&mut self) -> Result<ProviderSettings, String> {
         self.assistant_provider_settings_for(&self.assistant.model.clone())
     }
 
-    fn assistant_provider_settings_for(&self, model: &str) -> Result<ProviderSettings, String> {
+    fn assistant_provider_settings_for(&mut self, model: &str) -> Result<ProviderSettings, String> {
         let model = model.trim();
         if model.is_empty() {
             return Err(
@@ -5424,6 +5454,16 @@ impl GrafitoApp {
                 ..settings.capabilities
             };
             settings = settings.with_capabilities(capabilities);
+        }
+        // Sesión Go (docs Go 2026-09-08): sólo para el gateway Go
+        // (`opencode.ai/zen/go`; cubre OpenCodeGo y el Custom que apunta ahí).
+        // DeepSeek/Ollama/Custom no-Go traen `None` (sin header). Lazy: se crea
+        // en el primer request Go y queda estable hasta Limpiar.
+        let is_go = settings.profile == ProviderProfile::OpenCodeGo
+            || settings.endpoint.contains("opencode.ai");
+        if is_go {
+            let session = self.assistant_runtime.ensure_go_session();
+            settings = settings.with_go_session_id(Some(session))?;
         }
         Ok(settings)
     }
@@ -5510,7 +5550,7 @@ fn should_fallback_agent_spark_to_deepseek(
         && !error.contains("429")
 }
 
-/// Detecta errores 400 de sesión/cuenta/clave del gateway Zen (2026-09-08).
+/// Detecta errores 400 de sesión/cuenta/clave del gateway Go (docs Go 2026-09-08).
 ///
 /// El lector del transporte (`grafito-assistant::http_status_error` +
 /// `remote_error_category`) hoy NO parsea el campo `type` del cuerpo: sólo
@@ -5518,7 +5558,8 @@ fn should_fallback_agent_spark_to_deepseek(
 /// subcadena sobre el error ya formateado
 /// (`remote assistant returned HTTP 400: {"type":"error","error":{"type":"MissingSessionID",...}}`).
 /// Tipos cubiertos: `MissingSessionID|InvalidApiKey|ModelDisabled|AccountBlocked`.
-/// Puro, sin `unwrap`, sin I/O. No toca el wire (prohibido inventar `session_id`).
+/// Puro, sin `unwrap`, sin I/O. No toca el wire (prohibido inventar `session_id`
+/// en bodies: la sesión viaja sólo como header `x-opencode-session`).
 fn is_session_or_account_error(error: &str) -> bool {
     error.contains("MissingSessionID")
         || error.contains("InvalidApiKey")
@@ -5532,7 +5573,8 @@ fn is_session_or_account_error(error: &str) -> bool {
 /// fallback se re-dispara al infinito (un aviso por intento = "bucle").
 /// La preferencia guardada queda intacta; el próximo pedido reintenta spark.
 /// Nunca ante 429: cambiar de modelo no devuelve cuota y duplicaría el gasto.
-/// El 400 de sesión/cuenta (tier gratuito sin sesión válida) también reintenta
+/// El 400 de sesión/cuenta del gateway Go (incluido `MissingSessionID` con
+/// header: el servidor puede rechazar por región) también reintenta
 /// una vez con deepseek, con aviso honesto de una línea (ver rama en
 /// `poll_assistant_jobs`).
 fn should_fallback_remote_spark_to_deepseek(
@@ -5591,17 +5633,18 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     } else if error.contains("Responses API") {
         "Este modelo usa la Responses API: el modo agente con herramientas aún no está soportado. Usá el chat simple o cambiá a deepseek-v4-flash.".into()
     } else if is_session_or_account_error(error) {
-        // 400 de sesión/cuenta/clave (tier gratuito sin sesión válida, 2026-09-08):
+        // 400 de sesión/cuenta/clave del gateway Go (2026-09-08, docs Go):
         // dice QUÉ pasa + qué hacer, sin el genérico "Revisá Configuración → Modelo".
-        // OJO: MissingSessionID NO es tu clave (llega bien; lo exige el servidor
-        // para el tier gratuito). InvalidApiKey SÍ puede ser clave mala/expirada.
+        // OJO: MissingSessionID NO es tu clave (el header `x-opencode-session`
+        // viaja solo; el gateway lo rechazó igual, p.ej. por región).
+        // InvalidApiKey SÍ puede ser clave mala/expirada o sesión sin re-conectar.
         // Si hubo fallback, el aviso de una línea ya dijo que se reintentó con
         // deepseek; este mensaje es para cuando NO hubo fallback (corrección en
         // curso, otro modelo, o reintento ya consumido).
         if error.contains("MissingSessionID") {
-            "Spark gratis exige sesión del proveedor y no se pudo abrir (no es tu clave). Probá el modelo pago `muse-spark-1.3`, reintentá en un rato, o seguí con deepseek.".into()
+            "No se pudo abrir la sesión de Muse Spark en el gateway Go (el header viaja solo). Reintentá, verificá tu región (Spark está limitado por región Meta) o re-conectá tu clave Go; o seguí con deepseek.".into()
         } else {
-            "El proveedor rechazó la cuenta o la clave (revisá tu clave de Zen en Configuración) o seguí con deepseek.".into()
+            "El gateway Go rechazó la cuenta o la clave. Re-conectá tu clave Go en Configuración avanzada, verificá tu región, o seguí con deepseek.".into()
         }
     } else if error.contains("cancel") {
         "La consulta remota se canceló antes de completarse.".into()
@@ -6905,7 +6948,7 @@ mod tests {
         IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
         SpecAnimIa, ANIM_IA_SPEC_TIMEOUT_MS, ANIM_SIN_IA_AVISO,
     };
-    use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
+    use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
         AssistantFocus, AssistantOperation, AssistantRepairFailure, AssistantRepairFailureKind,
         AssistantRepairFeedback, AssistantRequest, ConversationRole, ConversationTurn,
@@ -7459,8 +7502,9 @@ mod tests {
 
     #[test]
     fn spark_400_missing_session_falls_back_with_session_message() {
-        // Mock del gateway Zen 2026-09-08: el tier gratuito sin sesión válida
-        // devuelve 400 con `MissingSessionID` en el cuerpo.
+        // Mock del gateway Go (docs Go 2026-09-08): sin sesión válida devuelve
+        // 400 con `MissingSessionID` en el cuerpo. El usuario PAGA Go: nada de
+        // "tier gratuito" ni "modelo pago" en los mensajes.
         let body_400 = r#"remote assistant returned HTTP 400: {"type":"error","error":{"type":"MissingSessionID","message":"session required"}}"#;
         assert!(
             is_session_or_account_error(body_400),
@@ -7502,15 +7546,32 @@ mod tests {
                 "nada de genérico ante {tipo}: {mensaje}"
             );
         }
-        // Mensaje ante el 400 real: no culpa a tu clave + qué hacer, sin genérico.
+        // Mensaje ante el 400 real: header viaja solo + región + re-conectar,
+        // sin "gratis"/"pago", con deepseek y sin genérico.
         let mensaje = remote_error_message(body_400, "muse-spark-1.3-contributor-free");
         assert!(
-            mensaje.contains("no es tu clave"),
-            "no culpa a la clave: {mensaje}"
+            mensaje.contains("header viaja solo"),
+            "dice que el header ya viaja: {mensaje}"
+        );
+        assert!(
+            mensaje.contains("región"),
+            "pide verificar región (Spark limitado por región Meta): {mensaje}"
+        );
+        assert!(
+            mensaje.contains("re-conectá"),
+            "pide re-conectar la clave Go si persiste: {mensaje}"
         );
         assert!(
             mensaje.contains("deepseek"),
             "ofrece seguir con deepseek: {mensaje}"
+        );
+        assert!(
+            !mensaje.contains("gratis") && !mensaje.contains("tier"),
+            "nada de tier gratuito (el usuario PAGA Go): {mensaje}"
+        );
+        assert!(
+            !mensaje.contains("modelo pago"),
+            "nada de modelo pago (ya lo tiene): {mensaje}"
         );
         assert!(
             !mensaje.contains("Revisá Configuración → Modelo"),
@@ -7535,6 +7596,54 @@ mod tests {
             "muse-spark-1.3-contributor-free",
             0,
         ));
+    }
+
+    #[test]
+    fn go_session_estable_entre_turnos_y_rota_al_limpiar() {
+        // Estable entre turnos: dos ensures seguidos devuelven el mismo UUID.
+        let mut runtime = AssistantRuntime::default();
+        assert!(runtime.go_session_id.is_none());
+        let primero = runtime.ensure_go_session();
+        assert_eq!(runtime.go_session_id.as_deref(), Some(primero.as_str()));
+        let segundo = runtime.ensure_go_session();
+        assert_eq!(primero, segundo, "estable entre turnos");
+        assert!(grafito_assistant::sanitize_go_session_id(&segundo).is_some());
+        // Rota al Limpiar: el próximo turno usa otra sesión.
+        runtime.rotate_go_session();
+        let tercero = runtime.ensure_go_session();
+        assert_ne!(segundo, tercero, "rota al Limpiar conversación");
+        assert!(grafito_assistant::sanitize_go_session_id(&tercero).is_some());
+        // UA propio, no genérico.
+        let ua = grafito_assistant::go_user_agent();
+        assert!(ua.starts_with("grafito/"), "{ua}");
+    }
+
+    #[test]
+    fn missing_session_con_header_igual_fallback_por_region() {
+        // Aunque el header `x-opencode-session` viaje (sesión válida generada),
+        // el servidor puede rechazar por región: el 400 sigue haciendo fallback
+        // a deepseek una vez, sin tocar la preferencia.
+        let mut runtime = AssistantRuntime::default();
+        let session = runtime.ensure_go_session();
+        let settings = ProviderSettings::for_profile(
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+        )
+        .with_go_session_id(Some(session))
+        .expect("sesión UUID válida");
+        assert!(settings.go_session_id.is_some());
+        let body_400 = r#"remote assistant returned HTTP 400: {"type":"error","error":{"type":"MissingSessionID","message":"session required"}}"#;
+        assert!(should_fallback_remote_spark_to_deepseek(
+            body_400,
+            settings.profile,
+            &settings.model,
+            0,
+        ));
+        // Y el mensaje sigue en términos Go (reintentar + región + re-conectar).
+        let mensaje = remote_error_message(body_400, &settings.model);
+        assert!(mensaje.contains("Reintentá"), "{mensaje}");
+        assert!(mensaje.contains("región"), "{mensaje}");
+        assert!(mensaje.contains("deepseek"), "{mensaje}");
     }
 
     #[test]

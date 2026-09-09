@@ -149,10 +149,10 @@ const OPENCODE_MODELS: &[&str] = &[
     // Muse Spark viaja por la Responses API (verificado 2026-09-04: 200 en ~2s).
     // El modo agente con herramientas aún no está soportado para Spark:
     // el fallback de sesión reintenta con deepseek sin tocar tu preferencia.
-    // Vigentes 2026-09-08 (opencode.ai/docs/zen): `muse-spark-1.3` y
-    // `muse-spark-1.2` (pagos), `muse-spark-1.3-contributor-free` (gratis,
-    // exige sesión válida). Los `-contributor` viejos se conservan por
-    // compatibilidad (rutean por `contains("muse-spark")`).
+    // Go (suscripción, docs Go 2026-09-08): `-contributor`; Zen (custom):
+    // `1.3`/`1.2` pagos y `-contributor-free` gratis (exige sesión válida).
+    // Los `-contributor` viejos se conservan por compatibilidad (rutean por
+    // `contains("muse-spark")`).
     "muse-spark-1.3",
     "muse-spark-1.2",
     "muse-spark-1.3-contributor-free",
@@ -1343,12 +1343,13 @@ pub fn verified_models_summary_text() -> &'static str {
 
 /// Detalle de modelos verificados (dentro del plegable, no crudo en ayuda).
 ///
-/// Pura, sin I/O ni `unwrap`. Gratis vs pagos (catálogo Zen 2026-09-08):
-/// `muse-spark-1.3-contributor-free` es el tier gratuito (pide sesión válida);
-/// `muse-spark-1.3` y `muse-spark-1.2` son pagos. Los `-contributor` viejos
-/// siguen funcionando por compatibilidad.
+/// Pura, sin I/O ni `unwrap`. Go vs Zen (docs Go 2026-09-08 + catálogo Zen):
+/// Go (suscripción) = `muse-spark-1.3-contributor` / `1.2-contributor`;
+/// Zen (custom endpoints) = `muse-spark-1.3` / `1.2` (pagos) y
+/// `muse-spark-1.3-contributor-free` (gratis, pide sesión válida).
+/// Los `-contributor` viejos siguen funcionando por compatibilidad.
 pub fn verified_models_detail_text() -> &'static str {
-    "deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3 (pago), muse-spark-1.2 (pago), muse-spark-1.3-contributor-free (gratis, pide sesión válida), fusion (+ 17 más por descubrimiento)."
+    "deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor (Go), muse-spark-1.2-contributor (Go), muse-spark-1.3 (Zen pago), muse-spark-1.2 (Zen pago), muse-spark-1.3-contributor-free (Zen gratis, pide sesión válida), fusion (+ 17 más por descubrimiento)."
 }
 
 impl AssistantPanelState {
@@ -9607,11 +9608,11 @@ mod tests {
         assert!(choices.contains(&"muse-spark-1.3-contributor-free".to_string()));
         assert!(choices.contains(&"qwen3.8-max".to_string()));
         assert!(choices.contains(&"kimi-k3".to_string()));
-        // Help documenta gratis vs pagos (Configuración → plegable).
+        // Help documenta Go (suscripción) vs Zen (custom) en el plegable.
         let detail = verified_models_detail_text();
         assert!(detail.contains("muse-spark-1.3-contributor-free"));
-        assert!(detail.contains("gratis"));
-        assert!(detail.contains("pago"));
+        assert!(detail.contains("muse-spark-1.3-contributor (Go)"));
+        assert!(detail.contains("Zen"));
         // OpenCode Go ahora acepta todos los modelos visibles; kimi ya no se filtra
         assert!(choices.iter().any(|model| model.contains("kimi")));
         assert!(choices.iter().any(|model| model.contains("mimo"))); // MiMo 2.5-VL (visión)

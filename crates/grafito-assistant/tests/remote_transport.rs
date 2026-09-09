@@ -689,6 +689,7 @@ fn payload_validation_rejects_unscoped_custom_credentials_before_a_request() {
             model: "custom-model".into(),
             api_key_env: Some(api_key_env.into()),
             capabilities: ProviderProfile::CustomOpenAiCompatible.capabilities(),
+            go_session_id: None,
         };
 
         assert!(build_chat_completion_payload(&settings, &request).is_err());

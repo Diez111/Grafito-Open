@@ -1208,10 +1208,12 @@ fn request_agent_completion(
         return Err(crate::rate_limit_paused_error());
     }
     let client = crate::shared_http_client()?;
+    let endpoint = crate::chat_completion_endpoint(settings)?;
     let mut call = client
-        .post(crate::chat_completion_endpoint(settings)?)
+        .post(endpoint.clone())
         .json(&payload)
         .timeout(timeout);
+    call = crate::apply_go_transport_headers(call, &endpoint, settings.go_session_id.as_deref());
     if let Some(key) = api_key {
         call = call.bearer_auth(crate::sanitize_api_key(key)?);
     }
@@ -1641,10 +1643,9 @@ fn post_responses_output(
         return Err("assistant agent request was cancelled".into());
     }
     let client = crate::shared_http_client()?;
-    let mut call = client
-        .post(crate::responses_endpoint(settings)?)
-        .json(payload)
-        .timeout(timeout);
+    let endpoint = crate::responses_endpoint(settings)?;
+    let mut call = client.post(endpoint.clone()).json(payload).timeout(timeout);
+    call = crate::apply_go_transport_headers(call, &endpoint, settings.go_session_id.as_deref());
     if crate::check_rate_limit_cooldown().is_err() {
         return Err(crate::rate_limit_paused_error());
     }
