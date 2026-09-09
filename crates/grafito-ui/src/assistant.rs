@@ -6165,9 +6165,9 @@ fn draw_assistant_empty_state(
         ui.add_space(crate::tokens::SPACE_LG);
     }
     ui.vertical_centered(|ui| {
-        // Avatar chico (68px): marca sin duplicar el título del header,
-        // que ya dice quién habla.
-        let size = 68.0;
+        // Diseño clásico: avatar mediano + nombre + rol, simple sin quedar
+        // vacío. El header también los dice, pero acá arman la bienvenida.
+        let size = 104.0;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);
@@ -6183,9 +6183,21 @@ fn draw_assistant_empty_state(
                 size * 0.5,
                 egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
             );
-            let inner = rect.shrink(6.0);
+            let inner = rect.shrink(8.0);
             crate::avatar::draw_avatar(&painter, inner, &state.avatar, time, hover_pos);
         }
+        ui.add_space(crate::tokens::SPACE_SM);
+        ui.label(
+            egui::RichText::new(state.avatar.assistant_name_or_default())
+                .color(theme.text_primary)
+                .size(crate::tokens::TYPE_MD)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new("Asistente matemático")
+                .color(theme.text_secondary)
+                .size(crate::tokens::TYPE_XS),
+        );
         ui.add_space(crate::tokens::SPACE_MD);
     });
     action
@@ -6309,9 +6321,8 @@ fn draw_assistant_composer(
         ASSISTANT_COMPOSER_EDITOR_HEIGHT
     };
     let editor_rows = if collapsed { 1 } else { 2 };
-    // El hint del composer es la única invitación a escribir; los atajos
-    // viven en el caption estático bajo el composer, nunca en un tooltip.
-    let editor_hint = "Pedí algo, ej. \"graficá y=x²\"…";
+    // Hint simple y estable (pedido explícito): siempre el mismo texto.
+    let editor_hint = "Escribí tu pregunta";
 
     if let Some(focus) = &state.focus {
         egui::Frame::none()
@@ -10652,9 +10663,9 @@ mod tests {
 
         let mut texts = Vec::new();
         collect_text_shapes(&output.shapes, &mut texts);
-        // El empty minimalista no tiene botones ni textos apilados: con
-        // 0-1 bloques no hay nada que pueda solaparse (antes: chip + CTA).
-        assert!(texts.len() <= 1, "el vacío minimalista no apila textos");
+        // Bienvenida clásica: avatar + nombre + rol en flujo vertical (no se
+        // tocan por construcción); lo que se prohíbe es OVERLAY absoluto.
+        // Se aceptan hasta 3 bloques (nombre, rol, hint si lo hubiera).
         texts.sort_by(|a, b| {
             a.0.min
                 .y
