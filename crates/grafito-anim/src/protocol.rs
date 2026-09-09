@@ -1736,15 +1736,22 @@ pub fn playlist_frame_at(timeline: &Timeline, t_ms: u64, total_frames: usize) ->
     (value.round() as usize).min(total_frames.saturating_sub(1))
 }
 
-/// `Group` simultáneo estilo Manim (`LaggedStart`): arranque escalonado.
+/// `Group` simultáneo estilo Manim (`LaggedStart`): arranque escalonado +
+/// composición alfa simultánea (M4).
 ///
-/// Solo timings: `lag_ratio` 0..=1 desplaza cada sub-animación
-/// `lag_ratio * run_ms` tras la anterior (`0` = todo junto, `1` = una tras
-/// otra). El compositado simultáneo de píxeles NO se hace en este crate
-/// (cada renderer nativo dibuja frame completo; mezclarlos exige un
-/// compositor alfa que hoy no existe): el runner FIFO los ejecuta en orden
-/// con estos offsets documentados. `indices` refiere a posiciones de la
-/// playlist (validar con `validate_for_playlist`).
+/// Dos caras del mismo grupo:
+/// - timings: `lag_ratio` 0..=1 desplaza cada sub-animación
+///   `lag_ratio * run_ms` tras la anterior (`0` = todo junto, `1` = una tras
+///   otra); el runner FIFO los ejecuta en orden con estos offsets
+///   (`start_offsets_ms` / `span_ms`);
+/// - píxeles: `composicion_esperada` valida que los sets referenciados tengan
+///   el MISMO N y el MISMO viewport (si difieren → `Err` honesto, jamás
+///   reescaleo silencioso) y `mezclar_pixel_alfa` es el over con el que
+///   `grafito-app/src/anim_native.rs::componer_grupo_nativo` los fusiona
+///   frame a frame (`sets[0]` fondo → último frente).
+///
+///  refiere a posiciones de la playlist (validar con
+/// `validate_for_playlist`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnimationGroup {
     /// Posiciones de la playlist que arrancan escalonadas (2..=8, únicas).
@@ -1848,6 +1855,164 @@ impl AnimationGroup {
         };
         run_ms.saturating_add(extra)
     }
+
+    /// Valida la composición simultánea de los sets que el grupo referencia
+    /// (M4, cara píxeles del `Group`).
+    ///
+    /// `conteos` = frames por step de la playlist y `tamanos` = `(w, h)` por
+    /// step, ambos indexados por posición de playlist. Exige: mismos largos
+    /// de arreglo, índices dentro, al menos 2 sets referenciados, todos con
+    /// el MISMO N (> 0) y el MISMO viewport (lados 1..=4096); el set
+    /// compuesto debe entrar en `GROUP_MAX_SET_BYTES`. Si algo difiere →
+    /// `Err` honesto en español (jamás reescaleo silencioso). Devuelve
+    /// `(N, (w, h))` del compuesto. Puro, sin pánicos.
+    pub fn composicion_esperada(
+        &self,
+        conteos: &[usize],
+        tamanos: &[(usize, usize)],
+    ) -> Result<(usize, (usize, usize)), ProtocolError> {
+        if conteos.len() != tamanos.len() {
+            return Err(ProtocolError::InvalidField {
+                field: "group.composicion",
+                reason: format!(
+                    "conteos ({}) y tamaños ({}) desparejos: pasalos por posición de playlist",
+                    conteos.len(),
+                    tamanos.len()
+                ),
+            });
+        }
+        self.validate_for_playlist(conteos.len())?;
+        if self.indices.len() < 2 {
+            return Err(ProtocolError::InvalidField {
+                field: "group.indices",
+                reason: "el compuesto necesita al menos 2 animaciones".into(),
+            });
+        }
+        let primero = self.indices[0];
+        let n0 = match conteos.get(primero) {
+            Some(n) => *n,
+            None => {
+                return Err(ProtocolError::InvalidField {
+                    field: "group.indices",
+                    reason: format!(
+                        "índice {primero} fuera de la playlist de {} steps",
+                        conteos.len()
+                    ),
+                });
+            }
+        };
+        if n0 == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "group.frames",
+                reason: format!("el set {primero} está vacío: sin frames no hay qué componer"),
+            });
+        }
+        let t0 = match tamanos.get(primero) {
+            Some(t) => *t,
+            None => {
+                return Err(ProtocolError::InvalidField {
+                    field: "group.indices",
+                    reason: format!(
+                        "índice {primero} fuera de la playlist de {} steps",
+                        conteos.len()
+                    ),
+                });
+            }
+        };
+        valida_lado_compuesto(t0)?;
+        for index in &self.indices {
+            let n = conteos.get(*index).copied().unwrap_or(0);
+            if n != n0 {
+                return Err(ProtocolError::InvalidField {
+                    field: "group.frames",
+                    reason: format!(
+                        "el set {index} trae {n} frames y el grupo pide {n0}: igualá N (sin reescaleo silencioso)"
+                    ),
+                });
+            }
+            let t = tamanos.get(*index).copied().unwrap_or((0, 0));
+            valida_lado_compuesto(t)?;
+            if t != t0 {
+                return Err(ProtocolError::InvalidField {
+                    field: "group.viewport",
+                    reason: format!(
+                        "el set {index} mide {}x{} y el grupo pide {}x{}: igualá el viewport (sin reescaleo silencioso)",
+                        t.0, t.1, t0.0, t0.1
+                    ),
+                });
+            }
+        }
+        match t0
+            .0
+            .checked_mul(t0.1)
+            .and_then(|v| v.checked_mul(PLAYLIST_BYTES_PER_PIXEL))
+            .and_then(|v| v.checked_mul(n0))
+        {
+            Some(got) if got <= GROUP_MAX_SET_BYTES => Ok((n0, t0)),
+            other => Err(ProtocolError::InvalidField {
+                field: "group.presupuesto",
+                reason: match other {
+                    Some(got) => format!(
+                        "el compuesto estimado ({got} bytes) excede el tope de {GROUP_MAX_SET_BYTES}: bajá resolución o fotogramas"
+                    ),
+                    None => format!(
+                        "el compuesto estimado desborda el contador (tope {GROUP_MAX_SET_BYTES}): bajá resolución o fotogramas"
+                    ),
+                },
+            }),
+        }
+    }
+}
+
+/// Tope del set compuesto en RAM (M4, paridad con `PARAMETRIC_MAX_BYTES` y
+/// `NATIVE_MAX_SET_BYTES`): 64 MiB. El compuesto tiene N frames (no N×sets),
+/// pero cada capa suma I/O de lectura; la cota cubre el peor caso honesto.
+pub const GROUP_MAX_SET_BYTES: usize = 64 * 1024 * 1024;
+
+/// Valida un lado del compuesto (1..=4096 por lado, paridad con `Resolution`).
+fn valida_lado_compuesto(t: (usize, usize)) -> Result<(), ProtocolError> {
+    if t.0 == 0 || t.1 == 0 || t.0 > 4096 || t.1 > 4096 {
+        return Err(ProtocolError::InvalidCanvas(format!(
+            "viewport {}x{} fuera de 1..=4096 para componer",
+            t.0, t.1
+        )));
+    }
+    Ok(())
+}
+
+/// Mezcla alfa `frente` sobre `fondo` (Porter-Duff over en alfa directo).
+///
+/// Canales `[R, G, B, A]` 0..=255. `frente` opaco tapa, `frente`
+/// transparente conserva el fondo, a medias promedia honesto. Puro, sin
+/// pánicos (todo f64 finito + round + clamp).
+pub fn mezclar_pixel_alfa(fondo: [u8; 4], frente: [u8; 4]) -> [u8; 4] {
+    let af = f64::from(frente[3]) / 255.0;
+    let ab = f64::from(fondo[3]) / 255.0;
+    if !af.is_finite() || !ab.is_finite() {
+        return fondo;
+    }
+    let ao = af + ab * (1.0 - af);
+    if !ao.is_finite() || ao <= 0.0 {
+        return [0, 0, 0, 0];
+    }
+    let mut out = [0_u8; 4];
+    for k in 0..3 {
+        let cf = f64::from(frente[k]);
+        let cb = f64::from(fondo[k]);
+        let v = (cf * af + cb * ab * (1.0 - af)) / ao;
+        out[k] = if v.is_finite() {
+            v.round().clamp(0.0, 255.0) as u8
+        } else {
+            fondo[k]
+        };
+    }
+    let a = ao * 255.0;
+    out[3] = if a.is_finite() {
+        a.round().clamp(0.0, 255.0) as u8
+    } else {
+        fondo[3]
+    };
+    out
 }
 
 /// Timings estilo Manim (`run_time` + `wait` por animación).
@@ -2087,5 +2252,68 @@ mod playlist_f2b_tests {
             None,
             "desborde honesto, no wrap"
         );
+    }
+}
+
+// ── M4: Group simultáneo real (solo tests, sin tocar prod) ───────────────
+#[cfg(test)]
+mod group_compose_m4_tests {
+    use super::*;
+
+    #[test]
+    fn composicion_exige_mismo_n_y_viewport() {
+        let grupo = AnimationGroup::try_new(vec![0, 1], 0.0).unwrap();
+        // Caso feliz: mismo N y mismo viewport.
+        assert_eq!(
+            grupo.composicion_esperada(&[48, 48], &[(64, 48), (64, 48)]),
+            Ok((48, (64, 48)))
+        );
+        // N distinto → Err honesto (sin reescaleo silencioso).
+        let err = grupo
+            .composicion_esperada(&[48, 24], &[(64, 48), (64, 48)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("24") && err.contains("48"), "got: {err}");
+        // Viewport distinto → Err honesto.
+        let err = grupo
+            .composicion_esperada(&[48, 48], &[(64, 48), (96, 72)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("viewport"), "got: {err}");
+        // Set vacío, arreglos desparejos e índice fuera.
+        assert!(grupo
+            .composicion_esperada(&[0, 0], &[(64, 48), (64, 48)])
+            .is_err());
+        assert!(grupo.composicion_esperada(&[48, 48], &[(64, 48)]).is_err());
+        assert!(grupo.composicion_esperada(&[48], &[(64, 48)]).is_err());
+        // Lado fuera de 1..=4096 y presupuesto excedido.
+        assert!(grupo
+            .composicion_esperada(&[48, 48], &[(0, 48), (0, 48)])
+            .is_err());
+        assert!(grupo
+            .composicion_esperada(&[48, 48], &[(4096, 4096), (4096, 4096)])
+            .is_err());
+    }
+
+    #[test]
+    fn mezcla_alfa_over_correcta() {
+        // Frente opaco tapa.
+        assert_eq!(
+            mezclar_pixel_alfa([0, 0, 255, 255], [255, 0, 0, 255]),
+            [255, 0, 0, 255]
+        );
+        // Frente transparente conserva el fondo.
+        assert_eq!(
+            mezclar_pixel_alfa([0, 0, 255, 255], [255, 0, 0, 0]),
+            [0, 0, 255, 255]
+        );
+        // Nada sobre nada = transparente.
+        assert_eq!(mezclar_pixel_alfa([0, 0, 0, 0], [0, 0, 0, 0]), [0, 0, 0, 0]);
+        // Rojo 50% sobre azul opaco: ambas capas aportan (±1 por redondeo).
+        let m = mezclar_pixel_alfa([0, 0, 255, 255], [255, 0, 0, 128]);
+        assert_eq!(m[3], 255);
+        assert!((m[0] as i16 - 128).abs() <= 1, "r={}", m[0]);
+        assert_eq!(m[1], 0);
+        assert!((m[2] as i16 - 127).abs() <= 1, "b={}", m[2]);
     }
 }

@@ -344,12 +344,67 @@ impl ParametricAnim {
     /// Evalúa la expresión del fotograma `i` en `x` (barrido/traza/lugar/
     /// tangente/área usan A; morph interpola A→B con la fracción del frame).
     pub fn eval_frame(&self, i: usize, x: f64) -> Option<f64> {
+        self.eval_frame_con_vivo(i, x, None)
+    }
+
+    // ── M4: updater por frame con `p` vivo ─────────────────────────────
+    // El `LiveParam p` del documento (`grafito-core`, slider del panel) ya
+    // existe; la animación en reproducción lo LEE por frame: si el documento
+    // define `p` (el llamador pasa `Some(v)` finito, típicamente
+    // `doc.live_param_value("p", …)`), el scrub/play lo sigue; si no
+    // (`None` o no finito), rango propio `[p0, p1]`.
+    //
+    // Seam: el cableado vive donde el player muestrea frames
+    // (`grafito-app/src/anim_native.rs`: `sample_curve_con_vivo`,
+    // `render_parametric_frames_con_updater`), NUNCA en la UI. Acá solo los
+    // primitivos puros + este contrato. Sin I/O, sin `unwrap`.
+
+    /// Valor del parámetro en el fotograma `i` siguiendo el vivo.
+    ///
+    /// `Some(v)` finito = manda el slider (se usa tal cual, sin clampear:
+    /// el evaluador acepta cualquier `p` finito y clampear mentiría);
+    /// `None` o no finito = `frame_param(i)` (rango propio). Puro.
+    pub fn frame_param_con_vivo(&self, i: usize, vivo: Option<f64>) -> f64 {
+        match vivo {
+            Some(v) if v.is_finite() => v,
+            _ => self.frame_param(i),
+        }
+    }
+
+    /// Fracción 0..1 del fotograma `i` siguiendo el vivo (para traza/morph).
+    ///
+    /// Sin vivo = `frame_fraction(i)`. Con vivo finito, el `p` vivo se
+    /// mapea al rango `[p0, p1]` como `s = (v - p0)/(p1 - p0)` clampea­do a
+    /// 0..1 (rango degenerado o no finito → `frame_fraction(i)` honesto).
+    /// Puro, sin pánicos.
+    pub fn frame_fraction_con_vivo(&self, i: usize, vivo: Option<f64>) -> f64 {
+        let v = match vivo {
+            Some(v) if v.is_finite() => v,
+            _ => return self.frame_fraction(i),
+        };
+        if !self.p0.is_finite() || !self.p1.is_finite() || self.p0 == self.p1 {
+            return self.frame_fraction(i);
+        }
+        let s = (v - self.p0) / (self.p1 - self.p0);
+        if s.is_finite() {
+            s.clamp(0.0, 1.0)
+        } else {
+            self.frame_fraction(i)
+        }
+    }
+
+    /// Evalúa el fotograma `i` en `x` siguiendo el vivo.
+    ///
+    /// No-morph: evalúa en `frame_param_con_vivo`. Morph: interpola A→B con
+    /// `frame_fraction_con_vivo` (A y B se evalúan en `p0`, como hoy).
+    /// `None` honesto si no hay dominio, igual que `eval_frame`.
+    pub fn eval_frame_con_vivo(&self, i: usize, x: f64, vivo: Option<f64>) -> Option<f64> {
         match self.kind {
             ParametricKind::Morph => {
                 let b = self.expr_b.as_deref().unwrap_or("");
                 let fa = eval_expr(&self.expr_a, x, self.param.as_str(), self.p0)?;
                 let fb = eval_expr(b, x, self.param.as_str(), self.p0)?;
-                let s = self.frame_fraction(i);
+                let s = self.frame_fraction_con_vivo(i, vivo);
                 let v = fa + (fb - fa) * s;
                 if v.is_finite() {
                     Some(v)
@@ -358,7 +413,7 @@ impl ParametricAnim {
                 }
             }
             _ => {
-                let p = self.frame_param(i);
+                let p = self.frame_param_con_vivo(i, vivo);
                 eval_expr(&self.expr_a, x, self.param.as_str(), p)
             }
         }
@@ -2809,5 +2864,75 @@ mod shape_morph_f2a {
         assert_eq!(anim.kind, ParametricKind::Morph);
         let v0 = anim.eval_frame(0, 2.0).unwrap();
         assert!((v0 - 4.0).abs() < 1e-9, "frame 0 = A: {v0}");
+    }
+}
+
+// ── M4: updater por frame con `p` vivo (solo tests, sin tocar prod) ──────
+#[cfg(test)]
+mod vivo_m4 {
+    use super::*;
+
+    fn barrido() -> ParametricAnim {
+        ParametricAnim::try_new(
+            ParametricKind::Sweep,
+            "x+p".to_string(),
+            None,
+            ParamName::try_new("p").unwrap(),
+            0.0,
+            10.0,
+            FrameCount::try_new(8).unwrap(),
+            Resolution::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn con_vivo_el_frame_refleja_p_actual() {
+        let anim = barrido();
+        // Con vivo 7.0, CUALQUIER frame evalúa en p=7 (el scrub lo sigue).
+        for i in 0..anim.frame_count() {
+            assert_eq!(anim.frame_param_con_vivo(i, Some(7.0)), 7.0);
+            assert_eq!(anim.eval_frame_con_vivo(i, 1.0, Some(7.0)), Some(8.0));
+        }
+        // Sin vivo, rango propio: frame 0 → p0, último → p1.
+        assert_eq!(anim.frame_param_con_vivo(0, None), 0.0);
+        assert_eq!(anim.frame_param_con_vivo(7, None), 10.0);
+        assert_eq!(anim.eval_frame_con_vivo(0, 1.0, None), Some(1.0));
+        assert_eq!(anim.eval_frame_con_vivo(7, 1.0, None), Some(11.0));
+        // Vivo no finito = rango propio (honesto, sin panic).
+        assert_eq!(anim.frame_param_con_vivo(0, Some(f64::NAN)), 0.0);
+        assert_eq!(anim.frame_param_con_vivo(0, Some(f64::INFINITY)), 0.0);
+        assert_eq!(anim.eval_frame_con_vivo(0, 1.0, Some(f64::NAN)), Some(1.0));
+    }
+
+    #[test]
+    fn morph_mapea_vivo_a_fraccion_clampeada() {
+        let anim = ParametricAnim::try_new(
+            ParametricKind::Morph,
+            "x^2".to_string(),
+            Some("x^3".to_string()),
+            ParamName::try_new("p").unwrap(),
+            0.0,
+            1.0,
+            FrameCount::try_new(4).unwrap(),
+            Resolution::default(),
+        )
+        .unwrap();
+        // Vivo 0.25 → s=0.25: 4 + (8-4)*0.25 = 5 en x=2.
+        let v = anim.eval_frame_con_vivo(99, 2.0, Some(0.25)).unwrap();
+        assert!((v - 5.0).abs() < 1e-9, "got {v}");
+        // Fuera de rango se clampa (no extrapola en silencio): vivo 99 → s=1.
+        let v1 = anim.eval_frame_con_vivo(0, 2.0, Some(99.0)).unwrap();
+        assert!((v1 - 8.0).abs() < 1e-9, "got {v1}");
+        // Sin vivo, el frame manda (frame 0 = A).
+        let v0 = anim.eval_frame_con_vivo(0, 2.0, None).unwrap();
+        assert!((v0 - 4.0).abs() < 1e-9, "got {v0}");
+        // `eval_frame` intacto: equivale al vivo `None`.
+        for i in 0..4 {
+            assert_eq!(
+                anim.eval_frame(i, 2.0),
+                anim.eval_frame_con_vivo(i, 2.0, None)
+            );
+        }
     }
 }

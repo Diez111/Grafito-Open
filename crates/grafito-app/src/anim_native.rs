@@ -9,8 +9,8 @@ pub(crate) const NATIVE_ANIM_FRAME_COUNT: usize = 48;
 #[cfg(test)]
 use grafito_anim::protocol::CANONICAL_TEMPLATES;
 use grafito_anim::protocol::{
-    contiene_palabra, scene_param_clamped, template_for_concept, SCENE_PARAM_A, SCENE_PARAM_B,
-    SCENE_PARAM_SPAN, SCENE_PARAM_TERMS, SCENE_PARAM_X0,
+    contiene_palabra, mezclar_pixel_alfa, scene_param_clamped, template_for_concept, SCENE_PARAM_A,
+    SCENE_PARAM_B, SCENE_PARAM_SPAN, SCENE_PARAM_TERMS, SCENE_PARAM_X0,
 };
 use grafito_assistant::CancellationToken;
 use std::path::{Path, PathBuf};
@@ -1481,6 +1481,64 @@ pub(crate) fn integral_acumulada(
     }
 }
 
+/// Evalúa la canónica en el frame siguiendo el vivo (M4); sin canónica, `x*x`.
+fn integral_eval_con_vivo(
+    anim: Option<&ParametricAnim>,
+    frame: usize,
+    x: f64,
+    vivo: Option<f64>,
+) -> Option<f64> {
+    match anim {
+        Some(a) => a.eval_frame_con_vivo(frame, x, vivo),
+        None => {
+            let v = x * x;
+            if v.is_finite() {
+                Some(v)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// `S` acumulada por trapecios siguiendo el vivo (M4; idem `integral_acumulada`).
+pub(crate) fn integral_acumulada_con_vivo(
+    anim: Option<&ParametricAnim>,
+    frame: usize,
+    a: f64,
+    x_end: f64,
+    vivo: Option<f64>,
+) -> Option<f64> {
+    if x_end <= a {
+        return Some(0.0);
+    }
+    let pasos = ((x_end - a) / 0.05).ceil() as usize;
+    let mut s = 0.0;
+    let mut valida = false;
+    for i in 0..pasos.min(4096) {
+        let x0 = a + i as f64 * 0.05;
+        let x1 = (a + (i + 1) as f64 * 0.05).min(x_end);
+        if x1 <= x0 {
+            continue;
+        }
+        if let (Some(fa), Some(fb)) = (
+            integral_eval_con_vivo(anim, frame, x0, vivo),
+            integral_eval_con_vivo(anim, frame, x1, vivo),
+        ) {
+            let tramo = (fa + fb) * 0.5 * (x1 - x0);
+            if tramo.is_finite() {
+                s += tramo;
+                valida = true;
+            }
+        }
+    }
+    if valida && s.is_finite() {
+        Some(s)
+    } else {
+        None
+    }
+}
+
 fn render_integral_frames_with_params_impl(
     width: u32,
     height: u32,
@@ -2834,10 +2892,22 @@ fn draw_parametric_base(buf: &mut [u8], w: usize, h: usize, t: f64, title: &str,
 
 /// Muestrea `y = anim(frame i, x)` en 121 puntos de [-3,3]; huecos donde no hay dominio.
 fn sample_curve(anim: &ParametricAnim, frame: usize) -> Vec<Option<(f64, f64)>> {
+    sample_curve_con_vivo(anim, frame, None)
+}
+
+/// Idem siguiendo el `p` vivo del documento (M4, updater por frame).
+///
+/// `Some(v)` finito = el slider manda en este frame; `None` = rango propio.
+/// La dibuja el player en cada frame, nunca la UI.
+fn sample_curve_con_vivo(
+    anim: &ParametricAnim,
+    frame: usize,
+    vivo: Option<f64>,
+) -> Vec<Option<(f64, f64)>> {
     (0..=120)
         .map(|k| {
             let x = -3.0 + 6.0 * (k as f64 / 120.0);
-            anim.eval_frame(frame, x).map(|y| (x, y))
+            anim.eval_frame_con_vivo(frame, x, vivo).map(|y| (x, y))
         })
         .collect()
 }
@@ -2857,9 +2927,19 @@ fn draw_curve_gaps(buf: &mut [u8], w: usize, h: usize, pts: &[Option<(f64, f64)>
 
 /// Pendiente numérica central (clamp a ±10 para dibujar; `None` sin dominio).
 fn numeric_slope(anim: &ParametricAnim, frame: usize, x: f64) -> Option<f64> {
+    numeric_slope_con_vivo(anim, frame, x, None)
+}
+
+/// Idem siguiendo el `p` vivo del documento (M4).
+fn numeric_slope_con_vivo(
+    anim: &ParametricAnim,
+    frame: usize,
+    x: f64,
+    vivo: Option<f64>,
+) -> Option<f64> {
     let h_step = 1e-3;
-    let a = anim.eval_frame(frame, x - h_step)?;
-    let b = anim.eval_frame(frame, x + h_step)?;
+    let a = anim.eval_frame_con_vivo(frame, x - h_step, vivo)?;
+    let b = anim.eval_frame_con_vivo(frame, x + h_step, vivo)?;
     let s = (b - a) / (2.0 * h_step);
     if s.is_finite() {
         Some(s.clamp(-10.0, 10.0))
@@ -2897,6 +2977,24 @@ pub fn render_parametric_frames_with_progress_con_rotulo(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
+    render_parametric_frames_con_updater(anim, &mut |_| None, con_rotulo, on_frame)
+}
+
+/// Núcleo con updater por frame (M4): `updater(frame)` se lee EN CADA frame
+/// donde el player muestrea (nunca en la UI).
+///
+/// El llamador pasa el `p` vivo del documento
+/// (`doc.live_param_value("p", …)` cuando la variable existe, `None` si no):
+/// con `Some` finito el scrub/play sigue al slider; con `None`, rango propio
+/// del `anim`. El cierre puede devolver distinto valor por frame (updater
+/// real estilo Manim) o uno fijo (foto del slider). Presupuesto intacto:
+/// mismo N y mismo viewport que la vía sin vivo.
+pub fn render_parametric_frames_con_updater(
+    anim: &ParametricAnim,
+    updater: &mut dyn FnMut(usize) -> Option<f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
     let (w, h, n) = check_parametric_budget(anim)?;
     let mut frames = Vec::new();
     frames
@@ -2906,8 +3004,9 @@ pub fn render_parametric_frames_with_progress_con_rotulo(
             max: PARAMETRIC_MAX_BYTES,
         })?;
     for frame in 0..n {
-        let s = anim.frame_fraction(frame);
-        let p = anim.frame_param(frame);
+        let vivo = updater(frame);
+        let s = anim.frame_fraction_con_vivo(frame, vivo);
+        let p = anim.frame_param_con_vivo(frame, vivo);
         let mut buf = alloc_frame_buffer(w, h).map_err(|_| {
             let got = estimate_frames_bytes(w, h, 1);
             ParametricRenderError::AllocFailed {
@@ -2917,7 +3016,7 @@ pub fn render_parametric_frames_with_progress_con_rotulo(
         draw_parametric_base(&mut buf, w, h, s, &anim.expr_a, con_rotulo);
         match anim.kind {
             ParametricKind::Sweep | ParametricKind::Morph => {
-                let pts = sample_curve(anim, frame);
+                let pts = sample_curve_con_vivo(anim, frame, vivo);
                 draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
             }
             ParametricKind::Trace => {
@@ -2927,14 +3026,14 @@ pub fn render_parametric_frames_with_progress_con_rotulo(
                     .map(|k| {
                         let x = -3.0 + 6.0 * (k as f64 / 120.0);
                         if x <= x_max {
-                            anim.eval_frame(frame, x).map(|y| (x, y))
+                            anim.eval_frame_con_vivo(frame, x, vivo).map(|y| (x, y))
                         } else {
                             None
                         }
                     })
                     .collect();
                 draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
-                if let Some(y) = anim.eval_frame(frame, x_max) {
+                if let Some(y) = anim.eval_frame_con_vivo(frame, x_max, vivo) {
                     let (px, py) = to_pixel(w, h, x_max, y);
                     draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
                 }
@@ -2944,23 +3043,24 @@ pub fn render_parametric_frames_with_progress_con_rotulo(
                 let pts: Vec<Option<(f64, f64)>> = (0..=120)
                     .map(|k| {
                         let q = anim.p0 + (p - anim.p0) * (k as f64 / 120.0);
-                        anim.eval_frame(frame, q).map(|y| (q, y))
+                        anim.eval_frame_con_vivo(frame, q, vivo).map(|y| (q, y))
                     })
                     .collect();
                 draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
                 let xc = p.clamp(-3.0, 3.0);
-                if let Some(y) = anim.eval_frame(frame, xc) {
+                if let Some(y) = anim.eval_frame_con_vivo(frame, xc, vivo) {
                     let (px, py) = to_pixel(w, h, xc, y);
                     draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
                 }
             }
             ParametricKind::Tangent => {
-                let pts = sample_curve(anim, frame);
+                let pts = sample_curve_con_vivo(anim, frame, vivo);
                 draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
                 let xc = p.clamp(-3.0, 3.0);
-                if let (Some(y0), Some(slope)) =
-                    (anim.eval_frame(frame, xc), numeric_slope(anim, frame, xc))
-                {
+                if let (Some(y0), Some(slope)) = (
+                    anim.eval_frame_con_vivo(frame, xc, vivo),
+                    numeric_slope_con_vivo(anim, frame, xc, vivo),
+                ) {
                     let xa = (xc - 1.2).max(-3.0);
                     let xb = (xc + 1.2).min(3.0);
                     let a = to_pixel(w, h, xa, y0 + slope * (xa - xc));
@@ -2984,13 +3084,13 @@ pub fn render_parametric_frames_with_progress_con_rotulo(
                     if x < a || x > b {
                         continue;
                     }
-                    if let Some(y) = anim.eval_frame(frame, x) {
+                    if let Some(y) = anim.eval_frame_con_vivo(frame, x, vivo) {
                         let top = to_pixel(w, h, x, y);
                         let base = to_pixel(w, h, x, 0.0);
                         draw_line(&mut buf, w, h, base, top, FILL_SOFT_BLUE);
                     }
                 }
-                let y_b = anim.eval_frame(frame, b).map_or(0.0, |v| v);
+                let y_b = anim.eval_frame_con_vivo(frame, b, vivo).map_or(0.0, |v| v);
                 draw_line(
                     &mut buf,
                     w,
@@ -2999,9 +3099,9 @@ pub fn render_parametric_frames_with_progress_con_rotulo(
                     to_pixel(w, h, b, y_b),
                     DOT_BLUE,
                 );
-                let pts = sample_curve(anim, frame);
+                let pts = sample_curve_con_vivo(anim, frame, vivo);
                 draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
-                let etiqueta = match integral_acumulada(Some(anim), frame, a, b) {
+                let etiqueta = match integral_acumulada_con_vivo(Some(anim), frame, a, b, vivo) {
                     Some(s) => format!("S={s:.2}"),
                     None => "S=?".to_string(),
                 };
@@ -3029,6 +3129,181 @@ pub fn render_parametric_frames_con_rotulo(
     con_rotulo: bool,
 ) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
     render_parametric_frames_with_progress_con_rotulo(anim, con_rotulo, &mut |_, _| {})
+}
+
+/// Atajo con `p` vivo fijo (M4): todo el set se muestrea con el mismo `vivo`
+/// (foto del slider; el llamador re-renderiza al moverse).
+///
+/// `Some(v)` finito = el documento define `p` y el play lo sigue;
+/// `None` = rango propio (idéntico a la vía sin vivo). Puro en memoria.
+pub fn render_parametric_frames_con_vivo(
+    anim: &ParametricAnim,
+    vivo: Option<f64>,
+) -> Result<Vec<egui::ColorImage>, ParametricRenderError> {
+    render_parametric_frames_con_updater(anim, &mut |_| vivo, false, &mut |_, _| {})
+}
+
+// ── M4: Group simultáneo REAL (composición alfa frame a frame) ───────────
+// El `AnimationGroup{lag_ratio}` ya calcula offsets de arranque; acá los
+// PÍXELES simultáneos: 2+ sets del MISMO N y MISMO viewport se fusionan con
+// over (`mezclar_pixel_alfa`, `sets[0]` fondo → último frente). Si N o el
+// tamaño difieren → `Err` honesto, jamás reescaleo silencioso. Nota honesta:
+// los frames nativos son opacos (alfa 255), así que el frente tapa; la mezcla
+// real se ve con capas translúcidas (ver test). Presupuesto intacto: el set
+// compuesto respeta `NATIVE_MAX_SET_BYTES`. Puro en memoria, sin I/O.
+
+/// Error tipado de la composición simultánea de grupo (mensajes en español).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupComposeError {
+    /// Sin sets (vacío).
+    Vacio,
+    /// Un solo set (para 1 usar la playlist).
+    UnSoloSet { got: usize },
+    /// Algún set vacío.
+    SetVacio { set: usize },
+    /// N distinto entre sets.
+    ConteosDistintos {
+        esperado: usize,
+        got: usize,
+        set: usize,
+    },
+    /// Tamaño distinto entre frames.
+    TamanosDistintos {
+        esperado: [usize; 2],
+        got: [usize; 2],
+        set: usize,
+        frame: usize,
+    },
+    /// Lado fuera de 1..=4096.
+    DimensionFueraDeRango { width: usize, height: usize },
+    /// El compuesto excede el tope de bytes.
+    Presupuesto { got: usize },
+}
+
+impl std::fmt::Display for GroupComposeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vacio => write!(f, "sin sets para componer: pasame al menos 2 animaciones"),
+            Self::UnSoloSet { got } => write!(
+                f,
+                "el compuesto necesita al menos 2 animaciones (pasaste {got}): para 1 sola usá la playlist"
+            ),
+            Self::SetVacio { set } => {
+                write!(f, "el set {set} está vacío: sin frames no hay qué componer")
+            }
+            Self::ConteosDistintos { esperado, got, set } => write!(
+                f,
+                "el set {set} trae {got} frames y el grupo pide {esperado}: igualá N (sin reescaleo silencioso)"
+            ),
+            Self::TamanosDistintos {
+                esperado,
+                got,
+                set,
+                frame,
+            } => write!(
+                f,
+                "el frame {frame} del set {set} mide {}x{} y el grupo pide {}x{}: igualá el viewport (sin reescaleo silencioso)",
+                got[0], got[1], esperado[0], esperado[1]
+            ),
+            Self::DimensionFueraDeRango { width, height } => write!(
+                f,
+                "dimensión {width}x{height} fuera de 1..={NATIVE_MAX_DIM} para componer"
+            ),
+            Self::Presupuesto { got } => write!(
+                f,
+                "el compuesto estimado ({got} bytes) excede el tope de {NATIVE_MAX_SET_BYTES}: bajá la resolución o los fotogramas"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GroupComposeError {}
+
+/// Compone 2+ sets simultáneos píxel a píxel (alfa over por frame).
+///
+/// `sets[k][i]` = frame `i` de la capa `k` (`sets[0]` fondo, último frente).
+/// Exige mismo N no vacío y mismo tamaño en todos; si no → `Err` honesto.
+/// Determinista: mismos sets → mismos píxeles. Puro en memoria.
+pub fn componer_grupo_nativo(
+    sets: &[Vec<egui::ColorImage>],
+) -> Result<Vec<egui::ColorImage>, GroupComposeError> {
+    if sets.is_empty() {
+        return Err(GroupComposeError::Vacio);
+    }
+    if sets.len() < 2 {
+        return Err(GroupComposeError::UnSoloSet { got: sets.len() });
+    }
+    let n = sets[0].len();
+    if n == 0 {
+        return Err(GroupComposeError::SetVacio { set: 0 });
+    }
+    for (k, set) in sets.iter().enumerate() {
+        if set.is_empty() {
+            return Err(GroupComposeError::SetVacio { set: k });
+        }
+        if set.len() != n {
+            return Err(GroupComposeError::ConteosDistintos {
+                esperado: n,
+                got: set.len(),
+                set: k,
+            });
+        }
+    }
+    let size0 = sets[0][0].size;
+    let (w, h) = (size0[0], size0[1]);
+    if w == 0 || h == 0 || w > NATIVE_MAX_DIM as usize || h > NATIVE_MAX_DIM as usize {
+        return Err(GroupComposeError::DimensionFueraDeRango {
+            width: w,
+            height: h,
+        });
+    }
+    let px_count = w
+        .checked_mul(h)
+        .ok_or(GroupComposeError::DimensionFueraDeRango {
+            width: w,
+            height: h,
+        })?;
+    for (k, set) in sets.iter().enumerate() {
+        for (i, frame) in set.iter().enumerate() {
+            if frame.size != size0 || frame.pixels.len() != px_count {
+                return Err(GroupComposeError::TamanosDistintos {
+                    esperado: size0,
+                    got: frame.size,
+                    set: k,
+                    frame: i,
+                });
+            }
+        }
+    }
+    match estimate_frames_bytes(w, h, n) {
+        Some(got) if got <= NATIVE_MAX_SET_BYTES => {}
+        other => {
+            return Err(GroupComposeError::Presupuesto {
+                got: other.unwrap_or(usize::MAX),
+            });
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut pixeles = Vec::with_capacity(px_count);
+        for pi in 0..px_count {
+            // Lectura en alfa directo (`to_srgba_unmultiplied`): los bytes
+            // crudos de `Color32` van premultiplicados y mezclar sobre ellos
+            // oscurecería el doble. Escritura idem directa.
+            let mut acc = sets[0][i].pixels[pi].to_srgba_unmultiplied();
+            for set in sets.iter().skip(1) {
+                acc = mezclar_pixel_alfa(acc, set[i].pixels[pi].to_srgba_unmultiplied());
+            }
+            pixeles.push(egui::Color32::from_rgba_unmultiplied(
+                acc[0], acc[1], acc[2], acc[3],
+            ));
+        }
+        out.push(egui::ColorImage {
+            size: size0,
+            pixels: pixeles,
+        });
+    }
+    Ok(out)
 }
 
 /// Equivalente paramétrico canónico de un template viejo, si lo tiene.
@@ -4642,6 +4917,77 @@ mod parametric_render_tests {
         assert_parametric_valid(&render_parametric_frames(&area).unwrap(), 12, "área");
     }
 
+    // ── M4: updater por frame con `p` vivo ─────────────────────────────
+    #[test]
+    fn vivo_fijo_refleja_p_actual_en_todo_el_set() {
+        // Barrido `x+p` en [0,10]: con vivo 7.0 el frame N refleja p=7
+        // (mismo muestreo que `eval_frame_con_vivo`, a nivel render).
+        let a = anim(ParametricKind::Sweep, "x+p", None, "p", 0.0, 10.0, 8);
+        let fijos = render_parametric_frames(&a).unwrap();
+        let vivos = render_parametric_frames_con_vivo(&a, Some(7.0)).unwrap();
+        assert_eq!(vivos.len(), 8);
+        // Con vivo fijo, TODO el set congela p=7: todos los frames iguales…
+        for f in &vivos {
+            assert_eq!(f.pixels, vivos[0].pixels, "vivo fijo congela el set");
+        }
+        // …y el frame 0 vivo coincide con el frame fijo donde p=7 (frame 6
+        // de 8 en [0,10]: p = 10*6/7 ≈ 8.57 no da exacto, así que se compara
+        // contra el muestreo directo del frame con vivo).
+        let directo = sample_curve_con_vivo(&a, 3, Some(7.0));
+        let propio = sample_curve_con_vivo(&a, 3, None);
+        assert_ne!(directo, propio, "el vivo cambia el muestreo");
+        // El vivo 7.0 en x=1 da y=8 en todos los frames (p actual manda).
+        for i in 0..8 {
+            assert_eq!(a.eval_frame_con_vivo(i, 1.0, Some(7.0)), Some(8.0));
+        }
+        // Sin vivo el set anima de verdad (primero != último).
+        assert_ne!(fijos[0].pixels, fijos[7].pixels);
+        // `None` por updater == vía clásica píxel a píxel (sin regresión).
+        let via_updater =
+            render_parametric_frames_con_updater(&a, &mut |_| None, false, &mut |_, _| {}).unwrap();
+        assert_eq!(via_updater.len(), fijos.len());
+        for (f, g) in via_updater.iter().zip(fijos.iter()) {
+            assert_eq!(f.pixels, g.pixels);
+        }
+    }
+
+    #[test]
+    fn updater_por_frame_varia_y_no_finito_cae_a_rango_propio() {
+        let a = anim(ParametricKind::Sweep, "x+p", None, "p", 0.0, 10.0, 4);
+        // Updater real: cada frame lee su propio vivo (rampa 0,2,4,6).
+        let vivos = [0.0, 2.0, 4.0, 6.0];
+        let mut k = 0_usize;
+        let frames = render_parametric_frames_con_updater(
+            &a,
+            &mut |_| {
+                let v = vivos[k.min(3)];
+                k += 1;
+                Some(v)
+            },
+            false,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(frames.len(), 4);
+        assert_ne!(frames[0].pixels, frames[3].pixels, "la rampa anima");
+        // Updater que devuelve NaN/inf en un frame: ese frame usa rango propio.
+        let fijos = render_parametric_frames(&a).unwrap();
+        let mixtos = render_parametric_frames_con_updater(
+            &a,
+            &mut |frame| {
+                if frame == 2 {
+                    Some(f64::NAN)
+                } else {
+                    None
+                }
+            },
+            false,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(mixtos[2].pixels, fijos[2].pixels, "NaN cae a rango propio");
+    }
+
     #[test]
     fn progreso_real_por_frame_y_determinismo() {
         let a = anim(ParametricKind::Sweep, "x^2+p*x", None, "p", -2.0, 2.0, 8);
@@ -4750,6 +5096,93 @@ mod parametric_render_tests {
         // que la vía clásica produce el mismo largo con la misma canónica.
         let clasicos = render_integral_frames(96, 72);
         assert_eq!(clasicos.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+}
+
+// ── M4: Group simultáneo real (solo tests, sin tocar prod) ──────────────
+#[cfg(test)]
+mod group_compose_m4_tests {
+    use super::*;
+
+    fn imagen_solida(w: usize, h: usize, rgba: [u8; 4]) -> egui::ColorImage {
+        egui::ColorImage {
+            size: [w, h],
+            pixels: vec![
+                egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
+                w.saturating_mul(h)
+            ],
+        }
+    }
+
+    #[test]
+    fn dos_animaciones_distintas_solapadas() {
+        // Dos plantillas distintas, mismo N (48) y mismo viewport (96×72;
+        // el mínimo nativo es 64 por lado, 64×48 clampea a 64×64).
+        let fondo = render_integral_frames(96, 72);
+        let frente = render_native_animation_frames(96, 72);
+        assert_eq!(fondo.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!(frente.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_ne!(
+            fondo[0].pixels, frente[0].pixels,
+            "las dos animaciones difieren"
+        );
+        let compuesto = componer_grupo_nativo(&[fondo.clone(), frente.clone()]).unwrap();
+        assert_eq!(compuesto.len(), NATIVE_ANIM_FRAME_COUNT);
+        for (i, f) in compuesto.iter().enumerate() {
+            assert_eq!(f.size, [96, 72], "frame {i}: viewport");
+            assert_eq!(f.pixels.len(), 96 * 72, "frame {i}: píxeles");
+        }
+        // Frames nativos opacos: el frente tapa (over honesto documentado)…
+        for (c, f) in compuesto.iter().zip(frente.iter()) {
+            assert_eq!(c.pixels, f.pixels);
+        }
+        // …pero el compuesto trae la capa de arriba, no la de abajo.
+        assert_ne!(compuesto[0].pixels, fondo[0].pixels);
+        // Tres capas también componen (fondo → medio → frente).
+        let triple = componer_grupo_nativo(&[fondo, frente.clone(), frente]).unwrap();
+        assert_eq!(triple.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+
+    #[test]
+    fn capas_translucidas_se_mezclan_de_verdad() {
+        // Azul opaco + rojo 50%: el compuesto promedia (±2 por premultiplicado).
+        let fondo = vec![imagen_solida(2, 2, [0, 0, 255, 255]); 3];
+        let frente = vec![imagen_solida(2, 2, [255, 0, 0, 128]); 3];
+        let compuesto = componer_grupo_nativo(&[fondo, frente]).unwrap();
+        assert_eq!(compuesto.len(), 3);
+        for f in &compuesto {
+            for p in &f.pixels {
+                assert_eq!(p.a(), 255);
+                assert!((p.r() as i16 - 128).abs() <= 2, "r={}", p.r());
+                assert_eq!(p.g(), 0);
+                assert!((p.b() as i16 - 127).abs() <= 2, "b={}", p.b());
+            }
+        }
+    }
+
+    #[test]
+    fn mismo_n_y_viewport_o_err_honesto() {
+        let ok = vec![imagen_solida(4, 4, [0, 0, 255, 255]); 3];
+        let ok2 = vec![imagen_solida(4, 4, [255, 0, 0, 255]); 3];
+        assert!(componer_grupo_nativo(&[ok.clone(), ok2.clone()]).is_ok());
+        // N distinto → Err (sin reescaleo silencioso).
+        let corto = vec![imagen_solida(4, 4, [255, 0, 0, 255]); 2];
+        let err = componer_grupo_nativo(&[ok.clone(), corto])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("igualá N"), "got: {err}");
+        // Viewport distinto → Err.
+        let otro_size = vec![imagen_solida(8, 4, [255, 0, 0, 255]); 3];
+        let err = componer_grupo_nativo(&[ok.clone(), otro_size])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("viewport"), "got: {err}");
+        // 0/1 sets y set vacío → Err.
+        assert_eq!(componer_grupo_nativo(&[]), Err(GroupComposeError::Vacio));
+        assert!(componer_grupo_nativo(std::slice::from_ref(&ok)).is_err());
+        assert!(componer_grupo_nativo(&[ok, vec![]]).is_err());
+        // Prosa rioplatense en los errores.
+        assert!(GroupComposeError::Vacio.to_string().contains("al menos 2"));
     }
 }
 

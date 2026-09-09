@@ -534,6 +534,345 @@ pub fn morph_shapes(
     Ok(frames)
 }
 
+// ── M4: `.animate` encadenable mínimo estilo Manim ─────────────────────────
+// Builder puro sobre formas: `rotate/shift/scale/set_fill/set_opacity`
+// encadenables (con alias rioplatenses `rotar/mover/escalar/relleno/opacidad`)
+// que componen UN estado destino y materializan frames interpolados con
+// easing vía `morph_shapes`/`MorphEasing` (la misma cuenta del morph general,
+// sin duplicarla).
+//
+// Seam elegido (menor): vive acá, en el cerebro puro, sin UI nueva. Se usa
+// desde `ParametricAnim`/playlist o comando tomando `puntos()` y dibujando
+// cada `Vec<Point2>` como polilínea con el renderer existente
+// (`draw_curve_gaps` en `grafito-app/src/anim_native.rs`); ningún panel ni
+// comando nuevo fue necesario para el mínimo.
+//
+// Semántica Manim: cada eslabón compone el destino (`rotate` y `scale`
+// pivotan sobre el centroide actual del destino, `shift` traslada); la
+// interpolación es inicio→destino con el easing dado. Entradas no finitas
+// (`NaN`/`inf`) o `scale <= 0` son no-op honestas (el encadenado sigue
+// infalible); lo estructural (vacío, no finito en el origen, cerrada con 2)
+// es `Err` en `nuevo`/`fotogramas`, jamás deforma en silencio.
+// Presupuestos intactos: `samples` 2..=512, `frames` 1..=48, tope de bytes
+// vía `MorphConfig::try_new`. Sin I/O, sin `unwrap` en prod.
+
+/// Estilo interpolable de una forma (canales RGBA 0..=255 + opacidad 0..1).
+///
+/// `relleno` y `opacidad` son canales independientes (Manim `set_fill` /
+/// `opacity`): el renderer los combina como
+/// `alfa_efectivo = relleno[3]/255 · opacidad`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EstiloForma {
+    /// Color de relleno RGBA (cada canal 0..=255).
+    pub relleno: [u8; 4],
+    /// Opacidad global 0..=1 (1.0 = opaco).
+    pub opacidad: f32,
+}
+
+impl Default for EstiloForma {
+    fn default() -> Self {
+        Self {
+            relleno: [255, 255, 255, 255],
+            opacidad: 1.0,
+        }
+    }
+}
+
+/// Un fotograma animado: puntos interpolados + estilo interpolado.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FotogramaForma {
+    /// Puntos del frame (largo = `samples` del builder).
+    pub puntos: Vec<Point2>,
+    /// Relleno interpolado del frame.
+    pub relleno: [u8; 4],
+    /// Opacidad interpolada del frame (0..=1).
+    pub opacidad: f32,
+}
+
+/// Builder `.animate` mínimo sobre una forma 2D.
+#[derive(Debug, Clone)]
+pub struct AnimarForma {
+    inicio: Vec<Point2>,
+    destino: Vec<Point2>,
+    relleno_ini: [u8; 4],
+    relleno_fin: [u8; 4],
+    opacidad_ini: f32,
+    opacidad_fin: f32,
+    samples: usize,
+    frames: usize,
+    closed: bool,
+    align_start: bool,
+    easing: MorphEasing,
+}
+
+/// Centroide (promedio) de puntos finitos; `(0,0)` si no hay ninguno.
+///
+/// Los constructores ya rechazan lo no finito, así que el fallback solo
+/// cubre el imposible defensivo. Puro, sin pánicos.
+fn centroide(pts: &[Point2]) -> Point2 {
+    let mut sx = 0.0_f64;
+    let mut sy = 0.0_f64;
+    let mut n = 0_usize;
+    for p in pts {
+        if p.x.is_finite() && p.y.is_finite() {
+            sx += p.x;
+            sy += p.y;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return Point2::new(0.0, 0.0);
+    }
+    let x = sx / (n as f64);
+    let y = sy / (n as f64);
+    if x.is_finite() && y.is_finite() {
+        Point2::new(x, y)
+    } else {
+        Point2::new(0.0, 0.0)
+    }
+}
+
+/// Interpola un canal 0..=255 con el easing ya evaluado `e` (clamp honesto:
+// `EaseOutBack` sobrepasa a propósito en geometría, en color se recorta).
+fn lerp_canal(a: u8, b: u8, e: f64) -> u8 {
+    let v = f64::from(a) + (f64::from(b) - f64::from(a)) * e;
+    if !v.is_finite() {
+        return a;
+    }
+    v.round().clamp(0.0, 255.0) as u8
+}
+
+/// Interpola la opacidad 0..=1 con el easing ya evaluado `e` (clamp honesto).
+fn lerp_opacidad(a: f32, b: f32, e: f64) -> f32 {
+    let v = f64::from(a) + (f64::from(b) - f64::from(a)) * e;
+    if !v.is_finite() {
+        return a;
+    }
+    v.clamp(0.0, 1.0) as f32
+}
+
+impl AnimarForma {
+    /// Arranca el builder desde una forma (copia inicio y destino).
+    ///
+    /// Valida como abierta (el flag `closed` se elige después con
+    /// `closed()`; si la cerrás con 2 puntos, `fotogramas` falla honesto).
+    pub fn nuevo(forma: &[Point2]) -> Result<Self, MorphError> {
+        valida_forma(forma, "A", false)?;
+        Ok(Self {
+            inicio: forma.to_vec(),
+            destino: forma.to_vec(),
+            relleno_ini: EstiloForma::default().relleno,
+            relleno_fin: EstiloForma::default().relleno,
+            opacidad_ini: 1.0,
+            opacidad_fin: 1.0,
+            samples: MORPH_DEFAULT_SAMPLES,
+            frames: MORPH_DEFAULT_FRAMES,
+            closed: false,
+            align_start: true,
+            easing: MorphEasing::default(),
+        })
+    }
+
+    /// `true` = polígono cerrado (se recorre con vuelta).
+    pub fn closed(mut self, v: bool) -> Self {
+        self.closed = v;
+        self
+    }
+
+    /// Puntos remuestreados por frame (2..=512; se valida en `fotogramas`).
+    pub fn samples(mut self, s: usize) -> Self {
+        self.samples = s;
+        self
+    }
+
+    /// Fotogramas del set (1..=48; se valida en `fotogramas`).
+    pub fn frames(mut self, n: usize) -> Self {
+        self.frames = n;
+        self
+    }
+
+    /// Curva de easing entre frames.
+    pub fn easing(mut self, e: MorphEasing) -> Self {
+        self.easing = e;
+        self
+    }
+
+    /// `true` = alinear el inicio de B con el de A (rotar/invertir).
+    pub fn align_start(mut self, v: bool) -> Self {
+        self.align_start = v;
+        self
+    }
+
+    /// Rota el destino `grados` antihorarios sobre su centroide actual.
+    ///
+    /// `grados` no finito = no-op (el encadenado sigue infalible).
+    pub fn rotate(mut self, grados: f64) -> Self {
+        if !grados.is_finite() {
+            return self;
+        }
+        let rad = grados.to_radians();
+        if !rad.is_finite() {
+            return self;
+        }
+        let (co, si) = (rad.cos(), rad.sin());
+        if !co.is_finite() || !si.is_finite() {
+            return self;
+        }
+        let c = centroide(&self.destino);
+        for p in &mut self.destino {
+            let dx = p.x - c.x;
+            let dy = p.y - c.y;
+            let nx = c.x + dx * co - dy * si;
+            let ny = c.y + dx * si + dy * co;
+            if nx.is_finite() && ny.is_finite() {
+                p.x = nx;
+                p.y = ny;
+            }
+        }
+        self
+    }
+
+    /// Traslada el destino `(dx, dy)` en mundo.
+    ///
+    /// Algún componente no finito = no-op.
+    pub fn shift(mut self, dx: f64, dy: f64) -> Self {
+        if !dx.is_finite() || !dy.is_finite() {
+            return self;
+        }
+        for p in &mut self.destino {
+            let nx = p.x + dx;
+            let ny = p.y + dy;
+            if nx.is_finite() && ny.is_finite() {
+                p.x = nx;
+                p.y = ny;
+            }
+        }
+        self
+    }
+
+    /// Escala el destino `factor` sobre su centroide actual.
+    ///
+    /// `factor` no finito o `<= 0` = no-op (no se espeja ni colapsa en
+    /// silencio: pedí el factor válido de nuevo).
+    pub fn scale(mut self, factor: f64) -> Self {
+        if !factor.is_finite() || factor <= 0.0 {
+            return self;
+        }
+        let c = centroide(&self.destino);
+        for p in &mut self.destino {
+            let nx = c.x + (p.x - c.x) * factor;
+            let ny = c.y + (p.y - c.y) * factor;
+            if nx.is_finite() && ny.is_finite() {
+                p.x = nx;
+                p.y = ny;
+            }
+        }
+        self
+    }
+
+    /// Fija el relleno destino (el frame 0 usa el default neutro).
+    pub fn set_fill(mut self, rgba: [u8; 4]) -> Self {
+        self.relleno_fin = rgba;
+        self
+    }
+
+    /// Fija la opacidad destino 0..=1 (fuera de rango se clampe; no finita
+    /// = no-op).
+    pub fn set_opacity(mut self, alpha: f32) -> Self {
+        if !alpha.is_finite() {
+            return self;
+        }
+        self.opacidad_fin = alpha.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Alias rioplatense de `rotate`.
+    pub fn rotar(self, grados: f64) -> Self {
+        self.rotate(grados)
+    }
+
+    /// Alias rioplatense de `shift`.
+    pub fn mover(self, dx: f64, dy: f64) -> Self {
+        self.shift(dx, dy)
+    }
+
+    /// Alias rioplatense de `scale`.
+    pub fn escalar(self, factor: f64) -> Self {
+        self.scale(factor)
+    }
+
+    /// Alias rioplatense de `set_fill`.
+    pub fn relleno(self, rgba: [u8; 4]) -> Self {
+        self.set_fill(rgba)
+    }
+
+    /// Alias rioplatense de `set_opacity`.
+    pub fn opacidad(self, alpha: f32) -> Self {
+        self.set_opacity(alpha)
+    }
+
+    /// Estado destino compuesto hasta ahora (solo lectura).
+    pub fn objetivo(&self) -> &[Point2] {
+        &self.destino
+    }
+
+    /// Estilo destino compuesto hasta ahora.
+    pub fn estilo_objetivo(&self) -> EstiloForma {
+        EstiloForma {
+            relleno: self.relleno_fin,
+            opacidad: self.opacidad_fin,
+        }
+    }
+
+    /// Materializa los frames: geometría vía `morph_shapes` + estilo con el
+    /// mismo easing. Todo `Err` es honesto (presupuesto, cerrada con 2,
+    /// formas incompatibles); jamás deforma en silencio.
+    pub fn fotogramas(&self) -> Result<Vec<FotogramaForma>, MorphError> {
+        let cfg = MorphConfig::try_new(
+            self.samples,
+            self.frames,
+            self.closed,
+            self.align_start,
+            self.easing,
+        )?;
+        let sets = morph_shapes(&self.inicio, &self.destino, &cfg)?;
+        let n = sets.len();
+        let mut out = Vec::with_capacity(n);
+        for (fi, fila) in sets.into_iter().enumerate() {
+            let s = if n <= 1 {
+                1.0
+            } else {
+                (fi as f64) / ((n.saturating_sub(1)) as f64)
+            };
+            let e = self.easing.apply(s);
+            let mut rel = [0_u8; 4];
+            for (k, slot) in rel.iter_mut().enumerate() {
+                if let (Some(a), Some(b)) = (self.relleno_ini.get(k), self.relleno_fin.get(k)) {
+                    *slot = lerp_canal(*a, *b, e);
+                }
+            }
+            out.push(FotogramaForma {
+                puntos: fila,
+                relleno: rel,
+                opacidad: lerp_opacidad(self.opacidad_ini, self.opacidad_fin, e),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Atajo inglés de `fotogramas` (paridad Manim en el nombre).
+    pub fn build(&self) -> Result<Vec<FotogramaForma>, MorphError> {
+        self.fotogramas()
+    }
+
+    /// Solo los puntos por frame (para dibujar como polilínea con el
+    /// renderer existente, sin estilo).
+    pub fn puntos(&self) -> Result<Vec<Vec<Point2>>, MorphError> {
+        let frames = self.fotogramas()?;
+        Ok(frames.into_iter().map(|f| f.puntos).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,5 +1047,156 @@ mod tests {
         assert!(e.to_string().contains("vacía"));
         let e2 = MorphError::MuestrasFueraDeRango { got: 999, max: 512 };
         assert!(e2.to_string().contains("999"));
+    }
+
+    // ── M4: `.animate` encadenable ──────────────────────────────────────
+    fn centroide_y(frames: &[FotogramaForma]) -> Vec<f64> {
+        frames
+            .iter()
+            .map(|f| {
+                let n = f.puntos.len() as f64;
+                f.puntos.iter().map(|p| p.y).sum::<f64>() / n
+            })
+            .collect()
+    }
+
+    #[test]
+    fn animate_rotate_shift_da_frames_monotonos() {
+        // Pedido M4 textual: `cuadrado.rotate(45°).shift(arriba)`.
+        let frames = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .closed(true)
+            .samples(8)
+            .frames(5)
+            .easing(MorphEasing::Linear)
+            .rotate(45.0)
+            .shift(0.0, 1.0)
+            .fotogramas()
+            .unwrap();
+        assert_eq!(frames.len(), 5);
+        assert!(frames.iter().all(|f| f.puntos.len() == 8));
+        // El centroide sube 0.5 → 1.5 monótono (rotar no mueve el centroide,
+        // trasladar +1 en y sí; easing lineal = pasos iguales).
+        let ys = centroide_y(&frames);
+        assert!((ys[0] - 0.5).abs() < 1e-6, "arranca en 0.5, got {}", ys[0]);
+        assert!((ys[4] - 1.5).abs() < 1e-6, "termina en 1.5, got {}", ys[4]);
+        for w in ys.windows(2) {
+            assert!(w[1] > w[0], "monótono creciente: {ys:?}");
+            assert!((w[1] - w[0] - 0.25).abs() < 1e-6, "paso lineal: {ys:?}");
+        }
+        // El destino compuesto es el cuadrado rotado + trasladado.
+        let obj = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .closed(true)
+            .rotate(45.0)
+            .shift(0.0, 1.0)
+            .objetivo()
+            .to_vec();
+        let c = centroide(&obj);
+        assert!((c.x - 0.5).abs() < 1e-9 && (c.y - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn animate_escala_relleno_opacidad_encadenan() {
+        let frames = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .samples(8)
+            .frames(4)
+            .easing(MorphEasing::Linear)
+            .scale(2.0)
+            .set_fill([255, 0, 0, 255])
+            .set_opacity(0.2)
+            .fotogramas()
+            .unwrap();
+        assert_eq!(frames.len(), 4);
+        // Opacidad 1.0 → 0.2 monótona decreciente.
+        assert!((frames[0].opacidad - 1.0).abs() < 1e-6);
+        assert!((frames[3].opacidad - 0.2).abs() < 1e-6);
+        for w in frames.windows(2) {
+            assert!(w[1].opacidad < w[0].opacidad);
+        }
+        // Relleno neutro → rojo.
+        assert_eq!(frames[0].relleno, [255, 255, 255, 255]);
+        assert_eq!(frames[3].relleno, [255, 0, 0, 255]);
+        // Escalar ×2 duplica el ancho del destino aprox.
+        let obj = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .scale(2.0)
+            .objetivo()
+            .to_vec();
+        let min_x = obj.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let max_x = obj.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        assert!((max_x - min_x - 2.0).abs() < 1e-9);
+        // Alias rioplatenses dan lo mismo.
+        let a = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .rotar(30.0)
+            .mover(1.0, 2.0)
+            .escalar(1.5)
+            .objetivo()
+            .to_vec();
+        let b = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .rotate(30.0)
+            .shift(1.0, 2.0)
+            .scale(1.5)
+            .objetivo()
+            .to_vec();
+        assert_eq!(a.len(), b.len());
+        for (pa, pb) in a.iter().zip(b.iter()) {
+            assert!((pa.x - pb.x).abs() < 1e-12 && (pa.y - pb.y).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn animate_entradas_raras_no_rompen_y_falla_honesto() {
+        // No finitos / escala inválida = no-op, el set sale igual al quieto.
+        let quieto = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .samples(8)
+            .frames(3)
+            .fotogramas()
+            .unwrap();
+        let raro = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .samples(8)
+            .frames(3)
+            .rotate(f64::NAN)
+            .shift(f64::INFINITY, 0.0)
+            .scale(0.0)
+            .scale(-2.0)
+            .scale(f64::NAN)
+            .set_opacity(f32::NAN)
+            .fotogramas()
+            .unwrap();
+        assert_eq!(quieto.len(), raro.len());
+        for (a, b) in quieto.iter().zip(raro.iter()) {
+            assert_eq!(a.puntos.len(), b.puntos.len());
+            for (pa, pb) in a.puntos.iter().zip(b.puntos.iter()) {
+                assert!((pa.x - pb.x).abs() < 1e-12 && (pa.y - pb.y).abs() < 1e-12);
+            }
+        }
+        // Cerrada con 2 puntos falla honesto (no cierra en silencio).
+        let dos = vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)];
+        let err = AnimarForma::nuevo(&dos)
+            .unwrap()
+            .closed(true)
+            .fotogramas()
+            .unwrap_err();
+        assert_eq!(err, MorphError::CerradaNecesitaTres { cual: "A", got: 2 });
+        // Vacía y gigante también.
+        assert!(AnimarForma::nuevo(&[]).is_err());
+        let big = vec![Point2::new(0.0, 0.0); MORPH_MAX_INPUT_POINTS + 1];
+        assert!(AnimarForma::nuevo(&big).is_err());
+        // `puntos()` sirve al renderer de polilíneas existente.
+        let pts = AnimarForma::nuevo(&cuadrada())
+            .unwrap()
+            .samples(8)
+            .frames(3)
+            .rotate(10.0)
+            .puntos()
+            .unwrap();
+        assert_eq!(pts.len(), 3);
+        assert!(pts.iter().all(|f| f.len() == 8));
     }
 }
