@@ -1041,6 +1041,8 @@ impl AssistantRuntime {
     /// de completado con su propio presupuesto. Si la conversación ya está en
     /// `MAX_CONVERSATION_TURNS`, se omite el preview sin perder el final.
     /// Puro UI-state, sin I/O: se llama cada frame desde `poll_assistant_jobs`.
+    /// Además registra `first_delta_at` (para la etapa `Recibiendo`) y sincroniza
+    /// la etapa visible a la Piel (sólo textos/estados, sin layout).
     pub(crate) fn drain_remote_stream_preview(
         &mut self,
         panel: &mut AssistantPanelState,
@@ -1056,6 +1058,10 @@ impl AssistantRuntime {
             stream.try_iter().collect()
         };
         if deltas.is_empty() {
+            // Sin deltas igual se refresca la etapa (conectando → esperando →
+            // aviso lento de 10s), para que el deepseek no-streaming también
+            // tenga feedback sin silencio prolongado.
+            self.sync_remote_stage_to_panel(panel);
             return false;
         }
         let Some(job) = self.remote_job.as_mut() else {
@@ -1064,6 +1070,9 @@ impl AssistantRuntime {
         for delta in deltas {
             job.stream_text.push_str(&delta);
         }
+        if job.first_delta_at.is_none() {
+            job.first_delta_at = Some(std::time::Instant::now());
+        }
         let display: String = job
             .stream_text
             .chars()
@@ -1071,6 +1080,7 @@ impl AssistantRuntime {
             .collect();
         if !job.preview_active {
             if panel.conversation.len() >= MAX_CONVERSATION_TURNS {
+                self.sync_remote_stage_to_panel(panel);
                 return false;
             }
             panel
@@ -1084,8 +1094,51 @@ impl AssistantRuntime {
                 last.content = display;
             }
         }
+        self.sync_remote_stage_to_panel(panel);
         ctx.request_repaint();
         true
+    }
+
+    /// Sincroniza la etapa visible del turno remoto a la Piel.
+    ///
+    /// Deriva `Autorizada → Conectando → EsperandoPrimerToken → Recibiendo(KiB)`
+    /// de tiempo+deltas (heurística documentada) y pone `remote_stage` +
+    /// `remote_stage_elapsed_secs` en el panel. Puro UI-state, sin I/O.
+    /// Sin job en vuelo no toca nada (la etapa se reinicia en
+    /// begin/complete/fail).
+    fn sync_remote_stage_to_panel(&self, panel: &mut AssistantPanelState) {
+        let Some(job) = self.remote_job.as_ref() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let elapsed_secs = now
+            .checked_duration_since(job.started_at)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let has_first_delta = job.first_delta_at.is_some();
+        let kib = job.stream_text.len() / 1024;
+        let stage = remote_stage_for_job(elapsed_secs, has_first_delta, kib);
+        // El aviso lento mide el tiempo EN la etapa actual, no desde el arranque:
+        // `Recibiendo` cuenta desde el primer delta, el resto desde el arranque.
+        let stage_elapsed_secs = match stage {
+            RemoteStage::Recibiendo { .. } => job
+                .first_delta_at
+                .and_then(|first| now.checked_duration_since(first))
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0),
+            _ => elapsed_secs,
+        };
+        let ui_stage = match stage {
+            RemoteStage::Autorizada => grafito_ui::assistant::RemoteStage::Autorizada,
+            RemoteStage::Conectando => grafito_ui::assistant::RemoteStage::Conectando,
+            RemoteStage::EsperandoPrimerToken => {
+                grafito_ui::assistant::RemoteStage::EsperandoPrimerToken
+            }
+            RemoteStage::Recibiendo { kib } => {
+                grafito_ui::assistant::RemoteStage::Recibiendo { kib }
+            }
+        };
+        panel.set_remote_stage(ui_stage, stage_elapsed_secs);
     }
 
     fn take_finished_proposal_job(&mut self) -> Option<FinishedProposalJob> {
@@ -1347,6 +1400,53 @@ fn socratic_guard_context(
     SocraticGuardContext { fsm, scaffold }
 }
 
+/// Ventana de `conectando` (2s): sin deltas y con menos de 2s desde el
+/// arranque se muestra "Conectando…"; pasado ese tiempo sin deltas se pasa a
+/// "Esperando primer token…". Heurística tiempo+deltas (la app no ve el
+/// handshake TLS): documentada como tal, no como señal del wire.
+/// El umbral lento (10s, aviso "tardando más de lo normal, podés cancelar")
+/// vive en `grafito-assistant::REMOTE_SLOW_STAGE_SECS` y
+/// `grafito-ui::assistant::REMOTE_SLOW_STAGE_SECS` (la UI no depende de este
+/// crate): el texto lo pone la Piel, la app sólo sincroniza etapa + segundos.
+const REMOTE_CONNECTING_WINDOW_SECS: u64 = 2;
+
+/// Etapa visible del turno remoto (sub-estado de `Thinking`, con timestamp).
+///
+/// Cadena: `Autorizada → Conectando → EsperandoPrimerToken → Recibiendo(N KiB)
+/// → Lista` (lista = job cosechado, sin job en vuelo). `Autorizada` cubre el
+/// primer segundo tras el consentimiento (autorización y spawn ocurren en el
+/// mismo frame); `Recibiendo` sólo existe con deltas SSE (protocolo
+/// Responses/Spark: el resto, p.ej. deepseek chat, se queda en espera con
+/// aviso lento, honesto y sin KiB inventados).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteStage {
+    Autorizada,
+    Conectando,
+    EsperandoPrimerToken,
+    Recibiendo { kib: usize },
+}
+
+/// Calcula la etapa desde tiempo + deltas (puro, testeable, sin I/O).
+///
+/// - `elapsed_secs`: segundos desde `started_at`.
+/// - `has_first_delta`: si ya llegó algún delta SSE.
+/// - `kib`: KiB acumulados (`stream_text.len() / 1024`).
+pub(crate) fn remote_stage_for_job(
+    elapsed_secs: u64,
+    has_first_delta: bool,
+    kib: usize,
+) -> RemoteStage {
+    if has_first_delta {
+        RemoteStage::Recibiendo { kib }
+    } else if elapsed_secs < 1 {
+        RemoteStage::Autorizada
+    } else if elapsed_secs < REMOTE_CONNECTING_WINDOW_SECS {
+        RemoteStage::Conectando
+    } else {
+        RemoteStage::EsperandoPrimerToken
+    }
+}
+
 struct AssistantRemoteJob {
     id: u64,
     /// Identidad seleccionada por el usuario, usada para descartar resultados obsoletos.
@@ -1370,6 +1470,11 @@ struct AssistantRemoteJob {
     /// Hay un turno provisional al final de `conversation` que debe limpiarse
     /// al terminar/cancelar (ver `pop_provisional_stream_turn`).
     preview_active: bool,
+    /// Instante de arranque del worker (para etapas con timestamp).
+    started_at: std::time::Instant,
+    /// Instante del primer delta SSE (para `Recibiendo` + aviso lento).
+    /// `None` = aún esperando primer token (p.ej. deepseek no-streaming).
+    first_delta_at: Option<std::time::Instant>,
 }
 
 struct AssistantProposalJob {
@@ -3316,7 +3421,13 @@ impl GrafitoApp {
             stream_rx: Some(stream_rx),
             stream_text: String::new(),
             preview_active: false,
+            started_at: std::time::Instant::now(),
+            first_delta_at: None,
         });
+        // Etapa inicial visible de inmediato (sin esperar al primer poll):
+        // `Autorizada` con 0s, la Piel sólo renderiza el texto.
+        self.assistant
+            .set_remote_stage(grafito_ui::assistant::RemoteStage::Autorizada, 0);
     }
 
     /// Lanza el modo agente (loop con herramientas seguras) en un hilo y
@@ -5661,8 +5772,17 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
             "El modelo '{}' no está disponible: {error}. Revisá Configuración → Modelo.",
             current_model
         )
+    } else if error.contains("waiting for first token") {
+        // Etapa `esperando primer token`: el proveedor no mandó ningún delta
+        // en todo el timeout total (sin agrandarlo). Honesto + sugerencia,
+        // nunca el inglés crudo.
+        "Se colgó esperando el primer token: el proveedor no mandó nada a tiempo. Reintentá, y si sigue, probá con deepseek-v4-flash o pedilo por partes. Podés cancelar en cualquier momento.".into()
+    } else if error.contains("while receiving") {
+        // Etapa `recibiendo`: se cortó con parcial ya visible (KiB en el
+        // error interno, no se ecoa crudo). Se pide continuar, no reempezar.
+        "Se cortó mientras recibía la respuesta (ya habías visto una parte). Pedí que continúe desde el último punto o por partes.".into()
     } else if error.contains("timeout") || error.contains("timed out") {
-        format!("La conexión tardó demasiado: {error}. Revisá tu conexión.")
+        "La consulta tardó demasiado y se acabó el tiempo total (no se agranda el presupuesto). Reintentá, revisá tu conexión o probá con otro modelo.".into()
     } else if error.contains("500") {
         if current_model.contains("muse-spark") {
             "Muse Spark responde por la Responses API; si ves un 500 es transitorio del proveedor. Probá de nuevo o cambiá a deepseek-v4-flash, qwen3.8-max o kimi-k3 en Configuración → Modelo.".to_string()
@@ -5672,8 +5792,14 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
                 current_model
             )
         }
-    } else if error.contains("DNS") || error.contains("connect") || error.contains("network") {
-        format!("Error de red: {error}. Revisá tu conexión.")
+    } else if error.contains("could not connect")
+        || error.contains("DNS")
+        || error.contains("connect")
+        || error.contains("network")
+    {
+        // Etapa `conectando` (incluye `connect_timeout` 10s): sin ruta al
+        // proveedor. Honesto + sugerencia, sin eco crudo en inglés.
+        "No pude conectar al proveedor (etapa conectando). Revisá tu conexión o el DNS y reintentá; si persiste, probá con otro modelo.".into()
     } else if error.contains("body cap") {
         "La respuesta superó el tope de 256 KiB: pedila por partes (ej: «dame 3 ejemplos»)."
             .to_string()
@@ -6937,7 +7063,7 @@ mod tests {
         preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
         preflight_assistant_parameter, preflight_assistant_scene, prosa_integral_explicita,
         prosa_para_spec_anim_ia, read_bounded_attachment, remote_error_message,
-        render_media_desde_spec_ia, resolver_turno_anim_ia,
+        remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
         should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
         socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
         stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_spec_anim_ia,
@@ -6946,7 +7072,7 @@ mod tests {
         AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
         AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
         IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
-        SpecAnimIa, ANIM_IA_SPEC_TIMEOUT_MS, ANIM_SIN_IA_AVISO,
+        RemoteStage, SpecAnimIa, ANIM_IA_SPEC_TIMEOUT_MS, ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
@@ -7751,6 +7877,8 @@ mod tests {
             stream_rx: None,
             stream_text: String::new(),
             preview_active: false,
+            started_at: std::time::Instant::now(),
+            first_delta_at: None,
         });
         let proposal_cancel = CancellationToken::default();
         let (proposal_tx, proposal_rx) =
@@ -8708,6 +8836,8 @@ mod tests {
             stream_rx: None,
             stream_text: String::new(),
             preview_active: false,
+            started_at: std::time::Instant::now(),
+            first_delta_at: None,
         });
 
         assert!(runtime.cancel_stale_remote_job(ProviderProfile::DeepSeek, "deepseek-chat"));
@@ -8748,6 +8878,8 @@ mod tests {
             stream_rx: Some(delta_rx),
             stream_text: String::new(),
             preview_active: false,
+            started_at: std::time::Instant::now(),
+            first_delta_at: None,
         });
         let mut panel = AssistantPanelState::default();
         panel
@@ -8799,6 +8931,141 @@ mod tests {
         panel.conversation.push(ConversationTurn::user("hola"));
         pop_provisional_stream_turn(&mut panel);
         assert_eq!(panel.conversation.len(), 1);
+    }
+
+    #[test]
+    fn remote_stages_go_in_order_with_rioplatense_texts() {
+        // autorizada → conectando → esperando primer token → recibiendo (KiB).
+        assert_eq!(remote_stage_for_job(0, false, 0), RemoteStage::Autorizada);
+        assert_eq!(remote_stage_for_job(1, false, 0), RemoteStage::Conectando);
+        assert_eq!(
+            remote_stage_for_job(2, false, 0),
+            RemoteStage::EsperandoPrimerToken
+        );
+        assert_eq!(
+            remote_stage_for_job(30, false, 0),
+            RemoteStage::EsperandoPrimerToken
+        );
+        assert_eq!(
+            remote_stage_for_job(3, true, 0),
+            RemoteStage::Recibiendo { kib: 0 }
+        );
+        assert_eq!(
+            remote_stage_for_job(12, true, 3),
+            RemoteStage::Recibiendo { kib: 3 }
+        );
+        // Textos rioplatenses viven en la Piel (una sola fuente); la app solo
+        // sincroniza etapa + segundos. Aca se pinnea el mapeo app->ui.
+        let ui_for = |stage: RemoteStage| match stage {
+            RemoteStage::Autorizada => grafito_ui::assistant::RemoteStage::Autorizada,
+            RemoteStage::Conectando => grafito_ui::assistant::RemoteStage::Conectando,
+            RemoteStage::EsperandoPrimerToken => {
+                grafito_ui::assistant::RemoteStage::EsperandoPrimerToken
+            }
+            RemoteStage::Recibiendo { kib } => {
+                grafito_ui::assistant::RemoteStage::Recibiendo { kib }
+            }
+        };
+        assert_eq!(
+            ui_for(RemoteStage::Autorizada).label(),
+            "Autorizada, conectando…"
+        );
+        assert_eq!(
+            ui_for(RemoteStage::EsperandoPrimerToken).label(),
+            "Esperando el primer token…"
+        );
+        assert_eq!(
+            ui_for(RemoteStage::Recibiendo { kib: 3 }).label(),
+            "Recibiendo (3 KiB)…"
+        );
+        // Umbral lento unico (10s) en transporte y Piel: sin agrandar timeouts.
+        assert_eq!(grafito_assistant::REMOTE_SLOW_STAGE_SECS, 10);
+        assert_eq!(grafito_ui::assistant::REMOTE_SLOW_STAGE_SECS, 10);
+        assert_eq!(grafito_assistant::REMOTE_CONNECT_TIMEOUT_SECS, 10);
+    }
+
+    #[test]
+    fn remote_stage_sync_updates_panel_and_first_delta_marks_receiving() {
+        let mut runtime = AssistantRuntime::default();
+        let (_result_tx, result_rx) = sync_channel::<Result<RemoteCompletion, String>>(1);
+        let (delta_tx, delta_rx) = sync_channel::<String>(128);
+        runtime.remote_job = Some(AssistantRemoteJob {
+            id: 1,
+            provider: ProviderProfile::OpenCodeGo,
+            model: "deepseek-v4-flash".into(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: false,
+            question: "q".into(),
+            correction_attempt: 0,
+            repair_target_turn: None,
+            document_revision: 1,
+            document_digest: "d".into(),
+            focus: None,
+            cancellation: CancellationToken::default(),
+            receiver: result_rx,
+            stream_rx: Some(delta_rx),
+            stream_text: String::new(),
+            preview_active: false,
+            started_at: std::time::Instant::now(),
+            first_delta_at: None,
+        });
+        let mut panel = AssistantPanelState::default();
+        let ctx = egui::Context::default();
+        // Sin deltas: etapa inicial (autorizada/conectando), sin burbuja.
+        assert!(!runtime.drain_remote_stream_preview(&mut panel, &ctx));
+        assert!(matches!(
+            panel.remote_stage,
+            grafito_ui::assistant::RemoteStage::Autorizada
+                | grafito_ui::assistant::RemoteStage::Conectando
+        ));
+        // Primer delta: marca `first_delta_at` y pasa a `Recibiendo`.
+        delta_tx.send("hola ".into()).unwrap();
+        assert!(runtime.drain_remote_stream_preview(&mut panel, &ctx));
+        let job = runtime.remote_job.as_ref().unwrap();
+        assert!(job.first_delta_at.is_some());
+        assert!(matches!(
+            panel.remote_stage,
+            grafito_ui::assistant::RemoteStage::Recibiendo { .. }
+        ));
+        assert_eq!(panel.remote_stage_text(), "Recibiendo (0 KiB)…");
+    }
+
+    #[test]
+    fn remote_error_messages_are_honest_per_stage_without_raw_echo() {
+        // Esperando primer token: dice la etapa + sugerencia, sin inglés crudo.
+        let esperando = remote_error_message(
+            "remote assistant stream timed out waiting for first token after 60s",
+            "muse-spark-1.3",
+        );
+        assert!(esperando.contains("primer token"), "{esperando}");
+        assert!(
+            esperando.contains("deepseek") || esperando.contains("Reintentá"),
+            "{esperando}"
+        );
+        assert!(!esperando.contains("timed out after"), "{esperando}");
+        // Recibiendo: pide continuar, sin eco crudo.
+        let recibiendo = remote_error_message(
+            "remote assistant stream timed out while receiving after 60s (12 KiB received)",
+            "muse-spark-1.3",
+        );
+        assert!(recibiendo.contains("recib"), "{recibiendo}");
+        assert!(
+            recibiendo.contains("continúe") || recibiendo.contains("partes"),
+            "{recibiendo}"
+        );
+        assert!(!recibiendo.contains("while receiving"), "{recibiendo}");
+        // Timeout genérico: tiempo total, sin agrandar presupuesto.
+        let total =
+            remote_error_message("remote assistant timed out after 60s", "deepseek-v4-flash");
+        assert!(total.contains("tiempo total"), "{total}");
+        assert!(!total.contains("timed out after"), "{total}");
+        // Conectando: etapa + sugerencia, sin inglés crudo.
+        let conectando = remote_error_message(
+            "remote assistant stream could not connect to the provider (red o DNS)",
+            "deepseek-v4-flash",
+        );
+        assert!(conectando.contains("conectando"), "{conectando}");
+        assert!(!conectando.contains("could not connect"), "{conectando}");
     }
 
     #[test]

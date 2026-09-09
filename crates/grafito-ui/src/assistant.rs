@@ -633,10 +633,52 @@ struct PendingRemoteAuthorization {
     reason: String,
 }
 
+/// Umbral de etapa lenta (10s): si la etapa remota en curso supera este
+/// tiempo, el texto avisa ("tardando más de lo normal, podés cancelar").
+/// Sólo cambia el texto, jamás el timeout total. Duplicado en
+/// `grafito-assistant` y `grafito-app`: mantener los tres en 10s.
+pub const REMOTE_SLOW_STAGE_SECS: u64 = 10;
+
+/// Etapa visible del turno remoto (sub-estado de `Thinking`, con timestamp
+/// que pone la app cada frame). Piel pura: sólo textos/estados, sin I/O.
+///
+/// Cadena: `Autorizada → Conectando → EsperandoPrimerToken → Recibiendo(KiB)`.
+/// La app la deriva de tiempo+deltas (heurística documentada, no señal del
+/// wire); `Recibiendo` sólo existe con deltas SSE (Spark/Responses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemoteStage {
+    /// Consentimiento recién dado, arrancando el worker.
+    #[default]
+    Autorizada,
+    /// Primeros segundos sin deltas (ventana de conexión).
+    Conectando,
+    /// Sin deltas pasada la ventana: el proveedor aún no mandó nada.
+    EsperandoPrimerToken,
+    /// Con deltas SSE acumulados (KiB visibles en la burbuja provisional).
+    Recibiendo { kib: usize },
+}
+
+impl RemoteStage {
+    /// Texto rioplatense corto de la etapa (puro, sin I/O).
+    pub fn label(self) -> String {
+        match self {
+            Self::Autorizada => "Autorizada, conectando…".into(),
+            Self::Conectando => "Conectando al proveedor…".into(),
+            Self::EsperandoPrimerToken => "Esperando el primer token…".into(),
+            Self::Recibiendo { kib } => format!("Recibiendo ({kib} KiB)…"),
+        }
+    }
+}
+
 /// Estado de UI del asistente. Las claves sólo son borradores efímeros y nunca
 /// se serializan ni se envían a esta capa una vez guardadas en el llavero.
 #[derive(Clone)]
 pub struct AssistantPanelState {
+    /// Etapa visible del turno remoto (la app la actualiza cada frame con
+    /// timestamp; la Piel sólo la renderiza, cero I/O/spawn en `Ui::`).
+    pub remote_stage: RemoteStage,
+    /// Segundos en la etapa actual (para el aviso lento de 10s).
+    pub remote_stage_elapsed_secs: u64,
     /// Perfil de proveedor seleccionado por el usuario.
     pub provider: ProviderProfile,
     /// Identificador del modelo configurado para el proveedor actual.
@@ -843,6 +885,8 @@ impl Default for AssistantPanelState {
             proposal_correction_target_turn: None,
             proposal_correction_attempt: None,
             proposal_correction_context: None,
+            remote_stage: RemoteStage::Autorizada,
+            remote_stage_elapsed_secs: 0,
             is_pending: false,
             pending_remote_authorization: None,
             pending_clarification: None,
@@ -899,6 +943,34 @@ impl AssistantPanelState {
             && self.input_bytes() <= RequestBudget::default().max_input_chars
     }
 
+    /// Texto visible del turno remoto en curso (etapas con timestamp).
+    ///
+    /// Piel pura (`&Estado`, sin I/O): `Autorizada → Conectando → Esperando
+    /// primer token → Recibiendo (N KiB)`. Si la etapa supera
+    /// `REMOTE_SLOW_STAGE_SECS` (10s) agrega
+    /// "tardando más de lo normal, podés cancelar". La app actualiza
+    /// `remote_stage` + `remote_stage_elapsed_secs` cada frame.
+    pub fn remote_stage_text(&self) -> String {
+        let base = self.remote_stage.label();
+        if self.remote_stage_elapsed_secs >= REMOTE_SLOW_STAGE_SECS {
+            format!("{base} tardando más de lo normal, podés cancelar.")
+        } else {
+            base
+        }
+    }
+
+    /// Actualiza la etapa visible (la llama la app cada frame, sin I/O).
+    pub fn set_remote_stage(&mut self, stage: RemoteStage, elapsed_secs: u64) {
+        self.remote_stage = stage;
+        self.remote_stage_elapsed_secs = elapsed_secs;
+    }
+
+    /// Reinicia la etapa a `Autorizada` al arrancar un turno remoto.
+    fn reset_remote_stage(&mut self) {
+        self.remote_stage = RemoteStage::Autorizada;
+        self.remote_stage_elapsed_secs = 0;
+    }
+
     /// Borra el error recuperable y descarta su corrección pendiente, manteniendo conversación y adjuntos.
     pub fn clear_error(&mut self) {
         self.error = None;
@@ -948,6 +1020,7 @@ impl AssistantPanelState {
         self.is_pending = true;
         self.is_cancelling = false;
         self.is_fusion_review = false;
+        self.reset_remote_stage();
         self.clear_proposal_cards();
         self.clear_proposal_correction();
         self.error = None;
@@ -1148,6 +1221,7 @@ impl AssistantPanelState {
         self.is_pending = true;
         self.is_cancelling = false;
         self.is_fusion_review = is_fusion_review;
+        self.reset_remote_stage();
         self.image_upload_consent = false;
         self.error = None;
     }
@@ -1538,6 +1612,7 @@ impl AssistantPanelState {
         self.is_pending = true;
         self.is_cancelling = false;
         self.is_fusion_review = false;
+        self.reset_remote_stage();
         self.clear_proposal_cards();
         self.clear_proposal_correction();
         self.clear_remote_authorization();
@@ -1563,6 +1638,7 @@ impl AssistantPanelState {
         self.is_pending = false;
         self.is_cancelling = false;
         self.is_fusion_review = false;
+        self.reset_remote_stage();
         // El consentimiento visible representó el payload terminado y no se
         // reutiliza para una consulta posterior.
         self.image_upload_consent = false;
@@ -1582,6 +1658,7 @@ impl AssistantPanelState {
         self.is_pending = false;
         self.is_cancelling = false;
         self.is_fusion_review = false;
+        self.reset_remote_stage();
         self.image_upload_consent = false;
         self.error = None;
     }
@@ -1594,6 +1671,7 @@ impl AssistantPanelState {
         self.is_pending = false;
         self.is_cancelling = false;
         self.is_fusion_review = false;
+        self.reset_remote_stage();
         self.image_upload_consent = false;
         self.error = Some(error.into());
     }
@@ -6855,12 +6933,16 @@ fn draw_pending_indicator(
                 .draw(ui);
                 ui.label(
                     egui::RichText::new(match state.is_cancelling {
-                        true => "Cancelando...",
+                        true => "Cancelando...".to_owned(),
                         false => {
                             if state.agent_mode {
-                                "Agente trabajando..."
+                                "Agente trabajando...".to_owned()
                             } else {
-                                "Consulta remota autorizada..."
+                                // Etapas visibles con timestamp (sin feedback
+                                // intermedio era el bug): la app actualiza
+                                // `remote_stage` cada frame; acá sólo se
+                                // renderiza el texto rioplatense corto.
+                                state.remote_stage_text()
                             }
                         }
                     })
@@ -8776,13 +8858,15 @@ fn provider_label(provider: ProviderProfile) -> &'static str {
 const ASSISTANT_LIVE_RESPONSE_CHARS: usize = 200;
 
 /// Texto polite para la live-region del lector. Puro (`&Estado`): error >
-/// turno en curso > última respuesta > silencio. Sin I/O ni spawn.
+/// turno en curso (con etapa visible) > última respuesta > silencio.
+/// Sin I/O ni spawn.
 pub fn assistant_live_text(state: &AssistantPanelState) -> Option<String> {
     if let Some(error) = state.error.as_ref() {
         return Some(format!("Asistente: error. {error}"));
     }
     if state.is_pending {
-        return Some("Asistente pensando, esperá que termine.".to_owned());
+        // Misma etapa que el indicador visual (sin silencio prolongado).
+        return Some(format!("Asistente: {}.", state.remote_stage_text()));
     }
     // Respuesta lista: anuncia la última del asistente (resumen puro).
     last_assistant_response_summary(state)
@@ -8912,6 +8996,44 @@ mod tests {
         }
         // Las 7 vivas son alcanzables (ninguna muerta, ninguna faltante).
         assert_eq!(vistos.len(), 7, "faltan variantes por cubrir: {vistos:?}");
+    }
+
+    #[test]
+    fn remote_stages_have_rioplatense_texts_in_order() {
+        // autorizada → conectando → esperando primer token → recibiendo (KiB).
+        assert_eq!(RemoteStage::Autorizada.label(), "Autorizada, conectando…");
+        assert_eq!(RemoteStage::Conectando.label(), "Conectando al proveedor…");
+        assert_eq!(
+            RemoteStage::EsperandoPrimerToken.label(),
+            "Esperando el primer token…"
+        );
+        assert_eq!(
+            RemoteStage::Recibiendo { kib: 3 }.label(),
+            "Recibiendo (3 KiB)…"
+        );
+        // El panel expone el mismo texto (Piel pura, sin I/O).
+        let mut estado = AssistantPanelState::default();
+        estado.set_remote_stage(RemoteStage::Conectando, 0);
+        assert_eq!(estado.remote_stage_text(), "Conectando al proveedor…");
+        estado.set_remote_stage(RemoteStage::Recibiendo { kib: 2 }, 0);
+        assert_eq!(estado.remote_stage_text(), "Recibiendo (2 KiB)…");
+    }
+
+    #[test]
+    fn remote_slow_stage_warns_after_ten_seconds() {
+        assert_eq!(REMOTE_SLOW_STAGE_SECS, 10);
+        let mut estado = AssistantPanelState::default();
+        estado.set_remote_stage(RemoteStage::EsperandoPrimerToken, 9);
+        assert!(!estado.remote_stage_text().contains("tardando"));
+        estado.set_remote_stage(RemoteStage::EsperandoPrimerToken, 10);
+        let lento = estado.remote_stage_text();
+        assert!(lento.contains("Esperando el primer token"), "{lento}");
+        assert!(lento.contains("tardando más de lo normal"), "{lento}");
+        assert!(lento.contains("podés cancelar"), "{lento}");
+        // La live-region anuncia la misma etapa (sin silencio prolongado).
+        estado.is_pending = true;
+        let live = assistant_live_text(&estado).unwrap();
+        assert!(live.contains("Esperando el primer token"), "{live}");
     }
 
     fn correction_context() -> AssistantCorrectionContext {
@@ -9475,7 +9597,8 @@ mod tests {
             ..Default::default()
         };
         let announced = assistant_live_text(&pending).expect("pending anuncia");
-        assert!(announced.contains("pensando"));
+        // Etapa visible por defecto (`Autorizada`), no el genérico anterior.
+        assert!(announced.contains("Autorizada"), "{announced}");
         let mut failed = AssistantPanelState {
             is_pending: true,
             ..Default::default()

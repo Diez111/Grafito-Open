@@ -212,6 +212,19 @@ fn models_cache_is_fresh(age: Duration) -> bool {
 /// `effective_remote_timeout`).
 const REMOTE_TIMEOUT_MIN_MS: u64 = 100;
 const REMOTE_TIMEOUT_MAX_MS: u64 = 120_000;
+/// Timeout de conexión TCP/TLS (10s): sub-timeout dentro del total.
+/// Falla rápido si no hay ruta al proveedor, sin agrandar el presupuesto
+/// total (`effective_remote_timeout` sigue mandando: 60s simple, 30s agente).
+/// Va en `shared_http_client` como `connect_timeout`; el `timeout` por
+/// request sigue siendo el total.
+#[cfg(feature = "assistant-net")]
+pub const REMOTE_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Umbral de etapa lenta (10s): si `conectando`, `esperando primer token` o
+/// `recibiendo` supera este tiempo, la UI avisa
+/// ("tardando más de lo normal, podés cancelar"). Sólo cambia el texto,
+/// jamás el timeout total. Duplicado en `grafito-app`/`grafito-ui` (la UI
+/// no depende de este crate): mantener los tres en 10s.
+pub const REMOTE_SLOW_STAGE_SECS: u64 = 10;
 /// Error honesto cuando el build es sin red (`--no-default-features`, sin
 /// `assistant-net`): el transporte remoto no existe y el llamante debe usar
 /// resolución local o informar al usuario. Sin URL ni claves.
@@ -1120,7 +1133,7 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
 /// |---|---|---|---|---|
 /// | HTTP 500 (u otro no-2xx) | `remote assistant returned HTTP {status}: {body:500}` | mismo formato, cap `RESPONSES_MAX_BODY_BYTES` 256 KiB antes de parsear | mismo formato | draft falla → `Fusion could not create a draft: {error}`; audit falla → `Fusion could not complete the audit; its draft was discarded.` (nunca se muestra el borrador) |
 /// | HTTP 429 | mismo formato + ` (reintentá en {N}s)` con `Retry-After` parseado (entero o fecha HTTP, clamp 1..120s) | ídem | ídem | ídem por fase (draft/audit); el mensaje final conserva el prefijo Fusion |
-/// | timeout/transporte | `transport_error`: `timed out after {N}s` / `could not connect` / `request failed`, sin URL ni clave | ídem | ídem (requiere clave, si falta: `API key is unavailable`) | draft usa mitad del timeout, audit el resto (`checked_sub`, nunca 0); timeout total conserva `effective_remote_timeout` |
+/// | timeout/transporte | `transport_error`: `timed out after {N}s` / `could not connect` (incluye `connect_timeout` 10s, etapa `conectando`) / `request failed`, sin URL ni clave | streaming distingue etapa: `timed out waiting for first token after {N}s` (sin deltas) / `timed out while receiving after {N}s ({K} KiB received)` (con parcial visible) | ídem (requiere clave, si falta: `API key is unavailable`) | draft usa mitad del timeout, audit el resto (`checked_sub`, nunca 0); timeout total conserva `effective_remote_timeout` |
 /// | cuerpo largo | truncado a `MAX_ERROR_BODY_CHARS` 500 chars, sin eco de secretos | ídem | ídem | ídem |
 /// | `status:incomplete` / `stop:max_tokens` | N/A (`finish_reason` debe ser `stop`, si es `length` → schema error sin eco) | `RemoteCompletion{truncated:true}` con el texto parcial | `stop_reason:max_tokens` → `truncated:true` | se propaga `truncated` del audit final |
 ///
@@ -1507,9 +1520,20 @@ pub fn request_responses_completion_streaming(
     if let Some(key) = api_key {
         call = call.bearer_auth(sanitize_api_key(key)?);
     }
-    let response = call
-        .send()
-        .map_err(|error| transport_error("remote assistant stream", &error, Some(timeout)))?;
+    let response = call.send().map_err(|error| {
+        let base = transport_error("remote assistant stream", &error, Some(timeout));
+        // `send()` sin respuesta = aún no hubo deltas: etapa `esperando primer
+        // token`. `transport_error` ya distingue `could not connect`
+        // (conectando, con `connect_timeout` 10s); sólo se precisa el timeout.
+        if base.contains("timed out") {
+            format!(
+                "remote assistant stream timed out waiting for first token after {}s",
+                timeout.as_secs().max(1)
+            )
+        } else {
+            base
+        }
+    })?;
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
@@ -1605,9 +1629,19 @@ fn read_responses_sse_stream(
             return Err("remote assistant request was cancelled".into());
         }
         if Instant::now() > deadline {
+            // Timeout honesto por etapa (nunca silencio + error crudo): la app
+            // mapea cada marcador a criollo con qué colgó + sugerencia.
+            // - Sin ningún delta: colgó esperando el primer token.
+            // - Con deltas: se cortó recibiendo (se informa KiB ya visibles).
+            let secs = timeout.as_secs().max(1);
+            if events_seen == 0 {
+                return Err(format!(
+                    "remote assistant stream timed out waiting for first token after {secs}s"
+                ));
+            }
+            let kib = text.len() / 1024;
             return Err(format!(
-                "remote assistant stream timed out after {}s",
-                timeout.as_secs().max(1)
+                "remote assistant stream timed out while receiving after {secs}s ({kib} KiB received)"
             ));
         }
         match reader.read(&mut chunk) {
@@ -1649,6 +1683,23 @@ fn read_responses_sse_stream(
                 }
             }
             Err(_) => {
+                // Lectura cortada a mitad de stream: si ya venció el deadline
+                // (stall del servidor bajo `timeout` total de reqwest) se
+                // reporta como timeout por etapa, no como error genérico, para
+                // que la app diga qué colgó + sugerencia. Sin deltas =
+                // esperando primer token; con deltas = recibiendo (KiB).
+                if Instant::now() >= deadline {
+                    let secs = timeout.as_secs().max(1);
+                    if events_seen == 0 {
+                        return Err(format!(
+                            "remote assistant stream timed out waiting for first token after {secs}s"
+                        ));
+                    }
+                    let kib = text.len() / 1024;
+                    return Err(format!(
+                        "remote assistant stream timed out while receiving after {secs}s ({kib} KiB received)"
+                    ));
+                }
                 return Err("remote assistant response body could not be read".to_string());
             }
         }
@@ -3113,22 +3164,24 @@ fn request_anthropic_completion(
 }
 
 /// Clasifica un error de transporte sin exponer detalles sensibles (sin URL ni
-/// clave): timeout lleva "timed out", fallo de conexión/DNS/TLS lleva
-/// "could not connect", el resto lleva "request failed". La UI mapea cada
-/// caso a un mensaje distinto en criollo.
+/// clave): fallo de conexión/DNS/TLS (incluido el `connect_timeout` de 10s)
+/// lleva "could not connect" (etapa `conectando`), timeout total lleva
+/// "timed out" (etapa `esperando`/`recibiendo` según haya deltas o no, ver
+/// `read_responses_sse_stream`), el resto lleva "request failed". La UI mapea
+/// cada caso a un mensaje distinto en criollo con qué etapa colgó.
 #[cfg(feature = "assistant-net")]
 pub(crate) fn transport_error(
     context: &str,
     error: &reqwest::Error,
     timeout: Option<Duration>,
 ) -> String {
-    if error.is_timeout() {
+    if error.is_connect() {
+        format!("{context} could not connect to the provider (red o DNS)")
+    } else if error.is_timeout() {
         match timeout {
             Some(timeout) => format!("{context} timed out after {}s", timeout.as_secs().max(1)),
             None => format!("{context} timed out"),
         }
-    } else if error.is_connect() {
-        format!("{context} could not connect to the provider (red o DNS)")
     } else if error.is_body() || error.is_decode() {
         format!("{context} request failed while sending or reading the body")
     } else if error.is_builder() {
@@ -3454,7 +3507,10 @@ pub fn clear_models_cache_for_tests() {}
 ///
 /// Se construye una única vez y su pool de conexiones se reutiliza entre
 /// peticiones, evitando el costo de TLS y de crear un `Client` por llamada.
-/// El timeout de cada petición se aplica sobre la `RequestBuilder`.
+/// El timeout de cada petición se aplica sobre la `RequestBuilder` (total
+/// `effective_remote_timeout`); el `connect_timeout` de 10s
+/// (`REMOTE_CONNECT_TIMEOUT_SECS`) sólo acota el handshake TCP/TLS y nunca
+/// agranda el total.
 #[cfg(feature = "assistant-net")]
 fn shared_http_client() -> Result<&'static reqwest::blocking::Client, String> {
     static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
@@ -3463,6 +3519,7 @@ fn shared_http_client() -> Result<&'static reqwest::blocking::Client, String> {
         .get_or_init(|| {
             reqwest::blocking::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(std::time::Duration::from_secs(REMOTE_CONNECT_TIMEOUT_SECS))
                 .build()
                 .map_err(|_| "remote assistant HTTP client could not be created".to_string())
         })
@@ -5472,6 +5529,137 @@ mod tests {
         // El acumulado válido posterior sigue funcionando.
         send2("ab🦀");
         assert_eq!(rx2.try_recv().unwrap(), "🦀");
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_paints_partial_before_done() {
+        // El parcial debe pintar desde el primer delta, sin esperar al
+        // `[DONE]`: el `progress` se invoca por delta con el acumulado.
+        clear_rate_limit_for_tests();
+        let body = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola\"}\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" mundo\"}\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
+            .to_vec();
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let mut snapshots = Vec::new();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            64,
+            Some(&mut |accumulated: &str| {
+                snapshots.push(accumulated.to_owned());
+            }),
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(completion.text, "Hola mundo");
+        // Al menos un snapshot por delta, y el primero es parcial previo al DONE.
+        assert!(snapshots.len() >= 2, "{snapshots:?}");
+        assert_eq!(snapshots[0], "Hola");
+        assert_eq!(snapshots.last().map(String::as_str), Some("Hola mundo"));
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_timeout_waiting_first_token_is_stage_aware() {
+        // Mock lento: acepta, lee el request y duerme sin responder. El cliente
+        // (timeout 200ms) debe fallar honesto con etapa `waiting for first token`.
+        use std::io::{Read, Write};
+        clear_rate_limit_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 32_768];
+            let _ = stream.read(&mut buffer);
+            thread::sleep(Duration::from_millis(800));
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            let _ = stream.flush();
+        });
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let error = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_millis(200),
+            64,
+            None,
+            None,
+        )
+        .unwrap_err();
+        let _ = server.join();
+        assert!(
+            error.contains("waiting for first token"),
+            "etapa honesta, era: {error}"
+        );
+        assert!(!error.contains("http://"), "{error}");
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_timeout_while_receiving_keeps_stage_and_kib() {
+        // Mock lento a mitad de stream: manda un delta, flushea y se cuelga.
+        // El timeout debe decir `while receiving` + KiB, no error genérico.
+        use std::io::{Read, Write};
+        clear_rate_limit_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 32_768];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            );
+            let _ = stream.write_all(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola parcial\"}\n",
+            );
+            let _ = stream.flush();
+            thread::sleep(Duration::from_millis(800));
+        });
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let mut snapshots = Vec::new();
+        let error = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_millis(200),
+            64,
+            Some(&mut |accumulated: &str| {
+                snapshots.push(accumulated.to_owned());
+            }),
+            None,
+        )
+        .unwrap_err();
+        let _ = server.join();
+        assert!(
+            error.contains("while receiving"),
+            "etapa honesta, era: {error}"
+        );
+        assert!(error.contains("KiB received"), "{error}");
+        // El parcial sí llegó al callback antes del timeout (pinta sin DONE).
+        assert!(
+            snapshots.iter().any(|snap| snap.contains("Hola parcial")),
+            "{snapshots:?}"
+        );
+    }
+
+    #[test]
+    fn remote_slow_stage_threshold_is_documented_ten_seconds() {
+        // La UI avisa "tardando más de lo normal" cuando una etapa supera N
+        // segundos. El umbral vive acá y en app/ui (sin dependencia cruzada):
+        // los tres deben ser 10s para no mentir.
+        assert_eq!(REMOTE_SLOW_STAGE_SECS, 10);
+        assert_eq!(REMOTE_CONNECT_TIMEOUT_SECS, 10);
     }
 
     #[test]
