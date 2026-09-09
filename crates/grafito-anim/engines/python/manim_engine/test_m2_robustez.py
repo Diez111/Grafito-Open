@@ -114,6 +114,31 @@ class TestLimitesExpr(unittest.TestCase):
         self.assertEqual(safe_eval("x**2", 3.0), 9.0)
         self.assertAlmostEqual(safe_eval("sin(x)", 0.0), 0.0)
 
+    def test_r1_pool_global_threads_estables_tras_50_timeouts(self):
+        # R1-6: pool global reutilizado (antes 1 ThreadPoolExecutor por eval).
+        # 50 timeouts seguidos no hacen crecer los hilos sin cota.
+        import threading
+
+        from manim_engine.__main__ import _get_safe_eval_pool
+
+        pool = _get_safe_eval_pool()
+        self.assertIs(_get_safe_eval_pool(), pool, "el pool se reutiliza")
+        antes = threading.active_count()
+        timeouts = 0
+        for _ in range(50):
+            try:
+                # Timeout ínfimo: fuerza la rama TimeoutError sin colgar.
+                safe_eval("x**2", 3.0, timeout_secs=0.0)
+            except ValueError:
+                timeouts += 1
+            except Exception:
+                pass
+        despues = threading.active_count()
+        self.assertGreaterEqual(timeouts, 1, "al menos un timeout para medir")
+        self.assertLessEqual(
+            despues - antes, 2, f"hilos estables tras 50 timeouts: {antes}→{despues}"
+        )
+
 
 class TestPlaceholderExclusivo(unittest.TestCase):
     def setUp(self):
@@ -149,6 +174,10 @@ class TestPlaceholderExclusivo(unittest.TestCase):
             self.assertEqual(fh.read(), b"MIO")
 
     def test_legitimo_escribe_png_valido(self):
+        # R1-10 SPEC: PNG decodificado de verdad (no solo magic + len>8).
+        # El stub honesto es PNG válido con IHDR legible (ancho/alto > 0).
+        import struct
+
         ruta = placeholder_media("ok1", "png", "derivada")
         with open(ruta, "rb") as fh:
             data = fh.read()
@@ -157,6 +186,27 @@ class TestPlaceholderExclusivo(unittest.TestCase):
             "el stub debe ser PNG válido, no 8 bytes",
         )
         self.assertGreater(len(data), 8)
+        # Decodifica de verdad: firma 8B + IHDR con ancho/alto sanos.
+        self.assertEqual(data[0:8], bytes.fromhex("89504e470d0a1a0a"))
+        # IHDR: len(4) + "IHDR"(4) + w(4) + h(4) en offset 8..24.
+        self.assertGreaterEqual(len(data), 24, "PNG truncado sin IHDR")
+        (ihdr_len,) = struct.unpack(">I", data[8:12])
+        self.assertEqual(data[12:16], b"IHDR")
+        self.assertGreaterEqual(ihdr_len, 13)
+        (w, h) = struct.unpack(">II", data[16:24])
+        self.assertGreater(w, 0, "ancho PNG válido")
+        self.assertGreater(h, 0, "alto PNG válido")
+        # Si Pillow está, decodifica píxeles de verdad.
+        try:
+            from PIL import Image as _Img
+            import io as _io
+
+            img = _Img.open(_io.BytesIO(data))
+            img.load()
+            self.assertGreater(img.width, 0)
+            self.assertGreater(img.height, 0)
+        except ImportError:
+            pass
 
 
 class TestPrepararRender(unittest.TestCase):

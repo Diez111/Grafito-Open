@@ -1899,6 +1899,14 @@ impl TeachingUiState {
     }
 }
 
+/// R1-8: ¿el overlay debe cerrarse por entrada? `Esc` cierra siempre;
+/// clic en el dim cierra SOLO si fue fuera de la ventana (el dim está
+/// detrás: un clic en la ventana no llega al dim por orden de capas).
+/// Puro, sin I/O — testeable headless.
+pub(crate) fn overlay_debe_cerrar_por_entrada(esc: bool, clic_fuera: bool) -> bool {
+    esc || clic_fuera
+}
+
 /// Dibuja la enseñanza si hay sesión activa. Retorna true si se cerró.
 pub fn draw_teaching_overlay(
     state: &mut TeachingUiState,
@@ -1939,16 +1947,29 @@ pub fn draw_teaching_overlay(
     let mut should_retreat = false;
     let theme = grafito_ui::theme::current_theme(ctx);
     let _ = opened_at;
+    // R1-8: `Esc` cierra el overlay (antes no había salida por teclado).
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        should_close = true;
+    }
     // Fondo opaco a pantalla completa: tapa canvas y paneles para que nada
     // sangre dentro del overlay ni entren clics al canvas de atrás.
-    egui::Area::new(egui::Id::new("teaching_dim"))
+    // R1-8: el dim cierra SOLO si el clic fue fuera de la ventana (el Área
+    // está detrás por `Order::Middle`; la ventana va encima y consume sus
+    // propios clics, así que `clicked` acá = fuera).
+    let dim_clic_fuera = egui::Area::new(egui::Id::new("teaching_dim"))
         .fixed_pos(ctx.screen_rect().min)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            let (fondo, _) = ui.allocate_exact_size(ctx.screen_rect().size(), egui::Sense::click());
+            let (fondo, resp) =
+                ui.allocate_exact_size(ctx.screen_rect().size(), egui::Sense::click());
             ui.painter()
                 .rect_filled(fondo, 0.0, theme.panel_bg.gamma_multiply(0.92));
-        });
+            resp.clicked()
+        })
+        .inner;
+    if overlay_debe_cerrar_por_entrada(false, dim_clic_fuera) {
+        should_close = true;
+    }
     egui::Window::new("Enseñanza — Paso a paso")
         .id(egui::Id::new("teaching_overlay"))
         .collapsible(false)
@@ -2399,6 +2420,31 @@ pub fn draw_teaching_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r1_overlay_esc_y_clic_fuera_cierran() {
+        // R1-8 flujo abrir→Esc→fuera (headless, puro sobre la decisión):
+        // `Esc` cierra, dim cierra solo si clic fuera, nada cierra solo.
+        assert!(overlay_debe_cerrar_por_entrada(true, false), "Esc cierra");
+        assert!(
+            overlay_debe_cerrar_por_entrada(false, true),
+            "clic fuera cierra"
+        );
+        assert!(overlay_debe_cerrar_por_entrada(true, true), "ambos cierran");
+        assert!(
+            !overlay_debe_cerrar_por_entrada(false, false),
+            "sin entrada no cierra solo"
+        );
+        // El overlay existe con sesión (abrir): sin sesión no hay qué cerrar.
+        let mut con_sesion = TeachingUiState {
+            session: Some(TeachingSession::for_topic("derivada")),
+            ..Default::default()
+        };
+        assert!(con_sesion.session.is_some(), "abrir deja sesión");
+        let ctx = egui::Context::default();
+        con_sesion.close_with_ctx(&ctx);
+        assert!(con_sesion.session.is_none(), "cerrar limpia la sesión");
+    }
 
     #[test]
     fn presupuestos_texto_pedagogico_pinneados() {

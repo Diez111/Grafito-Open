@@ -397,6 +397,35 @@ def validate_expr(src: str) -> str:
     return src
 
 
+_SAFE_EVAL_POOL = None
+_SAFE_EVAL_POOL_LOCK = None
+
+
+def _get_safe_eval_pool():
+    """Pool global reutilizado R1-6 (un solo hilo, sin crear por eval).
+
+    Antes se creaba un `ThreadPoolExecutor(1)` + `shutdown(wait=False)` por
+    eval: 50 timeouts seguidos dejaban 50 hilos abandonados. Ahora el pool
+    vive en el módulo y se reutiliza (threads estables). El hilo abandonado
+    tras un timeout sigue sin poder matarse (GIL): la barrera primaria es
+    `validate_expr`; el timeout es segunda barrera. Nunca se hace shutdown
+    (vive hasta el fin del worker).
+    """
+    import concurrent.futures as _cf
+    import threading as _th
+
+    global _SAFE_EVAL_POOL, _SAFE_EVAL_POOL_LOCK
+    if _SAFE_EVAL_POOL_LOCK is None:
+        _SAFE_EVAL_POOL_LOCK = _th.Lock()
+    if _SAFE_EVAL_POOL is None:
+        with _SAFE_EVAL_POOL_LOCK:
+            if _SAFE_EVAL_POOL is None:
+                _SAFE_EVAL_POOL = _cf.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="safe-eval"
+                )
+    return _SAFE_EVAL_POOL
+
+
 def safe_eval(
     expr: str, x_val: float, timeout_secs: float = SAFE_EVAL_TIMEOUT_SECS
 ) -> float:
@@ -407,22 +436,19 @@ def safe_eval(
     no se puede plegar (`x**x`, funciones con convergencia lenta…).
     Vencido → `ValueError` rápido. El hilo abandonado no se puede matar
     (GIL): la barrera primaria sigue siendo `validate_expr`.
+    R1-6: usa el pool global reutilizado (sin crear hilos por eval).
     """
     code = compile(validate_expr(expr), "<expr>", "eval")
     env = {"x": x_val, **SAFE_FUNCS}
     import concurrent.futures as _cf
 
-    pool = _cf.ThreadPoolExecutor(max_workers=1)
+    pool = _get_safe_eval_pool()
+    futuro = pool.submit(eval, code, {"__builtins__": {}}, env)
     try:
-        futuro = pool.submit(eval, code, {"__builtins__": {}}, env)
-        try:
-            return futuro.result(timeout=timeout_secs)
-        except _cf.TimeoutError as e:
-            futuro.cancel()
-            raise ValueError(f"evaluación excedió {timeout_secs}s (anti-DoS)") from e
-    finally:
-        # Sin espera: el hilo abandonado muere solo al terminar el eval.
-        pool.shutdown(wait=False, cancel_futures=True)
+        return futuro.result(timeout=timeout_secs)
+    except _cf.TimeoutError as e:
+        futuro.cancel()
+        raise ValueError(f"evaluación excedió {timeout_secs}s (anti-DoS)") from e
 
 
 def parse_canvas(raw) -> tuple:

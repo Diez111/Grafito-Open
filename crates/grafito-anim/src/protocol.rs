@@ -2309,7 +2309,9 @@ mod group_compose_m4_tests {
         );
         // Nada sobre nada = transparente.
         assert_eq!(mezclar_pixel_alfa([0, 0, 0, 0], [0, 0, 0, 0]), [0, 0, 0, 0]);
-        // Rojo 50% sobre azul opaco: ambas capas aportan (±1 por redondeo).
+        // SPEC R1-10: rojo 50% sobre azul opaco da [128,0,127,255] exacto en
+        // aritmética real; el ±1 es la precisión documentada del `round()`
+        // f64 (no calibración del bug): 128/255 no es exacto en binario.
         let m = mezclar_pixel_alfa([0, 0, 255, 255], [255, 0, 0, 128]);
         assert_eq!(m[3], 255);
         assert!((m[0] as i16 - 128).abs() <= 1, "r={}", m[0]);

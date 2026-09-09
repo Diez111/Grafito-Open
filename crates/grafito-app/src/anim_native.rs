@@ -1439,22 +1439,41 @@ pub(crate) fn integral_frame_end(a: f64, b: f64, frame: usize) -> f64 {
     a + (b - a) * t
 }
 
-/// `S` acumulada por trapecios (paso 1/20, ≤122 tramos acotados) sobre
-/// `[a, x_end]` con el evaluador existente; salta tramos no finitos.
-/// `Some(0.0)` si `x_end <= a`; `None` si ningún tramo valida (la etiqueta
-/// muestra `S=?` honesto en vez de inventar).
-pub(crate) fn integral_acumulada(
-    anim: Option<&ParametricAnim>,
-    frame: usize,
-    a: f64,
-    x_end: f64,
-) -> Option<f64> {
-    // Entradas finitas por construcción (cotas clampeadas + frame acotado):
-    // `<=` es total acá; NaN no llega (y el `as usize` saturaría a 0 igual).
+/// Cota de pasos de trapecios R1-7 (núcleo común, sin `as usize` ciego).
+///
+/// `None` si `a`/`x_end` no finitos o el ancho no finito (NaN/inf → `None`
+/// honesto, jamás 0 silencioso ni 4096 derrochado). `Some(0)` si `x_end <= a`
+/// (área nula). Si no, `Some(1..=4096)` acotado (el loop hace `.min(4096)`
+/// igual, pero acá el `as usize` ya es seguro: 1..=4096 finito).
+/// Puro, sin I/O.
+fn pasos_trapecios(a: f64, x_end: f64) -> Option<usize> {
+    if !a.is_finite() || !x_end.is_finite() {
+        return None;
+    }
     if x_end <= a {
+        return Some(0);
+    }
+    let diff = x_end - a;
+    if !diff.is_finite() || diff <= 0.0 {
+        return None;
+    }
+    let pasos_f = (diff / 0.05).ceil();
+    if !pasos_f.is_finite() || pasos_f <= 0.0 {
+        return None;
+    }
+    if pasos_f >= 4096.0 {
+        return Some(4096);
+    }
+    Some(pasos_f as usize)
+}
+
+/// Núcleo común R1-7: trapecios sobre `[a, x_end]` con evaluador inyectado.
+/// Salta tramos no finitos; `None` si ningún tramo valida.
+fn trapecios_con_eval(a: f64, x_end: f64, eval: impl Fn(f64) -> Option<f64>) -> Option<f64> {
+    let pasos = pasos_trapecios(a, x_end)?;
+    if pasos == 0 {
         return Some(0.0);
     }
-    let pasos = ((x_end - a) / 0.05).ceil() as usize;
     let mut s = 0.0;
     let mut valida = false;
     for i in 0..pasos.min(4096) {
@@ -1463,10 +1482,7 @@ pub(crate) fn integral_acumulada(
         if x1 <= x0 {
             continue;
         }
-        if let (Some(fa), Some(fb)) = (
-            integral_eval(anim, frame, x0),
-            integral_eval(anim, frame, x1),
-        ) {
+        if let (Some(fa), Some(fb)) = (eval(x0), eval(x1)) {
             let tramo = (fa + fb) * 0.5 * (x1 - x0);
             if tramo.is_finite() {
                 s += tramo;
@@ -1479,6 +1495,19 @@ pub(crate) fn integral_acumulada(
     } else {
         None
     }
+}
+
+/// `S` acumulada por trapecios (paso 1/20, ≤122 tramos acotados) sobre
+/// `[a, x_end]` con el evaluador existente; salta tramos no finitos.
+/// `Some(0.0)` si `x_end <= a`; `None` si ningún tramo valida o entradas no
+/// finitas (la etiqueta muestra `S=?` honesto en vez de inventar).
+pub(crate) fn integral_acumulada(
+    anim: Option<&ParametricAnim>,
+    frame: usize,
+    a: f64,
+    x_end: f64,
+) -> Option<f64> {
+    trapecios_con_eval(a, x_end, |x| integral_eval(anim, frame, x))
 }
 
 /// Evalúa la canónica en el frame siguiendo el vivo (M4); sin canónica, `x*x`.
@@ -1502,6 +1531,7 @@ fn integral_eval_con_vivo(
 }
 
 /// `S` acumulada por trapecios siguiendo el vivo (M4; idem `integral_acumulada`).
+/// R1-7: mismo núcleo común + mismo guard no-finito → `None`.
 pub(crate) fn integral_acumulada_con_vivo(
     anim: Option<&ParametricAnim>,
     frame: usize,
@@ -1509,34 +1539,7 @@ pub(crate) fn integral_acumulada_con_vivo(
     x_end: f64,
     vivo: Option<f64>,
 ) -> Option<f64> {
-    if x_end <= a {
-        return Some(0.0);
-    }
-    let pasos = ((x_end - a) / 0.05).ceil() as usize;
-    let mut s = 0.0;
-    let mut valida = false;
-    for i in 0..pasos.min(4096) {
-        let x0 = a + i as f64 * 0.05;
-        let x1 = (a + (i + 1) as f64 * 0.05).min(x_end);
-        if x1 <= x0 {
-            continue;
-        }
-        if let (Some(fa), Some(fb)) = (
-            integral_eval_con_vivo(anim, frame, x0, vivo),
-            integral_eval_con_vivo(anim, frame, x1, vivo),
-        ) {
-            let tramo = (fa + fb) * 0.5 * (x1 - x0);
-            if tramo.is_finite() {
-                s += tramo;
-                valida = true;
-            }
-        }
-    }
-    if valida && s.is_finite() {
-        Some(s)
-    } else {
-        None
-    }
+    trapecios_con_eval(a, x_end, |x| integral_eval_con_vivo(anim, frame, x, vivo))
 }
 
 fn render_integral_frames_with_params_impl(
@@ -2813,6 +2816,8 @@ pub enum ParametricRenderError {
     Oom { got: Option<usize>, max: usize },
     /// La reserva del frame falló (OOM real del SO).
     AllocFailed { bytes: usize },
+    /// Vivo fijo congelaría el GIF (R1-1): el export exige rango propio.
+    VivoFijoNoExportable,
 }
 
 impl std::fmt::Display for ParametricRenderError {
@@ -2832,6 +2837,10 @@ impl std::fmt::Display for ParametricRenderError {
             Self::AllocFailed { bytes } => {
                 write!(f, "sin memoria para reservar el frame ({bytes} bytes)")
             }
+            Self::VivoFijoNoExportable => write!(
+                f,
+                "el vivo fijo congela el GIF (foto del slider): exportá con rango propio o re-render por cambio de slider"
+            ),
         }
     }
 }
@@ -3134,6 +3143,11 @@ pub fn render_parametric_frames_con_rotulo(
 /// Atajo con `p` vivo fijo (M4): todo el set se muestrea con el mismo `vivo`
 /// (foto del slider; el llamador re-renderiza al moverse).
 ///
+/// SEMÁNTICA PINNEADA R1-1: vivo fijo = preview foto, SOLO re-render por
+/// cambio de slider. Congela el GIF (N frames idénticos): el export GIF lo
+/// prohíbe con `Err(VivoFijoNoExportable)` vía `validar_vivo_para_gif`.
+/// Para export usar la vía sin vivo o el updater por frame.
+///
 /// `Some(v)` finito = el documento define `p` y el play lo sigue;
 /// `None` = rango propio (idéntico a la vía sin vivo). Puro en memoria.
 pub fn render_parametric_frames_con_vivo(
@@ -3143,14 +3157,27 @@ pub fn render_parametric_frames_con_vivo(
     render_parametric_frames_con_updater(anim, &mut |_| vivo, false, &mut |_, _| {})
 }
 
+/// Guard honesto R1-1: el GIF no acepta vivo fijo (set congelado).
+///
+/// `Some(v)` finito → `Err(VivoFijoNoExportable)`; `None` o no-finito
+/// (cae a rango propio) → `Ok(())`. Puro, sin I/O.
+pub fn validar_vivo_para_gif(vivo: Option<f64>) -> Result<(), ParametricRenderError> {
+    match vivo {
+        Some(v) if v.is_finite() => Err(ParametricRenderError::VivoFijoNoExportable),
+        _ => Ok(()),
+    }
+}
+
 // ── M4: Group simultáneo REAL (composición alfa frame a frame) ───────────
 // El `AnimationGroup{lag_ratio}` ya calcula offsets de arranque; acá los
 // PÍXELES simultáneos: 2+ sets del MISMO N y MISMO viewport se fusionan con
 // over (`mezclar_pixel_alfa`, `sets[0]` fondo → último frente). Si N o el
-// tamaño difieren → `Err` honesto, jamás reescaleo silencioso. Nota honesta:
-// los frames nativos son opacos (alfa 255), así que el frente tapa; la mezcla
-// real se ve con capas translúcidas (ver test). Presupuesto intacto: el set
-// compuesto respeta `NATIVE_MAX_SET_BYTES`. Puro en memoria, sin I/O.
+// tamaño difieren → `Err` honesto, jamás reescaleo silencioso. R1-2: los
+// frames nativos son opacos (alfa 255) y el frente taparía mudo: todo frente
+// totalmente opaco → `Err(FrenteOpaco)` honesto (exigí alfa<255 por set o
+// modo split/grid). La mezcla real se ve con capas translúcidas (ver test).
+// Presupuesto intacto: el set compuesto respeta `NATIVE_MAX_SET_BYTES`.
+// Puro en memoria, sin I/O.
 
 /// Error tipado de la composición simultánea de grupo (mensajes en español).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3178,6 +3205,8 @@ pub enum GroupComposeError {
     DimensionFueraDeRango { width: usize, height: usize },
     /// El compuesto excede el tope de bytes.
     Presupuesto { got: usize },
+    /// Frente totalmente opaco: taparía mudo (R1-2).
+    FrenteOpaco { set: usize },
 }
 
 impl std::fmt::Display for GroupComposeError {
@@ -3213,16 +3242,31 @@ impl std::fmt::Display for GroupComposeError {
                 f,
                 "el compuesto estimado ({got} bytes) excede el tope de {NATIVE_MAX_SET_BYTES}: bajá la resolución o los fotogramas"
             ),
+            Self::FrenteOpaco { set } => write!(
+                f,
+                "el set {set} es totalmente opaco y taparía al fondo en silencio: usá alfa<255 por capa o modo split/grid"
+            ),
         }
     }
 }
 
 impl std::error::Error for GroupComposeError {}
 
+/// ¿El set es totalmente opaco (todo píxel alfa 255 en todo frame)?
+/// Puro, sin I/O. Vacío → `false` (lo rechaza `SetVacio` aparte).
+fn set_es_totalmente_opaco(set: &[egui::ColorImage]) -> bool {
+    !set.is_empty()
+        && set
+            .iter()
+            .all(|frame| frame.pixels.iter().all(|p| p.a() == 255))
+}
+
 /// Compone 2+ sets simultáneos píxel a píxel (alfa over por frame).
 ///
 /// `sets[k][i]` = frame `i` de la capa `k` (`sets[0]` fondo, último frente).
 /// Exige mismo N no vacío y mismo tamaño en todos; si no → `Err` honesto.
+/// R1-2: exige translucidez en los frentes (alfa<255 en algún píxel): frente
+/// totalmente opaco → `Err(FrenteOpaco)`, jamás tapa silenciosa.
 /// Determinista: mismos sets → mismos píxeles. Puro en memoria.
 pub fn componer_grupo_nativo(
     sets: &[Vec<egui::ColorImage>],
@@ -3281,6 +3325,11 @@ pub fn componer_grupo_nativo(
             return Err(GroupComposeError::Presupuesto {
                 got: other.unwrap_or(usize::MAX),
             });
+        }
+    }
+    for (k, set) in sets.iter().enumerate().skip(1) {
+        if set_es_totalmente_opaco(set) {
+            return Err(GroupComposeError::FrenteOpaco { set: k });
         }
     }
     let mut out = Vec::with_capacity(n);
@@ -3622,6 +3671,45 @@ mod tests {
             super::integral_frame_end(0.0, 2.0, NATIVE_ANIM_FRAME_COUNT - 1),
             2.0
         );
+    }
+    #[test]
+    fn integral_no_finita_da_none_y_nucleo_comun() {
+        // R1-7: guard `!finito → None` + núcleo común (ambas vías coinciden).
+        let canon = super::integral_canonical_anim().expect("canónica");
+        for (a, b) in [
+            (f64::NAN, 2.0),
+            (0.0, f64::NAN),
+            (f64::INFINITY, 2.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 2.0),
+        ] {
+            assert_eq!(
+                super::integral_acumulada(Some(&canon), 0, a, b),
+                None,
+                "a={a} b={b} → None"
+            );
+            assert_eq!(
+                super::integral_acumulada_con_vivo(Some(&canon), 0, a, b, None),
+                None,
+                "vivo a={a} b={b} → None"
+            );
+            assert_eq!(
+                super::integral_acumulada_con_vivo(Some(&canon), 0, a, b, Some(1.0)),
+                None,
+                "vivo fijo a={a} b={b} → None"
+            );
+        }
+        // Núcleo común: sin vivo ambas dan lo mismo en rango sano.
+        let s1 = super::integral_acumulada(Some(&canon), 0, 0.0, 2.0).expect("S");
+        let s2 =
+            super::integral_acumulada_con_vivo(Some(&canon), 0, 0.0, 2.0, None).expect("S vivo");
+        assert!((s1 - s2).abs() < 1e-12, "núcleo común: {s1} vs {s2}");
+        // Pasos acotados y sanos.
+        assert_eq!(super::pasos_trapecios(0.0, 0.0), Some(0));
+        assert_eq!(super::pasos_trapecios(2.0, 2.0), Some(0));
+        assert_eq!(super::pasos_trapecios(f64::NAN, 1.0), None);
+        assert_eq!(super::pasos_trapecios(0.0, f64::INFINITY), None);
+        assert_eq!(super::pasos_trapecios(0.0, 500.0), Some(4096));
     }
     #[test]
     fn taylor_frames_bounded() {
@@ -4952,6 +5040,25 @@ mod parametric_render_tests {
     }
 
     #[test]
+    fn vivo_fijo_no_va_a_gif_err_honesto() {
+        // R1-1: semántica pinneada — vivo fijo = foto preview, el GIF lo
+        // prohíbe con `Err` honesto en vez de congelar silencioso.
+        assert_eq!(
+            validar_vivo_para_gif(Some(7.0)),
+            Err(ParametricRenderError::VivoFijoNoExportable)
+        );
+        assert!(validar_vivo_para_gif(None).is_ok());
+        // No-finito cae a rango propio: no congela, va al GIF.
+        assert!(validar_vivo_para_gif(Some(f64::NAN)).is_ok());
+        assert!(validar_vivo_para_gif(Some(f64::INFINITY)).is_ok());
+        let msg = format!("{}", ParametricRenderError::VivoFijoNoExportable);
+        assert!(
+            msg.contains("congela") || msg.contains("vivo"),
+            "mensaje honesto en español, got: {msg}"
+        );
+    }
+
+    #[test]
     fn updater_por_frame_varia_y_no_finito_cae_a_rango_propio() {
         let a = anim(ParametricKind::Sweep, "x+p", None, "p", 0.0, 10.0, 4);
         // Updater real: cada frame lee su propio vivo (rampa 0,2,4,6).
@@ -5116,8 +5223,8 @@ mod group_compose_m4_tests {
 
     #[test]
     fn dos_animaciones_distintas_solapadas() {
-        // Dos plantillas distintas, mismo N (48) y mismo viewport (96×72;
-        // el mínimo nativo es 64 por lado, 64×48 clampea a 64×64).
+        // R1-2: dos nativas opacas YA no componen en silencio (tapaba mudo).
+        // Mismo N y viewport, pero el frente es totalmente opaco → Err honesto.
         let fondo = render_integral_frames(96, 72);
         let frente = render_native_animation_frames(96, 72);
         assert_eq!(fondo.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -5126,26 +5233,33 @@ mod group_compose_m4_tests {
             fondo[0].pixels, frente[0].pixels,
             "las dos animaciones difieren"
         );
-        let compuesto = componer_grupo_nativo(&[fondo.clone(), frente.clone()]).unwrap();
-        assert_eq!(compuesto.len(), NATIVE_ANIM_FRAME_COUNT);
-        for (i, f) in compuesto.iter().enumerate() {
-            assert_eq!(f.size, [96, 72], "frame {i}: viewport");
-            assert_eq!(f.pixels.len(), 96 * 72, "frame {i}: píxeles");
-        }
-        // Frames nativos opacos: el frente tapa (over honesto documentado)…
-        for (c, f) in compuesto.iter().zip(frente.iter()) {
-            assert_eq!(c.pixels, f.pixels);
-        }
-        // …pero el compuesto trae la capa de arriba, no la de abajo.
-        assert_ne!(compuesto[0].pixels, fondo[0].pixels);
-        // Tres capas también componen (fondo → medio → frente).
-        let triple = componer_grupo_nativo(&[fondo, frente.clone(), frente]).unwrap();
-        assert_eq!(triple.len(), NATIVE_ANIM_FRAME_COUNT);
+        let err = componer_grupo_nativo(&[fondo.clone(), frente.clone()]).unwrap_err();
+        assert_eq!(err, GroupComposeError::FrenteOpaco { set: 1 });
+        assert!(
+            err.to_string().contains("opaco"),
+            "mensaje honesto en español, got: {err}"
+        );
+        // Tres capas opacas también se rechazan (la primera frente opaca manda).
+        let err3 = componer_grupo_nativo(&[fondo, frente.clone(), frente]).unwrap_err();
+        assert_eq!(err3, GroupComposeError::FrenteOpaco { set: 1 });
+    }
+
+    #[test]
+    fn dos_opacos_no_tapan_en_silencio() {
+        // R1-2 pinneado: 2 sets totalmente opacos → `Err(FrenteOpaco)`, jamás
+        // `compuesto == frente` silencioso. Exigí alfa<255 o split/grid.
+        let fondo = vec![imagen_solida(4, 4, [0, 0, 255, 255]); 3];
+        let frente = vec![imagen_solida(4, 4, [255, 0, 0, 255]); 3];
+        let err = componer_grupo_nativo(&[fondo, frente]).unwrap_err();
+        assert_eq!(err, GroupComposeError::FrenteOpaco { set: 1 });
+        assert!(err.to_string().contains("split/grid"), "got: {err}");
     }
 
     #[test]
     fn capas_translucidas_se_mezclan_de_verdad() {
-        // Azul opaco + rojo 50%: el compuesto promedia (±2 por premultiplicado).
+        // SPEC R1-10: over Porter-Duff en alfa directo; la ida y vuelta por
+        // `Color32` premultiplicado mete ±2 (no es calibración del bug, es
+        // la precisión documentada del tipo de píxel egui).
         let fondo = vec![imagen_solida(2, 2, [0, 0, 255, 255]); 3];
         let frente = vec![imagen_solida(2, 2, [255, 0, 0, 128]); 3];
         let compuesto = componer_grupo_nativo(&[fondo, frente]).unwrap();
@@ -5162,17 +5276,19 @@ mod group_compose_m4_tests {
 
     #[test]
     fn mismo_n_y_viewport_o_err_honesto() {
+        // OJO R1-2: los frentes de este test son translúcidos (alfa 128):
+        // con opacos daría `FrenteOpaco` antes de llegar al N/viewport.
         let ok = vec![imagen_solida(4, 4, [0, 0, 255, 255]); 3];
-        let ok2 = vec![imagen_solida(4, 4, [255, 0, 0, 255]); 3];
+        let ok2 = vec![imagen_solida(4, 4, [255, 0, 0, 128]); 3];
         assert!(componer_grupo_nativo(&[ok.clone(), ok2.clone()]).is_ok());
         // N distinto → Err (sin reescaleo silencioso).
-        let corto = vec![imagen_solida(4, 4, [255, 0, 0, 255]); 2];
+        let corto = vec![imagen_solida(4, 4, [255, 0, 0, 128]); 2];
         let err = componer_grupo_nativo(&[ok.clone(), corto])
             .unwrap_err()
             .to_string();
         assert!(err.contains("igualá N"), "got: {err}");
         // Viewport distinto → Err.
-        let otro_size = vec![imagen_solida(8, 4, [255, 0, 0, 255]); 3];
+        let otro_size = vec![imagen_solida(8, 4, [255, 0, 0, 128]); 3];
         let err = componer_grupo_nativo(&[ok.clone(), otro_size])
             .unwrap_err()
             .to_string();

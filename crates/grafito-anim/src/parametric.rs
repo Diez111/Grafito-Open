@@ -1653,12 +1653,16 @@ fn token_parece_funcion(token: &str) -> bool {
         || token.starts_with('-')
 }
 
-/// Expresión suelta sin `=` ("derivada x³ [-2,2]"): primer token con `x`
-/// evaluable en el rango. Un solo token (el multi-token sin `=` sigue a
-/// canónica, como hoy): el gate de evaluabilidad impide que prosa común
-/// ("explica" trae `x`) se lea como función; lo que parece función pero
-/// no evalúa (`foo(x)`) es `Invalida`, no canónica muda. Pura, sin I/O.
+/// Expresión suelta sin `=` ("derivada x³ [-2,2]"): barre TODOS los tokens
+/// (R1-3). La explícita válida gana aunque haya ruido antes (`foo(x)` solo
+/// es inválida si no hay ninguna válida): dos pasadas lógicas en un solo
+/// barrido (guarda la primera inválida y sigue buscando explícita).
+/// Un solo token (el multi-token sin `=` sigue a canónica, como hoy): el gate
+/// de evaluabilidad impide que prosa común ("explica" trae `x`) se lea como
+/// función; lo que parece función pero no evalúa (`foo(x)`) es `Invalida`
+/// solo si no aparece ninguna válida después, no canónica muda. Pura, sin I/O.
 fn extract_bare_expr(text: &str, param_raw: &str, p0: f64, p1: f64) -> BareExpr {
+    let mut primera_invalida: Option<String> = None;
     for pedazo in text.split_whitespace() {
         let token = pedazo.trim_matches(|c: char| ",;.:()[]«»\"'".contains(c));
         if token.is_empty() || !(token.contains('x') || token.contains('X')) {
@@ -1675,13 +1679,16 @@ fn extract_bare_expr(text: &str, param_raw: &str, p0: f64, p1: f64) -> BareExpr 
         if area_expr_evaluable(token, &param_efectivo, p0, p1) {
             return BareExpr::Explicita(token.to_string());
         }
-        if token_parece_funcion(token) {
-            return BareExpr::Invalida(format!(
+        if primera_invalida.is_none() && token_parece_funcion(token) {
+            primera_invalida = Some(format!(
                 "la función {pedazo:?} no se puede evaluar en [{p0},{p1}]: revisá la expresión, por ejemplo f(x)=x^2"
             ));
         }
     }
-    BareExpr::Ninguna
+    match primera_invalida {
+        Some(detalle) => BareExpr::Invalida(detalle),
+        None => BareExpr::Ninguna,
+    }
 }
 
 fn area_anim(
@@ -2255,6 +2262,25 @@ mod tests {
         // Suelta no evaluable con `x` → Err honesto, jamás canónica muda.
         assert!(infer_tangent_anim("derivada foo(x) [-2,2]").is_err());
         assert!(infer_area_anim("integral foo(x) [0,2]").is_err());
+    }
+
+    #[test]
+    fn bare_barre_todos_los_tokens_explicita_gana() {
+        // R1-3: la explícita válida gana aunque haya ruido antes; `foo(x)`
+        // solo es inválida si no hay ninguna válida.
+        let res = infer_tangent_anim("derivada foo(x) x^2").unwrap();
+        assert!(!res.es_canonica());
+        assert_eq!(res.anim().expr_a, "x^2");
+        let area = infer_area_anim("integral foo(x) x^2 [0,2]").unwrap();
+        assert!(!area.es_canonica());
+        assert_eq!(area.anim().expr_a, "x^2");
+        // Solo-ruido con `+` no es Err por el `+`: va a canónica honesta.
+        let taxi = infer_tangent_anim("taxi + derivada").unwrap();
+        assert!(taxi.es_canonica(), "el + no inventa función");
+        let taxi_area = infer_area_anim("taxi + integral").unwrap();
+        assert!(taxi_area.es_canonica());
+        // Sin válida sigue siendo Err honesto.
+        assert!(infer_tangent_anim("derivada foo(x) [-2,2]").is_err());
     }
 
     #[test]

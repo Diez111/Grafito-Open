@@ -1457,11 +1457,31 @@ impl AssistantRuntime {
             hubo = true;
         }
         if let Some(job) = self.gif_export_job.take() {
+            // R1-4: cancela el token (el export chequea entre frames) y el
+            // reaper hace `join` ACOTADO (5 s) + borra el temporal: sin
+            // crecimiento de threads ni basura en disco. Si da timeout, el
+            // hilo queda detached con marca (se borra igual el path conocido).
+            job.cancel.cancel();
+            let ruta_conocida = job.path.clone();
             let _ = std::thread::Builder::new()
                 .name("gif-export-reaper".into())
                 .spawn(move || {
-                    if let Ok(Ok(path)) = job.handle.join() {
-                        let _ = std::fs::remove_file(path);
+                    match join_gif_handle_bounded(job.handle, GIF_REAPER_TIMEOUT) {
+                        Some(Ok(path)) => {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        Some(Err(_)) => {
+                            let _ = std::fs::remove_file(&ruta_conocida);
+                        }
+                        None => {
+                            // Timeout: detached con marca + limpieza best-effort.
+                            eprintln!(
+                                "[gif-reaper] timeout tras {:?}, hilo detached; borro {}",
+                                GIF_REAPER_TIMEOUT,
+                                ruta_conocida.display()
+                            );
+                            let _ = std::fs::remove_file(&ruta_conocida);
+                        }
                     }
                 });
             hubo = true;
@@ -1813,11 +1833,82 @@ struct AssistantAnimIaJob {
 /// Guarda el `JoinHandle` de `spawn_gif_export` (hilo existente, reusable y
 /// probado) para drenarlo sin bloquear en `poll_gif_export_job`.
 /// `frame_count` es solo para el mensaje de éxito (cuántos fotogramas
-/// viajaron al GIF).
+/// viajaron al GIF). `cancel` permite abortar el export (R1-4) y `path` es
+/// el destino temporal para borrarlo aunque el `join` dé timeout.
 struct GifExportJob {
     handle: std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::GifExportError>>,
     frame_count: usize,
+    cancel: grafito_assistant::CancellationToken,
+    path: std::path::PathBuf,
 }
+
+/// Cota del reaper GIF R1-4: el `join` en el path de cancel nunca bloquea
+/// más que esto (poll `is_finished` cada 50 ms).
+pub(crate) const GIF_REAPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `join` acotado R1-4: espera hasta `timeout` (poll 50 ms) y devuelve
+/// `Some(resultado)` si el hilo terminó, `None` si dio timeout (hilo
+/// detached: al salir del scope el `JoinHandle` se suelta y el hilo sigue
+/// solo, con marca en el llamador). Puro sobre el handle, sin I/O.
+pub(crate) fn join_gif_handle_bounded(
+    handle: std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::GifExportError>>,
+    timeout: std::time::Duration,
+) -> Option<Result<std::path::PathBuf, crate::anim_native::GifExportError>> {
+    let inicio = std::time::Instant::now();
+    // Poll sin bloquear: el export corre en su hilo, acá solo miramos.
+    while !handle.is_finished() {
+        if inicio.elapsed() >= timeout {
+            // Timeout: se suelta el handle (detach) con marca del llamador;
+            // el hilo exportador sigue solo hasta terminar.
+            std::mem::forget(handle);
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    match handle.join() {
+        Ok(res) => Some(res),
+        Err(_) => Some(Err(crate::anim_native::GifExportError::Encode(
+            "la exportación terminó inesperadamente".to_string(),
+        ))),
+    }
+}
+
+/// Guard R1-5: marca `spec_terminado` en `Drop` (también si `complete`
+/// paniquea). Sin esto el puente forwarder quedaba en loop eterno y el
+/// `join` de abajo nunca llegaba: hilo huérfano por turno.
+///
+/// Puro sobre el `Arc`, sin I/O, sin `unwrap`.
+struct SpecTerminadoGuard {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for SpecTerminadoGuard {
+    fn drop(&mut self) {
+        self.flag.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// `join` acotado R1-5 para el puente (100 ms): poll `is_finished` cada
+/// 10 ms; si termina se joinea, si no se suelta (detach) y se retorna
+/// `false` con marca del llamador. Puro sobre el handle, sin I/O.
+pub(crate) fn join_puente_bounded(
+    handle: std::thread::JoinHandle<()>,
+    timeout: std::time::Duration,
+) -> bool {
+    let inicio = std::time::Instant::now();
+    while !handle.is_finished() {
+        if inicio.elapsed() >= timeout {
+            std::mem::forget(handle);
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = handle.join();
+    true
+}
+
+/// Cota del puente R1-5: el `join` del forwarder nunca bloquea más que esto.
+pub(crate) const PUENTE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Job del modo agente (loop con herramientas).
 struct AssistantAgentJob {
@@ -4008,10 +4099,18 @@ impl GrafitoApp {
             "grafito_animacion_{}_{stamp}_{frame_count}.gif",
             std::process::id()
         ));
-        let handle = crate::anim_native::spawn_gif_export(frames, path, delay_cs);
+        let cancel = grafito_assistant::CancellationToken::default();
+        let handle = crate::anim_native::spawn_gif_export_cancelable(
+            frames,
+            path.clone(),
+            delay_cs,
+            cancel.clone(),
+        );
         self.assistant_runtime.gif_export_job = Some(GifExportJob {
             handle,
             frame_count,
+            cancel,
+            path,
         });
         self.assistant.set_media_export(MediaExportState::Exporting);
         ctx.request_repaint();
@@ -4117,6 +4216,11 @@ impl GrafitoApp {
             let cancel_agent_puente = cancel_agent.clone();
             let cancel_turno_puente = cancel.clone();
             let spec_terminado = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // R1-5: flag en `Drop`/scopeguard — si `complete` paniquea, el
+            // guard marca igual y el puente muere (sin hilo huérfano eterno).
+            let _guard = SpecTerminadoGuard {
+                flag: spec_terminado.clone(),
+            };
             let spec_terminado_puente = spec_terminado.clone();
             let puente = std::thread::spawn(move || {
                 while !spec_terminado_puente.load(std::sync::atomic::Ordering::Acquire) {
@@ -4131,7 +4235,12 @@ impl GrafitoApp {
                 &completer, &mensajes, &tools, 512, timeout, &cancel_agent,
             );
             spec_terminado.store(true, std::sync::atomic::Ordering::Release);
-            let _ = puente.join();
+            // R1-5: `join` acotado 100 ms (antes sin cota en path de cancel).
+            // Si da timeout el puente queda detached con marca y se sigue.
+            if !join_puente_bounded(puente, PUENTE_JOIN_TIMEOUT) {
+                eprintln!("[puente-spec] timeout tras 100ms, hilo detached");
+            }
+            drop(_guard);
             if cancel.is_cancelled() {
                 return PedidoSpecIa::Transporte("La generación se canceló.".into());
             }
@@ -7419,25 +7528,25 @@ mod tests {
         commit_assistant_graph_preflight, decide_animacion, esperar_spec_ia_con_timeout,
         ia_disponible_para_anim, inspect_remote_action_proposals, inspect_remote_proposals,
         inspect_remote_proposals_cancellable, is_agent_spark_responses_unsupported_error,
-        is_session_or_account_error, is_socratic_repair_error, limpiar_media_si_no_animacion,
-        parsear_spec_anim_ia, plantilla_para_pedido, playlist_para_pedido,
-        pop_provisional_stream_turn, preflight_assistant_flower_scene,
-        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
-        preflight_assistant_parameter, preflight_assistant_scene, prosa_canonica_para_plantilla,
-        prosa_integral_explicita, prosa_para_spec_anim_ia, prosa_tangente_explicita,
-        read_bounded_attachment, remote_error_message, remote_stage_for_job,
-        render_media_desde_spec_ia, resolver_turno_anim_ia,
-        should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
-        socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
-        stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_spec_anim_ia,
-        validate_assistant_command, verified_remote_proposals, wants_exercise_request,
-        AgentChannelMsg, AnimIaRender, AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob,
-        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
-        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
-        DecisionAnimacion, DesenlaceAnimIa, GifExportJob, IntegralPedido,
-        LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification, RemoteStage,
-        SpecAnimIa, TangentePedido, ANIM_IA_SPEC_TIMEOUT_MS, ANIM_MOTOR_IDLE_TIMEOUT_SECS,
-        ANIM_MOTOR_JOB_TIMEOUT_SECS, ANIM_SIN_IA_AVISO,
+        is_session_or_account_error, is_socratic_repair_error, join_gif_handle_bounded,
+        join_puente_bounded, limpiar_media_si_no_animacion, parsear_spec_anim_ia,
+        plantilla_para_pedido, playlist_para_pedido, pop_provisional_stream_turn,
+        preflight_assistant_flower_scene, preflight_assistant_graph_command,
+        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
+        preflight_assistant_scene, prosa_canonica_para_plantilla, prosa_integral_explicita,
+        prosa_para_spec_anim_ia, prosa_tangente_explicita, read_bounded_attachment,
+        remote_error_message, remote_stage_for_job, render_media_desde_spec_ia,
+        resolver_turno_anim_ia, should_fallback_agent_spark_to_deepseek,
+        should_fallback_remote_spark_to_deepseek, socratic_guard_context,
+        spec_canonico_para_fallback, split_playlist_request, stage_assistant_parameter,
+        titulo_curado, titulo_curado_localized, validar_spec_anim_ia, validate_assistant_command,
+        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AnimIaRender,
+        AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation,
+        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
+        IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
+        RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, ANIM_IA_SPEC_TIMEOUT_MS,
+        ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS, ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
@@ -8944,6 +9053,8 @@ mod tests {
         runtime.gif_export_job = Some(GifExportJob {
             handle: std::thread::spawn(move || Ok(ruta_hilo)),
             frame_count: 1,
+            cancel: CancellationToken::default(),
+            path: ruta.clone(),
         });
         assert!(runtime.cancel_anim_job(), "había turno en vuelo");
         assert!(remote_cancel.is_cancelled(), "remote señalado");
@@ -8961,6 +9072,92 @@ mod tests {
         assert!(!ruta.exists(), "el reaper entierra el temporal");
         // Remote conserva el slot hasta el drain (sin huérfanos).
         assert!(!runtime.remote_request_slot_is_free());
+    }
+
+    #[test]
+    fn r1_puente_muere_si_complete_paniquea() {
+        // R1-5: flag en `Drop`/scopeguard + `join` acotado 100 ms. Si el
+        // `complete` paniquea, el puente igual muere (sin hilo huérfano).
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        // El guard marca en Drop incluso con panic (vía `catch_unwind`).
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = SpecTerminadoGuard { flag: flag.clone() };
+            panic!("complete simulado");
+        }));
+        assert!(res.is_err());
+        assert!(flag.load(Ordering::Acquire), "el guard marca en panic");
+        // El puente con la flag marcada muere solo y el join acotado lo drena.
+        let flag2 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_puente = flag2.clone();
+        let puente = std::thread::spawn(move || {
+            while !flag_puente.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        flag2.store(true, Ordering::Release);
+        assert!(
+            join_puente_bounded(puente, Duration::from_millis(100)),
+            "puente marcado muere dentro de la cota"
+        );
+        // Colgado de verdad: timeout rápido sin bloquear (detach con marca).
+        let colgado = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(30)));
+        let inicio = std::time::Instant::now();
+        assert!(!join_puente_bounded(colgado, Duration::from_millis(50)));
+        assert!(inicio.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn r1_reaper_acotado_sin_crecimiento_y_temporal_borrado() {
+        // R1-4: cancel durante export → `join` acotado (no cuelga) + temporal
+        // borrado + sin crecimiento de threads (5 cancels seguidos estables).
+        use std::time::Duration;
+        // Rápido: termina y se joinea dentro de la cota.
+        let h = std::thread::spawn(|| {
+            Ok::<_, crate::anim_native::GifExportError>(std::path::PathBuf::from("x"))
+        });
+        let inicio = std::time::Instant::now();
+        assert!(join_gif_handle_bounded(h, Duration::from_secs(2)).is_some());
+        assert!(inicio.elapsed() < Duration::from_secs(2));
+        // Colgado: da timeout rápido sin bloquear (detach con marca).
+        let colgado = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(30));
+            Ok::<_, crate::anim_native::GifExportError>(std::path::PathBuf::from("y"))
+        });
+        let inicio = std::time::Instant::now();
+        assert!(join_gif_handle_bounded(colgado, Duration::from_millis(120)).is_none());
+        assert!(
+            inicio.elapsed() < Duration::from_secs(5),
+            "el timeout no cuelga el cancel"
+        );
+        // Cancel real sobre temporal: el slot se suelta y el reaper entierra.
+        let mut runtime = AssistantRuntime::default();
+        let ruta = std::env::temp_dir().join(format!(
+            "grafito_reaper_r1_{}_{}.gif",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&ruta, b"GIF89a").expect("temporal");
+        let ruta_hilo = ruta.clone();
+        runtime.gif_export_job = Some(GifExportJob {
+            handle: std::thread::spawn(move || Ok(ruta_hilo)),
+            frame_count: 1,
+            cancel: CancellationToken::default(),
+            path: ruta.clone(),
+        });
+        assert!(runtime.cancel_anim_job());
+        assert!(runtime.gif_export_job.is_none());
+        for _ in 0..200 {
+            if !ruta.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!ruta.exists(), "temporal borrado tras cancel");
     }
 
     #[test]
@@ -9380,6 +9577,8 @@ mod tests {
         app.assistant_runtime.gif_export_job = Some(GifExportJob {
             handle: std::thread::spawn(|| Ok(std::path::PathBuf::from("ocupado"))),
             frame_count: 1,
+            cancel: CancellationToken::default(),
+            path: std::path::PathBuf::from("ocupado"),
         });
         app.export_assistant_media(&ctx);
         assert!(

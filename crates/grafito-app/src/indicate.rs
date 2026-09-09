@@ -45,10 +45,14 @@ impl IndicateHighlight {
         if now_ms < 0.0 {
             return Err("Indicar: tiempo negativo".to_string());
         }
+        // R1-9: `as u64` satura sin pánico pero mentiría (1e30 → MAX):
+        // más allá de `u64::MAX` es `Err` honesto.
+        if now_ms > u64::MAX as f64 {
+            return Err("Indicar: tiempo excede el máximo representable".to_string());
+        }
         if ttl_ms == 0 || ttl_ms > INDICATE_MAX_TTL_MS {
             return Err(format!("Indicar: TTL {ttl_ms} ms fuera de rango"));
         }
-        // `now_ms` finito ⇒ `round` finito ⇒ `as u64` satura sin pánico.
         let start_ms = now_ms.round() as u64;
         Ok(Self {
             target,
@@ -184,6 +188,17 @@ mod tests {
         assert!(IndicateHighlight::try_new(id, -1.0).is_err());
         assert!(IndicateHighlight::try_new_with_ttl(id, 0.0, 0).is_err());
         assert!(IndicateHighlight::try_new_with_ttl(id, 0.0, INDICATE_MAX_TTL_MS + 1).is_err());
+    }
+
+    #[test]
+    fn constructor_rechaza_mas_alla_de_u64_max() {
+        // R1-9: `now_ms > u64::MAX as f64 → Err` (el `as u64` saturaría a MAX
+        // y mentiría con un pulso en el futuro lejano).
+        let id = ObjectId::new();
+        assert!(IndicateHighlight::try_new(id, 1e30).is_err());
+        assert!(IndicateHighlight::try_new(id, u64::MAX as f64 * 2.0).is_err());
+        // El borde sano sigue pasando.
+        assert!(IndicateHighlight::try_new(id, 1_000_000.0).is_ok());
     }
 
     #[test]
