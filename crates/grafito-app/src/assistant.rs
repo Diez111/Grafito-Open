@@ -5149,9 +5149,13 @@ impl GrafitoApp {
                                     ToastKind::Info,
                                 );
                             } else if should_fallback_remote_spark_to_deepseek(
+                                // OJO bucle: acá va el modelo INTENTADO (`model`
+                                // del job), no la preferencia. Con la preferencia
+                                // (siempre spark), el fallo del reintento en
+                                // deepseek re-disparaba el fallback al infinito.
                                 &error,
-                                self.assistant.provider,
-                                &self.assistant.model,
+                                provider,
+                                &model,
                                 correction_attempt,
                             ) {
                                 if is_session_or_account_error(&error) {
@@ -5511,6 +5515,9 @@ fn is_session_or_account_error(error: &str) -> bool {
 }
 
 /// Fallback chat (no agente) sólo-sesión: Spark 500/timeout/400-sesión → deepseek.
+/// `model` DEBE ser el intentado por el job, jamás la preferencia guardada:
+/// si el reintento en deepseek falla y se evalúa la preferencia (spark), el
+/// fallback se re-dispara al infinito (un aviso por intento = "bucle").
 /// La preferencia guardada queda intacta; el próximo pedido reintenta spark.
 /// Nunca ante 429: cambiar de modelo no devuelve cuota y duplicaría el gasto.
 /// El 400 de sesión/cuenta (tier gratuito sin sesión válida) también reintenta
@@ -7506,6 +7513,30 @@ mod tests {
         ));
         assert!(!should_fallback_remote_spark_to_deepseek(
             &format!("{body_400} 429"),
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor-free",
+            0,
+        ));
+    }
+
+    #[test]
+    fn fallback_evalua_modelo_intentado_no_preferencia_sin_bucle() {
+        // Regresión del bucle: el reintento en deepseek fallaba y el chequeo
+        // con la PREFERENCIA (spark) re-disparaba el fallback al infinito
+        // (un aviso por intento). El llamador debe pasar el modelo del job.
+        let deepseek_401 = "remote assistant returned HTTP 401: {\"type\":\"error\",\"error\":{\"type\":\"InvalidApiKey\"}}";
+        // Intento en deepseek (reintento del fallback) + preferencia spark:
+        // con modelo intentado deepseek NO hay fallback, aunque la
+        // preferencia siga siendo spark.
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            deepseek_401,
+            ProviderProfile::OpenCodeGo,
+            "deepseek-v4-flash",
+            0,
+        ));
+        // Intento en spark con el mismo error SÍ dispara (una sola vez).
+        assert!(should_fallback_remote_spark_to_deepseek(
+            deepseek_401,
             ProviderProfile::OpenCodeGo,
             "muse-spark-1.3-contributor-free",
             0,
