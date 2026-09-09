@@ -17,8 +17,9 @@ use grafito_pedagogy::{
     TeachingTopic,
 };
 use grafito_profile::StudentProfile;
+use grafito_ui::assistant::{humanize_prose_text, AssistantBlocksCache, AssistantMessageBlock};
 use grafito_ui::icons::{action_icon_button, Icon};
-use grafito_whiteboard::WhiteboardDoc;
+use grafito_whiteboard::{WhiteboardDoc, WhiteboardElement};
 use std::time::{Duration, Instant};
 
 /// Ancho ideal de la ventana de enseñanza (SPACE_XXL * 16 = 640, tokenizado).
@@ -54,6 +55,9 @@ pub struct TeachingUiState {
     pub ejercicio: PanelEjercicio,
     cached_hash: u64,
     cached_len: usize,
+    /// Parser del transcript (misma gramática que el asistente): evita
+    /// re-parsear el paso en cada frame. Fuente única de markdown.
+    bloques: AssistantBlocksCache,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -71,6 +75,7 @@ impl Default for TeachingUiState {
             ejercicio: PanelEjercicio::default(),
             cached_hash: 0,
             cached_len: 0,
+            bloques: AssistantBlocksCache::default(),
         }
     }
 }
@@ -1470,6 +1475,233 @@ pub fn rect_burbuja_morph(
     r
 }
 
+// ── Frente E1: overlay de enseñanza sin marcas crudas ni duplicación ──
+
+/// Etiqueta de progreso real (1-based): "Paso N de M". Pura, sin I/O.
+pub fn etiqueta_paso(indice_actual: usize, total_pasos: usize) -> String {
+    format!(
+        "Paso {} de {}",
+        indice_actual.saturating_add(1),
+        total_pasos.max(1)
+    )
+}
+
+/// ¿Este `#` es marca markdown y no contenido? Marca = al inicio o tras
+/// espacio, y seguido de espacio, fin u otro `#`. Así "## Enfoque" se pela
+/// pero "C#" o "F# rigid" quedan intactos. Puro, por chars (UTF-8 seguro).
+fn es_marca_gato(anterior: Option<char>, siguiente: Option<char>) -> bool {
+    let abre = anterior.is_none_or(|c| c == ' ' || c == '#');
+    let cierra = siguiente.is_none_or(|c| c == ' ' || c == '#');
+    abre && cierra
+}
+
+/// Quita marcas markdown en línea (`**`, `__`, `` ` ``, `##` filtrado).
+/// No parsea bloques: eso lo hace el parser del transcript
+/// (`AssistantBlocksCache`); acá sólo se limpia texto ya extraído
+/// (títulos, etiquetas). Puro, sin I/O.
+pub fn texto_plano_inline(texto: &str) -> String {
+    let sin_negrita = texto.replace("**", "").replace("__", "");
+    let sin_codigo = sin_negrita.replace('`', "");
+    let chars: Vec<char> = sin_codigo.chars().collect();
+    let mut limpio = String::with_capacity(sin_codigo.len());
+    for (i, c) in chars.iter().enumerate() {
+        if *c == '#' {
+            let anterior = if i == 0 {
+                None
+            } else {
+                chars.get(i - 1).copied()
+            };
+            let siguiente = chars.get(i + 1).copied();
+            if es_marca_gato(anterior, siguiente) {
+                continue;
+            }
+        }
+        limpio.push(*c);
+    }
+    // Colapsa espacios dobles que dejan las marcas (una pasada).
+    let mut final_out = String::with_capacity(limpio.len());
+    let mut previo_espacio = false;
+    for c in limpio.chars() {
+        if c == ' ' {
+            if previo_espacio {
+                continue;
+            }
+            previo_espacio = true;
+        } else {
+            previo_espacio = false;
+        }
+        final_out.push(c);
+    }
+    final_out.trim().to_string()
+}
+
+/// Título de una línea sin marcas crudas ("## Enfoque" → "Enfoque").
+/// Si no queda nada, honesto: "Paso". Puro, sin I/O.
+pub fn titulo_limpio(titulo: &str) -> String {
+    let plano = texto_plano_inline(titulo);
+    if plano.is_empty() {
+        "Paso".to_string()
+    } else {
+        plano
+    }
+}
+
+/// Estado de la sección pizarra: colapsada si vacía, lienzo si hay dibujo
+/// útil, placeholder honesto si el hint sólo da texto de fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstadoPizarra {
+    /// Sin hint y sin trazos: no se dibuja nada (ni recuadro negro vacío).
+    Oculta,
+    /// Hay vectores reales (trazos, flechas, figuras): lienzo interactivo.
+    Lienzo,
+    /// El hint sólo produce texto de fallback (tiny centrado ilegible):
+    /// placeholder honesto en vez del recuadro negro.
+    Placeholder,
+}
+
+/// ¿El hint produce dibujo útil (algo más que el texto de fallback)?
+/// Puro, sin I/O.
+pub fn pizarra_tiene_dibujo(hint: &str) -> bool {
+    whiteboard_elements_for_hint(hint)
+        .iter()
+        .any(|e| !matches!(e, WhiteboardElement::Text { .. }))
+}
+
+/// Decide la sección pizarra (una sola fuente, cero duplicación).
+/// Puro, sin I/O.
+pub fn estado_pizarra(hint: &str, doc_vacia: bool) -> EstadoPizarra {
+    if hint.trim().is_empty() && doc_vacia {
+        return EstadoPizarra::Oculta;
+    }
+    if pizarra_tiene_dibujo(hint) || !doc_vacia {
+        return EstadoPizarra::Lienzo;
+    }
+    if hint.trim().is_empty() {
+        EstadoPizarra::Oculta
+    } else {
+        EstadoPizarra::Placeholder
+    }
+}
+
+/// Dibuja texto con la gramática del transcript (mismo parser, sin duplicar:
+/// `AssistantBlocksCache` + `humanize_prose_text`). Los bloques de código,
+/// tabla y matemática caen a marco monoespaciado honesto (el renderer
+/// matemático completo vive en el panel del asistente).
+/// Cero I/O y cero spawn: sólo CPU en memoria.
+pub fn draw_bloques_markdown(ui: &mut egui::Ui, texto: &str, cache: &mut AssistantBlocksCache) {
+    let tema = grafito_ui::theme::current_theme(ui.ctx());
+    let bloques = cache.blocks(texto);
+    for bloque in &bloques {
+        match bloque {
+            AssistantMessageBlock::Heading { level, text } => {
+                let size = match level {
+                    1 => grafito_ui::tokens::TYPE_LG,
+                    2 => grafito_ui::tokens::TYPE_MD,
+                    _ => grafito_ui::tokens::TYPE_SM,
+                };
+                ui.label(
+                    egui::RichText::new(humanize_prose_text(&texto_plano_inline(text)))
+                        .strong()
+                        .size(size)
+                        .color(tema.text_primary),
+                );
+            }
+            AssistantMessageBlock::Bullet(text) => {
+                ui.horizontal_top(|ui| {
+                    ui.label(egui::RichText::new("·").color(tema.accent));
+                    ui.label(
+                        egui::RichText::new(humanize_prose_text(&texto_plano_inline(text)))
+                            .size(grafito_ui::tokens::TYPE_BASE)
+                            .color(tema.text_primary),
+                    );
+                });
+            }
+            AssistantMessageBlock::Ordered { number, text } => {
+                ui.horizontal_top(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{number}."))
+                            .strong()
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(tema.accent),
+                    );
+                    ui.label(
+                        egui::RichText::new(humanize_prose_text(&texto_plano_inline(text)))
+                            .size(grafito_ui::tokens::TYPE_BASE)
+                            .color(tema.text_primary),
+                    );
+                });
+            }
+            AssistantMessageBlock::Quote(text) => {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                    ui.label(
+                        egui::RichText::new(humanize_prose_text(&texto_plano_inline(text)))
+                            .italics()
+                            .size(grafito_ui::tokens::TYPE_BASE)
+                            .color(tema.text_secondary),
+                    );
+                });
+            }
+            AssistantMessageBlock::Paragraph(text) => {
+                ui.label(
+                    egui::RichText::new(humanize_prose_text(&texto_plano_inline(text)))
+                        .size(grafito_ui::tokens::TYPE_BASE)
+                        .color(tema.text_primary),
+                );
+            }
+            AssistantMessageBlock::DisplayMath(math) => {
+                marco_monoespaciado(ui, "Expresión", math);
+            }
+            AssistantMessageBlock::Code { language: _, text } => {
+                marco_monoespaciado(ui, "Código", text);
+            }
+            AssistantMessageBlock::Table(rows) => {
+                marco_monoespaciado(ui, "Tabla", &tabla_como_texto(rows));
+            }
+        }
+    }
+}
+
+/// Marco monoespaciado honesto para bloques no-prosa. Puro dibujado, sin I/O.
+fn marco_monoespaciado(ui: &mut egui::Ui, titulo: &str, contenido: &str) {
+    let tema = grafito_ui::theme::current_theme(ui.ctx());
+    egui::Frame::none()
+        .fill(tema.input_bg)
+        .stroke(Stroke::new(1.0, tema.separator.gamma_multiply(0.10)))
+        .rounding(grafito_ui::tokens::RADIUS_MD)
+        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(titulo)
+                    .strong()
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(tema.accent),
+            );
+            ui.label(
+                egui::RichText::new(contenido)
+                    .monospace()
+                    .size(grafito_ui::tokens::TYPE_SM)
+                    .color(tema.text_primary),
+            );
+        });
+}
+
+/// Tabla del transcript como texto plano (fallback honesto). Puro, sin I/O.
+fn tabla_como_texto(filas: &[Vec<String>]) -> String {
+    filas
+        .iter()
+        .map(|fila| {
+            fila.iter()
+                .map(|celda| texto_plano_inline(celda))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl TeachingUiState {
     /// Huella O(frames) de `anim_frames` para el cache de texturas.
     ///
@@ -1603,15 +1835,21 @@ impl TeachingUiState {
         self.cached_len = 0;
     }
 
+    /// Hidrata la pizarra con los vectores del hint (fuente única: si el
+    /// hint no da dibujo útil, la sección lo resuelve con `estado_pizarra`).
+    fn hidratar_pizarra(&mut self, hint: &str) {
+        let mut doc = WhiteboardDoc::default();
+        for elem in whiteboard_elements_for_hint(hint) {
+            doc.add(elem);
+        }
+        self.whiteboard.doc = doc;
+    }
+
     pub fn start(&mut self, topic: &str) {
         let session = TeachingSession::for_topic(topic);
         // Inicializar pizarra con elementos vectoriales reales según hint
         if let Some(step) = session.current() {
-            let mut doc = WhiteboardDoc::default();
-            for elem in whiteboard_elements_for_hint(&step.whiteboard_hint) {
-                doc.add(elem);
-            }
-            self.whiteboard.doc = doc;
+            self.hidratar_pizarra(&step.whiteboard_hint.clone());
             // Iniciar orquestación manim para el primer paso — cancela cualquier job previo
             if let Some(tmpl) = &step.manim_template {
                 self.orchestrator.cancel();
@@ -1627,16 +1865,15 @@ impl TeachingUiState {
         if let Some(session) = &mut self.session {
             let ok = session.advance();
             if let Some(step) = session.current() {
-                // Hidratar pizarra del nuevo paso
-                let mut doc = WhiteboardDoc::default();
-                for elem in whiteboard_elements_for_hint(&step.whiteboard_hint) {
-                    doc.add(elem);
-                }
-                self.whiteboard.doc = doc;
-                if let Some(tmpl) = &step.manim_template {
+                let hint = step.whiteboard_hint.clone();
+                let tmpl = step.manim_template.clone();
+                let titulo = step.title.clone();
+                // Hidratar pizarra del nuevo paso (drop del borrow antes de &mut).
+                self.hidratar_pizarra(&hint);
+                if let Some(tmpl) = &tmpl {
                     // Avanzar implica nuevo concepto → cancelar previo y relanzar
                     self.orchestrator.cancel();
-                    let _ = self.orchestrator.start(&step.title, tmpl.clone());
+                    let _ = self.orchestrator.start(&titulo, tmpl.clone());
                     self.anim_frames = None;
                     self.clear_anim_textures_only(None);
                 }
@@ -1647,6 +1884,31 @@ impl TeachingUiState {
         } else {
             false
         }
+    }
+    /// Vuelve al paso anterior (clampa en cero, nunca baja). Rehidrata la
+    /// pizarra del paso y reinicia el morph, igual que `advance`.
+    pub fn retroceder(&mut self) -> bool {
+        if self.session.is_none() {
+            return false;
+        }
+        if let Some(session) = &mut self.session {
+            if session.current == 0 {
+                return false;
+            }
+            session.current -= 1;
+            if let Some(paso) = session.current_mut() {
+                paso.completed = false;
+            }
+        }
+        if let Some(nuevo_hint) = self
+            .session
+            .as_ref()
+            .and_then(|s| s.current().map(|p| p.whiteboard_hint.clone()))
+        {
+            self.hidratar_pizarra(&nuevo_hint);
+        }
+        self.opened_at = Some(Instant::now());
+        true
     }
     pub fn close(&mut self) {
         self.session = None;
@@ -1713,15 +1975,30 @@ pub fn draw_teaching_overlay(
     let anim_textures: Vec<egui::TextureHandle> = state.anim_textures.clone();
     let progress = session_snapshot.progress();
     let is_last = session_snapshot.is_last();
-    let topic_label = session_snapshot.topic.label();
+    let topic_label = titulo_limpio(&session_snapshot.topic.label());
     let step_count = session_snapshot.steps.len();
     let current_idx = session_snapshot.current;
     let current_step = session_snapshot.current().cloned();
+    let etiqueta = etiqueta_paso(current_idx, step_count);
+    // Cache del parser del transcript: se clona para dibujar sin pelear
+    // borrows con `state`, y se devuelve al cerrar la ventana.
+    let mut bloques_cache = state.bloques.clone();
 
     let mut should_close = false;
     let mut should_advance = false;
+    let mut should_retreat = false;
     let theme = grafito_ui::theme::current_theme(ctx);
     let _ = opened_at;
+    // Fondo opaco a pantalla completa: tapa canvas y paneles para que nada
+    // sangre dentro del overlay ni entren clics al canvas de atrás.
+    egui::Area::new(egui::Id::new("teaching_dim"))
+        .fixed_pos(ctx.screen_rect().min)
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let (fondo, _) = ui.allocate_exact_size(ctx.screen_rect().size(), egui::Sense::click());
+            ui.painter()
+                .rect_filled(fondo, 0.0, theme.panel_bg.gamma_multiply(0.92));
+        });
     egui::Window::new("Enseñanza — Paso a paso")
         .id(egui::Id::new("teaching_overlay"))
         .collapsible(false)
@@ -1767,7 +2044,7 @@ pub fn draw_teaching_overlay(
                             .color(theme.text_primary),
                     );
                     ui.label(
-                        egui::RichText::new(format!("Paso {} de {}", current_idx + 1, step_count))
+                        egui::RichText::new(etiqueta.clone())
                             .size(grafito_ui::tokens::TYPE_XS)
                             .color(theme.text_secondary.gamma_multiply(0.60)),
                     );
@@ -1836,9 +2113,9 @@ pub fn draw_teaching_overlay(
                 }
             }
             ui.add_space(grafito_ui::tokens::SPACE_SM);
-            // Barra progreso — hairline 4px, sin animación extra
+            // Barra progreso — 8px tokenizada, sin animación extra
             let (r, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), grafito_ui::tokens::SPACE_XS),
+                egui::vec2(ui.available_width(), grafito_ui::tokens::SPACE_SM),
                 egui::Sense::hover(),
             );
             ui.painter()
@@ -1865,18 +2142,20 @@ pub fn draw_teaching_overlay(
                             .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
                             .show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
+                                // Título del paso: fuente única y sin marcas
+                                // crudas (el tópico puede traer "## Enfoque"
+                                // del transcript del asistente).
                                 ui.label(
-                                    egui::RichText::new(&step.title)
+                                    egui::RichText::new(titulo_limpio(&step.title))
                                         .strong()
                                         .size(grafito_ui::tokens::TYPE_MD)
                                         .color(theme.accent),
                                 );
                                 ui.add_space(grafito_ui::tokens::SPACE_XS);
-                                ui.label(
-                                    egui::RichText::new(&step.explanation)
-                                        .size(grafito_ui::tokens::TYPE_BASE)
-                                        .color(theme.text_primary),
-                                );
+                                // Explicación con la gramática del transcript
+                                // (encabezados, listas y citas renderizados,
+                                // jamás `##` o `**` crudos).
+                                draw_bloques_markdown(ui, &step.explanation, &mut bloques_cache);
                                 if let Some(expr) = &step.math_expr {
                                     ui.add_space(grafito_ui::tokens::SPACE_SM);
                                     egui::Frame::none()
@@ -1891,82 +2170,82 @@ pub fn draw_teaching_overlay(
                                         ))
                                         .show(ui, |ui| {
                                             ui.label(
-                                                egui::RichText::new(expr)
+                                                egui::RichText::new(texto_plano_inline(expr))
                                                     .monospace()
                                                     .size(grafito_ui::tokens::TYPE_SM)
                                                     .color(theme.text_primary),
                                             );
                                         });
                                 }
-                                if !step.whiteboard_hint.is_empty() {
-                                    ui.add_space(grafito_ui::tokens::SPACE_XS);
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Pizarra: {}",
-                                            step.whiteboard_hint
-                                        ))
-                                        .size(grafito_ui::tokens::TYPE_XS)
-                                        .color(theme.text_tertiary)
-                                        .weak(),
-                                    );
-                                }
                             });
-                        // Pizarra vectorial real — altura responsive clamp 96..160, no fija 120 enorme
-                        if !step.whiteboard_hint.is_empty() || !state.whiteboard.doc.is_empty() {
-                            ui.add_space(grafito_ui::tokens::SPACE_SM);
-                            egui::Frame::none()
-                                .fill(theme.input_bg)
-                                .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-                                .rounding(grafito_ui::tokens::RADIUS_MD)
-                                .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
-                                .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("Pizarra")
-                                                .size(grafito_ui::tokens::TYPE_XS)
-                                                .color(theme.text_tertiary)
-                                                .strong(),
+                        // Pizarra: una sola fuente para la etiqueta (acá) y el
+                        // contenido (el lienzo ya dibuja sus vectores: nada de
+                        // texto centrado encima ni "Pizarra:" duplicado).
+                        // Vacía → nada (sin recuadro negro); sólo-texto →
+                        // placeholder honesto; con dibujo → lienzo legible.
+                        match estado_pizarra(&step.whiteboard_hint, state.whiteboard.doc.is_empty())
+                        {
+                            EstadoPizarra::Oculta => {}
+                            EstadoPizarra::Placeholder => {
+                                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                                ui.label(
+                                    egui::RichText::new("Pizarra lista: dibujá vos arriba, che.")
+                                        .size(grafito_ui::tokens::TYPE_XS)
+                                        .color(theme.text_secondary),
+                                );
+                            }
+                            EstadoPizarra::Lienzo => {
+                                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                                egui::Frame::none()
+                                    .fill(theme.input_bg)
+                                    .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Pizarra")
+                                                    .size(grafito_ui::tokens::TYPE_XS)
+                                                    .color(theme.text_tertiary)
+                                                    .strong(),
+                                            );
+                                            let hint = titulo_limpio(&step.whiteboard_hint);
+                                            if !hint.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(format!("· {hint}"))
+                                                        .size(grafito_ui::tokens::TYPE_XS)
+                                                        .color(theme.text_secondary),
+                                                );
+                                            }
+                                        });
+                                        ui.add_space(grafito_ui::tokens::SPACE_XS);
+                                        // Altura legible: 120 ideal, clamp a
+                                        // 96..160 y a 35% del alto disponible.
+                                        let wb_h = (grafito_ui::tokens::SPACE_XXL * 3.0)
+                                            .clamp(96.0, 160.0)
+                                            .min((ui.available_height() * 0.35).max(96.0));
+                                        let (wb_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(ui.available_width(), wb_h),
+                                            egui::Sense::click_and_drag(),
                                         );
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "· {}",
-                                                step.whiteboard_hint
-                                            ))
-                                            .size(grafito_ui::tokens::TYPE_XS)
-                                            .color(theme.text_secondary),
-                                        );
+                                        // Dibujar pizarra vectorial real (trazo, rectángulos, flechas)
+                                        state.whiteboard.draw(ui, wb_rect);
+                                        // Permitir dibujar encima (pencil) dentro del overlay
+                                        state.whiteboard.handle_canvas_input(wb_rect, ui, budget);
+                                        if ui.is_rect_visible(wb_rect) {
+                                            // Borde sutil por encima del draw para definición
+                                            ui.painter().rect_stroke(
+                                                wb_rect,
+                                                grafito_ui::tokens::RADIUS_MD,
+                                                Stroke::new(
+                                                    1.0,
+                                                    theme.separator.gamma_multiply(0.08),
+                                                ),
+                                            );
+                                        }
                                     });
-                                    ui.add_space(grafito_ui::tokens::SPACE_XS);
-                                    // Altura responsive: 120 ideal pero clamp a 96..160 y a 30% del alto disponible
-                                    let wb_h = (grafito_ui::tokens::SPACE_XXL * 3.0)
-                                        .clamp(96.0, 160.0)
-                                        .min((ui.available_height() * 0.35).max(96.0));
-                                    let (wb_rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(ui.available_width(), wb_h),
-                                        egui::Sense::click_and_drag(),
-                                    );
-                                    // Dibujar pizarra vectorial real (trazo, rectángulos, flechas)
-                                    state.whiteboard.draw(ui, wb_rect);
-                                    // Permitir dibujar encima (pencil) dentro del overlay
-                                    state.whiteboard.handle_canvas_input(wb_rect, ui, budget);
-                                    if ui.is_rect_visible(wb_rect) {
-                                        // Borde sutil por encima del draw para definición
-                                        ui.painter().rect_stroke(
-                                            wb_rect,
-                                            grafito_ui::tokens::RADIUS_MD,
-                                            Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
-                                        );
-                                        // Hint centrado sobre grilla
-                                        ui.painter().text(
-                                            wb_rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            &step.whiteboard_hint,
-                                            egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
-                                            theme.text_tertiary.gamma_multiply(0.85),
-                                        );
-                                    }
-                                });
+                            }
                         }
                         // Animación nativa fallback (si completó)
                         if !anim_textures.is_empty() {
@@ -2074,16 +2353,26 @@ pub fn draw_teaching_overlay(
                     }
                 });
             ui.add_space(grafito_ui::tokens::SPACE_MD);
-            // Controles profesionales — primaria llena ancho, secundaria ghost, iconografía limpia
+            // Controles en UNA fila limpia: [Atrás][Siguiente][Cerrar].
+            // Sin iconos decorativos sueltos ni filas partidas.
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+                let puede_atras = current_idx > 0;
+                let atras = egui::Button::new(
+                    egui::RichText::new("Atrás").size(grafito_ui::tokens::TYPE_SM),
+                )
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.12)))
+                .rounding(grafito_ui::tokens::RADIUS_MD);
+                if ui
+                    .add_enabled(puede_atras, atras)
+                    .on_hover_text("Vuelve al paso anterior")
+                    .clicked()
+                {
+                    should_retreat = true;
+                }
                 let primary_label = if is_last { "Finalizar" } else { "Siguiente" };
-                let primary_icon = if is_last {
-                    Icon::Check
-                } else {
-                    Icon::ChevronRight
-                };
-                // Botón primario: fill accent, 36h, RADIUS_MD, left-aligned label + right icon
+                // Botón primario: fill accent, 36h, RADIUS_MD
                 let btn = egui::Button::new(
                     egui::RichText::new(primary_label)
                         .strong()
@@ -2115,15 +2404,6 @@ pub fn draw_teaching_overlay(
                         should_advance = true;
                     }
                 }
-                // Icono decorativo pequeño al lado (no duplica label, solo indica dirección)
-                let icon_color = theme.accent;
-                let (icon_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(grafito_ui::tokens::ICON_SM, grafito_ui::tokens::ICON_SM),
-                    egui::Sense::hover(),
-                );
-                if ui.is_rect_visible(icon_rect) {
-                    grafito_ui::icons::draw_icon(ui.painter(), icon_rect, primary_icon, icon_color);
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let ghost = egui::Button::new(
                         egui::RichText::new("Cerrar").size(grafito_ui::tokens::TYPE_SM),
@@ -2146,6 +2426,11 @@ pub fn draw_teaching_overlay(
                 });
             });
         });
+    // Devuelve el cache del parser (con lo ya parseado) al estado.
+    state.bloques = bloques_cache;
+    if should_retreat {
+        state.retroceder();
+    }
     if should_advance {
         // `advance` ya retiró con gracia (sin ctx: el drop real ocurre en
         // los ticks); `forget_image` sería no-op para managed. Sin drop
@@ -2667,6 +2952,118 @@ mod tests {
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 draw_mi_plan(ui, &plan);
+            });
+        });
+    }
+
+    // ── Frente E1: overlay sin marcas crudas ni duplicación ──
+
+    #[test]
+    fn e1_etiqueta_paso_es_uno_based_y_real() {
+        assert_eq!(etiqueta_paso(0, 3), "Paso 1 de 3");
+        assert_eq!(etiqueta_paso(2, 3), "Paso 3 de 3");
+        assert_eq!(etiqueta_paso(0, 0), "Paso 1 de 1");
+    }
+
+    #[test]
+    fn e1_titulo_limpio_pela_heading_y_negrita() {
+        assert_eq!(titulo_limpio("## Enfoque"), "Enfoque");
+        assert_eq!(titulo_limpio("# Concepto"), "Concepto");
+        assert_eq!(titulo_limpio("**Concepto**"), "Concepto");
+        assert_eq!(
+            titulo_limpio("Vamos a desglosar: ## Enfoque"),
+            "Vamos a desglosar: Enfoque"
+        );
+        // Contenido legítimo intacto: `#` sin forma de marca no se toca.
+        assert_eq!(titulo_limpio("C# básico"), "C# básico");
+        assert_eq!(titulo_limpio("Función f(x)=x²"), "Función f(x)=x²");
+        // Vacío honesto: nunca título en blanco.
+        assert_eq!(titulo_limpio("##"), "Paso");
+        assert_eq!(titulo_limpio("   "), "Paso");
+    }
+
+    #[test]
+    fn e1_texto_plano_inline_no_rompe_utf8() {
+        let limpio = texto_plano_inline("**áéíóú** `código` ## título");
+        assert!(!limpio.contains("**"));
+        assert!(!limpio.contains('`'));
+        assert!(!limpio.contains('#'));
+        assert!(limpio.contains("áéíóú"));
+    }
+
+    #[test]
+    fn e1_estado_pizarra_oculta_placeholder_lienzo() {
+        // Sin hint y sin trazos: nada (ni recuadro negro vacío).
+        assert_eq!(estado_pizarra("", true), EstadoPizarra::Oculta);
+        assert_eq!(estado_pizarra("   ", true), EstadoPizarra::Oculta);
+        // Hint con dibujo útil: lienzo (secante trae trazos y flechas).
+        assert_eq!(
+            estado_pizarra("Secante que colapsa a tangente", true),
+            EstadoPizarra::Lienzo
+        );
+        // Hint que sólo da texto de fallback: placeholder honesto.
+        assert_eq!(
+            estado_pizarra("Pizarra para explorar", true),
+            EstadoPizarra::Placeholder
+        );
+        // Trazo del usuario siempre muestra lienzo aunque el hint sea pobre.
+        assert_eq!(estado_pizarra("", false), EstadoPizarra::Lienzo);
+        assert_eq!(
+            estado_pizarra("Pizarra para explorar", false),
+            EstadoPizarra::Lienzo
+        );
+    }
+
+    #[test]
+    fn e1_pizarra_tiene_dibujo_distigue_fallback() {
+        assert!(pizarra_tiene_dibujo("Secante que colapsa a tangente"));
+        assert!(pizarra_tiene_dibujo("Recta con hueco en a"));
+        assert!(!pizarra_tiene_dibujo("Pizarra para explorar"));
+        assert!(!pizarra_tiene_dibujo(""));
+    }
+
+    #[test]
+    fn e1_bloques_parsean_heading_sin_marcas_crudas() {
+        // Misma gramática del transcript: "## Enfoque" es Heading, no texto.
+        let mut cache = AssistantBlocksCache::default();
+        let bloques = cache.blocks("## Enfoque\n\nTexto plano");
+        assert_eq!(bloques.len(), 2);
+        assert!(matches!(
+            bloques.first(),
+            Some(AssistantMessageBlock::Heading { level: 2, text })
+            if text == "Enfoque"
+        ));
+        assert!(matches!(
+            bloques.get(1),
+            Some(AssistantMessageBlock::Paragraph(_))
+        ));
+    }
+
+    #[test]
+    fn e1_retroceder_clampea_en_cero_y_vuelve() {
+        let mut estado = TeachingUiState::default();
+        estado.start("derivada de x²");
+        assert!(!estado.retroceder(), "en el primer paso no hay atrás");
+        assert_eq!(estado.session.as_ref().map(|s| s.current), Some(0));
+        assert!(estado.advance());
+        assert_eq!(estado.session.as_ref().map(|s| s.current), Some(1));
+        assert!(estado.retroceder());
+        assert_eq!(estado.session.as_ref().map(|s| s.current), Some(0));
+        assert!(!estado.retroceder(), "otra vez en cero: clampa");
+    }
+
+    #[test]
+    fn e1_draw_bloques_no_paniquea_headless() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut cache = AssistantBlocksCache::default();
+                draw_bloques_markdown(
+                    ui,
+                    "## Enfoque\n\nVamos a desglosar: **derivada**\n\n- paso uno\n- paso dos\n\n> cita honesta\n\n1. primero\n2. segundo",
+                    &mut cache,
+                );
+                draw_bloques_markdown(ui, "", &mut cache);
             });
         });
     }

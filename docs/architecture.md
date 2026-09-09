@@ -106,7 +106,7 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 - **Atajos verificados** (handlers en `grafito-app/src/app.rs:4088-4290`; menús en `ui.rs:141-227`; etiquetas toolbar en `grafito-ui/src/toolbar.rs:36-156`): Ctrl+N/O/S + Ctrl+Shift+S archivo (`lifecycle.rs:20-31`), Ctrl+Z/Y deshacer/rehacer (+Shift en Ctrl+Y = herramienta YIntercept, `app.rs:237-248`), Supr eliminar, Esc cancelar, F1-F6 herramientas 2D, F8 Esfera 3D + F9 Cubo 3D (`app.rs:4135-4144`), R/E/I/X/N/S/Y/V/M/G herramientas sin modificadores, Ctrl+A Analizar, Shift+L/K/J toggles log X/Y/ambos, G snap, Ctrl+K paleta, Ctrl+T tema (`app.rs:4259-4267`), Ctrl+P Lápiz + Ctrl+E Borrador (`app.rs:4268-4278`), Ctrl+Shift+1..9,0 perspectivas (10, `app.rs:4236-4242`). Cero fantasmas desde BUILD 2026-09-04 (antes: Ctrl+P, Ctrl+E, F8, F9 documentados sin handler).
 - **Responsive shell**: rail 60px (`RAIL_WIDTH`, `tokens.rs:164`; `ui.rs:549-552`) visible sólo en Medium/Wide (≥1360, `lib.rs:417-424,441-442`) — colapsado en Compact, luego también <780px; drawer derecho 292..440 con clamp (`clamp_drawer_right_width`, `tokens.rs:207-210`; dock 3D `ui.rs:727-731`; Inspector `panels.rs:2125-2132`); panel izquierdo min 180 + max 45% viewport (`PANEL_LEFT_MIN`, `PANEL_LEFT_MAX_FRACTION`, `tokens.rs:151-154`; `panels.rs:1201-1206`).
 - **Onboarding** (`app.rs:1763`, `:4922-5033`; `utils.rs:46-48`): gating `show_onboarding = !config.onboarding_completed`; Window 420px, 3 bullets (5/8/18 grupos en codigo; el copy visible aun dice 17 en `grafito-ui/src/i18n.rs:216` y `app.rs:6914` — sucios F1-F4, sync pendiente), botones [Probar ejemplo][Empezar vacío][No mostrar]; Probar ejemplo y No mostrar persisten `onboarding_completed=true`.
-- **Paleta de comandos** (`grafito-ui/src/command_palette.rs`): fuzzy subsecuencia sin tildes (`fuzzy_match`, `:224-251`), bilingüe es/en (`filtered_commands`, `:275-296`), footer en español con conteo "N de M · ↑↓ navegar · Enter abrir · Esc cerrar" (`:394-403`), 14 acciones UI en español con clave inglesa estable (`UI_ACTIONS`, `:58-199`; test `:528-584`).
+- **Paleta de comandos** (`grafito-ui/src/command_palette.rs`): fuzzy subsecuencia sin tildes (`fuzzy_match`, `:224-251`), bilingüe es/en (`filtered_commands`, `:275-296`), footer en español con conteo "N de M · ↑↓ navegar · Enter abrir · Esc cerrar" (`:394-403`), 15 acciones UI en español con clave inglesa estable (`UI_ACTIONS`; test actualizado).
 
 ## 8. Presupuestos y Limites
 
@@ -133,8 +133,8 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | AttachmentLimits max_total_bytes | 1 MiB | assistant-types/src/lib.rs:251 |
 | Assistant | AttachmentLimits max_pixels / max_total_pixels | 1 MiP / 2 MiP | assistant-types/src/lib.rs:249,252 |
 | Assistant | AttachmentLimits max_attachments | 2 | assistant-types/src/lib.rs:250 |
-| Comandos | COMMANDS registrados | 272 (`command!(`) | command/src/command_registry.rs (250 base +6 CAS W1 +1 ImplicitSurface A1 +2 B1 +7 B2 +2 Bar/Pie +2 C1 +1 FillSeries C2 +1 MeasureDistance W-B; blindaje `registry_counts_match_documented_architecture`) |
-| Comandos | palette-visible | 226 (46 ocultos) + 14 acciones UI = 240 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs |
+| Comandos | COMMANDS registrados | 337 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
+| Comandos | palette-visible | 291 (46 ocultos) + 15 acciones UI = 306 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
 | Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
@@ -231,8 +231,8 @@ Notas:
 |---|---|
 | RequestBudget 8192 / 2048 / 8 / 60s | `crates/grafito-assistant-types/src/lib.rs:198-209` |
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
-| 272 comandos (`command!(`), 226 visibles + 14 UI = 240 en paleta | `crates/grafito-command/src/command_registry.rs` (250 base +6 W1 +1 A1 +2 B1 +7 B2 +2 Bar/Pie +2 C1 +1 C2 +1 MeasureDistance W-B) |
-| 14 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs:58-199`, `:224-251`, `:394-403` |
+| 337 comandos (`command!(`), 291 visibles + 15 UI = 306 en paleta | `crates/grafito-command/src/command_registry.rs` |
+| 15 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs` |
 | 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
 | 87 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (contado F5: 87 variantes) |
 | 10 perspectivas (Ctrl+Shift+1..9,0) | `crates/grafito-app/src/lib.rs:90-111`, `app.rs:4236-4242` |

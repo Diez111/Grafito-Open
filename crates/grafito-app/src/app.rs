@@ -1551,6 +1551,10 @@ pub struct GrafitoApp {
     /// Avoids repeating the same numeric-solver toast on every drag frame.
     pub point_drag_error_reported: bool,
     pub selected_object: Option<ObjectId>,
+    /// Pulso `Indicate` estilo Manim sobre la selección (~1.2 s, expira solo).
+    /// `None` = inactivo; se dispara con `trigger_indicate` y se expira por
+    /// frame en `update` (con `request_repaint` mientras late).
+    pub(crate) indicate: Option<crate::indicate::IndicateHighlight>,
     pub preview_object: Option<GeoObject>,
     pub input_text: String,
     /// Texto de celdas aún no confirmado; nunca se reconcilia con geometría.
@@ -2277,6 +2281,7 @@ impl GrafitoApp {
             select_drag_object: None,
             point_drag_error_reported: false,
             selected_object: None,
+            indicate: None,
             preview_object: None,
             input_text: String::new(),
             command_input_focus_requested: false,
@@ -3180,6 +3185,33 @@ impl GrafitoApp {
         self.notify_at(message, kind, self.ui_time);
     }
 
+    /// Dispara el pulso `Indicate` estilo Manim sobre un objeto (~1.2 s,
+    /// expira solo). Id inexistente o tiempo no-finito → `Err` honesto y el
+    /// estado queda intacto (nunca fantasma).
+    pub(crate) fn trigger_indicate(&mut self, id: ObjectId) -> Result<(), String> {
+        if self.document.get_object(id).is_none() {
+            return Err(format!("Indicar: el objeto {id} no existe"));
+        }
+        let highlight = crate::indicate::IndicateHighlight::try_new(id, self.ui_time * 1000.0)?;
+        self.indicate = Some(highlight);
+        Ok(())
+    }
+
+    /// Expira el pulso si venció o si su objeto ya no existe. Devuelve `true`
+    /// mientras sigue activo (el llamador pide otro frame).
+    /// `now_ms` no-finito cuenta como vencido (sin fantasma).
+    pub(crate) fn tick_indicate(&mut self, now_ms: f64) -> bool {
+        let vencido = self.indicate.as_ref().is_some_and(|highlight| {
+            highlight.expirado(now_ms) || self.document.get_object(highlight.target()).is_none()
+        });
+        if vencido {
+            self.indicate = None;
+            false
+        } else {
+            self.indicate.is_some()
+        }
+    }
+
     pub(crate) fn pending_document_action(&self) -> Option<DocumentAction> {
         self.document_lifecycle.pending_action()
     }
@@ -3723,6 +3755,26 @@ impl GrafitoApp {
                     DARK.apply(ctx);
                 } else {
                     LIGHT.apply(ctx);
+                }
+                return;
+            }
+            "Indicate Selection" => {
+                match self.selected_object {
+                    Some(id) => match self.trigger_indicate(id) {
+                        Ok(()) => {
+                            self.cas_result = "Indicando selección (~1.2 s)".to_string();
+                        }
+                        Err(error) => {
+                            self.cas_result = error.clone();
+                            self.notify(error, grafito_ui::toast::ToastKind::Error);
+                        }
+                    },
+                    None => {
+                        self.notify(
+                            "Indicar: sin selección — elegí un objeto en el lienzo",
+                            grafito_ui::toast::ToastKind::Error,
+                        );
+                    }
                 }
                 return;
             }
@@ -5992,6 +6044,12 @@ impl eframe::App for GrafitoApp {
         let (dt, ui_time) = ctx.input(|i| (i.stable_dt.min(0.1) as f64, i.time));
         self.ui_time = ui_time;
 
+        // Indicate estilo Manim: expira solo (~1.2 s); mientras late pide
+        // otro frame para animar el pulso.
+        if self.tick_indicate(ui_time * 1000.0) {
+            needs_repaint = true;
+        }
+
         // En modo explorador trigonométrico, saltar las animaciones de
         // variables del documento para evitar recomputes de fondo.
         let variable_animating =
@@ -6387,6 +6445,13 @@ impl eframe::App for GrafitoApp {
                                 );
                                 callback_painter.add(egui::epaint::Shape::Callback(callback));
                             });
+                            // Indicate estilo Manim: anillo pulsante sobre la
+                            // selección, tras los objetos y con clip al canvas.
+                            self.draw_indicate_highlight(
+                                &painter,
+                                canvas_rect,
+                                self.ui_time * 1000.0,
+                            );
                         }
                         if scene_plan.schedule_gpu_prepare && !gpu_base {
                             ctx.request_repaint();
@@ -8340,6 +8405,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         select_drag_object: None,
         point_drag_error_reported: false,
         selected_object: None,
+        indicate: None,
         preview_object: None,
         input_text: String::new(),
         command_input_focus_requested: false,
@@ -8466,3 +8532,60 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
 // (`grafito-ui/src/assistant.rs::set_media`, `draw_media_card`) es el único
 // destino, con scrub, velocidad y botón Exportar GIF (`GifExportJob`,
 // `export_assistant_media`, `poll_gif_export_job`).
+
+#[cfg(test)]
+mod indicate_integration_tests {
+    use super::*;
+
+    #[test]
+    fn indica_dispara_y_expira_solo_a_los_1300_ms() {
+        let mut app = dummy_grafito_app();
+        let id = app
+            .document
+            .try_add_point(Point2::new(1.0, 2.0))
+            .expect("punto válido");
+        app.ui_time = 0.0;
+        assert!(app.trigger_indicate(id).is_ok());
+        assert_eq!(app.indicate.map(|hl| hl.target()), Some(id));
+        // Sigue latiendo antes del TTL.
+        assert!(app.tick_indicate(1199.0));
+        assert!(app.indicate.is_some());
+        // A los 1300 ms expiró solo.
+        assert!(!app.tick_indicate(1300.0));
+        assert!(app.indicate.is_none());
+    }
+
+    #[test]
+    fn indica_id_inexistente_es_err_honesto() {
+        let mut app = dummy_grafito_app();
+        let fantasma = ObjectId::new();
+        assert!(app.trigger_indicate(fantasma).is_err());
+        assert!(app.indicate.is_none());
+    }
+
+    #[test]
+    fn indica_tiempo_no_finito_es_err_honesto() {
+        let mut app = dummy_grafito_app();
+        let id = app
+            .document
+            .try_add_point(Point2::new(0.0, 0.0))
+            .expect("punto válido");
+        app.ui_time = f64::NAN;
+        assert!(app.trigger_indicate(id).is_err());
+        assert!(app.indicate.is_none());
+    }
+
+    #[test]
+    fn indica_expira_si_el_objeto_desaparece() {
+        let mut app = dummy_grafito_app();
+        let id = app
+            .document
+            .try_add_point(Point2::new(3.0, 4.0))
+            .expect("punto válido");
+        app.ui_time = 0.0;
+        assert!(app.trigger_indicate(id).is_ok());
+        app.document.remove_object(id);
+        assert!(!app.tick_indicate(100.0));
+        assert!(app.indicate.is_none());
+    }
+}

@@ -3151,6 +3151,66 @@ impl GrafitoApp {
         }
     }
 
+    /// Anillo pulsante `Indicate` estilo Manim sobre la selección (~1.2 s).
+    ///
+    /// Piel pura: sin I/O ni spawn. Lee `self.indicate` y las curvas de
+    /// `crate::indicate` (alpha/radio/grosor), con clip al canvas y color
+    /// accent del theme. Todo lo vencido, inexistente o no anclable en 2D
+    /// se salta en silencio (el `tick` por frame ya lo expira).
+    pub(crate) fn draw_indicate_highlight(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        now_ms: f64,
+    ) {
+        let Some(highlight) = &self.indicate else {
+            return;
+        };
+        if highlight.expirado(now_ms) {
+            return;
+        }
+        let Some(obj) = self.document.get_object(highlight.target()) else {
+            return;
+        };
+        let Some(rep) = trail_representative_position(obj) else {
+            return;
+        };
+        if !rep.x.is_finite() || !rep.y.is_finite() {
+            return;
+        }
+        let view = *self.document.view();
+        let screen = view.world_to_screen(rep);
+        if !screen.x.is_finite() || !screen.y.is_finite() {
+            return;
+        }
+        let pos = canvas_rect.min + egui::Vec2::new(screen.x, screen.y);
+        if !canvas_rect.expand(32.0).contains(pos) {
+            return;
+        }
+        let alpha = highlight.alpha(now_ms);
+        if alpha <= 0.0 {
+            return;
+        }
+        let radius = highlight.radio(now_ms);
+        if !radius.is_finite() || radius <= 0.0 {
+            return;
+        }
+        let painter = clipped_to_canvas(painter, canvas_rect);
+        let accent = current_theme(painter.ctx()).accent;
+        let a = (alpha.clamp(0.0, 1.0) * 255.0).clamp(0.0, 255.0) as u8;
+        if a == 0 {
+            return;
+        }
+        let ring = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
+        painter.circle_stroke(pos, radius, Stroke::new(highlight.grosor(now_ms), ring));
+        let halo_alpha = (f32::from(a) * 0.12).clamp(0.0, 255.0) as u8;
+        painter.circle_filled(
+            pos,
+            (radius * 0.45).max(2.0),
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), halo_alpha),
+        );
+    }
+
     fn draw_gpu_object_backfill(
         &self,
         painter: &egui::Painter,

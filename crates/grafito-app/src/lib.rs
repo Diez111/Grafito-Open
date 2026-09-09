@@ -32,6 +32,7 @@ pub(crate) mod export;
 // el futuro inspector live-preview de alta resolución), testeado headless.
 // El `allow` cubre ese resto muerto en prod, no el módulo entero.
 pub(crate) mod implicit_surface_compute;
+pub(crate) mod indicate;
 pub(crate) mod input;
 #[allow(dead_code)]
 // D3: pipeline testeado headless; D1-bis cablea el TextEdit en panels.rs (prohibido en D3).

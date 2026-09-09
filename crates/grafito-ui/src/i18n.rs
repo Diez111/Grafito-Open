@@ -82,12 +82,12 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 184;
+pub const MSG_COUNT: usize = 185;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
-/// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (18) +
+/// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (19) +
 /// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) +
-/// `anim` (2) + `media.title` (12) + `panel.conformal` (3) = 184.
+/// `anim` (2) + `media.title` (12) + `panel.conformal` (3) = 185.
 pub static MESSAGES: &[Msg] = &[
     // ── toolbar.group (18) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
@@ -197,7 +197,7 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.tool.tetrahedron3d", es: "Tetraedro", en: "Tetrahedron" },
     Msg { key: "toolbar.tool.checkbox", es: "Casilla", en: "Checkbox" },
     Msg { key: "toolbar.tool.inputbox", es: "Caja de entrada", en: "Input box" },
-    // ── palette (17): 14 acciones UI + título + vacío + pie ──
+    // ── palette (18): 15 acciones UI + título + vacío + pie ──
     // ES idéntico a `UI_ACTIONS` en command_palette.rs; EN = clave estable de despacho.
     Msg { key: "palette.action.point", es: "Herramienta Punto", en: "Point Tool" },
     Msg { key: "palette.action.line", es: "Herramienta Recta", en: "Line Tool" },
@@ -213,6 +213,7 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "palette.action.zoom_fit", es: "Encuadrar todo", en: "Zoom to Fit" },
     Msg { key: "palette.action.toggle_grid", es: "Alternar cuadrícula", en: "Toggle Grid" },
     Msg { key: "palette.action.toggle_dark", es: "Alternar modo oscuro", en: "Toggle Dark Mode" },
+    Msg { key: "palette.action.indicate_selection", es: "Indicar selección", en: "Indicate Selection" },
     Msg { key: "palette.title", es: "Paleta de Comandos", en: "Command Palette" },
     Msg { key: "palette.empty", es: "No se encontraron comandos", en: "No commands found" },
     Msg { key: "palette.custom_tools", es: "Herramientas personalizadas", en: "Custom tools" },
@@ -476,6 +477,7 @@ pub fn palette_action(slug: &str, locale: Locale) -> &'static str {
         "zoom_fit" => t("palette.action.zoom_fit", locale),
         "toggle_grid" => t("palette.action.toggle_grid", locale),
         "toggle_dark" => t("palette.action.toggle_dark", locale),
+        "indicate_selection" => t("palette.action.indicate_selection", locale),
         _ => "",
     }
 }
@@ -669,8 +671,8 @@ pub struct PtMsg {
     pub pt: &'static str,
 }
 
-/// Claves principales de UI con traducción PT (93). Ordenado por dominio como
-/// [`MESSAGES`]: grupos (18) + paleta (17) + onboarding (11) + cheat (10) +
+/// Claves principales de UI con traducción PT (94). Ordenado por dominio como
+/// [`MESSAGES`]: grupos (18) + paleta (18) + onboarding (11) + cheat (10) +
 /// toast (10) + app/misc (12).
 pub static PT_MESSAGES: &[PtMsg] = &[
     // ── grupos (18) ──
@@ -692,7 +694,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "toolbar.group.fourd", pt: "4D projetado" },
     PtMsg { key: "toolbar.group.advanced", pt: "Avançado" },
     PtMsg { key: "toolbar.group.dynamics", pt: "Dinâmica" },
-    // ── paleta (17) ──
+    // ── paleta (18) ──
     PtMsg { key: "palette.action.point", pt: "Ferramenta Ponto" },
     PtMsg { key: "palette.action.line", pt: "Ferramenta Reta" },
     PtMsg { key: "palette.action.circle", pt: "Ferramenta Circunferência" },
@@ -707,6 +709,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "palette.action.zoom_fit", pt: "Enquadrar tudo" },
     PtMsg { key: "palette.action.toggle_grid", pt: "Alternar grade" },
     PtMsg { key: "palette.action.toggle_dark", pt: "Alternar modo escuro" },
+    PtMsg { key: "palette.action.indicate_selection", pt: "Indicar seleção" },
     PtMsg { key: "palette.title", pt: "Paleta de Comandos" },
     PtMsg { key: "palette.empty", pt: "Nenhum comando encontrado" },
     PtMsg { key: "palette.custom_tools", pt: "Ferramentas personalizadas" },
@@ -888,7 +891,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 184);
+        assert_eq!(MSG_COUNT, 185);
     }
 
     #[test]
@@ -1074,10 +1077,10 @@ mod tests {
 
     #[test]
     fn pt_covers_main_ui_keys() {
-        // F3d: overlay parcial PT — 93 claves principales, sin duplicados ni vacíos,
+        // F3d: overlay parcial PT — 94 claves principales, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 93);
-        assert_eq!(pt_coverage(), (93, 184));
+        assert_eq!(PT_MESSAGES.len(), 94);
+        assert_eq!(pt_coverage(), (94, 185));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -1107,7 +1110,7 @@ mod tests {
             }
             assert!(found, "grupo sin PT: {slug}");
         }
-        // Paleta completa: 14 acciones + título + vacío + pie.
+        // Paleta completa: 15 acciones + título + vacío + pie.
         for key in [
             "palette.action.point",
             "palette.action.line",
@@ -1123,6 +1126,7 @@ mod tests {
             "palette.action.zoom_fit",
             "palette.action.toggle_grid",
             "palette.action.toggle_dark",
+            "palette.action.indicate_selection",
             "palette.title",
             "palette.empty",
             "palette.footer_nav",
@@ -1283,27 +1287,27 @@ mod tests {
 
     #[test]
     fn pt_coverage_prints_real_percentage() {
-        // Cobertura PT medida: 93/184 ≈ 50.5%. Se imprime el % real con
+        // Cobertura PT medida: 94/185 ≈ 50.8%. Se imprime el % real con
         // `--nocapture`; el assert fija el numerador para que cualquier
         // agregado (o faltante) de PT rompa el test a propósito.
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (93, 184));
+        assert_eq!((covered, total), (94, 185));
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!(
             "cobertura PT: {covered}/{total} = {pct:.1}% (87 tools + panel sin PT en fallback ES)"
         );
-        assert!((pct - 50.5).abs() < 0.1, "pct real: {pct}");
+        assert!((pct - 50.8).abs() < 0.1, "pct real: {pct}");
     }
 
     #[test]
     fn pt_partial_badge_pinned() {
         // P1b: el PT parcial es visible en el selector (badge + conteo).
-        // Si sube la cobertura, actualizar (93, 184) Y el badge; al llegar a
+        // Si sube la cobertura, actualizar (94, 185) Y el badge; al llegar a
         // 100% remover el badge y este test.
-        assert!(pt_is_partial(), "hoy 93/184 < 100%: el badge debe existir");
+        assert!(pt_is_partial(), "hoy 94/185 < 100%: el badge debe existir");
         assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
-        assert_eq!(pt_partial_badge_text(), "Português parcial · 93/184");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 94/185");
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (93, 184));
+        assert_eq!((covered, total), (94, 185));
     }
 }

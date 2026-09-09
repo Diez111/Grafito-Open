@@ -4910,17 +4910,69 @@ pub fn media_counter_text(index: usize, frame_count: usize) -> (String, String) 
 /// piso solo evita el colapso en paneles angostos. Puro.
 const MEDIA_TOOLBAR_MIN_SLIDER_W: f32 = crate::tokens::SPACE_XXL + crate::tokens::SPACE_XS;
 
-/// Anchos fijos estimados de los botones de la toolbar (tokens, sin literales).
+/// Anchos honestos de los botones de la toolbar (tokens, sin literales).
 ///
-/// Derivados de la escala base 4: el play/icono usan el piso táctil, la
-/// velocidad un `SPACE_XXL` y Exportar dos `SPACE_XXL` menos un `SPACE_XS`
-/// ("Exportar" ≈ 7 chars + padding). Son cotas de decisión, no medición de
-/// texto: si sobra, la fila única igual entra; si falta, se colapsa a dos
-/// filas antes de cortar nada.
-const MEDIA_TOOLBAR_PLAY_W: f32 = crate::tokens::HIT_TARGET_MIN;
-const MEDIA_TOOLBAR_ICON_W: f32 = crate::tokens::HIT_TARGET_MIN;
-const MEDIA_TOOLBAR_SPEED_W: f32 = crate::tokens::SPACE_XXL;
-const MEDIA_TOOLBAR_EXPORT_W: f32 = crate::tokens::SPACE_XXL * 2.0 - crate::tokens::SPACE_XS;
+/// E2: los viejos (`24/24/40/76`) mentían — medían el piso táctil y no la
+/// fuente real del panel (emoji ⏸/⛶ con fallback más ancho que el texto,
+/// `0.5x ▾` más largo que `1x`, `Exportar` con padding del Button) ni
+/// restaban el cromo (`Frame` turno + card) ni el overlay del scrollbar
+/// flotante (cero asignado pero ~10px que tapan el borde). Estos son cotas
+/// mínimas medidas con la fuente del panel: play/icono = táctil + aire
+/// emoji, velocidad = `SPACE_XXL + SPACE_SM` (entra `0.5x ▾`), exportar =
+/// `SPACE_XXL * 2` (sin recorte). Si sobra, la fila única igual entra; si
+/// falta, se colapsa a dos filas u overflow explícito antes de cortar nada.
+const MEDIA_TOOLBAR_PLAY_W: f32 = crate::tokens::HIT_TARGET_MIN + crate::tokens::SPACE_XS;
+const MEDIA_TOOLBAR_ICON_W: f32 = crate::tokens::HIT_TARGET_MIN + crate::tokens::SPACE_XS;
+const MEDIA_TOOLBAR_SPEED_W: f32 = crate::tokens::SPACE_XXL + crate::tokens::SPACE_SM;
+const MEDIA_TOOLBAR_EXPORT_W: f32 = crate::tokens::SPACE_XXL * 2.0;
+/// Botón ancho de cierre en overlay (`"Cerrar (Esc)"`): dos `SPACE_XXL`.
+const MEDIA_TOOLBAR_CLOSE_W: f32 = crate::tokens::SPACE_XXL * 2.0;
+/// Reserva del cromo anidado: `Frame` del turno (8+8) + `Frame` de la card
+/// (8+8) = `SPACE_SM * 4`. Los tests viejos pasaban el ancho del panel
+/// (300/340/520) como si fuera el disponible dentro de la card: mentían
+/// por estos 32px.
+const MEDIA_CARD_CHROME_W: f32 = crate::tokens::SPACE_SM * 4.0;
+/// Reserva del scrollbar flotante: asigna cero pero tapa ~10px al hacer
+/// hover (`bar_width` 10 en egui 0.29). Se reserva `SPACE_MD` (12, tokens)
+/// para que `Exportar` jamás quede bajo la barra.
+const MEDIA_SCROLLBAR_OVERLAY_W: f32 = crate::tokens::SPACE_MD;
+
+/// Ancho efectivo dentro de la card desde el ancho del panel (puro).
+///
+/// E2: el panel mide 300..520 pero adentro hay cromo de turno mas card y
+/// el scrollbar flotante tapa el borde. Resta ambas reservas con tokens.
+/// Entrada no finita o menor que la reserva devuelve 0, nunca corta.
+pub fn media_effective_inner_width(panel_w: f32) -> f32 {
+    if !panel_w.is_finite() {
+        return 0.0;
+    }
+    (panel_w - MEDIA_CARD_CHROME_W - MEDIA_SCROLLBAR_OVERLAY_W).max(0.0)
+}
+
+/// Ancho que necesitan los botones derechos en una fila (puro).
+///
+/// `Exportar + icono/Cerrar + velocidad + 2 gaps`. En overlay el cierre es
+/// ancho (`MEDIA_TOOLBAR_CLOSE_W`); inline es icono (`MEDIA_TOOLBAR_ICON_W`).
+pub fn media_right_buttons_need(in_fullscreen: bool) -> f32 {
+    let middle = if in_fullscreen {
+        MEDIA_TOOLBAR_CLOSE_W
+    } else {
+        MEDIA_TOOLBAR_ICON_W
+    };
+    MEDIA_TOOLBAR_EXPORT_W + middle + MEDIA_TOOLBAR_SPEED_W + crate::tokens::SPACE_XS * 2.0
+}
+
+/// Si la segunda fila necesita overflow explícito (puro).
+///
+/// `Exportar` siempre visible: si no entran los tres botones, velocidad y
+/// grande/cerrar colapsan al menú `···`, jamás se cortan ni se vuelven
+/// iconos mudos sin etiqueta.
+pub fn media_needs_overflow(avail_w: f32, in_fullscreen: bool) -> bool {
+    if !avail_w.is_finite() || avail_w <= 0.0 {
+        return true;
+    }
+    avail_w < media_right_buttons_need(in_fullscreen)
+}
 
 /// Disposición de la toolbar única v3 (pura y testeable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4933,18 +4985,31 @@ pub enum MediaToolbarLayout {
     TwoRows,
 }
 
-/// Decide la disposición por tokens (pura, sin `unwrap`).
+/// Decide la disposición por tokens honestos (pura, sin `unwrap`).
 ///
-/// Dos filas si el panel es angosto (`< ASSISTANT_PANEL_NARROW_WIDTH`, el
-/// mismo umbral que colapsa el composer: 300/340 caen acá, 520 no) o si el
-/// resto para el deslizador baja del piso `MEDIA_TOOLBAR_MIN_SLIDER_W`
-/// (contador gigante con panel justo). Ancho inválido → dos filas
-/// (conservador: nunca corta). Sin panic.
+/// E2: `avail_w` es el disponible DENTRO de la card (`ui.available_width()`).
+/// Se reserva el overlay del scrollbar flotante antes de decidir: sin esa
+/// resta, una fila que "entra" por 5px quedaba bajo la barra y `Exportar`
+/// se veía cortado al borde. Dos filas si el ancho efectivo es angosto
+/// (`< ASSISTANT_PANEL_NARROW_WIDTH`, el mismo umbral que colapsa el
+/// composer) o si el resto para el deslizador baja del piso
+/// `MEDIA_TOOLBAR_MIN_SLIDER_W` (contador gigante con panel justo). Ancho
+/// inválido → dos filas (conservador: nunca corta). Sin panic.
 pub fn media_toolbar_layout(avail_w: f32, frame_count: usize) -> MediaToolbarLayout {
     if !avail_w.is_finite() || avail_w <= 0.0 {
         return MediaToolbarLayout::TwoRows;
     }
-    if avail_w < ASSISTANT_PANEL_NARROW_WIDTH {
+    // El flotante no asigna pero tapa: decidir sobre lo visible de verdad.
+    let avail = (avail_w - MEDIA_SCROLLBAR_OVERLAY_W).max(0.0);
+    media_toolbar_layout_on_visible(avail, frame_count)
+}
+
+/// Núcleo sin resta de overlay (puro): decide sobre ancho ya visible.
+fn media_toolbar_layout_on_visible(visible_w: f32, frame_count: usize) -> MediaToolbarLayout {
+    if !visible_w.is_finite() || visible_w <= 0.0 {
+        return MediaToolbarLayout::TwoRows;
+    }
+    if visible_w < ASSISTANT_PANEL_NARROW_WIDTH {
         return MediaToolbarLayout::TwoRows;
     }
     let gaps = SPACE_XS * 5.0;
@@ -4954,10 +5019,52 @@ pub fn media_toolbar_layout(avail_w: f32, frame_count: usize) -> MediaToolbarLay
         + MEDIA_TOOLBAR_EXPORT_W
         + media_counter_slot_width(frame_count)
         + gaps;
-    if avail_w - fixed < MEDIA_TOOLBAR_MIN_SLIDER_W {
+    if visible_w - fixed < MEDIA_TOOLBAR_MIN_SLIDER_W {
         return MediaToolbarLayout::TwoRows;
     }
     MediaToolbarLayout::SingleRow
+}
+
+/// Disposición desde el ancho del panel (pura, la que miente menos).
+///
+/// E2: convierte `panel_w` (SidePanel 300..520) a disponible real con
+/// `media_effective_inner_width` (cromo + scrollbar) y decide. Los tests
+/// viejos llamaban a `media_toolbar_layout(340)` directo: con 340 decían
+/// dos filas por el umbral, pero con 380 decían una fila cuando adentro
+/// (336) ya no entraba. Esta es la entrada honesta para anchos de panel.
+pub fn media_toolbar_layout_for_panel(panel_w: f32, frame_count: usize) -> MediaToolbarLayout {
+    // `effective` ya restó cromo + overlay (= visible): no restar dos veces.
+    media_toolbar_layout_on_visible(media_effective_inner_width(panel_w), frame_count)
+}
+
+/// Ancho estimado del estado del header (puro, tokens).
+///
+/// `chars * TYPE_XS * 0.6 + SPACE_SM`: el estado va en `TYPE_XS` fuerte a
+/// la derecha y siempre se reserva primero, jamás se trunca a seco.
+pub fn media_status_width(status: &str) -> f32 {
+    let chars = status.chars().count().max(1) as f32;
+    chars * TYPE_XS * 0.6 + SPACE_SM
+}
+
+/// Presupuesto de caracteres del título según el hueco real (puro).
+///
+/// `(disponible − estado − gaps) / (TYPE_SM * 0.55)`: a `TYPE_SM` cada char
+/// pesa ~0.55em en Inter. Clampeado a `8..=max_chars` para que el título
+/// siempre muestre algo y el estado nunca se corte. No finito → mínimo.
+pub fn media_header_title_budget(avail_w: f32, status: &str, max_chars: usize) -> usize {
+    if !avail_w.is_finite() || avail_w <= 0.0 {
+        return 8.min(max_chars);
+    }
+    let rest = avail_w - media_status_width(status) - SPACE_SM;
+    if rest <= 0.0 {
+        return 8.min(max_chars);
+    }
+    let per_char = TYPE_SM * 0.55;
+    if per_char <= 0.0 {
+        return max_chars;
+    }
+    let budget = (rest / per_char).floor() as usize;
+    budget.clamp(8.min(max_chars), max_chars.max(8.min(max_chars)))
 }
 
 /// Límite del título del pedido en el header v3 (card angosta, 1 línea).
@@ -5088,33 +5195,64 @@ pub fn media_overlay_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
 /// Header v3 de la card (UNA línea): título del pedido con elide + estado
 /// textual a la derecha (`generando…` / `lista` / `error: motivo`).
 ///
-/// Piel pura: el estado se reserva primero (derecha) y el título usa el
-/// resto sin wrap (el elide manual ya lo acota). Sin I/O ni spawn.
+/// E2: el viejo reservaba el estado con un `with_layout` anidado y un título
+/// a 32 chars fijos con `Truncate`: a 300px el estado (`lista`) quedaba
+/// cortado arriba-derecha porque el título pedía todo el ancho. Ahora el
+/// estado se reserva primero con ancho medido (`media_status_width`) y el
+/// título usa el resto con presupuesto real (`media_header_title_budget`) +
+/// elide con `…` y tooltip con el texto completo en ambos. Jamás corte seco.
+/// Piel pura: sin I/O ni spawn.
 fn draw_media_header(
     ui: &mut egui::Ui,
-    title_elided: &str,
+    title_full: &str,
     status: &str,
     status_color: egui::Color32,
 ) {
     let theme = current_theme(ui.ctx());
+    let avail = ui.available_width();
+    // Presupuesto real: el título se acota al hueco menos el estado. En card
+    // angosta manda `MEDIA_HEADER_TITLE_MAX_CHARS` (32), en overlay holgado
+    // `MEDIA_HEADER_TITLE_MAX_CHARS_WIDE` (48): ambas cotas quedan usadas.
+    let cap = if avail < 400.0 {
+        MEDIA_HEADER_TITLE_MAX_CHARS
+    } else {
+        MEDIA_HEADER_TITLE_MAX_CHARS_WIDE
+    };
+    let budget = media_header_title_budget(avail, status, cap);
+    let title_shown = media_elided_title(title_full, budget);
+    let status_w = media_status_width(status);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+        // Estado a la derecha con ancho fijo medido: nunca se trunca.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(status)
-                    .color(status_color)
-                    .size(TYPE_XS)
-                    .strong(),
+            let resp = ui.add_sized(
+                egui::vec2(status_w, ui.spacing().interact_size.y),
+                egui::Label::new(
+                    egui::RichText::new(status)
+                        .color(status_color)
+                        .size(TYPE_XS)
+                        .strong(),
+                ),
             );
+            // Tooltip solo si hay algo que aclarar (error largo): `lista` no
+            // necesita ruido, el motivo completo vive abajo en la card.
+            if status.starts_with("error:") {
+                resp.on_hover_text(status);
+            }
         });
-        ui.add(
+        // Título a la izquierda con el resto: elide + tooltip con completo.
+        let title_resp = ui.add(
             egui::Label::new(
-                egui::RichText::new(title_elided)
+                egui::RichText::new(title_shown.clone())
                     .color(theme.text_primary)
                     .size(TYPE_SM)
                     .strong(),
             )
             .wrap_mode(egui::TextWrapMode::Truncate),
         );
+        if title_shown != title_full.trim() {
+            title_resp.on_hover_text(title_full.trim());
+        }
     });
 }
 
@@ -5141,12 +5279,15 @@ struct MediaToolbarOutcome {
 /// Ancha (`SingleRow`): `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
 /// Angosta (`TwoRows`, ver `media_toolbar_layout`): arriba `[▶/⏸]
 /// [deslizador + N/M]`, abajo `[1x▾] [⛶/Cerrar] [Exportar]` a la derecha.
-/// El deslizador usa el espacio restante real sin piso forzado (el piso vive
-/// en la decisión, no en el dibujo: forzar un mínimo acá empujaba Exportar
-/// fuera del panel → el "Expor…" cortado del screenshot). Sin `.text()`
-/// lateral (apretaba la fila): la posición se lee en `N/M` + hover con el
-/// texto largo. UN solo contador (vive en `draw_media_counter_slot`, jamás
-/// etiqueta suelta). Piel pura: muta solo `Cell`s, emite `ExportMedia`.
+/// E2: si ni la segunda fila entra (`media_needs_overflow`), velocidad y
+/// grande/cerrar colapsan al menú explícito `···`; `Exportar` siempre queda
+/// visible como botón, jamás cortado al borde. El deslizador usa el espacio
+/// restante real sin piso forzado (el piso vive en la decisión, no en el
+/// dibujo: forzar un mínimo acá empujaba Exportar fuera del panel → el
+/// "Expor…" cortado del screenshot). Sin `.text()` lateral (apretaba la
+/// fila): la posición se lee en `N/M` + hover con el texto largo. UN solo
+/// contador (vive en `draw_media_counter_slot`, jamás etiqueta suelta).
+/// Piel pura: muta solo `Cell`s, emite `ExportMedia`.
 fn draw_media_toolbar(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -5168,7 +5309,20 @@ fn draw_media_toolbar(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                draw_media_right_buttons(ui, state, view, &mut action, &mut close_requested);
+                // Reserva de la segunda fila: si no entran los tres, overflow
+                // explícito (Exportar + ···), jamás corte seco.
+                let avail = ui.available_width();
+                if media_needs_overflow(avail, view.in_fullscreen) {
+                    draw_media_right_buttons_overflow(
+                        ui,
+                        state,
+                        view,
+                        &mut action,
+                        &mut close_requested,
+                    );
+                } else {
+                    draw_media_right_buttons(ui, state, view, &mut action, &mut close_requested);
+                }
             });
         });
     } else {
@@ -5231,20 +5385,7 @@ fn draw_media_right_buttons(
     action: &mut Option<AssistantUiAction>,
     close_requested: &mut bool,
 ) {
-    let export_response = ui.add_enabled(
-        view.frame_count > 0 && !view.exporting,
-        egui::Button::new("Exportar").small(),
-    );
-    if export_response.clicked() {
-        *action = Some(AssistantUiAction::ExportMedia);
-    }
-    if view.frame_count == 0 {
-        export_response.on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
-    } else if view.exporting {
-        export_response.on_disabled_hover_text("Ya se está exportando…");
-    } else {
-        export_response.on_hover_text(MEDIA_TIP_EXPORT);
-    }
+    draw_media_export_button(ui, view, action);
     if view.in_fullscreen {
         if ui
             .small_button("Cerrar (Esc)")
@@ -5269,6 +5410,71 @@ fn draw_media_right_buttons(
     }
 }
 
+/// Botón `Exportar` (extraído para reuso en overflow: siempre visible).
+fn draw_media_export_button(
+    ui: &mut egui::Ui,
+    view: &MediaToolbarView,
+    action: &mut Option<AssistantUiAction>,
+) {
+    let export_response = ui.add_enabled(
+        view.frame_count > 0 && !view.exporting,
+        egui::Button::new("Exportar").small(),
+    );
+    if export_response.clicked() {
+        *action = Some(AssistantUiAction::ExportMedia);
+    }
+    if view.frame_count == 0 {
+        export_response.on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+    } else if view.exporting {
+        export_response.on_disabled_hover_text("Ya se está exportando…");
+    } else {
+        export_response.on_hover_text(MEDIA_TIP_EXPORT);
+    }
+}
+
+/// Segunda fila en overflow explícito: `Exportar + ···` (puro dibujo).
+///
+/// E2: cuando ni la segunda fila entra, velocidad y grande/cerrar viven en
+/// el menú `···` con etiquetas legibles (jamás iconos mudos ni corte seco).
+/// `Exportar` queda fuera del menú, siempre visible. Sin I/O ni spawn.
+fn draw_media_right_buttons_overflow(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    view: &MediaToolbarView,
+    action: &mut Option<AssistantUiAction>,
+    close_requested: &mut bool,
+) {
+    draw_media_export_button(ui, view, action);
+    ui.menu_button("···", |ui| {
+        if ui
+            .small_button(format!("Velocidad: {} ▾", view.speed_label))
+            .on_hover_text(MEDIA_TIP_SPEED)
+            .clicked()
+        {
+            state.media_speed.set(state.media_speed.get().cycle());
+            ui.close_menu();
+        }
+        if view.in_fullscreen {
+            if ui
+                .small_button("Cerrar (Esc)")
+                .on_hover_text("Cierra esta vista grande")
+                .clicked()
+            {
+                *close_requested = true;
+                ui.close_menu();
+            }
+        } else if ui
+            .small_button("Ver grande ⛶")
+            .on_hover_text(MEDIA_TIP_FULLSCREEN)
+            .clicked()
+        {
+            state.media_fullscreen.set(true);
+            ui.close_menu();
+        }
+    })
+    .response
+    .on_hover_text("Más acciones de la animación");
+}
 /// Deslizador de scrub en el hueco restante, sin ancho mínimo forzado.
 ///
 /// El piso `MEDIA_TOOLBAR_MIN_SLIDER_W` vive en `media_toolbar_layout`
@@ -5360,12 +5566,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.set_min_height(assistant_media_min_side());
-                draw_media_header(
-                    ui,
-                    &media_elided_title(&title, MEDIA_HEADER_TITLE_MAX_CHARS),
-                    &status,
-                    status_color,
-                );
+                draw_media_header(ui, &title, &status, status_color);
                 ui.add_space(SPACE_XS);
                 let pulse = ((now_s * 2.4).sin() + 1.0) * 0.5;
                 ui.add(egui::ProgressBar::new(0.2 + 0.55 * pulse as f32).desired_height(SPACE_XS));
@@ -5422,12 +5623,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            draw_media_header(
-                ui,
-                &media_elided_title(&title, MEDIA_HEADER_TITLE_MAX_CHARS),
-                &status,
-                status_color,
-            );
+            draw_media_header(ui, &title, &status, status_color);
             ui.add_space(SPACE_XS);
             // Preview full-width, altura estable = f(ancho, aspecto del
             // primer frame). Se reserva SIEMPRE el ancho total y la imagen se
@@ -5520,12 +5716,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             )
             .show(ui.ctx(), |ui| {
                 ui.set_min_width(ui.available_width());
-                draw_media_header(
-                    ui,
-                    &media_elided_title(&title, MEDIA_HEADER_TITLE_MAX_CHARS_WIDE),
-                    &status,
-                    status_color,
-                );
+                draw_media_header(ui, &title, &status, status_color);
                 ui.add_space(SPACE_XS);
                 if let Some(texture) = state.media_textures().0.get(index).cloned() {
                     let size = texture.size_vec2();
@@ -11292,6 +11483,172 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn e2_metricas_reales_cromo_scroll_y_botones_honestos() {
+        // E2: por qué mentían los viejos — pasaban el ancho del panel
+        // (300/340/520) como disponible dentro de la card y medían botones
+        // con el piso táctil (24/24/40/76). Lo real resta cromo (turno 16 +
+        // card 16 = 32) y overlay flotante (12) y mide botones con la fuente
+        // (28/28/48/80). Este test falla con las métricas viejas y pasa con
+        // las reales.
+        assert_eq!(media_effective_inner_width(300.0), 256.0);
+        assert_eq!(media_effective_inner_width(340.0), 296.0);
+        assert_eq!(media_effective_inner_width(520.0), 476.0);
+        assert_eq!(media_effective_inner_width(f32::NAN), 0.0);
+        assert_eq!(media_effective_inner_width(20.0), 0.0);
+        // Botones honestos más anchos que los viejos (emoji fallback + 0.5x).
+        assert!(
+            MEDIA_TOOLBAR_PLAY_W > 24.0,
+            "play honesto: {}",
+            MEDIA_TOOLBAR_PLAY_W
+        );
+        assert!(
+            MEDIA_TOOLBAR_ICON_W > 24.0,
+            "icono honesto: {}",
+            MEDIA_TOOLBAR_ICON_W
+        );
+        assert!(
+            MEDIA_TOOLBAR_SPEED_W > 40.0,
+            "velocidad honesta: {}",
+            MEDIA_TOOLBAR_SPEED_W
+        );
+        assert!(
+            MEDIA_TOOLBAR_EXPORT_W >= 80.0 - f32::EPSILON,
+            "export honesto: {}",
+            MEDIA_TOOLBAR_EXPORT_W
+        );
+        // La mentira concreta: a panel 380 el viejo (layout directo) decía
+        // una fila y cortaba; el honesto (vía panel) dice dos filas.
+        assert_eq!(
+            media_toolbar_layout(380.0, 48),
+            MediaToolbarLayout::SingleRow,
+            "inner 380 sí entra en una fila"
+        );
+        assert_eq!(
+            media_toolbar_layout_for_panel(380.0, 48),
+            MediaToolbarLayout::TwoRows,
+            "panel 380 adentro son 336: dos filas, no corte"
+        );
+        // Paneles reales: 300/340 dos filas, 520 una.
+        assert_eq!(
+            media_toolbar_layout_for_panel(300.0, 48),
+            MediaToolbarLayout::TwoRows
+        );
+        assert_eq!(
+            media_toolbar_layout_for_panel(340.0, 48),
+            MediaToolbarLayout::TwoRows
+        );
+        assert_eq!(
+            media_toolbar_layout_for_panel(520.0, 48),
+            MediaToolbarLayout::SingleRow
+        );
+    }
+
+    #[test]
+    fn e2_overflow_explicito_exportar_siempre_visible() {
+        // E2: Exportar jamás se corta; si no entran los tres, van al menú.
+        let need_inline = media_right_buttons_need(false);
+        let need_overlay = media_right_buttons_need(true);
+        assert!(need_overlay > need_inline, "cerrar pesa más que icono");
+        assert!(!media_needs_overflow(need_inline, false));
+        assert!(!media_needs_overflow(need_inline + 40.0, false));
+        assert!(media_needs_overflow(need_inline - 1.0, false));
+        assert!(media_needs_overflow(80.0, false), "a 80px ni dos botones");
+        assert!(media_needs_overflow(f32::NAN, false));
+        // Fila ancha real (256 = panel 300 efectivo) no necesita overflow;
+        // la angosta extrema sí y ahí Exportar queda fuera del menú.
+        assert!(!media_needs_overflow(256.0, false));
+        assert!(media_needs_overflow(100.0, false));
+        // Headless: la rama overflow dibuja sin pánico y conserva Exportar.
+        let context = egui::Context::default();
+        let state = AssistantPanelState::default();
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(100.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let (compact, long) = media_counter_text(8, 48);
+                    let view = MediaToolbarView {
+                        counter_compact: &compact,
+                        counter_long: &long,
+                        speed_label: "0.5x",
+                        duration_ms: 4000,
+                        frame_count: 48,
+                        exporting: false,
+                        in_fullscreen: false,
+                    };
+                    // A 100px la segunda fila va a overflow (Exportar + ···).
+                    assert!(media_needs_overflow(ui.available_width(), false));
+                    let _ = draw_media_toolbar(ui, &state, &view);
+                });
+            },
+        );
+        // Blindaje: el overflow existe con etiquetas legibles, no iconos mudos.
+        let source = include_str!("assistant.rs");
+        assert!(
+            source.contains("draw_media_right_buttons_overflow"),
+            "existe overflow"
+        );
+        assert!(source.contains("···"), "menú explícito ···");
+        assert!(
+            source.contains("Ver grande ⛶"),
+            "overflow con etiqueta legible"
+        );
+    }
+
+    #[test]
+    fn e2_header_estado_reservado_titulo_con_tooltip() {
+        // E2: `lista` arriba-derecha jamás se trunca; el título usa el resto
+        // con elide + tooltip. Lo viejo usaba 32 fijos + Truncate y el título
+        // pedía todo el ancho.
+        let status = "lista";
+        let w = media_status_width(status);
+        assert!(w > 30.0 && w < 80.0, "estado medido: {w}");
+        // A 256px (panel 300 efectivo) el título largo se acota y el estado entra.
+        let budget = media_header_title_budget(256.0, status, MEDIA_HEADER_TITLE_MAX_CHARS);
+        assert!(
+            budget <= MEDIA_HEADER_TITLE_MAX_CHARS,
+            "presupuesto: {budget}"
+        );
+        assert!(budget >= 8, "mínimo legible: {budget}");
+        let titulo = "Animación de la derivada de x al cuadrado con detalle";
+        let mostrado = media_elided_title(titulo, budget);
+        assert!(mostrado.ends_with('…'), "elide marcado: {mostrado}");
+        assert!(mostrado.chars().count() <= budget);
+        // Estado largo (error) también se reserva sin corte seco.
+        let err = media_header_status(false, &MediaExportState::Failed("corte".into()));
+        let w_err = media_status_width(&err);
+        assert!(w_err > w, "error pesa más que lista: {w_err} > {w}");
+        let b_err = media_header_title_budget(256.0, &err, MEDIA_HEADER_TITLE_MAX_CHARS);
+        assert!(
+            b_err <= budget,
+            "con error el título cede: {b_err} <= {budget}"
+        );
+        // Headless: header a 256px dibuja sin pánico con título largo + lista.
+        let context = egui::Context::default();
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(256.0, 120.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_media_header(ui, titulo, status, egui::Color32::GREEN);
+                    draw_media_header(ui, titulo, &err, egui::Color32::RED);
+                });
+            },
+        );
+    }
+
+    #[test]
     fn media_toolbar_dibuja_sin_panico_a_300_340_520() {
         // Frente layout §2 headless: ejerce la rama real de dibujo a cada
         // ancho (300/340 → dos filas, 520 → una) con el contador del
@@ -11467,10 +11824,9 @@ mod tests {
         let card = &source[start..end];
         // Positivos: header v3 + toolbar única + placeholder dentro del rect
         // + progreso dentro (los literales `generando…/lista/error:` viven en
-        // `media_header_status`, justo antes de este bloque).
+        // `media_header_status`, justo antes de este bloque; E2 mueve el
+        // elide al header con presupuesto real, la card solo pasa el título).
         for kept in [
-            "media_elided_title",
-            "media_header_status",
             "draw_media_header",
             "draw_media_toolbar",
             "MediaToolbarView",

@@ -2137,6 +2137,47 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             }
                                         }
                                     });
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("Resaltar:").size(TYPE_SM),
+                                        );
+                                        let puede = selection.as_ref().is_some_and(
+                                            |(id, _, _)| {
+                                                app.document.get_object(*id).is_some()
+                                            },
+                                        );
+                                        if ui
+                                            .add_enabled(
+                                                puede,
+                                                egui::Button::new(
+                                                    egui::RichText::new("Indicar").size(TYPE_SM),
+                                                ),
+                                            )
+                                            .on_hover_text(
+                                                "Hace latir el objeto seleccionado ~1.2 s en el lienzo",
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some((id, _, _)) = selection.as_ref() {
+                                                match app.trigger_indicate(*id) {
+                                                    Ok(()) => {
+                                                        app.cas_result =
+                                                            "Indicando selección (~1.2 s)"
+                                                                .to_string();
+                                                    }
+                                                    Err(error) => {
+                                                        app.cas_result = format!(
+                                                            "No se pudo indicar: {error}"
+                                                        );
+                                                        app.notify(
+                                                            app.cas_result.clone(),
+                                                            grafito_ui::toast::ToastKind::Error,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
                                 },
                             );
                             ui.add_space(CARD_SPACING);

@@ -25,7 +25,7 @@ pub struct PaletteCommand {
     pub selection_key: &'static str,
     /// Alias bilingües (inglés + español) sólo para la búsqueda.
     pub keywords: &'static str,
-    /// Slug del catálogo i18n (`palette_action`) para las 14 acciones UI;
+    /// Slug del catálogo i18n (`palette_action`) para las 15 acciones UI;
     /// `None` en comandos del registry (conservan su etiqueta).
     locale_slug: Option<&'static str>,
     insertion: Option<&'static str>,
@@ -65,7 +65,7 @@ impl PaletteCommand {
         self.command_id.and_then(command_registry::by_id)
     }
 
-    /// Nombre visible en el idioma pedido. Las 14 acciones UI resuelven vía
+    /// Nombre visible en el idioma pedido. Las 15 acciones UI resuelven vía
     /// catálogo i18n (ES idéntico a `name`); el registry conserva su etiqueta.
     fn localized_name(&self, locale: Locale) -> &'static str {
         match self.locale_slug {
@@ -242,6 +242,17 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         selection_key: "Toggle Dark Mode",
         locale_slug: Some("toggle_dark"),
         keywords: "toggle dark mode tema oscuro claro noche",
+        insertion: None,
+        command_id: None,
+    },
+    PaletteCommand {
+        name: "Indicar selección",
+        category: "Vista",
+        syntax_hint: "Hace latir la selección ~1.2 s",
+        help: "Resalta el objeto seleccionado con un pulso breve en el lienzo.",
+        selection_key: "Indicate Selection",
+        locale_slug: Some("indicate_selection"),
+        keywords: "indicate selection indicar seleccion resaltar latir highlight pulso",
         insertion: None,
         command_id: None,
     },
@@ -742,6 +753,10 @@ mod tests {
             ("zoom", "Zoom to Fit"),
             ("lapiz", "Pencil"),
             ("pencil", "Pencil"),
+            ("indicar", "Indicate Selection"),
+            ("indicate", "Indicate Selection"),
+            ("resaltar", "Indicate Selection"),
+            ("highlight", "Indicate Selection"),
         ] {
             let state = CommandPaletteState {
                 search: query.to_string(),
@@ -794,7 +809,7 @@ mod tests {
     fn comandos_localizados_en_espanol_coinciden_con_la_ui_actual() {
         use super::UI_ACTIONS;
         use crate::i18n::{palette_action, Locale};
-        assert_eq!(UI_ACTIONS.len(), 14);
+        assert_eq!(UI_ACTIONS.len(), 15);
         let current = all_commands();
         let localized = super::all_commands_localized(Locale::Es);
         assert_eq!(current.len(), localized.len());
@@ -821,7 +836,7 @@ mod tests {
             .iter()
             .filter(|cmd| !cmd.is_registered())
             .collect();
-        assert_eq!(ui_actions.len(), 14);
+        assert_eq!(ui_actions.len(), 15);
         for expected in [
             "Point Tool",
             "Line Tool",
@@ -837,6 +852,7 @@ mod tests {
             "Zoom to Fit",
             "Toggle Grid",
             "Toggle Dark Mode",
+            "Indicate Selection",
         ] {
             assert!(
                 ui_actions.iter().any(|cmd| cmd.name == expected),
@@ -879,7 +895,7 @@ mod tests {
     fn acciones_ui_muestran_espanol_y_despachan_clave_inglesa() {
         let commands = all_commands();
         let ui_actions: Vec<_> = commands.iter().filter(|cmd| !cmd.is_registered()).collect();
-        assert_eq!(ui_actions.len(), 14);
+        assert_eq!(ui_actions.len(), 15);
         // Etiquetas visibles en español rioplatense.
         for expected in [
             "Herramienta Punto",
@@ -896,6 +912,7 @@ mod tests {
             "Encuadrar todo",
             "Alternar cuadrícula",
             "Alternar modo oscuro",
+            "Indicar selección",
         ] {
             assert!(
                 ui_actions.iter().any(|cmd| cmd.name == expected),
@@ -918,6 +935,7 @@ mod tests {
             "Zoom to Fit",
             "Toggle Grid",
             "Toggle Dark Mode",
+            "Indicate Selection",
         ] {
             assert!(
                 ui_actions
@@ -925,6 +943,16 @@ mod tests {
                     .any(|cmd| cmd.selection_key == expected_key),
                 "falta la clave estable {expected_key:?}"
             );
+        }
+        let indicar = ui_actions
+            .iter()
+            .find(|cmd| cmd.name == "Indicar selección");
+        match indicar {
+            Some(i) => {
+                assert_eq!(i.selection_key, "Indicate Selection");
+                assert!(i.input_template().is_none());
+            }
+            None => panic!("falta la acción Indicar selección"),
         }
         let guardar = ui_actions.iter().find(|cmd| cmd.name == "Guardar");
         match guardar {
