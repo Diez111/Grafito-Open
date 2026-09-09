@@ -115,15 +115,55 @@ pub(crate) fn clasifica_pedido_integral(pedido: &str, template: &str) -> Integra
     }
 }
 
+/// Estado del pedido de tangente/derivada frente a la función (M1, puro).
+///
+/// Espejo de [`IntegralPedido`]: sin función se renderiza la canónica y la
+/// prosa la declara; con función inválida hay error honesto sin frames ni
+/// hilo. Antes solo existía la vía integral (`clasifica_pedido_integral`) y
+/// la tangente inválida caía a canónica muda.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TangentePedido {
+    /// No es `derivative-slope` o no menciona tangente (flujo intacto).
+    NoAplica,
+    /// Sin función: renderiza la canónica y la prosa la declara.
+    Canonica,
+    /// Con función válida del usuario: flujo explícito que la nombra.
+    Explicita,
+    /// Con función inválida: error honesto sin frames ni hilo.
+    FuncionInvalida(String),
+}
+
+/// Clasifica un pedido de animación tangente (puro, sin I/O).
+///
+/// Solo actúa cuando la plantilla resuelta es `derivative-slope` Y el texto
+/// menciona derivada/tangente/pendiente. El resto → `NoAplica` (nada cambia).
+pub(crate) fn clasifica_pedido_tangente(pedido: &str, template: &str) -> TangentePedido {
+    if template.trim().to_lowercase() != "derivative-slope"
+        || !grafito_anim::parametric::pedido_menciona_tangente(pedido)
+    {
+        return TangentePedido::NoAplica;
+    }
+    match grafito_anim::parametric::infer_tangent_anim(pedido) {
+        Ok(resuelto) if resuelto.es_canonica() => TangentePedido::Canonica,
+        Ok(_) => TangentePedido::Explicita,
+        Err(error) => TangentePedido::FuncionInvalida(error.to_string()),
+    }
+}
+
 /// Plantilla honesta para un pedido de animación (punto único de resolución).
 ///
 /// Si el pedido menciona integral/área (con typos acotados vía
 /// `pedido_menciona_area`: "integrela"→"integral"), la plantilla es
 /// `integral-area` aunque `detect_template_for_concept` diga `universal`
-/// por el typo. El resto delega al detector clásico. Puro, sin I/O.
+/// por el typo. Espejo M1: si menciona derivada/tangente/pendiente (fuzzy
+/// "derivadaa"→"derivada"), es `derivative-slope`. El resto delega al
+/// detector clásico. Puro, sin I/O.
 pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
     if grafito_anim::parametric::pedido_menciona_area(pedido) {
         return "integral-area";
+    }
+    if grafito_anim::parametric::pedido_menciona_tangente(pedido) {
+        return "derivative-slope";
     }
     crate::anim_native::detect_template_for_concept(pedido)
 }
@@ -146,15 +186,46 @@ pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
 
 /// W-B — timeout para pedir SPEC a la IA: mitad del budget del turno.
 ///
-/// `RequestBudget::default().timeout_ms` es 60s
-/// (`grafito-assistant-types` 8192/2048/8/60s); la mitad deja aire para
-/// validar con `infer_*` + renderizar sin pasar el budget.
+/// Cadena completa de timeouts del turno de animación (todos acotados,
+/// ninguno cuelga la UI porque corren en workers):
+/// `RequestBudget::default().timeout_ms` = 60s (tope del turno,
+/// `grafito-assistant-types` 8192/2048/8/60s; rango 100..=120000ms).
+/// ESTE const = 30s (SPEC de la IA: mitad del budget, deja aire para
+/// validar con `infer_*` + renderizar; pineado en
+/// `wb_timeout_es_mitad_del_budget_y_peor_caso_un_request`).
+/// Rama agente: el mismo plazo viaja como `timeout` al completador
+/// (`RemoteAgentCompleter::complete`, por turno) y la `Cancellation` del
+/// agente se liga al token del turno (forwarder en
+/// `pedir_spec_ia_de_verdad`), así Cancel corta aunque falte transporte.
+/// Rama remota: el mismo plazo en `request.budget.timeout_ms` con poll de
+/// cancel cada 25ms.
+/// Motor externo: `ANIM_MOTOR_IDLE_TIMEOUT_SECS` (reposo) y
+/// `ANIM_MOTOR_JOB_TIMEOUT_SECS` (job total) — si no responde, cae al
+/// nativo (<2s) sin colgar el turno.
+/// Transporte compartido: `connect_timeout` 10s
+/// (`grafito-assistant::shared_http_client`), sub-timeout dentro del total.
 /// Peor caso documentado: 1 request extra (el SPEC) + render local.
 pub(crate) const ANIM_IA_SPEC_TIMEOUT_MS: u64 = 30_000;
 
-/// W-B — aviso de UNA línea ante fallback canónico (offline, timeout o error
-/// 400-429). Declara la canónica x² y ofrece otra; la prosa del turno usa la
-/// canónica declarada existente, este texto es el toast de una línea.
+/// M1 — timeout de reposo del motor externo de animación (2s).
+///
+/// Si el motor no saluda en este plazo, el turno cae al generador nativo
+/// (ver `run_assistant_animation_with`): «Animá» nunca se queda colgado.
+/// Sub-timeout dentro de `ANIM_MOTOR_JOB_TIMEOUT_SECS`.
+pub(crate) const ANIM_MOTOR_IDLE_TIMEOUT_SECS: u64 = 2;
+
+/// M1 — timeout total de un job del motor externo (15s).
+///
+/// Cota del `run_job` con closure de cancel (<200ms): pasado este plazo o
+/// ante cancel, se descarta y renderiza el nativo. Sub-plazo dentro de
+/// `ANIM_IA_SPEC_TIMEOUT_MS` (el SPEC ya consumió su mitad del budget).
+pub(crate) const ANIM_MOTOR_JOB_TIMEOUT_SECS: u64 = 15;
+
+/// W-B — aviso genérico ante fallback canónico (offline, timeout o error
+/// 400-429). Lo usa el resolver puro (`resolver_turno_anim_ia`, sin contexto
+/// de plantilla); los workers lo ESPECIALIZAN con `aviso_fallback_canonico`
+/// (plantilla y rango reales del SPEC renderizado) antes del toast.
+/// La prosa del turno usa la canónica declarada existente.
 pub(crate) const ANIM_SIN_IA_AVISO: &str = "sin conexión: te muestro x², pedime otra";
 
 /// W-B — SPEC validado venido de la IA (función, rango, kind/plantilla).
@@ -184,13 +255,15 @@ pub(crate) fn ia_disponible_para_anim(
 
 /// W-B — prompt acotado para pedir SPEC a la IA (puro, sin I/O).
 ///
-/// Pide UNA sola línea JSON con expr/p0/p1/plantilla; el parseo es estricto
-/// y la validación posterior usa `infer_*` (si la IA inventa, se descarta
-/// con `Err` honesto). Capado por chars para no pasar el budget.
+/// Pide UNA sola línea JSON con expr/p0/p1/plantilla (`integral-area` o
+/// `derivative-slope` según el pedido; el ejemplo integral no debe sesgar
+/// la tangente); el parseo es estricto y la validación posterior usa
+/// `infer_*` (si la IA inventa, se descarta con `Err` honesto). Capado por
+/// chars para no pasar el budget.
 pub(crate) fn prompt_spec_anim_ia(pedido: &str) -> String {
     let recortado: String = pedido.chars().take(500).collect();
     format!(
-        "Devolvé SOLO una línea JSON para animar en Grafito: {{\"expr\": \"f(x)\", \"p0\": 0, \"p1\": 2, \"plantilla\": \"integral-area\"}}. Pedido: {recortado}"
+        "Devolvé SOLO una línea JSON para animar en Grafito: {{\"expr\": \"f(x)\", \"p0\": 0, \"p1\": 2, \"plantilla\": \"integral-area\"}} (si el pedido es de tangente/derivada, usá \"plantilla\": \"derivative-slope\"). Pedido: {recortado}"
     )
 }
 
@@ -257,6 +330,92 @@ pub(crate) fn prosa_para_spec_anim_ia(spec: &SpecAnimIa) -> String {
         spec.p1,
         crate::anim_ui::animation_reference_sentence(),
     )
+}
+
+/// M1 — prosa canónica declarada según plantilla (punto único local).
+///
+/// Tangente → `TANGENT_CANONICAL_PROSA`, resto → `INTEGRAL_CANONICAL_PROSA`,
+/// siempre con la frase de referencia. La usan Submit, los fallbacks sin
+/// IA y el worker IA-primero: la misma canónica en todos lados. Pura.
+pub(crate) fn prosa_canonica_para_plantilla(plantilla: &str) -> String {
+    let canonica = if plantilla.trim().to_lowercase() == "derivative-slope" {
+        grafito_anim::parametric::TANGENT_CANONICAL_PROSA
+    } else {
+        grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
+    };
+    format!(
+        "{}\n\n{}",
+        crate::anim_ui::animation_reference_sentence(),
+        canonica
+    )
+}
+
+/// M1 — aviso de UNA línea ante fallback canónico con plantilla y rango
+/// reales (defecto 3: el genérico `ANIM_SIN_IA_AVISO` no decía qué se
+/// mostraba). Se construye del SPEC efectivamente renderizado, no del
+/// pedido: `x^2 en [0,2] (integral)` o `x^2 en [-1.5,1.5] (tangente)`.
+/// Puro, sin I/O.
+pub(crate) fn aviso_fallback_canonico(spec: &SpecAnimIa) -> String {
+    let kind = if spec.plantilla.trim().to_lowercase() == "derivative-slope" {
+        "tangente"
+    } else {
+        "integral"
+    };
+    format!(
+        "sin conexión: te muestro {} en [{},{}] ({}), pedime otra",
+        spec.expr, spec.p0, spec.p1, kind
+    )
+}
+/// M1 — prosa rioplatense para tangente explícita: nombra función y rango.
+///
+/// Espejo de `prosa_integral_explicita` (vive en `grafito-ui`, intocable en
+/// este frente): re-infiere el rango del pedido para que la curva nunca
+/// quede huérfana (la vía local genérica solo ponía la frase de referencia).
+/// Sin "pedime otra" (ese marcador es solo de la canónica). Pura, sin I/O.
+pub(crate) fn prosa_tangente_explicita(expr: &str, pedido: &str) -> String {
+    let (_, p0, p1) = grafito_anim::parametric::infer_tangent_anim(pedido)
+        .map(|resuelto| {
+            let anim = resuelto.anim();
+            (anim.expr_a.clone(), anim.p0, anim.p1)
+        })
+        .unwrap_or_else(|_| {
+            (
+                expr.to_string(),
+                grafito_anim::parametric::TANGENT_CANONICAL_P0,
+                grafito_anim::parametric::TANGENT_CANONICAL_P1,
+            )
+        });
+    format!(
+        "te muestro con f(x)={expr} en [{p0},{p1}].\n\n{}",
+        crate::anim_ui::animation_reference_sentence()
+    )
+}
+
+/// M1 — animación paramétrica explícita del pedido, igual que el agente.
+///
+/// Si la plantilla es `integral-area`/`derivative-slope` y el texto menciona
+/// el tipo, infiere con `infer_area_anim`/`infer_tangent_anim` (las mismas
+/// puertas del agente): explícita del usuario, canónica declarada, o `Err`
+/// honesto ante función inválida (jamás canónica muda). El resto →
+/// `Ok(None)` y el llamante cae al `parametric_for_template`/clásico.
+/// Pura salvo construcción, sin I/O.
+pub(crate) fn anim_parametrica_para_pedido(
+    template: &str,
+    texto: &str,
+) -> Result<Option<grafito_anim::parametric::ParametricAnim>, String> {
+    let plantilla = template.trim().to_lowercase();
+    if plantilla == "integral-area" && grafito_anim::parametric::pedido_menciona_area(texto) {
+        return grafito_anim::parametric::infer_area_anim(texto)
+            .map(|resuelto| Some(resuelto.anim().clone()))
+            .map_err(|error| error.to_string());
+    }
+    if plantilla == "derivative-slope" && grafito_anim::parametric::pedido_menciona_tangente(texto)
+    {
+        return grafito_anim::parametric::infer_tangent_anim(texto)
+            .map(|resuelto| Some(resuelto.anim().clone()))
+            .map_err(|error| error.to_string());
+    }
+    Ok(None)
 }
 
 /// W-B — valida un SPEC ya parseado con las puertas `infer_*` existentes.
@@ -791,9 +950,31 @@ pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
                 expr,
             }
         }
-        IntegralPedido::NoAplica => DecisionAnimacion::RenderGenerico {
-            plantilla,
-            concepto,
+        IntegralPedido::NoAplica => match clasifica_pedido_tangente(pedido, &plantilla) {
+            // M1: la tangente inválida (`foo(x)`) era canónica muda; ahora
+            // es guía honesta igual que la integral (paridad con el agente).
+            TangentePedido::FuncionInvalida(detalle) => {
+                DecisionAnimacion::PreguntarSinMedia(detalle)
+            }
+            TangentePedido::Canonica => DecisionAnimacion::RenderCanonico {
+                plantilla,
+                concepto,
+            },
+            TangentePedido::Explicita => {
+                let expr = match grafito_anim::parametric::infer_tangent_anim(pedido) {
+                    Ok(resuelto) => resuelto.anim().expr_a.clone(),
+                    Err(error) => return DecisionAnimacion::PreguntarSinMedia(error.to_string()),
+                };
+                DecisionAnimacion::RenderExplicito {
+                    plantilla,
+                    concepto,
+                    expr,
+                }
+            }
+            TangentePedido::NoAplica => DecisionAnimacion::RenderGenerico {
+                plantilla,
+                concepto,
+            },
         },
     }
 }
@@ -1217,60 +1398,72 @@ impl AssistantRuntime {
 
     /// Cancela todos los jobs del asistente para el botón Cancel.
     ///
-    /// - `remote`/`proposal`/`agent`/`model` tienen token: se marcan cancelados
-    ///   pero el slot se conserva hasta que `take_finished_*`/`poll_assistant_agent`
-    ///   drene el worker (sin huérfanos; ver test `cancelled_remote_job_...`).
-    /// - `anim` tiene token (AS4, como `agent`): se señala y se dropea el slot.
-    ///   El worker es acotado (render nativo <2 s con chequeo entre frames o
-    ///   `job_timeout` 15 s del motor con closure `cancel`) y su `send` falla
-    ///   tras el drop, así que el hilo termina solo sin dejar trabajo huérfano.
-    ///
+    /// M1: delega en `cancel_anim_job`, que ya cancela TODO lo vivo del
+    /// turno (remote/proposal/agent/model señalados con slot hasta el
+    /// drain, anim dropeados, export con reaper). Sin duplicar el contrato.
     /// Retorna `true` si había algún job en vuelo.
     fn cancel_all_assistant_jobs(&mut self) -> bool {
-        let mut cancelled = false;
+        self.cancel_anim_job()
+    }
+
+    /// Cancela TODO lo vivo del turno de animación (M1, defecto 5).
+    ///
+    /// Headless y sin I/O en el llamante:
+    /// - `remote`/`proposal`/`agent`/`model` tienen token: se marcan
+    ///   cancelados pero el slot se conserva hasta que
+    ///   `take_finished_*`/`poll_assistant_agent` drene el worker (sin
+    ///   huérfanos; ver test `cancelled_remote_job_...`).
+    /// - `anim`/`anim_ia` tienen token (AS4, como `agent`): se señalan y se
+    ///   dropea el slot. El worker es acotado (render nativo <2 s con
+    ///   chequeo entre frames o `job_timeout` 15 s del motor con closure
+    ///   `cancel`) y su `send` falla tras el drop, así que el hilo termina
+    ///   solo sin dejar trabajo huérfano.
+    /// - `gif_export` (`JoinHandle`, no cancelable): se suelta el slot y un
+    ///   reaper en background hace `join` + borra el temporal para no dejar
+    ///   basura ni publicar éxito de un turno cancelado. La card la resetea
+    ///   el llamante a `Idle` (ver `cancel_assistant_request` y runners).
+    ///
+    /// Retorna `true` si había algún job en vuelo.
+    pub(crate) fn cancel_anim_job(&mut self) -> bool {
+        let mut hubo = false;
         if let Some(job) = self.remote_job.as_ref() {
             job.cancellation.cancel();
-            cancelled = true;
+            hubo = true;
         }
         if let Some(job) = self.proposal_job.as_ref() {
             job.cancellation.cancel();
-            cancelled = true;
+            hubo = true;
         }
         if let Some(job) = self.agent_job.as_ref() {
             job.cancellation.cancel();
-            cancelled = true;
+            hubo = true;
         }
         if let Some(job) = self.model_job.as_ref() {
             job.cancellation.cancel();
-            cancelled = true;
+            hubo = true;
         }
-        if self.cancel_anim_job() {
-            cancelled = true;
-        }
-        cancelled
-    }
-
-    /// Cancela solo el job de animación (AS4): señala el token y dropea el slot.
-    ///
-    /// Headless y sin I/O: el hilo en vuelo observa el token entre frames
-    /// (closure de progreso) y descarta el resultado rancio en vez de
-    /// publicarlo. Retorna `true` si había job en vuelo.
-    /// W-B: también cancela el worker IA-primero (cero doble render: nunca
-    /// quedan dos renders en vuelo).
-    pub(crate) fn cancel_anim_job(&mut self) -> bool {
         if let Some(job) = self.anim_job.as_ref() {
             job.cancellation.cancel();
         }
         if let Some(job) = self.anim_ia_job.as_ref() {
             job.cancellation.cancel();
         }
-        let mut hubo = false;
         if self.anim_job.is_some() {
             self.anim_job = None;
             hubo = true;
         }
         if self.anim_ia_job.is_some() {
             self.anim_ia_job = None;
+            hubo = true;
+        }
+        if let Some(job) = self.gif_export_job.take() {
+            let _ = std::thread::Builder::new()
+                .name("gif-export-reaper".into())
+                .spawn(move || {
+                    if let Ok(Ok(path)) = job.handle.join() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                });
             hubo = true;
         }
         hubo
@@ -1598,12 +1791,13 @@ struct AssistantAnimJob {
 /// W-B — render listo desde el worker IA-primero (media + prosa coherentes).
 ///
 /// `media` y `prosa` vienen del MISMO spec validado (o IA o canónico de
-/// fallback, nunca mezclados). `aviso` es `Some` solo en fallback (una línea
-/// para el toast). `spec` es el efectivamente renderizado (para tests).
+/// fallback, nunca mezclados). `aviso` es `Some` solo en fallback: UNA línea
+/// con plantilla y rango reales (`aviso_fallback_canonico`). `spec` es el
+/// efectivamente renderizado (para tests).
 pub(crate) struct AnimIaRender {
     pub media: grafito_ui::assistant::AssistantMedia,
     pub prosa: String,
-    pub aviso: Option<&'static str>,
+    pub aviso: Option<String>,
 }
 
 /// W-B — job del worker IA-primero (SPEC de la IA + render en un solo hilo).
@@ -1679,6 +1873,30 @@ struct FinishedModelJob {
     provider: ProviderProfile,
     cancelled: bool,
     result: Result<Vec<String>, String>,
+}
+
+/// Empuja prosa al último turno del asistente (ApplyProposal, M1).
+///
+/// Solo si el último turno es del asistente (el compromiso verificado lo
+/// garantiza en la práctica; el guard evita mezclar si no lo fuera).
+/// Pura sobre el transcript, sin I/O ni spawn.
+fn empuja_prosa_apply(conversacion: &mut [ConversationTurn], prosa: &str) {
+    if let Some(turno) = conversacion.last_mut() {
+        if turno.role == ConversationRole::Assistant {
+            turno.content.push_str("\n\n");
+            turno
+                .content
+                .push_str(&grafito_ui::assistant::humanize_prose_text(prosa));
+        }
+    }
+}
+
+/// ¿El último turno del asistente aún no declara media (sin "deslizador")?
+/// Pura, sin I/O.
+fn ultimo_turno_sin_media(conversacion: &[ConversationTurn]) -> bool {
+    conversacion.last().is_some_and(|turno| {
+        turno.role == ConversationRole::Assistant && !turno.content.contains("deslizador")
+    })
 }
 
 impl GrafitoApp {
@@ -2179,7 +2397,7 @@ impl GrafitoApp {
                 // Cancela animación previa si existe — evita crash al pedir otra cosa tras animación
                 // y evita "tomo una ya hecha" (stale derivative). Cancel real:
                 // señala el token, el hilo descarta.
-                if self.assistant_runtime.cancel_anim_job() {
+                if self.cancela_turno_anim() {
                     self.assistant.anim_progress = false;
                     // Z3 trigger único: si el pedido nuevo también anima, el
                     // reemplazo se avisa explícito (misma frase que los
@@ -2317,9 +2535,9 @@ impl GrafitoApp {
                         let question = problem_clone.clone();
                         self.assistant.begin_request(question);
                         self.assistant.problem.clear();
-                        let mut prosa = crate::anim_ui::animation_reference_sentence().to_string();
-                        prosa.push_str("\n\n");
-                        prosa.push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+                        // M1: la canónica se declara con SU prosa (punto
+                        // único `prosa_canonica_para_plantilla`, jamás cruzada).
+                        let prosa = prosa_canonica_para_plantilla(plantilla);
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                         self.assistant.complete_local_request(humano);
                         self.assistant.set_media(None, ctx);
@@ -2335,7 +2553,13 @@ impl GrafitoApp {
                         let question = problem_clone.clone();
                         self.assistant.begin_request(question);
                         self.assistant.problem.clear();
-                        let prosa = prosa_integral_explicita(expr, &problem_clone);
+                        // M1: la explícita nombra SU función y rango (tangente
+                        // o integral según plantilla, jamás huérfana).
+                        let prosa = if plantilla.trim().to_lowercase() == "derivative-slope" {
+                            prosa_tangente_explicita(expr, &problem_clone)
+                        } else {
+                            prosa_integral_explicita(expr, &problem_clone)
+                        };
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                         self.assistant.complete_local_request(humano);
                         self.assistant.set_media(None, ctx);
@@ -2498,79 +2722,61 @@ impl GrafitoApp {
                         let template_crudo = template_opt
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("derivative-slope");
+                            .filter(|s| !s.is_empty());
                         let concept = concept_opt
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
                             .unwrap_or("");
-                        // Plantilla honesta: si el concepto menciona integral
-                        // (con typos), se coerciona a `integral-area` aunque el
-                        // LLM haya propuesto `universal` (mismo punto único
-                        // que Submit vía `plantilla_para_pedido`).
-                        let plantilla_efectiva: &str =
-                            if grafito_anim::parametric::pedido_menciona_area(concept) {
-                                "integral-area"
-                            } else {
-                                template_crudo
-                            };
-                        // N1: misma política que Submit (inferencia + agente).
-                        match clasifica_pedido_integral(concept, plantilla_efectiva) {
-                            IntegralPedido::FuncionInvalida(detalle) => {
-                                // Compromiso verificado pero función inválida:
-                                // prosa honesta sin hilo de render (sin frames).
-                                if let Some(turno) = self.assistant.conversation.last_mut() {
-                                    if turno.role == ConversationRole::Assistant {
-                                        turno.content.push_str("\n\n");
-                                        turno.content.push_str(
-                                            &grafito_ui::assistant::humanize_prose_text(&detalle),
-                                        );
-                                    }
-                                }
-                                self.notify(detalle, ToastKind::Info);
+                        // M1 defecto 8: punto único de plantilla, igual que
+                        // Submit vía `plantilla_para_pedido`. Vacío → se
+                        // resuelve del concepto (vacío total → default
+                        // histórico `derivative-slope`); integral/tangente
+                        // mencionadas coercionan aunque el LLM haya propuesto
+                        // `universal`.
+                        let plantilla_efectiva: String = match template_crudo {
+                            None if concept.is_empty() => "derivative-slope".to_string(),
+                            None => plantilla_para_pedido(concept).to_string(),
+                            Some(crudo)
+                                if grafito_anim::parametric::pedido_menciona_area(concept) =>
+                            {
+                                "integral-area".to_string()
                             }
-                            IntegralPedido::Explicita => {
-                                // Explícita: la prosa nombra la función (nunca huérfana).
-                                if let Some(turno) = self.assistant.conversation.last_mut() {
-                                    if turno.role == ConversationRole::Assistant
-                                        && !turno.content.contains("deslizador")
-                                    {
-                                        let expr =
-                                            grafito_anim::parametric::infer_area_anim(concept)
-                                                .map(|r| r.anim().expr_a.clone())
-                                                .unwrap_or_default();
-                                        turno.content.push_str("\n\n");
-                                        turno.content.push_str(
-                                            &grafito_ui::assistant::humanize_prose_text(
-                                                &prosa_integral_explicita(&expr, concept),
-                                            ),
-                                        );
-                                    }
-                                }
-                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                            Some(crudo)
+                                if crudo == "universal"
+                                    && grafito_anim::parametric::pedido_menciona_tangente(
+                                        concept,
+                                    ) =>
+                            {
+                                "derivative-slope".to_string()
                             }
-                            pedido_integral => {
-                                // El agente propuso `generate_animation` (vía
-                                // `GenerateAnimation` verificado): el hilo genera e
-                                // incrusta como `AssistantMedia` DEL TURNO.
-                                if let Some(turno) = self.assistant.conversation.last_mut() {
-                                    if turno.role == ConversationRole::Assistant
-                                        && !turno.content.contains("deslizador")
-                                    {
-                                        turno.content.push_str("\n\n");
-                                        turno.content.push_str(
-                                            crate::anim_ui::animation_reference_sentence(),
-                                        );
-                                    }
-                                }
-                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
-                                // N1: canónica renderizada Y declarada.
-                                if matches!(pedido_integral, IntegralPedido::Canonica) {
-                                    append_canonical_integral_prose(
-                                        &mut self.assistant.conversation,
-                                    );
-                                }
-                            }
+                            Some(crudo) => crudo.to_string(),
+                        };
+                        // M1 defecto 8: pasa por SPEC+validación igual que el
+                        // resto. Con IA disponible va IA-primero (la IA
+                        // propone el SPEC, el motor solo renderiza lo
+                        // validado); sin IA cae al local validado de abajo.
+                        let es_animable = plantilla_efectiva.trim() == "integral-area"
+                            || (plantilla_efectiva.trim() == "derivative-slope"
+                                && grafito_anim::parametric::pedido_menciona_tangente(concept));
+                        let rate_limited = rate_limit_cooldown_remaining_secs().is_some();
+                        if es_animable
+                            && ia_disponible_para_anim(
+                                self.assistant.agent_mode,
+                                self.remote_provider_ready(),
+                                rate_limited,
+                                self.exam_mode,
+                            )
+                        {
+                            self.run_assistant_animation_ia_primero(
+                                ctx,
+                                concept.to_string(),
+                                plantilla_efectiva.clone(),
+                            );
+                            // El worker IA-primero publica prosa+media del
+                            // MISMO spec (o fallback declarado): nada más que
+                            // hacer en este turno.
+                        } else {
+                            self.animacion_apply_local_validada(ctx, &plantilla_efectiva, concept);
                         }
                     } else {
                         self.run_assistant_animation(ctx);
@@ -3903,9 +4109,33 @@ impl GrafitoApp {
             ];
             let tools = vec![grafito_assistant::agent::generate_animation_tool_schema()];
             let cancel_agent = grafito_agent::loop_engine::Cancellation::default();
-            match <grafito_assistant::agent::RemoteAgentCompleter as grafito_agent::loop_engine::AgentCompleter>::complete(
+            // M1: liga la Cancellation del agente al token del turno. Son
+            // tipos distintos sin conversión (`Cancellation` del loop vs
+            // `CancellationToken` del asistente): el puente es este forwarder
+            // efímero (poll 25ms, muere al terminar el SPEC) que propaga el
+            // cancel aunque el transporte siga en vuelo.
+            let cancel_agent_puente = cancel_agent.clone();
+            let cancel_turno_puente = cancel.clone();
+            let spec_terminado = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let spec_terminado_puente = spec_terminado.clone();
+            let puente = std::thread::spawn(move || {
+                while !spec_terminado_puente.load(std::sync::atomic::Ordering::Acquire) {
+                    if cancel_turno_puente.is_cancelled() {
+                        cancel_agent_puente.cancel();
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            });
+            let respuesta = <grafito_assistant::agent::RemoteAgentCompleter as grafito_agent::loop_engine::AgentCompleter>::complete(
                 &completer, &mensajes, &tools, 512, timeout, &cancel_agent,
-            ) {
+            );
+            spec_terminado.store(true, std::sync::atomic::Ordering::Release);
+            let _ = puente.join();
+            if cancel.is_cancelled() {
+                return PedidoSpecIa::Transporte("La generación se canceló.".into());
+            }
+            match respuesta {
                 Ok(grafito_agent::loop_engine::AgentChatResponse::ToolCalls { calls }) => {
                     let mut primero: Option<PedidoSpecIa> = None;
                     for call in &calls {
@@ -4001,7 +4231,7 @@ impl GrafitoApp {
         if self.exam_blocks("Asistente") {
             return;
         }
-        if self.assistant_runtime.cancel_anim_job() {
+        if self.cancela_turno_anim() {
             self.assistant.anim_progress = false;
             if let Some(message) = anim_replace_message(true) {
                 self.notify(message, ToastKind::Info);
@@ -4015,11 +4245,7 @@ impl GrafitoApp {
         let settings = match self.assistant_provider_settings() {
             Ok(settings) => settings,
             Err(_) => {
-                let prosa = format!(
-                    "{}\n\n{}",
-                    crate::anim_ui::animation_reference_sentence(),
-                    grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
-                );
+                let prosa = prosa_canonica_para_plantilla(&plantilla_fallback);
                 let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                 self.assistant.complete_local_request(humano);
                 self.run_assistant_animation_with(ctx, &plantilla_fallback, &pedido_original);
@@ -4030,14 +4256,11 @@ impl GrafitoApp {
         let api_key = match self.assistant_api_key() {
             Ok(key) => key,
             Err(_) => {
-                let prosa = format!(
-                    "{}\n\n{}",
-                    crate::anim_ui::animation_reference_sentence(),
-                    grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
-                );
+                let prosa = prosa_canonica_para_plantilla(&plantilla_fallback);
                 let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                 self.assistant.complete_local_request(humano);
-                self.notify(ANIM_SIN_IA_AVISO, ToastKind::Info);
+                let canonico = spec_canonico_para_fallback(&plantilla_fallback);
+                self.notify(aviso_fallback_canonico(&canonico), ToastKind::Info);
                 self.run_assistant_animation_with(ctx, &plantilla_fallback, &pedido_original);
                 ctx.request_repaint();
                 return;
@@ -4069,21 +4292,13 @@ impl GrafitoApp {
                         Err(error) => Err(error),
                     }
                 }
-                DesenlaceAnimIa::FallbackCanonico { aviso } => {
+                DesenlaceAnimIa::FallbackCanonico { aviso: _ } => {
+                    // M1: el aviso genérico del resolver se especializa acá
+                    // con la canónica EFECTIVAMENTE renderizada (plantilla y
+                    // rango reales, no promesa del pedido).
                     let canonico = spec_canonico_para_fallback(&plantilla_hilo);
-                    let prosa = if plantilla_hilo.trim().to_lowercase() == "derivative-slope" {
-                        format!(
-                            "{}\n\n{}",
-                            crate::anim_ui::animation_reference_sentence(),
-                            grafito_anim::parametric::TANGENT_CANONICAL_PROSA
-                        )
-                    } else {
-                        format!(
-                            "{}\n\n{}",
-                            crate::anim_ui::animation_reference_sentence(),
-                            grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
-                        )
-                    };
+                    let prosa = prosa_canonica_para_plantilla(&plantilla_hilo);
+                    let aviso = aviso_fallback_canonico(&canonico);
                     match render_media_desde_spec_ia(&canonico, &worker_cancel) {
                         Ok(media) => Ok(AnimIaRender {
                             media,
@@ -4110,6 +4325,107 @@ impl GrafitoApp {
         ctx.request_repaint();
     }
 
+    /// M1 defecto 8 — rama local validada del ApplyProposal (sin IA).
+    ///
+    /// Misma política que Submit sin IA: integral inválida/explícita/
+    /// canónica vía `clasifica_pedido_integral`, tangente vía
+    /// `clasifica_pedido_tangente` (inválida → prosa honesta sin hilo;
+    /// explícita → prosa que nombra f y rango; canónica → referencia +
+    /// declara), resto → genérico local. El hilo re-valida con `infer_*`
+    /// (doble puerta, cero basura). Sin I/O en el llamante.
+    fn animacion_apply_local_validada(
+        &mut self,
+        ctx: &egui::Context,
+        plantilla_efectiva: &str,
+        concept: &str,
+    ) {
+        match clasifica_pedido_integral(concept, plantilla_efectiva) {
+            IntegralPedido::FuncionInvalida(detalle) => {
+                // Compromiso verificado pero función inválida: prosa
+                // honesta sin hilo de render (sin frames).
+                empuja_prosa_apply(&mut self.assistant.conversation, &detalle);
+                self.notify(detalle, ToastKind::Info);
+            }
+            IntegralPedido::Explicita => {
+                // Explícita: la prosa nombra la función (nunca huérfana).
+                if ultimo_turno_sin_media(&self.assistant.conversation) {
+                    let expr = grafito_anim::parametric::infer_area_anim(concept)
+                        .map(|resuelto| resuelto.anim().expr_a.clone())
+                        .unwrap_or_default();
+                    empuja_prosa_apply(
+                        &mut self.assistant.conversation,
+                        &prosa_integral_explicita(&expr, concept),
+                    );
+                }
+                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+            }
+            IntegralPedido::Canonica => {
+                // Canónica integral: referencia + declara (idempotente).
+                if ultimo_turno_sin_media(&self.assistant.conversation) {
+                    empuja_prosa_apply(
+                        &mut self.assistant.conversation,
+                        crate::anim_ui::animation_reference_sentence(),
+                    );
+                }
+                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                append_canonical_integral_prose(&mut self.assistant.conversation);
+            }
+            IntegralPedido::NoAplica => {
+                match clasifica_pedido_tangente(concept, plantilla_efectiva) {
+                    TangentePedido::FuncionInvalida(detalle) => {
+                        empuja_prosa_apply(&mut self.assistant.conversation, &detalle);
+                        self.notify(detalle, ToastKind::Info);
+                    }
+                    TangentePedido::Explicita => {
+                        if ultimo_turno_sin_media(&self.assistant.conversation) {
+                            let expr = grafito_anim::parametric::infer_tangent_anim(concept)
+                                .map(|resuelto| resuelto.anim().expr_a.clone())
+                                .unwrap_or_default();
+                            empuja_prosa_apply(
+                                &mut self.assistant.conversation,
+                                &prosa_tangente_explicita(&expr, concept),
+                            );
+                        }
+                        self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                    }
+                    TangentePedido::Canonica => {
+                        // Canónica tangente: referencia + declara SU prosa
+                        // (idempotente por "pedime otra", igual que integral).
+                        if ultimo_turno_sin_media(&self.assistant.conversation) {
+                            empuja_prosa_apply(
+                                &mut self.assistant.conversation,
+                                crate::anim_ui::animation_reference_sentence(),
+                            );
+                        }
+                        self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                        if let Some(turno) = self.assistant.conversation.last_mut() {
+                            if turno.role == ConversationRole::Assistant
+                                && !turno.content.contains("pedime otra")
+                            {
+                                turno.content.push_str("\n\n");
+                                turno
+                                    .content
+                                    .push_str(grafito_anim::parametric::TANGENT_CANONICAL_PROSA);
+                            }
+                        }
+                    }
+                    TangentePedido::NoAplica => {
+                        // El agente propuso `generate_animation` (vía
+                        // `GenerateAnimation` verificado): el hilo genera e
+                        // incrusta como `AssistantMedia` DEL TURNO.
+                        if ultimo_turno_sin_media(&self.assistant.conversation) {
+                            empuja_prosa_apply(
+                                &mut self.assistant.conversation,
+                                crate::anim_ui::animation_reference_sentence(),
+                            );
+                        }
+                        self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn run_assistant_animation_with(
         &mut self,
         ctx: &egui::Context,
@@ -4123,7 +4439,7 @@ impl GrafitoApp {
         // W-A: si hay una animación en curso, reemplazo EXPLÍCITO avisado
         // (antes era mudo). Cancel real (AS4): señala el token antes de
         // dropear, el hilo descarta. El toast dice "espero o reemplazo".
-        if self.assistant_runtime.cancel_anim_job() {
+        if self.cancela_turno_anim() {
             self.assistant.anim_progress = false;
             if let Some(message) = anim_replace_message(true) {
                 self.notify(message, ToastKind::Info);
@@ -4210,13 +4526,21 @@ impl GrafitoApp {
                 return;
             }
             // Nativo cancelable (AS4): paramétrico si hay `ParametricAnim`, si
-            // no el clásico. El render no acepta token: el closure de progreso
+            // no el clásico. M1: primero la explícita del pedido
+            // (`anim_parametrica_para_pedido`, igual que el agente: x³
+            // explícita jamás cae a canónica); `Err` honesto sin frames.
+            // El render no acepta token: el closure de progreso
             // lo chequea entre frames y el hilo descarta el resultado rancio.
             let render_native_cancellable =
                 || -> Result<grafito_ui::assistant::AssistantMedia, String> {
-                    if let Some(anim) =
+                    let explicita =
+                        match anim_parametrica_para_pedido(&template_owned, &concept_owned) {
+                            Ok(explicita) => explicita,
+                            Err(error) => return Err(error),
+                        };
+                    if let Some(anim) = explicita.or_else(|| {
                         crate::anim_native::parametric_for_template(&template_owned, &concept_owned)
-                    {
+                    }) {
                         // Rango vivo de "p" si el documento lo define (F2c).
                         // `ParamName` no es `Copy`: se clona (cadenas de ≤16
                         // chars) y ante `Err` se conserva la anim original.
@@ -4301,10 +4625,11 @@ impl GrafitoApp {
                     let config = grafito_anim::EngineConfig {
                         command: engine_section.command,
                         working_dir: Some(work_dir.clone()),
-                        // Timeouts cortos: si el motor no responde, se cae al
-                        // generador nativo para que «Animá» nunca se quede colgado.
-                        idle_timeout: std::time::Duration::from_secs(2),
-                        job_timeout: std::time::Duration::from_secs(15),
+                        // Timeouts cortos documentados (`ANIM_MOTOR_*`): si el
+                        // motor no responde, se cae al generador nativo para
+                        // que «Animá» nunca se quede colgado.
+                        idle_timeout: std::time::Duration::from_secs(ANIM_MOTOR_IDLE_TIMEOUT_SECS),
+                        job_timeout: std::time::Duration::from_secs(ANIM_MOTOR_JOB_TIMEOUT_SECS),
                         ..Default::default()
                     };
                     // Cancel real en el motor externo: `run_job` aborta <200 ms.
@@ -4387,7 +4712,7 @@ impl GrafitoApp {
         }
         // Z3 trigger único: mismo reemplazo explícito que el single
         // (`anim_replace_message`, sin duplicar el texto).
-        if self.assistant_runtime.cancel_anim_job() {
+        if self.cancela_turno_anim() {
             self.assistant.anim_progress = false;
             if let Some(message) = anim_replace_message(true) {
                 self.notify(message, ToastKind::Info);
@@ -4403,7 +4728,9 @@ impl GrafitoApp {
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let mut partes: Vec<(Vec<egui::ColorImage>, u64)> = Vec::new();
-            let mut nombres: Vec<String> = Vec::new();
+            // M1: cada lado titula por el punto único (`titulo_curado`,
+            // jamás eco crudo del concepto).
+            let mut bases: Vec<(String, String)> = Vec::new();
             for step in &playlist.steps {
                 if worker_cancellation.is_cancelled() {
                     let _ = sender.send(Err(
@@ -4416,10 +4743,7 @@ impl GrafitoApp {
                 let Some(request) = step.request.as_ref() else {
                     continue;
                 };
-                let titulo: String = request.concept.chars().take(40).collect();
-                if !titulo.trim().is_empty() {
-                    nombres.push(titulo.trim().to_string());
-                }
+                bases.push((request.template.clone(), request.concept.clone()));
                 let plantilla = request.template.clone();
                 let concepto = request.concept.clone();
                 let params = request.params.clone();
@@ -4429,10 +4753,20 @@ impl GrafitoApp {
                         saw_cancel = true;
                     }
                 };
-                // Mismo camino que el single: paramétrico si hay equivalente,
-                // si no el clásico. Sin motor externo (ver doc del método).
-                let frames = if let Some(anim) =
-                    crate::anim_native::parametric_for_template(&plantilla, &concepto)
+                // Mismo camino que el single: explícita del pedido igual
+                // que el agente, si no paramétrica canónica, si no clásica.
+                // `Err` honesto sin media parcial en silencio. Sin motor
+                // externo (ver doc del método).
+                let explicita = match anim_parametrica_para_pedido(&plantilla, &concepto) {
+                    Ok(explicita) => explicita,
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        repaint.request_repaint();
+                        return;
+                    }
+                };
+                let frames = if let Some(anim) = explicita
+                    .or_else(|| crate::anim_native::parametric_for_template(&plantilla, &concepto))
                 {
                     match crate::anim_native::render_parametric_frames_with_progress(
                         &anim,
@@ -4483,10 +4817,17 @@ impl GrafitoApp {
                 crate::anim_native::GIF_BASE_FPS,
             ) {
                 Ok(frames) => {
-                    let title = if nombres.is_empty() {
+                    // M1: UN `titulo_curado` compartido por las 3 vías +
+                    // playlist (defecto 7): cada lado cura por el punto
+                    // único, sin eco crudo ni typos visibles.
+                    let title = if bases.is_empty() {
                         "playlist (nativa)".to_string()
                     } else {
-                        format!("{} (playlist nativa)", nombres.join(" y después "))
+                        let curados: Vec<String> = bases
+                            .iter()
+                            .map(|(plantilla, concepto)| titulo_curado(plantilla, concepto, None))
+                            .collect();
+                        format!("{} (playlist nativa)", curados.join(" y después "))
                     };
                     let _ =
                         sender.send(Ok(grafito_ui::assistant::AssistantMedia { title, frames }));
@@ -5039,18 +5380,38 @@ impl GrafitoApp {
     }
 
     fn cancel_assistant_request(&mut self) {
-        // Cancela remote+proposal+agent+model+anim (todos, sin else-if: aunque el
-        // slot remoto sólo permite un job de consulta a la vez, model/anim son
-        // independientes y deben cancelarse también). Los workers con token se
-        // drenan en poll (take_finished_*); anim señala su token y dropea el
-        // slot (worker acotado con chequeo entre frames).
+        // Cancela remote+proposal+agent+model+anim+export (todos, sin else-if:
+        // aunque el slot remoto sólo permite un job de consulta a la vez,
+        // model/anim/export son independientes y deben cancelarse también).
+        // Los workers con token se drenan en poll (take_finished_*); anim
+        // señala su token y dropea el slot (worker acotado con chequeo entre
+        // frames); el export suelto lo entierra el reaper y la card vuelve
+        // a `Idle` (ver `cancela_turno_anim`).
         let had_anim = self.assistant_runtime.anim_job.is_some();
-        if self.assistant_runtime.cancel_all_assistant_jobs() {
+        if self.cancela_turno_anim() {
             if had_anim {
                 self.assistant.anim_progress = false;
             }
             self.begin_cancelling_remote_request();
         }
+    }
+
+    /// Cancela el turno en vuelo + resetea la card de export si el cancel
+    /// soltó su hilo (M1, defecto 5).
+    ///
+    /// Sin el reset, un export en vuelo cancelado dejaría la card en
+    /// `Exporting` para siempre (el reaper entierra el archivo en background
+    /// y el poll ya no drena nada). Solo resetea si HABÍA export y el slot
+    /// se soltó: un `Done`/`Failed` previo no se toca. Sin I/O en el
+    /// llamante. Retorna si había algún job en vuelo.
+    fn cancela_turno_anim(&mut self) -> bool {
+        let habia_export = self.assistant_runtime.gif_export_job.is_some();
+        let hubo = self.assistant_runtime.cancel_all_assistant_jobs();
+        if habia_export && self.assistant_runtime.gif_export_job.is_none() {
+            self.assistant
+                .set_media_export(grafito_ui::assistant::MediaExportState::Idle);
+        }
+        hubo
     }
 
     fn begin_cancelling_remote_request(&mut self) {
@@ -7051,9 +7412,10 @@ fn read_bounded_attachment(reader: impl Read, max_bytes: usize) -> Result<Vec<u8
 mod tests {
     use super::{
         accepts_model_result, accepts_remote_context, accepts_remote_result,
-        append_canonical_integral_prose, apply_local_assistant_plan, assistant_graph_perspective,
-        attachment_error_message, can_offer_assistant_proposal_correction,
-        clasifica_pedido_integral, classify_local_assistant_response,
+        anim_parametrica_para_pedido, append_canonical_integral_prose, apply_local_assistant_plan,
+        assistant_graph_perspective, attachment_error_message, aviso_fallback_canonico,
+        can_offer_assistant_proposal_correction, clasifica_pedido_integral,
+        clasifica_pedido_tangente, classify_local_assistant_response,
         commit_assistant_graph_preflight, decide_animacion, esperar_spec_ia_con_timeout,
         ia_disponible_para_anim, inspect_remote_action_proposals, inspect_remote_proposals,
         inspect_remote_proposals_cancellable, is_agent_spark_responses_unsupported_error,
@@ -7061,18 +7423,21 @@ mod tests {
         parsear_spec_anim_ia, plantilla_para_pedido, playlist_para_pedido,
         pop_provisional_stream_turn, preflight_assistant_flower_scene,
         preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
-        preflight_assistant_parameter, preflight_assistant_scene, prosa_integral_explicita,
-        prosa_para_spec_anim_ia, read_bounded_attachment, remote_error_message,
-        remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
+        preflight_assistant_parameter, preflight_assistant_scene, prosa_canonica_para_plantilla,
+        prosa_integral_explicita, prosa_para_spec_anim_ia, prosa_tangente_explicita,
+        read_bounded_attachment, remote_error_message, remote_stage_for_job,
+        render_media_desde_spec_ia, resolver_turno_anim_ia,
         should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
         socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
         stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_spec_anim_ia,
         validate_assistant_command, verified_remote_proposals, wants_exercise_request,
-        AgentChannelMsg, AssistantAgentJob, AssistantAnimJob, AssistantCommandInvocation,
-        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
-        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
-        IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
-        RemoteStage, SpecAnimIa, ANIM_IA_SPEC_TIMEOUT_MS, ANIM_SIN_IA_AVISO,
+        AgentChannelMsg, AnimIaRender, AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob,
+        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
+        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
+        DecisionAnimacion, DesenlaceAnimIa, GifExportJob, IntegralPedido,
+        LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification, RemoteStage,
+        SpecAnimIa, TangentePedido, ANIM_IA_SPEC_TIMEOUT_MS, ANIM_MOTOR_IDLE_TIMEOUT_SECS,
+        ANIM_MOTOR_JOB_TIMEOUT_SECS, ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
@@ -8402,6 +8767,303 @@ mod tests {
                 DesenlaceAnimIa::FallbackCanonico { aviso } => {
                     assert_eq!(aviso, ANIM_SIN_IA_AVISO);
                     assert!(!aviso.contains('\n'), "UNA línea: {aviso}");
+                }
+                otra => panic!("timeout/transporte debe ser fallback, fue {otra:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn m1_submit_tangente_explicita_x3_frames_de_x3() {
+        // Defecto 1: "derivada x³ [-2,2]" por Submit → frames de x³, no
+        // canónica muda. Decisión + render usan `infer_tangent_anim` igual
+        // que el agente.
+        let pedido = "derivada x³ [-2,2] con animación";
+        assert_eq!(plantilla_para_pedido(pedido), "derivative-slope");
+        assert_eq!(
+            clasifica_pedido_tangente(pedido, "derivative-slope"),
+            TangentePedido::Explicita
+        );
+        match decide_animacion(pedido) {
+            DecisionAnimacion::RenderExplicito {
+                plantilla,
+                concepto: _,
+                expr,
+            } => {
+                assert_eq!(plantilla, "derivative-slope");
+                assert_eq!(expr, "x^3");
+            }
+            otra => panic!("explícita debe renderizar, fue {otra:?}"),
+        }
+        // La prosa nombra f y rango (defecto 6: jamás huérfana).
+        let prosa = prosa_tangente_explicita("x^3", pedido);
+        assert!(prosa.contains("x^3"), "{prosa}");
+        assert!(prosa.contains("[-2,2]"), "{prosa}");
+        assert!(prosa.contains("deslizador"), "{prosa}");
+        assert!(!prosa.contains("pedime otra"), "{prosa}");
+        // El render explícito difiere de la canónica x².
+        let anim = anim_parametrica_para_pedido("derivative-slope", pedido)
+            .expect("explícita no falla")
+            .expect("derivative-slope con tangente es paramétrica");
+        assert_eq!(anim.expr_a, "x^3");
+        let cancel = CancellationToken::default();
+        let media = render_media_desde_spec_ia(
+            &SpecAnimIa {
+                expr: anim.expr_a.clone(),
+                p0: anim.p0,
+                p1: anim.p1,
+                plantilla: "derivative-slope".to_string(),
+                param: anim.param.as_str().to_string(),
+            },
+            &cancel,
+        )
+        .expect("render x^3");
+        assert!(
+            media.title.contains("x^3"),
+            "título nombra x³: {}",
+            media.title
+        );
+        let canonica = spec_canonico_para_fallback("derivative-slope");
+        let media_canonica = render_media_desde_spec_ia(&canonica, &cancel).expect("canónica");
+        assert_ne!(
+            media.frames[0].pixels, media_canonica.frames[0].pixels,
+            "x³ no es la canónica x²"
+        );
+    }
+
+    #[test]
+    fn m1_tangente_invalida_foo_error_honesto_sin_frames() {
+        // Defecto 2: `foo(x)` en tangente diverge (agente `Err`, Submit
+        // canónica muda). Ahora Submit es honesto con qué pedir.
+        let pedido = "tangente móvil de f(x)=foo(x) con animación";
+        assert_eq!(plantilla_para_pedido(pedido), "derivative-slope");
+        match clasifica_pedido_tangente(pedido, "derivative-slope") {
+            TangentePedido::FuncionInvalida(detalle) => {
+                assert!(detalle.contains("foo(x)"), "{detalle}");
+                assert!(detalle.contains("x^2"), "da ejemplo: {detalle}");
+            }
+            otro => panic!("inválida no clasifica, fue {otro:?}"),
+        }
+        match decide_animacion(pedido) {
+            DecisionAnimacion::PreguntarSinMedia(guia) => {
+                assert!(guia.contains("foo(x)"), "{guia}");
+            }
+            otra => panic!("inválida no renderiza, fue {otra:?}"),
+        }
+        assert!(anim_parametrica_para_pedido("derivative-slope", pedido).is_err());
+        // Suelta sin `=` también es honesta, no canónica muda.
+        assert!(
+            anim_parametrica_para_pedido("derivative-slope", "derivada foo(x) [-2,2]").is_err()
+        );
+    }
+
+    #[test]
+    fn m1_aviso_fallback_declara_plantilla_y_rango_reales() {
+        // Defecto 3: el aviso declara lo EFECTIVAMENTE renderizado.
+        let integral = spec_canonico_para_fallback("integral-area");
+        let aviso = aviso_fallback_canonico(&integral);
+        assert!(!aviso.contains('\n'), "UNA línea: {aviso}");
+        assert!(aviso.contains("x^2"), "{aviso}");
+        assert!(aviso.contains("[0,2]"), "{aviso}");
+        assert!(aviso.contains("integral"), "{aviso}");
+        assert!(aviso.contains("pedime otra"), "{aviso}");
+        let tangente = spec_canonico_para_fallback("derivative-slope");
+        let aviso_t = aviso_fallback_canonico(&tangente);
+        assert!(!aviso_t.contains('\n'), "UNA línea: {aviso_t}");
+        assert!(aviso_t.contains("x^2"), "{aviso_t}");
+        assert!(aviso_t.contains("[-1.5,1.5]"), "{aviso_t}");
+        assert!(aviso_t.contains("tangente"), "{aviso_t}");
+        assert_ne!(aviso, aviso_t, "cada plantilla declara lo suyo");
+    }
+
+    #[test]
+    fn m1_prosa_canonica_por_plantilla_no_cruza() {
+        // La canónica tangente declara tangente; la integral, integral.
+        let tangente = prosa_canonica_para_plantilla("derivative-slope");
+        assert!(tangente.contains("tangente"), "{tangente}");
+        assert!(tangente.contains("x²"), "{tangente}");
+        assert!(tangente.contains("deslizador"), "{tangente}");
+        let integral = prosa_canonica_para_plantilla("integral-area");
+        assert!(!integral.contains("tangente"), "{integral}");
+        assert!(integral.contains("x²"), "{integral}");
+    }
+
+    #[test]
+    fn m1_cancel_total_cancela_todo_incluye_export() {
+        // Defecto 5: `cancel_anim_job` cancela TODO lo vivo del turno.
+        let mut runtime = AssistantRuntime::default();
+        let remote_cancel = CancellationToken::default();
+        let (_rtx, rrx) = sync_channel::<Result<RemoteCompletion, String>>(1);
+        runtime.remote_job = Some(AssistantRemoteJob {
+            id: 1,
+            provider: ProviderProfile::OpenCodeGo,
+            model: "deepseek-v4-flash".into(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: false,
+            question: "q".into(),
+            correction_attempt: 0,
+            repair_target_turn: None,
+            document_revision: 1,
+            document_digest: "d".into(),
+            focus: None,
+            cancellation: remote_cancel.clone(),
+            receiver: rrx,
+            stream_rx: None,
+            stream_text: String::new(),
+            preview_active: false,
+            started_at: std::time::Instant::now(),
+            first_delta_at: None,
+        });
+        let agent_cancel = grafito_agent::loop_engine::Cancellation::default();
+        let (_atx, arx) = sync_channel::<AgentChannelMsg>(1);
+        let (_ctx, crx) = sync_channel::<grafito_ui::assistant::PendingClarification>(1);
+        runtime.agent_job = Some(AssistantAgentJob {
+            provider: ProviderProfile::OpenCodeGo,
+            model: "deepseek-v4-flash".into(),
+            cancellation: agent_cancel.clone(),
+            receiver: arx,
+            clarification_receiver: crx,
+        });
+        let anim_cancel = CancellationToken::default();
+        let (_anx, anrx) = sync_channel::<Result<AnimIaRender, String>>(1);
+        runtime.anim_ia_job = Some(AssistantAnimIaJob {
+            cancellation: anim_cancel.clone(),
+            receiver: anrx,
+        });
+        // Export en vuelo sobre un temporal real: el reaper lo entierra.
+        let ruta = std::env::temp_dir().join(format!(
+            "grafito_cancel_reaper_{}_{}.gif",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&ruta, b"GIF89a").expect("temporal del test");
+        let ruta_hilo = ruta.clone();
+        runtime.gif_export_job = Some(GifExportJob {
+            handle: std::thread::spawn(move || Ok(ruta_hilo)),
+            frame_count: 1,
+        });
+        assert!(runtime.cancel_anim_job(), "había turno en vuelo");
+        assert!(remote_cancel.is_cancelled(), "remote señalado");
+        assert!(agent_cancel.is_cancelled(), "agent señalado");
+        assert!(anim_cancel.is_cancelled(), "anim-ia señalado");
+        assert!(runtime.anim_ia_job.is_none(), "anim dropeado");
+        assert!(runtime.gif_export_job.is_none(), "export soltado");
+        // El reaper hace join + borra (espera acotada, sin cuelgue).
+        for _ in 0..200 {
+            if !ruta.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!ruta.exists(), "el reaper entierra el temporal");
+        // Remote conserva el slot hasta el drain (sin huérfanos).
+        assert!(!runtime.remote_request_slot_is_free());
+    }
+
+    #[test]
+    fn m1_playlist_titula_por_punto_unico_sin_eco_crudo() {
+        // Defecto 7: la playlist titula por `titulo_curado` (mismo que las
+        // 3 vías), jamás eco crudo con typos.
+        let pedido =
+            "haceme una animacion de una integrela y después explica la derivada con animación";
+        let (a, b) = split_playlist_request(pedido).expect("playlist X y después Y");
+        let ta = plantilla_para_pedido(&a);
+        let tb = plantilla_para_pedido(&b);
+        assert_eq!(ta, "integral-area");
+        assert_eq!(tb, "derivative-slope");
+        let titulo = format!(
+            "{} (playlist nativa)",
+            [titulo_curado(ta, &a, None), titulo_curado(tb, &b, None)].join(" y después ")
+        );
+        assert!(!titulo.to_lowercase().contains("integrela"), "{titulo}");
+        assert!(titulo.contains("Integral"), "{titulo}");
+        assert!(titulo.contains("Derivada"), "{titulo}");
+    }
+
+    #[test]
+    fn m1_timeouts_motor_pineados_y_spec_pre_cancelado_no_toca_red() {
+        // Defecto 4: cada timeout documentado en su const.
+        assert_eq!(ANIM_MOTOR_IDLE_TIMEOUT_SECS, 2);
+        assert_eq!(ANIM_MOTOR_JOB_TIMEOUT_SECS, 15);
+        assert_eq!(
+            ANIM_IA_SPEC_TIMEOUT_MS,
+            grafito_assistant_types::RequestBudget::default().timeout_ms / 2
+        );
+        // Token pre-cancelado: el SPEC agente no toca red (Transporte
+        // honesto inmediato; la ligadura Cancellation↔token vive adentro).
+        let cancel = CancellationToken::default();
+        cancel.cancel();
+        let settings = grafito_assistant::ProviderSettings::for_profile(
+            ProviderProfile::OpenCodeGo,
+            "deepseek-v4-flash",
+        );
+        match crate::GrafitoApp::pedir_spec_ia_de_verdad(
+            "derivada x^3 [-2,2]".to_string(),
+            settings,
+            None,
+            true,
+            ANIM_IA_SPEC_TIMEOUT_MS,
+            cancel,
+        ) {
+            PedidoSpecIa::Transporte(detalle) => {
+                assert!(detalle.contains("cancel"), "{detalle}");
+            }
+            otra => panic!("pre-cancelado debe ser Transporte, fue {otra:?}"),
+        }
+    }
+
+    #[test]
+    fn m1_remota_ia_tangente_x3_valida_prosa_frames_y_timeout_fallback() {
+        // Vía remota IA ante los mismos inputs que Submit y agente.
+        // 1. Explícita: JSON tangente x³ → SPEC válido, prosa que nombra.
+        let texto_ia =
+            r#"{"expr": "x^3", "p0": -2, "p1": 2, "plantilla": "derivative-slope", "param": "p"}"#;
+        let spec = parsear_spec_anim_ia(texto_ia, "derivada x³ [-2,2] con animación")
+            .expect("tangente x^3 valida");
+        assert_eq!(spec.expr, "x^3");
+        assert_eq!((spec.p0, spec.p1), (-2.0, 2.0));
+        assert_eq!(spec.plantilla, "derivative-slope");
+        let prosa = prosa_para_spec_anim_ia(&spec);
+        assert!(prosa.contains("x^3"), "{prosa}");
+        assert!(prosa.contains("[-2,2]"), "{prosa}");
+        match resolver_turno_anim_ia(true, PedidoSpecIa::Exito(spec.clone())) {
+            DesenlaceAnimIa::RenderIa {
+                spec: render_spec,
+                prosa: render_prosa,
+            } => {
+                assert_eq!(render_spec.expr, "x^3");
+                assert!(render_prosa.contains("x^3"), "{render_prosa}");
+            }
+            otro => panic!("con IA válida debe renderizar IA, fue {otro:?}"),
+        }
+        let cancel = CancellationToken::default();
+        let media = render_media_desde_spec_ia(&spec, &cancel).expect("render tangente x^3");
+        assert!(
+            media.title.contains("x^3"),
+            "título nombra x³: {}",
+            media.title
+        );
+        // 2. Vacía (sin función): el parse exige función → error honesto.
+        assert!(parsear_spec_anim_ia("{}", "derivada con animación").is_err());
+        // 3. Inválida: foo(x) no valida con `infer_*`.
+        let basura = r#"{"expr": "foo(x)", "p0": -2, "p1": 2, "plantilla": "derivative-slope"}"#;
+        assert!(parsear_spec_anim_ia(basura, "tangente con animación").is_err());
+        match resolver_turno_anim_ia(true, PedidoSpecIa::Invalido("la función no valida".into())) {
+            DesenlaceAnimIa::ErrorHonesto(detalle) => assert!(!detalle.is_empty()),
+            otro => panic!("SPEC inválido debe ser error honesto, fue {otro:?}"),
+        }
+        // 4. Timeout/transporte → fallback canónico con aviso genérico del
+        // resolver (el worker lo especializa con `aviso_fallback_canonico`).
+        for salida in [
+            PedidoSpecIa::Timeout,
+            PedidoSpecIa::Transporte("remote assistant returned HTTP 429".into()),
+        ] {
+            match resolver_turno_anim_ia(true, salida) {
+                DesenlaceAnimIa::FallbackCanonico { aviso } => {
+                    assert_eq!(aviso, ANIM_SIN_IA_AVISO);
                 }
                 otra => panic!("timeout/transporte debe ser fallback, fue {otra:?}"),
             }
@@ -10167,15 +10829,20 @@ mod tests {
             &ctx,
         );
         assert!(panel.media.is_some(), "T1 instala la integral");
-        // T2: OTRA animación explícita → local-only, prosa limpia.
+        // T2: OTRA animación (tangente canónica declarada, M1: antes era
+        // RenderGenerico huérfano) → local-only, prosa limpia que declara.
         let pedido2 = "explica la derivada con animación";
         let d2 = decide_animacion(pedido2);
         assert!(
-            matches!(d2, DecisionAnimacion::RenderGenerico { .. }),
+            matches!(d2, DecisionAnimacion::RenderCanonico { .. }),
             "{d2:?}"
         );
         panel.begin_request(pedido2.to_string());
-        let prosa2 = crate::anim_ui::animation_reference_sentence().to_string();
+        let prosa2 = prosa_canonica_para_plantilla("derivative-slope");
+        assert!(
+            prosa2.contains("tangente"),
+            "la canónica se declara: {prosa2}"
+        );
         sin_controles("prosa2", &prosa2);
         let humano2 = grafito_ui::assistant::humanize_prose_text(&prosa2);
         sin_controles("humano2", &humano2);

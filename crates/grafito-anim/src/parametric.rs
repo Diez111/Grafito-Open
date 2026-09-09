@@ -1563,6 +1563,72 @@ fn area_expr_evaluable(expr: &str, param: &str, p0: f64, p1: f64) -> bool {
     validas > 0
 }
 
+/// Normaliza superíndices de prosa (`x²`, `x³`) a `^n` para el evaluador.
+///
+/// El teclado móvil mete `³` y el pedido "derivada x³ [-2,2]" debe leerse
+/// como `x^3` en las 3 vías (Submit, agente, remota IA). Solo `²`/`³`
+/// (los que la prosa canónica usa); otro superíndice va a canónica honesta.
+/// Pura, sin I/O.
+fn normaliza_superscripts(texto: &str) -> String {
+    texto.replace('²', "^2").replace('³', "^3")
+}
+
+/// Resultado del barrido de expresión suelta (sin `=`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BareExpr {
+    /// Ningún token parece función: va a canónica, como hoy.
+    Ninguna,
+    /// Token con `x` evaluable en el rango: explícita del usuario.
+    Explicita(String),
+    /// Token que parece función (`foo(x)`, `x^2+`) pero no evalúa:
+    /// `Err` honesto con la expresión, jamás canónica muda.
+    Invalida(String),
+}
+
+/// ¿El token parece función aunque no evalúe? Paréntesis u operadores
+/// (`foo(x)`, `x^2+`); la prosa pura (`explica`) no parece función y se
+/// ignora hacia canónica. Pura, sin I/O.
+fn token_parece_funcion(token: &str) -> bool {
+    token.contains('(')
+        || token.contains(')')
+        || token.contains('^')
+        || token.contains('*')
+        || token.contains('/')
+        || token.contains('+')
+        || token.starts_with('-')
+}
+
+/// Expresión suelta sin `=` ("derivada x³ [-2,2]"): primer token con `x`
+/// evaluable en el rango. Un solo token (el multi-token sin `=` sigue a
+/// canónica, como hoy): el gate de evaluabilidad impide que prosa común
+/// ("explica" trae `x`) se lea como función; lo que parece función pero
+/// no evalúa (`foo(x)`) es `Invalida`, no canónica muda. Pura, sin I/O.
+fn extract_bare_expr(text: &str, param_raw: &str, p0: f64, p1: f64) -> BareExpr {
+    for pedazo in text.split_whitespace() {
+        let token = pedazo.trim_matches(|c: char| ",;.:()[]«»\"'".contains(c));
+        if token.is_empty() || !(token.contains('x') || token.contains('X')) {
+            continue;
+        }
+        if token.contains('=') {
+            continue;
+        }
+        let param_efectivo: String = if param_raw.trim().is_empty() {
+            guess_param_name(token, None).to_string()
+        } else {
+            param_raw.to_string()
+        };
+        if area_expr_evaluable(token, &param_efectivo, p0, p1) {
+            return BareExpr::Explicita(token.to_string());
+        }
+        if token_parece_funcion(token) {
+            return BareExpr::Invalida(format!(
+                "la función {pedazo:?} no se puede evaluar en [{p0},{p1}]: revisá la expresión, por ejemplo f(x)=x^2"
+            ));
+        }
+    }
+    BareExpr::Ninguna
+}
+
 fn area_anim(
     expr: String,
     param_raw: &str,
@@ -1593,42 +1659,54 @@ fn area_anim(
 
 /// Infiere un pedido de integral/área a `AreaPedido`.
 ///
-/// - Sin expresión tras `=` → `Canonica` (`x^2` en `[0,2]`, o el rango
-///   pedido si lo trae).
-/// - Con expresión evaluable (constantes incluidas) → `Explicita`.
+/// - Sin expresión (ni tras `=` ni suelta) → `Canonica` (`x^2` en `[0,2]`,
+///   o el rango pedido si lo trae).
+/// - Con expresión evaluable (constantes incluidas, con `=` o suelta como
+///   "integral x³ [0,2]") → `Explicita`.
 /// - Con prosa sin `x` no evaluable ("F=m*a") → se ignora la prosa y va
 ///   `Canonica` (no era una función).
 /// - Con `x` no evaluable en ningún punto ("foo(x)") → `Err` honesto
 ///   (`NoSoportado` con ejemplo), sin frames.
 /// - Sin mención a integral/área → `FaltaTipo` (no es un pedido de área).
 pub fn infer_area_anim(pedido: &str) -> ParametricResult<AreaPedido> {
-    let text = pedido.trim();
-    if text.is_empty() {
+    let text_original = pedido.trim();
+    if text_original.is_empty() {
         return Err(ParametricError::PedidoVacio);
     }
-    if text.chars().count() > 2000 {
+    if text_original.chars().count() > 2000 {
         return Err(ParametricError::ExpresionMuyLarga {
-            got: text.chars().count(),
+            got: text_original.chars().count(),
             max: 2000,
         });
     }
     if !pedido_menciona_area(pedido) {
         return Err(ParametricError::FaltaTipo);
     }
+    let normalizado = normaliza_superscripts(text_original);
+    let text: &str = &normalizado;
     let lower = text.to_lowercase();
     let (param_raw, p0, p1) = extract_range(text).map_or_else(
         || (String::new(), INTEGRAL_CANONICAL_P0, INTEGRAL_CANONICAL_P1),
         |(nombre, a, b)| (nombre, a, b),
     );
-    let Some(expr) = extract_single_expr(text) else {
-        let anim = area_anim(
-            INTEGRAL_CANONICAL_EXPR.to_string(),
-            &param_raw,
-            p0,
-            p1,
-            &lower,
-        )?;
-        return Ok(AreaPedido::Canonica(anim));
+    let expr: String = match extract_single_expr(text) {
+        Some(expr) => expr,
+        None => match extract_bare_expr(text, &param_raw, p0, p1) {
+            BareExpr::Explicita(expr) => expr,
+            BareExpr::Invalida(detalle) => {
+                return Err(ParametricError::NoSoportado { detalle });
+            }
+            BareExpr::Ninguna => {
+                let anim = area_anim(
+                    INTEGRAL_CANONICAL_EXPR.to_string(),
+                    &param_raw,
+                    p0,
+                    p1,
+                    &lower,
+                )?;
+                return Ok(AreaPedido::Canonica(anim));
+            }
+        },
     };
     // Nombre del parámetro efectivo para validar la expresión.
     let param_efectivo: String = if param_raw.trim().is_empty() {
@@ -1747,39 +1825,51 @@ fn tangent_anim(
 
 /// Infiere un pedido de tangente/derivada a `TangentPedido`.
 ///
-/// - Sin expresión tras `=` → `Canonica` (`x^2` en `[-1.5,1.5]`, o el rango
-///   pedido si lo trae).
-/// - Con expresión evaluable → `Explicita`.
+/// - Sin expresión (ni tras `=` ni suelta) → `Canonica` (`x^2` en
+///   `[-1.5,1.5]`, o el rango pedido si lo trae).
+/// - Con expresión evaluable (con `=` o suelta como "derivada x³ [-2,2]")
+///   → `Explicita`.
 /// - Con prosa sin `x` no evaluable → se ignora la prosa y va `Canonica`.
 /// - Con `x` no evaluable en ningún punto → `Err` honesto, sin frames.
 pub fn infer_tangent_anim(pedido: &str) -> ParametricResult<TangentPedido> {
-    let text = pedido.trim();
-    if text.is_empty() {
+    let text_original = pedido.trim();
+    if text_original.is_empty() {
         return Err(ParametricError::PedidoVacio);
     }
-    if text.chars().count() > 2000 {
+    if text_original.chars().count() > 2000 {
         return Err(ParametricError::ExpresionMuyLarga {
-            got: text.chars().count(),
+            got: text_original.chars().count(),
             max: 2000,
         });
     }
     if !pedido_menciona_tangente(pedido) {
         return Err(ParametricError::FaltaTipo);
     }
+    let normalizado = normaliza_superscripts(text_original);
+    let text: &str = &normalizado;
     let lower = text.to_lowercase();
     let (param_raw, p0, p1) = extract_range(text).map_or_else(
         || (String::new(), TANGENT_CANONICAL_P0, TANGENT_CANONICAL_P1),
         |(nombre, a, b)| (nombre, a, b),
     );
-    let Some(expr) = extract_single_expr(text) else {
-        let anim = tangent_anim(
-            TANGENT_CANONICAL_EXPR.to_string(),
-            &param_raw,
-            p0,
-            p1,
-            &lower,
-        )?;
-        return Ok(TangentPedido::Canonica(anim));
+    let expr: String = match extract_single_expr(text) {
+        Some(expr) => expr,
+        None => match extract_bare_expr(text, &param_raw, p0, p1) {
+            BareExpr::Explicita(expr) => expr,
+            BareExpr::Invalida(detalle) => {
+                return Err(ParametricError::NoSoportado { detalle });
+            }
+            BareExpr::Ninguna => {
+                let anim = tangent_anim(
+                    TANGENT_CANONICAL_EXPR.to_string(),
+                    &param_raw,
+                    p0,
+                    p1,
+                    &lower,
+                )?;
+                return Ok(TangentPedido::Canonica(anim));
+            }
+        },
     };
     // Nombre del parámetro efectivo para validar la expresión: el canónico
     // `p` cuando no hay rango explícito (espejo de `tangent_anim`).
@@ -2082,6 +2172,34 @@ mod tests {
         let res = infer_tangent_anim("derivada pelada").expect("menciona derivada");
         assert_eq!(res.anim().param.as_str(), "p");
         assert_eq!(res.anim().param.as_str(), TANGENT_CANONICAL_PARAM);
+    }
+
+    #[test]
+    fn expresion_suelta_sin_igual_es_explicita_en_las_3_vias() {
+        // M1: "derivada x³ [-2,2]" (superíndice, sin `=`) → explícita x^3,
+        // no canónica muda. Base común de Submit, agente y remota IA.
+        let res = infer_tangent_anim("derivada x³ [-2,2]").unwrap();
+        assert!(!res.es_canonica(), "la suelta evaluable es explícita");
+        assert_eq!(res.anim().expr_a, "x^3");
+        assert_eq!((res.anim().p0, res.anim().p1), (-2.0, 2.0));
+        assert_eq!(res.anim().kind, ParametricKind::Tangent);
+        // Espejo en área.
+        let area = infer_area_anim("integral x³ [0,2]").unwrap();
+        assert!(!area.es_canonica());
+        assert_eq!(area.anim().expr_a, "x^3");
+        assert_eq!((area.anim().p0, area.anim().p1), (0.0, 2.0));
+        // ASCII también vale.
+        let ascii = infer_tangent_anim("tangente de x^2 en [0,1]").unwrap();
+        assert!(!ascii.es_canonica());
+        assert_eq!(ascii.anim().expr_a, "x^2");
+        // Prosa común con `x` ("explica") NO se lee como función.
+        let prosa = infer_tangent_anim("explica la derivada con animación").unwrap();
+        assert!(prosa.es_canonica(), "la prosa va a canónica");
+        let prosa_area = infer_area_anim("haceme una animacion de una integral").unwrap();
+        assert!(prosa_area.es_canonica());
+        // Suelta no evaluable con `x` → Err honesto, jamás canónica muda.
+        assert!(infer_tangent_anim("derivada foo(x) [-2,2]").is_err());
+        assert!(infer_area_anim("integral foo(x) [0,2]").is_err());
     }
 
     #[test]

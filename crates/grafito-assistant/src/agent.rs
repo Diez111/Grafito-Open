@@ -4227,4 +4227,39 @@ mod tests {
         assert!(anim_spec_json_para_hilo("haceme una animación").is_err());
         assert!(anim_spec_json_para_hilo("").is_err());
     }
+
+    #[test]
+    fn m1_spec_json_matriz_3_vias_explicita_vacia_invalida_timeout() {
+        // M1: la vía agente se comporta IGUAL que Submit ante los mismos
+        // inputs (misma puerta `infer_*`, sin duplicar reglas).
+        // 1. Explícita suelta (superíndice, sin `=`): x³ con rango.
+        let suelta = anim_spec_json_para_hilo("derivada x³ [-2,2]")
+            .expect("la suelta evaluable es explícita");
+        assert!(suelta.contains("x^3"), "trae x^3 normalizada: {suelta}");
+        assert!(
+            suelta.contains("\"kind\":\"tangent\""),
+            "kind tangente: {suelta}"
+        );
+        assert!(suelta.contains("-2"), "trae el rango: {suelta}");
+        // 2. Vacía/sin función: canónica DECLARADA (mismo que Submit).
+        let vacia = anim_spec_json_para_hilo("hace una animacion de una derivada")
+            .expect("sin función va a canónica");
+        assert!(vacia.contains("x^2"), "canónica x^2: {vacia}");
+        assert!(
+            vacia.contains("\"canonical\":true"),
+            "declara canónica: {vacia}"
+        );
+        // 3. Inválida: `Err` honesto con qué pedir (mismo que Submit).
+        let invalida = anim_spec_json_para_hilo("tangente móvil de f(x)=foo(x) con animación")
+            .expect_err("foo(x) no valida");
+        assert!(invalida.contains("foo(x)"), "{invalida}");
+        assert!(invalida.contains("x^2"), "da ejemplo: {invalida}");
+        // Suelta inválida sin `=` también es `Err`, no canónica muda.
+        assert!(anim_spec_json_para_hilo("derivada foo(x) [-2,2]").is_err());
+        // 4. Timeout: no aplica en puro (sin red); el transporte acota por
+        // turno (`per_turn_timeout`, pineado en
+        // `responses_loop_reports_per_turn_timeout`) y la app liga su
+        // Cancellation al token del turno (forwarder en
+        // `pedir_spec_ia_de_verdad`).
+    }
 }
