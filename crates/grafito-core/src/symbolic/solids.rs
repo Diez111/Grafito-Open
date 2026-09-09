@@ -307,6 +307,202 @@ pub fn project_ortho(point: [f64; 3], view: OrthoView) -> (f64, f64) {
     }
 }
 
+/// Vértices de un cubo eje-alineado de centro dado y arista `size`.
+/// Orden binario `(-,-,-)…(+,+,+)`. `None` si no finitos o `size <= 0`.
+pub fn cube_vertices(center: [f64; 3], size: f64) -> Option<[[f64; 3]; 8]> {
+    if !center.iter().all(|v| v.is_finite()) || !size.is_finite() || size <= 0.0 {
+        return None;
+    }
+    let h = 0.5 * size;
+    if !h.is_finite() {
+        return None;
+    }
+    let mut out = [[0.0_f64; 3]; 8];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let sx = if i & 1 == 0 { -h } else { h };
+        let sy = if i & 2 == 0 { -h } else { h };
+        let sz = if i & 4 == 0 { -h } else { h };
+        let p = [center[0] + sx, center[1] + sy, center[2] + sz];
+        if !p.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        *slot = p;
+    }
+    Some(out)
+}
+
+/// Aristas del cubo por índices en [`cube_vertices`] (12, sin duplicados).
+pub fn cube_edges() -> [[usize; 2]; 12] {
+    [
+        [0, 1],
+        [2, 3],
+        [4, 5],
+        [6, 7],
+        [0, 2],
+        [1, 3],
+        [4, 6],
+        [5, 7],
+        [0, 4],
+        [1, 5],
+        [2, 6],
+        [3, 7],
+    ]
+}
+
+/// Vista ortográfica que mejor muestra un plano de normal `normal`:
+/// dominante X→perfil, Y→planta, Z→alzado. Espeja
+/// `render_3d::OrthoProjection` (piel) para que el polígono 2D no colapse.
+pub fn best_ortho_view_for_normal(normal: [f64; 3]) -> OrthoView {
+    let ax = normal[0].abs();
+    let ay = normal[1].abs();
+    let az = normal[2].abs();
+    if ax >= ay && ax >= az {
+        OrthoView::Side
+    } else if ay >= ax && ay >= az {
+        OrthoView::Top
+    } else {
+        OrthoView::Front
+    }
+}
+
+/// Intersección plano-cubo como polígono 3D ordenado angularmente en el plano.
+///
+/// Plano `ax+by+cz+d=0` + cubo eje-alineado. Recorre las 12 aristas,
+/// interpola los cruces, deduplica (1e-9) y ordena por ángulo alrededor del
+/// centroide en una base ortonormal del plano (misma que el círculo
+/// plano-esfera). `None` si el plano es degenerado, el cubo es inválido o hay
+/// menos de 3 puntos distintos (tangencia en punto/arista: sin polígono).
+pub fn plane_cube_section(
+    plane: (f64, f64, f64, f64),
+    center: [f64; 3],
+    size: f64,
+) -> Option<Vec<[f64; 3]>> {
+    const EPS: f64 = 1e-9;
+    const DEDUP_EPS2: f64 = 1e-18;
+    let (a, b, c, d) = plane;
+    if !a.is_finite() || !b.is_finite() || !c.is_finite() || !d.is_finite() {
+        return None;
+    }
+    let norm_len = (a * a + b * b + c * c).sqrt();
+    if !norm_len.is_finite() || norm_len <= 1e-12 {
+        return None;
+    }
+    let vertices = cube_vertices(center, size)?;
+    let mut points: Vec<[f64; 3]> = Vec::new();
+    for edge in cube_edges() {
+        let p0 = vertices[edge[0]];
+        let p1 = vertices[edge[1]];
+        let v0 = a * p0[0] + b * p0[1] + c * p0[2] + d;
+        let v1 = a * p1[0] + b * p1[1] + c * p1[2] + d;
+        if !v0.is_finite() || !v1.is_finite() {
+            return None;
+        }
+        if v0.abs() <= EPS && v1.abs() <= EPS {
+            for p in [p0, p1] {
+                if !points.iter().any(|q| {
+                    let dx = q[0] - p[0];
+                    let dy = q[1] - p[1];
+                    let dz = q[2] - p[2];
+                    dx * dx + dy * dy + dz * dz <= DEDUP_EPS2
+                }) {
+                    points.push(p);
+                }
+            }
+        } else if v0.abs() <= EPS {
+            if !points.iter().any(|q| {
+                let dx = q[0] - p0[0];
+                let dy = q[1] - p0[1];
+                let dz = q[2] - p0[2];
+                dx * dx + dy * dy + dz * dz <= DEDUP_EPS2
+            }) {
+                points.push(p0);
+            }
+        } else if v1.abs() <= EPS {
+            if !points.iter().any(|q| {
+                let dx = q[0] - p1[0];
+                let dy = q[1] - p1[1];
+                let dz = q[2] - p1[2];
+                dx * dx + dy * dy + dz * dz <= DEDUP_EPS2
+            }) {
+                points.push(p1);
+            }
+        } else if v0 * v1 < 0.0 {
+            let denom = v0 - v1;
+            if !denom.is_finite() || denom.abs() <= 1e-18 {
+                continue;
+            }
+            let t = v0 / denom;
+            if !t.is_finite() {
+                continue;
+            }
+            let p = [
+                p0[0] + t * (p1[0] - p0[0]),
+                p0[1] + t * (p1[1] - p0[1]),
+                p0[2] + t * (p1[2] - p0[2]),
+            ];
+            if !p.iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            if !points.iter().any(|q| {
+                let dx = q[0] - p[0];
+                let dy = q[1] - p[1];
+                let dz = q[2] - p[2];
+                dx * dx + dy * dy + dz * dz <= DEDUP_EPS2
+            }) {
+                points.push(p);
+            }
+        }
+    }
+    if points.len() < 3 {
+        return None;
+    }
+    // Orden angular alrededor del centroide en base (u, v) del plano.
+    let n = points.len() as f64;
+    let mut centroid = [0.0_f64; 3];
+    for p in &points {
+        centroid[0] += p[0] / n;
+        centroid[1] += p[1] / n;
+        centroid[2] += p[2] / n;
+    }
+    let nx = a / norm_len;
+    let ny = b / norm_len;
+    let nz = c / norm_len;
+    let arbitrary = if nx.abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let mut u = [
+        ny * arbitrary[2] - nz * arbitrary[1],
+        nz * arbitrary[0] - nx * arbitrary[2],
+        nx * arbitrary[1] - ny * arbitrary[0],
+    ];
+    let ulen = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+    if !ulen.is_finite() || ulen <= 1e-12 {
+        return None;
+    }
+    u[0] /= ulen;
+    u[1] /= ulen;
+    u[2] /= ulen;
+    let v = [
+        ny * u[2] - nz * u[1],
+        nz * u[0] - nx * u[2],
+        nx * u[1] - ny * u[0],
+    ];
+    let mut with_angle: Vec<(f64, [f64; 3])> = Vec::with_capacity(points.len());
+    for p in points {
+        let dx = [p[0] - centroid[0], p[1] - centroid[1], p[2] - centroid[2]];
+        let x = dx[0] * u[0] + dx[1] * u[1] + dx[2] * u[2];
+        let y = dx[0] * v[0] + dx[1] * v[1] + dx[2] * v[2];
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        with_angle.push((y.atan2(x), p));
+    }
+    with_angle.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    Some(with_angle.into_iter().map(|(_, p)| p).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +579,32 @@ mod tests {
         assert_eq!(project_ortho([1.0, 2.0, 3.0], OrthoView::Top), (1.0, 3.0));
         assert_eq!(project_ortho([1.0, 2.0, 3.0], OrthoView::Side), (2.0, 3.0));
         assert_eq!(OrthoView::Top.name(), "planta");
+    }
+
+    #[test]
+    fn plano_z_corta_cubo_en_cuadrado() {
+        // R3.2: cubo centro origen arista 2 + plano z=0 → cuadrado (±1,±1,0).
+        let section =
+            plane_cube_section((0.0, 0.0, 1.0, 0.0), [0.0, 0.0, 0.0], 2.0).expect("sección");
+        assert_eq!(section.len(), 4, "cuadrado esperado: {section:?}");
+        for p in &section {
+            assert!(p[2].abs() < 1e-9, "en el plano z=0: {p:?}");
+            assert!((p[0].abs() - 1.0).abs() < 1e-9, "x=±1: {p:?}");
+            assert!((p[1].abs() - 1.0).abs() < 1e-9, "y=±1: {p:?}");
+        }
+        assert_eq!(
+            best_ortho_view_for_normal([0.0, 0.0, 1.0]),
+            OrthoView::Front
+        );
+        assert_eq!(best_ortho_view_for_normal([1.0, 0.0, 0.0]), OrthoView::Side);
+        assert_eq!(best_ortho_view_for_normal([0.0, 1.0, 0.0]), OrthoView::Top);
+    }
+
+    #[test]
+    fn plano_lejos_no_corta_y_degenerado_falla() {
+        assert!(plane_cube_section((0.0, 0.0, 1.0, -5.0), [0.0, 0.0, 0.0], 2.0).is_none());
+        assert!(plane_cube_section((0.0, 0.0, 0.0, 0.0), [0.0, 0.0, 0.0], 2.0).is_none());
+        assert!(cube_vertices([0.0, 0.0, 0.0], 0.0).is_none());
+        assert_eq!(cube_edges().len(), 12);
     }
 }

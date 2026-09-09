@@ -500,11 +500,12 @@ pub fn palette_footer(filtered: usize, total: usize, locale: Locale) -> String {
 // ── Helpers por dominio (Oleada 3 los usa para migrar call-sites) ──
 
 /// Sufijos válidos de `onboarding.*` (11).
-pub const ONBOARDING_KEYS: &[&str; 11] = &[
+pub const ONBOARDING_KEYS: &[&str; 12] = &[
     "title",
     "subtitle",
     "bullet_primary",
     "bullet_secondary",
+    "bullet_tertiary",
     "bullet_university",
     "btn_example",
     "btn_empty",
@@ -522,6 +523,7 @@ pub fn onboarding_msg(suffix: &'static str, locale: Locale) -> &'static str {
         "subtitle" => t("onboarding.subtitle", locale),
         "bullet_primary" => t("onboarding.bullet_primary", locale),
         "bullet_secondary" => t("onboarding.bullet_secondary", locale),
+        "bullet_tertiary" => t("onboarding.bullet_tertiary", locale),
         "bullet_university" => t("onboarding.bullet_university", locale),
         "btn_example" => t("onboarding.btn_example", locale),
         "btn_empty" => t("onboarding.btn_empty", locale),
@@ -646,19 +648,19 @@ pub fn anim_msg(suffix: &'static str, locale: Locale) -> &'static str {
     }
 }
 
-// ── Portugués: overlay parcial F3d, variante plena W2 ──
+// ── Portugués: overlay completo R3.4 (antes parcial F3d, variante plena W2) ──
 //
 // F3d lo dejó como tabla parcial `clave → texto` con fallback al EN en el
 // call-site porque añadir la variante rompía matches exhaustivos fuera del
 // frente. W2 levanta esa restricción: `Locale::Pt` existe y `t(key, Pt)`
-// resuelve PT→ES→EN solo (ver `t`). El overlay sigue parcial a propósito:
-// 93 claves (18 grupos + 18 paleta + 11 onboarding + 10 cheat + 10 toast +
-// 12 app/misc + 2 anim + 12 media.title); las 87 `toolbar.tool` + 3
-// `panel.conformal` + `onboarding.bullet_tertiary` caen a ES vía `Msg::get`.
+// resuelve PT→ES→EN solo (ver `t`). R3.4 completa el overlay al 100%:
+// 185 claves (18 grupos + 19 paleta + 12 onboarding + 10 cheat + 10 toast +
+// 12 app/misc + 2 anim + 12 media.title + 87 `toolbar.tool` + 3
+// `panel.conformal`).
 // El lint `unwrap_used` sigue prohibido en prod: el fallback se escribe con
 // `match` o `if let`.
 //
-// Cobertura: 93/184 (50.5%). Medida real en el test `pt_covers_main_ui_keys`
+// Cobertura: 185/185 (100%). Medida real en el test `pt_covers_main_ui_keys`
 // (imprime el % por `--nocapture`).
 
 /// Una entrada del overlay portugués: clave del catálogo + texto PT.
@@ -671,9 +673,10 @@ pub struct PtMsg {
     pub pt: &'static str,
 }
 
-/// Claves principales de UI con traducción PT (94). Ordenado por dominio como
-/// [`MESSAGES`]: grupos (18) + paleta (18) + onboarding (11) + cheat (10) +
-/// toast (10) + app/misc (12).
+/// Claves principales de UI con traducción PT (185). Ordenado por dominio como
+/// [`MESSAGES`]: grupos (18) + paleta (19) + onboarding (12) + cheat (10) +
+/// toast (10) + app/misc (12) + anim (2) + media.title (12) + tools (87) +
+/// panel.conformal (3).
 pub static PT_MESSAGES: &[PtMsg] = &[
     // ── grupos (18) ──
     PtMsg { key: "toolbar.group.move", pt: "Selecionar" },
@@ -719,7 +722,8 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "onboarding.subtitle", pt: "Grafito — lousa geométrica interativa" },
     PtMsg { key: "onboarding.bullet_primary", pt: "• Construa com 5 ferramentas essenciais — Mover, Ponto, Reta, Círculo, Polígono" },
     PtMsg { key: "onboarding.bullet_secondary", pt: "• Secundário adiciona mais 3 — Lápis, Medida, Análise (8 no total)" },
-    PtMsg { key: "onboarding.bullet_university", pt: "• Universidade desbloqueia 17 grupos — Cônicas, 3D, CAS, Estatística, Complexos, Dinâmica…" },
+    PtMsg { key: "onboarding.bullet_university", pt: "• Universidade desbloqueia 18 grupos — Cônicas, 3D, CAS, Estatística, Complexos, Dinâmica…" },
+    PtMsg { key: "onboarding.bullet_tertiary", pt: "3. Arraste um ponto e veja o que se move" },
     PtMsg { key: "onboarding.btn_example", pt: "Testar exemplo" },
     PtMsg { key: "onboarding.btn_empty", pt: "Começar vazio" },
     PtMsg { key: "onboarding.btn_dismiss", pt: "Não mostrar" },
@@ -777,11 +781,103 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "media.title.taylor", pt: "Série de Taylor" },
     PtMsg { key: "media.title.conformal", pt: "Mapeamento conforme" },
     PtMsg { key: "media.title.default", pt: "Animação" },
+    // ── toolbar.tool (87) — R3.4 cierra el recorte F3d/W2 ──
+    PtMsg { key: "toolbar.tool.select", pt: "Selecionar" },
+    PtMsg { key: "toolbar.tool.point", pt: "Ponto" },
+    PtMsg { key: "toolbar.tool.midpoint", pt: "M Ponto médio" },
+    PtMsg { key: "toolbar.tool.line", pt: "Reta" },
+    PtMsg { key: "toolbar.tool.segment", pt: "Segmento" },
+    PtMsg { key: "toolbar.tool.ray", pt: "Semirreta" },
+    PtMsg { key: "toolbar.tool.vector", pt: "Vetor" },
+    PtMsg { key: "toolbar.tool.perpendicular", pt: "Perpendicular" },
+    PtMsg { key: "toolbar.tool.circle", pt: "Círculo centro-ponto" },
+    PtMsg { key: "toolbar.tool.tangent", pt: "Tangente" },
+    PtMsg { key: "toolbar.tool.polygon", pt: "Polígono" },
+    PtMsg { key: "toolbar.tool.regular_polygon", pt: "Polígono regular" },
+    PtMsg { key: "toolbar.tool.pencil", pt: "Lápis" },
+    PtMsg { key: "toolbar.tool.eraser", pt: "Borracha" },
+    PtMsg { key: "toolbar.tool.ellipse_foci", pt: "Elipse por focos" },
+    PtMsg { key: "toolbar.tool.parabola_focus", pt: "Parábola foco-diretriz" },
+    PtMsg { key: "toolbar.tool.hyperbola_foci", pt: "Hipérbole por focos" },
+    PtMsg { key: "toolbar.tool.conic_five", pt: "Cônica por 5 pontos" },
+    PtMsg { key: "toolbar.tool.function", pt: "f(x) Função" },
+    PtMsg { key: "toolbar.tool.param2d", pt: "(x,y) Paramétrica 2D" },
+    PtMsg { key: "toolbar.tool.polar", pt: "r(t) Polar" },
+    PtMsg { key: "toolbar.tool.implicit", pt: "F(x,y)=0 Implícita" },
+    PtMsg { key: "toolbar.tool.field2d", pt: "Campo vetorial" },
+    PtMsg { key: "toolbar.tool.locus", pt: "Lugar geométrico" },
+    PtMsg { key: "toolbar.tool.distance", pt: "Distância" },
+    PtMsg { key: "toolbar.tool.angle", pt: "Ângulo" },
+    PtMsg { key: "toolbar.tool.area", pt: "Área" },
+    PtMsg { key: "toolbar.tool.slope", pt: "m Inclinação" },
+    PtMsg { key: "toolbar.tool.root", pt: "Raízes" },
+    PtMsg { key: "toolbar.tool.extremum", pt: "Extremos" },
+    PtMsg { key: "toolbar.tool.inflection", pt: "Inflexão" },
+    PtMsg { key: "toolbar.tool.yintercept", pt: "Intersecção Y" },
+    PtMsg { key: "toolbar.tool.xintercept", pt: "Intersecção X" },
+    PtMsg { key: "toolbar.tool.intersect", pt: "Intersecção" },
+    PtMsg { key: "toolbar.tool.analyze", pt: "Analisar" },
+    PtMsg { key: "toolbar.tool.coincident", pt: "Coincidente" },
+    PtMsg { key: "toolbar.tool.dist_constraint", pt: "Distância" },
+    PtMsg { key: "toolbar.tool.angle_constraint", pt: "Ângulo" },
+    PtMsg { key: "toolbar.tool.horizontal", pt: "Horizontal" },
+    PtMsg { key: "toolbar.tool.vertical", pt: "Vertical" },
+    PtMsg { key: "toolbar.tool.equal_length", pt: "= Mesmo comprimento" },
+    PtMsg { key: "toolbar.tool.symmetry", pt: "Simetria" },
+    PtMsg { key: "toolbar.tool.union", pt: "União" },
+    PtMsg { key: "toolbar.tool.intersection", pt: "Intersecção" },
+    PtMsg { key: "toolbar.tool.difference", pt: "Diferença" },
+    PtMsg { key: "toolbar.tool.xor", pt: "XOR" },
+    PtMsg { key: "toolbar.tool.point3d", pt: "Ponto 3D" },
+    PtMsg { key: "toolbar.tool.segment3d", pt: "Segmento 3D" },
+    PtMsg { key: "toolbar.tool.line3d", pt: "Reta 3D" },
+    PtMsg { key: "toolbar.tool.plane3d", pt: "Plano 3D" },
+    PtMsg { key: "toolbar.tool.sphere3d", pt: "Esfera" },
+    PtMsg { key: "toolbar.tool.cube3d", pt: "Cubo" },
+    PtMsg { key: "toolbar.tool.cylinder3d", pt: "Cilindro" },
+    PtMsg { key: "toolbar.tool.cone3d", pt: "Cone" },
+    PtMsg { key: "toolbar.tool.torus3d", pt: "Toro" },
+    PtMsg { key: "toolbar.tool.moebius", pt: "Möbius" },
+    PtMsg { key: "toolbar.tool.surface3d", pt: "z Superfície" },
+    PtMsg { key: "toolbar.tool.curve3d", pt: "(x,y,z) Curva 3D" },
+    PtMsg { key: "toolbar.tool.field3d", pt: "Campo 3D" },
+    PtMsg { key: "toolbar.tool.hypersurface4d", pt: "4D Hipersuperfície" },
+    PtMsg { key: "toolbar.tool.tesseract4d", pt: "Tesserato 4D: objeto centrado e projetado" },
+    PtMsg { key: "toolbar.tool.hypercube5d", pt: "Hipercubo 5D: objeto centrado e projetado" },
+    PtMsg { key: "toolbar.tool.fractal", pt: "Fractal" },
+    PtMsg { key: "toolbar.tool.histogram", pt: "Histograma" },
+    PtMsg { key: "toolbar.tool.scatter", pt: "Dispersão" },
+    PtMsg { key: "toolbar.tool.domain_coloring", pt: "Coloração do domínio" },
+    PtMsg { key: "toolbar.tool.heatmap", pt: "Mapa de calor" },
+    PtMsg { key: "toolbar.tool.complex_grid", pt: "Grade complexa" },
+    PtMsg { key: "toolbar.tool.slider", pt: "Deslizante" },
+    PtMsg { key: "toolbar.tool.attractor3d", pt: "Atrator 3D" },
+    PtMsg { key: "toolbar.tool.parallel", pt: "Paralela" },
+    PtMsg { key: "toolbar.tool.arc", pt: "Arco 3 pontos" },
+    PtMsg { key: "toolbar.tool.sector", pt: "Setor circular" },
+    PtMsg { key: "toolbar.tool.button", pt: "Botão" },
+    PtMsg { key: "toolbar.tool.image", pt: "Imagem" },
+    PtMsg { key: "toolbar.tool.trig_animation", pt: "Animação trigonométrica" },
+    PtMsg { key: "toolbar.tool.translate", pt: "Translada" },
+    PtMsg { key: "toolbar.tool.rotate", pt: "Gira" },
+    PtMsg { key: "toolbar.tool.dilate", pt: "Homotetia" },
+    PtMsg { key: "toolbar.tool.reflect", pt: "Reflete" },
+    PtMsg { key: "toolbar.tool.compass", pt: "Compasso" },
+    PtMsg { key: "toolbar.tool.semicircle", pt: "Semicírculo" },
+    PtMsg { key: "toolbar.tool.spline", pt: "Spline" },
+    PtMsg { key: "toolbar.tool.prism3d", pt: "Prisma" },
+    PtMsg { key: "toolbar.tool.tetrahedron3d", pt: "Tetraedro" },
+    PtMsg { key: "toolbar.tool.checkbox", pt: "Caixa de seleção" },
+    PtMsg { key: "toolbar.tool.inputbox", pt: "Caixa de entrada" },
+    // ── panel.conformal (3) — R3.4 cierra el fallback ES ──
+    PtMsg { key: "panel.conformal.title", pt: "Animação de Mapeamento Conforme" },
+    PtMsg { key: "panel.conformal.animate", pt: "Animar deformação (homotopia)" },
+    PtMsg { key: "panel.conformal.speed", pt: "Velocidade" },
 ];
 
-/// Texto PT de `key`, o `None` si la clave sigue en fallback ES/EN
-/// (las 87 `toolbar.tool` hoy: ver test `pt_reports_tool_fallback`).
-/// Lookup lineal como [`t`]: el overlay es chico (<100 claves).
+/// Texto PT de `key`, o `None` si la clave no está en el catálogo.
+/// Desde R3.4 el overlay es total (185/185): `None` solo para claves
+/// inexistentes. Lookup lineal como [`t`]: el overlay es chico (<200 claves).
 pub fn pt(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < PT_MESSAGES.len() {
@@ -794,26 +890,26 @@ pub fn pt(key: &'static str) -> Option<&'static str> {
 }
 
 /// Cobertura del overlay PT: `(cubiertas, total del catálogo)`.
-/// El numerador lo fija el test `pt_covers_main_ui_keys` en 93.
+/// El numerador lo fija el test `pt_covers_main_ui_keys` en 185.
 pub fn pt_coverage() -> (usize, usize) {
     (PT_MESSAGES.len(), MESSAGES.len())
 }
 
 /// Badge honesto del overlay parcial PT (P1b, visible en el selector).
 ///
-/// El test `pt_partial_badge_pinned` lo pinnea junto a la cobertura: si sube
-/// la cobertura hay que actualizar numerador Y este badge (o removerlo al
-/// llegar a 100%).
+/// R3.4: cobertura 100%, el badge ya no se muestra (ver `toolbar.rs`:
+/// solo se dibuja si `pt_is_partial()`). Se conserva la constante y el texto
+/// con conteo para el hover histórico y el test que pinnea el 100%.
 pub const PT_PARTIAL_BADGE: &str = "Português parcial";
 
-/// `true` mientras el overlay PT no cubra el catálogo (hoy 93/184 ≈ 50.5%).
+/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 185/185 = falso).
 pub fn pt_is_partial() -> bool {
     let (cubiertas, total) = pt_coverage();
     cubiertas < total
 }
 
-/// Texto del badge con conteo real, p. ej. `"Português parcial · 93/184"`.
-/// Puro, sin I/O: el selector lo muestra cuando `Locale::Pt` está activo.
+/// Texto del badge con conteo real, p. ej. `"Português parcial · 185/185"`.
+/// Puro, sin I/O: el selector lo muestra solo si `pt_is_partial()`.
 pub fn pt_partial_badge_text() -> String {
     let (cubiertas, total) = pt_coverage();
     format!("{PT_PARTIAL_BADGE} · {cubiertas}/{total}")
@@ -1036,7 +1132,7 @@ mod tests {
 
     #[test]
     fn helper_prefixes_resolve_all_keys() {
-        assert_eq!(ONBOARDING_KEYS.len(), 11);
+        assert_eq!(ONBOARDING_KEYS.len(), 12);
         assert_eq!(CHEAT_KEYS.len(), 10);
         assert_eq!(TOAST_KEYS.len(), 10);
         assert_eq!(MEDIA_TITLE_KEYS.len(), 12);
@@ -1077,10 +1173,10 @@ mod tests {
 
     #[test]
     fn pt_covers_main_ui_keys() {
-        // F3d: overlay parcial PT — 94 claves principales, sin duplicados ni vacíos,
+        // R3.4: overlay total PT — 185 claves, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 94);
-        assert_eq!(pt_coverage(), (94, 185));
+        assert_eq!(PT_MESSAGES.len(), 185);
+        assert_eq!(pt_coverage(), (185, 185));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -1173,6 +1269,25 @@ mod tests {
         assert_eq!(pt("toolbar.group.transform"), Some("Transformar"));
         assert_eq!(pt("palette.title"), Some("Paleta de Comandos"));
         assert_eq!(pt("does.not.exist"), None);
+        // R3.4: el recorte F3d/W2 está cerrado — tools, conformal y
+        // bullet_tertiary también resuelven directo en PT.
+        for key in [
+            "toolbar.tool.point",
+            "toolbar.tool.translate",
+            "toolbar.tool.circle",
+            "panel.conformal.title",
+            "panel.conformal.animate",
+            "panel.conformal.speed",
+            "onboarding.bullet_tertiary",
+        ] {
+            assert!(pt(key).is_some(), "R3.4 sin PT: {key}");
+        }
+        assert_eq!(pt("toolbar.tool.point"), Some("Ponto"));
+        assert_eq!(pt("toolbar.tool.translate"), Some("Translada"));
+        assert_eq!(
+            pt("panel.conformal.title"),
+            Some("Animação de Mapeamento Conforme")
+        );
     }
 
     #[test]
@@ -1223,20 +1338,22 @@ mod tests {
             pt("anim.empty.guide"),
             Some("tente reduzir a resolução ou tentar de novo")
         );
-        // `panel.conformal.*` sigue en fallback ES honesto (fuera del overlay
-        // puntual): `pt()` da `None` y `t(key, Pt)` cae al ES, jamás vacío.
-        assert_eq!(pt("panel.conformal.title"), None);
+        // R3.4: `panel.conformal.*` ya está en el overlay total: `pt()` da
+        // `Some` directo en PT, jamás vacío ni fallback.
+        assert_eq!(
+            pt("panel.conformal.title"),
+            Some("Animação de Mapeamento Conforme")
+        );
         assert_eq!(
             super::t("panel.conformal.title", Locale::Pt),
-            "Animación de Mapeo Conforme"
+            "Animação de Mapeamento Conforme"
         );
     }
 
     #[test]
     fn pt_reports_tool_fallback() {
-        // Medición honesta del recorte F3d/W2: las 87 `toolbar.tool` quedan en
-        // fallback ES (vía `Msg::get`). `pt()` devuelve `None` y `t(key, Pt)`
-        // cae al ES.
+        // R3.4: el recorte F3d/W2 está cerrado — las 87 `toolbar.tool` tienen
+        // PT directo (antes 0 a propósito con fallback ES).
         let mut tool_total = 0;
         let mut tool_covered = 0;
         for m in MESSAGES {
@@ -1249,10 +1366,10 @@ mod tests {
         }
         assert_eq!(tool_total, 87);
         assert_eq!(
-            tool_covered, 0,
-            "tools en PT: el recorte F3d/W2 es 0 a propósito"
+            tool_covered, 87,
+            "tools en PT: R3.4 cierra el recorte al 100%"
         );
-        assert_eq!(pt("toolbar.tool.translate"), None);
+        assert_eq!(pt("toolbar.tool.translate"), Some("Translada"));
         assert_eq!(tool_label("translate", Locale::En), "Translate");
     }
 
@@ -1263,9 +1380,9 @@ mod tests {
         assert_eq!(t("toolbar.group.move", Locale::Pt), "Selecionar");
         assert_eq!(t("palette.title", Locale::Pt), "Paleta de Comandos");
         assert_eq!(t("toast.saved", Locale::Pt), "Documento salvo em {path}");
-        // Sin PT (87 tools): cae a ES, jamás vacío.
-        assert_eq!(t("toolbar.tool.translate", Locale::Pt), "Traslada");
-        assert_eq!(t("toolbar.tool.circle", Locale::Pt), "Círculo centro-punto");
+        // R3.4: tools con PT directo (antes fallback ES), jamás vacío.
+        assert_eq!(t("toolbar.tool.translate", Locale::Pt), "Translada");
+        assert_eq!(t("toolbar.tool.circle", Locale::Pt), "Círculo centro-ponto");
         assert!(!t("toolbar.tool.translate", Locale::Pt).is_empty());
         // Clave inexistente: la propia clave (igual que ES/EN).
         assert_eq!(t("does.not.exist", Locale::Pt), "does.not.exist");
@@ -1287,27 +1404,25 @@ mod tests {
 
     #[test]
     fn pt_coverage_prints_real_percentage() {
-        // Cobertura PT medida: 94/185 ≈ 50.8%. Se imprime el % real con
+        // Cobertura PT medida: 185/185 = 100%. Se imprime el % real con
         // `--nocapture`; el assert fija el numerador para que cualquier
         // agregado (o faltante) de PT rompa el test a propósito.
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (94, 185));
+        assert_eq!((covered, total), (185, 185));
         let pct = covered as f64 * 100.0 / total as f64;
-        eprintln!(
-            "cobertura PT: {covered}/{total} = {pct:.1}% (87 tools + panel sin PT en fallback ES)"
-        );
-        assert!((pct - 50.8).abs() < 0.1, "pct real: {pct}");
+        eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (overlay total R3.4)");
+        assert!((pct - 100.0).abs() < 0.1, "pct real: {pct}");
     }
 
     #[test]
     fn pt_partial_badge_pinned() {
-        // P1b: el PT parcial es visible en el selector (badge + conteo).
-        // Si sube la cobertura, actualizar (94, 185) Y el badge; al llegar a
-        // 100% remover el badge y este test.
-        assert!(pt_is_partial(), "hoy 94/185 < 100%: el badge debe existir");
+        // R3.4: cobertura 100% — el badge parcial ya no se muestra (ver
+        // `toolbar.rs`: solo dibuja si `pt_is_partial()`). Se pinnea el 100%
+        // y el texto con conteo para el hover histórico.
+        assert!(!pt_is_partial(), "R3.4 185/185 = 100%: sin badge parcial");
         assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
-        assert_eq!(pt_partial_badge_text(), "Português parcial · 94/185");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 185/185");
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (94, 185));
+        assert_eq!((covered, total), (185, 185));
     }
 }

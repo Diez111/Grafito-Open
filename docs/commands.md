@@ -187,8 +187,8 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Estadística
 
 - `Histogram[{data}, bins]`: Crea un histograma. Mutacion: crea objetos. Riesgo: medio. Alias: `histograma`.
-- `BarChart[{data}]`: Crea un gráfico de barras por categoría (una barra por dato). Mutacion: crea objetos. Riesgo: medio. Alias: `barras`, `bar`.
-- `PieChart[{data}]`: Crea un gráfico de torta proporcional (valores no negativos con total positivo). Mutacion: crea objetos. Riesgo: medio. Alias: `torta`, `pie`.
+- `BarChart[{data}]`: Crea un gráfico de barras por categoría (una barra por dato) desde lista o rango de planilla DataTable (tabla usa la columna y; tabla.xs/.ys elige columna). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `BarChart[tabla]`. Alias: `barras`, `bar`.
+- `PieChart[{data}]`: Crea un gráfico de torta proporcional (valores no negativos con total positivo) desde lista o rango de planilla DataTable (tabla usa la columna y; tabla.xs/.ys elige columna). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `PieChart[tabla]`. Alias: `torta`, `pie`.
 - `ScatterPlot[{xs}, {ys}]`: Crea un grafico de dispersion. Mutacion: crea objetos. Riesgo: medio. Alias: `scatter`.
 - `BoxPlot[{data}]`: Crea un diagrama de caja. Mutacion: crea objetos. Riesgo: medio.
 - `LinearRegression[{xs}, {ys}]`: Calcula una regresion lineal. Mutacion: crea objetos. Riesgo: medio. Alias: `regression`, `regresion`.
@@ -288,7 +288,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (Cube/Tetrahedron/Pyramid/Prism vía PolyhedronNet::unfold; persiste una cara = un polígono 2D). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Net[poliedro, escala]`. Alias: `desarrollo`, `desplegado`, `unwrap`.
 - `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `cuadrica`, `cuádrica`.
 - `ImplicitSurface[expr, x0, x1, y0, y1, z0, z1, res]`: Crea una superficie implícita F(x,y,z)=0 en la caja dada (marching-tetra, res 8..=32, 16 por defecto). Mutacion: crea objetos. Riesgo: medio. Alias: `superficieimplicita`, `implicitsurface3d`.
-- `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
+- `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Cubo (polígono ortográfico; resto de poliedros stub honesto). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
 ## Crear
 
 - `Arc[centro, radio, inicio, fin]`: Crea un arco por centro/radio/ángulos o por tres puntos. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Arc[P1, P2, P3]`. Alias: `arco`.
@@ -363,7 +363,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `StartAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StartAnimation[variable]`. Alias: `IniciarAnimacion`.
 - `StopAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StopAnimation[variable]`. Alias: `DetenerAnimacion`.
 - `Delete[objeto]`: No soportado: usa Erase[etiqueta] o EraseAll[]. Mutacion: solo consulta. Riesgo: bajo. Alias: `Eliminar`, `Borrar`.
-- `Rename[objeto, nuevo_nombre]`: No soportado: Grafito aún no renombra objetos por comando; edita la etiqueta en la UI. Mutacion: solo consulta. Riesgo: bajo. Alias: `Renombrar`.
+- `Rename[objeto, nuevo_nombre]`: Renombra la etiqueta de un objeto: Rename[objeto, nuevo_nombre] valida (no vacío, ≤64, sin saltos, sin colisión) y aplica con undo transaccional. Mutacion: transforma objetos. Riesgo: bajo. Alias: `Renombrar`.
 ## Análisis
 
 - `TangentAt[expr, x0]`: Recta tangente a y=f(x) en x0: TangentAt[expr, x0] crea una recta por (x0,f(x0)) con pendiente f'(x0). Mutacion: crea objetos. Riesgo: bajo. Alias: `TangenteEn`.

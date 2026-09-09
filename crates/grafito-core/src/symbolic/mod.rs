@@ -29,8 +29,9 @@ pub use exchange::{
 };
 pub use series::{build_fill_series, parse_series_mode, parse_series_range, SeriesKind};
 pub use solids::{
-    cone_area, cone_volume, cube_area, cube_volume, cylinder_area, cylinder_volume, project_ortho,
-    solid_area, solid_measure_status, solid_volume, sphere_area, sphere_volume, tetrahedron_area,
+    best_ortho_view_for_normal, cone_area, cone_volume, cube_area, cube_edges, cube_vertices,
+    cube_volume, cylinder_area, cylinder_volume, plane_cube_section, project_ortho, solid_area,
+    solid_measure_status, solid_volume, sphere_area, sphere_volume, tetrahedron_area,
     tetrahedron_volume, torus_area, torus_volume, OrthoView, SolidError,
 };
 

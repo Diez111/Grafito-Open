@@ -133,7 +133,8 @@ fn oleada2_todos_visibles_en_paleta() {
         palette_must_be_visible(canonical);
     }
     // Frente trig+racionalización (+4 visibles S): 287 → 291, 333 → 337.
-    assert_eq!(command_registry::palette_commands().count(), 291);
+    // Frente R3.1 (Rename stub→visible): 291 → 292 (total 337 intacto).
+    assert_eq!(command_registry::palette_commands().count(), 292);
     assert_eq!(command_registry::all().len(), 337);
 }
 

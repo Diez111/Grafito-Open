@@ -1358,13 +1358,17 @@ pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
                 .selectable_value(locale, Locale::Pt, "PT")
                 .on_hover_text(format!(
                     "Idioma · Language · Idioma: {}",
-                    crate::i18n::pt_partial_badge_text()
+                    if crate::i18n::pt_is_partial() {
+                        crate::i18n::pt_partial_badge_text()
+                    } else {
+                        "Português".to_string()
+                    }
                 ));
         })
         .response;
-    // P1b: badge visible — el PT parcial no pasa silencioso. Solo cuando está
-    // activo, para no ensuciar ES/EN.
-    if *locale == Locale::Pt {
+    // P1b/R3.4: badge visible solo mientras el PT sea parcial. Al 100% no se
+    // ensucia ES/EN ni el propio PT con un cartel innecesario.
+    if *locale == Locale::Pt && crate::i18n::pt_is_partial() {
         ui.label(
             egui::RichText::new(crate::i18n::pt_partial_badge_text())
                 .small()
@@ -2228,13 +2232,13 @@ mod tests {
         assert!(es.len() > "Herramienta: ".len());
         let en = toolbar_live_text(Tool::Line, Locale::En);
         assert!(en.starts_with("Tool: "), "{en}");
-        // W2: PT anuncia con prefijo propio y etiqueta ES donde no hay PT.
+        // W2/R3.4: PT anuncia con prefijo propio y etiqueta PT directa.
         let pt = toolbar_live_text(Tool::Line, Locale::Pt);
         assert!(pt.starts_with("Ferramenta: "), "{pt}");
-        assert!(pt.contains("Recta"), "{pt}");
-        // Sin PT (tools): cae a ES, jamás vacío ni slug crudo.
+        assert!(pt.contains("Reta"), "{pt}");
+        // Con PT total: etiqueta PT directa, jamás vacío ni slug crudo.
         let pt_tool = toolbar_live_text(Tool::Translate, Locale::Pt);
-        assert_eq!(pt_tool, "Ferramenta: Traslada");
+        assert_eq!(pt_tool, "Ferramenta: Translada");
         // Cambiar de herramienta cambia el anuncio (el lector anuncia el cambio).
         assert_ne!(
             toolbar_live_text(Tool::Line, Locale::Es),
@@ -2292,11 +2296,11 @@ mod tests {
         );
         assert_eq!(current, Tool::Select);
         assert_eq!(locale, Locale::Pt);
-        // Grupo con PT resuelve al overlay; tool sin PT cae a ES.
+        // Grupo con PT resuelve al overlay; tool con PT directo R3.4.
         assert_eq!(ToolGroupId::Point.label_localized(Locale::Pt), "Pontos");
         assert_eq!(
             entry_display_name(Tool::Point, "Punto", Locale::Pt),
-            "Punto"
+            "Ponto"
         );
     }
 

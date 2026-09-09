@@ -1995,24 +1995,30 @@ const COMMANDS: &[CommandSpec] = &[
         "BarChart",
         ["barras", "bar"],
         "Estadística",
-        "Crea un gráfico de barras por categoría (una barra por dato).",
+        "Crea un gráfico de barras por categoría (una barra por dato) desde lista o rango de planilla DataTable (tabla usa la columna y; tabla.xs/.ys elige columna).",
         CreatesObject,
         Medium,
         true,
         "BarChart",
-        [signature!("BarChart[{data}]"; "data": Data required)]
+        [
+            signature!("BarChart[{data}]"; "data": Data required),
+            signature!("BarChart[tabla]"; "tabla": ObjectLabel required)
+        ]
     ),
     command!(
         "statistics.pie-chart",
         "PieChart",
         ["torta", "pie"],
         "Estadística",
-        "Crea un gráfico de torta proporcional (valores no negativos con total positivo).",
+        "Crea un gráfico de torta proporcional (valores no negativos con total positivo) desde lista o rango de planilla DataTable (tabla usa la columna y; tabla.xs/.ys elige columna).",
         CreatesObject,
         Medium,
         true,
         "PieChart",
-        [signature!("PieChart[{data}]"; "data": Data required)]
+        [
+            signature!("PieChart[{data}]"; "data": Data required),
+            signature!("PieChart[tabla]"; "tabla": ObjectLabel required)
+        ]
     ),
     command!(
         "statistics.scatter-plot",
@@ -3135,7 +3141,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Intersection3D",
         ["intersect3d", "interseccion3d", "intersección3d"],
         "3D",
-        "Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub).",
+        "Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Cubo (polígono ortográfico; resto de poliedros stub honesto).",
         CreatesObject,
         Medium,
         true,
@@ -3900,14 +3906,14 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("Delete[objeto]"; "objeto": ObjectLabel required)]
     ),
     command!(
-        "scripting.rename-stub",
+        "scripting.rename",
         "Rename",
         ["Renombrar"],
         "Dinámica",
-        "No soportado: Grafito aún no renombra objetos por comando; edita la etiqueta en la UI.",
-        ReadOnly,
+        "Renombra la etiqueta de un objeto: Rename[objeto, nuevo_nombre] valida (no vacío, ≤64, sin saltos, sin colisión) y aplica con undo transaccional.",
+        TransformsObject,
         Low,
-        false,
+        true,
         "Rename",
         [signature!("Rename[objeto, nuevo_nombre]"; "objeto": ObjectLabel required, "nuevo_nombre": Expression required)]
     ),
@@ -5703,11 +5709,14 @@ mod registry_tests {
         // brazo delegante en commands.rs al motor extendido en
         // geometry::symbolic sin duplicar Simplify; architecture.md §8/§13
         // queda BLOCKER como en P2/Onda 1 por PROHIBIDO-resto del frente).
+        // Frente R3.1 (f10-plan-total): +1 visible S sin comando nuevo
+        // (Rename pasa de stub oculto a real visible con brazo `run_rename`;
+        // conteo total intacto 337, paleta 291→292).
         assert_eq!(all().len(), 337, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            291,
-            "comandos visibles en paleta (docs §8: 291 + 14 UI = 305)"
+            292,
+            "comandos visibles en paleta (docs §8: 292 + 15 UI = 307)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

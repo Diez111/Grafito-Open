@@ -184,30 +184,30 @@ fn golden_conic_hyperbola_maps_to_hyperbola() {
     );
 }
 #[test]
-fn golden_conic_rotated_is_omitted_honest() {
+fn golden_conic_rotated_maps_to_implicit_curve() {
+    // R3.3: la rotada ya no se omite: autovalores → implícita exacta con x*y.
     let xml = format!(
         r#"{}<element type="conic" label="c_rot"><matrix A0="1" A1="0.5" A2="1" A3="0" A4="0" A5="-1"/><eigenvectors x0="0.707" y0="0.707" x1="-0.707" y1="0.707"/></element>{}"#,
         xml_header(),
         xml_footer()
     );
     let bytes = ggb_with_xml(&xml);
-    let rep = import_ggb_bytes(&bytes).expect("rotated conic debe importar con omitido");
+    let rep = import_ggb_bytes(&bytes).expect("rotada debe importar real");
     assert!(
-        !rep.tipos.contains_key("Ellipse")
-            && !rep.tipos.contains_key("Hyperbola")
-            && !rep.tipos.contains_key("Parabola")
-    );
-    assert!(
-        !rep.omitidos.is_empty(),
-        "rotada debe generar omitido honesto"
-    );
-    assert!(
-        rep.omitidos
-            .iter()
-            .any(|o| o.razon.contains("rotada") || o.razon.contains("canónica")),
-        "razón debe mencionar canónica {:?}",
+        rep.tipos.contains_key("ImplicitCurve"),
+        "esperaba ImplicitCurve, got {:?} omitidos {:?}",
+        rep.tipos,
         rep.omitidos
     );
+    let cmd = rep
+        .objetos
+        .iter()
+        .find(|o| o.tipo == "ImplicitCurve")
+        .expect("ImplicitCurve objeto")
+        .comando
+        .clone();
+    assert!(cmd.starts_with("ImplicitCurve["), "{cmd}");
+    assert!(cmd.contains("x*y"), "debe conservar el giro: {cmd}");
 }
 #[test]
 fn golden_polygon_via_command_maps_to_polygon() {
@@ -300,6 +300,39 @@ fn golden_angle_via_command_maps_to_polygon_and_text() {
             .any(|o| o.tipo == "Text" && o.razon.contains("ángulo")),
         "Angle debe generar Text medida omitido"
     );
+}
+#[test]
+fn golden_angle_two_lines_maps_to_real_angle() {
+    // R3.3: Angle de 2 rectas ya no se omite: importa el ángulo real.
+    let xml = format!(
+        "{}{}{}{}{}{}{}{}{}",
+        xml_header(),
+        point_xml("A", 0.0, 0.0),
+        point_xml("B", 1.0, 0.0),
+        point_xml("C", 0.0, 0.0),
+        point_xml("D", 0.0, 1.0),
+        r#"<command name="Segment"><input a0="A" a1="B"/><output a0="s1"/></command>"#,
+        r#"<command name="Segment"><input a0="C" a1="D"/><output a0="s2"/></command>"#,
+        r#"<command name="Angle"><input a0="s1" a1="s2"/><output a0="alpha"/></command>"#,
+        xml_footer()
+    );
+    let bytes = ggb_with_xml(&xml);
+    let rep = import_ggb_bytes(&bytes).expect("angle 2 rectas");
+    assert!(
+        rep.tipos.contains_key("Angle"),
+        "Angle 2 rectas debe mapear a Angle {:?} omitidos {:?}",
+        rep.tipos,
+        rep.omitidos
+    );
+    let cmd = rep
+        .objetos
+        .iter()
+        .find(|o| o.tipo == "Angle")
+        .expect("Angle objeto")
+        .comando
+        .clone();
+    assert!(cmd.starts_with("Angle[s1, s2,"), "{cmd}");
+    assert!(cmd.contains('9'), "perpendiculares ≈90°: {cmd}");
 }
 #[test]
 fn golden_intersect_line_line_maps_to_point_evaluated() {

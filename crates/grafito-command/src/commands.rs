@@ -675,6 +675,78 @@ fn parse_data_command_arg(
         .map_err(|error| CommandOutcome::Error(format!("{command}: {error}")))
 }
 
+/// Datos para `BarChart`/`PieChart`: literal `{…}` o rango de planilla vía
+/// `DataTable` (`tabla`, `tabla.xs` o `tabla.ys`; sin sufijo usa `ys`, la
+/// columna de valores). Reusa el lookup de `resolve_list_arg` (mismo arreglo
+/// `D.y*s`→`D.ys` por la multiplicación implícita) sin duplicar el motor de
+/// validación (`bar_chart_bars`/`pie_chart_slices` validan después).
+fn parse_chart_data_arg(
+    command: &str,
+    value: &str,
+    document: &Document,
+) -> Result<Vec<f64>, CommandOutcome> {
+    let trimmed_raw = value.trim().trim_matches('"').trim_matches('\'').trim();
+    if trimmed_raw.starts_with('{') && trimmed_raw.ends_with('}') {
+        return parse_data_command_arg(command, trimmed_raw, &document.variables);
+    }
+    // Corrige `D.ys` → `D.y*s` de `insert_implicit_multiplication` (igual que
+    // `resolve_list_arg`).
+    let trimmed = trimmed_raw
+        .replace(".y*s", ".ys")
+        .replace(".x*s", ".xs")
+        .replace(".y*S", ".ys")
+        .replace(".x*S", ".xs");
+    let (label_part, suffix) = if let Some(dot_pos) = trimmed.rfind('.') {
+        let candidate = trimmed[dot_pos + 1..].trim();
+        if candidate.eq_ignore_ascii_case("xs")
+            || candidate.eq_ignore_ascii_case("x")
+            || candidate.eq_ignore_ascii_case("ys")
+            || candidate.eq_ignore_ascii_case("y")
+        {
+            (trimmed[..dot_pos].trim(), Some(candidate))
+        } else {
+            (trimmed.as_str(), None)
+        }
+    } else {
+        (trimmed.as_str(), None)
+    };
+    let label = clean_label(label_part);
+    if label.is_empty() {
+        return Err(CommandOutcome::Error(format!(
+            "{command}: usa {{a, b, c}} o etiqueta DataTable[.xs|.ys]"
+        )));
+    }
+    let Some(id) = find_object_by_label(document, label) else {
+        return Err(CommandOutcome::Error(format!(
+            "{command}: '{label}' no es una lista ni DataTable (usa {{a, b, c}} o etiqueta DataTable[.xs|.ys])"
+        )));
+    };
+    let Some(GeoObject::DataTable(table)) = document.get_object(id) else {
+        return Err(CommandOutcome::Error(format!(
+            "{command}: '{label}' debe ser una lista {{a, b, c}} o una tabla DataTable"
+        )));
+    };
+    let data: &[f64] = match suffix {
+        Some(s) if s.eq_ignore_ascii_case("xs") || s.eq_ignore_ascii_case("x") => &table.xs,
+        // Sin sufijo: columna de valores `ys` (lo que se grafica).
+        Some(s) if s.eq_ignore_ascii_case("ys") || s.eq_ignore_ascii_case("y") => &table.ys,
+        None => &table.ys,
+        Some(s) => {
+            return Err(CommandOutcome::Error(format!(
+                "{command}: sufijo '{s}' inválido, usa .xs o .ys"
+            )));
+        }
+    };
+    if data.len() > grafito_core::validation::MAX_ARRAY_LENGTH {
+        return Err(CommandOutcome::Error(format!(
+            "{command}: longitud {} excede el máximo {}",
+            data.len(),
+            grafito_core::validation::MAX_ARRAY_LENGTH
+        )));
+    }
+    Ok(data.to_vec())
+}
+
 fn data_table_for_fit(
     document: &Document,
     command: &str,
@@ -8617,11 +8689,7 @@ fn handle_remaining_cas_commands(
             }
         }
         "BarChart" if !cmd.args.is_empty() => {
-            let data = command_result!(parse_data_command_arg(
-                "BarChart",
-                &cmd.args[0],
-                &document.variables,
-            ));
+            let data = command_result!(parse_chart_data_arg("BarChart", &cmd.args[0], document));
             // El motor valida (vacío/todo-cero/no-finitos); el `Err` es
             // mensaje honesto y no se crea ningún objeto inventado.
             match grafito_core::symbolic::bar_chart_bars(&data) {
@@ -8637,11 +8705,7 @@ fn handle_remaining_cas_commands(
             }
         }
         "PieChart" if !cmd.args.is_empty() => {
-            let data = command_result!(parse_data_command_arg(
-                "PieChart",
-                &cmd.args[0],
-                &document.variables,
-            ));
+            let data = command_result!(parse_chart_data_arg("PieChart", &cmd.args[0], document));
             // La torta exige no-negativos y total > 0; el motor lo chequea
             // y el `Err` se vuelve mensaje honesto sin crear objeto.
             match grafito_core::symbolic::pie_chart_slices(&data) {
@@ -9796,6 +9860,12 @@ fn handle_remaining_cas_commands(
             }
             input_text.clear();
             return CommandOutcome::Message(format!("SetCaption: '{label}' → '{caption}'"));
+        }
+        "Rename" if cmd.args.len() == 2 => {
+            return run_rename(document, &cmd.args, input_text);
+        }
+        "Rename" => {
+            return CommandOutcome::Error("Rename: usa Rename[objeto, nuevo_nombre]".into());
         }
         "SetLineStyle" if cmd.args.len() == 2 => {
             let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
@@ -14892,6 +14962,55 @@ pub fn find_object_by_label(document: &Document, label: &str) -> Option<ObjectId
     document.try_find_object_by_label(label).ok().flatten()
 }
 
+/// Renombra la etiqueta de un objeto con validación + `set_label`.
+///
+/// Reglas (rioplatense, honestas): no vacío, ≤64, sin saltos de línea,
+/// sin colisión con otro objeto. Limpia comillas externas como `SetCaption`.
+/// El undo lo da la transacción de `process_input` (staging + `commit`);
+/// acá solo se muta el `staged` y se limpia `input_text` en éxito.
+pub(crate) fn run_rename(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Rename: usa Rename[objeto, nuevo_nombre]".into());
+    }
+    let label = args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+    let Some(id) = find_object_by_label(document, label) else {
+        return CommandOutcome::Error(format!("Rename: objeto '{label}' no encontrado"));
+    };
+    let nuevo = args[1]
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim()
+        .to_string();
+    if nuevo.is_empty() {
+        return CommandOutcome::Error("Rename: el nuevo nombre no puede estar vacío".into());
+    }
+    if nuevo.len() > 64 {
+        return CommandOutcome::Error("Rename: el nuevo nombre excede 64 caracteres".into());
+    }
+    if nuevo.contains('\n') || nuevo.contains('\r') {
+        return CommandOutcome::Error(
+            "Rename: el nuevo nombre no puede tener saltos de línea".into(),
+        );
+    }
+    if let Some(other) = find_object_by_label(document, &nuevo) {
+        if other != id {
+            return CommandOutcome::Error(format!("Rename: ya existe otro objeto '{nuevo}'"));
+        }
+    }
+    match document.get_object_mut(id) {
+        Some(obj) => obj.set_label(nuevo.clone()),
+        None => {
+            return CommandOutcome::Error(format!("Rename: objeto '{label}' no encontrado"));
+        }
+    }
+    input_text.clear();
+    CommandOutcome::Message(format!("Rename: '{label}' → '{nuevo}'"))
+}
+
 /// Busca tres `Point3D` por etiqueta y devuelve sus posiciones.
 fn parse_three_point_labels(
     document: &Document,
@@ -14956,14 +15075,21 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
     if let Some(outcome) = try_plane_sphere_intersection(document, &b, &a, "Intersection3D") {
         return outcome;
     }
+    // R3.2: plano-cubo real vía solids+ortho; resto de poliedros sigue stub honesto.
+    if let Some(outcome) = try_plane_cube_intersection(document, &a, &b, "Intersection3D") {
+        return outcome;
+    }
+    if let Some(outcome) = try_plane_cube_intersection(document, &b, &a, "Intersection3D") {
+        return outcome;
+    }
     if is_polyhedron_object(&a) || is_polyhedron_object(&b) {
-        // Intersección Plano-Poliedro: stub validado.
+        // Intersección Plano-Poliedro: solo cubo real; resto stub validado.
         if matches!(
             (&a, &b),
             (GeoObject::Plane3D(_), _) | (_, GeoObject::Plane3D(_))
         ) {
             return CommandOutcome::Message(
-                "Intersection3D: intersección Plano-Poliedro genérica (stub) — use vista 3D para visualización"
+                "Intersection3D: Plano-Poliedro solo cubo como polígono (resto stub) — use vista 3D para visualización"
                     .into(),
             );
         }
@@ -15046,7 +15172,7 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
             }
         }
         _ => CommandOutcome::Error(
-            "Intersection3D: soporta Plano-Plano, Recta-Plano, Recta-Recta o Plano-Esfera (Plano-Poliedro genérico como stub)".into(),
+            "Intersection3D: soporta Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera o Plano-Cubo (resto de poliedros como stub)".into(),
         ),
     }
 }
@@ -15195,6 +15321,76 @@ fn try_plane_sphere_intersection(
     )))
 }
 
+/// Intersección Plano-Cubo como polígono 2D ortográfico (R3.2).
+/// Reusa `solids::{plane_cube_section, best_ortho_view_for_normal, project_ortho}`:
+/// el cerebro da la sección 3D ordenada y la vista que no colapsa (misma tabla
+/// que `render_3d::OrthoProjection`: Front/Top/Side). `None` si la pareja no es
+/// plano-cubo; `Some(Message)` honesto si no hay polígono (sin corte o tangencia).
+fn try_plane_cube_intersection(
+    document: &mut Document,
+    plane_obj: &GeoObject,
+    cube_obj: &GeoObject,
+    prefix: &str,
+) -> Option<CommandOutcome> {
+    let GeoObject::Plane3D(plane) = plane_obj else {
+        return None;
+    };
+    let GeoObject::Cube3D(cube) = cube_obj else {
+        return None;
+    };
+    if !cube.size.is_finite() || cube.size <= 0.0 {
+        return Some(CommandOutcome::Error(format!(
+            "{prefix}: tamaño de cubo inválido"
+        )));
+    }
+    if !cube.center.x.is_finite() || !cube.center.y.is_finite() || !cube.center.z.is_finite() {
+        return Some(CommandOutcome::Error(format!(
+            "{prefix}: centro de cubo no finito"
+        )));
+    }
+    let center = [cube.center.x, cube.center.y, cube.center.z];
+    let Some(section) = grafito_core::symbolic::plane_cube_section(
+        (plane.a, plane.b, plane.c, plane.d),
+        center,
+        cube.size,
+    ) else {
+        return Some(CommandOutcome::Message(format!(
+            "{prefix}: plano y cubo no forman polígono (sin corte o tangencia en punto/arista)"
+        )));
+    };
+    let view = grafito_core::symbolic::best_ortho_view_for_normal([plane.a, plane.b, plane.c]);
+    let mut vertices: Vec<Point2> = Vec::with_capacity(section.len());
+    for p in &section {
+        let (x, y) = grafito_core::symbolic::project_ortho(*p, view);
+        if !x.is_finite() || !y.is_finite() {
+            return Some(CommandOutcome::Error(format!(
+                "{prefix}: proyección ortográfica no finita"
+            )));
+        }
+        vertices.push(Point2::new(x, y));
+    }
+    if vertices.len() < 3 {
+        return Some(CommandOutcome::Message(format!(
+            "{prefix}: plano y cubo no forman polígono (sin corte o tangencia en punto/arista)"
+        )));
+    }
+    let id =
+        match try_insert_command_object(document, GeoObject::Polygon(PolygonObj::new(vertices))) {
+            Ok(id) => id,
+            Err(error) => return Some(CommandOutcome::Error(format!("{prefix}: {error}"))),
+        };
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    Some(CommandOutcome::Message(format!(
+        "{prefix}: polígono plano-cubo {} vértices (vista {}) → {}",
+        section.len(),
+        view.name(),
+        label
+    )))
+}
+
 /// Wrapper para `Intersect` genérico: si la pareja es 3D conocida, delega.
 fn try_intersect_3d_via_generic(
     document: &mut Document,
@@ -15209,12 +15405,19 @@ fn try_intersect_3d_via_generic(
     if let Some(o) = try_plane_sphere_intersection(document, b, a, "Intersect") {
         return Some(o);
     }
-    // Plano-Poliedro genérico stub.
+    // R3.2: plano-cubo real también por `Intersect` genérico.
+    if let Some(o) = try_plane_cube_intersection(document, a, b, "Intersect") {
+        return Some(o);
+    }
+    if let Some(o) = try_plane_cube_intersection(document, b, a, "Intersect") {
+        return Some(o);
+    }
+    // Plano-Poliedro genérico stub (resto no-cubo).
     if (matches!(a, GeoObject::Plane3D(_)) && is_polyhedron_object(b))
         || (matches!(b, GeoObject::Plane3D(_)) && is_polyhedron_object(a))
     {
         return Some(CommandOutcome::Message(
-            "Intersect: intersección Plano-Poliedro (stub) — use vista 3D para visualización"
+            "Intersect: intersección Plano-Poliedro solo cubo como polígono (resto stub) — use vista 3D para visualización"
                 .into(),
         ));
     }

@@ -1447,10 +1447,7 @@ pub(crate) fn handle_ggb_command(
         "StartAnimation" => unsupported("StartAnimation", "usa PlayPause[variable] o PlayPause[]"),
         "StopAnimation" => unsupported("StopAnimation", "usa PlayPause[variable] o PlayPause[]"),
         "Delete" => unsupported("Delete", "usa Erase[etiqueta] o EraseAll[]"),
-        "Rename" => unsupported(
-            "Rename",
-            "Grafito aún no renombra objetos por comando; edita la etiqueta en la UI",
-        ),
+        "Rename" => crate::commands::run_rename(document, args, input_text),
         _ => return None,
     };
     Some(outcome)
@@ -1772,7 +1769,6 @@ mod tests {
             ("StartAnimation[]", "PlayPause"),
             ("StopAnimation[]", "PlayPause"),
             ("Delete[A]", "Erase"),
-            ("Rename[A, B]", "etiqueta"),
         ] {
             let mut doc = doc_with_point("A");
             let mut input = cmd.to_string();

@@ -134,7 +134,7 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | AttachmentLimits max_pixels / max_total_pixels | 1 MiP / 2 MiP | assistant-types/src/lib.rs:249,252 |
 | Assistant | AttachmentLimits max_attachments | 2 | assistant-types/src/lib.rs:250 |
 | Comandos | COMMANDS registrados | 337 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
-| Comandos | palette-visible | 291 (46 ocultos) + 15 acciones UI = 306 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs |
+| Comandos | palette-visible | 292 (45 ocultos) + 15 acciones UI = 307 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible) |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
 | Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
@@ -231,7 +231,7 @@ Notas:
 |---|---|
 | RequestBudget 8192 / 2048 / 8 / 60s | `crates/grafito-assistant-types/src/lib.rs:198-209` |
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
-| 337 comandos (`command!(`), 291 visibles + 15 UI = 306 en paleta | `crates/grafito-command/src/command_registry.rs` |
+| 337 comandos (`command!(`), 292 visibles + 15 UI = 307 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible) |
 | 15 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs` |
 | 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
 | 87 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (contado F5: 87 variantes) |
@@ -258,7 +258,7 @@ Sin tocar geometría exacta, A11Y ni perf; sin `unwrap` (gates §9).
 | Categoría | Grafito hoy (archivo) | GeoGebra | Esfuerzo |
 |---|---|---|---|
 | Capas | `symbolic/exchange.rs` (`LayerTable` 0..=255 + visibilidad) | capas con orden | S cerrado (API; wiring panel P2) |
-| Bar/Pie | `symbolic/exchange.rs` (`bar_chart_stub`/`pie_chart_stub` validan y derivan a Histogram) | BarChart/PieChart | S cerrado honesto |
+| Bar/Pie | `command/src/commands.rs` (`BarChart`/`PieChart` reales desde lista o `DataTable[.xs\|.ys]` vía `parse_chart_data_arg`; `exchange.rs` conserva `bar_chart_stub`/`pie_chart_stub` solo como validación sin documento) | BarChart/PieChart | S cerrado (R3.5: rango de planilla) |
 | Tabla viva lectura | `symbolic/exchange.rs` (`datatable_rows`/`cell`/`to_csv` sobre `DataTableObj`) | spreadsheet viva | S cerrado (edición P2) |
 | Volumen/área 3D | `symbolic/solids.rs` (esfera/cubo/cilindro/cono/toro/tetra/pirámide/prisma exactos; cuádrica → `None` + `solid_measure_status`) | Volume/Area 3D | S cerrado |
 | Vistas ortográficas | `symbolic/solids.rs` (`OrthoView` alzado/planta/perfil) + `render_3d.rs` (`OrthoProjection`, píxeles egui) | vistas 3D | S cerrado (cableado cámara P2) |

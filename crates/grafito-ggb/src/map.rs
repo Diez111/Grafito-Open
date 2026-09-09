@@ -66,6 +66,126 @@ fn is_identity_eigen(eigen: Option<[f64; 4]>) -> bool {
     };
     (x0 - 1.0).abs() < 1e-6 && y0.abs() < 1e-6 && x1.abs() < 1e-6 && (y1 - 1.0).abs() < 1e-6
 }
+
+/// Autovalores de `[[a, b/2], [b/2, c]]` (forma cuadrática de la cónica).
+/// Wrapper 2×2 cerrado, sin motor nuevo: `λ = (tr ± √(tr²−4·det))/2`.
+fn conic_eigenvalues(a: f64, b: f64, c: f64) -> Option<(f64, f64)> {
+    let half = 0.5 * b;
+    let trace = a + c;
+    let det = a * c - half * half;
+    if !trace.is_finite() || !det.is_finite() {
+        return None;
+    }
+    let disc = trace * trace - 4.0 * det;
+    if !disc.is_finite() || disc < 0.0 {
+        return None;
+    }
+    let root = disc.sqrt();
+    if !root.is_finite() {
+        return None;
+    }
+    Some(((trace + root) * 0.5, (trace - root) * 0.5))
+}
+
+/// Ángulo agudo (0..=90°) entre dos rectas por sus extremos. `None` si degeneradas.
+fn angle_between_lines(
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    p4: (f64, f64),
+) -> Option<f64> {
+    let u = (p2.0 - p1.0, p2.1 - p1.1);
+    let v = (p4.0 - p3.0, p4.1 - p3.1);
+    let n1 = (u.0 * u.0 + u.1 * u.1).sqrt();
+    let n2 = (v.0 * v.0 + v.1 * v.1).sqrt();
+    if n1 <= 1e-12 || n2 <= 1e-12 || !n1.is_finite() || !n2.is_finite() {
+        return None;
+    }
+    let mut cos = ((u.0 * v.0 + u.1 * v.1) / (n1 * n2)).abs();
+    if !cos.is_finite() {
+        return None;
+    }
+    cos = cos.clamp(0.0, 1.0);
+    let ang = cos.acos().to_degrees();
+    ang.is_finite().then_some(ang)
+}
+
+/// Cónica rotada (`b≠0` o eigen no identidad) como `ImplicitCurve` exacta.
+///
+/// Usa los autovalores solo para clasificar y rechazar degeneradas (wrapper,
+/// sin motor nuevo): el comando emitido conserva la ecuación original con el
+/// término cruzado, así no se pierde la rotación. Elipse/hipérbola exigen
+/// centro finito y `f'≠0`; la parábola (`det≈0`) se importa directa si el
+/// bloque cuadrático y el lineal no son nulos.
+fn mapear_conica_rotada(
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+) -> Result<(String, String), String> {
+    let (l1, l2) = conic_eigenvalues(a, b, c)
+        .ok_or_else(|| "cónica rotada con autovalores no finitos".to_string())?;
+    if !l1.is_finite() || !l2.is_finite() {
+        return Err("cónica rotada con autovalores no finitos".to_string());
+    }
+    if l1.abs() <= EPS && l2.abs() <= EPS {
+        return Err("cónica rotada degenerada (bloque cuadrático nulo)".to_string());
+    }
+    let half = 0.5 * b;
+    let det = a * c - half * half;
+    if det.abs() > EPS {
+        // Centro: [[2a,b],[b,2c]]·[h,k] = [−d,−e].
+        let m00 = 2.0 * a;
+        let m01 = b;
+        let m10 = b;
+        let m11 = 2.0 * c;
+        let mdet = m00 * m11 - m01 * m10;
+        if !mdet.is_finite() || mdet.abs() <= EPS {
+            return Err("cónica rotada con centro singular".to_string());
+        }
+        let h = ((-d) * m11 - m01 * (-e)) / mdet;
+        let k = (m00 * (-e) - (-d) * m10) / mdet;
+        if !h.is_finite() || !k.is_finite() {
+            return Err("cónica rotada con centro no finito".to_string());
+        }
+        if h.abs() > 1e6 || k.abs() > 1e6 {
+            return Err("cónica rotada con centro desbordado".to_string());
+        }
+        let f_prime = a * h * h + b * h * k + c * k * k + d * h + e * k + f;
+        if !f_prime.is_finite() {
+            return Err("cónica rotada con f' no finito".to_string());
+        }
+        if f_prime.abs() <= EPS {
+            return Err("cónica rotada degenerada (f'≈0: punto o rectas)".to_string());
+        }
+    } else if a.abs() <= EPS && c.abs() <= EPS && b.abs() <= EPS {
+        return Err("cónica rotada degenerada (sin término cuadrático)".to_string());
+    }
+    if a.abs() > 1e6
+        || b.abs() > 1e6
+        || c.abs() > 1e6
+        || d.abs() > 1e6
+        || e.abs() > 1e6
+        || f.abs() > 1e6
+    {
+        return Err("cónica rotada con coeficientes desbordados".to_string());
+    }
+    let cmd = format!(
+        "ImplicitCurve[{}*x^2+{}*x*y+{}*y^2+{}*x+{}*y+{}=0]",
+        fmt_num(a),
+        fmt_num(b),
+        fmt_num(c),
+        fmt_num(d),
+        fmt_num(e),
+        fmt_num(f)
+    );
+    if cmd.len() > MAX_EXPR_CHARS {
+        return Err("cónica rotada excede MAX_EXPR_CHARS".to_string());
+    }
+    Ok(("ImplicitCurve".to_string(), cmd))
+}
 #[allow(clippy::needless_return)]
 fn mapear_conica(elem: &GgbElemento) -> Result<(String, String), String> {
     let m = elem.matrix.ok_or_else(|| "cónica sin matriz".to_string())?;
@@ -79,13 +199,10 @@ fn mapear_conica(elem: &GgbElemento) -> Result<(String, String), String> {
     {
         return Err("cónica con coeficientes no finitos".to_string());
     }
-    if !is_identity_eigen(elem.eigen) {
-        return Err(
-            "cónica rotada no canónica (requiere eigen identidad) — omitida honesta F2".to_string(),
-        );
-    }
-    if b.abs() > 1e-6 {
-        return Err("cónica con término cruzado b≠0 no canónica".to_string());
+    // R3.3: rotada (término cruzado o eigen no identidad) → implícita exacta
+    // vía autovalores; la canónica sigue a Ellipse/Parábola/Hipérbola.
+    if !is_identity_eigen(elem.eigen) || b.abs() > 1e-6 {
+        return mapear_conica_rotada(a, b, c, d, e, f);
     }
     let disc = b * b - 4.0 * a * c;
     let _etiqueta = sanitize_etiqueta(&elem.etiqueta);
@@ -1178,7 +1295,53 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                 });
                             }
                         } else if entradas.len() == 2 {
-                            reporte.omitidos.push(OmittedObject { tipo: cmd.nombre.clone(), label: salida_etiqueta, razon: "Angle con 2 args (rectas) no soportado canónico — omitido honesto".to_string() });
+                            // R3.3: Angle de 2 rectas → constraint real
+                            // `Angle[l1, l2, grados]` (agudo 0..90°) + Text medida
+                            // omitido como en el caso de 3 puntos.
+                            let a = entradas[0].trim();
+                            let b = entradas[1].trim();
+                            let l1 = lineas.get(a).copied();
+                            let l2 = lineas.get(b).copied();
+                            if let (Some((p1, p2)), Some((p3, p4))) = (l1, l2) {
+                                if let Some(ang) = angle_between_lines(p1, p2, p3, p4) {
+                                    let cmd_str = format!("Angle[{a}, {b}, {}]", fmt_num(ang));
+                                    if cmd_str.len() > MAX_EXPR_CHARS {
+                                        reporte.omitidos.push(OmittedObject {
+                                            tipo: cmd.nombre.clone(),
+                                            label: salida_etiqueta,
+                                            razon: "Angle comando excede MAX_EXPR_CHARS"
+                                                .to_string(),
+                                        });
+                                    } else {
+                                        try_push_mapeado(
+                                            &mut reporte,
+                                            salida_etiqueta.clone(),
+                                            "Angle".to_string(),
+                                            cmd_str,
+                                        );
+                                        reporte.omitidos.push(OmittedObject {
+                                            tipo: "Text".to_string(),
+                                            label: format!("{salida_etiqueta}_medida"),
+                                            razon: format!(
+                                                "ángulo {}° — Texto decorativo omitido (sin comando Text estable en esta versión)",
+                                                fmt_num(ang)
+                                            ),
+                                        });
+                                    }
+                                } else {
+                                    reporte.omitidos.push(OmittedObject {
+                                        tipo: cmd.nombre.clone(),
+                                        label: salida_etiqueta,
+                                        razon: "Angle rectas degeneradas o no finitas".to_string(),
+                                    });
+                                }
+                            } else {
+                                reporte.omitidos.push(OmittedObject {
+                                    tipo: cmd.nombre.clone(),
+                                    label: salida_etiqueta,
+                                    razon: format!("Angle rectas no halladas '{a}' '{b}'"),
+                                });
+                            }
                         } else {
                             reporte.omitidos.push(OmittedObject {
                                 tipo: cmd.nombre.clone(),
