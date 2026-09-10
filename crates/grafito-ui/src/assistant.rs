@@ -5776,6 +5776,9 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     // donde cambia el frame (no a 40 ms fijos: la mitad de los wakes repintaba
     // el mismo frame). La barra fina (generando/exportando) late con el otro
     // intervalo.
+    // UN solo wake por frame: antes había dos (borde de frame + 48ms fijos
+    // de export) que se intercalaban repintando el mismo frame = parpadeo.
+    // Reproduciendo, el wake del borde ya cubre el pulso de progreso.
     if !state.media_paused.get() {
         let delay_ms = media_next_frame_delay_ms(
             state.media_playhead_ms.get(),
@@ -5785,8 +5788,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         );
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(delay_ms));
-    }
-    if exporting {
+    } else if exporting {
         ui.ctx()
             .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
     }
