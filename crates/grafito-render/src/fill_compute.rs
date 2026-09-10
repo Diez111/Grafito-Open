@@ -14,7 +14,7 @@
 use crate::implicit_compute::{compile_expr, BytecodeProgram};
 use grafito_core::RelationOperator;
 use grafito_geometry::ast::Expr;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Maximum number of output pixels the pipeline can handle in one dispatch.
 /// 4096 × 4096 covers any practical desktop resolution; larger canvases fall
@@ -212,7 +212,7 @@ impl FillComputePipeline {
         operator: RelationOperator,
         view_bounds: (f64, f64, f64, f64),
         canvas_size: (u32, u32),
-        document_vars: &HashMap<String, f64>,
+        document_vars: &BTreeMap<String, f64>,
     ) -> Option<Vec<u8>> {
         // Eq is a contour, not a region — no fill.
         let op_code = match operator {

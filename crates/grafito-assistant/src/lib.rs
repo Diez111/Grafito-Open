@@ -15,6 +15,7 @@
 #![cfg_attr(not(feature = "assistant-net"), allow(dead_code))]
 
 pub mod agent;
+pub mod cas_nativo;
 pub mod harness;
 
 use base64::Engine;
@@ -342,11 +343,15 @@ fn solve_local_cas(
         }
         return Some(
             match grafito_geometry::symbolic::derivative(expression, "x") {
-                Ok(result) => cas_solved(
+                Ok(result) if cas_derivative_spot_check(expression, &result) => cas_solved(
                     format!("d/dx({expression}) = {result}"),
                     expression,
                     &result,
                     "Derivada simbólica (CAS nativo)",
+                ),
+                Ok(_) => cas_unsupported(
+                    "la derivada simbólica no pasó el preflight numérico",
+                    prefix,
                 ),
                 Err(error) => cas_unsupported(&error, prefix),
             },
@@ -366,12 +371,13 @@ fn solve_local_cas(
         }
         return Some(
             match grafito_geometry::symbolic::integrate(expression, "x") {
-                Ok(result) => cas_solved(
+                Ok(result) if cas_antiderivative_spot_check(expression, &result) => cas_solved(
                     format!("∫ {expression} dx = {result} + C"),
                     expression,
                     &format!("{result} + C"),
                     "Integral simbólica (CAS nativo)",
                 ),
+                Ok(_) => cas_unsupported("la antiderivada no pasó el preflight numérico", prefix),
                 Err(error) => cas_unsupported(&error, prefix),
             },
         );
@@ -385,17 +391,36 @@ fn solve_local_cas(
         }
         return Some(
             match grafito_geometry::symbolic::limit(expression, "x", at) {
-                Ok(result) => cas_solved(
-                    format!("lim x→{at} de ({expression}) = {result}"),
-                    expression,
-                    &result,
-                    "Límite (CAS nativo, Richardson)",
-                ),
+                // `limit` devuelve frase ("lim(x→0) f = 1.00000000"): el número
+                // citado es lo que va tras el último `=` y eso se verifica.
+                Ok(result) => match parse_limit_value(&result) {
+                    Some(value)
+                        if value.is_finite() && cas_limit_spot_check(expression, at, value) =>
+                    {
+                        cas_solved(
+                            format!("lim x→{at} de ({expression}) = {result}"),
+                            expression,
+                            &result,
+                            "Límite (CAS nativo, Richardson)",
+                        )
+                    }
+                    Some(_) => cas_unsupported("el límite no pasó el preflight numérico", prefix),
+                    None => cas_unsupported("el límite no es un número finito verificable", prefix),
+                },
                 Err(error) => cas_unsupported(&error, prefix),
             },
         );
     }
     None
+}
+
+/// Extrae el número citado tras el último `=` de una frase del CAS
+/// ("lim(x→0) f = 1.00000000" → 1.0). `None` si no hay número verificable.
+fn parse_limit_value(result: &str) -> Option<f64> {
+    result
+        .rsplit('=')
+        .next()
+        .and_then(|tail| tail.trim().parse::<f64>().ok())
 }
 
 fn split_limit_problem(rest: &str) -> (&str, f64) {
@@ -420,10 +445,103 @@ fn cas_solved(answer: String, before: &str, after: &str, rule: &str) -> Assistan
             before: before.to_string(),
             after: after.to_string(),
             rule: rule.into(),
-            verification: "Resultado del CAS nativo, reproducible sin red.".into(),
+            verification:
+                "Resultado del CAS nativo con preflight numérico (evaluate + residuo acotado)."
+                    .into(),
         }],
         plan: None,
     }
+}
+
+/// Evalúa una expresión univariada en `x`, o `None` si no es finita.
+fn eval_univariate(expression: &str, x: f64) -> Option<f64> {
+    match evaluate(expression, &[("x".to_string(), x)]) {
+        Ok(value) if value.is_finite() => Some(value),
+        _ => None,
+    }
+}
+
+/// Puntos de preflight (evitan el 0 singular sin perder cobertura).
+const CAS_SPOT_SAMPLES: &[f64] = &[-2.0, -1.5, -1.0, -0.5, 0.5, 1.0, 1.5, 2.0];
+
+/// ¿`candidate` aproxima la derivada de `expression`? Diferencias centrales
+/// con tolerancia relativa 1e-3; exige ≥2 muestras verificadas.
+fn cas_derivative_spot_check(expression: &str, candidate: &str) -> bool {
+    const H: f64 = 1e-4;
+    let mut verified = 0_usize;
+    for sample in CAS_SPOT_SAMPLES {
+        let x = *sample;
+        let (Some(forward), Some(backward)) = (
+            eval_univariate(expression, x + H),
+            eval_univariate(expression, x - H),
+        ) else {
+            continue;
+        };
+        let numeric = (forward - backward) / (2.0 * H);
+        let Some(closed) = eval_univariate(candidate, x) else {
+            return false;
+        };
+        if !numeric.is_finite() {
+            continue;
+        }
+        let tolerance = 1e-3 * (1.0 + closed.abs() + numeric.abs());
+        if (numeric - closed).abs() <= tolerance {
+            verified += 1;
+        } else {
+            return false;
+        }
+    }
+    verified >= 2
+}
+
+/// ¿`candidate` es antiderivada de `expression`? Deriva numéricamente la
+/// candidata y compara con el integrando; exige ≥2 muestras verificadas.
+fn cas_antiderivative_spot_check(expression: &str, candidate: &str) -> bool {
+    const H: f64 = 1e-4;
+    let mut verified = 0_usize;
+    for sample in CAS_SPOT_SAMPLES {
+        let x = *sample;
+        let (Some(forward), Some(backward)) = (
+            eval_univariate(candidate, x + H),
+            eval_univariate(candidate, x - H),
+        ) else {
+            continue;
+        };
+        let numeric = (forward - backward) / (2.0 * H);
+        let Some(expected) = eval_univariate(expression, x) else {
+            continue;
+        };
+        if !numeric.is_finite() {
+            continue;
+        }
+        let tolerance = 1e-3 * (1.0 + expected.abs() + numeric.abs());
+        if (numeric - expected).abs() <= tolerance {
+            verified += 1;
+        } else {
+            return false;
+        }
+    }
+    verified >= 2
+}
+
+/// ¿`expression` tiende a `limit` en `at`? Muestras bilaterales con
+/// tolerancia 1e-2; exige ≥2 muestras verificadas.
+fn cas_limit_spot_check(expression: &str, at: f64, limit: f64) -> bool {
+    let mut verified = 0_usize;
+    for delta in [1e-1, 1e-2, 1e-3, 1e-4] {
+        for side in [-1.0, 1.0] {
+            let Some(value) = eval_univariate(expression, at + side * delta) else {
+                continue;
+            };
+            let tolerance = 1e-2 * (1.0 + limit.abs());
+            if (value - limit).abs() <= tolerance {
+                verified += 1;
+            } else {
+                return false;
+            }
+        }
+    }
+    verified >= 2
 }
 
 fn cas_unsupported(error: &str, prefix: &str) -> AssistantResponse {

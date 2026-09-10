@@ -25,7 +25,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use grafito_core::{Document, FunctionObj, GeoObject, ImplicitCurveObj, RelationOperator};
 use grafito_geometry::ViewTransform;
 use grafito_render::Renderer;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn view_800x600() -> ViewTransform {
     ViewTransform::new(800.0, 600.0)
@@ -50,7 +50,7 @@ fn bench_cold_10_funcs(c: &mut Criterion) {
 }
 
 fn bench_prepare_ast_10x(c: &mut Criterion) {
-    let variables: HashMap<String, f64> = HashMap::new();
+    let variables: BTreeMap<String, f64> = BTreeMap::new();
     let exprs: Vec<String> = (1..=10).map(|i| format!("sin({i}*x)")).collect();
     c.bench_function("prepare_ast_10x", |b| {
         b.iter(|| {
@@ -72,7 +72,7 @@ fn curve_obj() -> ImplicitCurveObj {
 }
 
 fn bench_h3_asts_cache_miss(c: &mut Criterion) {
-    let variables: HashMap<String, f64> = HashMap::new();
+    let variables: BTreeMap<String, f64> = BTreeMap::new();
     c.bench_function("h3_asts_cache_miss", |b| {
         b.iter(|| {
             let obj = curve_obj();
@@ -85,7 +85,7 @@ fn bench_h3_asts_cache_miss(c: &mut Criterion) {
 }
 
 fn bench_h3_asts_cache_hit(c: &mut Criterion) {
-    let variables: HashMap<String, f64> = HashMap::new();
+    let variables: BTreeMap<String, f64> = BTreeMap::new();
     let obj = curve_obj();
     let _ = obj.get_cached_asts(&variables, &["x", "y"]).unwrap();
     c.bench_function("h3_asts_cache_hit", |b| {

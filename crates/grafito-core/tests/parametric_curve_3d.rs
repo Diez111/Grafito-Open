@@ -6,13 +6,13 @@ use grafito_core::{
     serialize_document, Document, GeoObject, ParametricCurve3DObj, Surface3DObj,
 };
 use grafito_geometry::Point3D;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn curve_3d_sampling_uses_the_declared_parameter() {
     let curve = ParametricCurve3DObj::new("s", "s^2", "2*s", 0.0, 2.0).with_parameter("s");
 
-    let samples = evaluate_parametric_curve_3d(&curve, 2, &HashMap::new());
+    let samples = evaluate_parametric_curve_3d(&curve, 2, &BTreeMap::new());
 
     assert_eq!(samples.len(), 3);
     assert_eq!(samples[2], (2.0, 4.0, 4.0));
@@ -54,11 +54,11 @@ fn curve_3d_parameter_round_trips_and_defaults_for_legacy_documents() {
 #[test]
 fn surface_sampling_keeps_document_xyz_for_explicit_and_parametric_surfaces() {
     let explicit = Surface3DObj::new("10*x + y", (1.0, 2.0), (3.0, 4.0));
-    let explicit_samples = evaluate_surface_3d(&explicit, 1, &HashMap::new());
+    let explicit_samples = evaluate_surface_3d(&explicit, 1, &BTreeMap::new());
     assert_eq!(explicit_samples[0][0], Point3D::new(1.0, 3.0, 13.0));
 
     let parametric =
         Surface3DObj::new_parametric("u", "10 + v", "100 + u + v", (1.0, 2.0), (3.0, 4.0));
-    let parametric_samples = evaluate_surface_3d(&parametric, 1, &HashMap::new());
+    let parametric_samples = evaluate_surface_3d(&parametric, 1, &BTreeMap::new());
     assert_eq!(parametric_samples[0][0], Point3D::new(1.0, 13.0, 104.0));
 }

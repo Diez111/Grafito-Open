@@ -20,6 +20,15 @@ pub fn interpolate_color(from: Color32, to: Color32, progress: f32) -> Color32 {
 }
 
 /// Easing functions for smooth transitions.
+///
+/// Vocabulario compartido con el wire (`grafito_anim::protocol::EASING_NAMES`)
+/// y con `RateFunc` (`grafito_anim::scene`, W2): la Piel resuelve el nombre a
+/// la fn existente vía [`easing::by_name`] (desconocido → `linear` honesto).
+/// Correspondencia documentada en W2 (`RateFunc::from_name`/`legacy_name`):
+/// `linear`→`Linear` (exacto), `cubic_in`/`cubic_out`/`cubic_in_out`→
+/// `EaseInOut` (exacto el in_out), `sin_in_out`→`Smooth` (aproximado),
+/// `quadratic_in`/`quadratic_out`→`RushInOut` (aproximado),
+/// `ease_out_back`→`Wiggle` (aproximado, ambos no-monotónicos).
 pub mod easing {
     pub fn linear(t: f32) -> f32 {
         t
@@ -52,6 +61,23 @@ pub mod easing {
         let c1 = 1.70158;
         let c3 = c1 + 1.0;
         1.0 + c3 * (t - 1.0_f32).powi(3) + c1 * (t - 1.0_f32).powi(2)
+    }
+
+    /// Resuelve un easing por nombre del wire (`EASING_NAMES`): los 8
+    /// canónicos van a la fn existente; desconocido o vacío → `linear`
+    /// honesto (jamás inventa curva). Puro, sin pánicos.
+    pub fn by_name(name: &str) -> fn(f32) -> f32 {
+        match name.trim().to_lowercase().as_str() {
+            "linear" => linear,
+            "quadratic_in" => quadratic_in,
+            "quadratic_out" => quadratic_out,
+            "cubic_in" => cubic_in,
+            "cubic_out" => cubic_out,
+            "cubic_in_out" => cubic_in_out,
+            "sin_in_out" => sin_in_out,
+            "ease_out_back" => ease_out_back,
+            _ => linear,
+        }
     }
 }
 
@@ -305,10 +331,302 @@ fn with_alpha(color: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
 
+/// Ejes y viewport compartidos para previews de animación (Piel pura).
+///
+/// `fn render(&Estado) -> Frame`: todo acá es puro y sin E/S; el raster
+/// (`grafito-app/src/anim_native.rs`) lo usa para no duplicar la mate.
+/// Cero I/O, cero spawn.
+pub mod anim_axes {
+    use crate::tokens::SPACE_XS;
+
+    /// Ancho estimado por glifo del rótulo quemado a escala 1 (avance
+    /// `ab_glyph` ≈ 6px + tracking): caja conservadora para el anti-solape.
+    pub const TICK_CHAR_W_PX: f32 = 7.0;
+    /// Alto estimado del rótulo a escala 1 (ascenso ≈ 10px + 1 de aire).
+    pub const TICK_CHAR_H_PX: f32 = 11.0;
+
+    /// Etiqueta corta de tick: 1 decimal máximo, sin ceros colgando
+    /// (`1.50` → `1.5`, `2.0` → `2`). No-finito → `"?"` honesto.
+    /// Pura, sin pánicos.
+    pub fn short_tick_label(value: f64) -> String {
+        if !value.is_finite() {
+            return "?".to_string();
+        }
+        if value == 0.0 {
+            return "0".to_string();
+        }
+        let redondeado = (value * 10.0).round() / 10.0;
+        if redondeado == 0.0 {
+            return "0".to_string();
+        }
+        if redondeado.fract() == 0.0 && redondeado.abs() < 1e15 {
+            return format!("{:.0}", redondeado);
+        }
+        format!("{redondeado:.1}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+
+    /// Caja ocupada por un rótulo (píxeles de frame). El padding deriva de
+    /// `SPACE_XS` (tokens, no mágico).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct LabelCaja {
+        pub x: usize,
+        pub y: usize,
+        pub w: usize,
+        pub h: usize,
+    }
+
+    impl LabelCaja {
+        /// ¿Se tocan (con 2px de aire por lado = `SPACE_XS / 2`)?
+        pub fn solapa(self, otra: Self) -> bool {
+            let pad = SPACE_XS as usize / 2;
+            let (ax0, ay0) = (self.x.saturating_sub(pad), self.y.saturating_sub(pad));
+            let (ax1, ay1) = (
+                self.x.saturating_add(self.w).saturating_add(pad),
+                self.y.saturating_add(self.h).saturating_add(pad),
+            );
+            let (bx0, by0) = (otra.x.saturating_sub(pad), otra.y.saturating_sub(pad));
+            let (bx1, by1) = (
+                otra.x.saturating_add(otra.w).saturating_add(pad),
+                otra.y.saturating_add(otra.h).saturating_add(pad),
+            );
+            ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1
+        }
+    }
+
+    /// ¿Cabe `(x, y, tw, th)` sin tocar ninguna ocupada? No muta.
+    pub fn cabe_label_entre(
+        x: usize,
+        y: usize,
+        tw: usize,
+        th: usize,
+        ocupadas: &[LabelCaja],
+    ) -> bool {
+        let caja = LabelCaja { x, y, w: tw, h: th };
+        !ocupadas.iter().any(|o| caja.solapa(*o))
+    }
+
+    /// Reserva `(x, y, tw, th)` si cabe: `true` = dibujar y quedó ocupada,
+    /// `false` = no dibujar (colisiona). Puro sobre el registro.
+    pub fn reserva_label(
+        x: usize,
+        y: usize,
+        tw: usize,
+        th: usize,
+        ocupadas: &mut Vec<LabelCaja>,
+    ) -> bool {
+        if cabe_label_entre(x, y, tw, th, ocupadas) {
+            ocupadas.push(LabelCaja { x, y, w: tw, h: th });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Recorta un segmento en float-píxeles a la caja `[0,w-1]×[0,h-1]`
+    /// (Cohen–Sutherland, como máximo 4 iteraciones acotadas).
+    /// `None` = fuera de vista o degenerado no-finito: el llamador NO dibuja
+    /// (clip limpio, jamás plateau). Puro, sin pánicos.
+    #[allow(clippy::too_many_arguments)]
+    pub fn clip_seg_a_caja(
+        ax: f32,
+        ay: f32,
+        bx: f32,
+        by: f32,
+        w: usize,
+        h: usize,
+    ) -> Option<((usize, usize), (usize, usize))> {
+        if w == 0 || h == 0 {
+            return None;
+        }
+        if !(ax.is_finite() && ay.is_finite() && bx.is_finite() && by.is_finite()) {
+            return None;
+        }
+        let (x0, y0) = (0.0f32, 0.0f32);
+        let (x1, y1) = ((w - 1) as f32, (h - 1) as f32);
+        const IZQ: u8 = 1;
+        const DER: u8 = 2;
+        const ARRIBA: u8 = 4;
+        const ABAJO: u8 = 8;
+        fn codigo(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> u8 {
+            let mut c = 0u8;
+            if x < x0 {
+                c |= IZQ;
+            } else if x > x1 {
+                c |= DER;
+            }
+            if y < y0 {
+                c |= ARRIBA;
+            } else if y > y1 {
+                c |= ABAJO;
+            }
+            c
+        }
+        let (mut ax, mut ay, mut bx, mut by) = (ax, ay, bx, by);
+        for _ in 0..4 {
+            let (ca, cb) = (
+                codigo(ax, ay, x0, y0, x1, y1),
+                codigo(bx, by, x0, y0, x1, y1),
+            );
+            if ca == 0 && cb == 0 {
+                let redondea = |v: f32, max: i32| (v.round() as i32).clamp(0, max) as usize;
+                return Some((
+                    (redondea(ax, x1 as i32), redondea(ay, y1 as i32)),
+                    (redondea(bx, x1 as i32), redondea(by, y1 as i32)),
+                ));
+            }
+            if ca & cb != 0 {
+                return None;
+            }
+            let cc = if ca != 0 { ca } else { cb };
+            let (dx, dy) = (bx - ax, by - ay);
+            if !dx.is_finite() || !dy.is_finite() {
+                return None;
+            }
+            let (nx, ny) = if cc & (IZQ | DER) != 0 {
+                if dx == 0.0 {
+                    return None;
+                }
+                let x = if cc & IZQ != 0 { x0 } else { x1 };
+                let t = (x - ax) / dx;
+                if !t.is_finite() {
+                    return None;
+                }
+                (x, ay + t * dy)
+            } else if cc & ARRIBA != 0 {
+                if dy == 0.0 {
+                    return None;
+                }
+                let t = (y0 - ay) / dy;
+                if !t.is_finite() {
+                    return None;
+                }
+                (ax + t * dx, y0)
+            } else {
+                if dy == 0.0 {
+                    return None;
+                }
+                let t = (y1 - ay) / dy;
+                if !t.is_finite() {
+                    return None;
+                }
+                (ax + t * dx, y1)
+            };
+            if !nx.is_finite() || !ny.is_finite() {
+                return None;
+            }
+            if ca != 0 {
+                (ax, ay) = (nx, ny);
+            } else {
+                (bx, by) = (nx, ny);
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{interpolate_color, ThinkingOrb, ThinkingOrbState};
+    use super::{anim_axes, easing, interpolate_color, ThinkingOrb, ThinkingOrbState};
     use egui::Color32;
+
+    // ── anim_axes: rótulos cortos + clip limpio + anti-solape ──────────
+    #[test]
+    fn tick_corto_un_decimal_maximo() {
+        assert_eq!(anim_axes::short_tick_label(2.0), "2");
+        assert_eq!(anim_axes::short_tick_label(-1.0), "-1");
+        assert_eq!(anim_axes::short_tick_label(1.5), "1.5");
+        assert_eq!(anim_axes::short_tick_label(0.0), "0");
+        assert_eq!(anim_axes::short_tick_label(-0.04), "0");
+        assert_eq!(anim_axes::short_tick_label(f64::NAN), "?");
+        assert_eq!(anim_axes::short_tick_label(f64::INFINITY), "?");
+        // 1 decimal máximo: 1/3 no sale como "0.33".
+        assert_eq!(anim_axes::short_tick_label(1.0 / 3.0), "0.3");
+    }
+
+    #[test]
+    fn clip_recorta_sin_aplastar() {
+        // Dentro intacto.
+        assert!(anim_axes::clip_seg_a_caja(10.0, 10.0, 50.0, 50.0, 320, 240).is_some());
+        // Totalmente fuera (arriba, donde la parábola se aplastaba) → None.
+        assert!(anim_axes::clip_seg_a_caja(10.0, -80.0, 50.0, -40.0, 320, 240).is_none());
+        // Cruza el borde: sale clipado dentro de la caja, sin plateau.
+        let ((ax, _), (bx, _)) = anim_axes::clip_seg_a_caja(160.0, 120.0, 160.0, -60.0, 320, 240)
+            .expect("cruce vertical debe clipar");
+        assert_eq!((ax, bx), (160, 160));
+        // Degenerados honestos.
+        assert!(anim_axes::clip_seg_a_caja(f32::NAN, 0.0, 1.0, 1.0, 320, 240).is_none());
+        assert!(anim_axes::clip_seg_a_caja(0.0, 0.0, 1.0, 1.0, 0, 240).is_none());
+    }
+
+    #[test]
+    fn reserva_rechaza_cajas_que_solapan() {
+        let mut ocupadas = Vec::new();
+        assert!(anim_axes::reserva_label(100, 100, 30, 11, &mut ocupadas));
+        // Encima de la anterior ("0000" amontonados) → se rechaza.
+        assert!(!anim_axes::reserva_label(105, 102, 30, 11, &mut ocupadas));
+        // Lejos → se acepta.
+        assert!(anim_axes::reserva_label(200, 100, 30, 11, &mut ocupadas));
+        assert_eq!(ocupadas.len(), 2);
+    }
+
+    // ── F1: unificación con RateFunc (W2) ─────────────────────────────
+    #[test]
+    fn easing_by_name_cubre_wire_y_falla_a_linear() {
+        for name in grafito_anim::protocol::EASING_NAMES {
+            let f = easing::by_name(name);
+            for t in [0.0f32, 0.5, 1.0] {
+                assert!(f(t).is_finite(), "{name}({t}) finito");
+            }
+            // Todos arrancan en 0 y cierran en 1 (ease_out_back sobrepasa
+            // en el medio pero cierra exacto).
+            assert!(f(0.0).abs() < 1e-6, "{name}(0)==0");
+            assert!((f(1.0) - 1.0).abs() < 1e-6, "{name}(1)==1");
+        }
+        // Desconocido o vacío → linear honesto (no inventa curva).
+        assert_eq!(easing::by_name("no-existe")(0.5), easing::linear(0.5));
+        assert_eq!(easing::by_name("")(0.5), easing::linear(0.5));
+        assert_eq!(
+            easing::by_name("  CUBIC_IN_OUT  ")(0.25),
+            easing::cubic_in_out(0.25)
+        );
+    }
+
+    #[test]
+    fn easing_paridad_con_ratefunc_w2() {
+        use grafito_anim::scene::RateFunc;
+        // Exactos (misma fórmula en f32 vs f64 casteado: tolerancia ulp).
+        for i in 0..=100 {
+            let t = i as f32 / 100.0;
+            assert!(
+                (easing::linear(t) - RateFunc::Linear.apply_f32(t)).abs() <= 1e-6,
+                "linear exacto en t={t}"
+            );
+            assert!(
+                (easing::cubic_in_out(t) - RateFunc::EaseInOut.apply_f32(t)).abs() <= 1e-6,
+                "cubic_in_out exacto en t={t}"
+            );
+        }
+        // Aproximado documentado en W2: sin_in_out vs Smooth (smoothstep).
+        // Endpoints y medio coinciden; el interior difiere apenas.
+        let mut max = 0.0f32;
+        for i in 0..=200 {
+            let t = i as f32 / 200.0;
+            max = max.max((easing::sin_in_out(t) - RateFunc::Smooth.apply_f32(t)).abs());
+        }
+        assert!(max < 0.025, "sin_in_out≈Smooth, max diff={max}");
+        // Los 3 exactos de `legacy_name` resuelven por nombre del wire.
+        for (rate, legacy) in [
+            (RateFunc::Linear, "linear"),
+            (RateFunc::Smooth, "sin_in_out"),
+            (RateFunc::EaseInOut, "cubic_in_out"),
+        ] {
+            assert_eq!(rate.legacy_name(), Some(legacy));
+            let _ = easing::by_name(legacy);
+        }
+    }
 
     #[test]
     fn color_interpolation_clamps_and_preserves_endpoints() {

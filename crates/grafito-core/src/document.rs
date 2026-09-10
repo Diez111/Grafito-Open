@@ -140,7 +140,7 @@ const MAX_AUTO_LABEL_NUMBER: usize = crate::validation::MAX_OBJECT_COUNT + 1;
 
 /// Decodifica el parámetro `kind` de `LineByTwoPoints`: 0 = recta infinita,
 /// 1 = segmento, 2 = semirrecta. Ausente = recta (GeoGebra `Line[A, B]`).
-fn line_by_two_points_kind(params: &HashMap<String, f64>) -> Result<LineKind, String> {
+fn line_by_two_points_kind(params: &BTreeMap<String, f64>) -> Result<LineKind, String> {
     match params.get("kind").copied().unwrap_or(0.0) {
         0.0 => Ok(LineKind::Line),
         1.0 => Ok(LineKind::Segment),
@@ -155,7 +155,7 @@ fn line_by_two_points_kind(params: &HashMap<String, f64>) -> Result<LineKind, St
 /// (manejada por su variable, no arrastrable) de constante (`"0"`, liberable
 /// al arrastrar). Sin evaluar: el motor resuelve identificadores desconocidos
 /// sin fallar, así que el `evaluate` no discrimina.
-fn expr_references_variables(expr: &str, variables: &HashMap<String, f64>) -> bool {
+fn expr_references_variables(expr: &str, variables: &VarMap) -> bool {
     if variables.is_empty() {
         return false;
     }
@@ -183,11 +183,11 @@ fn canonical_label_counter(counter: usize) -> usize {
 
 fn deserialize_next_label_numbers<'de, D>(
     deserializer: D,
-) -> Result<HashMap<String, usize>, D::Error>
+) -> Result<BTreeMap<String, usize>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let counters = HashMap::<String, usize>::deserialize(deserializer)?;
+    let counters = BTreeMap::<String, usize>::deserialize(deserializer)?;
     Ok(counters
         .into_iter()
         .map(|(base, counter)| (base, canonical_label_counter(counter)))
@@ -213,6 +213,19 @@ pub type CachedVarsList =
 
 /// A fallible mutation that can be staged as part of a document revision.
 pub type DocumentOperation = Box<dyn FnOnce(&mut Document) -> Result<(), String> + Send>;
+
+/// Puente F4 BTreeMap: mapa ordenado de variables (`String → f64`).
+///
+/// Destino de la migración por dominio de `Document::variables`: mismo
+/// contenido, iteración ordenada (determinismo en hash/baseline/export).
+/// [`Document::sorted_variables`] retorna un clon para call-sites que
+/// necesitan snapshot propio.
+pub type VarMap = BTreeMap<String, f64>;
+
+/// Puente F4 BTreeMap: mapa ordenado de metadatos de variable.
+///
+/// Destino de la migración por dominio de `variable_meta` (privado).
+pub type VarMetaMap = BTreeMap<String, VariableMeta>;
 
 /// A group of document mutations that either commits as one revision or leaves
 /// the document untouched.
@@ -817,33 +830,28 @@ pub fn whiteboard_pages_to_svg(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     /// The main document containing all geometric objects.
-    // Migración P0 HashMap→BTreeMap: `objects` es BTreeMap para determinismo total
-    // en serialización y hashing. `variables`/`variable_meta`/`live_sequences`/
-    // `variables_assumptions`/`spreadsheet_coordinate_points` mantienen HashMap:
-    // intento 2026-09-03 de migrar `variables:BTreeMap + variable_meta:BTreeMap +
-    // live_sequences:BTreeMap + variables_assumptions:BTreeMap` rompe
-    // `cargo check -p grafito-command` con 484 errores E0308 (mismatched types
-    // BTreeMap vs HashMap en parse_numeric_arg/prepare_function_ast/etc.). Como
-    // 484 > umbral 10, se revierte (BUILD gate). Determinismo se garantiza vía
-    // `semantic_document_baseline` (BTreeMap sort en `to_value`) y
-    // `ValidatedDocument`. Deuda P1: migrar requiere abstraer firmas
-    // `&HashMap<String,f64>` → genérico `&BTreeMap`/`&dyn Map` o alias
-    // `type VarMap = BTreeMap<...>` en 484 call-sites de grafito-command +
-    // grafito-geometry param sampling.
+    // Migración P0 HashMap→BTreeMap (cerebro-audit 2026-09-10): `objects`,
+    // `next_label_number`, `spreadsheet_coordinate_points`, `variables`
+    // (`VarMap`), `variable_meta` (`VarMetaMap`), `live_sequences` y
+    // `variables_assumptions` son BTreeMap (determinismo total en
+    // serialización, hashing e iteración; JSON idéntico en contenido, claves
+    // ordenadas). Determinismo reforzado vía `semantic_document_baseline`
+    // (BTreeMap sort en `to_value`) y `ValidatedDocument`.
+    // `sorted_variables()` queda como vista clonada (compatibilidad).
     objects: BTreeMap<ObjectId, GeoObject>,
     view: ViewTransform,
     #[serde(skip)]
     selection: Vec<ObjectId>,
     #[serde(default, deserialize_with = "deserialize_next_label_numbers")]
-    next_label_number: HashMap<String, usize>,
-    pub variables: HashMap<String, f64>,
+    next_label_number: BTreeMap<String, usize>,
+    pub variables: VarMap,
     /// Hipótesis simbólicas por variable (ej. "x" -> "positive" para `Assume[x>0]`).
     /// Stub persistido para el CAS; las claves son identificadores válidos y los
     /// valores describen la restricción (positive, nonzero, real, integer, etc.).
     #[serde(default)]
-    pub variables_assumptions: HashMap<String, String>,
+    pub variables_assumptions: BTreeMap<String, String>,
     #[serde(default)]
-    variable_meta: HashMap<String, VariableMeta>,
+    variable_meta: VarMetaMap,
     pub spreadsheet: Vec<Vec<String>>,
     /// Celdas CAS locales enviadas explícitamente; no hay borradores en este
     /// modelo para que save/open no puedan perder texto parcialmente editado.
@@ -852,7 +860,7 @@ pub struct Document {
     #[serde(default)]
     spreadsheet_variables: HashSet<String>,
     #[serde(default)]
-    spreadsheet_coordinate_points: HashMap<String, ObjectId>,
+    spreadsheet_coordinate_points: BTreeMap<String, ObjectId>,
     #[serde(skip)]
     pub spatial: crate::spatial::SpatialIndex,
     #[serde(skip)]
@@ -885,7 +893,7 @@ pub struct Document {
     pub cached_vars_list: CachedVarsList,
     /// Secuencias vivas: DataTable backing con recálculo automático al cambiar variables.
     #[serde(default)]
-    pub live_sequences: HashMap<ObjectId, LiveSequenceBinding>,
+    pub live_sequences: BTreeMap<ObjectId, LiveSequenceBinding>,
     /// Rastro por objeto (GeoGebra "trace"): ids con estela activada. Persiste
     /// (`#[serde(default)]` = migración automática desde JSON viejo); el
     /// contenido de la estela (`trails`) es efímero y nunca se serializa.
@@ -967,14 +975,14 @@ impl Default for Document {
             objects: BTreeMap::new(),
             view: ViewTransform::default(),
             selection: Vec::new(),
-            next_label_number: HashMap::new(),
-            variables: HashMap::new(),
-            variables_assumptions: HashMap::new(),
-            variable_meta: HashMap::new(),
+            next_label_number: BTreeMap::new(),
+            variables: BTreeMap::new(),
+            variables_assumptions: BTreeMap::new(),
+            variable_meta: BTreeMap::new(),
             spreadsheet: Vec::new(),
             cas_worksheet: Vec::new(),
             spreadsheet_variables: HashSet::new(),
-            spreadsheet_coordinate_points: HashMap::new(),
+            spreadsheet_coordinate_points: BTreeMap::new(),
             spatial: crate::spatial::SpatialIndex::new(),
             spatial_dirty: true,
             spatial_variables_hash: 0,
@@ -987,7 +995,7 @@ impl Default for Document {
             last_solution: HashMap::new(),
             version: 0,
             cached_vars_list: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            live_sequences: HashMap::new(),
+            live_sequences: BTreeMap::new(),
             trace_enabled: BTreeMap::new(),
             trails: BTreeMap::new(),
             number_plane_labels: true,
@@ -1396,7 +1404,7 @@ impl Document {
         constraint_name: &str,
         inputs: &[ObjectId],
     ) -> (ObjectId, usize) {
-        self.add_constructed_object_with_params(obj, constraint_name, inputs, HashMap::new())
+        self.add_constructed_object_with_params(obj, constraint_name, inputs, BTreeMap::new())
     }
 
     /// Add a constructed object only when its constraint can be registered.
@@ -1406,7 +1414,7 @@ impl Document {
         constraint_name: &str,
         inputs: &[ObjectId],
     ) -> Result<(ObjectId, usize), String> {
-        self.try_add_constructed_object_with_params(obj, constraint_name, inputs, HashMap::new())
+        self.try_add_constructed_object_with_params(obj, constraint_name, inputs, BTreeMap::new())
     }
 
     /// Legacy construction API. On rejection it logs the error and returns an
@@ -1416,7 +1424,7 @@ impl Document {
         obj: GeoObject,
         constraint_name: &str,
         inputs: &[ObjectId],
-        params: HashMap<String, f64>,
+        params: BTreeMap<String, f64>,
     ) -> (ObjectId, usize) {
         self.try_add_constructed_object_with_params(obj, constraint_name, inputs, params)
             .unwrap_or_else(|error| {
@@ -1432,7 +1440,7 @@ impl Document {
         obj: GeoObject,
         constraint_name: &str,
         inputs: &[ObjectId],
-        params: HashMap<String, f64>,
+        params: BTreeMap<String, f64>,
     ) -> Result<(ObjectId, usize), String> {
         let id = obj.id();
         self.validate_constructive_constraint_parts(constraint_name, inputs, &obj, &params)?;
@@ -1895,7 +1903,7 @@ impl Document {
         &self,
         name: &str,
         inputs: &[ObjectId],
-        params: &HashMap<String, f64>,
+        params: &BTreeMap<String, f64>,
     ) -> Result<(), String> {
         let object_is = |id: ObjectId, predicate: fn(&GeoObject) -> bool| {
             self.get_object(id).is_some_and(predicate)
@@ -1990,7 +1998,7 @@ impl Document {
         name: &str,
         inputs: &[ObjectId],
         output: &GeoObject,
-        params: &HashMap<String, f64>,
+        params: &BTreeMap<String, f64>,
     ) -> Result<(), String> {
         if inputs.is_empty() {
             return Err(format!("{name}: requiere objetos de entrada"));
@@ -2431,7 +2439,7 @@ impl Document {
         name: &str,
         inputs: &[ObjectId],
         outputs: &[ObjectId],
-        params: &HashMap<String, f64>,
+        params: &BTreeMap<String, f64>,
     ) -> Result<(), String> {
         if Self::is_numeric_constraint_name(name) {
             return Ok(());
@@ -2466,7 +2474,7 @@ impl Document {
         &mut self,
         name: &str,
         inputs: Vec<ObjectId>,
-        params: HashMap<String, f64>,
+        params: BTreeMap<String, f64>,
     ) -> Result<usize, String> {
         self.validate_numeric_constraint_definition(name, &inputs, &params)?;
         self.constraints
@@ -2488,7 +2496,7 @@ impl Document {
         b: ObjectId,
         distance: f64,
     ) -> Result<usize, String> {
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("distance".to_string(), distance);
         self.try_add_numeric_constraint("Distance", vec![a, b], params)
     }
@@ -2508,7 +2516,7 @@ impl Document {
         b: ObjectId,
         angle_deg: f64,
     ) -> Result<usize, String> {
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("angle".to_string(), angle_deg);
         self.try_add_numeric_constraint("Angle", vec![a, b], params)
     }
@@ -2527,7 +2535,7 @@ impl Document {
         a: ObjectId,
         b: ObjectId,
     ) -> Result<usize, String> {
-        self.try_add_numeric_constraint("Tangent", vec![a, b], HashMap::new())
+        self.try_add_numeric_constraint("Tangent", vec![a, b], BTreeMap::new())
     }
 
     /// Add a numeric coincident constraint between two points.
@@ -2544,7 +2552,7 @@ impl Document {
         a: ObjectId,
         b: ObjectId,
     ) -> Result<usize, String> {
-        self.try_add_numeric_constraint("Coincident", vec![a, b], HashMap::new())
+        self.try_add_numeric_constraint("Coincident", vec![a, b], BTreeMap::new())
     }
 
     /// Add a numeric horizontal constraint to a line.
@@ -2557,7 +2565,7 @@ impl Document {
     }
 
     pub fn try_add_horizontal_constraint(&mut self, line: ObjectId) -> Result<usize, String> {
-        self.try_add_numeric_constraint("Horizontal", vec![line], HashMap::new())
+        self.try_add_numeric_constraint("Horizontal", vec![line], BTreeMap::new())
     }
 
     /// Add a numeric vertical constraint to a line.
@@ -2570,7 +2578,7 @@ impl Document {
     }
 
     pub fn try_add_vertical_constraint(&mut self, line: ObjectId) -> Result<usize, String> {
-        self.try_add_numeric_constraint("Vertical", vec![line], HashMap::new())
+        self.try_add_numeric_constraint("Vertical", vec![line], BTreeMap::new())
     }
 
     /// Add a numeric equal-length constraint between two line segments.
@@ -2587,7 +2595,7 @@ impl Document {
         line1: ObjectId,
         line2: ObjectId,
     ) -> Result<usize, String> {
-        self.try_add_numeric_constraint("EqualLength", vec![line1, line2], HashMap::new())
+        self.try_add_numeric_constraint("EqualLength", vec![line1, line2], BTreeMap::new())
     }
 
     /// Add a numeric symmetry constraint: `mirror_point` is the mirror of
@@ -2614,7 +2622,7 @@ impl Document {
         self.try_add_numeric_constraint(
             "Symmetry",
             vec![point, mirror_point, mirror_line],
-            HashMap::new(),
+            BTreeMap::new(),
         )
     }
 
@@ -4909,8 +4917,19 @@ impl Document {
         self.variables.get(name).copied()
     }
 
-    pub fn variables(&self) -> &HashMap<String, f64> {
+    pub fn variables(&self) -> &VarMap {
         &self.variables
+    }
+
+    /// Vista ordenada determinista de `variables` (puente F4 `VarMap`).
+    ///
+    /// Hoy `variables` ya es `VarMap`: retorna un clon para los call-sites que
+    /// necesitan snapshot propio (hash, baseline, export). Puro, sin mutar.
+    pub fn sorted_variables(&self) -> VarMap {
+        self.variables
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     /// Indica si el valor de una variable es derivado de una celda de spreadsheet.
@@ -4929,7 +4948,7 @@ impl Document {
         self.variable_meta.get(name)
     }
 
-    pub(crate) fn variable_metadata(&self) -> &HashMap<String, VariableMeta> {
+    pub(crate) fn variable_metadata(&self) -> &VarMetaMap {
         &self.variable_meta
     }
 
@@ -7074,6 +7093,38 @@ mod tests {
     }
 
     #[test]
+    fn sorted_variables_es_vista_ordenada_sin_mutar() {
+        let mut doc = Document::new();
+        doc.try_set_variable("z".to_string(), 3.0).expect("set z");
+        doc.try_set_variable("a".to_string(), 1.0).expect("set a");
+        doc.try_set_variable("m".to_string(), 2.0).expect("set m");
+        let sorted = doc.sorted_variables();
+        let keys: Vec<String> = sorted.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            ["a".to_string(), "m".to_string(), "z".to_string()],
+            "VarMap itera ordenado"
+        );
+        assert_eq!(sorted["a"], 1.0);
+        // Sin mutar: el mapa vivo sigue intacto.
+        assert_eq!(doc.get_variable("z"), Some(3.0));
+    }
+
+    #[test]
+    fn label_counters_btreemap_roundtrip_json() {
+        let mut doc = Document::new();
+        let _ = doc.try_add_object(crate::GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(1.0, 2.0),
+        )));
+        let json = serde_json::to_value(&doc).expect("serialize");
+        let back: Document = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            back.next_label_number, doc.next_label_number,
+            "contadores BTreeMap sobreviven roundtrip"
+        );
+    }
+
+    #[test]
     fn screen_size_updates_mark_spatial_state_only_when_dimensions_change() {
         let mut document = Document::new();
         document.spatial_dirty = false;
@@ -7305,7 +7356,7 @@ mod tests {
                 ),
                 "LineByTwoPoints",
                 &[a, b],
-                HashMap::from([("kind".to_string(), 0.0)]),
+                BTreeMap::from([("kind".to_string(), 0.0)]),
             )
             .unwrap();
         assert_eq!(
@@ -7396,7 +7447,7 @@ mod tests {
                 ),
                 "LineByTwoPoints",
                 &[a, b],
-                HashMap::from([("kind".to_string(), 0.0)]),
+                BTreeMap::from([("kind".to_string(), 0.0)]),
             )
             .unwrap();
         let (circle, _) = doc
@@ -7538,7 +7589,7 @@ mod tests {
                     "Translate",
                     vec![prev],
                     vec![next],
-                    HashMap::from([("dx".to_string(), 1.0), ("dy".to_string(), 0.0)]),
+                    BTreeMap::from([("dx".to_string(), 1.0), ("dy".to_string(), 0.0)]),
                 )
                 .unwrap();
             prev = next;
@@ -7569,7 +7620,7 @@ mod tests {
                 .try_add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))))
                 .unwrap();
             doc.constraints
-                .try_add_constraint("Midpoint", vec![a, b], vec![m], HashMap::new())
+                .try_add_constraint("Midpoint", vec![a, b], vec![m], BTreeMap::new())
                 .unwrap();
         }
         let error = doc

@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod scanline_speed_tests {
     use grafito_geometry::expr::prepare_function_ast;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::time::Instant;
 
     /// Simula un scanline fill: para cada fila, evaluar f en N samples.
@@ -35,7 +35,7 @@ mod scanline_speed_tests {
     fn bench_scanline_speedup() {
         // Disco: x^2 + y^2 < 1 sobre canvas 1000x600.
         // AST: x^2 + y^2 (4 nodos).
-        let ast = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
+        let ast = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
         let f = |x: f64, y: f64| ast.eval_2d("x", x, "y", y);
         let rows = 600;
         let cols = 1000;
@@ -58,7 +58,7 @@ mod scanline_speed_tests {
         // Ver nota P1b en `bench_scanline_speedup`: gate informativo manual.
         // Expresión compleja con ~20 nodos.
         let expr = "sin(x)*cos(y) + exp(-(x^2 + y^2)) * log(x^2 + y^2 + 1)";
-        let ast = prepare_function_ast(expr, &HashMap::new(), &["x", "y"]).unwrap();
+        let ast = prepare_function_ast(expr, &BTreeMap::new(), &["x", "y"]).unwrap();
         let f = |x: f64, y: f64| ast.eval_2d("x", x, "y", y);
         let rows = 600;
         let cols = 1000;

@@ -33,9 +33,25 @@ pub const KNOWN_TEMPLATES: &[&str] = &[
 const MIN_CANVAS: u64 = 64;
 const MAX_CANVAS: u64 = 4096;
 const DEFAULT_CANVAS: (u32, u32) = (640, 480);
-const DEFAULT_DURATION_MS: u64 = 2000;
 const MIN_DURATION_MS: u64 = 100;
 const MAX_DURATION_MS: u64 = 30_000;
+/// FPS del plan de animación (paridad diálogo `MediaExportDialog` 1..=60, default 12).
+pub const MIN_ANIM_FPS: u32 = 1;
+pub const MAX_ANIM_FPS: u32 = 60;
+pub const DEFAULT_ANIM_FPS: u32 = 12;
+/// Frames por item del player (paridad `PLAYER_MAX_FRAMES` 48) y total (96).
+pub const PLAYER_ITEM_MAX_FRAMES: usize = 48;
+pub const PLAYER_TOTAL_MAX_FRAMES: usize = 96;
+/// Calidades del plan (espejo UI `MediaExportQuality`: bitrate sugerido).
+pub const KNOWN_QUALITIES: &[&str] = &["baja", "media", "alta"];
+/// Vistas del plan (espejo UI `MediaExportView`).
+pub const KNOWN_VIEWS: &[&str] = &["plana", "orbita"];
+/// Efectos de creación del player (brazos `PlayItem`; `none` = morph histórico).
+pub const KNOWN_EFFECTS: &[&str] = &["create", "write", "fade", "grow", "indicate", "none"];
+/// Formatos de exportación del plan (wire `ExportFormat`: gif/png/mp4/webm).
+pub const KNOWN_EXPORT_FORMATS: &[&str] = &["gif", "png", "mp4", "webm"];
+/// Destinos del tracker (`TrackerMap`: opacidad/escala/centro).
+pub const KNOWN_TRACKER_MAPS: &[&str] = &["opacity", "scale", "center_x", "center_y"];
 
 // ── Error tipado en español ─────────────────────────────────────────────────
 
@@ -1231,6 +1247,253 @@ pub fn is_known_template(template: &str) -> bool {
     KNOWN_TEMPLATES.contains(&template)
 }
 
+// ── Plan de animación extendido (quality/view/effect/duration_s/fps/tracker) ──
+// Puro, sin Document ni I/O: valida contra los mismos presupuestos del núcleo
+// (`AnimDuration` 0.1..=30 s, fps 1..=60 del diálogo, frames 1..=48/total 96).
+
+/// Normaliza `quality` (default `media`); `Err` honesto si no es baja/media/alta.
+pub fn parse_anim_quality(raw: Option<&str>) -> Result<&'static str, ToolError> {
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("media");
+    let lower = text.to_lowercase();
+    match lower.as_str() {
+        "baja" | "baja calidad" | "low" => Ok("baja"),
+        "media" | "medium" => Ok("media"),
+        "alta" | "alta calidad" | "high" => Ok("alta"),
+        _ => Err(ToolError::CampoInvalido {
+            campo: "quality",
+            motivo: format!("calidad desconocida '{text}' (válidas: baja, media, alta)"),
+        }),
+    }
+}
+
+/// Bitrate sugerido en kbps por calidad (paridad UI 500/2000/8000, rango 100..=20000).
+pub fn suggested_bitrate_kbps(quality: &str) -> u32 {
+    match quality {
+        "baja" => 500,
+        "alta" => 8000,
+        _ => 2000,
+    }
+}
+
+/// Normaliza `view` (default `plana`); `Err` honesto si no es plana/orbita.
+pub fn parse_anim_view(raw: Option<&str>) -> Result<&'static str, ToolError> {
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("plana");
+    let lower = text.to_lowercase();
+    match lower.as_str() {
+        "plana" | "plano" | "2d" | "flat" => Ok("plana"),
+        "orbita" | "órbita" | "orbit" | "3d" => Ok("orbita"),
+        _ => Err(ToolError::CampoInvalido {
+            campo: "view",
+            motivo: format!("vista desconocida '{text}' (válidas: plana, orbita)"),
+        }),
+    }
+}
+
+/// Normaliza `effect` (default `none`); `Err` honesto si no es creation conocido.
+pub fn parse_anim_effect(raw: Option<&str>) -> Result<&'static str, ToolError> {
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("none");
+    let lower = text.to_lowercase();
+    match lower.as_str() {
+        "create" | "crear" | "traza" => Ok("create"),
+        "write" | "escribir" | "revelado" => Ok("write"),
+        "fade" | "alfa" | "aparicion" | "aparición" => Ok("fade"),
+        "grow" | "growfromcenter" | "grow_from_center" | "crecer" => Ok("grow"),
+        "indicate" | "pulso" | "indicar" => Ok("indicate"),
+        "none" | "ninguno" | "morph" | "transform" => Ok("none"),
+        _ => Err(ToolError::CampoInvalido {
+            campo: "effect",
+            motivo: format!(
+                "efecto desconocido '{text}' (válidos: create, write, fade, grow, indicate, none)"
+            ),
+        }),
+    }
+}
+
+/// Brazo `PlayItem` del player para un `effect` ya validado (routing puro).
+pub fn play_kind_for_effect(effect: &str) -> &'static str {
+    match effect {
+        "create" => "Create",
+        "write" => "Write",
+        "fade" => "Fade",
+        "grow" => "GrowFromCenter",
+        "indicate" => "Indicate",
+        _ => "Transform",
+    }
+}
+
+/// Normaliza `format` de exportación (default `gif`); `Err` honesto si no es wire válido.
+pub fn parse_anim_format(raw: Option<&str>) -> Result<&'static str, ToolError> {
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("gif");
+    let lower = text.to_lowercase();
+    match lower.as_str() {
+        "gif" => Ok("gif"),
+        "png" | "png-sequence" | "pngsequence" | "pngdir" | "secuencia" => Ok("png"),
+        "mp4" | "h264" => Ok("mp4"),
+        "webm" | "vp9" => Ok("webm"),
+        _ => Err(ToolError::CampoInvalido {
+            campo: "format",
+            motivo: format!("formato desconocido '{text}' (válidos: gif, png, mp4, webm)"),
+        }),
+    }
+}
+
+/// Extrae `duration_s` (default 2.0) validada contra `AnimDuration` 0.1..=30 s.
+pub fn parse_anim_duration_s(call: &ToolCall) -> Result<f64, ToolError> {
+    let secs = call
+        .arguments
+        .get("duration_s")
+        .or_else(|| call.arguments.get("duration"))
+        .and_then(Value::as_f64)
+        .unwrap_or(2.0);
+    if !is_valid_duration_secs(secs) {
+        return Err(ToolError::CampoInvalido {
+            campo: "duration_s",
+            motivo: format!("duración {secs} fuera de 0.1..=30 s"),
+        });
+    }
+    Ok(secs)
+}
+
+/// Extrae `fps` (default 12) validado 1..=60 (paridad diálogo).
+pub fn parse_anim_fps(call: &ToolCall) -> Result<u32, ToolError> {
+    let fps = call
+        .arguments
+        .get("fps")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::from(DEFAULT_ANIM_FPS));
+    if fps < u64::from(MIN_ANIM_FPS) || fps > u64::from(MAX_ANIM_FPS) {
+        return Err(ToolError::CampoInvalido {
+            campo: "fps",
+            motivo: format!("fps {fps} fuera de 1..=60"),
+        });
+    }
+    Ok(fps as u32)
+}
+
+/// Plan del tracker (`ValueTracker` + `TrackerMap`), si el LLM lo pide.
+///
+/// Acepta `tracker: {start, end, map}` con bordes finitos y `map` en
+/// opacity/scale/center_x/center_y. `None` = sin tracker (comportamiento histórico).
+/// `Err` honesto si el objeto viene mal formado; jamás ejecuta nada.
+pub fn parse_anim_tracker(call: &ToolCall) -> Result<Option<(f64, f64, &'static str)>, ToolError> {
+    let Some(obj) = call.arguments.get("tracker").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let start = obj
+        .get("start")
+        .and_then(Value::as_f64)
+        .ok_or(ToolError::CampoInvalido {
+            campo: "tracker.start",
+            motivo: "requiere número finito".to_string(),
+        })?;
+    let end = obj
+        .get("end")
+        .and_then(Value::as_f64)
+        .ok_or(ToolError::CampoInvalido {
+            campo: "tracker.end",
+            motivo: "requiere número finito".to_string(),
+        })?;
+    if !start.is_finite() || !end.is_finite() {
+        return Err(ToolError::CampoInvalido {
+            campo: "tracker",
+            motivo: "bordes no finitos".to_string(),
+        });
+    }
+    let map_raw = obj
+        .get("map")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("opacity");
+    let map = match map_raw.to_lowercase().as_str() {
+        "opacity" | "opacidad" | "alfa" => "opacity",
+        "scale" | "escala" => "scale",
+        "center_x" | "centerx" | "x" => "center_x",
+        "center_y" | "centery" | "y" => "center_y",
+        _ => {
+            return Err(ToolError::CampoInvalido {
+                campo: "tracker.map",
+                motivo: format!(
+                    "mapa desconocido '{map_raw}' (válidos: opacity, scale, center_x, center_y)"
+                ),
+            });
+        }
+    };
+    Ok(Some((start, end, map)))
+}
+
+/// Preflight puro del player: frames por item 1..=48 y total ≤96.
+///
+/// Reusa el patrón del CAS (spot-check honesto): `Err` antes de ejecutar.
+pub fn preflight_player_frames(items: &[usize]) -> Result<usize, ToolError> {
+    if items.is_empty() {
+        return Err(ToolError::FaltaCampo { campo: "items" });
+    }
+    let mut total = 0_usize;
+    for (i, frames) in items.iter().enumerate() {
+        if *frames == 0 || *frames > PLAYER_ITEM_MAX_FRAMES {
+            return Err(ToolError::PresupuestoExcedido(format!(
+                "el item {i} trae {frames} frames (válido 1..={PLAYER_ITEM_MAX_FRAMES})"
+            )));
+        }
+        total = total.saturating_add(*frames);
+        if total > PLAYER_TOTAL_MAX_FRAMES {
+            return Err(ToolError::PresupuestoExcedido(format!(
+                "el total {total} excede {PLAYER_TOTAL_MAX_FRAMES}: partí la escena en dos"
+            )));
+        }
+    }
+    Ok(total)
+}
+
+/// Preflight puro del colocado: opacidad 0..=1, escala >0 finita, centro finito.
+pub fn preflight_placed(opacity: f64, scale: f64, center: [f64; 2]) -> Result<(), ToolError> {
+    if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+        return Err(ToolError::CampoInvalido {
+            campo: "opacity",
+            motivo: format!("{opacity} fuera de 0..=1"),
+        });
+    }
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(ToolError::CampoInvalido {
+            campo: "scale",
+            motivo: format!("{scale} debe ser >0"),
+        });
+    }
+    if !center[0].is_finite() || !center[1].is_finite() {
+        return Err(ToolError::CampoInvalido {
+            campo: "center",
+            motivo: "centro no finito".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Preflight puro de la órbita: vista válida; `orbita` se declara pedida y la
+/// UI decide soporte según plantilla 3D (acá nunca se inventa soporte).
+pub fn preflight_orbit_view(view: &str) -> Result<bool, ToolError> {
+    match view {
+        "plana" => Ok(false),
+        "orbita" => Ok(true),
+        _ => Err(ToolError::CampoInvalido {
+            campo: "view",
+            motivo: format!("vista desconocida '{view}' (válidas: plana, orbita)"),
+        }),
+    }
+}
+
 fn canvas_from_call(call: &ToolCall) -> (u32, u32) {
     if let Some(arr) = call.arguments.get("canvas").and_then(Value::as_array) {
         if arr.len() == 2 {
@@ -2395,29 +2658,85 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
             },
         );
     }
-    // Duración fija válida 2.0 s (0.1..=30) -> 2000 ms (100..=30000).
-    if !is_valid_duration_secs(2.0)
-        || DEFAULT_DURATION_MS < MIN_DURATION_MS
-        || DEFAULT_DURATION_MS > MAX_DURATION_MS
-    {
+    // Parámetros extendidos (puros, validados contra presupuestos del núcleo).
+    let quality = match parse_anim_quality(call.arguments.get("quality").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return err_result(&call.id, error),
+    };
+    let view = match parse_anim_view(call.arguments.get("view").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return err_result(&call.id, error),
+    };
+    let effect = match parse_anim_effect(call.arguments.get("effect").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return err_result(&call.id, error),
+    };
+    let format = match parse_anim_format(call.arguments.get("format").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return err_result(&call.id, error),
+    };
+    let duration_s = match parse_anim_duration_s(call) {
+        Ok(value) => value,
+        Err(error) => return err_result(&call.id, error),
+    };
+    let fps = match parse_anim_fps(call) {
+        Ok(value) => value,
+        Err(error) => return err_result(&call.id, error),
+    };
+    let tracker = match parse_anim_tracker(call) {
+        Ok(value) => value,
+        Err(error) => return err_result(&call.id, error),
+    };
+    let duration_ms = (duration_s * 1000.0).round() as u64;
+    if !(MIN_DURATION_MS..=MAX_DURATION_MS).contains(&duration_ms) {
         return err_result(
             &call.id,
             ToolError::CampoInvalido {
-                campo: "duration",
-                motivo: "duración fuera de rango".to_string(),
+                campo: "duration_s",
+                motivo: format!("duración {duration_ms} ms fuera de 100..=30000"),
             },
         );
     }
-    let payload = json!({
+    // Routing puro: effect → brazo PlayItem, tracker → plan ValueTracker, view → órbita.
+    let play_kind = play_kind_for_effect(effect);
+    let orbit_requested = match preflight_orbit_view(view) {
+        Ok(value) => value,
+        Err(error) => return err_result(&call.id, error),
+    };
+    // Preflight del plan (frames estimados por duración×fps, clamp 1..=48).
+    let estimated_frames =
+        ((duration_s * f64::from(fps)).round() as usize).clamp(1, PLAYER_ITEM_MAX_FRAMES);
+    if let Err(error) = preflight_player_frames(&[estimated_frames]) {
+        return err_result(&call.id, error);
+    }
+    let mut payload = json!({
         "template": template,
         "concept": concept_norm,
         "params": params_map,
-        "export": "gif",
+        "export": format,
         "canvas": [canvas.0, canvas.1],
-        "duration_ms": DEFAULT_DURATION_MS,
+        "duration_ms": duration_ms,
+        "duration_s": duration_s,
+        "fps": fps,
+        "frames": estimated_frames,
+        "quality": quality,
+        "bitrate_kbps": suggested_bitrate_kbps(quality),
+        "view": view,
+        "orbit_requested": orbit_requested,
+        "orbit_supported": false,
+        "effect": effect,
+        "play_kind": play_kind,
         "protocol_version": ANIM_PROTOCOL_VERSION,
         "note": "solicitud validada; el motor de animación se ejecuta en la capa UI tras aprobación explícita"
     });
+    if let Some((start, end, map)) = tracker {
+        payload["tracker"] = json!({"start": start, "end": end, "map": map});
+    }
+    if orbit_requested {
+        payload["orbit_note"] = json!(
+            "órbita pedida; la UI la habilita solo en plantillas 3D, si no exporta la vista plana"
+        );
+    }
     ToolResult::text(&call.id, true, payload.to_string())
 }
 
@@ -2623,12 +2942,12 @@ pub fn suggest_next_tool_schema() -> ToolSchema {
     )
 }
 
-/// Schema de `generate_animation(template, concept, params)`.
+/// Schema de `generate_animation(template, concept, params, quality, view, effect, format, duration_s, fps, tracker)`.
 #[must_use]
 pub fn generate_animation_tool_schema() -> ToolSchema {
     ToolSchema::new(
         "generate_animation",
-        "Valida y propone una solicitud de animación didáctica (template, concept, params) sin ejecutar el motor; usa protocolo AnimRequest.",
+        "Valida y propone una solicitud de animación didáctica (template, concept, params, quality, view, effect, format, duration_s, fps, tracker) sin ejecutar el motor; usa protocolo AnimRequest.",
         json!({
             "type": "object",
             "properties": {
@@ -2637,7 +2956,14 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
                 "params": {"type": "object", "description": "Mapa opcional de parámetros numéricos finitos", "additionalProperties": {"type": "number"}},
                 "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
                 "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640)"},
-                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480)"}
+                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480)"},
+                "quality": {"type": "string", "description": "Calidad opcional: baja, media (default), alta (bitrate 500/2000/8000 kbps)"},
+                "view": {"type": "string", "description": "Vista opcional: plana (default) u orbita (órbita 3D; la UI la habilita solo en plantillas 3D)"},
+                "effect": {"type": "string", "description": "Efecto de creación opcional: create, write, fade, grow, indicate, none (default; none = morph histórico)"},
+                "format": {"type": "string", "description": "Formato de exportación opcional: gif (default), png, mp4, webm (mp4/webm requieren ffmpeg en la UI)"},
+                "duration_s": {"type": "number", "description": "Duración opcional en segundos 0.1..=30 (default 2.0)"},
+                "fps": {"type": "integer", "description": "Fotogramas por segundo 1..=60 (default 12)"},
+                "tracker": {"type": "object", "description": "Tracker opcional {start: number, end: number, map: opacity|scale|center_x|center_y} estilo ValueTracker", "properties": {"start": {"type": "number"}, "end": {"type": "number"}, "map": {"type": "string"}}, "required": ["start", "end"]}
             },
             "required": []
         }),
@@ -3074,6 +3400,107 @@ mod tests {
         assert_eq!(v["protocol_version"], 1);
         // Auto-template: integral -> integral-area
         assert_eq!(template, "integral-area");
+    }
+
+    #[test]
+    fn generate_animation_parametros_extendidos_validos() {
+        let r = safe_dispatch(
+            "generate_animation",
+            json!({
+                "concept": "derivada como pendiente",
+                "quality": "alta",
+                "view": "plana",
+                "effect": "create",
+                "format": "mp4",
+                "duration_s": 3.0,
+                "fps": 24,
+                "tracker": {"start": 0.0, "end": 1.0, "map": "opacity"},
+            }),
+        );
+        assert!(r.ok, "{}", r.content);
+        let v: Value = serde_json::from_str(&r.content).expect("json");
+        assert_eq!(v["quality"], "alta");
+        assert_eq!(v["bitrate_kbps"], 8000);
+        assert_eq!(v["view"], "plana");
+        assert_eq!(v["orbit_requested"], false);
+        assert_eq!(v["effect"], "create");
+        assert_eq!(v["play_kind"], "Create");
+        assert_eq!(v["export"], "mp4");
+        assert_eq!(v["duration_s"], 3.0);
+        assert_eq!(v["duration_ms"], 3000);
+        assert_eq!(v["fps"], 24);
+        assert_eq!(v["tracker"]["map"], "opacity");
+    }
+
+    #[test]
+    fn generate_animation_orbita_y_tracker() {
+        let r = safe_dispatch(
+            "generate_animation",
+            json!({
+                "concept": "mapa conforme",
+                "template": "conformal-map",
+                "view": "orbita",
+                "effect": "grow",
+                "tracker": {"start": -4.0, "end": 4.0, "map": "center_x"},
+            }),
+        );
+        assert!(r.ok, "{}", r.content);
+        let v: Value = serde_json::from_str(&r.content).expect("json");
+        assert_eq!(v["view"], "orbita");
+        assert_eq!(v["orbit_requested"], true);
+        assert_eq!(v["orbit_supported"], false);
+        assert!(v["orbit_note"].is_string(), "órbita honesta: {}", r.content);
+        assert_eq!(v["play_kind"], "GrowFromCenter");
+        assert_eq!(v["tracker"]["map"], "center_x");
+    }
+
+    #[test]
+    fn generate_animation_rechaza_fps_duracion_efecto_invalidos() {
+        for args in [
+            json!({"concept": "derivada", "fps": 0}),
+            json!({"concept": "derivada", "fps": 61}),
+            json!({"concept": "derivada", "duration_s": 0.05}),
+            json!({"concept": "derivada", "duration_s": 31.0}),
+            json!({"concept": "derivada", "effect": "explotar"}),
+            json!({"concept": "derivada", "view": "holograma"}),
+            json!({"concept": "derivada", "quality": "ultra"}),
+            json!({"concept": "derivada", "format": "exe"}),
+            json!({"concept": "derivada", "tracker": {"start": 0.0, "end": 1.0, "map": "rotar"}}),
+            json!({"concept": "derivada", "tracker": {"start": 0.0}}),
+        ] {
+            let r = safe_dispatch("generate_animation", args);
+            assert!(!r.ok, "debía rechazar: {}", r.content);
+            assert!(
+                r.content.contains("E_CAMPO_INVALIDO") || r.content.contains("E_PRESUPUESTO"),
+                "error tipado: {}",
+                r.content
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_player_frames_colocado_y_orbita() {
+        assert_eq!(preflight_player_frames(&[12, 24]).expect("frames"), 36);
+        assert!(preflight_player_frames(&[]).is_err());
+        assert!(preflight_player_frames(&[0]).is_err());
+        assert!(preflight_player_frames(&[49]).is_err());
+        assert!(preflight_player_frames(&[48, 48, 1]).is_err());
+        assert!(preflight_placed(1.0, 1.0, [0.0, 0.0]).is_ok());
+        assert!(preflight_placed(2.0, 1.0, [0.0, 0.0]).is_err());
+        assert!(preflight_placed(1.0, 0.0, [0.0, 0.0]).is_err());
+        assert!(preflight_placed(1.0, 1.0, [f64::NAN, 0.0]).is_err());
+        assert!(!preflight_orbit_view("plana").expect("plana"));
+        assert!(preflight_orbit_view("orbita").expect("orbita"));
+        assert!(preflight_orbit_view("holograma").is_err());
+        assert_eq!(play_kind_for_effect("create"), "Create");
+        assert_eq!(play_kind_for_effect("write"), "Write");
+        assert_eq!(play_kind_for_effect("fade"), "Fade");
+        assert_eq!(play_kind_for_effect("grow"), "GrowFromCenter");
+        assert_eq!(play_kind_for_effect("indicate"), "Indicate");
+        assert_eq!(play_kind_for_effect("none"), "Transform");
+        assert_eq!(suggested_bitrate_kbps("baja"), 500);
+        assert_eq!(suggested_bitrate_kbps("media"), 2000);
+        assert_eq!(suggested_bitrate_kbps("alta"), 8000);
     }
 
     // — Schemas OpenAI-compat —

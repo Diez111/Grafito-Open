@@ -9,7 +9,7 @@ use crate::object::{ImplicitCurveObj, ImplicitCurveSegments, RelationOperator};
 use crate::RenderQuality;
 use grafito_geometry::{expr, Point2};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Maximum resolution supported by the implicit-curve cache and render paths.
 pub const MAX_IMPLICIT_GRID_SIZE: usize = 1024;
@@ -108,7 +108,7 @@ pub fn segments_or_compute<'a>(
     ic: &'a ImplicitCurveObj,
     view_bounds: (f64, f64, f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
     quality: RenderQuality,
 ) -> std::sync::RwLockReadGuard<'a, ImplicitCurveSegments> {
     let padded_bounds = padded_snapped_bounds(view_bounds, 2.0, 64);
@@ -172,7 +172,7 @@ pub fn evaluate_implicit_curve(
     ic: &ImplicitCurveObj,
     view_bounds: (f64, f64, f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> ImplicitCurveSegments {
     let (x_min, x_max, y_min, y_max) = view_bounds;
     if grid_size == 0
@@ -316,6 +316,14 @@ pub fn marching_squares_from_grid(
 
     let mut remaining_work = MAX_MARCHING_SQUARES_WORK_UNITS;
     let mut remaining_segments = MAX_MARCHING_SQUARES_SEGMENTS;
+    if levels.len() > crate::validation::MAX_CONTOUR_LEVELS {
+        // Truncado honesto: antes el `.take()` silenciaba niveles extra.
+        log::warn!(
+            "contour levels {} truncated to {}",
+            levels.len(),
+            crate::validation::MAX_CONTOUR_LEVELS
+        );
+    }
     let mut contours = Vec::with_capacity(levels.len().min(crate::validation::MAX_CONTOUR_LEVELS));
     for level in levels
         .iter()
@@ -441,7 +449,7 @@ fn marching_squares_level(
 mod tests {
     use super::*;
     use crate::{ImplicitCurveObj, RelationOperator};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn make_circle() -> ImplicitCurveObj {
         ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq)
@@ -454,7 +462,7 @@ mod tests {
         // segmentos está cerca de (0, 0), NO cerca de otro punto.
         let ic = make_circle();
         let view_bounds = (-2.0, 2.0, -2.0, 2.0);
-        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &HashMap::new());
+        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &BTreeMap::new());
         assert!(!segments.is_empty(), "should produce at least one level");
         let (_, segs) = &segments[0];
         assert!(!segs.is_empty(), "should produce at least one segment");
@@ -485,7 +493,7 @@ mod tests {
         // (con tolerancia por la discretización del marching squares).
         let ic = make_circle();
         let view_bounds = (-2.0, 2.0, -2.0, 2.0);
-        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &HashMap::new());
+        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &BTreeMap::new());
         let (_, segs) = &segments[0];
         for (a, b) in segs {
             let da = (a.x * a.x + a.y * a.y).sqrt();
@@ -503,7 +511,7 @@ mod tests {
         // Este test verifica que los segmentos están en el contorno.
         let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::LessEq);
         let view_bounds = (-2.0, 2.0, -2.0, 2.0);
-        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &HashMap::new());
+        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &BTreeMap::new());
         let (_, segs) = &segments[0];
         assert!(!segs.is_empty(), "should produce segments");
         for (a, b) in segs {

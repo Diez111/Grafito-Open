@@ -6,7 +6,7 @@
 mod thin_tests {
     use grafito_geometry::ast::Expr;
     use grafito_geometry::expr::prepare_function_ast;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     /// Versión con stride del scanline.
     #[allow(clippy::too_many_arguments)]
@@ -65,8 +65,8 @@ mod thin_tests {
     fn test_thin_strip_05_units() {
         // Franja de 0.5 unidades: y entre -0.25 y 0.25.
         // |y| < 0.25 ⟺ y² < 0.0625.
-        let lhs = prepare_function_ast("y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("0.0625", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("0.0625", &BTreeMap::new(), &["x", "y"]).unwrap();
         // View 800x600, range [-5, 5] x [-5, 5].
         // dx = 10/800 = 0.0125. Franja = 0.5 = 40 pixels.
         // Con stride=8, hay 5 samples dentro. Debe detectarse.
@@ -78,8 +78,8 @@ mod thin_tests {
     #[test]
     fn test_thin_strip_001_units() {
         // Franja muy delgada: 0.01 unidades. ~1 pixel.
-        let lhs = prepare_function_ast("y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("0.000025", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("0.000025", &BTreeMap::new(), &["x", "y"]).unwrap();
         let count = scanline_thin(&lhs, &rhs, false, -5.0, 5.0, -5.0, 5.0, 800, 600, 8);
         println!("franja 0.01 units, stride=8: count={}", count);
         // Esta franja es de 1 pixel de ancho. Con stride=8, no se detecta

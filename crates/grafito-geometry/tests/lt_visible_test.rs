@@ -4,7 +4,7 @@
 
 use grafito_geometry::ast::Expr;
 use grafito_geometry::expr::prepare_function_ast;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[allow(clippy::too_many_arguments)]
 fn scanline_full(
@@ -98,8 +98,8 @@ fn scanline_full(
 fn test_lt_fill_view_normal() {
     // View default de la app: scale=50, screen=800x600.
     // Para un canvas de 1000x600, view = [-10, 10] x [-6, 6].
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let segs = scanline_full(&lhs, &rhs, false, -10.0, 10.0, -6.0, 6.0, 1000, 600, 2);
     let total_segs: usize = segs.iter().map(|s| s.len()).sum();
     let rows_with_fill: usize = segs.iter().filter(|s| !s.is_empty()).count();
@@ -119,8 +119,8 @@ fn test_lt_fill_view_normal() {
 fn test_gt_fill_view_normal() {
     // x^2 + y^2 > 1: el EXTERIOR del disco.
     // En view [-10, 10], la mayoría está afuera.
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let segs = scanline_full(&lhs, &rhs, true, -10.0, 10.0, -6.0, 6.0, 1000, 600, 2);
     let total_segs: usize = segs.iter().map(|s| s.len()).sum();
     let rows_with_fill: usize = segs.iter().filter(|s| !s.is_empty()).count();

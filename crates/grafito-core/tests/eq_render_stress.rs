@@ -6,13 +6,13 @@
 use grafito_core::implicit_curve::segments_or_compute;
 use grafito_core::RenderQuality;
 use grafito_core::{ImplicitCurveObj, RelationOperator};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn stress_test_eq_render() {
     // Simula el render de un ImplicitCurve con Eq.
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let view_bounds = (-5.0, 5.0, -5.0, 5.0);
 
     // Pre-compute del cache.
@@ -42,7 +42,7 @@ fn stress_test_cached_asts_with_unusual_inputs() {
         ("x^2 - y^2", "1", RelationOperator::Eq),
     ];
 
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     for (lhs, rhs, op) in &cases {
         let ic = ImplicitCurveObj::new(lhs, rhs, *op);
         let (l, r) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
@@ -57,7 +57,7 @@ fn stress_test_cached_asts_with_unusual_inputs() {
 fn stress_test_eq_after_clone() {
     // Verificar que el cache se preserva después de clone.
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let _g = segments_or_compute(
         &ic,
         (-2.0, 2.0, -2.0, 2.0),

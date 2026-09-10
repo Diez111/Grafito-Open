@@ -6,7 +6,7 @@
 mod scanline_correctness {
     use grafito_geometry::ast::Expr;
     use grafito_geometry::expr::prepare_function_ast;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     /// Versión standalone del scanline fill (mismo algoritmo que
     /// `draw_implicit_curve_fill` en `render_2d.rs`). Devuelve un
@@ -50,8 +50,8 @@ mod scanline_correctness {
     #[test]
     fn test_circle_inside_circle_outside() {
         // x^2 + y^2 < 1 -> disco.
-        let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
         let cols = 100;
         let rows = 100;
         let x_min = -1.5;
@@ -80,8 +80,8 @@ mod scanline_correctness {
         // Para Eq, el render del fill no se activa, pero el algoritmo
         // daría todos los puntos donde f=0 (solo el contorno). Esto
         // verifica que el algoritmo no se confunde.
-        let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
         let cols = 100;
         let rows = 100;
         let x_min = -1.5;
@@ -99,8 +99,8 @@ mod scanline_correctness {
     #[test]
     fn test_greater_than_circle_outside() {
         // x^2 + y^2 > 1 -> exterior del disco.
-        let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
         let cols = 100;
         let rows = 100;
         let x_min = -1.5;

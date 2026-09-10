@@ -85,11 +85,15 @@ impl std::fmt::Display for SampleError {
 impl std::error::Error for SampleError {}
 
 /// Finite-only evaluation helper: `None` for errors, `NaN` and infinities.
+///
+/// P2-perf: vía `evaluate_cached` (parse-once + LRU 128): los 5 probes de
+/// `classify_break_at` por candidato a break re-parseaban antes la expresión
+/// en cada punto. Semántica idéntica (`None` ante errores, NaN e infinitos).
 pub fn eval_sample(expr: &str, x: f64) -> Option<f64> {
     if !x.is_finite() {
         return None;
     }
-    match crate::expr::evaluate(expr, &[("x".to_string(), x)]) {
+    match crate::expr::evaluate_cached(expr, &[("x".to_string(), x)]) {
         Ok(y) if y.is_finite() => Some(y),
         _ => None,
     }
@@ -201,11 +205,32 @@ pub fn sample_function(
     let n = n.min(MAX_SAMPLE_POINTS);
 
     let dx = (x_max - x_min) / (n as f64 - 1.0);
-    let mut ys: Vec<Option<f64>> = Vec::with_capacity(n);
-    for i in 0..n {
-        let x = x_min + i as f64 * dx;
-        ys.push(eval_sample(expr, x));
-    }
+    // P2-perf: una sola compilación + evaluación en lote (`eval_batch_1d`
+    // parsea una vez y usa rayon ≥1024). Antes: `evaluate` por punto
+    // re-parseaba la expresión en cada muestra (O(n) parses). El filtro
+    // `is_finite` preserva la semántica exacta de `eval_sample`
+    // (`None` ante errores, NaN e infinitos). Si el lote falla honesto
+    // (p. ej. presupuesto dispar entre guardas), se cae al camino puntual.
+    let vars_vacias: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    let ys: Vec<Option<f64>> = match crate::expr::eval_batch_1d(
+        expr,
+        "x",
+        (0..n).map(|i| x_min + i as f64 * dx),
+        &vars_vacias,
+    ) {
+        Ok(lote) => lote
+            .into_iter()
+            .map(|v| v.filter(|y| y.is_finite()))
+            .collect(),
+        Err(_) => {
+            let mut ys = Vec::with_capacity(n);
+            for i in 0..n {
+                let x = x_min + i as f64 * dx;
+                ys.push(eval_sample(expr, x));
+            }
+            ys
+        }
+    };
 
     let mut out = SampledFunction {
         polylines: Vec::new(),

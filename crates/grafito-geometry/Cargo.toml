@@ -35,5 +35,10 @@ harness = false
 name = "integral_frames"
 harness = false
 
+# P2-perf: bench informativo del morph puro + órbita de cámara (sin gate).
+[[bench]]
+name = "morph_orbit"
+harness = false
+
 [lints]
 workspace = true

@@ -1,6 +1,6 @@
 use evalexpr::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 use lru::LruCache;
@@ -32,6 +32,21 @@ fn safe_tanh(a: f64) -> f64 {
         -1.0
     } else {
         a.tanh()
+    }
+}
+
+/// Reducción única de argumento trigonométrico para AST y opcodes.
+///
+/// Reduce `x` finito a `[0, TAU)` antes de `sin/cos/tan/sec/csc/cot` para
+/// acotar el error de argumento grande de forma idéntica en ambos paths
+/// (antes cada opcode repetía su propio `rem_euclid` inline y el AST no
+/// reducía, divergiendo en `|x| > 2π`). No-finito se propaga sin tocar.
+#[inline]
+pub fn trig_reduce(x: f64) -> f64 {
+    if x.is_finite() {
+        x.rem_euclid(std::f64::consts::TAU)
+    } else {
+        x
     }
 }
 
@@ -956,7 +971,7 @@ thread_local! {
     /// el path lento interpretado. Acotado a 128 entradas
     /// (`MAX_COMPILED_EXPR_CACHE`) con desalojo LRU real: el presupuesto de
     /// memoria está acotado y las expresiones calientes evitan re-parsear.
-    static COMPILED_EXPR_CACHE: RefCell<LruCache<String, Option<CompiledExpr>>> =
+    static COMPILED_EXPR_CACHE: RefCell<LruCache<String, Option<std::sync::Arc<CompiledExpr>>>> =
         RefCell::new(LruCache::new(COMPILED_EXPR_CACHE_SIZE));
 }
 
@@ -983,7 +998,10 @@ pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String
                 None => evaluate(expr, vars),
             }
         } else {
-            let compiled = CompiledExpr::new(&key, &HashMap::new()).ok();
+            // `Arc`: el hit clona el puntero (barato) en vez de todo el AST+opcodes.
+            let compiled = CompiledExpr::new(&key, &BTreeMap::new())
+                .ok()
+                .map(std::sync::Arc::new);
             let result = match &compiled {
                 Some(c) => c.eval(vars),
                 None => evaluate(expr, vars),
@@ -1016,7 +1034,7 @@ pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
     }
 
     // FAST PATH: try custom AST parser first
-    let vars_map: std::collections::HashMap<String, f64> =
+    let vars_map: std::collections::BTreeMap<String, f64> =
         vars.iter().map(|(k, v)| (k.clone(), *v)).collect();
     let ignore: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
     if let Ok(mut ast) = crate::ast::parse_ast(&expr) {
@@ -1083,7 +1101,7 @@ pub fn eval_function_var(expr: &str, var: &str, val: f64) -> Result<f64, String>
 pub fn eval_function_with_vars(
     expr: &str,
     x: f64,
-    vars: &std::collections::HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
 ) -> Result<f64, String> {
     eval_function_batch(expr, std::iter::once(x), vars).and_then(|mut res| {
         if let Some(Some(val)) = res.pop() {
@@ -1151,7 +1169,7 @@ pub fn eval_batch_1d(
     expr: &str,
     var_name: &str,
     xs: impl Iterator<Item = f64> + Clone,
-    vars: &std::collections::HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
 ) -> Result<Vec<Option<f64>>, String> {
     // F10-FIX: este path tiene su propio slow-path `build_operator_tree`
     // (ver abajo); la guarda va a la entrada, antes de `preprocess_expr`.
@@ -1252,7 +1270,7 @@ pub fn eval_batch_2d(
     var1_name: &str,
     var2_name: &str,
     points: impl Iterator<Item = (f64, f64)>,
-    vars: &std::collections::HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
 ) -> Result<Vec<Option<f64>>, String> {
     // F10-FIX: idem `eval_batch_1d` (slow-path `build_operator_tree` propio).
     check_expr_budget(expr)?;
@@ -1346,7 +1364,7 @@ pub fn eval_batch_2d(
 pub fn eval_function_batch(
     expr: &str,
     xs: impl Iterator<Item = f64> + Clone,
-    vars: &std::collections::HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
 ) -> Result<Vec<Option<f64>>, String> {
     eval_batch_1d(expr, "x", xs, vars)
 }
@@ -1355,7 +1373,7 @@ pub fn eval_function_batch(
 pub fn eval_surface_batch(
     expr: &str,
     pts: impl Iterator<Item = (f64, f64)>,
-    vars: &std::collections::HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
 ) -> Result<Vec<Option<f64>>, String> {
     eval_batch_2d(expr, "x", "y", pts, vars)
 }
@@ -1370,7 +1388,7 @@ pub fn validate(expr: &str) -> bool {
 /// point during rendering — critical for sum()-expanded functions.
 pub fn prepare_function_ast(
     expr: &str,
-    vars: &std::collections::HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
     ignore: &[&str],
 ) -> Result<crate::ast::Expr, String> {
     let expr_clean = preprocess_expr(expr);
@@ -1808,7 +1826,7 @@ impl CompiledExpr {
     /// Compile an expression, substituting the supplied constants.
     pub fn new(
         expr: &str,
-        constants: &std::collections::HashMap<String, f64>,
+        constants: &std::collections::BTreeMap<String, f64>,
     ) -> Result<Self, String> {
         // F10-FIX: slow-path `build_operator_tree` propio (ver abajo).
         check_expr_budget(expr)?;
@@ -1824,7 +1842,10 @@ impl CompiledExpr {
 
             let mut vars_set = std::collections::HashSet::new();
             ast.get_variables(&mut vars_set);
-            let vars_list: Vec<String> = vars_set.into_iter().collect();
+            // Ordenar: HashSet itera en orden arbitrario y v1/v2/v3 alimentan
+            // los opcodes posicionales; sin sort, `x+y` y `y+x` compilan distinto.
+            let mut vars_list: Vec<String> = vars_set.into_iter().collect();
+            vars_list.sort();
             if vars_list.len() <= 3 {
                 let v1 = vars_list.first().map(|s| s.as_str()).unwrap_or("");
                 let v2 = vars_list.get(1).map(|s| s.as_str()).unwrap_or("");
@@ -1939,28 +1960,13 @@ impl CompiledExpr {
                             stack[sp - 1] = -stack[sp - 1];
                         }
                         Opcode::Sin => {
-                            stack[sp - 1] = (if stack[sp - 1].is_finite() {
-                                stack[sp - 1].rem_euclid(std::f64::consts::TAU)
-                            } else {
-                                stack[sp - 1]
-                            })
-                            .sin();
+                            stack[sp - 1] = trig_reduce(stack[sp - 1]).sin();
                         }
                         Opcode::Cos => {
-                            stack[sp - 1] = (if stack[sp - 1].is_finite() {
-                                stack[sp - 1].rem_euclid(std::f64::consts::TAU)
-                            } else {
-                                stack[sp - 1]
-                            })
-                            .cos();
+                            stack[sp - 1] = trig_reduce(stack[sp - 1]).cos();
                         }
                         Opcode::Tan => {
-                            stack[sp - 1] = (if stack[sp - 1].is_finite() {
-                                stack[sp - 1].rem_euclid(std::f64::consts::TAU)
-                            } else {
-                                stack[sp - 1]
-                            })
-                            .tan();
+                            stack[sp - 1] = trig_reduce(stack[sp - 1]).tan();
                         }
                         Opcode::Asin => {
                             stack[sp - 1] = stack[sp - 1].asin();
@@ -2005,30 +2011,15 @@ impl CompiledExpr {
                             stack[sp - 1] = stack[sp - 1].round();
                         }
                         Opcode::Sec => {
-                            let c = (if stack[sp - 1].is_finite() {
-                                stack[sp - 1].rem_euclid(std::f64::consts::TAU)
-                            } else {
-                                stack[sp - 1]
-                            })
-                            .cos();
+                            let c = trig_reduce(stack[sp - 1]).cos();
                             stack[sp - 1] = if c.abs() < 1e-15 { f64::NAN } else { 1.0 / c };
                         }
                         Opcode::Csc => {
-                            let s = (if stack[sp - 1].is_finite() {
-                                stack[sp - 1].rem_euclid(std::f64::consts::TAU)
-                            } else {
-                                stack[sp - 1]
-                            })
-                            .sin();
+                            let s = trig_reduce(stack[sp - 1]).sin();
                             stack[sp - 1] = if s.abs() < 1e-15 { f64::NAN } else { 1.0 / s };
                         }
                         Opcode::Cot => {
-                            let t = (if stack[sp - 1].is_finite() {
-                                stack[sp - 1].rem_euclid(std::f64::consts::TAU)
-                            } else {
-                                stack[sp - 1]
-                            })
-                            .tan();
+                            let t = trig_reduce(stack[sp - 1]).tan();
                             stack[sp - 1] = if t.abs() < 1e-15 { f64::NAN } else { 1.0 / t };
                         }
                         Opcode::Asinh => {
@@ -2185,7 +2176,7 @@ impl CompiledExpr {
                     }
                 }
                 _ => {
-                    let vars_map: HashMap<String, f64> =
+                    let vars_map: BTreeMap<String, f64> =
                         vars.iter().map(|(k, v)| (k.clone(), *v)).collect();
                     let substituted = ast.clone().substitute_vars(&vars_map, &[]).simplify();
                     if let crate::ast::Expr::Const(result) = substituted {
@@ -2280,7 +2271,7 @@ fn validate_opcode_stack(ops: &[Opcode], max_depth: usize) -> Result<(), String>
 
 /// Compile an expression with the given constants and evaluate it once.
 pub fn evaluate_compiled(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
-    let constants: std::collections::HashMap<String, f64> =
+    let constants: std::collections::BTreeMap<String, f64> =
         vars.iter().map(|(k, v)| (k.clone(), *v)).collect();
     let compiled = CompiledExpr::new(expr, &constants)?;
     compiled.eval(vars)
@@ -2310,7 +2301,7 @@ pub fn eval_integral_batch(
     int_var: &str,
     lower: f64,
     xs: impl Iterator<Item = f64> + Clone,
-    vars: &std::collections::HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<Option<f64>> {
     // Prepare the integrand AST once
     let expr_clean = preprocess_expr(integrand);
@@ -2381,7 +2372,7 @@ mod tests {
     fn batch_par_sobre_umbral_coincide_con_escalar_punto_a_punto() {
         // F10-D: el path rayon (>=1024) debe dar bit a bit lo mismo que el
         // evaluador puntual. N=1500 cruza RAYON_BATCH_THRESHOLD.
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let n = RAYON_BATCH_THRESHOLD + 476;
         let xs: Vec<f64> = (0..n)
             .map(|i| -10.0 + 20.0 * (i as f64) / (n as f64))
@@ -2396,7 +2387,7 @@ mod tests {
     }
     #[test]
     fn batch_2d_par_sobre_umbral_coincide_con_punto_a_punto() {
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let n = RAYON_BATCH_THRESHOLD + 100;
         let pts: Vec<(f64, f64)> = (0..n)
             .map(|i| (i as f64 * 0.01, (i as f64 * 0.02).sin()))
@@ -2413,7 +2404,7 @@ mod tests {
     #[test]
     fn batch_chico_bajo_umbral_sigue_escalar_y_correcto() {
         // N=10 < umbral: path escalar intacto, mismo resultado.
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let got = eval_batch_1d("x^2", "x", [1.0, 2.0, 3.0].into_iter(), &vars).expect("batch");
         assert_eq!(got, vec![Some(1.0), Some(4.0), Some(9.0)]);
     }
@@ -2509,7 +2500,7 @@ mod tests {
 
     #[test]
     fn compiled_expr_substitutes_constants() {
-        let constants = HashMap::from([("a".to_string(), 2.0)]);
+        let constants = BTreeMap::from([("a".to_string(), 2.0)]);
         let compiled = CompiledExpr::new("a*x", &constants).unwrap();
         let value = compiled.eval(&[("x".to_string(), 3.0)]).unwrap();
         assert!((value - 6.0).abs() < 1e-12, "got {value}");
@@ -2531,7 +2522,7 @@ mod tests {
                     "evalexpr fallback leaked a finite value for {expression}"
                 );
             }
-            if let Ok(value) = CompiledExpr::new(expression, &HashMap::new())
+            if let Ok(value) = CompiledExpr::new(expression, &BTreeMap::new())
                 .unwrap()
                 .eval(&vars)
             {
@@ -2556,10 +2547,10 @@ mod tests {
         let ast = crate::ast::parse_ast("1/(1/x)").expect("parse");
         assert!(ast.eval_at("x", 0.0).is_nan());
         // El opcode debe coincidir: antes devolvía Ok(0.0) vía Inf intermedio.
-        let nested = CompiledExpr::new("1/(1/x)", &HashMap::new()).expect("compile");
+        let nested = CompiledExpr::new("1/(1/x)", &BTreeMap::new()).expect("compile");
         assert!(nested.eval(&vars).is_err());
         // Caso simple: 1/0 nunca puede ser Ok(Inf).
-        let simple = CompiledExpr::new("1/x", &HashMap::new()).expect("compile");
+        let simple = CompiledExpr::new("1/x", &BTreeMap::new()).expect("compile");
         assert!(simple.eval(&vars).is_err());
     }
 
@@ -2606,7 +2597,7 @@ mod tests {
 #[cfg(test)]
 mod hostile_crash_f10 {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     #[test]
     fn hostile_expr_vacia_operadores_unicode() {
@@ -2622,7 +2613,7 @@ mod hostile_crash_f10 {
             let _ = evaluate(expr, &empty_vars);
             let _ = evaluate_cached(expr, &empty_vars);
             let _ = validate(expr);
-            let vars = HashMap::new();
+            let vars = BTreeMap::new();
             let _ = prepare_function_ast(expr, &vars, &[]);
         }
         // Unicode partido / emojis multi-byte: jamás panic
@@ -2639,7 +2630,7 @@ mod hostile_crash_f10 {
             let _ = evaluate(expr, &[("x".to_string(), 1.0)]);
             let _ = evaluate_cached(expr, &[("x".to_string(), 1.0)]);
             let _ = validate(expr);
-            let vars = HashMap::new();
+            let vars = BTreeMap::new();
             let _ = prepare_function_ast(expr, &vars, &["x"]);
         }
     }
@@ -2654,7 +2645,7 @@ mod hostile_crash_f10 {
         let _ = evaluate(&deep, &vars);
         let _ = evaluate_cached(&deep, &vars);
         let _ = validate(&deep);
-        let map = HashMap::new();
+        let map = BTreeMap::new();
         let _ = prepare_function_ast(&deep, &map, &["x"]);
         let _ = crate::ast::parse_ast(&deep);
         // Profundidad media 300 (sobre MAX_AST_DEPTH 256 pero bajo tokens): debe dar Err
@@ -2673,7 +2664,7 @@ mod hostile_crash_f10 {
         let _ = evaluate(&big_x, &vars);
         let _ = evaluate_cached(&big_x, &vars);
         let _ = validate(&big_x);
-        let map = HashMap::new();
+        let map = BTreeMap::new();
         let _ = prepare_function_ast(&big_x, &map, &["x"]);
         let big_paren = format!("{}1{}", "(".repeat(5_000), ")".repeat(5_000));
         let _ = evaluate(&big_paren, &[]);
@@ -2728,7 +2719,7 @@ mod hostile_crash_f10 {
     #[test]
     fn hostile_batch_y_compiled_rechazan_16k() {
         // Los slow-paths propios de batch/compilado también tienen guarda.
-        use std::collections::HashMap as Map;
+        use std::collections::BTreeMap as Map;
         let big = "x+".repeat(8_000);
         let vars = Map::new();
         assert!(eval_batch_1d(&big, "x", vec![1.0].into_iter(), &vars).is_err());
@@ -2738,7 +2729,7 @@ mod hostile_crash_f10 {
 
     #[test]
     fn hostile_cas_rangos_degenerados() {
-        let map = HashMap::new();
+        let map = BTreeMap::new();
         // solve_expression con rangos degenerados / NaN / inf
         for (a, b) in [
             (0.0, 0.0),
@@ -2788,7 +2779,7 @@ mod hostile_crash_f10 {
 
     #[test]
     fn hostile_eval_batch_y_compiled() {
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         // batches con x NaN/inf
         let xs = vec![0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0];
         let _ = eval_batch_1d("x^2", "x", xs.clone().into_iter(), &vars);

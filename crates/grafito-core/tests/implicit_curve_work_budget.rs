@@ -7,7 +7,7 @@ use grafito_core::{
     },
     ImplicitCurveObj, RelationOperator,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn checkerboard_rows(grid_size: usize) -> Vec<Vec<f64>> {
     (0..=grid_size)
@@ -28,7 +28,7 @@ fn no_crossing_levels_consume_the_shared_cell_budget() {
         &curve,
         (0.0, 1.0, 0.0, 1.0),
         MAX_IMPLICIT_GRID_SIZE,
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
 
     let cells_per_level = MAX_IMPLICIT_GRID_SIZE * MAX_IMPLICIT_GRID_SIZE;
@@ -69,7 +69,7 @@ fn direct_evaluation_rejects_grids_larger_than_the_public_limit() {
         &curve,
         (-1.0, 1.0, -1.0, 1.0),
         MAX_IMPLICIT_GRID_SIZE + 1,
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
 
     assert!(contours.is_empty());

@@ -24,7 +24,7 @@ use grafito_render::{
     vector_compute::VectorComputePipeline,
     Renderer,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use wgpu::util::DeviceExt;
 
@@ -90,7 +90,7 @@ fn gpu_tests_are_required() -> bool {
 }
 
 fn cpu_scalar(expr: &str, x: f64, y: f64) -> f64 {
-    grafito_geometry::expr::prepare_function_ast(expr, &HashMap::new(), &["x", "y"])
+    grafito_geometry::expr::prepare_function_ast(expr, &BTreeMap::new(), &["x", "y"])
         .expect("test expression must parse")
         .eval_2d("x", x, "y", y)
 }
@@ -110,7 +110,7 @@ fn assert_gpu_matches_cpu(actual: f64, expr: &str, x: f64, y: f64, context: &str
 }
 
 fn assert_gpu_matches_cpu_parametric(actual: f64, expr: &str, t: f64, context: &str) {
-    let expected = grafito_geometry::expr::prepare_function_ast(expr, &HashMap::new(), &["t"])
+    let expected = grafito_geometry::expr::prepare_function_ast(expr, &BTreeMap::new(), &["t"])
         .expect("test expression must parse")
         .eval_at("t", t);
     if expected.is_nan() {
@@ -150,7 +150,7 @@ fn required_vulkan_function_evaluator_matches_cpu_edge_semantics() {
                 expr,
                 (0.0, 1.0),
                 1,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .expect("supported function expression must execute on the GPU");
         assert_eq!(values.len(), 2);
@@ -169,7 +169,7 @@ fn required_vulkan_function_evaluator_supports_exactly_32_stack_slots() {
     let expression = (1..32).fold("x".to_string(), |expression, _| {
         format!("min(x, {expression})")
     });
-    grafito_geometry::expr::prepare_function_ast(&expression, &HashMap::new(), &["x"])
+    grafito_geometry::expr::prepare_function_ast(&expression, &BTreeMap::new(), &["x"])
         .expect("the exact-stack test expression must parse");
 
     let values = compute
@@ -179,7 +179,7 @@ fn required_vulkan_function_evaluator_supports_exactly_32_stack_slots() {
             &expression,
             (0.25, 0.5),
             1,
-            &HashMap::new(),
+            &BTreeMap::new(),
         )
         .expect("an expression with exactly 32 stack slots must run on the GPU");
 
@@ -197,7 +197,7 @@ fn required_vulkan_function_evaluator_supports_exactly_32_stack_slots() {
             &function,
             (0.25, 0.5),
             1,
-            &HashMap::new(),
+            &BTreeMap::new(),
         )
     );
     assert!(function
@@ -231,7 +231,7 @@ fn required_vulkan_complex_pipelines_accept_the_stack_limit_and_reject_overflow(
             &gpu.queue,
             &valid,
             &[grafito_geometry::Point2::new(1.0, 0.0)],
-            &HashMap::new(),
+            &BTreeMap::new(),
         )
         .expect("a 32-slot complex program must execute without a NaN mapping");
     assert!(mapped[0].x.is_finite() && mapped[0].y.is_finite());
@@ -242,7 +242,7 @@ fn required_vulkan_complex_pipelines_accept_the_stack_limit_and_reject_overflow(
             &gpu.queue,
             &overflow,
             &[grafito_geometry::Point2::new(1.0, 0.0)],
-            &HashMap::new(),
+            &BTreeMap::new(),
         )
         .is_none());
 
@@ -253,7 +253,7 @@ fn required_vulkan_complex_pipelines_accept_the_stack_limit_and_reject_overflow(
             &gpu.queue,
             &valid,
             &[(1.0, 0.0)],
-            &HashMap::new(),
+            &BTreeMap::new(),
             0,
         )
         .expect("a 32-slot domain program must not black-map as a stack failure");
@@ -264,7 +264,7 @@ fn required_vulkan_complex_pipelines_accept_the_stack_limit_and_reject_overflow(
             &gpu.queue,
             &overflow,
             &[(1.0, 0.0)],
-            &HashMap::new(),
+            &BTreeMap::new(),
             0,
         )
         .is_none());
@@ -296,7 +296,7 @@ fn required_vulkan_implicit_evaluator_matches_cpu_edge_semantics() {
                 &curve,
                 (0.0, 1.0, 0.0, 1.0),
                 1,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .expect("supported implicit expression must execute on the GPU");
         for (j, row) in rows.into_iter().enumerate() {
@@ -321,7 +321,7 @@ fn required_vulkan_parametric_evaluator_matches_cpu_edge_semantics() {
             &gpu.queue,
             &modulo_and_round,
             1,
-            &HashMap::new(),
+            &BTreeMap::new(),
         )
         .expect("supported parametric curve must execute on the GPU");
     for (index, (x, y)) in samples.into_iter().enumerate() {
@@ -332,7 +332,7 @@ fn required_vulkan_parametric_evaluator_matches_cpu_edge_semantics() {
 
     let invalid_clamp = ParametricCurve2DObj::new("clamp(t, 1.00000001, 1) + 2", "0", 0.0, 1.0);
     let samples = compute
-        .evaluate_curve_2d(&gpu.device, &gpu.queue, &invalid_clamp, 1, &HashMap::new())
+        .evaluate_curve_2d(&gpu.device, &gpu.queue, &invalid_clamp, 1, &BTreeMap::new())
         .expect("supported parametric curve must execute on the GPU");
     for (index, (x, _)) in samples.into_iter().enumerate() {
         assert_gpu_matches_cpu_parametric(
@@ -351,7 +351,7 @@ fn required_vulkan_parametric_evaluator_matches_cpu_edge_semantics() {
             &gpu.queue,
             &division_and_domain,
             1,
-            &HashMap::new(),
+            &BTreeMap::new(),
         )
         .expect("supported parametric curve must execute on the GPU");
     for (index, (x, y)) in samples.into_iter().enumerate() {
@@ -372,7 +372,7 @@ fn required_vulkan_parametric_evaluator_matches_cpu_edge_semantics() {
             &gpu.queue,
             &inverse_domains,
             1,
-            &HashMap::new(),
+            &BTreeMap::new(),
         )
         .expect("supported parametric curve must execute on the GPU");
     for (index, (x, y)) in samples.into_iter().enumerate() {
@@ -383,7 +383,7 @@ fn required_vulkan_parametric_evaluator_matches_cpu_edge_semantics() {
 
     let atanh_domain = ParametricCurve2DObj::new("atanh(t + 2)", "0", 0.0, 1.0);
     let samples = compute
-        .evaluate_curve_2d(&gpu.device, &gpu.queue, &atanh_domain, 1, &HashMap::new())
+        .evaluate_curve_2d(&gpu.device, &gpu.queue, &atanh_domain, 1, &BTreeMap::new())
         .expect("supported parametric curve must execute on the GPU");
     for (index, (x, _)) in samples.into_iter().enumerate() {
         assert_gpu_matches_cpu_parametric(
@@ -402,7 +402,7 @@ fn required_vulkan_parametric_evaluator_matches_cpu_edge_semantics() {
         1.0,
     );
     let samples = compute
-        .evaluate_curve_3d(&gpu.device, &gpu.queue, &curve_3d, 1, &HashMap::new())
+        .evaluate_curve_3d(&gpu.device, &gpu.queue, &curve_3d, 1, &BTreeMap::new())
         .expect("supported parametric Curve3D must execute on the GPU");
     for (index, (x, y, z)) in samples.into_iter().enumerate() {
         let t = index as f64;
@@ -426,7 +426,7 @@ fn gpu_explicit_surface_samples_remain_in_document_xyz_order() {
     let surface = Surface3DObj::new("10*x + y", (1.0, 2.0), (3.0, 4.0));
 
     let grid = compute
-        .evaluate_surface(&gpu.device, &gpu.queue, &surface, 1, &HashMap::new())
+        .evaluate_surface(&gpu.device, &gpu.queue, &surface, 1, &BTreeMap::new())
         .expect("supported explicit surface must execute on the GPU");
 
     assert_eq!(grid[0][0], Point3D::new(1.0, 3.0, 13.0));
@@ -444,7 +444,7 @@ fn gpu_surface_nan_in_evaluated_z_falls_back_without_replacing_cpu_grid() {
         (1.0, 2.0),
     );
     let cpu_grid =
-        grafito_core::parametric_sampling::evaluate_surface_3d(&surface, 1, &HashMap::new());
+        grafito_core::parametric_sampling::evaluate_surface_3d(&surface, 1, &BTreeMap::new());
     assert!(cpu_grid.iter().flatten().all(Point3D::is_finite));
     *surface.cached_grid.write().unwrap() = cpu_grid.clone();
 
@@ -454,7 +454,7 @@ fn gpu_surface_nan_in_evaluated_z_falls_back_without_replacing_cpu_grid() {
         &gpu.queue,
         &surface,
         1,
-        &HashMap::new(),
+        &BTreeMap::new(),
     ));
     assert_eq!(*surface.cached_grid.read().unwrap(), cpu_grid);
 }
@@ -483,7 +483,7 @@ fn required_vulkan_vector_evaluator_matches_cpu_edge_semantics() {
                 &field,
                 (0.0, 1.0, 0.0, 1.0),
                 1,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .expect("supported vector field must execute on the GPU");
         for (x, y, u, v) in samples {
@@ -514,7 +514,7 @@ fn required_vulkan_fill_evaluator_matches_cpu_edge_semantics() {
         ("clamp(x, 1, -1)", RelationOperator::Less),
         ("clamp(x, 1.00000001, 1)", RelationOperator::Greater),
     ] {
-        let lhs = grafito_geometry::expr::prepare_function_ast(expr, &HashMap::new(), &["x", "y"])
+        let lhs = grafito_geometry::expr::prepare_function_ast(expr, &BTreeMap::new(), &["x", "y"])
             .expect("test expression must parse");
         let rhs = grafito_geometry::ast::Expr::Const(0.0);
         let pixels = compute
@@ -526,7 +526,7 @@ fn required_vulkan_fill_evaluator_matches_cpu_edge_semantics() {
                 operator,
                 (0.0, 1.0, 0.0, 1.0),
                 (1, 1),
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .expect("supported fill expression must execute on the GPU");
         let expected = cpu_scalar(expr, 0.0, 1.0);
@@ -548,7 +548,7 @@ fn required_vulkan_scalar_evaluators_reject_nonfinite_clamp_bounds() {
     let Some(gpu) = gpu_context_or_skip() else {
         return;
     };
-    let variables = HashMap::from([("upper".to_string(), f64::INFINITY)]);
+    let variables = BTreeMap::from([("upper".to_string(), f64::INFINITY)]);
 
     let function = FunctionComputePipeline::new(&gpu.device, &gpu.queue, 1);
     let values = function
@@ -627,7 +627,7 @@ fn parametric_gpu_rejects_resolved_reversed_and_degenerate_domains_without_repla
         return;
     };
     let compute = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 8, 8);
-    let variables = HashMap::from([
+    let variables = BTreeMap::from([
         ("low".to_string(), 0.0),
         ("high".to_string(), 1.0),
         ("same".to_string(), 0.5),
@@ -722,7 +722,7 @@ fn parametric_gpu_overflow_falls_back_without_erasing_cpu_samples_or_real_gaps()
         &gpu.queue,
         &overflowing,
         4,
-        &HashMap::new(),
+        &BTreeMap::new(),
     ));
     assert_eq!(*overflowing.cached_samples.read().unwrap(), cpu_samples);
 
@@ -733,7 +733,7 @@ fn parametric_gpu_overflow_falls_back_without_erasing_cpu_samples_or_real_gaps()
         &gpu.queue,
         &discontinuous,
         2,
-        &HashMap::new(),
+        &BTreeMap::new(),
     ));
     let samples = discontinuous.cached_samples.read().unwrap();
     assert!(samples[0].0.is_finite() && samples[2].0.is_finite());
@@ -747,7 +747,7 @@ fn curve_3d_gpu_uses_declared_parameter_despite_document_variable() {
     };
     let compute = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 8, 8);
     let curve = ParametricCurve3DObj::new("s", "s + 1", "s^2", 0.0, 1.0).with_parameter("s");
-    let variables = HashMap::from([("s".to_string(), 99.0)]);
+    let variables = BTreeMap::from([("s".to_string(), 99.0)]);
 
     let samples = compute
         .evaluate_curve_3d(&gpu.device, &gpu.queue, &curve, 4, &variables)
@@ -778,7 +778,7 @@ fn curve_3d_gpu_falls_back_without_replacing_cpu_samples_when_f32_loses_resoluti
         &gpu.queue,
         &curve,
         4,
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
 
     assert!(!used_gpu, "the GPU must decline imprecise Curve3D samples");
@@ -816,6 +816,9 @@ fn required_gpu_depth_and_composite_pipeline_renders_a_world_mesh() {
         near: 0.1,
         far: 100.0,
         aspect: 1.0,
+        gamma: 0.0,
+        focal_distance: 10.0,
+        frame_center: [0.0, 0.0],
     };
     let mesh = Renderer::build_3d_world_mesh(&document, &camera, 64.0, 64.0);
     assert!(!mesh.opaque_indices.is_empty());
@@ -987,7 +990,7 @@ fn implicit_gpu_greater_relations_match_cpu_field_and_nonzero_contour() {
         curve.contour_levels = Some(levels.to_vec());
 
         let rows = compute
-            .evaluate(&gpu.device, &gpu.queue, &curve, bounds, 2, &HashMap::new())
+            .evaluate(&gpu.device, &gpu.queue, &curve, bounds, 2, &BTreeMap::new())
             .expect("supported implicit expression must execute on the GPU");
 
         for (row_index, row) in rows.iter().enumerate() {
@@ -1003,7 +1006,7 @@ fn implicit_gpu_greater_relations_match_cpu_field_and_nonzero_contour() {
             &curve,
             bounds,
             2,
-            &HashMap::new(),
+            &BTreeMap::new(),
         );
 
         assert_eq!(gpu_segments.len(), 1);
@@ -1036,7 +1039,7 @@ fn implicit_gpu_rejects_a_grid_above_the_shared_per_object_limit() {
         &curve,
         (-1.0, 1.0, -1.0, 1.0),
         MAX_IMPLICIT_GRID_SIZE + 1,
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
 
     assert!(rows.is_none());
@@ -1145,20 +1148,20 @@ fn parametric_batch_matches_individual_dispatches() {
     let polar = PolarCurveObj::new("1 + cos(t)", 0.0, std::f64::consts::TAU);
 
     let individual_2d = compute
-        .evaluate_curve_2d(&gpu.device, &gpu.queue, &circle, 64, &HashMap::new())
+        .evaluate_curve_2d(&gpu.device, &gpu.queue, &circle, 64, &BTreeMap::new())
         .expect("single 2D dispatch must execute");
     let individual_polar = compute
-        .evaluate_polar(&gpu.device, &gpu.queue, &polar, 64, &HashMap::new())
+        .evaluate_polar(&gpu.device, &gpu.queue, &polar, 64, &BTreeMap::new())
         .expect("single polar dispatch must execute");
 
     let batched_2d = compute.evaluate_curves_2d_batched(
         &gpu.device,
         &gpu.queue,
         &[(&circle, 64), (&line, 64)],
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
     let batched_polar =
-        compute.evaluate_polars_batched(&gpu.device, &gpu.queue, &[(&polar, 64)], &HashMap::new());
+        compute.evaluate_polars_batched(&gpu.device, &gpu.queue, &[(&polar, 64)], &BTreeMap::new());
 
     assert_eq!(batched_2d.len(), 2);
     let batched_circle = batched_2d[0].as_ref().expect("circle must batch");
@@ -1187,13 +1190,13 @@ fn parametric_3d_batch_matches_individual_dispatch() {
     let helix = ParametricCurve3DObj::new("cos(t)", "sin(t)", "t", 0.0, std::f64::consts::TAU);
 
     let individual = compute
-        .evaluate_curve_3d(&gpu.device, &gpu.queue, &helix, 64, &HashMap::new())
+        .evaluate_curve_3d(&gpu.device, &gpu.queue, &helix, 64, &BTreeMap::new())
         .expect("single 3D dispatch must execute");
     let batched = compute.evaluate_curves_3d_batched(
         &gpu.device,
         &gpu.queue,
         &[(&helix, 64)],
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
     let batched = batched[0].as_ref().expect("helix must batch");
 
@@ -1219,7 +1222,7 @@ fn maybe_compute_batched_populates_caches_in_one_submit() {
         &gpu.device,
         &gpu.queue,
         &[(&circle, 64), (&line, 64)],
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
     assert_eq!(results, vec![true, true]);
     assert_eq!(circle.cached_samples.read().unwrap().len(), 65);
@@ -1231,7 +1234,7 @@ fn maybe_compute_batched_populates_caches_in_one_submit() {
         &gpu.device,
         &gpu.queue,
         &[(&circle, 64), (&line, 64)],
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
     assert_eq!(results2, vec![true, true]);
 }
@@ -1250,7 +1253,7 @@ fn maybe_compute_batched_3d_and_polar_populate_caches_in_one_submit() {
         &gpu.device,
         &gpu.queue,
         &[(&helix, 64)],
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
     assert_eq!(results_3d, vec![true]);
     assert_eq!(helix.cached_samples.read().unwrap().len(), 65);
@@ -1260,7 +1263,7 @@ fn maybe_compute_batched_3d_and_polar_populate_caches_in_one_submit() {
         &gpu.device,
         &gpu.queue,
         &[(&polar, 64)],
-        &HashMap::new(),
+        &BTreeMap::new(),
     );
     assert_eq!(results_polar, vec![true]);
     assert_eq!(polar.cached_samples.read().unwrap().len(), 65);
@@ -1275,7 +1278,7 @@ fn domain_coloring_rejects_over_250k_cells_before_dispatch() {
     let expr = grafito_complex::math::complex_expr::parse("z").expect("test expression must parse");
     let points: Vec<(f64, f64)> = (0..250_001).map(|i| (i as f64 * 1e-6, 0.0)).collect();
 
-    let result = compute.evaluate(&gpu.device, &gpu.queue, &expr, &points, &HashMap::new(), 0);
+    let result = compute.evaluate(&gpu.device, &gpu.queue, &expr, &points, &BTreeMap::new(), 0);
     assert!(
         result.is_none(),
         "MAX_CELLS 250k es un presupuesto duro: 250_001 celdas se rechazan"
@@ -1292,7 +1295,7 @@ fn surface_gpu_rejects_over_128_resolution_without_clamping() {
 
     assert!(
         compute
-            .evaluate_surface(&gpu.device, &gpu.queue, &surface, 129, &HashMap::new())
+            .evaluate_surface(&gpu.device, &gpu.queue, &surface, 129, &BTreeMap::new())
             .is_none(),
         "MAX_SURFACE_RES 128 es un presupuesto duro: res 129 se rechaza"
     );
@@ -1305,7 +1308,7 @@ fn surface_gpu_rejects_over_128_resolution_without_clamping() {
         &gpu.queue,
         &surface,
         129,
-        &HashMap::new(),
+        &BTreeMap::new(),
     ));
     assert_eq!(*surface.cached_grid.read().unwrap(), cpu_grid);
 }

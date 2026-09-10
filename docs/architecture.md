@@ -48,7 +48,7 @@ Idle -> Spawning -> AwaitingHello{deadline} -> AwaitingPong{deadline} -> Ready
 ```
 Empty -> Loading -> Validating -> Ready -> Mutating -> Persisting -> Ready
 ```
-- `ValidatedDocument` (`validation.rs:40`): wrapper fail-closed `try_new(doc)` que ejecuta `validate_document` antes de persistir o exponer snapshot al render. Migrar `HashMap` → `BTreeMap` en `Document` sigue como deuda migratoria; por ahora `semantic_document_baseline` garantiza orden.
+- `ValidatedDocument` (`validation.rs:40`): wrapper fail-closed `try_new(doc)` que ejecuta `validate_document` antes de persistir o exponer snapshot al render. `Document` ya es `BTreeMap` total en sus mapas de dominio; `semantic_document_baseline` refuerza orden.
 - MAX limits: MAX_OBJECT_COUNT 5000, MAX_EXPR_LENGTH 2000, MAX_TRANSFORM_DEPTH 64, MAX_DOCUMENT_SIZE 10M.
 - Hash determinista: sorted vars antes de hashear (object.rs:2605 fix), BTreeMap en serializacion (deuda migratoria).
 - Transformed try_new valida prepare_function_ast("z") y rechaza "0" singular.
@@ -102,7 +102,7 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 
 - **Tokens** (grafito-ui/src/tokens.rs): TYPE_XS..XXL (11..28, ratio 1.25), SPACE_XS..XXL (4..32, base 4), RADIUS_SM..LG, ICON_SM..XL — unica fuente de verdad.
 - **Assistant panel** (`crates/grafito-ui/src/assistant.rs:99-105`): SidePanel 300..520 (default 400) o TopBottomPanel bottom-sheet cuando el viewport < 740px (`ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH = 440 + 300`, `:103-105`; `assistant_uses_bottom_sheet`, `:1778-1780`), composer con clamp 88..260, sin ScrollArea envolvente (fix overflow), wrapping, clip.
-- **App shell** (grafito-app/src/app.rs ~7590L medido F5 con `wc -l`; assistant.rs ~8370L): eframe::App::update dispatch (god function, deuda P1), GrafitoApp ~96 campos (god object), `MAX_UNDO` 50 + `MAX_UNDO_BYTES` 50 MiB con `VecDeque<Document/ChangeSet>` (`pop_front` O(1), `Vec` previo era O(n) shift — corregido), `controllers.rs` stubs `DocumentController/ViewController/AssistantController` con `VecDeque` (P1), ViewMode/Perspective/CanvasMode redundancia (deuda P1), repaint intervals 150ms settle, 33ms multidimensional 30Hz, 16ms whiteboard 60Hz.
+- **App shell** (grafito-app/src/app.rs 8591L, assistant.rs 11609L, medido F4 con `wc -l`): eframe::App::update dispatch (god function, deuda P1), GrafitoApp ~96 campos (god object), `MAX_UNDO` 50 + `MAX_UNDO_BYTES` 50 MiB con `VecDeque<Document/ChangeSet>` (`pop_front` O(1), `Vec` previo era O(n) shift — corregido), `controllers.rs` reales `DocumentController/ViewController/AssistantController` con `VecDeque` + tests (F4; `GrafitoApp` aún no delega — wiring P2, dueño `app.rs`), `AssistantTurnState` enum real en `assistant.rs` (Idle→Composing→Thinking→AwaitingAuthorization→Animating, terminales Failed|Cancelled; sin `Verifying`; aún sin cablear a `AssistantRuntime` — P2), ViewMode/Perspective/CanvasMode redundancia (deuda P1), repaint intervals 150ms settle, 33ms multidimensional 30Hz, 16ms whiteboard 60Hz. Animación sin Python (`engines/python` eliminado del árbol): 11 plantillas nativas + MP4 vía ffmpeg-sidecar (`anim_native.rs:481`, `FfmpegMissing` honesto sin `ffmpeg` en PATH). CAS experto opt-in: feature `cas-nativo` con `alkahest-cas 3` (`grafito-assistant/Cargo.toml:44`).
 - **Atajos verificados** (handlers en `grafito-app/src/app.rs:4088-4290`; menús en `ui.rs:141-227`; etiquetas toolbar en `grafito-ui/src/toolbar.rs:36-156`): Ctrl+N/O/S + Ctrl+Shift+S archivo (`lifecycle.rs:20-31`), Ctrl+Z/Y deshacer/rehacer (+Shift en Ctrl+Y = herramienta YIntercept, `app.rs:237-248`), Supr eliminar, Esc cancelar, F1-F6 herramientas 2D, F8 Esfera 3D + F9 Cubo 3D (`app.rs:4135-4144`), R/E/I/X/N/S/Y/V/M/G herramientas sin modificadores, Ctrl+A Analizar, Shift+L/K/J toggles log X/Y/ambos, G snap, Ctrl+K paleta, Ctrl+T tema (`app.rs:4259-4267`), Ctrl+P Lápiz + Ctrl+E Borrador (`app.rs:4268-4278`), Ctrl+Shift+1..9,0 perspectivas (10, `app.rs:4236-4242`). Cero fantasmas desde BUILD 2026-09-04 (antes: Ctrl+P, Ctrl+E, F8, F9 documentados sin handler).
 - **Responsive shell**: rail 60px (`RAIL_WIDTH`, `tokens.rs:164`; `ui.rs:549-552`) visible sólo en Medium/Wide (≥1360, `lib.rs:417-424,441-442`) — colapsado en Compact, luego también <780px; drawer derecho 292..440 con clamp (`clamp_drawer_right_width`, `tokens.rs:207-210`; dock 3D `ui.rs:727-731`; Inspector `panels.rs:2125-2132`); panel izquierdo min 180 + max 45% viewport (`PANEL_LEFT_MIN`, `PANEL_LEFT_MAX_FRACTION`, `tokens.rs:151-154`; `panels.rs:1201-1206`).
 - **Onboarding** (`app.rs:1763`, `:4922-5033`; `utils.rs:46-48`): gating `show_onboarding = !config.onboarding_completed`; Window 420px, 3 bullets (5/8/18 grupos en codigo; el copy visible aun dice 17 en `grafito-ui/src/i18n.rs:216` y `app.rs:6914` — sucios F1-F4, sync pendiente), botones [Probar ejemplo][Empezar vacío][No mostrar]; Probar ejemplo y No mostrar persisten `onboarding_completed=true`.
@@ -133,8 +133,8 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | AttachmentLimits max_total_bytes | 1 MiB | assistant-types/src/lib.rs:251 |
 | Assistant | AttachmentLimits max_pixels / max_total_pixels | 1 MiP / 2 MiP | assistant-types/src/lib.rs:249,252 |
 | Assistant | AttachmentLimits max_attachments | 2 | assistant-types/src/lib.rs:250 |
-| Comandos | COMMANDS registrados | 337 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
-| Comandos | palette-visible | 292 (45 ocultos) + 15 acciones UI = 307 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible) |
+| Comandos | COMMANDS registrados | 338 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
+| Comandos | palette-visible | 293 (45 ocultos) + 15 acciones UI = 308 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible; 3D-A2: +Vista3D) |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
 | Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
@@ -213,14 +213,14 @@ Notas:
 
 ## 11. Riesgos residuales
 
-- BTreeMap determinismo total pendiente (mitigado `ValidatedDocument` + ordenación explícita; próximo: migrar `objects: HashMap→BTreeMap`)
+- BTreeMap determinismo total (cerebro-audit 2026-09-10): `objects`, `next_label_number`, `spreadsheet_coordinate_points`, `variables` (`VarMap`), `variable_meta` (`VarMetaMap`), `live_sequences`, `variables_assumptions` + params de constraints (`Constraint.params`, `Document` params fns) + `Exercise.params` son BTreeMap; ~210 firmas `&HashMap<String,f64>` migradas en core/geometry/command/render/complex/pedagogy/app (+ tests/benches/examples). Quedan `HashMap` solo fuera del dominio variables: índice solver `var_index`, mapas tipados `DD`/`Complex64`, intervalos simbólicos, escalares de planilla, cachés UI.
 - `Transformed` Jacobian det pendiente
 - `fill_compute` aún `None` (ahorra 128 MiB, habilitar lazy si `ImplicitCurve != Eq`)
-- App God Object `app.rs 7590L` (medido F5) parcialmente extraído (`controllers.rs` stubs)
+- App God Object `app.rs 8591L` + `assistant.rs 11609L` (medido F4): `controllers.rs` ya reales con tests pero `GrafitoApp` aún no delega (wiring P2); `AssistantTurnState` enum real sin cablear a `AssistantRuntime` (P2)
 
 ## 12. Próximos pasos
 
-1. Migrar `Document {objects,variables}` a `BTreeMap` + `ValidatedMatrix`
+1. `ValidatedMatrix` (la migración `Document {variables, variable_meta, live_sequences, variables_assumptions}` a `BTreeMap` ya se completó 2026-09-10)
 2. `WhiteboardDoc` export SVG + `GeoObject::Whiteboard` independiente
 3. `fill_compute` lazy + `DomainColoring` en export
 4. Classroom P2P opt-in (feature flag)
@@ -231,7 +231,7 @@ Notas:
 |---|---|
 | RequestBudget 8192 / 2048 / 8 / 60s | `crates/grafito-assistant-types/src/lib.rs:198-209` |
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
-| 337 comandos (`command!(`), 292 visibles + 15 UI = 307 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible) |
+| 338 comandos (`command!(`), 293 visibles + 15 UI = 308 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible; 3D-A2: +Vista3D) |
 | 15 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs` |
 | 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
 | 87 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (contado F5: 87 variantes) |
@@ -266,4 +266,4 @@ Sin tocar geometría exacta, A11Y ni perf; sin `unwrap` (gates §9).
 | PDF | `app/src/export.rs` (`serialize_pdf_vectorial` vía `printpdf 0.12`: rectas/círculos/polígonos/texto Helvetica, 1 pág.; `document_to_pdf` queda referencia histórica) | export PDF | S cerrado (multipágina falla honesto) |
 | CSV RFC 4180 | `symbolic/csv.rs` (`to_csv` CRLF + `parse_csv` con `""`, cotas 20k filas/10M) | import/export CSV | S cerrado (wiring UI P2) |
 | Clipboard SVG/PNG | `app/src/export.rs` (SVG real punto/círculo/polígono/texto; PNG vía `clipboard_png_bytes` + `arboard` "Copiar PNG", headless honesto) | copiar SVG/PNG | S cerrado |
-| Gruntz / Risch / marching cubes / Net / iroh / CRDT | `symbolic/exchange.rs` (`l_stub` siempre `Err` + diseño en mensaje) | CAS y P2P | L solo diseño + stub (F10.W5) |
+| Gruntz / Risch / marching-tetra / Net / iroh / CRDT | `symbolic/exchange.rs` (`l_stub` siempre `Err` + diseño en mensaje) | CAS y P2P | L solo diseño + stub (F10.W5) |

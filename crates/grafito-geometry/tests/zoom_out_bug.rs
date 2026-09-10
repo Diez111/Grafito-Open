@@ -4,7 +4,7 @@
 
 use grafito_geometry::ast::Expr;
 use grafito_geometry::expr::prepare_function_ast;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[allow(clippy::too_many_arguments)]
 fn scanline_with_stride(
@@ -74,8 +74,8 @@ fn scanline_with_stride(
 
 #[test]
 fn test_zoom_in_disk_with_stride8() {
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let cols = 1000;
     let rows = 600;
 

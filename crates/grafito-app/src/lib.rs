@@ -596,4 +596,17 @@ pub struct PerspectiveLayout {
 pub use app::run_app;
 pub(crate) use app::GrafitoApp;
 pub(crate) use app::PendingAction;
+// Desbloqueo mínimo para `benches/native_rgba.rs` (tarea F2c): solo lo que el
+// bench mide (dispatcher + consts de budgets + componer); el módulo sigue
+// privado, nada más se expone.
+pub use anim_native::{
+    componer_grupo_nativo, estimate_frames_bytes, render_anim_by_template,
+    GIF_EXPORT_MAX_FILE_BYTES, GIF_EXPORT_MAX_FRAMES, GIF_EXPORT_MAX_TOTAL_PIXELS,
+    NATIVE_ANIM_FRAME_COUNT, NATIVE_BYTES_PER_PIXEL, NATIVE_FRAME_BYTES_ESTIMADO_640X480,
+    NATIVE_MAX_SET_BYTES, NATIVE_TEMPLATES,
+};
+pub use app::{
+    grafito_build_date, grafito_git_hash, grafito_version_string, handle_version_args,
+    print_grafito_help, print_grafito_version,
+};
 pub(crate) use utils::to_color32;

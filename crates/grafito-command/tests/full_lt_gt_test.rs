@@ -4,7 +4,7 @@
 
 use grafito_command::commands::process_input;
 use grafito_core::{Document, GeoObject, RelationOperator};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn test_lt_disk_end_to_end() {
@@ -35,7 +35,7 @@ fn test_lt_disk_end_to_end() {
     );
 
     // El AST debe parsearse correctamente.
-    let (lhs, rhs) = ic.get_cached_asts(&HashMap::new(), &["x", "y"]).unwrap();
+    let (lhs, rhs) = ic.get_cached_asts(&BTreeMap::new(), &["x", "y"]).unwrap();
     let l = lhs.eval_2d("x", 0.0, "y", 0.0);
     let r = rhs.eval_2d("x", 0.0, "y", 0.0);
     assert_eq!(l, 0.0);
@@ -57,7 +57,7 @@ fn test_gt_disk_end_to_end() {
     assert!(ic.is_some());
     let ic = ic.unwrap();
     assert_eq!(ic.operator, RelationOperator::Greater);
-    let (lhs, rhs) = ic.get_cached_asts(&HashMap::new(), &["x", "y"]).unwrap();
+    let (lhs, rhs) = ic.get_cached_asts(&BTreeMap::new(), &["x", "y"]).unwrap();
     // Para > 1, swap=true. f(0, 0) = rhs - lhs = 1 - 0 = 1 > 0 (fuera).
     // f(2, 0) = 1 - 4 = -3 < 0 (dentro).
     let l_00 = lhs.eval_2d("x", 0.0, "y", 0.0);

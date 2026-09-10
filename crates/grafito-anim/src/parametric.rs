@@ -1961,6 +1961,264 @@ pub fn infer_tangent_anim(pedido: &str) -> ParametricResult<TangentPedido> {
     Ok(TangentPedido::Canonica(anim))
 }
 
+// ── Frente A: Taylor con función explícita ───────────────────────────────
+// Espejo de área/tangente: sin f va la canónica DECLARADA (`sin(x)`,
+// centro 0, orden 3: lo que el renderer histórico siempre mostró); con f
+// válida del usuario va la serie REAL de f vía el motor reutilizable
+// `grafito_geometry::symbolic::taylor_series` (el mismo del comando
+// `Taylor` y del resto observado: derivadas simbólicas con presupuestos,
+// cero matemática inventada). El centro sale del pedido o es 0; el orden
+// del pedido o 3 (rango vivo 1..=10 como el slider, se declara el efectivo
+// en prosa). Taylor no usa rango de parámetro: un `[a,b]` en el pedido se
+// ignora (documentado, la prosa nombra f + centro + orden, nunca rango).
+
+/// Expresión canónica cuando el pedido no trae función.
+pub const TAYLOR_CANONICAL_EXPR: &str = "sin(x)";
+/// Centro canónico cuando el pedido no lo trae.
+pub const TAYLOR_CANONICAL_CENTER: f64 = 0.0;
+/// Orden canónico (el histórico del renderer: `taylor_partial_sum(3, x)`).
+pub const TAYLOR_CANONICAL_ORDER: usize = 3;
+/// Orden mínimo del slider vivo.
+pub const TAYLOR_MIN_ORDER: usize = 1;
+/// Orden máximo del slider vivo.
+pub const TAYLOR_MAX_ORDER: usize = 10;
+/// Prosa rioplatense que declara la canónica por defecto (Submit + agente
+/// la usan cuando el spec efectivo es el default; con centro/orden pedidos
+/// la prosa los declara vía `taylor_prosa`).
+pub const TAYLOR_CANONICAL_PROSA: &str =
+    "te muestro Taylor de f(x)=sin(x) en x=0, orden 3; pedime otra y la cambio";
+
+/// Especificación Taylor resuelta: función + centro + orden. El renderer
+/// (`grafito-app/src/anim_native.rs`) calcula `P_n` con el motor y dibuja
+/// f vs `P_n`; jamás `sin(x)` en silencio cuando hay f explícita.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaylorSpec {
+    /// Función del usuario (o la canónica), tal cual para el motor.
+    pub expr: String,
+    /// Centro del desarrollo (del pedido o 0.0).
+    pub centro: f64,
+    /// Orden del polinomio (del pedido o 3), siempre 1..=10.
+    pub orden: usize,
+}
+
+/// Pedido de Taylor ya resuelto: canónico o explícito.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaylorPedido {
+    /// Sin función: canónica `sin(x)` (con centro/orden del pedido si los
+    /// trae) y prosa que la declara.
+    Canonica(TaylorSpec),
+    /// Con función válida del usuario: serie real vía el motor.
+    Explicita(TaylorSpec),
+}
+
+impl TaylorPedido {
+    /// La especificación a renderizar en ambas ramas.
+    pub fn spec(&self) -> &TaylorSpec {
+        match self {
+            Self::Canonica(s) | Self::Explicita(s) => s,
+        }
+    }
+
+    /// `true` solo en la rama canónica (la prosa debe declararlo).
+    pub fn es_canonica(&self) -> bool {
+        matches!(self, Self::Canonica(_))
+    }
+}
+
+/// ¿El pedido menciona Taylor? Espejo de `pedido_menciona_tangente`:
+/// normaliza sin tildes + fuzzy acotado ("taylr" matchea "taylor").
+/// Puro, sin I/O.
+pub fn pedido_menciona_taylor(pedido: &str) -> bool {
+    let norm = normaliza_para_match(pedido);
+    for token in norm.split(|c: char| !c.is_alphabetic()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token_matchea_clave(token, "taylor") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Prosa rioplatense del turno Taylor: nombra f + centro + orden SIEMPRE.
+///
+/// La canónica agrega el marcador "; pedime otra y la cambio" (espejo de
+/// tangente: ese marcador es solo de la canónica). Pura, sin I/O.
+pub fn taylor_prosa(spec: &TaylorSpec, canonica: bool) -> String {
+    let base = format!(
+        "te muestro Taylor de f(x)={} en x={}, orden {}",
+        spec.expr.trim(),
+        spec.centro,
+        spec.orden
+    );
+    if canonica {
+        format!("{base}; pedime otra y la cambio")
+    } else {
+        base
+    }
+}
+
+/// Número finito tras una clave (`centro 1.5`, `en x=2`, `orden=5`).
+/// Salta espacios y `=`/`:`; primer match finito gana. Puro, sin I/O.
+fn numero_tras_clave(norm: &str, clave: &str) -> Option<f64> {
+    let mut from = 0;
+    while let Some(rel) = norm.get(from..)?.find(clave) {
+        let pos = from + rel + clave.len();
+        let after = norm.get(pos..)?.trim_start();
+        let after = after.strip_prefix(['=', ':']).unwrap_or(after).trim_start();
+        if let Some(num) = number_prefix(after) {
+            if let Some(v) = parse_finite(&num) {
+                // -0.0 se normaliza a 0.0 (la prosa diría "x=-0").
+                return Some(if v == 0.0 { 0.0 } else { v });
+            }
+        }
+        from = pos;
+    }
+    None
+}
+
+/// Centro del desarrollo desde el pedido (`centro 1.5`, `en x=2`, `x0=1`,
+/// `alrededor de 2`). `None` → el llamador usa 0.0. Puro, sin I/O.
+fn extract_taylor_center(norm: &str) -> Option<f64> {
+    for clave in ["centro", "alrededor de", "en x", "x0"] {
+        if let Some(v) = numero_tras_clave(norm, clave) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Orden del polinomio desde el pedido (`orden 5`, `grado 4`, `terms=7`,
+/// `n=5`). Clampeado a 1..=10 (rango del slider; la prosa declara el
+/// efectivo). `None` → el llamador usa 3. Puro, sin I/O.
+fn extract_taylor_order(norm: &str) -> Option<usize> {
+    for clave in ["orden", "grado", "terms", "terminos", "n=", "n:"] {
+        if let Some(v) = numero_tras_clave(norm, clave) {
+            if !v.is_finite() {
+                continue;
+            }
+            // Trunca como el slider del renderer (`as usize`); el clamp y
+            // la prosa declaran el efectivo, sin mentir.
+            let n = v as usize;
+            return Some(n.clamp(TAYLOR_MIN_ORDER, TAYLOR_MAX_ORDER));
+        }
+    }
+    None
+}
+
+/// Recorta sufijos de Taylor que comparten la línea con la función
+/// (`f(x)=x^3 en x=1 orden 5` → `x^3`). Solo se intenta si la expresión
+/// cruda no evalúa (no altera casos que ya funcionan). Puro, sin I/O.
+fn recorta_sufijos_taylor(expr: &str) -> String {
+    let low = expr.to_lowercase();
+    let mut best: Option<usize> = None;
+    for clave in [" en x", " centro", " orden", " grado", " terms", " x0"] {
+        if let Some(p) = low.find(clave) {
+            best = Some(best.map_or(p, |b: usize| b.min(p)));
+        }
+    }
+    let mut out = match best {
+        Some(p) => expr.get(..p).unwrap_or("").to_string(),
+        None => expr.to_string(),
+    };
+    out = out.trim().to_string();
+    while out.ends_with([',', ';', '.']) {
+        out.pop();
+    }
+    out.trim().to_string()
+}
+
+/// ¿El motor deriva esta expresión en este centro y orden? Reusa
+/// `grafito_geometry::symbolic::taylor_series` (el mismo del comando
+/// `Taylor`): `Ok` = serie real disponible, `Err` = no derivable.
+/// Puro, sin I/O.
+fn taylor_motor_deriva(expr: &str, centro: f64, orden: usize) -> bool {
+    grafito_geometry::symbolic::taylor_series(expr, "x", centro, orden).is_ok()
+}
+
+/// Infiere un pedido de Taylor a `TaylorPedido`.
+///
+/// - Sin expresión (ni tras `=` ni suelta) → `Canonica` (`sin(x)`, con el
+///   centro/orden del pedido si los trae, o 0/3).
+/// - Con expresión evaluable en el mundo del render Y derivable por el
+///   motor → `Explicita` (serie real de f, jamás `sin(x)` en silencio).
+/// - Con `x` evaluable pero no derivable, o no evaluable (`foo(x)`) →
+///   `Err` honesto, sin frames.
+/// - Con prosa sin `x` no evaluable (`F=m*a`) → se ignora y va `Canonica`.
+/// - Sin mención a Taylor → `FaltaTipo` (no es un pedido de Taylor).
+pub fn infer_taylor_anim(pedido: &str) -> ParametricResult<TaylorPedido> {
+    let text_original = pedido.trim();
+    if text_original.is_empty() {
+        return Err(ParametricError::PedidoVacio);
+    }
+    if text_original.chars().count() > 2000 {
+        return Err(ParametricError::ExpresionMuyLarga {
+            got: text_original.chars().count(),
+            max: 2000,
+        });
+    }
+    if !pedido_menciona_taylor(pedido) {
+        return Err(ParametricError::FaltaTipo);
+    }
+    let normalizado = normaliza_superscripts(text_original);
+    let text: &str = &normalizado;
+    let norm = normaliza_para_match(text);
+    let lower = text.to_lowercase();
+    let centro = extract_taylor_center(&norm).unwrap_or(TAYLOR_CANONICAL_CENTER);
+    let orden = extract_taylor_order(&norm).unwrap_or(TAYLOR_CANONICAL_ORDER);
+    let spec_con = |expr: String| TaylorSpec {
+        expr,
+        centro,
+        orden,
+    };
+    let expr: String = match extract_single_expr(text) {
+        Some(expr) => expr,
+        None => match extract_bare_expr(text, "", centro, centro) {
+            BareExpr::Explicita(expr) => expr,
+            BareExpr::Invalida(detalle) => {
+                return Err(ParametricError::NoSoportado { detalle });
+            }
+            BareExpr::Ninguna => {
+                return Ok(TaylorPedido::Canonica(spec_con(
+                    TAYLOR_CANONICAL_EXPR.to_string(),
+                )));
+            }
+        },
+    };
+    // Candidatas: cruda primero, recortada después (sufijos "en x="/orden).
+    let mut candidatas = vec![expr];
+    let recortada = recorta_sufijos_taylor(&candidatas[0]);
+    if recortada != candidatas[0] && !recortada.trim().is_empty() {
+        candidatas.push(recortada);
+    }
+    for candidata in &candidatas {
+        // La explícita nombra la variable: una constante suelta ("1" del
+        // "x=1" del centro) jamás es la función pedida; sin `x` es prosa y
+        // va a canónica (no se inventa serie de una constante).
+        if (candidata.contains('x') || candidata.contains('X'))
+            && area_expr_evaluable(candidata, "p", centro, centro)
+            && taylor_motor_deriva(candidata, centro, orden)
+        {
+            return Ok(TaylorPedido::Explicita(spec_con(candidata.clone())));
+        }
+    }
+    // No derivable/evaluable: con `x` es función inválida (Err); sin `x`
+    // es prosa ("F=m*a") y se ignora yendo a la canónica.
+    let primera = &candidatas[0];
+    if primera.contains('x') || primera.contains('X') {
+        return Err(ParametricError::NoSoportado {
+            detalle: format!(
+                "la función {primera:?} no tiene serie de Taylor calculable acá: revisá la expresión, por ejemplo f(x)=x^3"
+            ),
+        });
+    }
+    let _ = lower;
+    Ok(TaylorPedido::Canonica(spec_con(
+        TAYLOR_CANONICAL_EXPR.to_string(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2313,6 +2571,112 @@ mod tests {
         assert!(!pedido_menciona_area("tarea de matemática"));
         assert!(distancia_acotada("integrela", "integral").is_some());
         assert!(distancia_acotada("zzz", "integral").is_none());
+    }
+
+    // ── Frente A: Taylor con función explícita ──────────────────────────
+    #[test]
+    fn taylor_sin_funcion_es_canonica_declarada() {
+        for pedido in [
+            "pedí un ejemplo de animación de taylor",
+            "haceme una animación de la serie de taylor",
+            "explicame taylor con animación",
+        ] {
+            assert!(
+                pedido_menciona_taylor(pedido),
+                "{pedido:?} debe mencionar taylor"
+            );
+            let res = infer_taylor_anim(pedido).unwrap();
+            assert!(res.es_canonica(), "{pedido:?} debe ser canónica");
+            let spec = res.spec();
+            assert_eq!(spec.expr, TAYLOR_CANONICAL_EXPR);
+            assert_eq!(spec.centro, TAYLOR_CANONICAL_CENTER);
+            assert_eq!(spec.orden, TAYLOR_CANONICAL_ORDER);
+        }
+        // La prosa por defecto es la const canónica.
+        let def = TaylorSpec {
+            expr: TAYLOR_CANONICAL_EXPR.to_string(),
+            centro: TAYLOR_CANONICAL_CENTER,
+            orden: TAYLOR_CANONICAL_ORDER,
+        };
+        assert_eq!(taylor_prosa(&def, true), TAYLOR_CANONICAL_PROSA);
+        assert!(TAYLOR_CANONICAL_PROSA.contains("sin(x)"));
+        assert!(TAYLOR_CANONICAL_PROSA.contains("pedime otra"));
+    }
+
+    #[test]
+    fn taylor_con_funcion_explicita_usa_serie_real() {
+        // La queja real: "pedí taylor y me tiró una senoidal nada que ver".
+        let res = infer_taylor_anim("animación de taylor de f(x)=x^3 en x=0 orden 5").unwrap();
+        assert!(!res.es_canonica(), "x^3 explícita jamás es canónica");
+        let spec = res.spec();
+        assert_eq!(spec.expr, "x^3");
+        assert_eq!(spec.centro, 0.0);
+        assert_eq!(spec.orden, 5);
+        // El motor deriva la explícita de verdad (serie real, no invento).
+        assert!(taylor_motor_deriva(&spec.expr, spec.centro, spec.orden));
+        // Suelta sin `=` también vale (superíndice incluido).
+        let suelta = infer_taylor_anim("taylor x³ orden 4").unwrap();
+        assert!(!suelta.es_canonica());
+        assert_eq!(suelta.spec().expr, "x^3");
+        assert_eq!(suelta.spec().orden, 4);
+        // sin(x) explícito pedido se declara como tal (no canónica muda).
+        let seno = infer_taylor_anim("serie de taylor de f(x)=sin(x)").unwrap();
+        assert!(!seno.es_canonica());
+        assert_eq!(seno.spec().expr, "sin(x)");
+    }
+
+    #[test]
+    fn taylor_centro_y_orden_del_pedido_o_default() {
+        let res = infer_taylor_anim("taylor de f(x)=x^3 en x=1 orden 5").unwrap();
+        assert_eq!(res.spec().centro, 1.0);
+        assert_eq!(res.spec().orden, 5);
+        let def = infer_taylor_anim("taylor de f(x)=x^3").unwrap();
+        assert_eq!(def.spec().centro, 0.0);
+        assert_eq!(def.spec().orden, TAYLOR_CANONICAL_ORDER);
+        // La canónica hereda centro/orden pedidos y la prosa los declara.
+        let canon = infer_taylor_anim("animación de taylor en x=1 orden 5").unwrap();
+        assert!(canon.es_canonica());
+        assert_eq!(canon.spec().centro, 1.0);
+        assert_eq!(canon.spec().orden, 5);
+        let prosa = taylor_prosa(canon.spec(), true);
+        assert!(prosa.contains("x=1"), "{prosa}");
+        assert!(prosa.contains("orden 5"), "{prosa}");
+    }
+
+    #[test]
+    fn taylor_prosa_nombra_f_centro_orden_siempre() {
+        let spec = TaylorSpec {
+            expr: "x^3".to_string(),
+            centro: 1.0,
+            orden: 5,
+        };
+        let prosa = taylor_prosa(&spec, false);
+        assert!(prosa.contains("x^3"), "{prosa}");
+        assert!(prosa.contains("x=1"), "{prosa}");
+        assert!(prosa.contains("orden 5"), "{prosa}");
+        assert!(
+            !prosa.contains("pedime otra"),
+            "la explícita no lleva marcador canónico: {prosa}"
+        );
+    }
+
+    #[test]
+    fn taylor_invalida_falla_honesto_sin_frames() {
+        let err = infer_taylor_anim("taylor de f(x)=foo(x) orden 3").unwrap_err();
+        match err {
+            ParametricError::NoSoportado { detalle } => {
+                assert!(detalle.contains("foo(x)"), "{detalle}");
+                assert!(detalle.contains("x^3"), "da ejemplo: {detalle}");
+            }
+            otro => panic!("esperaba NoSoportado, fue {otro:?}"),
+        }
+        // Sin mención a taylor no es pedido de taylor.
+        assert_eq!(
+            infer_taylor_anim("barrido de f(x)=x^2 con p en [0,1]").unwrap_err(),
+            ParametricError::FaltaTipo
+        );
+        assert!(!pedido_menciona_taylor("tarea de matemática"));
+        assert!(infer_taylor_anim("   ").is_err());
     }
 }
 
@@ -2670,6 +3034,85 @@ impl PolylineMorph {
             .map(|fila| fila.iter().map(|p| [p.x, p.y]).collect())
             .collect())
     }
+
+    /// Fotogramas suavizados con beziers cúbicos (F1 `MatchingShapes`).
+    ///
+    /// Parte de [`PolylineMorph::frames_puntos`] —que ya remuestrea A y B
+    /// por longitud de arco y acepta N distinto entre ambas— y aplica un
+    /// paso de B-spline cúbica por frame (`q[i]=(p[i-1]+4·p[i]+p[i+1])/6`,
+    /// preserva `samples`). Sin I/O, sin pánicos; presupuestos intactos.
+    pub fn frames_suaves(&self) -> ParametricResult<Vec<Vec<[f64; 2]>>> {
+        let frames = self.frames_puntos()?;
+        Ok(frames
+            .iter()
+            .map(|fila| suaviza_bezier(fila, self.closed))
+            .collect())
+    }
+}
+
+/// Suaviza una polilínea con beziers cúbicos (B-spline cúbica, un paso,
+/// preserva N). Espejo de `scene.rs::bezier_suaviza` para el evaluador
+/// paramétrico (sin capa de escena). Pura, sin pánicos.
+pub fn suaviza_bezier(pts: &[[f64; 2]], closed: bool) -> Vec<[f64; 2]> {
+    let n = pts.len();
+    if n < 3 {
+        return pts.to_vec();
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let (a, b, c) = if closed {
+            (pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n])
+        } else if i == 0 {
+            (pts[0], pts[0], pts[1])
+        } else if i + 1 >= n {
+            (pts[n - 2], pts[n - 1], pts[n - 1])
+        } else {
+            (pts[i - 1], pts[i], pts[i + 1])
+        };
+        let x = (a[0] + 4.0 * b[0] + c[0]) / 6.0;
+        let y = (a[1] + 4.0 * b[1] + c[1]) / 6.0;
+        if x.is_finite() && y.is_finite() {
+            out.push([x, y]);
+        } else {
+            out.push(b);
+        }
+    }
+    out
+}
+
+// ── F1: Taylor animado 1..=7 desde `terms` ─────────────────────────────────
+// El slider vivo admite 1..=10 (`TAYLOR_MIN/MAX_ORDER`); la animación corta
+// en 1..=7 para que el set de 48 frames siga legible. `render_taylor_frames_inner`
+// (W3, `grafito-app`) lee el orden vía `taylor_orden_para_anim` en vez del
+// fade fijo histórico (orden 3 cuando `params` no trae `terms`).
+
+/// Orden mínimo del Taylor animado (F1).
+pub const TAYLOR_ANIM_ORDEN_MIN: usize = 1;
+/// Orden máximo del Taylor animado (F1).
+pub const TAYLOR_ANIM_ORDEN_MAX: usize = 7;
+/// Orden histórico cuando `terms` falta o no es finito.
+pub const TAYLOR_ANIM_ORDEN_DEFAULT: usize = super::protocol::TAYLOR_ANIM_ORDER_DEFAULT;
+
+/// Orden animado desde `params["terms"]` (ausente/NaN/inf → 3; trunca y
+/// clampa a 1..=7). Delega en `protocol::taylor_anim_order_from_params`
+/// (única cuenta, sin duplicarla). Puro, sin pánicos.
+pub fn taylor_orden_para_anim(params: &std::collections::BTreeMap<String, f64>) -> usize {
+    super::protocol::taylor_anim_order_from_params(params)
+}
+
+/// `TaylorSpec` lista para `render_taylor_frames_inner` (W3): misma
+/// función y centro del pedido, orden desde `params["terms"]` 1..=7.
+/// Pura, sin pánicos.
+pub fn taylor_spec_para_anim(
+    expr: &str,
+    centro: f64,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> TaylorSpec {
+    TaylorSpec {
+        expr: expr.to_string(),
+        centro,
+        orden: taylor_orden_para_anim(params),
+    }
 }
 
 /// Valida un lado del morph (no vacío, acotado, finito, cerrada honesta).
@@ -2890,6 +3333,36 @@ mod shape_morph_f2a {
         assert_eq!(anim.kind, ParametricKind::Morph);
         let v0 = anim.eval_frame(0, 2.0).unwrap();
         assert!((v0 - 4.0).abs() < 1e-9, "frame 0 = A: {v0}");
+    }
+
+    #[test]
+    fn frames_suaves_preservan_muestras_con_n_distinto() {
+        let m = morph(16, 5);
+        let suaves = m.frames_suaves().unwrap();
+        assert_eq!(suaves.len(), 5);
+        assert!(suaves.iter().all(|f| f.len() == 16));
+        assert!(suaves
+            .iter()
+            .flatten()
+            .all(|p| p[0].is_finite() && p[1].is_finite()));
+        // Bezier de 2 puntos devuelve tal cual (sin inventar).
+        let dos = vec![[0.0, 0.0], [1.0, 1.0]];
+        assert_eq!(suaviza_bezier(&dos, false), dos);
+    }
+
+    #[test]
+    fn taylor_orden_para_anim_lee_terms_1_a_7() {
+        use std::collections::BTreeMap;
+        let vacio = BTreeMap::new();
+        assert_eq!(taylor_orden_para_anim(&vacio), 3);
+        let mut params = BTreeMap::new();
+        params.insert("terms".to_string(), 6.0);
+        assert_eq!(taylor_orden_para_anim(&params), 6);
+        params.insert("terms".to_string(), 99.0);
+        assert_eq!(taylor_orden_para_anim(&params), 7);
+        let spec = taylor_spec_para_anim("sin(x)", 0.0, &params);
+        assert_eq!(spec.orden, 7);
+        assert_eq!(spec.expr, "sin(x)");
     }
 }
 

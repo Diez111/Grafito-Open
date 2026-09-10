@@ -3,7 +3,7 @@
 
 use grafito_geometry::ast::Expr;
 use grafito_geometry::expr::prepare_function_ast;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[allow(clippy::too_many_arguments)]
 fn scanline_segments(
@@ -96,8 +96,8 @@ fn scanline_segments(
 #[test]
 fn test_lt_disk_view_large() {
     // View [-8, 9] x [-3, 3] (el del screenshot del usuario).
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let segs = scanline_segments(&lhs, &rhs, false, -8.0, 9.0, -3.0, 3.0, 1000, 600, 2);
     // El disco tiene radio 1. En este view, el disco es 1/17 del ancho
     // y 1/6 del alto. Esperamos ~50-100 filas con fill.
@@ -110,8 +110,8 @@ fn test_lt_disk_view_large() {
 fn test_gt_disk_view_large() {
     // x^2 + y^2 > 1: el EXTERIOR del disco.
     // En view [-8, 9], la mayoría del view es "exterior".
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let segs = scanline_segments(&lhs, &rhs, true, -8.0, 9.0, -3.0, 3.0, 1000, 600, 2);
     let total_segs: usize = segs.iter().map(|s| s.len()).sum();
     println!("GT total segments: {}", total_segs);
@@ -123,8 +123,8 @@ fn test_gt_disk_view_large() {
 fn test_default_view_lt_disk() {
     // View default del usuario al inicio: scale=50, screen=800x600.
     // dx = 16/800 = 0.02 world/pixel. View [-8, 8] x [-6, 6].
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let segs = scanline_segments(&lhs, &rhs, false, -8.0, 8.0, -6.0, 6.0, 800, 600, 2);
     let total_segs: usize = segs.iter().map(|s| s.len()).sum();
     println!("default view total segments: {}", total_segs);

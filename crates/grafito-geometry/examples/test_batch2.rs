@@ -1,10 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(deprecated)]
 use grafito_geometry::expr::eval_batch_2d;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn main() {
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let points = vec![(0.0, 0.0), (3.0, 0.0)];
     let res = eval_batch_2d("9", "x", "y", points.clone().into_iter(), &vars);
     println!("9: {:?}", res);

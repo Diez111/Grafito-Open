@@ -7,14 +7,14 @@
 //! panicara en otro hilo. Estos tests fallarían antes (ver regresiones abajo).
 
 use grafito_core::{ImplicitCurveObj, RelationOperator};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn test_empty_lhs_is_none() {
     // Regresión: si el parser aceptara "" como Const(0), el render dibujaría
     // una curva fantasma en lugar de omitir el objeto.
     let ic = ImplicitCurveObj::new("", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     assert!(
         ic.get_cached_asts(&vars, &["x", "y"]).is_none(),
         "lhs vacío debe ser None (omitir objeto), no Some"
@@ -24,7 +24,7 @@ fn test_empty_lhs_is_none() {
 #[test]
 fn test_empty_rhs_is_none() {
     let ic = ImplicitCurveObj::new("x^2", "", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     assert!(
         ic.get_cached_asts(&vars, &["x", "y"]).is_none(),
         "rhs vacío debe ser None (omitir objeto), no Some"
@@ -35,7 +35,7 @@ fn test_empty_rhs_is_none() {
 fn test_whitespace_only_is_none() {
     // Regresión: `trim` olvidado haría que "   " parseara distinto de "".
     let ic = ImplicitCurveObj::new("   ", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     assert!(
         ic.get_cached_asts(&vars, &["x", "y"]).is_none(),
         "lhs solo-espacios debe ser None igual que \"\""
@@ -52,7 +52,7 @@ fn test_double_plus_is_unary_plus_not_an_error() {
     // Regresión que atraparía: si alguien endurece el parser para rechazar
     // `++`, este test avisa del cambio de contrato (hay que actualizar docs).
     let ic = ImplicitCurveObj::new("x ++ y", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let result = ic.get_cached_asts(&vars, &["x", "y"]);
     assert!(
         result.is_some(),
@@ -80,7 +80,7 @@ fn test_truly_malformed_operator_is_none() {
     // `parse_primary("*")` → Err("Unexpected token"), luego None.
     // El test decorativo anterior usaba "x ++ y" (válido) y nunca cubría esto.
     let ic = ImplicitCurveObj::new("x +* y", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     assert!(
         ic.get_cached_asts(&vars, &["x", "y"]).is_none(),
         "'x +* y' debe ser None (omitir objeto), no Some ni panic"
@@ -93,7 +93,7 @@ fn test_valid_expr_is_some_control() {
     // (fail-closed roto por exceso), este test lo delata. Sin control,
     // los tests solo-None pasarían con un stub `-> None`.
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     assert!(
         ic.get_cached_asts(&vars, &["x", "y"]).is_some(),
         "expresión válida debe ser Some (control anti-stub)"
@@ -104,7 +104,7 @@ fn test_valid_expr_is_some_control() {
 fn test_cache_is_idempotent_without_panic() {
     // Regresión: bug histórico de slot combinado lhs/rhs que se
     // sobreescribía; segunda llamada debe devolver lo mismo sin panic.
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let empty = ImplicitCurveObj::new("", "1", RelationOperator::Eq);
     assert!(empty.get_cached_asts(&vars, &["x", "y"]).is_none());
     assert!(empty.get_cached_asts(&vars, &["x", "y"]).is_none());

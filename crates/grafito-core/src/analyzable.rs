@@ -11,7 +11,7 @@ use grafito_geometry::analysis::{
     analyze_polygon, analyze_vector_field2d, AnalysisFeature, AnalysisOptions, AnalysisResult,
 };
 use grafito_geometry::Point2;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::GeoObject;
 
@@ -28,7 +28,7 @@ use crate::GeoObject;
 pub fn analyze_object(
     obj: &GeoObject,
     view_bounds: (f64, f64, f64, f64), // (xmin, xmax, ymin, ymax)
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let (xmin, xmax, _, _) = view_bounds;
@@ -91,7 +91,7 @@ pub fn analyze_object(
 pub fn evaluate_curve_at(
     obj: &GeoObject,
     world: Point2,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
 ) -> Option<f64> {
     match obj {
         GeoObject::Function(f) => {
@@ -204,8 +204,8 @@ mod tests {
     use super::*;
     use crate::{CircleObj, LineKind, LineObj, ParabolaObj, PointObj, PolygonObj};
 
-    fn empty_vars() -> HashMap<String, f64> {
-        HashMap::new()
+    fn empty_vars() -> BTreeMap<String, f64> {
+        BTreeMap::new()
     }
 
     fn bounds() -> (f64, f64, f64, f64) {

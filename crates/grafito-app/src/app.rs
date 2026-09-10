@@ -788,6 +788,10 @@ pub(crate) fn normalize_multidimensional_motion_speed(speed: f32) -> f32 {
     }
 }
 
+/// Órbita de cámara en perspectiva para tests: el advance loop productivo usa
+/// `canvas::tick_view3d_ambient` (misma matemática, con vista); este wrapper
+/// solo existe para pinear el comportamiento histórico en tests.
+#[cfg(test)]
 pub(crate) fn advance_default_camera_orbit_at_speed(
     camera: &mut Camera3D,
     dt: f64,
@@ -797,12 +801,12 @@ pub(crate) fn advance_default_camera_orbit_at_speed(
         return false;
     }
     let speed = normalize_multidimensional_motion_speed(speed);
-    camera.orbit(
-        DEFAULT_3D_ORBIT_RADIANS_PER_SECOND * speed * dt.min(0.1) as f32,
-        0.0,
-    );
-    camera.theta = camera.theta.rem_euclid(std::f32::consts::TAU);
-    true
+    crate::canvas::tick_view3d_ambient(
+        crate::canvas::View3D::Perspective,
+        camera,
+        dt.min(0.1) as f32,
+        DEFAULT_3D_ORBIT_RADIANS_PER_SECOND * speed,
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -1365,7 +1369,7 @@ impl GpuFunctionEvaluator for AppGpuFunctionEvaluator {
         a: f64,
         b: f64,
         samples: usize,
-        variables: &std::collections::HashMap<String, f64>,
+        variables: &std::collections::BTreeMap<String, f64>,
     ) -> Option<Vec<f64>> {
         let renderer_lock = self.renderer.write().ok()?;
         let renderer = renderer_lock.as_ref()?;
@@ -1678,6 +1682,14 @@ pub struct GrafitoApp {
     pub(crate) multidimensional_motion_enabled: bool,
     /// Multiplicador transitorio compartido por la órbita 3D y la fase 4D.
     pub(crate) multidimensional_motion_speed: f32,
+    /// Vista 3D del canvas (dueño canvas.rs): la escribe el selector del
+    /// panel Vista y la leen el dibujo, el pick y el advance loop por frame.
+    /// Default perspectiva (GeoGebra).
+    pub view3d: crate::canvas::View3D,
+    /// Travelling 3D activo (paridad Manim `MovingCamera`): mientras hay uno,
+    /// el advance loop muestrea la cámara animada por frame en vez de
+    /// orbitar. `None` = órbita ambiental. Sin productor UI todavía (P2).
+    pub(crate) camera_travelling: Option<crate::render_3d::CameraTravelling>,
     pub use_gpu: bool,
     pub last_interaction_time: Instant,
     pub is_view_changing: bool,
@@ -2345,6 +2357,8 @@ impl GrafitoApp {
             transient_render_state: TransientRenderState::default(),
             multidimensional_motion_enabled: true,
             multidimensional_motion_speed: DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED,
+            view3d: crate::canvas::View3D::default(),
+            camera_travelling: None,
             use_gpu: gpu_available,
             last_interaction_time: Instant::now(),
             is_view_changing: false,
@@ -3067,7 +3081,19 @@ impl GrafitoApp {
 
         let speed = normalize_multidimensional_motion_speed(self.multidimensional_motion_speed);
         self.multidimensional_motion_speed = speed;
-        let camera_advanced = advance_default_camera_orbit_at_speed(&mut self.camera, dt, speed);
+        // Travelling activo: la cámara animada manda por frame (paridad
+        // Manim `MovingCamera` vía `camera3d_from_anim_perspective`); sin
+        // travelling, órbita ambiental solo en perspectiva — las vistas
+        // ortográficas no tienen azimut y el tick no toca la cámara.
+        let camera_advanced = match self.camera_travelling.as_ref() {
+            Some(travelling) => travelling.apply_at(&mut self.camera, self.ui_time),
+            None => crate::canvas::tick_view3d_ambient(
+                self.view3d,
+                &mut self.camera,
+                dt.min(0.1) as f32,
+                DEFAULT_3D_ORBIT_RADIANS_PER_SECOND * speed,
+            ),
+        };
         let four_d_advanced = self.has_visible_four_d_projection()
             && self.transient_render_state.advance_four_d_phase(
                 DEFAULT_4D_ROTATION_RADIANS_PER_SECOND * speed as f64 * dt.min(0.1),
@@ -6564,6 +6590,7 @@ impl eframe::App for GrafitoApp {
                                 h,
                                 false,
                                 canvas_resize_preview,
+                                self.view3d.to_ortho_projection(),
                             );
                         }
 
@@ -6572,6 +6599,7 @@ impl eframe::App for GrafitoApp {
                             crate::canvas::Canvas3DCallback {
                                 document: self.document_for_callback(),
                                 camera: self.camera,
+                                view3d: self.view3d,
                                 dark_mode: self.dark_mode,
                                 screen_w: w,
                                 screen_h: h,
@@ -6598,6 +6626,7 @@ impl eframe::App for GrafitoApp {
                                     motion_preview,
                                     typed_four_d_phase,
                                 },
+                                self.view3d.to_ortho_projection(),
                             );
                         }
                         if should_repaint_3d_warmup(scene_readiness) {
@@ -6616,6 +6645,7 @@ impl eframe::App for GrafitoApp {
                                 h,
                                 false,
                                 canvas_resize_preview,
+                                self.view3d.to_ortho_projection(),
                             );
                         }
                         {
@@ -6634,6 +6664,7 @@ impl eframe::App for GrafitoApp {
                                     motion_preview,
                                     typed_four_d_phase,
                                 },
+                                self.view3d.to_ortho_projection(),
                             );
                         }
                     }
@@ -8097,29 +8128,93 @@ pub(crate) fn load_mora_avatar_texture_once(
     );
 }
 
+/// Fecha de compilación inyectada por build.rs (`YYYY-MM-DD`); `"dev"` si
+/// el binario se compiló sin ella. Única fuente (antes duplicada en main.rs).
+pub fn grafito_build_date() -> &'static str {
+    option_env!("GRAFITO_BUILD_DATE").unwrap_or("dev")
+}
+
+/// Hash corto del commit inyectado por build.rs. Acepta el alias nuevo
+/// `GRAFITO_GIT_HASH` y el histórico `GRAFITO_BUILD_HASH` (que tests siguen
+/// leyendo); `"dev"` si no hay ninguno. Única fuente.
+pub fn grafito_git_hash() -> &'static str {
+    option_env!("GRAFITO_GIT_HASH")
+        .or(option_env!("GRAFITO_BUILD_HASH"))
+        .unwrap_or("dev")
+}
+
+/// Versión visible `Grafito v<semver> (<fecha> <hash>)`, p.ej.
+/// `Grafito v1.0.0 (2026-09-10 1c52ffc)`. Única fuente para el título de la
+/// ventana, `--help/--version` de `run_app` y de `main.rs`. Pura y testeable.
+pub fn grafito_version_string() -> String {
+    format!(
+        "Grafito v{} ({} {})",
+        env!("CARGO_PKG_VERSION"),
+        grafito_build_date(),
+        grafito_git_hash()
+    )
+}
+
+/// Imprime la versión visible en una línea (fuente única).
+pub fn print_grafito_version() {
+    println!("{}", grafito_version_string());
+}
+
+/// Imprime el `--help` completo (fuente única para `run_app` y `main.rs`:
+/// primera línea con fecha+hash, resto idéntico en ambos).
+pub fn print_grafito_help() {
+    println!("{}", grafito_version_string());
+    println!("Calculadora gráfica matemática interactiva");
+    println!("(Geometría, Álgebra, Cálculo, CAS, Estadística, Complejos)");
+    println!();
+    println!("Usage: grafito [OPTIONS]");
+    println!("Options:");
+    println!("  -h, --help       Print help information");
+    println!("  -V, --version    Print version information");
+    #[cfg(feature = "profile")]
+    println!(
+        "  --profile        Start a puffin_http profiler server on port {}",
+        puffin_http::DEFAULT_PORT
+    );
+}
+
+/// Consume `--help/-h` y `--version/-V` antes de abrir la GUI (fuente única:
+/// `main.rs` lo llama primero y `run_app` lo reutiliza).
+///
+/// Devuelve `true` si consumió los args (el llamador retorna sin GUI).
+/// `--help` gana sobre `--version`; el resto de args se ignora acá.
+pub fn handle_version_args(args: impl IntoIterator<Item = String>) -> bool {
+    let mut version_requested = false;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print_grafito_help();
+                return true;
+            }
+            "--version" | "-V" => version_requested = true,
+            _ => {}
+        }
+    }
+    if version_requested {
+        print_grafito_version();
+        return true;
+    }
+    false
+}
+
 /// Run the native Grafito desktop application.
 pub fn run_app() -> Result<(), eframe::Error> {
     env_logger::init();
+
+    // `--help/--version` desde la fuente única (mismo texto que en main.rs).
+    if handle_version_args(std::env::args().skip(1)) {
+        return Ok(());
+    }
 
     #[cfg(feature = "profile")]
     let mut profile = false;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
-            "--help" | "-h" => {
-                println!("Grafito v{}", env!("CARGO_PKG_VERSION"));
-                println!("Calculadora gráfica matemática interactiva");
-                println!("(Geometría, Álgebra, Cálculo, CAS, Estadística, Complejos)");
-                println!();
-                println!("Usage: grafito [OPTIONS]");
-                println!("Options:");
-                println!("  -h, --help       Print help information");
-                #[cfg(feature = "profile")]
-                println!(
-                    "  --profile        Start a puffin_http profiler server on port {}",
-                    puffin_http::DEFAULT_PORT
-                );
-                return Ok(());
-            }
             #[cfg(feature = "profile")]
             "--profile" => profile = true,
             _ => {}
@@ -8171,10 +8266,48 @@ pub fn run_app() -> Result<(), eframe::Error> {
         ..Default::default()
     };
     eframe::run_native(
-        "Grafito",
+        &grafito_version_string(),
         options,
         Box::new(|cc| Ok(Box::new(GrafitoApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod version_visible_tests {
+    use super::{grafito_version_string, handle_version_args};
+
+    #[test]
+    fn version_visible_lleva_semver_fecha_y_hash() {
+        // `Grafito v<semver> (<fecha> <hash>)`: título de ventana y
+        // `--help/--version` comparten esta única fuente.
+        let visible = grafito_version_string();
+        assert!(visible.starts_with("Grafito v"));
+        assert!(visible.contains(env!("CARGO_PKG_VERSION")));
+        assert!(visible.contains('(') && visible.ends_with(')'));
+        let (fecha, hash) = (super::grafito_build_date(), super::grafito_git_hash());
+        assert!(visible.contains(fecha));
+        assert!(visible.contains(hash));
+    }
+
+    #[test]
+    fn args_version_no_abren_gui() {
+        assert!(handle_version_args(["--help".to_owned()]));
+        assert!(handle_version_args(["-h".to_owned()]));
+        assert!(handle_version_args(["--version".to_owned()]));
+        assert!(handle_version_args(["-V".to_owned()]));
+        // --help gana sobre --version.
+        assert!(handle_version_args([
+            "--version".to_owned(),
+            "--help".to_owned()
+        ]));
+    }
+
+    #[test]
+    fn args_comunes_siguen_al_flujo_normal() {
+        assert!(!handle_version_args(["nota.json".to_owned()]));
+        assert!(!handle_version_args(Vec::<String>::new()));
+        assert!(!handle_version_args(["--profile".to_owned()]));
+    }
 }
 
 #[cfg(test)]
@@ -8468,6 +8601,8 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         transient_render_state: TransientRenderState::default(),
         multidimensional_motion_enabled: true,
         multidimensional_motion_speed: DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED,
+        view3d: crate::canvas::View3D::default(),
+        camera_travelling: None,
         use_gpu: false,
         last_interaction_time: Instant::now(),
         is_view_changing: false,

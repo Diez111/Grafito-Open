@@ -7,12 +7,12 @@
 use grafito_core::implicit_curve::segments_or_compute;
 use grafito_core::RenderQuality;
 use grafito_core::{ImplicitCurveObj, RelationOperator};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn test_cache_invalidates_when_expr_changes() {
     let mut ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let view_bounds = (-3.0, 3.0, -3.0, 3.0);
     let _g1 = segments_or_compute(&ic, view_bounds, 256, &vars, RenderQuality::Normal);
     let cached = ic.cached_segments.read().unwrap();
@@ -71,7 +71,7 @@ fn test_cache_invalidates_when_expr_changes() {
 #[test]
 fn test_cache_invalidates_when_operator_changes() {
     let mut ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let view_bounds = (-2.0, 2.0, -2.0, 2.0);
     let _g1 = segments_or_compute(&ic, view_bounds, 256, &vars, RenderQuality::Normal);
     let cached1 = ic.cached_segments.read().unwrap();

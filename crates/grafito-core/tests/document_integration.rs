@@ -1273,7 +1273,7 @@ fn persistent_locus_tracks_a_constructed_target_across_save_load_and_cascade_del
     let driver = document.add_object(GeoObject::Point(
         PointObj::new(Point2::new(0.0, 0.0)).with_label("A"),
     ));
-    let mut translation = std::collections::HashMap::new();
+    let mut translation = std::collections::BTreeMap::new();
     translation.insert("dx".to_string(), 1.0);
     translation.insert("dy".to_string(), -2.0);
     let (target, _) = document
@@ -1333,7 +1333,7 @@ fn variable_animation_captures_one_post_propagation_locus_sample_without_pointer
     bound_driver.x_expr = Some("phase".to_string());
     bound_driver.y_expr = Some("0".to_string());
     let driver = document.add_object(GeoObject::Point(bound_driver));
-    let mut translation = std::collections::HashMap::new();
+    let mut translation = std::collections::BTreeMap::new();
     translation.insert("dx".to_string(), 2.0);
     translation.insert("dy".to_string(), 0.0);
     let (target, _) = document
@@ -1531,7 +1531,7 @@ fn manual_variable_update_propagates_and_captures_a_locus_atomically() {
     let mut driver = PointObj::new(Point2::new(0.0, 0.0)).with_label("A");
     driver.x_expr = Some("phase".to_string());
     let driver = document.add_object(GeoObject::Point(driver));
-    let mut translation = std::collections::HashMap::new();
+    let mut translation = std::collections::BTreeMap::new();
     translation.insert("dx".to_string(), 1.0);
     translation.insert("dy".to_string(), 0.0);
     let (target, _) = document

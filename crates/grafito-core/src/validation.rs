@@ -44,9 +44,11 @@ pub const GEOM_EPS: f64 = 1e-12;
 /// Wrapper fail-closed que garantiza que el `Document` interno pasó `validate_document`.
 ///
 /// Uso: `ValidatedDocument::try_new(doc)?` antes de persistir o de exponer un
-/// snapshot al render. Migrar `HashMap` → `BTreeMap` en `Document` es la
-/// siguiente fase para determinismo total; por ahora el wrapper evita que un
-/// documento a medio mutar escape de `detached_clone` → `commit`.
+/// snapshot al render. Los mapas de `Document` (`objects`, `variables`,
+/// `variable_meta`, `live_sequences`, `variables_assumptions`,
+/// `next_label_number`, `spreadsheet_coordinate_points`) ya son `BTreeMap`
+/// (determinismo total); el wrapper evita que un documento a medio mutar
+/// escape de `detached_clone` → `commit`.
 ///
 /// # Cableado (3 sitios) — fail-closed
 ///

@@ -4,7 +4,7 @@
 //! cuando se llama repetidamente (simulando múltiples frames).
 
 use grafito_core::{ImplicitCurveObj, RelationOperator};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn test_cache_returns_correct_lhs_rhs_across_frames() {
@@ -13,7 +13,7 @@ fn test_cache_returns_correct_lhs_rhs_across_frames() {
     // El resultado debe ser -1 (porque x²+y²-1 = -1 en el origen),
     // no 0 (que sería el bug del cache compartido).
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
 
     for _ in 0..100 {
         let (lhs, rhs) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
@@ -36,7 +36,7 @@ fn test_cache_with_different_expressions() {
         let ic = ImplicitCurveObj::new(&expr, "0", RelationOperator::Eq);
         curves.push(ic);
     }
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     for (i, ic) in curves.iter().enumerate() {
         let (lhs, rhs) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         let l = lhs.eval_2d("x", 0.0, "y", 0.0);

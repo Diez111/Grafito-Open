@@ -6,7 +6,7 @@
 mod scanline_stride_tests {
     use grafito_geometry::ast::Expr;
     use grafito_geometry::expr::prepare_function_ast;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     /// Cuenta cuántos píxeles están "dentro" en una grilla cols×rows.
     /// Esta es la métrica de "área" del relleno.
@@ -51,8 +51,8 @@ mod scanline_stride_tests {
         // x^2 + y^2 <= 1: sobre 100x100 en [-1.5, 1.5]^2.
         // El disco tiene área pi = 3.14, sobre área total 9, ratio = 0.349.
         // Esperamos ~349 pixeles "dentro".
-        let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
         let count = count_inside(&lhs, &rhs, false, -1.5, 1.5, -1.5, 1.5, 100, 100);
         // El disco tiene area pi ~ 3.14. Area total 9. Ratio ~ 0.349.
         // 100x100 = 10000 pixeles. Esperamos ~3490 pixeles dentro.
@@ -74,8 +74,8 @@ mod scanline_stride_tests {
     fn test_fill_consistency_across_resolutions() {
         // El fill debe escalar consistentemente con la resolución.
         // Para 100x100 vs 200x200, el ratio debe ser similar.
-        let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
         let count_100 = count_inside(&lhs, &rhs, false, -1.5, 1.5, -1.5, 1.5, 100, 100);
         let count_200 = count_inside(&lhs, &rhs, false, -1.5, 1.5, -1.5, 1.5, 200, 200);
         let ratio_100 = count_100 as f64 / 10000.0;

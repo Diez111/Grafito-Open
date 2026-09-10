@@ -71,7 +71,7 @@
 
 **Nunca empezado (fases F2-F6 del plan):**
 - [ ] CAS: Gruntz límites simbólicos (L), Risch completo (L, solo Risch-Norman parcial), EDO simbólicas 1er orden (M), Laurent/residuos (M), Groebner real (L, hoy stub 2×2)
-- [ ] 3D: Net real (M), intersección plano-poliedro (M), volumen/área 3D (S), vistas ortográficas (S), F(x,y,z)=0 marching cubes (L), picking exacto resto, icosa/dodecaedro, revolución lathe
+- [ ] 3D: Net real (M), intersección plano-poliedro (M), volumen/área 3D (S), vistas ortográficas (S), F(x,y,z)=0 marching-tetra (L), picking exacto resto, icosa/dodecaedro, revolución lathe
 - [ ] Aula/P2P: statem Idle→Lobby→Live→Closed (M), ClassroomTransport + Loopback (M), unirse-con-código + roster + manos (M), QR real qrcode crate (S), iroh P2P (L), CRDT pizarra UUID+LWW (M), dashboard←StudentProfile real (M)
 - [ ] IA: telemetría por turno (S), juez LLM telling calibrado (M), contrato revise>block + over-blocking ≤5% (M), FSM durable serde (M), mastery por BKT posterior (S), scheduler FSRS-lite + interleaving (M), calibración EM N≥200 (M), Elo on-the-fly (M), costos visibles + cascada (S-M), sesiones cifradas (M-L), offline-first cola (L), errores vibecoder 2-3 botones (M), OCR local (L)
 - [ ] Paridad: capas (S), tabla viva + regresión ~ (M), action objects Button/Checkbox/InputBox + GGBScript (M), PDF real printpdf (M), Bar/Pie (S), probability panel (M), spreadsheet view (M), MathML export (M), custom tools .ggt (M), streamlines RK4 (L), TikZ axis pgfplots (S), usvg import (M), CSV RFC4180 (S), clipboard SVG/PNG (S-M), HTML export (M)

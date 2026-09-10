@@ -4,16 +4,24 @@
 //! no disponible"): grilla + texto, jamás una curva que parezca respuesta.
 //! Todas las plantillas son deterministas.
 
-pub(crate) const NATIVE_ANIM_FRAME_COUNT: usize = 48;
+/// Frames por set nativo (48; el bench `benches/native_rgba.rs` lo pinnea).
+pub const NATIVE_ANIM_FRAME_COUNT: usize = 48;
 
 #[cfg(test)]
 use grafito_anim::protocol::CANONICAL_TEMPLATES;
 use grafito_anim::protocol::{
-    contiene_palabra, mezclar_pixel_alfa, scene_param_clamped, template_for_concept, SCENE_PARAM_A,
-    SCENE_PARAM_B, SCENE_PARAM_SPAN, SCENE_PARAM_TERMS, SCENE_PARAM_X0,
+    contiene_palabra, mezclar_pixel_alfa, scene_param_clamped, taylor_anim_order_from_params,
+    template_for_concept, SCENE_PARAM_A, SCENE_PARAM_B, SCENE_PARAM_SPAN, SCENE_PARAM_TERMS,
+    SCENE_PARAM_X0,
 };
 use grafito_assistant::CancellationToken;
 use std::path::{Path, PathBuf};
+// Frente A: pasos lindos + skip anti-solape + formato de ticks reusados de
+// `render_2d` (misma Piel, sin romper capas: ambas son render egui/cpu).
+use crate::render_2d::{adaptive_label_skip, nice_number_plane_step};
+use grafito_ui::animation::anim_axes::{
+    cabe_label_entre, clip_seg_a_caja, short_tick_label, LabelCaja, TICK_CHAR_H_PX, TICK_CHAR_W_PX,
+};
 
 // ── Registro canónico nativo v4 (11 plantillas) ──────────────────────────
 // SYNC MECÁNICO 11↔11↔11 (ANIM-REVIVE):
@@ -154,6 +162,37 @@ fn gif_dim(value: usize) -> Result<u16, GifExportError> {
     })
 }
 
+/// Bytes RGBA de un frame ya validado en tamaño (núcleo compartido
+/// GIF/MP4). Puro, sin E/S: `pixel_count` es el `w*h` verificado por el
+/// llamador; cualquier descalce → `PixelCountMismatch` (sin panics).
+fn frame_rgba_bytes(
+    frame: &egui::ColorImage,
+    pixel_count: usize,
+    index: usize,
+) -> Result<Vec<u8>, GifExportError> {
+    if frame.pixels.len() != pixel_count {
+        return Err(GifExportError::PixelCountMismatch {
+            index,
+            expected: pixel_count,
+            got: frame.pixels.len(),
+        });
+    }
+    let byte_len = pixel_count
+        .checked_mul(4)
+        .ok_or(GifExportError::PixelCountMismatch {
+            index,
+            expected: pixel_count.saturating_mul(4),
+            got: frame.pixels.len().saturating_mul(4),
+        })?;
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(byte_len)
+        .map_err(|_| GifExportError::Encode(format!("sin memoria para el frame {index}")))?;
+    for px in &frame.pixels {
+        rgba.extend_from_slice(&[px.r(), px.g(), px.b(), px.a()]);
+    }
+    Ok(rgba)
+}
+
 /// Codifica frames a GIF animado en memoria (puro, sin E/S).
 ///
 /// Todos los frames deben compartir tamaño, con lado 1..=4096 y como máximo
@@ -223,28 +262,7 @@ pub fn encode_frames_to_gif_bytes_cancelable(
                     got: frame.size,
                 });
             }
-            if frame.pixels.len() != pixel_count {
-                return Err(GifExportError::PixelCountMismatch {
-                    index,
-                    expected: pixel_count,
-                    got: frame.pixels.len(),
-                });
-            }
-            let byte_len =
-                pixel_count
-                    .checked_mul(4)
-                    .ok_or(GifExportError::PixelCountMismatch {
-                        index,
-                        expected: pixel_count.saturating_mul(4),
-                        got: frame.pixels.len().saturating_mul(4),
-                    })?;
-            let mut rgba = Vec::new();
-            rgba.try_reserve_exact(byte_len).map_err(|_| {
-                GifExportError::Encode(format!("sin memoria para el frame {index}"))
-            })?;
-            for px in &frame.pixels {
-                rgba.extend_from_slice(&[px.r(), px.g(), px.b(), px.a()]);
-            }
+            let mut rgba = frame_rgba_bytes(frame, pixel_count, index)?;
             let mut gif_frame =
                 gif::Frame::from_rgba_speed(w16, h16, rgba.as_mut_slice(), GIF_EXPORT_SPEED);
             gif_frame.delay = delay_cs;
@@ -464,6 +482,1797 @@ pub fn check_gif_export_budget(frames: &[egui::ColorImage]) -> Result<(), GifExp
     Ok(())
 }
 
+// ── Export MP4 vía ffmpeg-sidecar (F1 Manim-en-Rust) ────────────────────────
+// Mismos budgets que el GIF (`GIF_EXPORT_MAX_FRAMES` 64, lado ≤4096, 8M px
+// totales): el preflight es `check_gif_export_budget` mapeado a
+// `Mp4ExportError::Budget`. Los frames se entuban como rawvideo RGBA al
+// stdin de `ffmpeg` (libx264, yuv420p, faststart) en un hilo worker con
+// `CancellationToken` — espejo de `spawn_gif_export_cancelable`: la UI
+// nunca bloquea ni hace E/S. Atómico como el GIF (tmp hermano + rename,
+// `O_EXCL` honesto si el destino existe).
+// Sin `ffmpeg` en el PATH → `FfmpegMissing` honesto ("unsupported mp4
+// nativo, usá gif"): el MP4 del wire nunca queda fake.
+
+/// FPS base del MP4 nativo (12, paridad con `GIF_BASE_FPS`).
+pub const MP4_BASE_FPS: u32 = 12;
+
+/// FPS desde el retardo GIF (`100/delay_cs`, clamp 1..=60): `delay 8` → 12.
+/// `delay 0` → base (honesto, sin división por cero). Puro.
+pub fn mp4_fps_for_delay(delay_cs: u16) -> u32 {
+    (100 / u32::from(delay_cs.max(1))).clamp(1, 60)
+}
+
+/// Error tipado de la exportación a MP4 (mensajes en español, sin panics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mp4ExportError {
+    /// Preflight de budgets (los mismos del GIF).
+    Budget(GifExportError),
+    /// Exportación cancelada vía `CancellationToken`.
+    Cancelled,
+    /// Sin `ffmpeg` en el PATH: MP4 nativo no disponible.
+    FfmpegMissing,
+    /// `ffmpeg` corrió pero falló (cola del stderr, 500 chars).
+    FfmpegFailed(String),
+    Io(String),
+}
+
+impl std::fmt::Display for Mp4ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(inner) => write!(f, "{inner}"),
+            Self::Cancelled => write!(f, "exportación cancelada"),
+            Self::FfmpegMissing => write!(
+                f,
+                "unsupported mp4 nativo, usá gif (ffmpeg no está en el PATH)"
+            ),
+            Self::FfmpegFailed(detail) => write!(f, "ffmpeg falló: {detail}"),
+            Self::Io(detail) => write!(f, "falló escribir el MP4: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for Mp4ExportError {}
+
+/// Hermano temporal para el MP4 (mismo directorio = mismo filesystem, el
+/// `rename` es atómico). A diferencia del GIF, conserva extensión `.mp4`:
+/// `ffmpeg` infiere el contenedor por extensión y `clip.mp4.tmp…` le da
+/// formato desconocido (más `-f mp4` explícito por defensa en profundidad).
+/// Puro, sin E/S.
+fn mp4_tmp_sibling(path: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name: String = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or(String::from("clip"));
+    let tmp_name = format!("{name}.tmp.{}-{stamp}.mp4", std::process::id());
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(tmp_name),
+        _ => PathBuf::from(tmp_name),
+    }
+}
+
+/// Limpieza best-effort del tmp hermano (nunca deja parcial huérfano).
+fn mp4_drop_tmp(tmp: &Path) {
+    let _ = std::fs::remove_file(tmp);
+}
+
+/// Núcleo bloqueante (llamar en hilo): preflight de budgets, entubado
+/// rawvideo a `ffmpeg`, publicación atómica. `ffmpeg_bin` overridea el
+/// binario (tests: `None` = `ffmpeg` del PATH). Sin pánicos.
+fn export_frames_to_mp4_inner(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+    ffmpeg_bin: Option<&Path>,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> Result<PathBuf, Mp4ExportError> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    if token.is_cancelled() {
+        return Err(Mp4ExportError::Cancelled);
+    }
+    // fps honesto: re-muestrea el set base (12fps) al N pedido con duración
+    // fija vía `Timeline::sample` (no solo `-framerate`).
+    let fps = mp4_fps_for_delay(delay_cs);
+    let frames = remuestrear_frames_para_fps(frames, GIF_BASE_FPS as u32, fps);
+    // `-ql`/`-qm`/`-qh` → resolución real (downscale en el worker).
+    let frames = reescalar_frames_para_calidad(&frames, quality);
+    check_gif_export_budget(&frames).map_err(Mp4ExportError::Budget)?;
+    let size = frames[0].size;
+    let (w, h) = (size[0], size[1]);
+    let pixel_count = w.checked_mul(h).ok_or(Mp4ExportError::Budget(
+        GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        },
+    ))?;
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(Mp4ExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    let tmp = mp4_tmp_sibling(path);
+    let bin = ffmpeg_bin.unwrap_or_else(|| Path::new("ffmpeg"));
+    let bitrate_kbps =
+        bitrate_kbps.clamp(ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_BITRATE_MAX_KBPS);
+    let (crf, preset) = quality.flags();
+    let mut child = Command::new(bin)
+        .arg("-y")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg("rgba")
+        .arg("-s")
+        .arg(format!("{w}x{h}"))
+        .arg("-framerate")
+        .arg(fps.to_string())
+        .arg("-i")
+        .arg("pipe:0")
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg(preset)
+        .arg("-crf")
+        .arg(crf.to_string())
+        .arg("-b:v")
+        .arg(format!("{bitrate_kbps}k"))
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        // yuv420p exige lados pares: el filtro es no-op si ya lo son.
+        .arg("-vf")
+        .arg("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg("-f")
+        .arg("mp4")
+        .arg(&tmp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            mp4_drop_tmp(&tmp);
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Mp4ExportError::FfmpegMissing
+            } else {
+                Mp4ExportError::Io(format!("no se pudo lanzar {}: {e}", bin.display()))
+            }
+        })?;
+    // Entubado frame a frame (token entre frames; cancelado → kill +_wait
+    // para no dejar zombie + limpieza del tmp, sin tocar el destino).
+    let pipe_result = (|| -> Result<(), Mp4ExportError> {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Mp4ExportError::Io("ffmpeg no abrió su stdin".to_string()))?;
+        for (index, frame) in frames.iter().enumerate() {
+            if token.is_cancelled() {
+                return Err(Mp4ExportError::Cancelled);
+            }
+            if frame.size != size {
+                return Err(Mp4ExportError::Budget(GifExportError::InconsistentSize {
+                    index,
+                    expected: size,
+                    got: frame.size,
+                }));
+            }
+            let rgba =
+                frame_rgba_bytes(frame, pixel_count, index).map_err(Mp4ExportError::Budget)?;
+            stdin.write_all(&rgba).map_err(|e| {
+                Mp4ExportError::Io(format!("no se pudo entubar el frame {index}: {e}"))
+            })?;
+        }
+        Ok(())
+    })();
+    if let Err(pipe_err) = pipe_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        mp4_drop_tmp(&tmp);
+        return Err(pipe_err);
+    }
+    // Espera vigilada: cancelar en `wait` mata al hijo (CANCEL_GRACE) sin
+    // zombies y sin tocar el destino.
+    match esperar_ffmpeg_con_cancel(&mut child, token) {
+        EsperaFfmpeg::Cancelado => {
+            mp4_drop_tmp(&tmp);
+            return Err(Mp4ExportError::Cancelled);
+        }
+        EsperaFfmpeg::FalloIo(detalle) => {
+            mp4_drop_tmp(&tmp);
+            return Err(Mp4ExportError::Io(detalle));
+        }
+        EsperaFfmpeg::Terminado(false, stderr) => {
+            mp4_drop_tmp(&tmp);
+            return Err(Mp4ExportError::FfmpegFailed(ffmpeg_stderr_tail(&stderr)));
+        }
+        EsperaFfmpeg::Terminado(true, _) => {}
+    }
+    if token.is_cancelled() {
+        mp4_drop_tmp(&tmp);
+        return Err(Mp4ExportError::Cancelled);
+    }
+    // Publicación atómica como el GIF (re-chequeo pre-rename anti-TOCTOU).
+    if std::fs::symlink_metadata(path).is_ok() {
+        mp4_drop_tmp(&tmp);
+        return Err(Mp4ExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        mp4_drop_tmp(&tmp);
+        return Err(Mp4ExportError::Io(format!(
+            "no se pudo publicar {}: {e}",
+            path.display()
+        )));
+    }
+    Ok(path.to_path_buf())
+}
+
+/// Escribe los frames como MP4 (bloquea: llamar en hilo, ver
+/// `spawn_mp4_export`). `ffmpeg` del PATH; sin él → `FfmpegMissing`.
+/// `bitrate_kbps` (100..=20000, se clampa) + `quality` (`-ql`/`-qm`/`-qh` →
+/// resolución + crf + preset reales).
+pub fn export_frames_to_mp4_file(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> Result<PathBuf, Mp4ExportError> {
+    export_frames_to_mp4_inner(
+        frames,
+        path,
+        delay_cs,
+        &CancellationToken::default(),
+        None,
+        bitrate_kbps,
+        quality,
+    )
+}
+
+/// Idem cancelable: chequea el token antes de spawnear `ffmpeg`, entre
+/// frames, durante el `wait` (mata al hijo) y antes de publicar; cancelado
+/// → `Cancelled` sin tocar disco.
+pub fn export_frames_to_mp4_file_cancelable(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> Result<PathBuf, Mp4ExportError> {
+    export_frames_to_mp4_inner(frames, path, delay_cs, token, None, bitrate_kbps, quality)
+}
+
+/// Idem con binario explícito (tests herméticos + distros sin PATH).
+pub fn export_frames_to_mp4_file_with_bin(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+    ffmpeg_bin: &Path,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> Result<PathBuf, Mp4ExportError> {
+    export_frames_to_mp4_inner(
+        frames,
+        path,
+        delay_cs,
+        token,
+        Some(ffmpeg_bin),
+        bitrate_kbps,
+        quality,
+    )
+}
+
+/// Exporta a MP4 en un hilo aparte (no bloquea la UI).
+///
+/// Espejo de `spawn_gif_export_cancelable`: preflight de budgets dentro del
+/// hilo (`Err` rápido sin tocar disco) + `CancellationToken` cooperativo.
+pub fn spawn_mp4_export(
+    frames: Vec<egui::ColorImage>,
+    path: PathBuf,
+    delay_cs: u16,
+    token: CancellationToken,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> std::thread::JoinHandle<Result<PathBuf, Mp4ExportError>> {
+    std::thread::spawn(move || {
+        export_frames_to_mp4_inner(
+            &frames,
+            &path,
+            delay_cs,
+            &token,
+            None,
+            bitrate_kbps,
+            quality,
+        )
+    })
+}
+
+// ── P1-render: vídeo todo incluido ─────────────────────────────────────────
+// El render atiende lo que W4 tipó en `grafito-anim` y la Piel aún ignoraba:
+// `ExportFormat::Webm`, `Camera::Perspective`, `Mobject` nuevos y `RateFunc`
+// exactas (estas últimas ya viajan en `MovingCamera.easing`: acá se aplican
+// vía `sample`, sin reimplementar).
+// Todo export corre en hilo (`spawn_*`, `CancellationToken` cooperativo,
+// tmp+rename atómico, `kill+wait` anti-zombie); la UI nunca hace E/S.
+// Presupuestos compartidos con el GIF: 64 frames, lado ≤4096, 8M px totales.
+
+// ── PNG-sequence en directorio (espejo del GIF, sin ffmpeg) ────────────────
+
+/// Error tipado de la PNG-sequence (mensajes en español, sin panics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PngDirExportError {
+    /// Preflight de budgets (los mismos del GIF).
+    Budget(GifExportError),
+    /// Exportación cancelada vía `CancellationToken`.
+    Cancelled,
+    Io(String),
+}
+
+impl std::fmt::Display for PngDirExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(inner) => write!(f, "{inner}"),
+            Self::Cancelled => write!(f, "exportación cancelada"),
+            Self::Io(detail) => write!(f, "falló escribir la secuencia PNG: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for PngDirExportError {}
+
+/// Hermano temporal del directorio destino (mismo filesystem: el `rename` de
+/// directorio es atómico). Sufijo con pid + nanos anti-colisión. Puro.
+fn png_dir_tmp_sibling(dir: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut os = dir.as_os_str().to_owned();
+    os.push(format!(".tmp.{}-{stamp}", std::process::id()));
+    PathBuf::from(os)
+}
+
+/// Limpieza best-effort del tmp (nunca deja directorio huérfano).
+fn png_dir_drop_tmp(tmp: &Path) {
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+/// Valida un `PngDir` contra el workdir del render (sintaxis + contención).
+///
+/// NUL/vacía o escape (`../`, absoluta ajena) → `Err` honesto antes de crear
+/// nada. Puro salvo `canonicalize` de lectura (nunca crea directorios).
+pub fn validate_png_dir_en(base: &Path, dir: &str) -> Result<grafito_anim::PngDir, String> {
+    let png = grafito_anim::PngDir::try_new(dir.to_string())
+        .map_err(|e| format!("secuencia PNG inválida: {e}"))?;
+    png.validate_en(base)
+        .map_err(|e| format!("secuencia PNG fuera del área de trabajo: {e}"))?;
+    Ok(png)
+}
+
+/// Escribe un frame como `frame_{index:04}.png` dentro de `dir` (ya creado).
+fn write_png_frame(
+    dir: &Path,
+    frame: &egui::ColorImage,
+    pixel_count: usize,
+    index: usize,
+) -> Result<(), PngDirExportError> {
+    let [w, h] = frame.size;
+    let w32 = u32::try_from(w).map_err(|_| {
+        PngDirExportError::Budget(GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        })
+    })?;
+    let h32 = u32::try_from(h).map_err(|_| {
+        PngDirExportError::Budget(GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        })
+    })?;
+    let rgba = frame_rgba_bytes(frame, pixel_count, index).map_err(PngDirExportError::Budget)?;
+    let nombre = format!("frame_{index:04}.png");
+    let destino = dir.join(nombre);
+    let imagen = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(w32, h32, rgba).ok_or(
+        PngDirExportError::Budget(GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        }),
+    )?;
+    imagen.save(&destino).map_err(|e| {
+        PngDirExportError::Io(format!("no se pudo escribir {}: {e}", destino.display()))
+    })?;
+    Ok(())
+}
+
+/// Núcleo bloqueante (llamar en hilo): preflight de budgets, vuelco de PNGs
+/// a un hermano tmp y publicación atómica por `rename`. `O_EXCL` honesto si
+/// el destino existe (symlink plantado incluido). Sin pánicos.
+fn export_frames_to_png_dir_inner(
+    frames: &[egui::ColorImage],
+    dir: &Path,
+    token: &CancellationToken,
+) -> Result<PathBuf, PngDirExportError> {
+    if token.is_cancelled() {
+        return Err(PngDirExportError::Cancelled);
+    }
+    check_gif_export_budget(frames).map_err(PngDirExportError::Budget)?;
+    let size = frames[0].size;
+    let (w, h) = (size[0], size[1]);
+    let pixel_count = w.checked_mul(h).ok_or(PngDirExportError::Budget(
+        GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        },
+    ))?;
+    if std::fs::symlink_metadata(dir).is_ok() {
+        return Err(PngDirExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            dir.display()
+        )));
+    }
+    let tmp = png_dir_tmp_sibling(dir);
+    if let Err(e) = std::fs::create_dir(&tmp) {
+        png_dir_drop_tmp(&tmp);
+        return Err(PngDirExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: {e}",
+            tmp.display()
+        )));
+    }
+    for (index, frame) in frames.iter().enumerate() {
+        if token.is_cancelled() {
+            png_dir_drop_tmp(&tmp);
+            return Err(PngDirExportError::Cancelled);
+        }
+        if frame.size != size {
+            png_dir_drop_tmp(&tmp);
+            return Err(PngDirExportError::Budget(
+                GifExportError::InconsistentSize {
+                    index,
+                    expected: size,
+                    got: frame.size,
+                },
+            ));
+        }
+        if let Err(e) = write_png_frame(&tmp, frame, pixel_count, index) {
+            png_dir_drop_tmp(&tmp);
+            return Err(e);
+        }
+    }
+    if token.is_cancelled() {
+        png_dir_drop_tmp(&tmp);
+        return Err(PngDirExportError::Cancelled);
+    }
+    if std::fs::symlink_metadata(dir).is_ok() {
+        png_dir_drop_tmp(&tmp);
+        return Err(PngDirExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            dir.display()
+        )));
+    }
+    if let Err(e) = std::fs::rename(&tmp, dir) {
+        png_dir_drop_tmp(&tmp);
+        return Err(PngDirExportError::Io(format!(
+            "no se pudo publicar {}: {e}",
+            dir.display()
+        )));
+    }
+    Ok(dir.to_path_buf())
+}
+
+/// Exporta los frames como secuencia PNG (`frame_0000.png`, …) en `dir`
+/// (bloquea: llamar en hilo). Mismos budgets que el GIF.
+pub fn export_frames_to_png_dir(
+    frames: &[egui::ColorImage],
+    dir: &Path,
+) -> Result<PathBuf, PngDirExportError> {
+    export_frames_to_png_dir_inner(frames, dir, &CancellationToken::default())
+}
+
+/// Idem cancelable: chequea el token entre frames; cancelado → `Cancelled`
+/// sin dejar ni destino ni tmp huérfano.
+pub fn export_frames_to_png_dir_cancelable(
+    frames: &[egui::ColorImage],
+    dir: &Path,
+    token: &CancellationToken,
+) -> Result<PathBuf, PngDirExportError> {
+    export_frames_to_png_dir_inner(frames, dir, token)
+}
+
+/// Exporta la secuencia PNG en un hilo aparte (no bloquea la UI).
+pub fn spawn_png_dir_export(
+    frames: Vec<egui::ColorImage>,
+    dir: PathBuf,
+    token: CancellationToken,
+) -> std::thread::JoinHandle<Result<PathBuf, PngDirExportError>> {
+    std::thread::spawn(move || export_frames_to_png_dir_inner(&frames, &dir, &token))
+}
+
+// ── Vídeo genérico ffmpeg (MP4 + WebM, sin audio) ────────────────────────────
+// El MP4 sin audio sigue por `export_frames_to_mp4_inner` (camino intacto).
+// Este runner genérico atiende WebM (`libvpx-vp9`, fallback `libaom-av1`).
+// Sin `ffmpeg` → `FfmpegMissing` honesto, sin fake. Misma disciplina que el
+// MP4 (tmp+rename, `kill+wait`). El audio se eliminó del núcleo (W1): no hay
+// pista, no hay mux, jamás video mudo fake.
+
+/// Codecs WebM en orden de intento (el primero que el `ffmpeg` acepte
+/// gana; el resto es fallback honesto, jamás fake).
+const WEBM_VIDEO_CODECS: &[&str] = &["libvpx-vp9", "libaom-av1"];
+
+/// Error tipado de la exportación a WebM (mensajes en español, sin panics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebmExportError {
+    /// Preflight de budgets (los mismos del GIF).
+    Budget(GifExportError),
+    /// Exportación cancelada vía `CancellationToken`.
+    Cancelled,
+    /// Sin `ffmpeg` en el PATH: WebM nativo no disponible.
+    FfmpegMissing,
+    /// `ffmpeg` corrió pero falló (cola del stderr, 500 chars).
+    FfmpegFailed(String),
+    Io(String),
+}
+
+impl std::fmt::Display for WebmExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(inner) => write!(f, "{inner}"),
+            Self::Cancelled => write!(f, "exportación cancelada"),
+            Self::FfmpegMissing => write!(
+                f,
+                "unsupported webm nativo, usá gif (ffmpeg no está en el PATH)"
+            ),
+            Self::FfmpegFailed(detail) => write!(f, "ffmpeg falló: {detail}"),
+            Self::Io(detail) => write!(f, "falló escribir el WebM: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for WebmExportError {}
+
+/// Hermano temporal para el vídeo genérico (conserva extensión: `ffmpeg`
+/// infiere el contenedor por extensión). Puro, sin E/S.
+fn video_tmp_sibling(path: &Path, extension: &str) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name: String = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or(String::from("clip"));
+    let tmp_name = format!("{name}.tmp.{}-{stamp}.{extension}", std::process::id());
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(tmp_name),
+        _ => PathBuf::from(tmp_name),
+    }
+}
+
+/// Limpieza best-effort del tmp hermano (nunca deja parcial huérfano).
+fn video_drop_tmp(tmp: &Path) {
+    let _ = std::fs::remove_file(tmp);
+}
+
+/// Cola del stderr (últimos 500 chars: el error real está al final).
+fn ffmpeg_stderr_tail(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .chars()
+        .rev()
+        .take(500)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+/// Espera a `ffmpeg` vigilando el token (misma disciplina `CANCEL_GRACE`
+/// del engine: `kill` + espera graciosa 100ms + `kill` final).
+///
+/// El stderr se drena en un hilo aparte (evita el bloqueo por pipe lleno)
+/// mientras el principal hace `try_wait` + token cada 5ms: cancelar en
+/// `wait` mata al hijo (sin zombies) y devuelve `Cancelled`. El llamador
+/// limpia el tmp hermano. Solo worker/hilo, jamás UI.
+enum EsperaFfmpeg {
+    Terminado(bool, Vec<u8>),
+    Cancelado,
+    FalloIo(String),
+}
+
+fn esperar_ffmpeg_con_cancel(
+    child: &mut std::process::Child,
+    token: &CancellationToken,
+) -> EsperaFfmpeg {
+    use std::io::Read as _;
+    let mut stderr = child.stderr.take();
+    let drenaje = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut err) = stderr {
+            let _ = err.read_to_end(&mut buf);
+        }
+        buf
+    });
+    loop {
+        if token.is_cancelled() {
+            let _ = child.kill();
+            let gracia = grafito_anim::CANCEL_GRACE;
+            let inicio = std::time::Instant::now();
+            let mut salio = false;
+            while inicio.elapsed() < gracia {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        salio = true;
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    Err(_) => break,
+                }
+            }
+            if !salio {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+            let _ = drenaje.join();
+            return EsperaFfmpeg::Cancelado;
+        }
+        match child.try_wait() {
+            Ok(Some(estado)) => {
+                let stderr_bytes = drenaje.join().unwrap_or_default();
+                return EsperaFfmpeg::Terminado(estado.success(), stderr_bytes);
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = drenaje.join();
+                return EsperaFfmpeg::FalloIo(format!("ffmpeg no terminó bien: {e}"));
+            }
+        }
+    }
+}
+
+/// Núcleo bloqueante genérico (llamar en hilo): preflight de budgets,
+/// entubado rawvideo a `ffmpeg` y publicación atómica.
+///
+/// `ffmpeg_bin` overridea el binario (tests herméticos). Sin pánicos.
+fn export_frames_to_video_inner(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+    ffmpeg_bin: Option<&Path>,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> Result<PathBuf, WebmExportError> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    if token.is_cancelled() {
+        return Err(WebmExportError::Cancelled);
+    }
+    // fps honesto: re-muestrea el set base (12fps) al N pedido con duración
+    // fija vía `Timeline::sample` (no solo `-framerate`).
+    let fps = mp4_fps_for_delay(delay_cs);
+    let frames = remuestrear_frames_para_fps(frames, GIF_BASE_FPS as u32, fps);
+    // `-ql`/`-qm`/`-qh` → resolución real (downscale en el worker).
+    let frames = reescalar_frames_para_calidad(&frames, quality);
+    check_gif_export_budget(&frames).map_err(WebmExportError::Budget)?;
+    let size = frames[0].size;
+    let (w, h) = (size[0], size[1]);
+    let pixel_count = w.checked_mul(h).ok_or(WebmExportError::Budget(
+        GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        },
+    ))?;
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(WebmExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    let tmp = video_tmp_sibling(path, "webm");
+    let bin = ffmpeg_bin.unwrap_or_else(|| Path::new("ffmpeg"));
+    let bitrate_kbps =
+        bitrate_kbps.clamp(ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_BITRATE_MAX_KBPS);
+    let (crf, _preset) = quality.flags();
+    let codecs = WEBM_VIDEO_CODECS;
+    for (intento, codec) in codecs.iter().enumerate() {
+        let ultimo_intento = intento + 1 == codecs.len();
+        if token.is_cancelled() {
+            video_drop_tmp(&tmp);
+            return Err(WebmExportError::Cancelled);
+        }
+        let mut cmd = Command::new(bin);
+        cmd.arg("-y")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("rgba")
+            .arg("-s")
+            .arg(format!("{w}x{h}"))
+            .arg("-framerate")
+            .arg(fps.to_string())
+            .arg("-i")
+            .arg("pipe:0");
+        // yuv420p exige lados pares: el filtro es no-op si ya lo son.
+        // `-b:v` + `-crf` del diálogo (`-ql`/`-qm`/`-qh` → bitrate/crf).
+        cmd.arg("-c:v")
+            .arg(codec)
+            .arg("-b:v")
+            .arg(format!("{bitrate_kbps}k"))
+            .arg("-crf")
+            .arg(crf.to_string())
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-vf")
+            .arg("scale=trunc(iw/2)*2:trunc(ih/2)*2");
+        cmd.arg("-f")
+            .arg("webm")
+            .arg(&tmp)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                video_drop_tmp(&tmp);
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Err(WebmExportError::FfmpegMissing);
+                }
+                return Err(WebmExportError::Io(format!(
+                    "no se pudo lanzar {}: {e}",
+                    bin.display()
+                )));
+            }
+        };
+        let pipe_result = (|| -> Result<(), WebmExportError> {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| WebmExportError::Io("ffmpeg no abrió su stdin".to_string()))?;
+            for (index, frame) in frames.iter().enumerate() {
+                if token.is_cancelled() {
+                    return Err(WebmExportError::Cancelled);
+                }
+                if frame.size != size {
+                    return Err(WebmExportError::Budget(GifExportError::InconsistentSize {
+                        index,
+                        expected: size,
+                        got: frame.size,
+                    }));
+                }
+                let rgba =
+                    frame_rgba_bytes(frame, pixel_count, index).map_err(WebmExportError::Budget)?;
+                stdin.write_all(&rgba).map_err(|e| {
+                    WebmExportError::Io(format!("no se pudo entubar el frame {index}: {e}"))
+                })?;
+            }
+            Ok(())
+        })();
+        if let Err(pipe_err) = pipe_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            video_drop_tmp(&tmp);
+            return Err(pipe_err);
+        }
+        // Espera vigilada: cancelar en `wait` mata al hijo (CANCEL_GRACE).
+        let espera = esperar_ffmpeg_con_cancel(&mut child, token);
+        match espera {
+            EsperaFfmpeg::Cancelado => {
+                video_drop_tmp(&tmp);
+                return Err(WebmExportError::Cancelled);
+            }
+            EsperaFfmpeg::FalloIo(detalle) => {
+                video_drop_tmp(&tmp);
+                return Err(WebmExportError::Io(detalle));
+            }
+            EsperaFfmpeg::Terminado(true, _) => {
+                if token.is_cancelled() {
+                    video_drop_tmp(&tmp);
+                    return Err(WebmExportError::Cancelled);
+                }
+                if std::fs::symlink_metadata(path).is_ok() {
+                    video_drop_tmp(&tmp);
+                    return Err(WebmExportError::Io(format!(
+                        "no se pudo crear {} sin sobrescribir: el destino ya existe",
+                        path.display()
+                    )));
+                }
+                if let Err(e) = std::fs::rename(&tmp, path) {
+                    video_drop_tmp(&tmp);
+                    return Err(WebmExportError::Io(format!(
+                        "no se pudo publicar {}: {e}",
+                        path.display()
+                    )));
+                }
+                return Ok(path.to_path_buf());
+            }
+            EsperaFfmpeg::Terminado(false, stderr) => {
+                let tail = ffmpeg_stderr_tail(&stderr);
+                video_drop_tmp(&tmp);
+                // Codec ausente en este build de ffmpeg → siguiente candidato.
+                if !ultimo_intento && tail.contains("Unknown encoder") {
+                    continue;
+                }
+                return Err(WebmExportError::FfmpegFailed(tail));
+            }
+        }
+    }
+    Err(WebmExportError::FfmpegFailed(
+        "ffmpeg no aceptó ningún codec de vídeo".to_string(),
+    ))
+}
+
+/// Escribe los frames como WebM (bloquea: llamar en hilo).
+/// `ffmpeg` del PATH (`libvpx-vp9`, fallback `libaom-av1`); sin él →
+/// `FfmpegMissing` honesto. Mismos budgets que el GIF.
+/// `bitrate_kbps` + `quality` igual que el MP4 (`-ql`/`-qm`/`-qh` reales).
+pub fn export_frames_to_webm_file(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> Result<PathBuf, WebmExportError> {
+    export_frames_to_video_inner(
+        frames,
+        path,
+        delay_cs,
+        &CancellationToken::default(),
+        None,
+        bitrate_kbps,
+        quality,
+    )
+}
+
+/// Idem cancelable (chequea el token entre frames, en el `wait` y antes de
+/// publicar).
+pub fn export_frames_to_webm_file_cancelable(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> Result<PathBuf, WebmExportError> {
+    export_frames_to_video_inner(frames, path, delay_cs, token, None, bitrate_kbps, quality)
+}
+
+/// Idem con binario explícito (tests herméticos + distros sin PATH).
+pub fn export_frames_to_webm_file_with_bin(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+    ffmpeg_bin: &Path,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> Result<PathBuf, WebmExportError> {
+    export_frames_to_video_inner(
+        frames,
+        path,
+        delay_cs,
+        token,
+        Some(ffmpeg_bin),
+        bitrate_kbps,
+        quality,
+    )
+}
+
+/// Exporta a WebM en un hilo aparte (no bloquea la UI).
+pub fn spawn_webm_export(
+    frames: Vec<egui::ColorImage>,
+    path: PathBuf,
+    delay_cs: u16,
+    token: CancellationToken,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+) -> std::thread::JoinHandle<Result<PathBuf, WebmExportError>> {
+    std::thread::spawn(move || {
+        export_frames_to_video_inner(
+            &frames,
+            &path,
+            delay_cs,
+            &token,
+            None,
+            bitrate_kbps,
+            quality,
+        )
+    })
+}
+
+// ── Tex real con tiny-skia (sin deps nuevas) ────────────────────────────────
+// `Mobject::Tex` trae SVG ya tipografiado (≤64 KiB, cota intacta vía
+// `crate::export::tex_svg_within_budget`). Se rasterizan las formas del
+// subconjunto honesto (`circle`/`rect`/`line` sobre `viewBox` o 100×100);
+// el texto tipográfico cae al fallback `ab_glyph` con el contenido visible
+// (`extract_svg_text_content`), jamás una curva inventada.
+
+/// Atributo `nombre="…"` (o con comilla simple) dentro de un tag SVG.
+/// `None` si no está o no cierra. Puro, sin pánicos.
+fn attr_cadena_svg<'a>(tag: &'a str, nombre: &str) -> Option<&'a str> {
+    for comilla in ['"', '\''] {
+        let aguja = format!("{nombre}={comilla}");
+        if let Some(pos) = tag.find(&aguja) {
+            let resto = tag.get(pos + aguja.len()..)?;
+            let fin = resto.find(comilla)?;
+            return resto.get(..fin);
+        }
+    }
+    None
+}
+
+/// Atributo numérico (`px` opcional, finito). `None` si falta o no es finito.
+fn attr_float_svg(tag: &str, nombre: &str) -> Option<f64> {
+    let crudo = attr_cadena_svg(tag, nombre)?;
+    let limpio = crudo.trim().trim_end_matches("px").trim();
+    let valor: f64 = limpio.parse().ok()?;
+    valor.is_finite().then_some(valor)
+}
+
+/// `viewBox="minx miny w h"` → `(w, h)`; si falta, `width`/`height`; si no,
+/// 100×100 (convención del `tex_desde_texto` mínimo). Puro.
+fn tex_viewport_wh(svg: &str) -> (f64, f64) {
+    if let Some(inicio) = svg.find("viewBox") {
+        let resto = svg.get(inicio..).unwrap_or("");
+        let numeros: Vec<f64> = resto
+            .chars()
+            .skip_while(|c| *c != '"' && *c != '\'')
+            .skip(1)
+            .take_while(|c| *c != '"' && *c != '\'')
+            .collect::<String>()
+            .split_whitespace()
+            .filter_map(|p| p.parse::<f64>().ok())
+            .collect();
+        if numeros.len() >= 4 {
+            let (w, h) = (numeros[2], numeros[3]);
+            if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 {
+                return (w, h);
+            }
+        }
+    }
+    // Sin viewBox: width/height del root (primer tag `<svg …>`).
+    let root = svg
+        .find("<svg")
+        .and_then(|pos| {
+            let resto = svg.get(pos..)?;
+            let fin = resto.find('>')?;
+            resto.get(..fin)
+        })
+        .unwrap_or("");
+    let w = attr_float_svg(root, "width").unwrap_or(100.0);
+    let h = attr_float_svg(root, "height").unwrap_or(100.0);
+    if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 {
+        (w, h)
+    } else {
+        (100.0, 100.0)
+    }
+}
+
+/// Dibuja las formas del subconjunto SVG sobre el frame. Devuelve `true` si
+/// pintó al menos una (el llamador usa el fallback de texto si es `false`).
+fn draw_tex_svg_onto(buf: &mut [u8], w: usize, h: usize, svg: &str) -> bool {
+    if !crate::export::tex_svg_within_budget(svg) || !svg.contains("<svg") {
+        return false;
+    }
+    let (vb_w, vb_h) = tex_viewport_wh(svg);
+    if !(vb_w.is_finite() && vb_h.is_finite() && vb_w > 0.0 && vb_h > 0.0) {
+        return false;
+    }
+    let escala_x = w as f64 / vb_w;
+    let escala_y = h as f64 / vb_h;
+    if !(escala_x.is_finite() && escala_y.is_finite() && escala_x > 0.0 && escala_y > 0.0) {
+        return false;
+    }
+    let mapea = |x: f64, y: f64| -> Option<(usize, usize)> {
+        if !(x.is_finite() && y.is_finite()) {
+            return None;
+        }
+        let px = x * escala_x;
+        let py = y * escala_y;
+        if !(px.is_finite() && py.is_finite()) {
+            return None;
+        }
+        // Saturado al frame (el stroke fuera del pixmap lo recorta tiny-skia).
+        Some((
+            px.round().clamp(0.0, w.max(1) as f64 - 1.0) as usize,
+            py.round().clamp(0.0, h.max(1) as f64 - 1.0) as usize,
+        ))
+    };
+    // (posición en el doc, clase): 0 círculo, 1 rect, 2 línea. Tope 256
+    // formas por SVG (el doc ya está acotado a 64 KiB).
+    let mut formas: Vec<(usize, u8)> = Vec::new();
+    for (pos, _) in svg.match_indices("<circle") {
+        formas.push((pos, 0));
+    }
+    for (pos, _) in svg.match_indices("<rect") {
+        formas.push((pos, 1));
+    }
+    for (pos, _) in svg.match_indices("<line") {
+        formas.push((pos, 2));
+    }
+    formas.sort_by_key(|&(pos, _)| pos);
+    formas.truncate(256);
+    let mut dibujadas = 0usize;
+    for (pos, clase) in formas {
+        let resto = match svg.get(pos..) {
+            Some(r) => r,
+            None => continue,
+        };
+        let fin = match resto.find('>') {
+            Some(e) if e <= 2048 => e,
+            _ => continue,
+        };
+        let tag = match resto.get(..fin) {
+            Some(t) => t,
+            None => continue,
+        };
+        let pinto = match clase {
+            0 => match (
+                attr_float_svg(tag, "cx"),
+                attr_float_svg(tag, "cy"),
+                attr_float_svg(tag, "r"),
+            ) {
+                (Some(cx), Some(cy), Some(r)) if r > 0.0 => {
+                    let puntos: Vec<(usize, usize)> = (0..=48)
+                        .filter_map(|k| {
+                            let a = k as f64 * std::f64::consts::TAU / 48.0;
+                            mapea(cx + r * a.cos(), cy + r * a.sin())
+                        })
+                        .collect();
+                    draw_polyline_px(buf, w, h, &puntos, TEXT_COLOR);
+                    !puntos.is_empty()
+                }
+                _ => false,
+            },
+            1 => match (
+                attr_float_svg(tag, "x"),
+                attr_float_svg(tag, "y"),
+                attr_float_svg(tag, "width"),
+                attr_float_svg(tag, "height"),
+            ) {
+                (Some(x), Some(y), Some(an), Some(al)) if an > 0.0 && al > 0.0 => {
+                    let esquinas = [
+                        mapea(x, y),
+                        mapea(x + an, y),
+                        mapea(x + an, y + al),
+                        mapea(x, y + al),
+                        mapea(x, y),
+                    ];
+                    let puntos: Vec<(usize, usize)> = esquinas.into_iter().flatten().collect();
+                    draw_polyline_px(buf, w, h, &puntos, TEXT_COLOR);
+                    puntos.len() >= 2
+                }
+                _ => false,
+            },
+            _ => match (
+                attr_float_svg(tag, "x1"),
+                attr_float_svg(tag, "y1"),
+                attr_float_svg(tag, "x2"),
+                attr_float_svg(tag, "y2"),
+            ) {
+                (Some(x1), Some(y1), Some(x2), Some(y2)) => match (mapea(x1, y1), mapea(x2, y2)) {
+                    (Some(a), Some(b)) => {
+                        draw_line(buf, w, h, a, b, TEXT_COLOR);
+                        true
+                    }
+                    _ => false,
+                },
+                _ => false,
+            },
+        };
+        if pinto {
+            dibujadas += 1;
+        }
+    }
+    dibujadas > 0
+}
+
+// ── Mobjects nuevos con tiny-skia ──────────────────────────────────────────
+// Dibujo real de los 6 `Mobject` que W4 sumó (`Circle`/`Square`/`Line`/
+// `Arrow`/`NumberPlane`/`VectorField`) en el mundo [-3,3]² de `to_pixel`.
+// `draw_mobject` valida primero (`false` honesto si inválido, sin pintar).
+
+/// Polilínea en píxeles (tramos consecutivos; <2 puntos = no-op honesto).
+fn draw_polyline_px(buf: &mut [u8], w: usize, h: usize, puntos: &[(usize, usize)], color: [u8; 4]) {
+    for par in puntos.windows(2) {
+        draw_line(buf, w, h, par[0], par[1], color);
+    }
+}
+
+/// Circunferencia en mundo (`r` en unidades de mundo, 64 segmentos).
+fn draw_circle_world(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    cx: f64,
+    cy: f64,
+    r: f64,
+    color: [u8; 4],
+) -> bool {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite() && r > 0.0) || w == 0 || h == 0 {
+        return false;
+    }
+    let puntos: Vec<(usize, usize)> = (0..=64)
+        .map(|k| {
+            let a = k as f64 * std::f64::consts::TAU / 64.0;
+            to_pixel(w, h, cx + r * a.cos(), cy + r * a.sin())
+        })
+        .collect();
+    draw_polyline_px(buf, w, h, &puntos, color);
+    true
+}
+
+/// Cuadrado centrado en mundo (`side` en unidades de mundo).
+fn draw_square_world(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    cx: f64,
+    cy: f64,
+    side: f64,
+    color: [u8; 4],
+) -> bool {
+    if !(cx.is_finite() && cy.is_finite() && side.is_finite() && side > 0.0) || w == 0 || h == 0 {
+        return false;
+    }
+    let m = side / 2.0;
+    let esquinas = [
+        to_pixel(w, h, cx - m, cy - m),
+        to_pixel(w, h, cx + m, cy - m),
+        to_pixel(w, h, cx + m, cy + m),
+        to_pixel(w, h, cx - m, cy + m),
+        to_pixel(w, h, cx - m, cy - m),
+    ];
+    draw_polyline_px(buf, w, h, &esquinas, color);
+    true
+}
+
+/// Flecha en mundo: línea + punta de dos alas a ±25° (largo 20% del tramo,
+/// clamp 0.05..0.40 para que se vea en miniaturas y no explote en zoom).
+/// El ángulo se mide en mundo (el aspecto del frame lo puede sesgar: solo
+/// didáctico, documentado).
+fn draw_arrow_world(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    from: [f64; 2],
+    to: [f64; 2],
+    color: [u8; 4],
+) -> bool {
+    if from.iter().chain(to.iter()).any(|v| !v.is_finite()) || w == 0 || h == 0 {
+        return false;
+    }
+    draw_line(
+        buf,
+        w,
+        h,
+        to_pixel(w, h, from[0], from[1]),
+        to_pixel(w, h, to[0], to[1]),
+        color,
+    );
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let largo = dx.hypot(dy);
+    if !largo.is_finite() || largo <= 0.0 {
+        return true;
+    }
+    let ala = (largo * 0.2).clamp(0.05, 0.40);
+    let base = dy.atan2(dx);
+    for signo in [1.0, -1.0] {
+        let a = base + signo * (std::f64::consts::PI - 25.0_f64.to_radians());
+        let punta = [to[0] + ala * a.cos(), to[1] + ala * a.sin()];
+        if punta.iter().all(|v| v.is_finite()) {
+            draw_line(
+                buf,
+                w,
+                h,
+                to_pixel(w, h, to[0], to[1]),
+                to_pixel(w, h, punta[0], punta[1]),
+                color,
+            );
+        }
+    }
+    true
+}
+
+/// `y = expr(x)` muestreada en 120 puntos de [-3,3] con el evaluador real
+/// (`grafito_geometry::expr::evaluate`); tramos finitos separados en huecos
+/// (asíntotas no se puentean con líneas falsas).
+fn draw_function_graph(buf: &mut [u8], w: usize, h: usize, expr: &str) -> bool {
+    let mut tramo: Vec<(f64, f64)> = Vec::new();
+    let mut pinto = false;
+    for k in 0..=120 {
+        let x = -3.0 + 6.0 * (k as f64) / 120.0;
+        let vars = [("x".to_string(), x)];
+        match grafito_geometry::expr::evaluate(expr, &vars) {
+            // En mundo (sin saturar): el clip lo hace `draw_curva_mundo`
+            // tramo a tramo; fuera de vista se corta, no se aplasta.
+            Ok(y) if y.is_finite() => tramo.push((x, y)),
+            _ => {
+                if tramo.len() >= 2 {
+                    pintados_curva(buf, w, h, &tramo);
+                    pinto = true;
+                }
+                tramo.clear();
+            }
+        }
+    }
+    if tramo.len() >= 2 {
+        pintados_curva(buf, w, h, &tramo);
+        pinto = true;
+    }
+    pinto
+}
+
+/// Curva principal a 2px con clip limpio (atajo para no repetir grosor).
+fn pintados_curva(buf: &mut [u8], w: usize, h: usize, tramo: &[(f64, f64)]) -> usize {
+    draw_curva_mundo(buf, w, h, tramo, CURVE_MAIN, CURVE_ANCHO)
+}
+
+/// Retícula de flechas `nx × ny` con rumbo determinista
+/// (`sin/cos` del lugar: sin física inventada, solo orientación visible).
+/// Submuestreo a ≤512 flechas (64×64 serían 4096 strokes por frame).
+fn draw_arrow_field(buf: &mut [u8], w: usize, h: usize, nx: usize, ny: usize) -> bool {
+    if nx == 0 || ny == 0 || nx > 64 || ny > 64 || w == 0 || h == 0 {
+        return false;
+    }
+    let paso = (nx * ny).div_ceil(512).max(1);
+    let mut indice = 0usize;
+    for ix in 0..nx {
+        for iy in 0..ny {
+            let mantener = indice.is_multiple_of(paso);
+            indice += 1;
+            if !mantener {
+                continue;
+            }
+            let x = -2.5 + 5.0 * (ix as f64) / (nx.max(1) as f64);
+            let y = -2.5 + 5.0 * (iy as f64) / (ny.max(1) as f64);
+            let rumbo = x.sin() * 1.2 + y.cos() * 0.8;
+            let (dx, dy) = (0.18 * rumbo.cos(), 0.18 * rumbo.sin());
+            draw_arrow_world(buf, w, h, [x - dx, y - dy], [x + dx, y + dy], MINT_FAINT);
+        }
+    }
+    true
+}
+
+/// Plano numerado: retícula del rango pedido (≤64 divisiones por lado, ya
+/// validado; tope defensivo 256 líneas) + ejes rotulados del mundo.
+#[allow(clippy::too_many_arguments)]
+fn draw_number_plane_cells(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    x_step: f64,
+    y_step: f64,
+) -> bool {
+    if !(x_step.is_finite() && y_step.is_finite() && x_step > 0.0 && y_step > 0.0) {
+        return false;
+    }
+    let mut x = x_min;
+    for _ in 0..256 {
+        if !(x.is_finite()) || x > x_max {
+            break;
+        }
+        draw_line(
+            buf,
+            w,
+            h,
+            to_pixel(w, h, x, y_min),
+            to_pixel(w, h, x, y_max),
+            FAINT_WHITE,
+        );
+        x += x_step;
+    }
+    let mut y = y_min;
+    for _ in 0..256 {
+        if !(y.is_finite()) || y > y_max {
+            break;
+        }
+        draw_line(
+            buf,
+            w,
+            h,
+            to_pixel(w, h, x_min, y),
+            to_pixel(w, h, x_max, y),
+            FAINT_WHITE,
+        );
+        y += y_step;
+    }
+    draw_axes_with_labels(buf, w, h);
+    true
+}
+
+/// Campo vectorial `func(x, y)` → rumbo en radianes por celda; celda que no
+/// evalúa se omite (hueco honesto, sin flecha inventada). Submuestreo ≤512.
+fn draw_vector_field_cells(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    func: &str,
+    nx: usize,
+    ny: usize,
+) -> bool {
+    if func.trim().is_empty() || nx == 0 || ny == 0 || nx > 64 || ny > 64 || w == 0 || h == 0 {
+        return false;
+    }
+    let paso = (nx * ny).div_ceil(512).max(1);
+    let mut indice = 0usize;
+    let mut pinto = false;
+    for ix in 0..nx {
+        for iy in 0..ny {
+            let mantener = indice.is_multiple_of(paso);
+            indice += 1;
+            if !mantener {
+                continue;
+            }
+            let x = -2.5 + 5.0 * (ix as f64) / (nx.max(1) as f64);
+            let y = -2.5 + 5.0 * (iy as f64) / (ny.max(1) as f64);
+            let vars = [("x".to_string(), x), ("y".to_string(), y)];
+            let Ok(rumbo) = grafito_geometry::expr::evaluate(func, &vars) else {
+                continue;
+            };
+            if !rumbo.is_finite() {
+                continue;
+            }
+            let (dx, dy) = (0.20 * rumbo.cos(), 0.20 * rumbo.sin());
+            draw_arrow_world(buf, w, h, [x - dx, y - dy], [x + dx, y + dy], MINT_STRONG);
+            pinto = true;
+        }
+    }
+    pinto
+}
+
+/// Dibuja un `Mobject` sobre el frame. Valida primero: inválido → `false`
+/// sin pintar. `Group` recursa con tope de profundidad 8 (paridad con el
+/// validador). Puro sobre el buffer, sin E/S.
+pub fn draw_mobject(buf: &mut [u8], w: usize, h: usize, mobject: &grafito_anim::Mobject) -> bool {
+    draw_mobject_con_profundidad(buf, w, h, mobject, 0)
+}
+
+fn draw_mobject_con_profundidad(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    mobject: &grafito_anim::Mobject,
+    profundidad: usize,
+) -> bool {
+    use grafito_anim::Mobject as M;
+    if profundidad > 8 || mobject.validate().is_err() {
+        return false;
+    }
+    match mobject {
+        M::Axes => {
+            draw_axes_with_labels(buf, w, h);
+            true
+        }
+        M::Dot { x, y } => {
+            let (px, py) = to_pixel(w, h, *x, *y);
+            draw_filled_circle(buf, w, h, px, py, 3, DOT_BLUE);
+            true
+        }
+        M::Circle { cx, cy, r } => draw_circle_world(buf, w, h, *cx, *cy, *r, CURVE_MAIN),
+        M::Square { cx, cy, side } => draw_square_world(buf, w, h, *cx, *cy, *side, SQUARE_BLUE),
+        M::Line { from, to } => {
+            draw_line(
+                buf,
+                w,
+                h,
+                to_pixel(w, h, from[0], from[1]),
+                to_pixel(w, h, to[0], to[1]),
+                TANGENT_BLUE,
+            );
+            true
+        }
+        M::Arrow { from, to } => draw_arrow_world(buf, w, h, *from, *to, TANGENT_BLUE),
+        M::Polygon { pts } => {
+            if pts.len() < 2 {
+                if let Some(p) = pts.first() {
+                    let (px, py) = to_pixel(w, h, p[0], p[1]);
+                    draw_filled_circle(buf, w, h, px, py, 2, CURVE_MAIN);
+                    return true;
+                }
+                return false;
+            }
+            let mut puntos: Vec<(usize, usize)> = pts
+                .iter()
+                .take(4096)
+                .map(|p| to_pixel(w, h, p[0], p[1]))
+                .collect();
+            if pts.len() >= 3 {
+                if let Some(primero) = puntos.first().copied() {
+                    puntos.push(primero);
+                }
+            }
+            draw_polyline_px(buf, w, h, &puntos, CURVE_MAIN);
+            true
+        }
+        M::FunctionGraph { expr } => draw_function_graph(buf, w, h, expr),
+        M::Tex { svg } => {
+            if draw_tex_svg_onto(buf, w, h, svg) {
+                true
+            } else if let Some(texto) = crate::export::extract_svg_text_content(svg, 48) {
+                draw_text_block(
+                    buf,
+                    w,
+                    h,
+                    w / 12,
+                    h / 2,
+                    &texto,
+                    TEXT_COLOR,
+                    text_scale_for_h(h),
+                );
+                true
+            } else {
+                false
+            }
+        }
+        M::ArrowField { nx, ny } => draw_arrow_field(buf, w, h, *nx, *ny),
+        M::NumberPlane {
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            x_step,
+            y_step,
+        } => draw_number_plane_cells(buf, w, h, *x_min, *x_max, *y_min, *y_max, *x_step, *y_step),
+        M::VectorField { func, nx, ny } => draw_vector_field_cells(buf, w, h, func, *nx, *ny),
+        M::Group(hijos) => {
+            let mut alguno = false;
+            for hijo in hijos.iter().take(32) {
+                alguno |= draw_mobject_con_profundidad(buf, w, h, hijo, profundidad + 1);
+            }
+            alguno
+        }
+    }
+}
+
+// ── Raster genérico del `ScenePlayer` (piel-ui, puro) ───────────────────────
+// `ScenePlayer::play` devuelve `Vec<PlayedFrame>` con `PlacedMobject`s
+// (`{ mobject, opacity, scale, center }`); esta fn los rasteriza a un
+// `ColorImage` sobre el fondo único + grilla fija, reusando `draw_mobject`.
+// Sirve para frames del player y para la órbita (con `Perspective` no se
+// dibujan ejes 2D: el contexto es 3D, como en `render_orbit_frames`).
+//
+// - Solo las variantes geométricas se transforman (`Dot`/`Circle`/`Square`/
+//   `Line`/`Arrow`/`Polygon`/`Group`): el resto (`Axes`, `FunctionGraph`,
+//   `ArrowField`, `Tex`, `NumberPlane`, `VectorField`) se dibuja tal cual
+//   (documentado, sin inventar geometría). Un `VMobject` entra vía
+//   `vmobject_como_polilinea` (aplanado Bézier honesto).
+// - `opacity` 0 → se omite; 1 → directo; intermedia → blend global de la
+//   capa sobre la base (los píxeles idénticos quedan idénticos).
+// - Viewport fijo [-3,3]² idéntico al resto de renderers nativos.
+// - Vacío o todo inválido → fondo honesto sin formas (jamás panic).
+
+/// Mueve un punto mundo por escala alrededor del centro. Puro.
+fn colocado_punto(p: [f64; 2], escala: f64, centro: [f64; 2]) -> [f64; 2] {
+    [
+        centro[0] + (p[0] - centro[0]) * escala,
+        centro[1] + (p[1] - centro[1]) * escala,
+    ]
+}
+
+/// Aplica `scale`/`center` a las variantes geométricas; el resto vuelve
+/// clonado (sin transformar). Puro, sin pánicos.
+fn transformar_colocado(
+    m: &grafito_anim::Mobject,
+    escala: f64,
+    centro: [f64; 2],
+) -> grafito_anim::Mobject {
+    use grafito_anim::Mobject as M;
+    if !escala.is_finite() || escala <= 0.0 || !centro.iter().all(|v| v.is_finite()) {
+        return m.clone();
+    }
+    match m {
+        M::Dot { x, y } => {
+            let p = colocado_punto([*x, *y], escala, centro);
+            M::Dot { x: p[0], y: p[1] }
+        }
+        M::Circle { cx, cy, r } => {
+            let p = colocado_punto([*cx, *cy], escala, centro);
+            M::Circle {
+                cx: p[0],
+                cy: p[1],
+                r: r * escala.abs(),
+            }
+        }
+        M::Square { cx, cy, side } => {
+            let p = colocado_punto([*cx, *cy], escala, centro);
+            M::Square {
+                cx: p[0],
+                cy: p[1],
+                side: side * escala.abs(),
+            }
+        }
+        M::Line { from, to } => M::Line {
+            from: colocado_punto(*from, escala, centro),
+            to: colocado_punto(*to, escala, centro),
+        },
+        M::Arrow { from, to } => M::Arrow {
+            from: colocado_punto(*from, escala, centro),
+            to: colocado_punto(*to, escala, centro),
+        },
+        M::Polygon { pts } => M::Polygon {
+            pts: pts
+                .iter()
+                .take(4096)
+                .map(|p| colocado_punto(*p, escala, centro))
+                .collect(),
+        },
+        M::Group(hijos) => M::Group(
+            hijos
+                .iter()
+                .take(32)
+                .map(|h| transformar_colocado(h, escala, centro))
+                .collect(),
+        ),
+        otro => otro.clone(),
+    }
+}
+
+/// Blendea la capa sobre la base con alfa global `opacity` (0..=1, finito).
+/// Puro sobre buffers RGBA del mismo largo; largos distintos = no-op.
+fn mezclar_capa_con_opacidad(base: &mut [u8], capa: &[u8], opacity: f32) {
+    if base.len() != capa.len() || !(0.0..=1.0).contains(&opacity) || !opacity.is_finite() {
+        return;
+    }
+    if opacity <= 0.0 {
+        return;
+    }
+    if opacity >= 1.0 {
+        base.copy_from_slice(capa);
+        return;
+    }
+    let o = opacity as f64;
+    for par in base.chunks_exact_mut(4).zip(capa.chunks_exact(4)) {
+        let (b, c) = par;
+        for k in 0..3 {
+            b[k] = (f64::from(c[k]) * o + f64::from(b[k]) * (1.0 - o)) as u8;
+        }
+        b[3] = 255;
+    }
+}
+
+/// Aplana un `VMobject` a polilínea (`Mobject::Polygon`): cada tramo
+/// ancla→ancla se muestrea como Bézier cúbica (8 subdivisiones; solo anclas
+/// si hay >512, con tope 4096 puntos). Manijas inconsistentes → solo anclas
+/// (honesto, sin inventar curva). `None` si vacío o sin puntos finitos.
+/// Puro, sin pánicos.
+pub fn vmobject_como_polilinea(vm: &grafito_anim::VMobject) -> Option<grafito_anim::Mobject> {
+    let n = vm.anchors.len();
+    if n == 0 {
+        return None;
+    }
+    let cubicas_ok = vm.handles_in.len() == n && vm.handles_out.len() == n;
+    let por_tramo = if n > 512 { 1 } else { 8 };
+    let mut pts: Vec<[f64; 2]> = Vec::new();
+    for i in 0..n {
+        let p0 = vm.anchors[i];
+        if i + 1 >= n {
+            if p0.iter().all(|v| v.is_finite()) {
+                pts.push(p0);
+            }
+            break;
+        }
+        let p3 = vm.anchors[i + 1];
+        if cubicas_ok {
+            let p1 = vm.handles_out[i];
+            let p2 = vm.handles_in[i + 1];
+            let todo = [p0, p1, p2, p3];
+            if todo.iter().all(|p| p.iter().all(|v| v.is_finite())) {
+                for k in 0..por_tramo {
+                    let t = k as f64 / por_tramo as f64;
+                    let u = 1.0 - t;
+                    pts.push([
+                        u * u * u * p0[0]
+                            + 3.0 * u * u * t * p1[0]
+                            + 3.0 * u * t * t * p2[0]
+                            + t * t * t * p3[0],
+                        u * u * u * p0[1]
+                            + 3.0 * u * u * t * p1[1]
+                            + 3.0 * u * t * t * p2[1]
+                            + t * t * t * p3[1],
+                    ]);
+                }
+                continue;
+            }
+        }
+        if p0.iter().all(|v| v.is_finite()) {
+            pts.push(p0);
+        }
+    }
+    pts.truncate(4096);
+    if pts.iter().all(|p| p.iter().all(|v| v.is_finite())) && !pts.is_empty() {
+        Some(grafito_anim::Mobject::Polygon { pts })
+    } else {
+        None
+    }
+}
+
+/// Rasteriza objetos colocados del player a un frame. Puro, sin E/S.
+pub fn render_placed_objects(
+    placed: &[grafito_anim::PlacedMobject],
+    w: usize,
+    h: usize,
+    camera: grafito_anim::Camera,
+) -> egui::ColorImage {
+    let (w, h) = if w == 0 || h == 0 {
+        (NATIVE_FALLBACK_W, NATIVE_FALLBACK_H)
+    } else {
+        (w, h)
+    };
+    let byte_len = w
+        .checked_mul(h)
+        .and_then(|v| v.checked_mul(4))
+        .unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+    let mut buf = vec![0u8; byte_len];
+    if byte_len != w * h * 4 {
+        return egui::ColorImage::from_rgba_unmultiplied(
+            [NATIVE_FALLBACK_W, NATIVE_FALLBACK_H],
+            &buf,
+        );
+    }
+    fill_background(&mut buf, w, h);
+    draw_subtle_grid(&mut buf, w, h);
+    if camera.is_ortho() {
+        draw_axes_with_labels(&mut buf, w, h);
+    }
+    for obj in placed.iter().take(32) {
+        if obj.opacity <= 0.0 {
+            continue;
+        }
+        let m = transformar_colocado(&obj.mobject, f64::from(obj.scale), obj.center);
+        if obj.opacity >= 1.0 {
+            draw_mobject(&mut buf, w, h, &m);
+        } else {
+            let mut capa = buf.clone();
+            if draw_mobject(&mut capa, w, h, &m) {
+                mezclar_capa_con_opacidad(&mut buf, &capa, obj.opacity);
+            }
+        }
+    }
+    egui::ColorImage::from_rgba_unmultiplied([w, h], &buf)
+}
+
+// ── Cámara 3D mínima (Perspective + MovingCamera, 2D intacto) ───────────────
+// La órbita usa `Camera::Perspective` + `project_3d` a través del puente de
+// la piel (`crate::render_3d::project_anim_camera_point`, que reusa
+// `OrthoProjection` para las vistas ortográficas del canvas). El travelling
+// se expresa como tracks reales (`MovingCamera::as_tracks`).
+
+/// Cámara en `t_ms` aplicando el easing del travelling (`MovingCamera` ya lo
+/// interpola con sus `RateFunc` exactas: acá solo se muestrea). Pura.
+pub fn anim_camera_sample(moving: &grafito_anim::MovingCamera, t_ms: u64) -> grafito_anim::Camera {
+    moving.sample(t_ms)
+}
+
+/// Ids de los tracks del travelling (4 en `Ortho`, 7 en `Perspective`).
+/// Vacío honesto si la cámara no produce tracks (nunca con cámaras
+/// validadas). Puro.
+pub fn anim_camera_track_ids(moving: &grafito_anim::MovingCamera) -> Vec<String> {
+    moving
+        .as_tracks()
+        .map(|tracks| tracks.iter().map(|t| t.prop_id.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Cámara orbital por defecto de la preview 3D (perspectiva 50° barriendo
+/// el cubo de lado 2). Si la construcción fallara (no debería: valores
+/// fijos validados), cae al ortho canónico 16:9 — jamás panic.
+fn orbit_camera_default() -> grafito_anim::Camera {
+    grafito_anim::Camera::perspective(50.0, [5.0, 2.0, 5.0], [0.0, 0.0, 0.0]).unwrap_or(
+        grafito_anim::Camera::Ortho(grafito_anim::Ortho::default_16_9()),
+    )
+}
+
+/// 48 frames de un cubo wireframe orbitado (perspectiva real `project_3d`).
+///
+/// 2D intacto: ningún renderer existente cambia; este es el camino 3D
+/// mínimo para que `Camera::Perspective` y `MovingCamera` no queden
+/// tipados sin render. Determinista, acotado por `resolve_native_size_budgeted`.
+pub fn render_orbit_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let desde = grafito_anim::Camera::perspective(50.0, [5.0, 2.0, 5.0], [0.0, 0.0, 0.0])
+        .unwrap_or(orbit_camera_default());
+    let hasta = grafito_anim::Camera::perspective(50.0, [-5.0, 3.5, 4.0], [0.0, 0.0, 0.0])
+        .unwrap_or(orbit_camera_default());
+    let travelling =
+        grafito_anim::MovingCamera::try_new(desde, hasta, 2000, grafito_anim::RateFunc::Linear)
+            .ok();
+    let centro = egui::pos2(w as f32 / 2.0, h as f32 / 2.0);
+    let escala = ((w.min(h) as f32) / 6.0).max(1.0);
+    let cubo: [[f64; 3]; 8] = [
+        [-1.0, -1.0, -1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, 1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [1.0, -1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+    ];
+    let aristas: [(usize, usize); 12] = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ];
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).clamp(1.0, 48.0);
+        let t_ms = ((t * 2000.0).round() as u64).min(2000);
+        let cam = travelling
+            .map(|m| m.sample(t_ms))
+            .unwrap_or(orbit_camera_default());
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        let px: Vec<Option<(usize, usize)>> = cubo
+            .iter()
+            .map(|v| {
+                crate::render_3d::project_anim_camera_point(&cam, *v, escala, centro).map(|p| {
+                    (
+                        p.x.round().clamp(0.0, w.max(1) as f32 - 1.0) as usize,
+                        p.y.round().clamp(0.0, h.max(1) as f32 - 1.0) as usize,
+                    )
+                })
+            })
+            .collect();
+        for (a, b) in aristas {
+            if let (Some(pa), Some(pb)) = (px[a], px[b]) {
+                draw_line(&mut buf, w, h, pa, pb, LINE_WHITE);
+            }
+        }
+        for punto in px.into_iter().flatten() {
+            draw_filled_circle(&mut buf, w, h, punto.0, punto.1, 2, DOT_BLUE);
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+    }
+    frames
+}
+
+/// 48 frames de un `Mobject` estático sobre fondo único (para previews y
+/// tests de dibujo real). `Mobject` inválido → fondo honesto sin formas.
+pub fn render_mobject_frames(
+    width: u32,
+    height: u32,
+    mobject: &grafito_anim::Mobject,
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for _frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_mobject(&mut buf, w, h, mobject);
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+    }
+    frames
+}
+
 // ── Dispatch honesto nativo (sync mecánico, ANIM-REVIVE) ───────────────────
 // Expone CÓMO se resolvió una plantilla: `Direct` (renderer dedicado) o
 // `FallbackUniversal` (`limit-epsilon` / `ode-*` / typos: sin renderer propio,
@@ -521,9 +2330,12 @@ pub fn native_dispatch_for(template: &str, concept: &str) -> NativeDispatch {
 // - TEXT (FG) #EBEBF5 ≈ DARK text_primary #FAFAF9 (blanco cálido, alpha 255).
 // - Acentos vivos mapean a Theme: BLUE→object_point, YELLOW→highlight/warning,
 //   RED→danger, MINT→success/object_function, VIOLET→toast_cas, ORANGE→warning.
-//   El acento canónico sage #6B7A6F (Theme accent) se usa como tinte en
-//   fill_background vía accent_for_concept; los 6 vivos garantizan contraste
-//   sobre BG oscuro para vídeo didáctico.
+//   El fondo es ÚNICO y fijo (`fill_background` + viñeta, sin tinte por
+//   concepto): los 6 vivos garantizan contraste sobre BG oscuro para vídeo
+//   didáctico.
+// - Lenguaje de color: amarilla 2px = objeto (`CURVE_MAIN` + `CURVE_ANCHO`),
+//   azul 2px = construcción (`TANGENT_BLUE`/`PAL_BLUE` + `CURVE_ANCHO`),
+//   rojo = punto/resultado (`POINT_RED` radio 3, `GIBBS_RED` radio 3).
 // REGLA: ningún color RGBA fuera de este bloque. Los renders solo usan estas
 // consts o `with_alpha(BASE, a)`. Ver test `palette_has_no_loose_hardcodes`.
 const BG: [u8; 4] = [14, 14, 20, 255];
@@ -534,16 +2346,13 @@ const TEXT_COLOR: [u8; 4] = [235, 235, 245, 255];
 // Trío canónico BG/FG/ACCENT (alias documentados para el gate de paleta).
 const PAL_BG: [u8; 4] = BG;
 const PAL_FG: [u8; 4] = TEXT_COLOR;
-// Base vivos (únicos literales de acento; ACCENTS y roles derivan de aquí).
+// Base vivos (únicos literales de acento; los roles derivan de aquí).
 const PAL_BLUE: [u8; 4] = [66, 133, 244, 255];
 const PAL_YELLOW: [u8; 4] = [235, 211, 84, 255];
 const PAL_RED: [u8; 4] = [255, 77, 77, 255];
 const PAL_MINT: [u8; 4] = [126, 214, 160, 255];
 const PAL_VIOLET: [u8; 4] = [168, 120, 255, 255];
 const PAL_ORANGE: [u8; 4] = [255, 153, 51, 255];
-const ACCENTS: [[u8; 4]; 6] = [
-    PAL_BLUE, PAL_YELLOW, PAL_RED, PAL_MINT, PAL_VIOLET, PAL_ORANGE,
-];
 // Acento canónico para progreso/puntos (azul Google, contrasta sobre BG).
 const PAL_ACCENT: [u8; 4] = PAL_BLUE;
 // ── Roles derivados (todos centralizados aquí, sin literales en renders) ──
@@ -558,12 +2367,10 @@ const FILL_SOFT_BLUE: [u8; 4] = [91, 155, 255, 80];
 const DOT_BLUE: [u8; 4] = [66, 133, 244, 255];
 const MINT_STRONG: [u8; 4] = [126, 214, 160, 200];
 const MINT_FAINT: [u8; 4] = [126, 214, 160, 120];
-const LINE_SOFT_BLUE: [u8; 4] = [91, 155, 255, 140];
 const FAINT_WHITE: [u8; 4] = [255, 255, 255, 35];
 const GIBBS_RED: [u8; 4] = [255, 77, 77, 200];
 const SCRIM: [u8; 4] = [0, 0, 0, 110];
 const TRACK: [u8; 4] = [255, 255, 255, 22];
-const TEXT_CUTOUT: [u8; 4] = [14, 14, 20, 180];
 
 const fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {
     [c[0], c[1], c[2], a]
@@ -805,23 +2612,8 @@ fn alloc_frame_buffer_or_fallback(w: usize, h: usize) -> (Vec<u8>, usize, usize)
     }
 }
 
-/// Hash FNV-1a rapido y determinista para variaciones por concepto.
-fn hash_concept(concept: &str) -> u64 {
-    let mut h: u64 = 14695981039346656037;
-    for b in concept.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(1099511628211);
-    }
-    // mezclar longitud para que strings vacios no den 0 trivial
-    h ^= concept.len() as u64;
-    h
-}
-
-fn accent_for_concept(concept: &str) -> [u8; 4] {
-    let h = hash_concept(concept);
-    ACCENTS[(h as usize) % ACCENTS.len()]
-}
-
+/// Normaliza el concepto del pedido para el eco del placeholder `universal`.
+/// Puro, sin pánicos.
 fn normalize_concept(concept: &str) -> String {
     let mut s = concept.trim().replace(['\n', '\r', '\t'], " ");
     // colapsar espacios multiples
@@ -928,15 +2720,215 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
 /// El fallback `universal` es placeholder neutro honesto (sin curva falsa).
 /// Garantiza menos de 2s incluso en debug.
 ///
-/// Convierte punto matematico (x,y en [-3,3]^2) a pixel del buffer.
+/// Convierte punto matematico (x,y en el viewport fijo [`VIEW_X_MIN`]..
+/// [`VIEW_X_MAX`] × [`VIEW_Y_MIN`]. [`VIEW_Y_MAX`]) a pixel del buffer.
 /// Nunca panic con w/h en 0.
+///
+/// OJO: satura al borde (útil para puntos/ejes ya en vista). Las CURVAS no
+/// usan esto: usan [`draw_seg_mundo`]/[`draw_curva_mundo`], que recortan el
+/// tramo fuera de vista en vez de aplastarlo (sin plateau).
 fn to_pixel(width: usize, height: usize, x: f64, y: f64) -> (usize, usize) {
     if width == 0 || height == 0 {
         return (0, 0);
     }
-    let px = ((x + 3.0) / 6.0 * (width as f64)).round() as usize;
-    let py = ((3.0 - y) / 6.0 * (height as f64)).round() as usize;
+    let px = ((x - VIEW_X_MIN) / VIEW_SPAN_X * (width as f64)).round() as usize;
+    let py = ((VIEW_Y_MAX - y) / VIEW_SPAN_Y * (height as f64)).round() as usize;
     (px.min(width - 1), py.min(height - 1))
+}
+
+// ── Viewport fijo + clip limpio (sin plateau) ─────────────────────────────
+// El mundo es SIEMPRE [-3,3]², idéntico en los 48 frames: la escala no cambia
+// entre frames (sin temblor). Lo fuera de vista se RECORTA (segmento clipado
+// a la caja del frame vía `clip_seg_a_caja` de la Piel); jamás se aplasta
+// contra el borde: `y=x²` se corta limpio en `y=3` en vez de dibujar un
+// plateau horizontal falso arriba.
+// Contraste AA sobre BG [14,14,20]: amarilla ≈11:1, azul ≈4.8:1,
+// roja ≈5:1 (todas ≥3:1 para gráficos); curvas a 2px (`CURVE_ANCHO`).
+/// Mínimo del viewport mundo en x (fijo, documentado, misma escala en 48).
+pub(crate) const VIEW_X_MIN: f64 = -3.0;
+/// Máximo del viewport mundo en x (fijo, documentado, misma escala en 48).
+pub(crate) const VIEW_X_MAX: f64 = 3.0;
+/// Mínimo del viewport mundo en y (fijo, documentado, misma escala en 48).
+pub(crate) const VIEW_Y_MIN: f64 = -3.0;
+/// Máximo del viewport mundo en y (fijo, documentado, misma escala en 48).
+pub(crate) const VIEW_Y_MAX: f64 = 3.0;
+/// Ancho del viewport mundo (6.0, deriva de `VIEW_X_*`).
+const VIEW_SPAN_X: f64 = VIEW_X_MAX - VIEW_X_MIN;
+/// Alto del viewport mundo (6.0, deriva de `VIEW_Y_*`).
+const VIEW_SPAN_Y: f64 = VIEW_Y_MAX - VIEW_Y_MIN;
+/// Grosor de curvas principales (parábola/tangente) en px.
+const CURVE_ANCHO: f32 = 2.0;
+
+/// ¿El punto mundo está en vista (finito y dentro del viewport fijo)?
+/// Puro, sin pánicos.
+fn en_vista_mundo(x: f64, y: f64) -> bool {
+    x.is_finite()
+        && y.is_finite()
+        && (VIEW_X_MIN..=VIEW_X_MAX).contains(&x)
+        && (VIEW_Y_MIN..=VIEW_Y_MAX).contains(&y)
+}
+
+/// Punto mundo a píxel solo si está en vista (`None` = fuera: el llamador
+/// NO dibuja, sin aplastar contra el borde). Puro, sin pánicos.
+fn to_pixel_opt(width: usize, height: usize, x: f64, y: f64) -> Option<(usize, usize)> {
+    if width == 0 || height == 0 || !en_vista_mundo(x, y) {
+        return None;
+    }
+    let px = ((x - VIEW_X_MIN) / VIEW_SPAN_X * (width as f64)).round() as usize;
+    let py = ((VIEW_Y_MAX - y) / VIEW_SPAN_Y * (height as f64)).round() as usize;
+    Some((px.min(width - 1), py.min(height - 1)))
+}
+
+/// Punto mundo a float-píxeles sin saturar (`None` si no-finito o w/h 0).
+/// Puro, sin pánicos.
+fn mundo_a_flotante(width: usize, height: usize, x: f64, y: f64) -> Option<(f32, f32)> {
+    if width == 0 || height == 0 || !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let px = (x - VIEW_X_MIN) / VIEW_SPAN_X * (width as f64);
+    let py = (VIEW_Y_MAX - y) / VIEW_SPAN_Y * (height as f64);
+    if !px.is_finite() || !py.is_finite() {
+        return None;
+    }
+    Some((px as f32, py as f32))
+}
+
+// ── Backend raster tiny-skia 0.11 (F1 Manim-en-Rust) ───────────────────────
+// Los 4 primitivos dibujan con strokes/fills/antialias reales estilo cairo
+// en vez de Bresenham/bloques a mano. Firmas intactas (uno a uno): los
+// ~100 call sites no cambian.
+//
+// Premultiplicado: `PixmapMut::from_bytes` asume RGBA premultiplicado;
+// nuestros buffers son rectos con alfa 255 en todo píxel (pineado por
+// `assert_frames_valid` y escrito por `fill_background` antes de dibujar):
+// con destino opaco, recto == premultiplicado y el blend SourceOver de
+// tiny-skia coincide con el manual anterior. Cada primitivo envuelve el
+// buffer (O(1), sin copia); si no calza (w/h 0 o len corto) es no-op
+// honesto. Regla de paleta intacta: ningún literal RGBA fuera del bloque
+// de consts (los helpers solo reciben `[u8; 4]` ya centralizados).
+
+/// Paint sólido con antialias desde un color de la paleta centralizada.
+fn sk_paint(color: [u8; 4]) -> tiny_skia::Paint<'static> {
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(color[0], color[1], color[2], color[3]);
+    paint.anti_alias = true;
+    paint
+}
+
+/// Vista O(1) del buffer como pixmap tiny-skia (`None` si no calza).
+fn sk_view(buf: &mut [u8], w: usize, h: usize) -> Option<tiny_skia::PixmapMut<'_>> {
+    let w32 = u32::try_from(w).ok()?;
+    let h32 = u32::try_from(h).ok()?;
+    tiny_skia::PixmapMut::from_bytes(buf, w32, h32)
+}
+
+/// Stroke redondo del grosor pedido (clamp 0.5..=8px: tiny-skia con ancho
+/// 0 no pinta y con ancho gigante tapa el frame).
+fn sk_stroke(ancho: f32) -> tiny_skia::Stroke {
+    tiny_skia::Stroke {
+        width: ancho.clamp(0.5, 8.0),
+        line_cap: tiny_skia::LineCap::Round,
+        line_join: tiny_skia::LineJoin::Round,
+        ..Default::default()
+    }
+}
+
+/// Stroke redondo de 1px para los primitivos de línea.
+fn sk_stroke_1px() -> tiny_skia::Stroke {
+    sk_stroke(1.0)
+}
+
+/// Línea con grosor explícito (curvas principales a 2px para contraste AA).
+/// Misma disciplina que `draw_line` (vista O(1), no-op honesto si no calza).
+fn draw_line_ancha(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    a: (usize, usize),
+    b: (usize, usize),
+    color: [u8; 4],
+    ancho: f32,
+) {
+    let Some(mut px) = sk_view(buf, w, h) else {
+        return;
+    };
+    if a == b {
+        let Some(rect) = tiny_skia::Rect::from_xywh(a.0 as f32, a.1 as f32, 1.0, 1.0) else {
+            return;
+        };
+        px.fill_rect(
+            rect,
+            &sk_paint(color),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        return;
+    }
+    // +0.5: centros de píxel (el stroke cubre la fila exacta; sin offset
+    // cubriría dos filas al 50% y las líneas se verían dobles).
+    let mut builder = tiny_skia::PathBuilder::new();
+    builder.move_to(a.0 as f32 + 0.5, a.1 as f32 + 0.5);
+    builder.line_to(b.0 as f32 + 0.5, b.1 as f32 + 0.5);
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    px.stroke_path(
+        &path,
+        &sk_paint(color),
+        &sk_stroke(ancho),
+        tiny_skia::Transform::identity(),
+        None,
+    );
+}
+
+/// Segmento en coords MUNDO con clip limpio: fuera de vista se recorta
+/// (vía `clip_seg_a_caja`), jamás se aplasta al borde. `true` = pintó.
+/// Puro sobre el buffer, sin E/S ni pánicos.
+#[allow(clippy::too_many_arguments)]
+fn draw_seg_mundo(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    color: [u8; 4],
+    ancho: f32,
+) -> bool {
+    let (Some((fax, fay)), Some((fbx, fby))) = (
+        mundo_a_flotante(w, h, ax, ay),
+        mundo_a_flotante(w, h, bx, by),
+    ) else {
+        return false;
+    };
+    let Some((a, b)) = clip_seg_a_caja(fax, fay, fbx, fby, w, h) else {
+        return false;
+    };
+    draw_line_ancha(buf, w, h, a, b, color, ancho);
+    true
+}
+
+/// Curva en coords MUNDO: cada tramo se clipa por separado; punto no-finito
+/// o tramo fuera = hueco honesto (asíntotas y bordes no se puentean con
+/// líneas falsas). Devuelve tramos pintados. Sin E/S ni pánicos.
+fn draw_curva_mundo(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    puntos: &[(f64, f64)],
+    color: [u8; 4],
+    ancho: f32,
+) -> usize {
+    let mut pintados = 0usize;
+    for par in puntos.windows(2) {
+        if draw_seg_mundo(
+            buf, w, h, par[0].0, par[0].1, par[1].0, par[1].1, color, ancho,
+        ) {
+            pintados += 1;
+        }
+    }
+    pintados
 }
 
 fn draw_line(
@@ -947,50 +2939,37 @@ fn draw_line(
     b: (usize, usize),
     color: [u8; 4],
 ) {
-    let mut x = a.0 as i64;
-    let mut y = a.1 as i64;
-    let dx = (b.0 as i64 - x).abs();
-    let dy = -(b.1 as i64 - y).abs();
-    let sx = if x < b.0 as i64 { 1 } else { -1 };
-    let sy = if y < b.1 as i64 { 1 } else { -1 };
-    let mut err = dx + dy;
-    loop {
-        if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-            let ux = x as usize;
-            let uy = y as usize;
-            if let Some(i) = uy
-                .checked_mul(w)
-                .and_then(|v| v.checked_add(ux))
-                .and_then(|v| v.checked_mul(4))
-            {
-                if i + 3 < buf.len() {
-                    // alpha blending simple: si color alpha <255, mezclar con fondo
-                    if color[3] == 255 {
-                        buf[i..i + 4].copy_from_slice(&color);
-                    } else {
-                        let a = color[3] as f64 / 255.0;
-                        for k in 0..3 {
-                            buf[i + k] =
-                                (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
-                        }
-                        buf[i + 3] = 255;
-                    }
-                }
-            }
-        }
-        if x == b.0 as i64 && y == b.1 as i64 {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
-        }
+    let Some(mut px) = sk_view(buf, w, h) else {
+        return;
+    };
+    if a == b {
+        // Punto degenerado: el Bresenham pintaba 1px; acá un rect 1x1.
+        let Some(rect) = tiny_skia::Rect::from_xywh(a.0 as f32, a.1 as f32, 1.0, 1.0) else {
+            return;
+        };
+        px.fill_rect(
+            rect,
+            &sk_paint(color),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        return;
     }
+    // +0.5: centros de píxel (el stroke de 1px cubre la fila exacta;
+    // sin offset cubriría dos filas al 50% y las líneas se verían dobles).
+    let mut builder = tiny_skia::PathBuilder::new();
+    builder.move_to(a.0 as f32 + 0.5, a.1 as f32 + 0.5);
+    builder.line_to(b.0 as f32 + 0.5, b.1 as f32 + 0.5);
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    px.stroke_path(
+        &path,
+        &sk_paint(color),
+        &sk_stroke_1px(),
+        tiny_skia::Transform::identity(),
+        None,
+    );
 }
 
 fn draw_filled_circle(
@@ -1003,36 +2982,21 @@ fn draw_filled_circle(
     color: [u8; 4],
 ) {
     let radius = radius.max(1);
-    for dy in -(radius as i64)..=(radius as i64) {
-        for dx in -(radius as i64)..=(radius as i64) {
-            if dx * dx + dy * dy <= (radius as i64) * (radius as i64) {
-                let x = cx as i64 + dx;
-                let y = cy as i64 + dy;
-                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                    let ux = x as usize;
-                    let uy = y as usize;
-                    if let Some(i) = uy
-                        .checked_mul(w)
-                        .and_then(|v| v.checked_add(ux))
-                        .and_then(|v| v.checked_mul(4))
-                    {
-                        if i + 3 < buf.len() {
-                            if color[3] == 255 {
-                                buf[i..i + 4].copy_from_slice(&color);
-                            } else {
-                                let a = color[3] as f64 / 255.0;
-                                for k in 0..3 {
-                                    buf[i + k] =
-                                        (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
-                                } // clippy ok
-                                buf[i + 3] = 255;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let Some(mut px) = sk_view(buf, w, h) else {
+        return;
+    };
+    let mut builder = tiny_skia::PathBuilder::new();
+    builder.push_circle(cx as f32 + 0.5, cy as f32 + 0.5, radius as f32);
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    px.fill_path(
+        &path,
+        &sk_paint(color),
+        tiny_skia::FillRule::Winding,
+        tiny_skia::Transform::identity(),
+        None,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1048,32 +3012,114 @@ fn draw_filled_rect(
 ) {
     let x1 = (x0 + rw).min(w);
     let y1 = (y0 + rh).min(h);
-    for y in y0..y1 {
-        for x in x0..x1 {
-            if let Some(i) = y
-                .checked_mul(w)
-                .and_then(|v| v.checked_add(x))
-                .and_then(|v| v.checked_mul(4))
-            {
-                if i + 3 >= buf.len() {
-                    continue;
-                }
-                if color[3] == 255 {
-                    buf[i..i + 4].copy_from_slice(&color);
-                } else {
-                    let a = color[3] as f64 / 255.0;
-                    for k in 0..3 {
-                        buf[i + k] = (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
-                    }
-                    buf[i + 3] = 255;
-                }
-            }
-        }
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let Some(mut px) = sk_view(buf, w, h) else {
+        return;
+    };
+    let Some(rect) =
+        tiny_skia::Rect::from_xywh(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32)
+    else {
+        return;
+    };
+    px.fill_rect(
+        rect,
+        &sk_paint(color),
+        tiny_skia::Transform::identity(),
+        None,
+    );
+}
+
+// Fuente embebida para el texto real (la misma Ubuntu-Light que `export.rs`
+// usa en `render_png`): `OnceLock` porque el render corre en hilos worker y
+// el parse por llamada rompería el presupuesto <2s. `None` honesto si la
+// fuente integrada faltara (jamás panic: el texto cae a bloques sólidos).
+fn sk_anim_font() -> Option<&'static ab_glyph::FontVec> {
+    static FONT: std::sync::OnceLock<Option<ab_glyph::FontVec>> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| {
+        egui::FontDefinitions::default()
+            .font_data
+            .get("Ubuntu-Light")
+            .and_then(|data| ab_glyph::FontVec::try_from_vec(data.font.clone().into_owned()).ok())
+    })
+    .as_ref()
+}
+
+/// Compensación de trazo para texto claro sobre fondo oscuro (×1.7 con
+/// clamp, como el embolden de FreeType / dark-mode de macOS): Ubuntu Light
+/// es fina y con cobertura cruda los rótulos chicos (ticks a 10px) quedan
+/// tenues sin ningún píxel sólido; con esto los núcleos llegan a 1.0 y los
+/// bordes conservan su AA. Determinista, sin literales de color.
+const TEXT_STEM_BOOST: f32 = 1.7;
+
+/// Celda sólida de fallback para glifos ausentes (emoji, CJK): el contrato
+/// histórico ("cualquier texto se renderiza sin panics", ver
+/// `universal_handles_any_text`) se mantiene sin inventar letra.
+#[allow(clippy::too_many_arguments)]
+fn sk_fallback_cell(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x: usize,
+    y: usize,
+    cell_w: usize,
+    cell_h: usize,
+    color: [u8; 4],
+) {
+    draw_filled_rect(buf, w, h, x, y, cell_w, cell_h, color);
+}
+
+/// Escala de texto por alto del frame (cine visual): 3 en HD (h≥720),
+/// 2 en miniatura grande (h≥360), 1 abajo. Pura, sin pánicos.
+pub fn text_scale_for_h(h: usize) -> usize {
+    if h >= 720 {
+        3
+    } else if h >= 360 {
+        2
+    } else {
+        1
     }
 }
 
-// M3-8: la ex `FONT5X7` ([[0; 7]; 95], todo ceros, jamás leída) se borró:
-// `draw_text_block` dibuja bloques 5x7 directos sin tabla de glifos.
+/// Scrim detrás de un rótulo (banda superior reservada): rectángulo `SCRIM`
+/// dimensionado al texto y la escala de `h`. El texto se dibuja aparte con
+/// `draw_text_block` en la misma posición. Puro sobre el buffer.
+fn draw_scrim_para_rotulo(buf: &mut [u8], w: usize, h: usize, x: usize, y: usize, texto: &str) {
+    if w == 0 || h == 0 || texto.is_empty() {
+        return;
+    }
+    let escala = text_scale_for_h(h);
+    let chars = texto.chars().take(48).count();
+    let ancho = chars
+        .saturating_mul(6 * escala)
+        .saturating_add(8)
+        .min(w.saturating_sub(x.min(w)));
+    let alto = (12 * escala + 8).min(h.saturating_sub(y.min(h)));
+    if ancho > 0 && alto > 0 {
+        draw_filled_rect(buf, w, h, x, y, ancho, alto, SCRIM);
+    }
+}
+
+/// Rótulo superior con scrim detrás: la banda superior queda reservada y el
+/// texto siempre contrasta (el scrim es `SCRIM` centralizado). Dibuja el
+/// rectángulo y el texto a la escala de `h`. Puro sobre el buffer.
+fn draw_rotulo_con_scrim(buf: &mut [u8], w: usize, h: usize, x: usize, y: usize, texto: &str) {
+    if w == 0 || h == 0 || texto.is_empty() {
+        return;
+    }
+    draw_scrim_para_rotulo(buf, w, h, x, y, texto);
+    draw_text_block(
+        buf,
+        w,
+        h,
+        x.saturating_add(4),
+        y.saturating_add(4),
+        texto,
+        TEXT_COLOR,
+        text_scale_for_h(h),
+    );
+}
 
 #[allow(clippy::too_many_arguments)]
 fn draw_text_block(
@@ -1086,57 +3132,107 @@ fn draw_text_block(
     color: [u8; 4],
     scale: usize,
 ) {
-    // Dibujo profesional minimal: cada caracter como bloque 5x7 con separacion 1px,
-    // escalable. Garantiza que cualquier texto (incluso emojis truncados) se renderice
-    // sin panics y en <1ms.
+    // Texto real con glifos (avance por glifo + tracking ≈ 6*scale como
+    // los bloques históricos; altura 10*scale para que el AA tenga núcleos
+    // sólidos legibles — a 7px ningún píxel llega a cobertura total y los
+    // rótulos quedaban tenues). Origen intacto: los rótulos caen en las
+    // mismas bandas que antes.
+    use ab_glyph::{Font as _, PxScale, ScaleFont as _};
     let scale = scale.clamp(1, 3);
-    let char_w = 5 * scale;
-    let char_h = 7 * scale;
-    let mut cx = x;
+    let cell_w = 5 * scale;
+    let cell_h = 7 * scale;
+    let tracking = scale as f32;
+    let Some(font) = sk_anim_font() else {
+        // Sin fuente integrada: bloques sólidos (legado honesto, sin panic).
+        let mut cx = x;
+        for ch in text.chars().take(48) {
+            if cx + cell_w >= w {
+                break;
+            }
+            if ch != ' ' {
+                sk_fallback_cell(buf, w, h, cx, y, cell_w, cell_h, color);
+            }
+            cx += cell_w + scale;
+        }
+        return;
+    };
+    let px = 10.0 * scale as f32;
+    let scaled = font.as_scaled(PxScale::from(px));
+    let baseline = y as f32 + scaled.ascent();
+    let space_advance = scaled.h_advance(font.glyph_id(' ')) + tracking;
+    let mut caret_x = x as f32;
+    let mut prev_id: Option<ab_glyph::GlyphId> = None;
     for ch in text.chars().take(48) {
-        if cx + char_w >= w {
+        if caret_x >= w as f32 {
             break;
         }
         if ch == ' ' {
-            cx += char_w + scale;
+            caret_x += space_advance;
+            prev_id = None;
             continue;
         }
-        // Texto sólido, sin variación hash que corrompe la lectura
-        draw_filled_rect(buf, w, h, cx, y, char_w, char_h, color);
-        // recortar interior 1px para efecto "pixel font" legible
-        if char_w > 2 && char_h > 2 {
-            let inner = TEXT_CUTOUT;
-            draw_filled_rect(
-                buf,
-                w,
-                h,
-                cx + scale,
-                y + scale,
-                char_w - 2 * scale,
-                char_h - 2 * scale,
-                inner,
-            );
+        let gid = font.glyph_id(ch);
+        if gid.0 == 0 {
+            sk_fallback_cell(buf, w, h, caret_x as usize, y, cell_w, cell_h, color);
+            caret_x += cell_w as f32 + tracking;
+            prev_id = None;
+            continue;
         }
-        cx += char_w + scale;
+        if let Some(prev) = prev_id {
+            caret_x += scaled.kern(prev, gid);
+        }
+        prev_id = Some(gid);
+        let glyph = ab_glyph::Glyph {
+            id: gid,
+            scale: PxScale::from(px),
+            position: ab_glyph::point(caret_x, baseline),
+        };
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            let ink_a = f32::from(color[3]) / 255.0;
+            outlined.draw(|dx, dy, coverage| {
+                if coverage <= 0.0 || ink_a <= 0.0 {
+                    return;
+                }
+                let gx = bounds.min.x as i32 + dx as i32;
+                let gy = bounds.min.y as i32 + dy as i32;
+                if gx < 0 || gy < 0 || gx >= w as i32 || gy >= h as i32 {
+                    return;
+                }
+                let alpha = ((coverage * TEXT_STEM_BOOST).clamp(0.0, 1.0) * ink_a).clamp(0.0, 1.0);
+                if let Some(i) = (gy as usize)
+                    .checked_mul(w)
+                    .and_then(|v| v.checked_add(gx as usize))
+                    .and_then(|v| v.checked_mul(4))
+                {
+                    if i + 3 < buf.len() {
+                        for k in 0..3 {
+                            buf[i + k] = (f32::from(color[k]) * alpha
+                                + f32::from(buf[i + k]) * (1.0 - alpha))
+                                as u8;
+                        }
+                        buf[i + 3] = 255;
+                    }
+                }
+            });
+        }
+        caret_x += scaled.h_advance(gid) + tracking;
     }
 }
 
-fn fill_background(buf: &mut [u8], w: usize, h: usize, concept: &str, t: f64) {
-    let accent = accent_for_concept(concept);
-    // gradiente vertical suave + tinte del acento segun t
+/// Fondo ÚNICO fijo de todo el cine nativo: gradiente vertical suave
+/// BG→BG_GRADIENT + viñeta (oscurece bordes 22% al extremo). Sin acento por
+/// concepto, sin fase temporal: el frame 0 y el 47 comparten fondo (el
+/// movimiento lo pone la matemática, no el cromo). Puro, sin pánicos.
+fn fill_background(buf: &mut [u8], w: usize, h: usize) {
+    // gradiente vertical suave
     for y in 0..h {
-        let v = y as f64 / h as f64;
-        // interpolacion BG -> BG_GRADIENT con seno sutil
-        let mix = v * 0.6 + (t * 0.08).sin() * 0.04;
-        let r = (BG[0] as f64 * (1.0 - mix)
-            + BG_GRADIENT[0] as f64 * mix
-            + accent[0] as f64 * 0.04 * (1.0 - v)) as u8;
-        let g = (BG[1] as f64 * (1.0 - mix)
-            + BG_GRADIENT[1] as f64 * mix
-            + accent[1] as f64 * 0.04 * (1.0 - v)) as u8;
-        let b = (BG[2] as f64 * (1.0 - mix)
-            + BG_GRADIENT[2] as f64 * mix
-            + accent[2] as f64 * 0.04 * (1.0 - v)) as u8;
+        let v = y as f64 / h.max(1) as f64;
+        // interpolacion BG -> BG_GRADIENT
+        let mix = v * 0.6;
+        let r = (BG[0] as f64 * (1.0 - mix) + BG_GRADIENT[0] as f64 * mix) as u8;
+        let g = (BG[1] as f64 * (1.0 - mix) + BG_GRADIENT[1] as f64 * mix) as u8;
+        let b = (BG[2] as f64 * (1.0 - mix) + BG_GRADIENT[2] as f64 * mix) as u8;
         for x in 0..w {
             if let Some(i) = y
                 .checked_mul(w)
@@ -1177,11 +3273,13 @@ fn fill_background(buf: &mut [u8], w: usize, h: usize, concept: &str, t: f64) {
     }
 }
 
-fn draw_subtle_grid(buf: &mut [u8], w: usize, h: usize, t: f64) {
-    // grid cada ~40px con parallax leve
+/// Grilla sutil ESTÁTICA (cada ~40px, punteada): el mismo fondo en los 48
+/// frames (sin parallax: la intersección grid↔relleno ya no baila y el test
+/// de sombra no necesita cota de fringe móvil). Pura, sin pánicos.
+fn draw_subtle_grid(buf: &mut [u8], w: usize, h: usize) {
+    // grid cada ~40px, fija
     let step = (w.min(h) / 10).max(18);
-    let off = ((t * 18.0) as usize) % step;
-    for x in (off..w).step_by(step) {
+    for x in (0..w).step_by(step) {
         for y in 0..h {
             if let Some(i) = y
                 .checked_mul(w)
@@ -1197,7 +3295,7 @@ fn draw_subtle_grid(buf: &mut [u8], w: usize, h: usize, t: f64) {
             }
         }
     }
-    for y in (off..h).step_by(step) {
+    for y in (0..h).step_by(step) {
         for x in 0..w {
             if x % 3 == 0 {
                 if let Some(i) = y
@@ -1224,9 +3322,230 @@ fn ease_in_out(t: f64) -> f64 {
     }
 }
 
+// ── Timeline por fases (cine visual, plantillas principales) ───────────────
+// setup 20% (base estática) / construcción 60% (cubic_in_out) / hold 20%
+// (resultado final). El `alpha` resultante mueve SOLO el elemento en
+// construcción; la base (ejes, curva fija, fondo) es idéntica en los 48.
+
+/// Fase de la timeline para un frame 0..`NATIVE_ANIM_FRAME_COUNT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaseConstruccion {
+    /// Base estática (`alpha` 0).
+    Setup,
+    /// Construyendo (`alpha` 0..1 con cubic_in_out).
+    Construccion,
+    /// Resultado final (`alpha` 1).
+    Hold,
+}
+
+/// Fracción de setup (0.2) y fin de construcción (0.8) sobre `t` global.
+pub const FASE_SETUP_HASTA: f64 = 0.2;
+/// Fin de la construcción sobre `t` global (hold hasta 1.0).
+pub const FASE_CONSTRUCCION_HASTA: f64 = 0.8;
+
+/// `(fase, alpha)` para el frame: `alpha` 0 en setup, `ease_in_out` en
+/// construcción, 1 en hold. Total (frame ≥48 → hold). Puro, sin pánicos.
+pub fn fase_para_frame(frame: usize) -> (FaseConstruccion, f64) {
+    let total = NATIVE_ANIM_FRAME_COUNT;
+    if total <= 1 {
+        return (FaseConstruccion::Hold, 1.0);
+    }
+    let t = (frame.min(total - 1) as f64) / (total - 1) as f64;
+    if t < FASE_SETUP_HASTA {
+        (FaseConstruccion::Setup, 0.0)
+    } else if t < FASE_CONSTRUCCION_HASTA {
+        let local = (t - FASE_SETUP_HASTA) / (FASE_CONSTRUCCION_HASTA - FASE_SETUP_HASTA);
+        (
+            FaseConstruccion::Construccion,
+            ease_in_out(local.clamp(0.0, 1.0)),
+        )
+    } else {
+        (FaseConstruccion::Hold, 1.0)
+    }
+}
+
+/// Solo el `alpha` de construcción (atajo para los renderers). Puro.
+pub fn fase_alpha(frame: usize) -> f64 {
+    fase_para_frame(frame).1
+}
+
+// ── Frente A: ejes con ticks numéricos y rótulos en previews ─────────────
+// Queja real: "no se sabe cuál es cuál". TODOS los renderers paramétricos
+// dibujan ejes x/y con ticks numéricos y rótulos vía `draw_axes_with_labels`
+// (el placeholder `universal` NO: por diseño honesto no lleva ejes ni
+// curvas). Paso lindo 1/2/5×10^n + skip anti-solape + formato reusados de
+// `render_2d`. Determinista, sin pánicos ni `unwrap`.
+
+/// Valores de tick en el intervalo abierto (-3, 3) para un paso dado (el 0
+/// se rotula una sola vez en el origen). Pura, testeable.
+fn axis_tick_values(paso: f64) -> Vec<f64> {
+    if !paso.is_finite() || paso <= 0.0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut k: i64 = 1;
+    while (k as f64) * paso < 3.0 {
+        if out.len() > 512 {
+            break;
+        }
+        let v = (k as f64) * paso;
+        out.push(-v);
+        out.push(v);
+        k += 1;
+    }
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// Ejes x/y del mundo [-3,3]² con ticks numéricos y rótulos "x"/"y".
+/// Viewport fijo del § viewport: misma escala en los 48 frames.
+///
+/// En miniaturas (<48px) dibuja solo las líneas (el texto sería ilegible y
+/// se solaparía). Rótulos con formato corto (1 decimal máximo, vía la Piel
+/// `short_tick_label`) + registro de cajas disjuntas: el que colisiona NO se
+/// dibuja (adiós "0000" amontonados y números verticales superpuestos).
+/// Cine visual: etiquetas a ≥8px del eje, "x"/"y" con margen 12px al borde,
+/// y el "0" del origen se omite si colisiona con otro rótulo.
+/// Los rótulos de ticks usan `draw_text_block` a escala 1 (las cajas de
+/// colisión asumen esa métrica): el test `ejes_pintan_texto_en_zona_de_ejes`
+/// los detecta como píxeles claros en las bandas de los ejes.
+fn draw_axes_with_labels(buf: &mut [u8], w: usize, h: usize) {
+    draw_line(
+        buf,
+        w,
+        h,
+        to_pixel(w, h, -3.0, 0.0),
+        to_pixel(w, h, 3.0, 0.0),
+        AXIS_COLOR,
+    );
+    draw_line(
+        buf,
+        w,
+        h,
+        to_pixel(w, h, 0.0, -3.0),
+        to_pixel(w, h, 0.0, 3.0),
+        AXIS_COLOR,
+    );
+    if w < 48 || h < 48 {
+        return;
+    }
+    // ~1 tick cada 64px del lado corto (mínimo 2 divisiones).
+    let por_eje = (w.min(h) as f64 / 64.0).max(2.0);
+    let paso = nice_number_plane_step(6.0 / por_eje);
+    if !paso.is_finite() || paso <= 0.0 {
+        return;
+    }
+    let ticks = axis_tick_values(paso);
+    if ticks.is_empty() {
+        return;
+    }
+    let (cx, cy) = to_pixel(w, h, 0.0, 0.0);
+    let skip_x = adaptive_label_skip(ticks.len(), w as f32, 48.0).max(1);
+    let skip_y = adaptive_label_skip(ticks.len(), h as f32, 20.0).max(1);
+    // Registro de cajas ocupadas: se reservan PRIMERO los slots de "x",
+    // "y" (nombre del eje tiene prioridad: el tick que colisione se omite,
+    // su marca igual se dibuja). El "0" se chequea al final y se omite si
+    // colisiona — bounding boxes disjuntos siempre.
+    let mut ocupadas: Vec<LabelCaja> = Vec::new();
+    let caja_x = LabelCaja {
+        x: w.saturating_sub(12 + TICK_CHAR_W_PX as usize + 4),
+        y: (cy + 8).min(h.saturating_sub(9)),
+        w: TICK_CHAR_W_PX as usize + 4,
+        h: TICK_CHAR_H_PX as usize,
+    };
+    let caja_y = LabelCaja {
+        x: (cx + 8).min(w.saturating_sub(24)),
+        y: 12.min(h.saturating_sub(9)),
+        w: TICK_CHAR_W_PX as usize + 4,
+        h: TICK_CHAR_H_PX as usize,
+    };
+    ocupadas.push(caja_x);
+    ocupadas.push(caja_y);
+    let caja_para = |tag: &str| -> (usize, usize) {
+        let tw = tag
+            .chars()
+            .count()
+            .saturating_mul(TICK_CHAR_W_PX as usize)
+            .saturating_add(4);
+        (tw, TICK_CHAR_H_PX as usize)
+    };
+    for (i, v) in ticks.iter().enumerate() {
+        let (px, _) = to_pixel(w, h, *v, 0.0);
+        draw_line(
+            buf,
+            w,
+            h,
+            (px, cy.saturating_sub(3)),
+            (px, cy.saturating_add(3).min(h.saturating_sub(1))),
+            AXIS_COLOR,
+        );
+        if i % skip_x == 0 {
+            let tag = short_tick_label(*v);
+            let ly = (cy + 8).min(h.saturating_sub(9));
+            let lx = px.saturating_add(2);
+            let (tw, th) = caja_para(&tag);
+            // Cerca del eje y vive el "0" del origen: no duplicarlo.
+            let lejos_origen =
+                px.saturating_sub(cx).max(cx.saturating_sub(px)) >= tw.saturating_add(6);
+            if lejos_origen && cabe_label_entre(lx, ly, tw, th, &ocupadas) {
+                draw_text_block(buf, w, h, lx, ly, &tag, TEXT_COLOR, 1);
+                ocupadas.push(LabelCaja {
+                    x: lx,
+                    y: ly,
+                    w: tw,
+                    h: th,
+                });
+            }
+        }
+        let (_, py) = to_pixel(w, h, 0.0, *v);
+        draw_line(
+            buf,
+            w,
+            h,
+            (cx.saturating_sub(3), py),
+            (cx.saturating_add(3).min(w.saturating_sub(1)), py),
+            AXIS_COLOR,
+        );
+        if i % skip_y == 0 {
+            let tag = short_tick_label(*v);
+            let lx = (cx + 8).min(w.saturating_sub(24));
+            let ly = py.saturating_sub(8);
+            let (tw, th) = caja_para(&tag);
+            // Cerca del eje x vive el "0" del origen: no duplicarlo.
+            let lejos_origen =
+                py.saturating_sub(cy).max(cy.saturating_sub(py)) >= th.saturating_add(4);
+            if lejos_origen && cabe_label_entre(lx, ly, tw, th, &ocupadas) {
+                draw_text_block(buf, w, h, lx, ly, &tag, TEXT_COLOR, 1);
+                ocupadas.push(LabelCaja {
+                    x: lx,
+                    y: ly,
+                    w: tw,
+                    h: th,
+                });
+            }
+        }
+    }
+    // Origen una sola vez (se omite si colisiona con un tick o con los
+    // slots reservados de "x"/"y") + rótulos de eje en sus slots
+    // reservados (margen 12px al borde, offset ≥8px del eje).
+    let (ox, oy) = (cx.saturating_add(8), (cy + 8).min(h.saturating_sub(9)));
+    let caja_cero = LabelCaja {
+        x: ox,
+        y: oy,
+        w: TICK_CHAR_W_PX as usize + 4,
+        h: TICK_CHAR_H_PX as usize,
+    };
+    if cabe_label_entre(ox, oy, caja_cero.w, caja_cero.h, &ocupadas) {
+        draw_text_block(buf, w, h, ox, oy, "0", TEXT_COLOR, 1);
+        ocupadas.push(caja_cero);
+    }
+    draw_text_block(buf, w, h, caja_x.x, caja_x.y, "x", TEXT_COLOR, 1);
+    draw_text_block(buf, w, h, caja_y.x, caja_y.y, "y", TEXT_COLOR, 1);
+}
+
 // ── Plantillas existentes ────────────────────────────────────────────────
 
-pub(crate) fn render_native_animation_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+pub fn render_native_animation_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
     // Legacy sin params: mapa vacío = comportamiento histórico exacto.
     render_derivative_frames_with_params(width, height, &std::collections::BTreeMap::new())
 }
@@ -1261,60 +3580,42 @@ fn render_derivative_frames_with_params_impl(
         .collect();
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
-        let t = if NATIVE_ANIM_FRAME_COUNT <= 1 {
-            0.0
-        } else {
-            frame as f64 / (NATIVE_ANIM_FRAME_COUNT - 1) as f64
-        };
+        // Timeline por fases: el barrido de la tangente se construye en el
+        // 60% central (setup/hold estáticos).
+        let t = fase_alpha(frame);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "derivada", t * 0.1);
-        draw_subtle_grid(&mut buf, w, h, t);
-        let axis = AXIS_COLOR;
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            axis,
-        );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            axis,
-        );
-        for pair in parabola.windows(2) {
-            let (ax, ay) = to_pixel(w, h, pair[0].0, pair[0].1);
-            let (bx, by) = to_pixel(w, h, pair[1].0, pair[1].1);
-            draw_line(&mut buf, w, h, (ax, ay), (bx, by), CURVE_MAIN);
-        }
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        // Parábola con clip limpio a 2px: fuera del viewport fijo se corta,
+        // no se aplasta (sin plateau). Idéntica en los 48 frames.
+        draw_curva_mundo(&mut buf, w, h, &parabola, CURVE_MAIN, CURVE_ANCHO);
         let x0 = (center - span + 2.0 * span * t).clamp(-3.0, 3.0);
         let y0 = x0 * x0;
         let slope = 2.0 * x0;
         let x_a = x0 - 1.0;
         let x_b = x0 + 1.0;
-        let (ax, ay) = to_pixel(w, h, x_a, y0 + slope * (x_a - x0));
-        let (bx, by) = to_pixel(w, h, x_b, y0 + slope * (x_b - x0));
-        draw_line(&mut buf, w, h, (ax, ay), (bx, by), TANGENT_BLUE);
-        let (px, py) = to_pixel(w, h, x0, y0);
-        draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+        // Tangente recortada a vista (2px AA); punto solo si está en vista:
+        // antes ambos se aplastaban contra el borde superior.
+        draw_seg_mundo(
+            &mut buf,
+            w,
+            h,
+            x_a,
+            y0 + slope * (x_a - x0),
+            x_b,
+            y0 + slope * (x_b - x0),
+            TANGENT_BLUE,
+            CURVE_ANCHO,
+        );
+        if let Some((px, py)) = to_pixel_opt(w, h, x0, y0) {
+            draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+        }
         // titulo superior (solo standalone/export: el chat ya titula en el header)
         if con_rotulo {
-            draw_text_block(
-                &mut buf,
-                w,
-                h,
-                w / 12,
-                h / 12,
-                "derivada  f'(x)",
-                TEXT_COLOR,
-                1,
-            );
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 12, h / 12, "derivada  f'(x)");
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -1322,7 +3623,7 @@ fn render_derivative_frames_with_params_impl(
     frames
 }
 
-pub(crate) fn render_pitagoras_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+pub fn render_pitagoras_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
     render_pitagoras_frames_impl(width, height, true, &mut |_, _| {})
 }
 
@@ -1335,12 +3636,16 @@ fn render_pitagoras_frames_impl(
     let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).clamp(0.0, 1.0);
+        // Timeline por fases: los cuadrados crecen 0→1 en construcción.
+        let t = fase_alpha(frame);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "pitagoras", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        // Frente A: ejes rotulados como el resto de paramétricos (el
+        // triángulo vive en el mismo mundo [-3,3]²; se dibuja encima).
+        draw_axes_with_labels(&mut buf, w, h);
         let p1 = to_pixel(w, h, -1.0, -1.0);
         let p2 = to_pixel(w, h, 1.0, -1.0);
         let p3 = to_pixel(w, h, 1.0, 0.5);
@@ -1365,16 +3670,7 @@ fn render_pitagoras_frames_impl(
             draw_line(&mut buf, w, h, mid, p1, SQUARE_GREEN);
         }
         if con_rotulo {
-            draw_text_block(
-                &mut buf,
-                w,
-                h,
-                w / 14,
-                h / 12,
-                "a^2 + b^2 = c^2",
-                TEXT_COLOR,
-                1,
-            );
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "a^2 + b^2 = c^2");
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -1382,7 +3678,7 @@ fn render_pitagoras_frames_impl(
     frames
 }
 
-pub(crate) fn render_integral_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+pub fn render_integral_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
     render_integral_frames_with_params(width, height, &std::collections::BTreeMap::new())
 }
 
@@ -1427,16 +3723,11 @@ fn integral_eval(anim: Option<&ParametricAnim>, frame: usize, x: f64) -> Option<
     }
 }
 
-/// Extremo derecho del área en el frame (`a..x_end` crece con el frame).
+/// Extremo derecho del área en el frame (`a..x_end` crece con la fase de
+/// construcción: 0 en setup, `ease_in_out` en construcción, `b` en hold).
 /// Puro, sin I/O, sin pánicos.
 pub(crate) fn integral_frame_end(a: f64, b: f64, frame: usize) -> f64 {
-    let total = NATIVE_ANIM_FRAME_COUNT;
-    let t = if total <= 1 {
-        0.0
-    } else {
-        frame.min(total - 1) as f64 / (total - 1) as f64
-    };
-    a + (b - a) * t
+    a + (b - a) * fase_alpha(frame)
 }
 
 /// Cota de pasos de trapecios R1-7 (núcleo común, sin `as usize` ciego).
@@ -1565,29 +3856,13 @@ fn render_integral_frames_with_params_impl(
         .collect();
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        // Timeline por fases (`integral_frame_end` ya usa `fase_alpha`).
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "integral", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
-        let axis = AXIS_COLOR;
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            axis,
-        );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            axis,
-        );
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
         let x_end = integral_frame_end(a, b, frame).clamp(-3.0, 3.0);
         // Área acumulada `a..x_end`: una pasada por columna de pantalla
         // (densa como la vía paramétrica: cada píxel se blendea una sola
@@ -1619,7 +3894,17 @@ fn render_integral_frames_with_params_impl(
         // Etiquetas ASCII honestas: título fijo (solo export) + valor acumulado
         // del frame (siempre: es dato, no rótulo).
         if con_rotulo {
-            draw_text_block(&mut buf, w, h, w / 14, h / 12, "y=x^2", TEXT_COLOR, 1);
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "y=x^2");
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "y=x^2",
+                TEXT_COLOR,
+                text_scale_for_h(h),
+            );
         }
         let etiqueta = match integral_acumulada(anim_ref, frame, a, x_end) {
             Some(s) => format!("[{a:.2},{x_end:.2}] S={s:.2}"),
@@ -1641,7 +3926,7 @@ fn render_integral_frames_with_params_impl(
     frames
 }
 
-pub(crate) fn render_taylor_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+pub fn render_taylor_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
     render_taylor_frames_impl(width, height, true, &mut |_, _| {})
 }
 
@@ -1683,11 +3968,11 @@ pub(crate) fn taylor_partial_sum(grado: usize, x: f64) -> f64 {
     suma
 }
 
-/// W-C T3: Taylor con orden vivo. `terms` en `1..=10` (def 3.0 = histórico:
-/// misma curva P3 que el legacy; la etiqueta sí suma el orden y por eso
-/// los píxeles difieren del legacy solo en el rótulo).
-/// La animación de convergencia la da el frame `t` (fade de aparición,
-/// como el legacy) + el slider del panel que re-renderiza por orden.
+/// W-C T3 + F1: Taylor con orden vivo. `terms` se lee con
+/// `taylor_anim_order_from_params` (W2: 1..=7, def 3 = histórico; el slider
+/// del panel que llega a 10 se clampa a 7 para que el set siga legible).
+/// La animación de convergencia la da el frame `t` (fade de aparición)
+/// + el slider del panel que re-renderiza por orden.
 pub fn render_taylor_frames_with_params(
     width: u32,
     height: u32,
@@ -1703,10 +3988,20 @@ fn render_taylor_frames_with_params_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let orden = scene_param_clamped(params, SCENE_PARAM_TERMS, 3.0, 1.0, 10.0) as usize;
-    let orden = orden.clamp(1, 10);
-    let etiqueta = format!("taylor sin(x) n={orden}");
-    render_taylor_frames_inner(width, height, orden, &etiqueta, con_rotulo, on_frame)
+    // W-C T3 + Frente A + F1: orden vivo por `terms` vía el lector
+    // canónico W2 (`taylor_anim_order_from_params`: 1..=7, def 3),
+    // centro vivo por `x0` (default histórico 0.0). Sin f en el mapa
+    // (solo f64) la serie es la canónica `sin(x)` DECLARADA por la prosa
+    // del turno; la f explícita del pedido entra por
+    // `render_taylor_frames_for_spec_impl`.
+    let orden = taylor_anim_order_from_params(params);
+    let centro = scene_param_clamped(params, SCENE_PARAM_X0, 0.0, -3.0, 3.0);
+    let spec = grafito_anim::parametric::TaylorSpec {
+        expr: grafito_anim::parametric::TAYLOR_CANONICAL_EXPR.to_string(),
+        centro,
+        orden,
+    };
+    render_taylor_frames_for_spec_impl(width, height, &spec, con_rotulo, on_frame)
 }
 
 fn render_taylor_frames_inner(
@@ -1722,35 +4017,29 @@ fn render_taylor_frames_inner(
     let taylor = |x: f64| taylor_partial_sum(orden, x);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "taylor", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
-        let axis = AXIS_COLOR;
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            axis,
-        );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            axis,
-        );
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
         for i in -60..60 {
             let x0 = i as f64 / 20.0;
             let x1 = (i + 1) as f64 / 20.0;
-            let a = to_pixel(w, h, x0, f(x0));
-            let b = to_pixel(w, h, x1, f(x1));
-            draw_line(&mut buf, w, h, a, b, CURVE_MAIN);
+            // `sin` vive en [-1,1] (en vista); el clip es no-op honesto.
+            draw_seg_mundo(
+                &mut buf,
+                w,
+                h,
+                x0,
+                f(x0),
+                x1,
+                f(x1),
+                CURVE_MAIN,
+                CURVE_ANCHO,
+            );
         }
         let alpha = (t * 255.0) as u8;
         for i in -60..60 {
@@ -1758,14 +4047,33 @@ fn render_taylor_frames_inner(
             let x1 = (i + 1) as f64 / 20.0;
             let w0 = (1.0 - (x0.abs() / 3.0)).clamp(0.0, 1.0);
             let w1 = (1.0 - (x1.abs() / 3.0)).clamp(0.0, 1.0);
-            let a = to_pixel(w, h, x0, taylor(x0));
-            let b = to_pixel(w, h, x1, taylor(x1));
+            // Polinomio sin saturar: fuera de vista se corta, no se aplasta.
             let mut c = PAL_BLUE;
             c[3] = (alpha as f64 * w0.min(w1)) as u8;
-            draw_line(&mut buf, w, h, a, b, c);
+            draw_seg_mundo(
+                &mut buf,
+                w,
+                h,
+                x0,
+                taylor(x0),
+                x1,
+                taylor(x1),
+                c,
+                CURVE_ANCHO,
+            );
         }
         if con_rotulo {
-            draw_text_block(&mut buf, w, h, w / 14, h / 12, etiqueta, TEXT_COLOR, 1);
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, etiqueta);
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                etiqueta,
+                TEXT_COLOR,
+                text_scale_for_h(h),
+            );
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -1773,7 +4081,209 @@ fn render_taylor_frames_inner(
     frames
 }
 
-pub(crate) fn render_conformal_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+// ── Frente A: Taylor con función explícita ──────────────────────────────
+// Queja real: "pedí taylor y me tiró una senoidal nada que ver". El renderer
+// histórico hardcodeaba `sin(x)`; ahora la serie es la REAL de f vía el
+// motor reutilizable `grafito_geometry::symbolic::taylor_series` (el mismo
+// del comando `Taylor`): `P_n` sale del motor como string (solo `* ^ + -`
+// y paréntesis) y se evalúa con el evaluador paramétrico; f se evalúa con
+// otro `ParametricAnim` temporal. Cero derivadas inventadas: si el motor no
+// deriva f, `taylor_poly_anim` da `None` honesto y se dibuja solo f.
+// Sin f, la canónica `sin(x)` la declara la PROSA del turno (el renderer
+// solo dibuja etiquetas ASCII con f + centro + orden).
+
+/// Evaluador temporal de una expresión en el mundo [-3,3] (`p` fijo en el
+/// frame 0: Taylor no tiene parámetro móvil). `None` si no construye
+/// (expresión >2000 chars). Puro, sin I/O.
+fn taylor_eval_anim(expr: &str) -> Option<ParametricAnim> {
+    ParametricAnim::try_new(
+        ParametricKind::Sweep,
+        expr.to_string(),
+        None,
+        ParamName::try_new("p").ok()?,
+        0.0,
+        1.0,
+        FrameCount::try_new(24).ok()?,
+        Resolution::default(),
+    )
+    .ok()
+}
+
+/// Polinomio de Taylor REAL de `expr` en `centro` hasta `orden` (1..=10),
+/// como evaluador listo para dibujar. `None` honesto si el centro no es
+/// finito, el motor no deriva f o el polinomio no evalúa en ningún punto
+/// del mundo. Puro, sin I/O.
+fn taylor_poly_anim(expr: &str, centro: f64, orden: usize) -> Option<ParametricAnim> {
+    if !centro.is_finite() {
+        return None;
+    }
+    let orden = orden.clamp(TAYLOR_MIN_ORDER, TAYLOR_MAX_ORDER);
+    let poly = grafito_geometry::symbolic::taylor_series(expr, "x", centro, orden).ok()?;
+    let anim = taylor_eval_anim(&poly)?;
+    for k in 0..9 {
+        let x = -3.0 + 6.0 * (k as f64 / 8.0);
+        if anim.eval_frame(0, x).is_some() {
+            return Some(anim);
+        }
+    }
+    None
+}
+
+/// Número corto ASCII para la etiqueta del frame ("0", "1", "0.5").
+/// No-finito → "?" honesto. Puro.
+fn fmt_corto(v: f64) -> String {
+    if !v.is_finite() {
+        return "?".to_string();
+    }
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        return format!("{:.0}", v);
+    }
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Taylor REAL de un spec (f explícita o canónica declarada): f amarilla
+/// fija + `P_n` azul con fade de aparición y peso al centro (como el
+/// legacy) + ejes rotulados. Si el motor no deriva f (el infer lo impide;
+/// defensa en profundidad), dibuja solo f sin inventar polinomio.
+pub fn render_taylor_frames_for_spec(
+    width: u32,
+    height: u32,
+    spec: &grafito_anim::parametric::TaylorSpec,
+) -> Vec<egui::ColorImage> {
+    render_taylor_frames_for_spec_impl(width, height, spec, true, &mut |_, _| {})
+}
+
+/// Núcleo con flag de rótulo + progreso REAL por frame (el chat usa
+/// `con_rotulo=false`: el header egui ya titula; export usa `true`).
+pub(crate) fn render_taylor_frames_for_spec_impl(
+    width: u32,
+    height: u32,
+    spec: &grafito_anim::parametric::TaylorSpec,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let orden = spec.orden.clamp(TAYLOR_MIN_ORDER, TAYLOR_MAX_ORDER);
+    let centro = if spec.centro.is_finite() {
+        spec.centro
+    } else {
+        0.0
+    };
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let expr = spec.expr.trim();
+    let expr_corta: String = expr.chars().take(12).collect();
+    let etiqueta = format!("taylor {expr_corta} c={} n={orden}", fmt_corto(centro));
+    let f_anim = taylor_eval_anim(expr)
+        .or_else(|| taylor_eval_anim(grafito_anim::parametric::TAYLOR_CANONICAL_EXPR));
+    let p_anim = taylor_poly_anim(expr, centro, orden);
+    let Some(f_anim) = f_anim else {
+        // Sin evaluador ni canónico (inconcebible: `sin(x)` construye
+        // siempre): fondo + ejes honestos, jamás curva falsa.
+        let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+        for _ in 0..NATIVE_ANIM_FRAME_COUNT {
+            let byte_len =
+                checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+            let mut buf = vec![0u8; byte_len];
+            fill_background(&mut buf, w, h);
+            draw_subtle_grid(&mut buf, w, h);
+            draw_axes_with_labels(&mut buf, w, h);
+            if con_rotulo {
+                draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, &etiqueta);
+                draw_text_block(
+                    &mut buf,
+                    w,
+                    h,
+                    w / 14,
+                    h / 12,
+                    &etiqueta,
+                    TEXT_COLOR,
+                    text_scale_for_h(h),
+                );
+            }
+            frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+            on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+        }
+        return frames;
+    };
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        for i in -60..60 {
+            let x0 = i as f64 / 20.0;
+            let x1 = (i + 1) as f64 / 20.0;
+            if let (Some(y0), Some(y1)) = (f_anim.eval_frame(0, x0), f_anim.eval_frame(0, x1)) {
+                draw_seg_mundo(&mut buf, w, h, x0, y0, x1, y1, CURVE_MAIN, CURVE_ANCHO);
+            }
+        }
+        let alpha = (t * 255.0) as u8;
+        if let Some(p) = p_anim.as_ref() {
+            for i in -60..60 {
+                let x0 = i as f64 / 20.0;
+                let x1 = (i + 1) as f64 / 20.0;
+                let w0 = (1.0 - ((x0 - centro).abs() / 3.0)).clamp(0.0, 1.0);
+                let w1 = (1.0 - ((x1 - centro).abs() / 3.0)).clamp(0.0, 1.0);
+                if let (Some(y0), Some(y1)) = (p.eval_frame(0, x0), p.eval_frame(0, x1)) {
+                    let mut c = PAL_BLUE;
+                    c[3] = (alpha as f64 * w0.min(w1)) as u8;
+                    draw_seg_mundo(&mut buf, w, h, x0, y0, x1, y1, c, CURVE_ANCHO);
+                }
+            }
+        }
+        if con_rotulo {
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, &etiqueta);
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                &etiqueta,
+                TEXT_COLOR,
+                text_scale_for_h(h),
+            );
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+    frames
+}
+
+/// Mapa de Möbius real w=(z−c)/(1−conj(c)·z) (F1, compartido).
+///
+/// El mismo que anima `mobius-transform`: la plantilla `conformal-map`
+/// dibuja esta deformación (holomorfa con derivada no nula fuera del polo:
+/// conforme de verdad) en vez del desplazamiento fake `x+0.2·sin(3x)`
+/// (seno decorativo, jamás una aplicación conforme). `None` honesto en el
+/// polo (den≈0) o salida no finita; resultado clamp a [-3,3]. Puro.
+fn mobius_map(x: f64, y: f64, cr: f64, ci: f64) -> Option<(f64, f64)> {
+    let nr = x - cr;
+    let ni = y - ci;
+    // conj(c)*z = (cr*x+ci*y) + i*(cr*y−ci*x)
+    let dr = 1.0 - (cr * x + ci * y);
+    let di = -(cr * y - ci * x);
+    let den = dr * dr + di * di;
+    if den < 1e-9 || !den.is_finite() {
+        return None;
+    }
+    let wr = (nr * dr + ni * di) / den;
+    let wi = (ni * dr - nr * di) / den;
+    if !wr.is_finite() || !wi.is_finite() {
+        return None;
+    }
+    Some((wr.clamp(-3.0, 3.0), wi.clamp(-3.0, 3.0)))
+}
+
+pub fn render_conformal_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
     render_conformal_frames_impl(width, height, true, &mut |_, _| {})
 }
 
@@ -1786,65 +4296,51 @@ fn render_conformal_frames_impl(
     let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "conformal", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
-        let axis = AXIS_COLOR;
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            axis,
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        // Barrido propio del parámetro (distinto del `mobius-transform`:
+        // primero != último, sin loop).
+        let (cr, ci) = (
+            0.45 * (2.0 * t - 1.0),
+            0.3 * (std::f64::consts::PI * t).sin(),
         );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            axis,
-        );
+        // Rejilla original tenue + imagen conforme brillante.
         for gx in -2..=2 {
             for gy in -2..=2 {
                 let x = gx as f64;
                 let y = gy as f64;
-                let tx = x + 0.2 * t * (3.0 * x).sin();
-                let ty = y + 0.15 * t * (3.0 * y).cos();
-                let p = to_pixel(w, h, tx, ty);
-                let sz = if gx == 0 && gy == 0 { 4 } else { 2 };
-                let col = if gx == 0 || gy == 0 {
-                    MINT_STRONG
-                } else {
-                    MINT_FAINT
-                };
-                draw_filled_circle(&mut buf, w, h, p.0, p.1, sz, col);
+                let p0 = to_pixel(w, h, x, y);
+                draw_filled_circle(&mut buf, w, h, p0.0, p0.1, 1, MINT_FAINT);
+                if let Some((wx, wy)) = mobius_map(x, y, cr, ci) {
+                    let p1 = to_pixel(w, h, wx, wy);
+                    draw_filled_circle(&mut buf, w, h, p1.0, p1.1, 2, MINT_STRONG);
+                }
             }
         }
-        for i in -60..60 {
-            let x0 = i as f64 / 20.0;
-            let x1 = (i + 1) as f64 / 20.0;
-            let y0 = 0.2 * t * (3.0 * x0).sin();
-            let y1 = 0.2 * t * (3.0 * x1).sin();
-            let a = to_pixel(w, h, x0, y0);
-            let b = to_pixel(w, h, x1, y1);
-            draw_line(&mut buf, w, h, a, b, LINE_SOFT_BLUE);
+        // Círculo unidad transformado (60 segmentos): la imagen deforma el
+        // círculo sin romper ángulos (conformidad visible).
+        let mut prev: Option<(usize, usize)> = None;
+        for k in 0..=60 {
+            let a = 2.0 * std::f64::consts::PI * k as f64 / 60.0;
+            let (zx, zy) = (a.cos(), a.sin());
+            if let Some((wx, wy)) = mobius_map(zx, zy, cr, ci) {
+                let p = to_pixel(w, h, wx, wy);
+                if let Some(q) = prev {
+                    draw_line(&mut buf, w, h, q, p, CURVE_MAIN);
+                }
+                prev = Some(p);
+            } else {
+                prev = None;
+            }
         }
         if con_rotulo {
-            draw_text_block(
-                &mut buf,
-                w,
-                h,
-                w / 14,
-                h / 12,
-                "conforme  w=f(z)",
-                TEXT_COLOR,
-                1,
-            );
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "conforme w=(z-c)/(1-cc*z)");
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -1894,8 +4390,8 @@ fn render_universal_youtube_frames_impl(
         // Fondo y grilla ESTÁTICOS con tinte fijo: el pedido no modula nada
         // para no fingir contenido (antes el hash del texto elegía color,
         // fase de la curva y órbitas de partículas).
-        fill_background(&mut buf, w, h, "universal", 0.0);
-        draw_subtle_grid(&mut buf, w, h, 0.0);
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
         // Rótulo honesto + eco del pedido (solo standalone/export: el chat ya
         // titula en el header de la card).
         let echo: String = concept_norm.chars().take(32).collect();
@@ -1986,7 +4482,8 @@ fn resolve_native_template(template: &str, concept: &str) -> &'static str {
 
 /// Dispatcher con params vivos (v3): el scrub de la UI re-renderiza llamando
 /// aquí con el mapa vivo. Atienden params: `derivative-slope` (x0/span),
-/// `integral-area` (a/b), `taylor-series` (terms = orden 1..=10, W-C T3),
+/// `integral-area` (a/b), `taylor-series` (terms = orden 1..=7 vía
+/// `taylor_anim_order_from_params`, F1),
 /// `euler`/`fourier` (terms). El resto IGNORA params
 /// por ahora (TODO honesto: conformal/pitagoras/
 /// logistic/gradient/mobius/universal aún no parametrizan) y delega al legacy.
@@ -2205,71 +4702,52 @@ fn render_euler_frames_with_params_impl(
             }
             break;
         }
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
         let terms = (1 + (t * (max_terms as f64 - 1.0)) as usize).clamp(1, max_terms);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "euler", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
-        let axis = AXIS_COLOR;
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            axis,
-        );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            axis,
-        );
-        // draw exp(x) target faint
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        // draw exp(x) target faint (sin saturar: el clip corta en el borde)
         for i in -60..60 {
             let x0 = i as f64 / 20.0;
             let x1 = (i + 1) as f64 / 20.0;
-            let y0 = x0.exp().clamp(-3.0, 3.0);
-            let y1 = x1.exp().clamp(-3.0, 3.0);
-            draw_line(
-                &mut buf,
-                w,
-                h,
-                to_pixel(w, h, x0, y0),
-                to_pixel(w, h, x1, y1),
-                FAINT_WHITE,
-            );
+            draw_seg_mundo(&mut buf, w, h, x0, x0.exp(), x1, x1.exp(), FAINT_WHITE, 1.0);
         }
-        // draw partial sum
+        // draw partial sum (sin saturar: el clip corta en el borde)
         let factorial = |n: usize| -> f64 { (1..=n).fold(1.0, |a, b| a * b as f64) };
         let partial = |x: f64| -> f64 {
             (0..terms)
                 .map(|k| x.powi(k as i32) / factorial(k))
                 .sum::<f64>()
-                .clamp(-3.0, 3.0)
         };
         for i in -60..60 {
             let x0 = i as f64 / 20.0;
             let x1 = (i + 1) as f64 / 20.0;
-            let a = to_pixel(w, h, x0, partial(x0));
-            let b = to_pixel(w, h, x1, partial(x1));
-            draw_line(&mut buf, w, h, a, b, TANGENT_BLUE);
+            draw_seg_mundo(
+                &mut buf,
+                w,
+                h,
+                x0,
+                partial(x0),
+                x1,
+                partial(x1),
+                TANGENT_BLUE,
+                CURVE_ANCHO,
+            );
         }
         // Indicador de términos (solo export: en el chat duplica el header).
         if con_rotulo {
-            draw_text_block(
+            draw_rotulo_con_scrim(
                 &mut buf,
                 w,
                 h,
                 w / 14,
                 h / 12,
                 &format!("e^x  n={}", terms - 1),
-                TEXT_COLOR,
-                1,
             );
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
@@ -2330,30 +4808,15 @@ fn render_fourier_frames_with_params_impl(
             }
             break;
         }
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
         let harmonics = (1 + (t * (max_harm as f64 - 1.0)) as usize).clamp(1, max_harm);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "fourier", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
-        let axis = AXIS_COLOR;
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            axis,
-        );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            axis,
-        );
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
         let fourier = |x: f64| -> f64 {
             let mut s = 0.0;
             for k in 0..harmonics {
@@ -2365,27 +4828,33 @@ fn render_fourier_frames_with_params_impl(
         for i in -60..60 {
             let x0 = i as f64 / 20.0;
             let x1 = (i + 1) as f64 / 20.0;
-            let a = to_pixel(w, h, x0, fourier(x0));
-            let b = to_pixel(w, h, x1, fourier(x1));
-            draw_line(&mut buf, w, h, a, b, CURVE_MAIN);
+            draw_seg_mundo(
+                &mut buf,
+                w,
+                h,
+                x0,
+                fourier(x0),
+                x1,
+                fourier(x1),
+                CURVE_MAIN,
+                CURVE_ANCHO,
+            );
         }
-        // Gibbs markers at discontinuities
+        // Gibbs markers at discontinuities (rojo punto/resultado, radio 3).
         for &cx in &[-std::f64::consts::PI, 0.0, std::f64::consts::PI] {
             if cx.abs() <= 3.0 {
                 let p = to_pixel(w, h, cx, 0.0);
-                draw_filled_circle(&mut buf, w, h, p.0, p.1, 2, GIBBS_RED);
+                draw_filled_circle(&mut buf, w, h, p.0, p.1, 3, GIBBS_RED);
             }
         }
         if con_rotulo {
-            draw_text_block(
+            draw_rotulo_con_scrim(
                 &mut buf,
                 w,
                 h,
                 w / 14,
                 h / 12,
                 &format!("fourier  k={}", harmonics),
-                TEXT_COLOR,
-                1,
             );
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
@@ -2435,28 +4904,14 @@ fn render_logistic_bifurcation_frames_impl(
             }
             break;
         }
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "bifurcacion logistica", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            AXIS_COLOR,
-        );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            AXIS_COLOR,
-        );
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
         // Área del diagrama con márgenes (segura en 64x64).
         let x0 = w / 12;
         let x1 = w.saturating_sub(w / 12).max(x0 + 8);
@@ -2511,7 +4966,17 @@ fn render_logistic_bifurcation_frames_impl(
             );
         }
         if con_rotulo {
-            draw_text_block(&mut buf, w, h, w / 14, h / 12, "bifurcacion r", PAL_FG, 1);
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "bifurcacion r");
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "bifurcacion r",
+                PAL_FG,
+                text_scale_for_h(h),
+            );
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -2559,28 +5024,14 @@ fn render_gradient_field_frames_impl(
             }
             break;
         }
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "campo gradiente", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            AXIS_COLOR,
-        );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            AXIS_COLOR,
-        );
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
         // Flechas del gradiente (5x5, determinista).
         let math_per_px = 6.0 / w.max(1) as f64;
         for gx in -2..=2 {
@@ -2618,7 +5069,17 @@ fn render_gradient_field_frames_impl(
             draw_filled_circle(&mut buf, w, h, p.0, p.1, 3, col);
         }
         if con_rotulo {
-            draw_text_block(&mut buf, w, h, w / 14, h / 12, "gradiente f", PAL_FG, 1);
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "gradiente f");
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "gradiente f",
+                PAL_FG,
+                text_scale_for_h(h),
+            );
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -2667,48 +5128,18 @@ fn render_mobius_frames_impl(
             }
             break;
         }
-        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, "mobius", t * 0.08);
-        draw_subtle_grid(&mut buf, w, h, t);
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            AXIS_COLOR,
-        );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            AXIS_COLOR,
-        );
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
         // c(t) barre sin loop (t=0 -> t=1 distintos): evita primero==último.
         let ang_c = 2.0 * std::f64::consts::PI * t;
         let (cr, ci) = (-0.4 + 0.8 * t, 0.3 * ang_c.sin());
-        let mobius = |x: f64, y: f64| -> Option<(f64, f64)> {
-            let nr = x - cr;
-            let ni = y - ci;
-            // conj(c)*z = (cr*x+ci*y) + i*(cr*y−ci*x)
-            let dr = 1.0 - (cr * x + ci * y);
-            let di = -(cr * y - ci * x);
-            let den = dr * dr + di * di;
-            if den < 1e-9 || !den.is_finite() {
-                return None;
-            }
-            let wr = (nr * dr + ni * di) / den;
-            let wi = (ni * dr - nr * di) / den;
-            if !wr.is_finite() || !wi.is_finite() {
-                return None;
-            }
-            Some((wr.clamp(-3.0, 3.0), wi.clamp(-3.0, 3.0)))
-        };
+        let mobius = |x: f64, y: f64| -> Option<(f64, f64)> { mobius_map(x, y, cr, ci) };
         // Rejilla original tenue + transformada brillante.
         for gx in -2..=2 {
             for gy in -2..=2 {
@@ -2741,11 +5172,23 @@ fn render_mobius_frames_impl(
         let pc = to_pixel(w, h, cr * 2.0, ci * 2.0);
         draw_filled_circle(&mut buf, w, h, pc.0, pc.1, 3, POINT_RED);
         if con_rotulo {
-            draw_text_block(&mut buf, w, h, w / 14, h / 12, "mobius  w(z)", PAL_FG, 1);
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "mobius  w(z)");
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "mobius  w(z)",
+                PAL_FG,
+                text_scale_for_h(h),
+            );
         }
         // Barra de progreso inferior: garantiza primero != último aunque c coincida.
         let bar_y = h.saturating_sub(4);
-        let bar_w = (w as f64 * t) as usize;
+        // Progreso lineal honesto del frame (la construcción va por fases).
+        let prog = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        let bar_w = (w as f64 * prog) as usize;
         draw_filled_rect(&mut buf, w, h, 0, bar_y, bar_w, 2, PAL_ACCENT);
         draw_filled_rect(
             &mut buf,
@@ -2803,7 +5246,8 @@ pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<e
 // declara cuáles tienen equivalente canónico (tangente/área/traza/barrido)
 // y cuáles conservan su renderer dedicado (`pitagoras`, euler, fourier…).
 use grafito_anim::parametric::{
-    FrameCount, ParamName, ParametricAnim, ParametricKind, PARAMETRIC_MAX_BYTES,
+    FrameCount, ParamName, ParametricAnim, ParametricKind, PARAMETRIC_MAX_BYTES, TAYLOR_MAX_ORDER,
+    TAYLOR_MIN_ORDER,
 };
 use grafito_anim::Resolution;
 
@@ -2874,28 +5318,13 @@ fn check_parametric_budget(
 /// `con_rotulo=false` omite el texto quemado (el header egui de la card ya
 /// titula); el fondo sigue usando `title` para el acento. `true` = histórico
 /// (standalone / export GIF).
-fn draw_parametric_base(buf: &mut [u8], w: usize, h: usize, t: f64, title: &str, con_rotulo: bool) {
-    fill_background(buf, w, h, title, t * 0.08);
-    draw_subtle_grid(buf, w, h, t);
-    draw_line(
-        buf,
-        w,
-        h,
-        to_pixel(w, h, -3.0, 0.0),
-        to_pixel(w, h, 3.0, 0.0),
-        AXIS_COLOR,
-    );
-    draw_line(
-        buf,
-        w,
-        h,
-        to_pixel(w, h, 0.0, -3.0),
-        to_pixel(w, h, 0.0, 3.0),
-        AXIS_COLOR,
-    );
+fn draw_parametric_base(buf: &mut [u8], w: usize, h: usize, title: &str, con_rotulo: bool) {
+    fill_background(buf, w, h);
+    draw_subtle_grid(buf, w, h);
+    draw_axes_with_labels(buf, w, h);
     let short: String = title.chars().take(24).collect();
     if con_rotulo {
-        draw_text_block(buf, w, h, w / 12, h / 12, &short, TEXT_COLOR, 1);
+        draw_rotulo_con_scrim(&mut *buf, w, h, w / 12, h / 12, &short);
     }
 }
 
@@ -2921,15 +5350,13 @@ fn sample_curve_con_vivo(
         .collect()
 }
 
-/// Dibuja la polilínea cortando en huecos (sin unir ramas ni dominios rotos).
+/// Dibuja la polilínea cortando en huecos (sin unir ramas ni dominios rotos)
+/// y cortando limpio en el borde del viewport (sin plateau: cada tramo se
+/// clipa en mundo en vez de saturar píxeles).
 fn draw_curve_gaps(buf: &mut [u8], w: usize, h: usize, pts: &[Option<(f64, f64)>], color: [u8; 4]) {
-    let px: Vec<Option<(usize, usize)>> = pts
-        .iter()
-        .map(|opt| opt.map(|(x, y)| to_pixel(w, h, x, y)))
-        .collect();
-    for pair in px.windows(2) {
-        if let (Some(a), Some(b)) = (pair[0], pair[1]) {
-            draw_line(buf, w, h, a, b, color);
+    for pair in pts.windows(2) {
+        if let (Some((ax, ay)), Some((bx, by))) = (pair[0], pair[1]) {
+            draw_seg_mundo(buf, w, h, ax, ay, bx, by, color, 1.0);
         }
     }
 }
@@ -3022,7 +5449,7 @@ pub fn render_parametric_frames_con_updater(
                 bytes: got.unwrap_or(w.saturating_mul(h).saturating_mul(4)),
             }
         })?;
-        draw_parametric_base(&mut buf, w, h, s, &anim.expr_a, con_rotulo);
+        draw_parametric_base(&mut buf, w, h, &anim.expr_a, con_rotulo);
         match anim.kind {
             ParametricKind::Sweep | ParametricKind::Morph => {
                 let pts = sample_curve_con_vivo(anim, frame, vivo);
@@ -3042,9 +5469,11 @@ pub fn render_parametric_frames_con_updater(
                     })
                     .collect();
                 draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
+                // Punto solo en vista (sin aplastar al borde).
                 if let Some(y) = anim.eval_frame_con_vivo(frame, x_max, vivo) {
-                    let (px, py) = to_pixel(w, h, x_max, y);
-                    draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                    if let Some((px, py)) = to_pixel_opt(w, h, x_max, y) {
+                        draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                    }
                 }
             }
             ParametricKind::Locus => {
@@ -3058,8 +5487,9 @@ pub fn render_parametric_frames_con_updater(
                 draw_curve_gaps(&mut buf, w, h, &pts, CURVE_MAIN);
                 let xc = p.clamp(-3.0, 3.0);
                 if let Some(y) = anim.eval_frame_con_vivo(frame, xc, vivo) {
-                    let (px, py) = to_pixel(w, h, xc, y);
-                    draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                    if let Some((px, py)) = to_pixel_opt(w, h, xc, y) {
+                        draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                    }
                 }
             }
             ParametricKind::Tangent => {
@@ -3072,11 +5502,21 @@ pub fn render_parametric_frames_con_updater(
                 ) {
                     let xa = (xc - 1.2).max(-3.0);
                     let xb = (xc + 1.2).min(3.0);
-                    let a = to_pixel(w, h, xa, y0 + slope * (xa - xc));
-                    let b = to_pixel(w, h, xb, y0 + slope * (xb - xc));
-                    draw_line(&mut buf, w, h, a, b, TANGENT_BLUE);
-                    let (px, py) = to_pixel(w, h, xc, y0);
-                    draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                    // Tangente recortada a vista (sin plateau en el borde).
+                    draw_seg_mundo(
+                        &mut buf,
+                        w,
+                        h,
+                        xa,
+                        y0 + slope * (xa - xc),
+                        xb,
+                        y0 + slope * (xb - xc),
+                        TANGENT_BLUE,
+                        CURVE_ANCHO,
+                    );
+                    if let Some((px, py)) = to_pixel_opt(w, h, xc, y0) {
+                        draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                    }
                 }
             }
             ParametricKind::Area => {
@@ -3188,7 +5628,8 @@ pub enum GroupComposeError {
     UnSoloSet { got: usize },
     /// Algún set vacío.
     SetVacio { set: usize },
-    /// N distinto entre sets.
+    /// N distinto entre sets (histórico F2: el re-muestreo vecino-más-cercano
+    /// acepta N dispar; se conserva por compat, ya no se construye).
     ConteosDistintos {
         esperado: usize,
         got: usize,
@@ -3261,12 +5702,41 @@ fn set_es_totalmente_opaco(set: &[egui::ColorImage]) -> bool {
             .all(|frame| frame.pixels.iter().all(|p| p.a() == 255))
 }
 
+/// Grilla de vecino más cercano para el re-muestreo temporal (F2): `n_comun`
+/// índices en `0..n_set` (bordes clampados). Misma fórmula que
+/// `AnimationGroup::plan_remuestreo` del núcleo (duplicada acá a propósito:
+/// el núcleo no expone el helper y el puente no debe invertir la dependencia).
+/// Pura, sin pánicos.
+fn indice_vecino_mas_cercano_nativo(n_set: usize, n_comun: usize) -> Vec<usize> {
+    if n_comun == 0 || n_set == 0 {
+        return Vec::new();
+    }
+    if n_comun == 1 || n_set == 1 {
+        return vec![0; n_comun];
+    }
+    let mut out = Vec::with_capacity(n_comun);
+    for j in 0..n_comun {
+        let pos =
+            (j as f64) * ((n_set.saturating_sub(1)) as f64) / ((n_comun.saturating_sub(1)) as f64);
+        let idx = if pos.is_finite() {
+            (pos.round() as usize).min(n_set.saturating_sub(1))
+        } else {
+            0
+        };
+        out.push(idx);
+    }
+    out
+}
+
 /// Compone 2+ sets simultáneos píxel a píxel (alfa over por frame).
 ///
 /// `sets[k][i]` = frame `i` de la capa `k` (`sets[0]` fondo, último frente).
-/// Exige mismo N no vacío y mismo tamaño en todos; si no → `Err` honesto.
-/// R1-2: exige translucidez en los frentes (alfa<255 en algún píxel): frente
-/// totalmente opaco → `Err(FrenteOpaco)`, jamás tapa silenciosa.
+/// N dispar se remuestrea al máximo (`n_comun`): el frame `j` del compuesto
+/// lee por capa su vecino más cercano (misma disciplina que
+/// `AnimationGroup::plan_remuestreo` del núcleo, sin inventar píxeles).
+/// Exige mismo viewport en todos (si difiere → `Err` honesto, jamás reescaleo
+/// silencioso). R1-2: exige translucidez en los frentes (alfa<255 en algún
+/// píxel): frente totalmente opaco → `Err(FrenteOpaco)`, jamás tapa silenciosa.
 /// Determinista: mismos sets → mismos píxeles. Puro en memoria.
 pub fn componer_grupo_nativo(
     sets: &[Vec<egui::ColorImage>],
@@ -3277,21 +5747,18 @@ pub fn componer_grupo_nativo(
     if sets.len() < 2 {
         return Err(GroupComposeError::UnSoloSet { got: sets.len() });
     }
-    let n = sets[0].len();
-    if n == 0 {
-        return Err(GroupComposeError::SetVacio { set: 0 });
-    }
+    // F2: `n_comun` = máximo; cada set aporta por frame su vecino más cercano
+    // (costo O(frames), despreciable frente al O(píxeles) del over).
+    let mut n_comun: usize = 0;
     for (k, set) in sets.iter().enumerate() {
         if set.is_empty() {
             return Err(GroupComposeError::SetVacio { set: k });
         }
-        if set.len() != n {
-            return Err(GroupComposeError::ConteosDistintos {
-                esperado: n,
-                got: set.len(),
-                set: k,
-            });
-        }
+        n_comun = n_comun.max(set.len());
+    }
+    let mut indices_por_set: Vec<Vec<usize>> = Vec::with_capacity(sets.len());
+    for set in sets.iter() {
+        indices_por_set.push(indice_vecino_mas_cercano_nativo(set.len(), n_comun));
     }
     let size0 = sets[0][0].size;
     let (w, h) = (size0[0], size0[1]);
@@ -3319,7 +5786,7 @@ pub fn componer_grupo_nativo(
             }
         }
     }
-    match estimate_frames_bytes(w, h, n) {
+    match estimate_frames_bytes(w, h, n_comun) {
         Some(got) if got <= NATIVE_MAX_SET_BYTES => {}
         other => {
             return Err(GroupComposeError::Presupuesto {
@@ -3332,16 +5799,17 @@ pub fn componer_grupo_nativo(
             return Err(GroupComposeError::FrenteOpaco { set: k });
         }
     }
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
+    let mut out = Vec::with_capacity(n_comun);
+    for j in 0..n_comun {
         let mut pixeles = Vec::with_capacity(px_count);
         for pi in 0..px_count {
             // Lectura en alfa directo (`to_srgba_unmultiplied`): los bytes
             // crudos de `Color32` van premultiplicados y mezclar sobre ellos
             // oscurecería el doble. Escritura idem directa.
-            let mut acc = sets[0][i].pixels[pi].to_srgba_unmultiplied();
-            for set in sets.iter().skip(1) {
-                acc = mezclar_pixel_alfa(acc, set[i].pixels[pi].to_srgba_unmultiplied());
+            let mut acc = sets[0][indices_por_set[0][j]].pixels[pi].to_srgba_unmultiplied();
+            for (k, set) in sets.iter().enumerate().skip(1) {
+                let frame = &set[indices_por_set[k][j]];
+                acc = mezclar_pixel_alfa(acc, frame.pixels[pi].to_srgba_unmultiplied());
             }
             pixeles.push(egui::Color32::from_rgba_unmultiplied(
                 acc[0], acc[1], acc[2], acc[3],
@@ -3396,12 +5864,291 @@ pub fn parametric_for_template(template: &str, concept: &str) -> Option<Parametr
     }
 }
 
+// ── Diálogo Exportar profesional (piel-ui, puro + estado) ─────────────────
+// El backend ya existe (`export_frames_to_gif_file`, `export_frames_to_png_dir`,
+// `export_frames_to_mp4_file`, `export_frames_to_webm_file`,
+// `draw_mobject` nuevos, `render_orbit_frames`): lo que faltaba era el ESTADO
+// del diálogo para que la Piel lo dibuje sin I/O.
+//
+// El estado vivo es `grafito_ui::assistant::MediaExportDialog`; acá quedan
+// los validadores, formatos, calidades y topes compartidos (ver abajo).
+//
+// Contrato `fn render(&Estado) -> Frame`: este struct ES el `Estado`. La UI
+// (`anim_ui::draw_anim_export_dialog`) solo lo renderiza y devuelve la
+// intención (`AnimExportAction`); el `spawn_*` + `CancellationToken` +
+// tmp+rename `O_EXCL` + `kill+wait` corren en el caller (hilo worker, jamás
+// en `Ui::`). La detección de ffmpeg (`detect_ffmpeg_available`) hace I/O de
+// solo-lectura (recorre `PATH` sin spawnear): llamarla desde el evento/hilo,
+// NUNCA desde el draw.
+//
+// Presupuestos pineados (no se redefinen): `GIF_EXPORT_MAX_FRAMES` 64,
+// `GIF_EXPORT_MAX_TOTAL_PIXELS` 8M, `GIF_EXPORT_MAX_FILE_BYTES` 5MB, default
+// 48 frames (`NATIVE_ANIM_FRAME_COUNT`).
+
+/// Frames por defecto del diálogo (los 48 nativos, intactos).
+pub const ANIM_EXPORT_DEFAULT_FRAMES: usize = NATIVE_ANIM_FRAME_COUNT;
+/// Bitrate mínimo/máximo del diálogo en kbps (rango del slider).
+pub const ANIM_EXPORT_BITRATE_MIN_KBPS: u32 = 100;
+/// Bitrate máximo del diálogo en kbps.
+pub const ANIM_EXPORT_BITRATE_MAX_KBPS: u32 = 20_000;
+/// FPS mínimo/máximo del diálogo.
+pub const ANIM_EXPORT_FPS_MIN: u32 = 1;
+/// FPS máximo del diálogo.
+pub const ANIM_EXPORT_FPS_MAX: u32 = 60;
+/// FPS por defecto (paridad con `GIF_BASE_FPS` 12).
+pub const ANIM_EXPORT_DEFAULT_FPS: u32 = 12;
+/// Motivo visible cuando MP4/WebM están deshabilitados sin ffmpeg.
+pub const FFMPEG_MISSING_HINT: &str = "MP4/WebM requieren ffmpeg — se exporta GIF";
+
+/// Formato de video del diálogo (visible en el selector).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoExportFormat {
+    /// GIF animado (siempre disponible, sin ffmpeg).
+    #[default]
+    Gif,
+    /// Secuencia PNG en directorio (siempre disponible, sin ffmpeg).
+    PngDir,
+    /// MP4 H.264 vía ffmpeg-sidecar.
+    Mp4,
+    /// WebM VP9/AV1 vía ffmpeg-sidecar.
+    Webm,
+}
+
+impl VideoExportFormat {
+    /// Los 4 del selector, en orden visible.
+    pub const ALL: [Self; 4] = [Self::Gif, Self::PngDir, Self::Mp4, Self::Webm];
+
+    /// Nombre visible del selector.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Gif => "GIF",
+            Self::PngDir => "PNG-sequence",
+            Self::Mp4 => "MP4",
+            Self::Webm => "WebM",
+        }
+    }
+
+    /// Extensión del destino.
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Gif => "gif",
+            Self::PngDir => "dir",
+            Self::Mp4 => "mp4",
+            Self::Webm => "webm",
+        }
+    }
+
+    /// ¿Necesita ffmpeg en el PATH?
+    pub const fn needs_ffmpeg(self) -> bool {
+        match self {
+            Self::Gif | Self::PngDir => false,
+            Self::Mp4 | Self::Webm => true,
+        }
+    }
+
+    /// Puente al wire (`grafito_anim::ExportFormat`). `PngDir` mapea a
+    /// `PngSequence`. Puro.
+    pub const fn to_wire(self) -> grafito_anim::ExportFormat {
+        match self {
+            Self::Gif => grafito_anim::ExportFormat::Gif,
+            Self::PngDir => grafito_anim::ExportFormat::PngSequence,
+            Self::Mp4 => grafito_anim::ExportFormat::Mp4,
+            Self::Webm => grafito_anim::ExportFormat::Webm,
+        }
+    }
+}
+
+impl std::fmt::Display for VideoExportFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.display_name())
+    }
+}
+
+// Extensión del diálogo sobre `VideoQuality` (vive abajo, bloque fps/bitrate
+// del worker de plot: `flags()` + `video_quality_desde_params` son suyos).
+// Acá solo lo visible del selector: orden, nombres, flag manim y bitrate
+// sugerido. Paridad pineada en tests (`crf()` espeja `flags().0`).
+impl VideoQuality {
+    /// Las 3 del selector, en orden visible.
+    pub const DIALOG_ALL: [Self; 3] = [Self::Baja, Self::Media, Self::Alta];
+
+    /// Nombre visible.
+    pub const fn dialog_display_name(self) -> &'static str {
+        match self {
+            Self::Baja => "Baja",
+            Self::Media => "Media",
+            Self::Alta => "Alta",
+        }
+    }
+
+    /// Flag de calidad estilo manim (`-ql`/`-qm`/`-qh`): Baja `-ql`, Media
+    /// `-qm`, Alta `-qh` (extensión honesta del par `-ql`/`-qm` pedido).
+    pub const fn manim_flag(self) -> &'static str {
+        match self {
+            Self::Baja => "-ql",
+            Self::Media => "-qm",
+            Self::Alta => "-qh",
+        }
+    }
+
+    /// CRF para libx264/VP9 (menor = mejor). Paridad con `flags().0`.
+    pub const fn dialog_crf(self) -> u32 {
+        match self {
+            Self::Baja => 30,
+            Self::Media => 23,
+            Self::Alta => 18,
+        }
+    }
+
+    /// Bitrate sugerido en kbps (dentro de 100..=20000).
+    pub const fn suggested_bitrate_kbps(self) -> u32 {
+        match self {
+            Self::Baja => 500,
+            Self::Media => 2000,
+            Self::Alta => 8000,
+        }
+    }
+}
+
+impl std::fmt::Display for VideoQuality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.dialog_display_name())
+    }
+}
+
+/// ¿El bitrate está en 100..=20000? Puro.
+pub fn validate_export_bitrate_kbps(bitrate: u32) -> Result<u32, String> {
+    if (ANIM_EXPORT_BITRATE_MIN_KBPS..=ANIM_EXPORT_BITRATE_MAX_KBPS).contains(&bitrate) {
+        Ok(bitrate)
+    } else {
+        Err(format!(
+            "bitrate {bitrate} fuera de {}..={}",
+            ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_BITRATE_MAX_KBPS
+        ))
+    }
+}
+
+/// ¿El fps está en 1..=60? Puro.
+pub fn validate_export_fps(fps: u32) -> Result<u32, String> {
+    if (ANIM_EXPORT_FPS_MIN..=ANIM_EXPORT_FPS_MAX).contains(&fps) {
+        Ok(fps)
+    } else {
+        Err(format!(
+            "fps {fps} fuera de {ANIM_EXPORT_FPS_MIN}..={ANIM_EXPORT_FPS_MAX}"
+        ))
+    }
+}
+
+/// ¿Hay ffmpeg usable? Recorre `PATH` buscando un ejecutable `ffmpeg`
+/// (`ffmpeg.exe` en Windows). Solo lectura, SIN spawnear: llamarla desde el
+/// evento/hilo que abre el diálogo, jamás desde `Ui::`.
+pub fn detect_ffmpeg_available() -> bool {
+    let path_var = std::env::var_os("PATH");
+    let Some(path_var) = path_var else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            let candidato = dir.join("ffmpeg.exe");
+            if candidato.is_file() {
+                return true;
+            }
+        }
+        let candidato = dir.join("ffmpeg");
+        if candidato.is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+// ── Helpers puros del diálogo vivo (el estado vive en
+// `grafito_ui::assistant::MediaExportDialog`; acá quedan los validadores,
+// formatos, calidades y topes que ambas Pieles comparten). El diálogo
+// duplicado `AnimExportDialog` se eliminó (W1: sin audio en el núcleo).
+
+#[cfg(test)]
+mod anim_export_dialog_tests {
+    use super::{
+        validate_export_bitrate_kbps, validate_export_fps, VideoExportFormat, VideoQuality,
+        ANIM_EXPORT_BITRATE_MAX_KBPS, ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_DEFAULT_FPS,
+        ANIM_EXPORT_DEFAULT_FRAMES, ANIM_EXPORT_FPS_MAX, ANIM_EXPORT_FPS_MIN, FFMPEG_MISSING_HINT,
+        GIF_EXPORT_MAX_FILE_BYTES, GIF_EXPORT_MAX_FRAMES, GIF_EXPORT_MAX_TOTAL_PIXELS,
+        NATIVE_ANIM_FRAME_COUNT,
+    };
+
+    #[test]
+    fn default_48_frames_intacto() {
+        assert_eq!(ANIM_EXPORT_DEFAULT_FRAMES, 48);
+        assert_eq!(ANIM_EXPORT_DEFAULT_FRAMES, NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!(ANIM_EXPORT_DEFAULT_FPS, 12);
+    }
+
+    #[test]
+    fn budgets_64_8m_5mb_pineados() {
+        assert_eq!(GIF_EXPORT_MAX_FRAMES, 64);
+        assert_eq!(GIF_EXPORT_MAX_TOTAL_PIXELS, 8_000_000);
+        assert_eq!(GIF_EXPORT_MAX_FILE_BYTES, 5 * 1024 * 1024);
+        assert_eq!(ANIM_EXPORT_BITRATE_MIN_KBPS, 100);
+        assert_eq!(ANIM_EXPORT_BITRATE_MAX_KBPS, 20_000);
+        assert_eq!(ANIM_EXPORT_FPS_MIN, 1);
+        assert_eq!(ANIM_EXPORT_FPS_MAX, 60);
+        // Paridad con el bloque fps/bitrate del worker de plot (mismos topes,
+        // nombres distintos por scope): si alguno deriva, este test avisa.
+        assert_eq!(ANIM_EXPORT_FPS_MIN, super::ANIM_FPS_MIN);
+        assert_eq!(ANIM_EXPORT_FPS_MAX, super::ANIM_FPS_MAX);
+        assert_eq!(ANIM_EXPORT_DEFAULT_FPS, super::ANIM_FPS_DEFAULT);
+        assert_eq!(ANIM_EXPORT_BITRATE_MIN_KBPS, super::ANIM_BITRATE_MIN_KBPS);
+        assert_eq!(ANIM_EXPORT_BITRATE_MAX_KBPS, super::ANIM_BITRATE_MAX_KBPS);
+        for calidad in VideoQuality::DIALOG_ALL {
+            assert_eq!(calidad.dialog_crf(), calidad.flags().0 as u32);
+        }
+    }
+
+    #[test]
+    fn formatos_y_hint_ffmpeg() {
+        assert_eq!(VideoExportFormat::ALL.len(), 4);
+        assert!(!VideoExportFormat::Gif.needs_ffmpeg());
+        assert!(!VideoExportFormat::PngDir.needs_ffmpeg());
+        assert!(VideoExportFormat::Mp4.needs_ffmpeg());
+        assert!(VideoExportFormat::Webm.needs_ffmpeg());
+        assert!(FFMPEG_MISSING_HINT.contains("ffmpeg"));
+        // Puente al wire intacto.
+        assert_eq!(
+            VideoExportFormat::PngDir.to_wire(),
+            grafito_anim::ExportFormat::PngSequence
+        );
+    }
+
+    #[test]
+    fn calidad_mapea_flags_bitrate_crf() {
+        assert_eq!(VideoQuality::Baja.manim_flag(), "-ql");
+        assert_eq!(VideoQuality::Media.manim_flag(), "-qm");
+        assert_eq!(VideoQuality::Alta.manim_flag(), "-qh");
+        assert!(VideoQuality::Baja.dialog_crf() > VideoQuality::Media.dialog_crf());
+        assert!(VideoQuality::Media.dialog_crf() > VideoQuality::Alta.dialog_crf());
+        for calidad in VideoQuality::DIALOG_ALL {
+            let bitrate = calidad.suggested_bitrate_kbps();
+            assert!(validate_export_bitrate_kbps(bitrate).is_ok());
+        }
+        assert!(validate_export_bitrate_kbps(99).is_err());
+        assert!(validate_export_bitrate_kbps(20_001).is_err());
+        assert!(validate_export_fps(0).is_err());
+        assert!(validate_export_fps(61).is_err());
+        assert!(validate_export_fps(12).is_ok());
+    }
+}
+
 // ── N1: predicados pixel-lógicos compartidos (integral honesta) ──────────
 // Sombra = relleno blendido (trayectoria recta fondo→[91,155,255]) + cota
-// móvil sólida [66,133,244]. El grid con parallax se mueve BAJO el relleno:
-// una intersección del grid (gris ~195) bajo el relleno da [163,182,214]
-// (sigue siendo área azul, solo más brillante). Por eso el tope es r<175
-// y no r<150: cubre la trayectoria entera incluido intersección-relleno.
+// móvil sólida [66,133,244]. El grid ESTÁTICO vive bajo el relleno: una
+// intersección del grid bajo el relleno da píxel más brillante pero sigue
+// siendo área azul. Por eso el tope es r<175 y no r<150: cubre la
+// trayectoria entera incluido intersección-relleno.
 // Fuera quedan: grises (b==r), texto blanco (b−r≈10), recorte del texto
 // (b−r≈7) y curva amarilla (r≥218 incluso sobre grid).
 
@@ -3418,6 +6165,39 @@ fn cuenta_pixeles_sombra(frame: &egui::ColorImage) -> usize {
         .count()
 }
 
+/// Píxeles de máscara que difieren entre dos frames (F1: el AA deja un
+/// fringe inestable sobre el grid aunque la geometría sea idéntica; contar
+/// el diff distingue fringe de movimiento real).
+#[cfg(test)]
+fn mask_diff_count(a: &[bool], b: &[bool]) -> usize {
+    a.iter().zip(b.iter()).filter(|(x, y)| x != y).count()
+}
+
+/// Cota de fringe AA (F1): 0.5% de los píxeles del frame (medido ≤0.02%
+/// en integral 64²→320×180). Una curva que se moviese de verdad cambia la
+/// mayoría de su máscara (90-321px), dos órdenes sobre la cota: el test
+/// sigue cazando regresiones de movimiento.
+#[cfg(test)]
+fn mask_fringe_allowance(frame_pixels: usize) -> usize {
+    (frame_pixels / 200).max(8)
+}
+
+/// La curva es la MISMA en los frames dados (vía clásica y paramétrica):
+/// toda la máscara salvo fringe AA. Pura de test, sin pánicos.
+#[cfg(test)]
+fn assert_curva_fija(frames: &[egui::ColorImage], label: &str) {
+    let n = frames[0].pixels.len();
+    let cota = mask_fringe_allowance(n);
+    let c0 = mascara_curva(&frames[0]);
+    assert!(c0.iter().any(|v| *v), "{label}: la curva debe pintarse");
+    for fi in [24, NATIVE_ANIM_FRAME_COUNT - 1] {
+        let d = mask_diff_count(&c0, &mascara_curva(&frames[fi]));
+        assert!(
+            d <= cota,
+            "{label}: curva 0 == {fi} salvo fringe (diff {d} > cota {cota})"
+        );
+    }
+}
 /// Máscara de la curva amarilla (r y g altos, b bajo): texto blanco
 /// (b=245), cota azul (r=66) y relleno (r<150) quedan fuera.
 #[cfg(test)]
@@ -3622,19 +6402,8 @@ mod tests {
                 sombras[0] < sombras[NATIVE_ANIM_FRAME_COUNT - 1],
                 "{w}x{h}: el área final debe sombrear más: {sombras:?}"
             );
-            // La curva es la MISMA en los frames 0/24/47.
-            let c0 = super::mascara_curva(&frames[0]);
-            assert!(c0.iter().any(|v| *v), "{w}x{h}: la curva debe pintarse");
-            assert_eq!(
-                c0,
-                super::mascara_curva(&frames[24]),
-                "{w}x{h}: curva 0 == 24"
-            );
-            assert_eq!(
-                c0,
-                super::mascara_curva(&frames[47]),
-                "{w}x{h}: curva 0 == 47"
-            );
+            // La curva es la MISMA en los frames 0/24/47 (salvo fringe AA).
+            super::assert_curva_fija(&frames, &format!("{w}x{h}"));
             // Cero puntos decorativos sueltos en los 48 frames.
             for (i, f) in frames.iter().enumerate() {
                 assert!(
@@ -3929,7 +6698,6 @@ mod tests {
         assert_eq!(PAL_ACCENT, PAL_BLUE);
         assert_ne!(PAL_BG, PAL_FG, "BG != FG");
         assert_ne!(PAL_BG, PAL_ACCENT, "BG != ACCENT");
-        assert_eq!(ACCENTS.len(), 6);
         // Roles derivan de la paleta (sin literales sueltos en renders).
         // T2: TRAIL_FAINT_ALPHA/CURVE_UNIVERSAL_ALPHA se eliminaron con la
         // curva falsa del universal (decoración que fingía respuesta).
@@ -4055,12 +6823,21 @@ mod tests {
     /// superior `0..y_hasta`. El chat debe dar 0 (el header egui ya titula);
     /// el export standalone debe dar >0.
     fn cuenta_texto_quemado(frame: &egui::ColorImage, y_hasta: usize) -> usize {
+        // Frente A: los ticks/rótulos de ejes ("y", "2", …) son dato
+        // permanente en la mitad derecha (cols ≥ w/2, ver
+        // `draw_axes_with_labels`); el título quemado histórico arranca en
+        // w/12–w/14 (mitad izquierda). Se cuenta solo x < w/2 para no
+        // confundir numeración de ejes con rótulo. Precondición de estos
+        // tests: 96x72 (labels x en filas 41..48, fuera de la franja 40).
         let w = frame.size[0];
+        let mitad = w / 2;
         frame
             .pixels
             .iter()
             .enumerate()
-            .filter(|(i, c)| i / w < y_hasta && c.r() == 235 && c.g() == 235 && c.b() == 245)
+            .filter(|(i, c)| {
+                i / w < y_hasta && i % w < mitad && c.r() == 235 && c.g() == 235 && c.b() == 245
+            })
             .count()
     }
 
@@ -4230,14 +7007,33 @@ mod tests {
         assert_eq!(normalize_concept("  hola   mundo  "), "hola mundo");
     }
     #[test]
-    fn different_concepts_produce_different_accents() {
-        let c1 = accent_for_concept("derivada");
-        let c2 = accent_for_concept("integral");
-        // no garantizado distinto, pero al menos determinista
-        assert_eq!(accent_for_concept("derivada"), c1);
-        // hash varia
-        assert_ne!(hash_concept("a"), hash_concept("b"));
-        let _ = c2;
+    fn fondo_unico_fijo_sin_acento_por_concepto() {
+        // El fondo ya no depende del concepto: mismo frame base para
+        // cualquier pedido (el movimiento lo pone la matemática).
+        for concepto in ["derivada", "integral", "otra cosa"] {
+            let _ = concepto;
+        }
+        let (w, h) = (64, 64);
+        let mut a = vec![0u8; w * h * 4];
+        let mut b = vec![0u8; w * h * 4];
+        super::fill_background(&mut a, w, h);
+        super::fill_background(&mut b, w, h);
+        assert_eq!(a, b, "fondo determinista y único");
+        // Gradiente vertical real: primera fila != última.
+        assert_ne!(
+            &a[0..w * 4],
+            &a[(h - 1) * w * 4..h * w * 4],
+            "gradiente vertical"
+        );
+        // Esquinas más oscuras que el centro (viñeta).
+        let esquina = u16::from(a[0]) + u16::from(a[1]) + u16::from(a[2]);
+        let centro_idx = (h / 2 * w + w / 2).saturating_mul(4);
+        let centro = if centro_idx + 2 < a.len() {
+            u16::from(a[centro_idx]) + u16::from(a[centro_idx + 1]) + u16::from(a[centro_idx + 2])
+        } else {
+            esquina
+        };
+        assert!(esquina <= centro, "viñeta: bordes ≤ centro");
     }
 
     // ── v3: params vivos ────────────────────────────────────────────────
@@ -4353,13 +7149,21 @@ mod tests {
         let b = render_taylor_frames_with_params(64, 64, &params_map(&[]));
         assert_eq!(a.len(), NATIVE_ANIM_FRAME_COUNT);
         assert_eq!(a[0].pixels, b[0].pixels, "mismo params → mismos píxeles");
-        // Orden 1 vs 10: el último frame difiere (curvas distintas).
+        // Orden 1 vs 10: el último frame difiere (curvas distintas;
+        // F1: `terms` se lee con `taylor_anim_order_from_params`, 1..=7).
         let t1 = render_taylor_frames_with_params(64, 64, &params_map(&[("terms", 1.0)]));
         let t10 = render_taylor_frames_with_params(64, 64, &params_map(&[("terms", 10.0)]));
         assert_ne!(
             t1[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
             t10[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
-            "terms debe cambiar taylor (orden 1 vs 10)"
+            "terms debe cambiar taylor (orden 1 vs 10→7)"
+        );
+        // Clamp F1: terms=10 es orden 7 (idéntico a terms=7).
+        let t7 = render_taylor_frames_with_params(64, 64, &params_map(&[("terms", 7.0)]));
+        assert_eq!(
+            t7[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            t10[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "terms=10 debe clamparse a orden 7"
         );
         // NaN → default (igual que vacío), sin panic.
         let nan = render_taylor_frames_with_params(64, 64, &params_map(&[("terms", f64::NAN)]));
@@ -4386,6 +7190,298 @@ mod tests {
             d10[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
             "dispatcher debe propagar terms a taylor"
         );
+    }
+
+    // ── Frente A: Taylor honesto + ejes en previews ─────────────────────
+    fn taylor_spec(expr: &str, centro: f64, orden: usize) -> grafito_anim::parametric::TaylorSpec {
+        grafito_anim::parametric::TaylorSpec {
+            expr: expr.to_string(),
+            centro,
+            orden,
+        }
+    }
+
+    #[test]
+    fn taylor_poly_de_x3_es_real_y_foo_es_none() {
+        // P_5(x³) en x=0 es x³ exacto: el motor deriva de verdad.
+        let p = super::taylor_poly_anim("x^3", 0.0, 5).expect("x^3 deriva");
+        let v = p.eval_frame(0, 0.7).expect("evalúa");
+        assert!(
+            (v - 0.7f64.powi(3)).abs() <= 1e-9,
+            "P_5(x³)(0.7) debe ser x³, fue {v}"
+        );
+        // f que el motor no deriva → None honesto, jamás polinomio inventado.
+        assert!(super::taylor_poly_anim("foo(x)", 0.0, 3).is_none());
+        assert!(super::taylor_poly_anim("x^3", f64::NAN, 3).is_none());
+    }
+
+    #[test]
+    fn taylor_x3_real_vs_canonica_declarada() {
+        // La queja real: taylor de x³ dibujaba sin(x). Ahora difieren.
+        let real = super::render_taylor_frames_for_spec(96, 72, &taylor_spec("x^3", 0.0, 5));
+        let canonica = super::render_taylor_frames_for_spec(
+            96,
+            72,
+            &taylor_spec(
+                grafito_anim::parametric::TAYLOR_CANONICAL_EXPR,
+                grafito_anim::parametric::TAYLOR_CANONICAL_CENTER,
+                grafito_anim::parametric::TAYLOR_CANONICAL_ORDER,
+            ),
+        );
+        assert_eq!(real.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!(canonica.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_ne!(
+            real[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            canonica[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "Taylor de x³ jamás es la senoidal canónica"
+        );
+        // Determinista: mismo spec → mismos píxeles.
+        let otra = super::render_taylor_frames_for_spec(96, 72, &taylor_spec("x^3", 0.0, 5));
+        assert_eq!(real[0].pixels, otra[0].pixels);
+        // Orden mueve la curva (P1(x³)=0 vs P5=x³).
+        let p1 = super::render_taylor_frames_for_spec(96, 72, &taylor_spec("x^3", 0.0, 1));
+        assert_ne!(
+            p1[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            real[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "el orden debe mover Taylor de x³"
+        );
+    }
+
+    #[test]
+    fn ejes_pintan_texto_en_zona_de_ejes() {
+        // El helper aislado: fondo + ejes rotulados tiene texto claro en
+        // las bandas de los ejes; fondo + líneas peladas no.
+        let (w, h) = (200usize, 150usize);
+        let len = w * h * 4;
+        let (cx, cy) = super::to_pixel(w, h, 0.0, 0.0);
+        let banda_x = cy + 4..cy + 14;
+        let banda_y = cx + 4..cx + 40;
+        let cuenta_bandas = |buf: &[u8]| {
+            let mut n = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let en_x = banda_x.contains(&y);
+                    let en_y = banda_y.contains(&x);
+                    if !en_x && !en_y {
+                        continue;
+                    }
+                    if let Some(i) = y
+                        .checked_mul(w)
+                        .and_then(|v| v.checked_add(x))
+                        .and_then(|v| v.checked_mul(4))
+                    {
+                        if i + 2 < buf.len() && buf[i] > 200 && buf[i + 1] > 200 && buf[i + 2] > 200
+                        {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            n
+        };
+        let mut pelado = vec![0u8; len];
+        super::fill_background(&mut pelado, w, h);
+        super::draw_line(
+            &mut pelado,
+            w,
+            h,
+            super::to_pixel(w, h, -3.0, 0.0),
+            super::to_pixel(w, h, 3.0, 0.0),
+            super::AXIS_COLOR,
+        );
+        super::draw_line(
+            &mut pelado,
+            w,
+            h,
+            super::to_pixel(w, h, 0.0, -3.0),
+            super::to_pixel(w, h, 0.0, 3.0),
+            super::AXIS_COLOR,
+        );
+        assert_eq!(cuenta_bandas(&pelado), 0, "líneas peladas sin texto");
+        let mut rotulado = vec![0u8; len];
+        super::fill_background(&mut rotulado, w, h);
+        super::draw_axes_with_labels(&mut rotulado, w, h);
+        assert!(
+            cuenta_bandas(&rotulado) > 20,
+            "ejes rotulados con ticks en bandas"
+        );
+    }
+
+    #[test]
+    fn axis_tick_values_cubre_rango_con_paso_lindo() {
+        assert_eq!(super::axis_tick_values(2.0), vec![-2.0, 2.0]);
+        assert_eq!(super::axis_tick_values(1.0), vec![-2.0, -1.0, 1.0, 2.0]);
+        assert!(super::axis_tick_values(f64::NAN).is_empty());
+        assert!(super::axis_tick_values(0.0).is_empty());
+        assert!(super::axis_tick_values(-1.0).is_empty());
+    }
+
+    /// ¿Hay plateau de curva amarilla en las filas superiores (rachas
+    /// horizontales largas = clamp aplastado)? El corte limpio cruza el
+    /// borde en columnas aisladas, nunca en rachas ≥24px.
+    fn tiene_plateau_sup(frame: &egui::ColorImage) -> bool {
+        let w = frame.size[0];
+        let filas = 3.min(frame.size[1]);
+        for y in 0..filas {
+            let mut racha = 0usize;
+            for x in 0..w {
+                let Some(c) = frame.pixels.get(y * w + x) else {
+                    continue;
+                };
+                if c.r() > 150 && c.g() > 130 && c.b() < 150 {
+                    racha += 1;
+                    if racha >= 24 {
+                        return true;
+                    }
+                } else {
+                    racha = 0;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn viewport_fijo_misma_escala_en_los_48_frames() {
+        // Viewport fijo documentado [-3,3]² (sin temblor entre frames).
+        assert_eq!((super::VIEW_X_MIN, super::VIEW_X_MAX), (-3.0, 3.0));
+        assert_eq!((super::VIEW_Y_MIN, super::VIEW_Y_MAX), (-3.0, 3.0));
+        let frames = super::render_derivative_frames_with_params(
+            320,
+            240,
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(frames.len(), super::NATIVE_ANIM_FRAME_COUNT);
+        for (i, f) in frames.iter().enumerate() {
+            assert_eq!(f.size, [320, 240], "frame {i}: misma escala");
+        }
+        // La parábola es fija: máscara amarilla idéntica salvo fringe AA
+        // (la tangente azul no entra en la máscara).
+        super::assert_curva_fija(&frames, "derivada viewport fijo");
+    }
+
+    #[test]
+    fn parabola_sin_plateau_corte_limpio_en_borde() {
+        // y=9 está fuera de vista: sin punto (antes se aplastaba al borde).
+        assert!(super::to_pixel_opt(320, 240, 0.0, 9.0).is_none());
+        assert!(super::to_pixel_opt(320, 240, 0.0, 2.0).is_some());
+        // Segmento totalmente fuera no pinta nada.
+        let (w, h) = (320usize, 240usize);
+        let mut buf = vec![7u8; w * h * 4];
+        let antes = buf.clone();
+        assert!(!super::draw_seg_mundo(
+            &mut buf,
+            w,
+            h,
+            -3.0,
+            5.0,
+            3.0,
+            9.0,
+            super::CURVE_MAIN,
+            super::CURVE_ANCHO,
+        ));
+        assert_eq!(buf, antes, "fuera de vista no toca el buffer");
+        // Ningún frame de la derivada tiene plateau superior.
+        let frames = super::render_derivative_frames_with_params(
+            320,
+            240,
+            &std::collections::BTreeMap::new(),
+        );
+        for (i, f) in frames.iter().enumerate().step_by(12) {
+            assert!(!tiene_plateau_sup(f), "frame {i}: sin plateau");
+        }
+    }
+
+    #[test]
+    fn labels_con_formato_corto_y_sin_solape() {
+        // 1 decimal máximo vía la Piel.
+        assert_eq!(grafito_ui::animation::anim_axes::short_tick_label(1.0), "1");
+        assert_eq!(
+            grafito_ui::animation::anim_axes::short_tick_label(-2.5),
+            "-2.5"
+        );
+        // Los ejes a 640×480 rotulan sin panic y con texto en bandas
+        // (cubre el filtro de cajas disjuntas en el tamaño del reporte).
+        let (w, h) = (640usize, 480usize);
+        let mut buf = vec![0u8; w * h * 4];
+        super::fill_background(&mut buf, w, h);
+        super::draw_axes_with_labels(&mut buf, w, h);
+        let (_, cy) = super::to_pixel(w, h, 0.0, 0.0);
+        let mut claros = 0usize;
+        for y in (cy + 4)..(cy + 14).min(h) {
+            for x in 0..w {
+                if let Some(i) = y
+                    .checked_mul(w)
+                    .and_then(|v| v.checked_add(x))
+                    .and_then(|v| v.checked_mul(4))
+                {
+                    if i + 2 < buf.len() && buf[i] > 200 && buf[i + 1] > 200 && buf[i + 2] > 200 {
+                        claros += 1;
+                    }
+                }
+            }
+        }
+        assert!(claros > 20, "ticks rotulados con texto claro");
+    }
+
+    #[test]
+    fn todos_los_parametricos_rotulan_eje_x() {
+        // Integración: cada renderer paramétrico deja el rótulo "x" junto al
+        // extremo derecho del eje (caja con margen 12px al borde, filas
+        // cy+8..): zona donde ninguna curva didáctica del set pinta
+        // (verificado por renderer).
+        let hay_x = |f: &egui::ColorImage| {
+            // Ventana derivada del propio frame (la vía paramétrica usa su
+            // viewport 640x480, no 200x150).
+            let (fw, fh) = (f.size[0], f.size[1]);
+            let (_, cy) = super::to_pixel(fw, fh, 0.0, 0.0);
+            let mut n = 0;
+            for y in cy + 8..(cy + 19).min(fh) {
+                for x in fw.saturating_sub(26)..fw {
+                    let p = &f.pixels[y * fw + x];
+                    if p.r() > 200 && p.g() > 200 && p.b() > 200 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let empty = params_map(&[]);
+        let mut casos: Vec<(&str, Vec<egui::ColorImage>)> = vec![
+            (
+                "derivative-slope",
+                super::render_derivative_frames_with_params(200, 150, &empty),
+            ),
+            ("integral-area", super::render_integral_frames(200, 150)),
+            ("taylor-series", super::render_taylor_frames(200, 150)),
+            (
+                "taylor-x3",
+                super::render_taylor_frames_for_spec(200, 150, &taylor_spec("x^3", 0.0, 5)),
+            ),
+            ("conformal-map", super::render_conformal_frames(200, 150)),
+            ("pitagoras", super::render_pitagoras_frames(200, 150)),
+            ("euler", super::render_euler_frames(200, 150)),
+            ("fourier", super::render_fourier_frames(200, 150)),
+            (
+                "logistic",
+                super::render_logistic_bifurcation_frames(200, 150),
+            ),
+            ("gradient", super::render_gradient_field_frames(200, 150)),
+            ("mobius", super::render_mobius_frames(200, 150)),
+        ];
+        if let Ok(frames) = super::render_parametric_frames(
+            &super::parametric_for_template("integral-area", "integral").expect("canónica"),
+        ) {
+            casos.push(("parametrica-base", frames));
+        }
+        assert!(casos.len() >= 11, "todos los paramétricos: {}", casos.len());
+        for (nombre, frames) in &casos {
+            assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT, "{nombre}: 48");
+            assert!(
+                hay_x(&frames[0]) > 0,
+                "{nombre}: frame 0 sin rótulo x en el extremo del eje"
+            );
+        }
     }
 
     #[test]
@@ -4581,6 +7677,462 @@ mod tests {
                 egui::ColorImage::new([8, 8], c)
             })
             .collect()
+    }
+
+    // ── F1 Manim-en-Rust: backend tiny-skia ──────────────────────────────
+    #[test]
+    fn skia_linea_pinta_y_es_determinista() {
+        let (w, h) = (32usize, 32usize);
+        let mut a = vec![0u8; w * h * 4];
+        let mut b = vec![0u8; w * h * 4];
+        super::fill_background(&mut a, w, h);
+        super::fill_background(&mut b, w, h);
+        super::draw_line(&mut a, w, h, (2, 16), (29, 16), super::CURVE_MAIN);
+        super::draw_line(&mut b, w, h, (2, 16), (29, 16), super::CURVE_MAIN);
+        assert_eq!(a, b, "mismo trazo → mismos bytes");
+        let tinta = a
+            .chunks_exact(4)
+            .filter(|px| px[0] > 150 && px[2] < 150)
+            .count();
+        assert!(tinta >= 20, "la línea debe pintar, tinta={tinta}");
+        // Punto degenerado pinta 1px (paridad con el Bresenham).
+        let mut c = vec![0u8; w * h * 4];
+        super::fill_background(&mut c, w, h);
+        super::draw_line(&mut c, w, h, (10, 10), (10, 10), super::CURVE_MAIN);
+        assert_ne!(a, c, "punto vs línea difieren");
+        // Buffer corto / tamaño 0: no-op honesto sin panic.
+        let mut corto = vec![0u8; 10];
+        super::draw_line(&mut corto, w, h, (0, 0), (5, 5), super::CURVE_MAIN);
+        super::draw_line(&mut a, 0, 0, (0, 0), (5, 5), super::CURVE_MAIN);
+    }
+
+    #[test]
+    fn skia_circulo_y_rect_rellenan() {
+        let (w, h) = (32usize, 32usize);
+        let mut buf = vec![0u8; w * h * 4];
+        super::fill_background(&mut buf, w, h);
+        super::draw_filled_circle(&mut buf, w, h, 16, 16, 5, super::POINT_RED);
+        let rojos = buf
+            .chunks_exact(4)
+            .filter(|px| px[0] > 150 && px[1] < 120)
+            .count();
+        assert!(rojos >= 40, "círculo debe rellenar, rojos={rojos}");
+        super::draw_filled_rect(&mut buf, w, h, 2, 2, 6, 6, super::PAL_ACCENT);
+        let azules = buf
+            .chunks_exact(4)
+            .filter(|px| px[2] > 150 && px[0] < 120)
+            .count();
+        assert!(azules >= 30, "rect debe rellenar, azules={azules}");
+        // Fuera de rango / vacío: no-op sin panic.
+        super::draw_filled_rect(&mut buf, w, h, 90, 90, 6, 6, super::PAL_ACCENT);
+        super::draw_filled_rect(&mut buf, w, h, 0, 0, 0, 0, super::PAL_ACCENT);
+        super::draw_filled_circle(&mut buf, w, h, 200, 200, 3, super::POINT_RED);
+    }
+
+    #[test]
+    fn skia_texto_pinta_glifos_reales_y_aguanta_emoji() {
+        let (w, h) = (200usize, 150usize);
+        let mut buf = vec![0u8; w * h * 4];
+        super::fill_background(&mut buf, w, h);
+        super::draw_text_block(&mut buf, w, h, 10, 10, "x", super::TEXT_COLOR, 1);
+        let claros = buf
+            .chunks_exact(4)
+            .filter(|px| px[0] > 200 && px[1] > 200 && px[2] > 200)
+            .count();
+        // Medido: 'x' a 10px deja 4 píxeles >200 (núcleos con cobertura
+        // total tras el boost); piso en 2 con margen al shimmer del fondo.
+        assert!(
+            claros >= 2,
+            "glifo 'x' debe dejar tinta clara sólida, claros={claros}"
+        );
+        // Emoji + texto largo + escala fuera de rango: sin panics.
+        super::draw_text_block(
+            &mut buf,
+            w,
+            h,
+            4,
+            4,
+            "\u{1f600} emoji test \u{1f9e0}",
+            super::TEXT_COLOR,
+            3,
+        );
+        super::draw_text_block(&mut buf, w, h, 0, 0, &"y".repeat(200), super::TEXT_COLOR, 9);
+        super::draw_text_block(&mut buf, w, h, 500, 500, "fuera", super::TEXT_COLOR, 1);
+    }
+
+    // ── F1: conformal-map con Möbius real ────────────────────────────────
+    #[test]
+    fn mobius_map_identidad_en_cero_y_none_en_polo() {
+        // c=0 → w=z (identidad) en la grilla.
+        for (x, y) in [(-2.0, 1.0), (0.0, 0.0), (1.5, -1.5)] {
+            let (wx, wy) = super::mobius_map(x, y, 0.0, 0.0).expect("lejos del polo");
+            assert!(
+                (wx - x).abs() < 1e-12 && (wy - y).abs() < 1e-12,
+                "c=0 es identidad en ({x},{y})"
+            );
+        }
+        // Polo en z=1/c: den≈0 → None honesto (jamás inventa punto).
+        assert!(
+            super::mobius_map(2.0, 0.0, 0.5, 0.0).is_none(),
+            "polo debe ser None"
+        );
+        assert!(super::mobius_map(f64::NAN, 0.0, 0.1, 0.0).is_none());
+    }
+
+    #[test]
+    fn conformal_es_mobius_real_determinista_y_distinto_de_mobius() {
+        let a = super::render_conformal_frames(96, 72);
+        assert_frames_valid(&a, 96, 72, "conformal-map");
+        let b = super::render_conformal_frames(96, 72);
+        assert_eq!(a[0].pixels, b[0].pixels, "determinista");
+        // Barrido propio: no es un alias del mobius-transform.
+        let m = super::render_mobius_frames(96, 72);
+        assert_ne!(
+            a[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            m[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "conformal ≠ mobius"
+        );
+    }
+
+    // ── F1: MP4 honesto vía ffmpeg-sidecar ───────────────────────────────
+    #[test]
+    fn mp4_fps_y_budgets_pineados() {
+        assert_eq!(super::MP4_BASE_FPS, 12);
+        assert_eq!(super::GIF_BASE_FPS, 12.0);
+        assert_eq!(super::mp4_fps_for_delay(8), 12, "delay 8 → 12fps");
+        assert_eq!(super::mp4_fps_for_delay(0), 60, "delay 0 → clamp sin div/0");
+        assert_eq!(super::mp4_fps_for_delay(4), 25);
+        assert_eq!(super::mp4_fps_for_delay(100), 1);
+        // Display honesto en español, sin panics.
+        assert!(format!("{}", super::Mp4ExportError::FfmpegMissing).contains("usá gif"));
+        assert!(!format!("{}", super::Mp4ExportError::Cancelled).is_empty());
+        assert!(!format!("{}", super::Mp4ExportError::FfmpegFailed("x".into())).is_empty());
+    }
+
+    #[test]
+    fn mp4_preflight_falla_rapido_sin_archivo() {
+        let dir = std::env::temp_dir().join(format!(
+            "grafito-mp4-preflight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join("no-debe-existir.mp4");
+        let _ = std::fs::remove_file(&dest);
+        // Vacío → Budget(EmptyFrames), sin tocar disco ni ffmpeg.
+        let err = super::export_frames_to_mp4_file(
+            &[],
+            &dest,
+            super::GIF_EXPORT_DELAY_CS,
+            2000,
+            super::VideoQuality::Media,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            super::Mp4ExportError::Budget(super::GifExportError::EmptyFrames)
+        );
+        assert!(!dest.exists(), "preflight no debe crear archivo");
+        // 65 frames → Budget(TooManyFrames).
+        let many = synthetic_frames(65);
+        let err =
+            super::export_frames_to_mp4_file(&many, &dest, 8, 2000, super::VideoQuality::Media)
+                .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                super::Mp4ExportError::Budget(super::GifExportError::TooManyFrames { .. })
+            ),
+            "fue: {err}"
+        );
+        assert!(!dest.exists(), "preflight no debe crear archivo");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mp4_sin_ffmpeg_falla_honesto_con_mensaje() {
+        // Binario inexistente a propósito: hermético, no depende del PATH.
+        let frames = synthetic_frames(2);
+        let dir = std::env::temp_dir().join(format!(
+            "grafito-mp4-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join("no-debe-existir.mp4");
+        let err = super::export_frames_to_mp4_file_with_bin(
+            &frames,
+            &dest,
+            8,
+            &CancellationToken::default(),
+            std::path::Path::new("/definitivamente/no/existe/ffmpeg-f1"),
+            2000,
+            super::VideoQuality::Media,
+        )
+        .unwrap_err();
+        assert_eq!(err, super::Mp4ExportError::FfmpegMissing);
+        assert!(
+            format!("{err}").contains("usá gif"),
+            "mensaje honesto con alternativa, fue: {err}"
+        );
+        assert!(!dest.exists(), "sin ffmpeg no hay archivo");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mp4_spawn_codifica_real_o_missing_honesto() {
+        // Integración con el ffmpeg del box: si está, el MP4 es real
+        // (existe y pesa >0); si no, `Missing` honesto. Jamás fake.
+        let dir = std::env::temp_dir().join(format!(
+            "grafito-mp4-spawn-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join("clip.mp4");
+        let frames = synthetic_frames(4);
+        let handle = super::spawn_mp4_export(
+            frames,
+            dest.clone(),
+            8,
+            CancellationToken::default(),
+            2000,
+            super::VideoQuality::Media,
+        );
+        match handle.join().expect("el hilo no debe panicar") {
+            Ok(path) => {
+                let bytes = std::fs::metadata(&path)
+                    .expect("MP4 real debe existir")
+                    .len();
+                assert!(bytes > 0, "MP4 real no vacío");
+                let _ = std::fs::remove_file(&path);
+            }
+            Err(super::Mp4ExportError::FfmpegMissing) => {
+                assert!(!dest.exists(), "sin ffmpeg no hay archivo");
+            }
+            Err(other) => panic!("MP4 real o Missing honesto, fue: {other}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn calidad_mapea_resolucion_crf_bitrate_reales() {
+        use super::{video_quality_export_size, video_quality_max_side, VideoQuality};
+        // `-ql`/`-qm`/`-qh` → lados + crf + bitrate.
+        assert_eq!(video_quality_max_side(VideoQuality::Baja), 640);
+        assert_eq!(video_quality_max_side(VideoQuality::Media), 1280);
+        assert_eq!(video_quality_max_side(VideoQuality::Alta), 4096);
+        // Sin upscale + pares + aspecto.
+        assert_eq!(
+            video_quality_export_size(320, 200, VideoQuality::Baja),
+            (320, 200)
+        );
+        assert_eq!(
+            video_quality_export_size(1280, 720, VideoQuality::Baja),
+            (640, 360)
+        );
+        assert_eq!(
+            video_quality_export_size(1920, 1080, VideoQuality::Media),
+            (1280, 720)
+        );
+        assert_eq!(
+            video_quality_export_size(4096, 4096, VideoQuality::Alta),
+            (4096, 4096)
+        );
+        let (w, h) = video_quality_export_size(1001, 707, VideoQuality::Baja);
+        assert_eq!((w % 2, h % 2), (0, 0), "yuv420p exige pares");
+        assert!(w <= 640 && h <= 640);
+        // crf + bitrate por calidad (paridad con `flags`/`suggested`).
+        assert_eq!(VideoQuality::Baja.flags(), (30, "veryfast"));
+        assert_eq!(VideoQuality::Media.flags(), (23, "veryfast"));
+        assert_eq!(VideoQuality::Alta.flags(), (18, "fast"));
+        assert_eq!(VideoQuality::Baja.suggested_bitrate_kbps(), 500);
+        assert_eq!(VideoQuality::Media.suggested_bitrate_kbps(), 2000);
+        assert_eq!(VideoQuality::Alta.suggested_bitrate_kbps(), 8000);
+    }
+
+    #[test]
+    fn remuestreo_fps_duracion_fija_via_timeline() {
+        use super::remuestrear_frames_para_fps;
+        assert!(remuestrear_frames_para_fps(&[], 12, 24).is_empty());
+        // 48 @12fps = 4s: a 24fps son 96 (misma duración).
+        let base = synthetic_frames(48);
+        let doble = remuestrear_frames_para_fps(&base, 12, 24);
+        assert_eq!(doble.len(), 96, "duración fija: 48@12 → 96@24");
+        assert_eq!(doble[0].pixels, base[0].pixels, "arranca igual");
+        assert_eq!(
+            doble[doble.len() - 1].pixels,
+            base[base.len() - 1].pixels,
+            "termina igual"
+        );
+        // Mismo fps = identidad exacta.
+        let igual = remuestrear_frames_para_fps(&base, 12, 12);
+        assert_eq!(igual.len(), 48);
+        for (a, b) in igual.iter().zip(base.iter()) {
+            assert_eq!(a.pixels, b.pixels);
+        }
+        // Mitad de fps: 48@24fps = 2s → 24@12fps.
+        let mitad = remuestrear_frames_para_fps(&base, 24, 12);
+        assert_eq!(mitad.len(), 24, "48@24 (2s) → 24@12");
+        assert_eq!(mitad[0].pixels, base[0].pixels);
+        // fps inválidos se clampean, sin panics.
+        assert_eq!(remuestrear_frames_para_fps(&base, 0, 0).len(), 48);
+        assert_eq!(remuestrear_frames_para_fps(&base, 999, 999).len(), 48);
+    }
+
+    /// ffmpeg falso que captura su argv en `$GRAFITO_FFMPEG_ARGS_<sufijo>` y
+    /// drena stdin (éxito inmediato). Solo unix (shebang + coreutils).
+    #[cfg(unix)]
+    fn ffmpeg_falso_con_argv(base: &std::path::Path, sufijo: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = base.join(format!("ffmpeg-falso-{sufijo}"));
+        let captura = base.join(format!("argv-{sufijo}.txt"));
+        // `touch` del último argv (el tmp hermano): como el real, el falso
+        // "produce" el archivo para que el rename publique.
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" > \"{}\"\ncat > /dev/null\nfor a in \"$@\"; do ultimo=\"$a\"; done\ntouch \"$ultimo\"\nexit 0\n",
+            captura.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        let mut permisos = std::fs::metadata(&bin).unwrap().permissions();
+        permisos.set_mode(0o755);
+        std::fs::set_permissions(&bin, permisos).unwrap();
+        (bin, captura)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mp4_plomea_bitrate_crf_calidad_reales() {
+        let base = std::env::temp_dir().join(format!(
+            "grafito-mp4-args-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let (falso, captura) = ffmpeg_falso_con_argv(&base, "mp4");
+        let dest = base.join("clip.mp4");
+        let frames = synthetic_frames(2);
+        super::export_frames_to_mp4_file_with_bin(
+            &frames,
+            &dest,
+            8,
+            &CancellationToken::default(),
+            &falso,
+            2000,
+            super::VideoQuality::Media,
+        )
+        .expect("el falso siempre sale 0");
+        let argv = std::fs::read_to_string(&captura).expect("argv capturado");
+        for aguja in [
+            "-b:v",
+            "2000k",
+            "-crf",
+            "23",
+            "-preset",
+            "veryfast",
+            "-framerate",
+            "12",
+            "libx264",
+            "+faststart",
+        ] {
+            assert!(argv.contains(aguja), "{aguja} en argv, fue: {argv}");
+        }
+        assert!(dest.exists(), "publicó el destino");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mp4_baja_reescala_y_crf_30() {
+        let base = std::env::temp_dir().join(format!(
+            "grafito-mp4-baja-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let (falso, captura) = ffmpeg_falso_con_argv(&base, "baja");
+        let dest = base.join("clip.mp4");
+        // 1280×720 en Baja → 640×360 real en `-s`.
+        let grande = vec![egui::ColorImage::new([1280, 720], egui::Color32::RED); 2];
+        super::export_frames_to_mp4_file_with_bin(
+            &grande,
+            &dest,
+            8,
+            &CancellationToken::default(),
+            &falso,
+            500,
+            super::VideoQuality::Baja,
+        )
+        .expect("el falso siempre sale 0");
+        let argv = std::fs::read_to_string(&captura).expect("argv capturado");
+        assert!(argv.contains("640x360"), "-s reescalado, fue: {argv}");
+        assert!(argv.contains("500k"), "bitrate baja, fue: {argv}");
+        assert!(argv.contains("-crf 30"), "crf baja, fue: {argv}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webm_cancelado_durante_wait_mata_al_hijo() {
+        // ffmpeg falso que duerme: el token cancela en pleno `wait` y el
+        // watcher debe matarlo (CANCEL_GRACE) sin dejar tmp ni destino.
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = std::env::temp_dir().join(format!(
+            "grafito-webm-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let dormilon = base.join("ffmpeg-duerme");
+        std::fs::write(&dormilon, "#!/bin/sh\nsleep 30\n").unwrap();
+        let mut permisos = std::fs::metadata(&dormilon).unwrap().permissions();
+        permisos.set_mode(0o755);
+        std::fs::set_permissions(&dormilon, permisos).unwrap();
+        let dest = base.join("clip.webm");
+        let token = CancellationToken::default();
+        let clon = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            clon.cancel();
+        });
+        let err = super::export_frames_to_webm_file_with_bin(
+            &synthetic_frames(2),
+            &dest,
+            8,
+            &token,
+            &dormilon,
+            2000,
+            super::VideoQuality::Media,
+        )
+        .unwrap_err();
+        assert_eq!(err, super::WebmExportError::Cancelled);
+        assert!(!dest.exists(), "cancelado no publica");
+        // Sin tmp huérfano junto al destino.
+        let restos: Vec<_> = std::fs::read_dir(&base)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(restos.is_empty(), "sin tmp huérfano: {restos:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -5191,10 +8743,7 @@ mod parametric_render_tests {
             sombras[0] < sombras[NATIVE_ANIM_FRAME_COUNT - 1],
             "el área final debe sombrear más: {sombras:?}"
         );
-        let c0 = super::mascara_curva(&frames[0]);
-        assert!(c0.iter().any(|v| *v), "la curva debe pintarse");
-        assert_eq!(c0, super::mascara_curva(&frames[24]), "curva 0 == 24");
-        assert_eq!(c0, super::mascara_curva(&frames[47]), "curva 0 == 47");
+        super::assert_curva_fija(&frames, "area-param");
         for (i, f) in frames.iter().enumerate() {
             assert!(!super::tiene_verde_suelto(f), "frame {i} sin verde");
         }
@@ -5275,19 +8824,18 @@ mod group_compose_m4_tests {
     }
 
     #[test]
-    fn mismo_n_y_viewport_o_err_honesto() {
+    fn viewport_o_err_honesto_y_n_dispar_remuestrea() {
         // OJO R1-2: los frentes de este test son translúcidos (alfa 128):
-        // con opacos daría `FrenteOpaco` antes de llegar al N/viewport.
+        // con opacos daría `FrenteOpaco` antes de llegar al viewport.
         let ok = vec![imagen_solida(4, 4, [0, 0, 255, 255]); 3];
         let ok2 = vec![imagen_solida(4, 4, [255, 0, 0, 128]); 3];
         assert!(componer_grupo_nativo(&[ok.clone(), ok2.clone()]).is_ok());
-        // N distinto → Err (sin reescaleo silencioso).
+        // F2: N distinto YA no es `Err`: se remuestrea al máximo (vecino más
+        // cercano, misma disciplina que `plan_remuestreo`). 3 + 2 → 3 frames.
         let corto = vec![imagen_solida(4, 4, [255, 0, 0, 128]); 2];
-        let err = componer_grupo_nativo(&[ok.clone(), corto])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("igualá N"), "got: {err}");
-        // Viewport distinto → Err.
+        let compuesto = componer_grupo_nativo(&[ok.clone(), corto]).unwrap();
+        assert_eq!(compuesto.len(), 3);
+        // Viewport distinto → Err (el re-muestreo es temporal, jamás espacial).
         let otro_size = vec![imagen_solida(8, 4, [255, 0, 0, 128]); 3];
         let err = componer_grupo_nativo(&[ok.clone(), otro_size])
             .unwrap_err()
@@ -5299,6 +8847,87 @@ mod group_compose_m4_tests {
         assert!(componer_grupo_nativo(&[ok, vec![]]).is_err());
         // Prosa rioplatense en los errores.
         assert!(GroupComposeError::Vacio.to_string().contains("al menos 2"));
+    }
+
+    #[test]
+    fn n_dispar_mapea_vecino_mas_cercano_exacto() {
+        // 4 + 2 → 4 frames; el corto aporta [0, 0, 1, 1]
+        // (round(0), round(1/3)=0, round(2/3)=1, round(1)). Frames de colores
+        // distintos por índice para que el mapeo sea observable píxel a píxel.
+        let fondo = vec![
+            imagen_solida(2, 2, [10, 20, 30, 255]),
+            imagen_solida(2, 2, [40, 50, 60, 255]),
+            imagen_solida(2, 2, [70, 80, 90, 255]),
+            imagen_solida(2, 2, [100, 110, 120, 255]),
+        ];
+        let frente = vec![
+            imagen_solida(2, 2, [255, 0, 0, 128]),
+            imagen_solida(2, 2, [0, 255, 0, 128]),
+        ];
+        let compuesto = componer_grupo_nativo(&[fondo.clone(), frente.clone()]).unwrap();
+        assert_eq!(compuesto.len(), 4);
+        let mapeo = [0_usize, 0, 1, 1];
+        for (j, frame) in compuesto.iter().enumerate() {
+            let esperado: Vec<egui::Color32> = fondo[j]
+                .pixels
+                .iter()
+                .zip(frente[mapeo[j]].pixels.iter())
+                .map(|(b, f)| {
+                    let mezcla =
+                        mezclar_pixel_alfa(b.to_srgba_unmultiplied(), f.to_srgba_unmultiplied());
+                    egui::Color32::from_rgba_unmultiplied(
+                        mezcla[0], mezcla[1], mezcla[2], mezcla[3],
+                    )
+                })
+                .collect();
+            assert_eq!(
+                frame.pixels, esperado,
+                "frame {j} mezcla fondo[{j}] con frente[{}]",
+                mapeo[j]
+            );
+        }
+    }
+
+    #[test]
+    fn remuestreo_nativo_en_paridad_con_el_nucleo() {
+        // El helper local replica `AnimationGroup::plan_remuestreo`: mismos
+        // índices o el test lo dice (no se finge paridad).
+        let grupo = grafito_anim::protocol::AnimationGroup::try_new(vec![0, 1], 0.0).unwrap();
+        for (n0, n1) in [(48_usize, 48_usize), (48, 24), (3, 2), (4, 2), (5, 1)] {
+            let plan = grupo.plan_remuestreo(&[n0, n1], &[(8, 8), (8, 8)]).unwrap();
+            assert_eq!(plan.n_comun, n0.max(n1));
+            assert_eq!(
+                plan.indices_por_set,
+                vec![
+                    indice_vecino_mas_cercano_nativo(n0, plan.n_comun),
+                    indice_vecino_mas_cercano_nativo(n1, plan.n_comun),
+                ],
+                "paridad de grilla para [{n0}, {n1}]"
+            );
+        }
+    }
+
+    #[test]
+    fn remuestreo_cuesta_o_de_frames() {
+        // Perf F2: el re-muestreo agrega O(frames) índices frente al O(píxeles)
+        // del over; N dispar debe costar ~igual que mismo N (cota 20×, piso
+        // 50 ms anti-flake en boxes lentos).
+        let fondo = vec![imagen_solida(160, 120, [0, 0, 255, 255]); 48];
+        let frente_igual = vec![imagen_solida(160, 120, [255, 0, 0, 128]); 48];
+        let frente_corto = vec![imagen_solida(160, 120, [255, 0, 0, 128]); 24];
+        let t0 = std::time::Instant::now();
+        let a = componer_grupo_nativo(&[fondo.clone(), frente_igual]).unwrap();
+        let t_igual = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let b = componer_grupo_nativo(&[fondo, frente_corto]).unwrap();
+        let t_dispar = t1.elapsed();
+        assert_eq!(a.len(), 48);
+        assert_eq!(b.len(), 48);
+        println!("componer mismo-N: {t_igual:?} | N-dispar remuestreado: {t_dispar:?}");
+        assert!(
+            t_dispar <= t_igual * 20 + std::time::Duration::from_millis(50),
+            "re-muestreo O(frames) desbocado: igual={t_igual:?} dispar={t_dispar:?}"
+        );
     }
 }
 
@@ -5681,20 +9310,14 @@ pub fn render_morph_frames(
             max: PARAMETRIC_MAX_BYTES,
         })?;
     let cerrada = morph.closed;
-    for (indice, forma) in puntos.iter().enumerate() {
-        let total = n.max(1);
-        let t = if total <= 1 {
-            0.0
-        } else {
-            (indice as f64) / ((total - 1) as f64)
-        };
+    for forma in puntos.iter() {
         let mut buf = alloc_frame_buffer(w, h).map_err(|_| {
             let got = estimate_frames_bytes(w, h, 1);
             MorphRenderError::AllocFailed {
                 bytes: got.unwrap_or(w.saturating_mul(h).saturating_mul(4)),
             }
         })?;
-        draw_parametric_base(&mut buf, w, h, t, "morph", true);
+        draw_parametric_base(&mut buf, w, h, "morph", true);
         draw_polyline_mundo(&mut buf, w, h, forma, cerrada, CURVE_MAIN);
         // Punto inicial marcado (misma semántica que la tangente: rojo).
         if let Some(primero) = forma.first() {
@@ -6249,6 +9872,1604 @@ mod morph_playlist_f2b_tests {
         assert!(
             !pt_msg.contains("{motor}") && !pt_msg.contains("{guia}"),
             "PT: {pt_msg}"
+        );
+    }
+}
+
+// ── P1-render: tests de vídeo todo incluido ─────────────────────────────────
+#[cfg(test)]
+mod p1_video_tests {
+    use super::*;
+
+    fn cuadros_sinteticos(n: usize) -> Vec<egui::ColorImage> {
+        (0..n)
+            .map(|k| {
+                let mut pixeles = Vec::with_capacity(32 * 32);
+                for i in 0..32 * 32 {
+                    let v = ((i + k * 37) % 256) as u8;
+                    pixeles.push(egui::Color32::from_rgba_unmultiplied(v, 255 - v, 128, 255));
+                }
+                egui::ColorImage {
+                    size: [32, 32],
+                    pixels: pixeles,
+                }
+            })
+            .collect()
+    }
+
+    fn dir_tmp(prefijo: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("{prefijo}-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn png_dir_roundtrip_conserva_frames_y_dimensiones() {
+        let cuadros = cuadros_sinteticos(4);
+        let base = dir_tmp("grafito-p1-png");
+        let destino = base.join("seq");
+        let salida = export_frames_to_png_dir(&cuadros, &destino).unwrap();
+        assert_eq!(salida, destino);
+        for i in 0..4 {
+            let bytes = std::fs::read(destino.join(format!("frame_{i:04}.png"))).unwrap();
+            let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).unwrap();
+            assert_eq!((img.width(), img.height()), (32, 32));
+        }
+        // O_EXCL: el destino ya existe → honesto sin pisar.
+        let err = export_frames_to_png_dir(&cuadros, &destino).unwrap_err();
+        assert!(matches!(err, PngDirExportError::Io(_)));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn png_dir_preflight_no_toca_disco() {
+        let base = dir_tmp("grafito-p1-png-budget");
+        let destino = base.join("no-debe-existir");
+        let err = export_frames_to_png_dir(&[], &destino).unwrap_err();
+        assert_eq!(err, PngDirExportError::Budget(GifExportError::EmptyFrames));
+        assert!(!destino.exists());
+        let muchos = cuadros_sinteticos(GIF_EXPORT_MAX_FRAMES + 1);
+        let err = export_frames_to_png_dir(&muchos, &destino).unwrap_err();
+        assert!(matches!(
+            err,
+            PngDirExportError::Budget(GifExportError::TooManyFrames { .. })
+        ));
+        assert!(!destino.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn png_dir_cancelado_no_deja_nada() {
+        let cuadros = cuadros_sinteticos(4);
+        let base = dir_tmp("grafito-p1-png-cancel");
+        let destino = base.join("seq");
+        let token = CancellationToken::default();
+        token.cancel();
+        let handle = spawn_png_dir_export(cuadros, destino.clone(), token);
+        assert_eq!(handle.join().unwrap(), Err(PngDirExportError::Cancelled));
+        assert!(!destino.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn png_dir_validate_en_contiene_escapes() {
+        let base = dir_tmp("grafito-p1-pngdir-en");
+        assert!(validate_png_dir_en(&base, "seq/frames").is_ok());
+        assert!(validate_png_dir_en(&base, "../afuera").is_err());
+        assert!(validate_png_dir_en(&base, "").is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn webm_preflight_y_missing_honestos() {
+        let base = dir_tmp("grafito-p1-webm");
+        let destino = base.join("no-debe-existir.webm");
+        let err =
+            export_frames_to_webm_file(&[], &destino, 8, 2000, VideoQuality::Media).unwrap_err();
+        assert_eq!(err, WebmExportError::Budget(GifExportError::EmptyFrames));
+        assert!(!destino.exists());
+        let cuadros = cuadros_sinteticos(2);
+        let err = export_frames_to_webm_file_with_bin(
+            &cuadros,
+            &destino,
+            8,
+            &CancellationToken::default(),
+            Path::new("/definitivamente/no/existe/ffmpeg-p1"),
+            2000,
+            VideoQuality::Media,
+        )
+        .unwrap_err();
+        assert_eq!(err, WebmExportError::FfmpegMissing);
+        assert!(format!("{err}").contains("usá gif"));
+        assert!(!destino.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn webm_spawn_codifica_real_o_missing_honesto() {
+        let base = dir_tmp("grafito-p1-webm-spawn");
+        let destino = base.join("clip.webm");
+        let handle = spawn_webm_export(
+            cuadros_sinteticos(4),
+            destino.clone(),
+            8,
+            CancellationToken::default(),
+            2000,
+            VideoQuality::Media,
+        );
+        match handle.join().expect("el hilo no debe panicar") {
+            Ok(path) => {
+                assert!(std::fs::metadata(&path).unwrap().len() > 0);
+                std::fs::remove_file(&path).unwrap();
+            }
+            Err(WebmExportError::FfmpegMissing) => assert!(!destino.exists()),
+            Err(otro) => panic!("WebM real o Missing honesto, fue: {otro}"),
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn tex_svg_rasteriza_formas_y_rechaza_basura() {
+        let svg = "<svg viewBox=\"0 0 100 100\"><circle cx=\"50\" cy=\"50\" r=\"20\"/><rect x=\"10\" y=\"10\" width=\"20\" height=\"20\"/><line x1=\"0\" y1=\"0\" x2=\"100\" y2=\"100\"/></svg>";
+        let mut fondo = vec![0u8; 64 * 64 * 4];
+        fill_background(&mut fondo, 64, 64);
+        let antes = fondo.clone();
+        assert!(draw_tex_svg_onto(&mut fondo, 64, 64, svg));
+        assert_ne!(fondo, antes, "las formas deben pintar píxeles");
+        assert!(!draw_tex_svg_onto(&mut fondo, 64, 64, "no es svg"));
+        let grande = "x".repeat(grafito_anim::MAX_TEX_SVG_BYTES + 1);
+        assert!(!draw_tex_svg_onto(&mut fondo, 64, 64, &grande));
+    }
+
+    #[test]
+    fn mobjects_nuevos_dibujan_e_invalidos_no_pintan() {
+        use grafito_anim::Mobject as M;
+        let nuevos = [
+            M::Circle {
+                cx: 0.0,
+                cy: 0.0,
+                r: 1.0,
+            },
+            M::Square {
+                cx: 0.0,
+                cy: 0.0,
+                side: 2.0,
+            },
+            M::Line {
+                from: [-2.0, -2.0],
+                to: [2.0, 2.0],
+            },
+            M::Arrow {
+                from: [-2.0, 0.0],
+                to: [2.0, 0.0],
+            },
+            M::NumberPlane {
+                x_min: -3.0,
+                x_max: 3.0,
+                y_min: -3.0,
+                y_max: 3.0,
+                x_step: 1.0,
+                y_step: 1.0,
+            },
+            M::VectorField {
+                func: "x+y".to_string(),
+                nx: 6,
+                ny: 6,
+            },
+            M::FunctionGraph {
+                expr: "x*x".to_string(),
+            },
+            M::ArrowField { nx: 6, ny: 6 },
+            M::Dot { x: 1.0, y: 1.0 },
+            M::Axes,
+        ];
+        for m in &nuevos {
+            let mut buf = vec![0u8; 64 * 64 * 4];
+            fill_background(&mut buf, 64, 64);
+            let antes = buf.clone();
+            assert!(draw_mobject(&mut buf, 64, 64, m), "debe dibujar: {m:?}");
+            assert_ne!(buf, antes, "debe cambiar píxeles: {m:?}");
+        }
+        // Inválidos: false honesto sin pintar.
+        let mut buf = vec![0u8; 64 * 64 * 4];
+        fill_background(&mut buf, 64, 64);
+        let antes = buf.clone();
+        assert!(!draw_mobject(
+            &mut buf,
+            64,
+            64,
+            &M::Circle {
+                cx: f64::NAN,
+                cy: 0.0,
+                r: 1.0
+            }
+        ));
+        assert_eq!(buf, antes);
+        // Tex con texto cae al fallback legible (no falso, no vacío).
+        let tex = M::tex_desde_texto("hola").unwrap();
+        let mut buf2 = vec![0u8; 64 * 64 * 4];
+        fill_background(&mut buf2, 64, 64);
+        assert!(draw_mobject(&mut buf2, 64, 64, &tex));
+        assert_ne!(buf2, antes);
+    }
+
+    #[test]
+    fn placed_objects_rasteriza_con_opacidad_escala_centro() {
+        use grafito_anim::{Camera, Mobject as M, Ortho, PlacedMobject};
+        let ortho = Camera::Ortho(Ortho::default_16_9());
+        // Vacío → fondo honesto 64×64.
+        let vacio = render_placed_objects(&[], 64, 64, ortho);
+        assert_eq!(vacio.size, [64, 64]);
+        // Círculo opaco centrado pinta píxeles no-fondo.
+        let circ = M::Circle {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+        };
+        let lleno = render_placed_objects(&[PlacedMobject::opaco(circ.clone())], 64, 64, ortho);
+        assert_ne!(lleno.pixels, vacio.pixels, "el objeto debe pintar");
+        // Opacidad 0 → idéntico al fondo.
+        let mudo =
+            PlacedMobject::try_new(circ.clone(), 0.0, 1.0, [0.0, 0.0]).expect("colocado válido");
+        let sin_pintar = render_placed_objects(&[mudo], 64, 64, ortho);
+        assert_eq!(sin_pintar.pixels, vacio.pixels, "opacity 0 no pinta");
+        // Opacidad intermedia → entre fondo y opaco (blend global).
+        let medio =
+            PlacedMobject::try_new(circ.clone(), 0.5, 1.0, [0.0, 0.0]).expect("colocado válido");
+        let inter = render_placed_objects(&[medio], 64, 64, ortho);
+        assert_ne!(inter.pixels, vacio.pixels);
+        assert_ne!(inter.pixels, lleno.pixels);
+        // Escala 2 agranda: más píxeles no-fondo que escala 1.
+        let chico = render_placed_objects(
+            &[PlacedMobject::try_new(circ.clone(), 1.0, 1.0, [0.0, 0.0]).expect("válido")],
+            64,
+            64,
+            ortho,
+        );
+        let grande = render_placed_objects(
+            &[PlacedMobject::try_new(circ, 1.0, 2.0, [0.0, 0.0]).expect("válido")],
+            64,
+            64,
+            ortho,
+        );
+        let cuenta = |f: &egui::ColorImage| {
+            f.pixels
+                .iter()
+                .zip(vacio.pixels.iter())
+                .filter(|(a, b)| a != b)
+                .count()
+        };
+        assert!(
+            cuenta(&grande) >= cuenta(&chico),
+            "escala 2 no debe pintar menos que escala 1"
+        );
+        // Polilínea (VMobject como polígono abierto de 2 pts) rasteriza.
+        let linea = M::Polygon {
+            pts: vec![[-2.0, -2.0], [2.0, 2.0]],
+        };
+        let pl = render_placed_objects(&[PlacedMobject::opaco(linea)], 64, 64, ortho);
+        assert_ne!(pl.pixels, vacio.pixels, "polilínea debe pintar");
+        // VMobject real aplanado a polilínea: pinta.
+        let vm = grafito_anim::VMobject::try_new(
+            vec![[-2.0, -2.0], [0.0, 2.0], [2.0, -2.0]],
+            vec![[-2.0, -2.0], [0.0, 2.0], [2.0, -2.0]],
+            vec![[-2.0, -2.0], [0.0, 2.0], [2.0, -2.0]],
+        )
+        .expect("vm válido");
+        let plano = vmobject_como_polilinea(&vm).expect("aplana");
+        let pv = render_placed_objects(&[PlacedMobject::opaco(plano)], 64, 64, ortho);
+        assert_ne!(pv.pixels, vacio.pixels, "VMobject aplanado debe pintar");
+        // VMobject vacío → None honesto.
+        let vacio_vm = grafito_anim::VMobject {
+            anchors: Vec::new(),
+            handles_in: Vec::new(),
+            handles_out: Vec::new(),
+        };
+        assert!(vmobject_como_polilinea(&vacio_vm).is_none());
+        // Perspective: sin ejes 2D pero el objeto igual se rasteriza.
+        let persp = Camera::perspective(50.0, [5.0, 2.0, 5.0], [0.0, 0.0, 0.0]).unwrap();
+        let p3 = render_placed_objects(
+            &[PlacedMobject::opaco(M::Dot { x: 0.0, y: 0.0 })],
+            64,
+            64,
+            persp,
+        );
+        assert_eq!(p3.size, [64, 64]);
+        assert_ne!(p3.pixels, vacio.pixels, "el punto debe pintarse en 3D");
+    }
+
+    #[test]
+    fn texto_escala_por_h_y_scrim_dimensiona() {
+        assert_eq!(text_scale_for_h(64), 1);
+        assert_eq!(text_scale_for_h(359), 1);
+        assert_eq!(text_scale_for_h(360), 2);
+        assert_eq!(text_scale_for_h(719), 2);
+        assert_eq!(text_scale_for_h(720), 3);
+        assert_eq!(text_scale_for_h(4096), 3);
+        // Scrim dimensiona al texto sin panics (incluso en 1px y vacío).
+        let mut buf = vec![0u8; 64 * 64 * 4];
+        fill_background(&mut buf, 64, 64);
+        let antes = buf.clone();
+        draw_scrim_para_rotulo(&mut buf, 64, 64, 4, 5, "hola");
+        assert_ne!(buf, antes, "el scrim debe oscurecer la banda");
+        draw_scrim_para_rotulo(&mut buf, 0, 0, 0, 0, "");
+        draw_rotulo_con_scrim(&mut buf, 64, 64, 4, 5, "x");
+    }
+
+    #[test]
+    fn fases_setup_construccion_hold() {
+        use super::{FaseConstruccion, FASE_CONSTRUCCION_HASTA, FASE_SETUP_HASTA};
+        assert_eq!(FASE_SETUP_HASTA, 0.2);
+        assert_eq!(FASE_CONSTRUCCION_HASTA, 0.8);
+        let (f0, a0) = fase_para_frame(0);
+        assert_eq!((f0, a0), (FaseConstruccion::Setup, 0.0));
+        let (f1, a1) = fase_para_frame(NATIVE_ANIM_FRAME_COUNT - 1);
+        assert_eq!((f1, a1), (FaseConstruccion::Hold, 1.0));
+        // Setup plano: primeros 20% en alpha 0.
+        for f in 0..10 {
+            assert_eq!(fase_alpha(f), 0.0, "setup en frame {f}");
+        }
+        // Hold plano: últimos 20% en alpha 1.
+        for f in 38..NATIVE_ANIM_FRAME_COUNT {
+            assert_eq!(fase_alpha(f), 1.0, "hold en frame {f}");
+        }
+        // Construcción monótona 0→1 con cubic (no lineal: el medio no es 0.5
+        // exacto del tramo... sí lo es por simetría cúbica: se pinnea).
+        let mut previo = 0.0;
+        for f in 10..38 {
+            let a = fase_alpha(f);
+            assert!(a >= previo, "monótono en {f}");
+            previo = a;
+        }
+        assert!((fase_alpha(24) - 0.5).abs() < 0.15, "medio ≈ 0.5");
+        // integral_frame_end respeta fases (extremos + monotonía).
+        assert_eq!(integral_frame_end(0.0, 2.0, 0), 0.0);
+        assert_eq!(
+            integral_frame_end(0.0, 2.0, NATIVE_ANIM_FRAME_COUNT - 1),
+            2.0
+        );
+    }
+
+    #[test]
+    fn camara_perspectiva_tracks_y_orbita_48() {
+        use grafito_anim::{Camera, MovingCamera, Ortho, RateFunc};
+        let desde = Camera::perspective(50.0, [5.0, 2.0, 5.0], [0.0, 0.0, 0.0]).unwrap();
+        let hasta = Camera::perspective(50.0, [-5.0, 2.0, 5.0], [0.0, 0.0, 0.0]).unwrap();
+        let travelling = MovingCamera::try_new(desde, hasta, 2000, RateFunc::Smooth).unwrap();
+        // 7 tracks de perspectiva (fov + eye xyz + center xyz).
+        let ids = anim_camera_track_ids(&travelling);
+        assert_eq!(ids.len(), 7);
+        assert!(ids.contains(&"cam.fov".to_string()));
+        assert!(ids.contains(&"cam.eye_x".to_string()));
+        assert!(ids.contains(&"cam.center_z".to_string()));
+        // Extremos del sample + project_3d honesto.
+        assert_eq!(anim_camera_sample(&travelling, 0), desde);
+        assert_eq!(anim_camera_sample(&travelling, 2000), hasta);
+        assert!(desde.project_3d([0.0, 0.0, 0.0]).is_some());
+        assert!(
+            desde.project_3d([5.0, 2.0, 5.0 + 1.0]).is_none()
+                || desde.project_3d([0.0, 0.0, 100.0]).is_none()
+        );
+        // Ortho: 4 tracks.
+        let o1 = Camera::Ortho(Ortho::try_new(-3.0, 3.0, -3.0, 3.0).unwrap());
+        let o2 = Camera::Ortho(Ortho::try_new(-2.0, 2.0, -2.0, 2.0).unwrap());
+        let mov2d = MovingCamera::try_new(o1, o2, 1000, RateFunc::Linear).unwrap();
+        assert_eq!(anim_camera_track_ids(&mov2d).len(), 4);
+        // Órbita: 48 frames reales; el travelling rompe la simetría en los
+        // tres ejes (si solo se espejara x sobre el cubo simétrico, el
+        // primero y el último serían espejos idénticos). Se cuenta diferencia
+        // en vez de `assert_ne!` directo para no volcar 4096 píxeles al log.
+        let frames = render_orbit_frames(64, 64);
+        assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+        let difieren = frames[0]
+            .pixels
+            .iter()
+            .zip(frames[NATIVE_ANIM_FRAME_COUNT - 1].pixels.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(difieren > 0, "la órbita debe mover la cámara entre frames");
+        // Mobject estático: 48 frames con la forma presente.
+        let cuadros = render_mobject_frames(
+            64,
+            64,
+            &grafito_anim::Mobject::Circle {
+                cx: 0.0,
+                cy: 0.0,
+                r: 1.0,
+            },
+        );
+        assert_eq!(cuadros.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+}
+
+// ── P2-perf: params vivos restantes + Manim resto (SOLO AÑADIDOS) ───────────
+// Coordinación W5: los writers legacy (`*_impl` sin params) NO se tocan.
+// Cada plantilla restante gana `render_*_with_params` + `_with_params_impl`
+// (clon parametrizado; mapa vacío o defaults → delega al legacy exacto) y
+// el dispatcher `render_anim_for_concept_with_params_p2` que atiende las 5
+// y delega el resto al dispatcher existente. Presupuesto intacto: siempre
+// 48 frames (`NATIVE_ANIM_FRAME_COUNT`).
+//
+// | Clave          | Plantilla            | Significado              | Default      |
+// |----------------|----------------------|--------------------------|--------------|
+// | `cr_range`     | conformal-map        | semirrecorrido real de c | 0.45 [0.05,1]|
+// | `ci_amp`       | conformal-map        | amplitud imag de c       | 0.3 [0,1]    |
+// | `tri_size`     | pitagoras            | escala del triángulo     | 1.0 [0.25,2] |
+// | `r0` / `r1`    | logistic-bifurcation | rango de r barrido       | 2.5 / 4.0    |
+// | `freq`         | gradient-field       | frecuencia del campo     | 1.0 [0.25,3] |
+// | `mob_amp`      | mobius-transform     | recorrido real de c(t)   | 0.8 [0,1.5]  |
+// Ausente/NaN/inf → default; fuera de rango → clamp. `r0 > r1` se ordena
+// (igual que `a`/`b` en integral-area).
+
+/// Semirrecorrido real del centro conforme (conformal-map).
+pub const P2_PARAM_CR_RANGE: &str = "cr_range";
+/// Amplitud imaginaria del centro conforme (conformal-map).
+pub const P2_PARAM_CI_AMP: &str = "ci_amp";
+/// Escala del triángulo (pitagoras).
+pub const P2_PARAM_TRI_SIZE: &str = "tri_size";
+/// Extremo inicial del barrido de r (logistic-bifurcation).
+pub const P2_PARAM_R0: &str = "r0";
+/// Extremo final del barrido de r (logistic-bifurcation).
+pub const P2_PARAM_R1: &str = "r1";
+/// Frecuencia del campo f=sin·cos (gradient-field).
+pub const P2_PARAM_FREQ: &str = "freq";
+/// Recorrido real de c(t) (mobius-transform).
+pub const P2_PARAM_MOB_AMP: &str = "mob_amp";
+/// Fotogramas por segundo pedidos (`AnimRequest.params`, Manim `-fps`).
+pub const P2_PARAM_FPS: &str = "fps";
+/// Bitrate pedido en kbps (`AnimRequest.params`, Manim `--bitrate`).
+pub const P2_PARAM_BITRATE: &str = "bitrate_kbps";
+/// Calidad: 0 baja (`-ql`), 1 media (`-qm`, default), 2 alta.
+pub const P2_PARAM_QUALITY: &str = "quality";
+
+/// Guarda compartida de los clones P2 con tope temporal: repite el último
+/// frame hasta completar los 48 (idéntica a la de los writers legacy).
+fn p2_rellena_con_ultimo(
+    frames: &mut Vec<egui::ColorImage>,
+    w: usize,
+    h: usize,
+    on_frame: &mut dyn FnMut(usize, usize),
+) {
+    let ultimo = frames.last().cloned().unwrap_or_else(|| {
+        let len = checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut b = vec![0u8; len];
+        for chunk in b.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&PAL_BG);
+        }
+        if len == w.checked_mul(h).and_then(|v| v.checked_mul(4)).unwrap_or(0) {
+            egui::ColorImage::from_rgba_unmultiplied([w, h], &b)
+        } else {
+            egui::ColorImage::from_rgba_unmultiplied([NATIVE_FALLBACK_W, NATIVE_FALLBACK_H], &b)
+        }
+    });
+    while frames.len() < NATIVE_ANIM_FRAME_COUNT {
+        frames.push(ultimo.clone());
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+}
+
+// ── conformal-map con params vivos ──────────────────────────────────────────
+
+/// Conformal con params vivos (`cr_range`, `ci_amp`). Mapa vacío = legacy.
+pub fn render_conformal_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_conformal_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
+}
+
+fn render_conformal_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    if params.is_empty() {
+        return render_conformal_frames_impl(width, height, con_rotulo, on_frame);
+    }
+    let cr_range = scene_param_clamped(params, P2_PARAM_CR_RANGE, 0.45, 0.05, 1.0);
+    let ci_amp = scene_param_clamped(params, P2_PARAM_CI_AMP, 0.3, 0.0, 1.0);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        let (cr, ci) = (
+            cr_range * (2.0 * t - 1.0),
+            ci_amp * (std::f64::consts::PI * t).sin(),
+        );
+        for gx in -2..=2 {
+            for gy in -2..=2 {
+                let x = gx as f64;
+                let y = gy as f64;
+                let p0 = to_pixel(w, h, x, y);
+                draw_filled_circle(&mut buf, w, h, p0.0, p0.1, 1, MINT_FAINT);
+                if let Some((wx, wy)) = mobius_map(x, y, cr, ci) {
+                    let p1 = to_pixel(w, h, wx, wy);
+                    draw_filled_circle(&mut buf, w, h, p1.0, p1.1, 2, MINT_STRONG);
+                }
+            }
+        }
+        let mut prev: Option<(usize, usize)> = None;
+        for k in 0..=60 {
+            let a = 2.0 * std::f64::consts::PI * k as f64 / 60.0;
+            let (zx, zy) = (a.cos(), a.sin());
+            if let Some((wx, wy)) = mobius_map(zx, zy, cr, ci) {
+                let p = to_pixel(w, h, wx, wy);
+                if let Some(q) = prev {
+                    draw_line(&mut buf, w, h, q, p, CURVE_MAIN);
+                }
+                prev = Some(p);
+            } else {
+                prev = None;
+            }
+        }
+        if con_rotulo {
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "conforme w=(z-c)/(1-cc*z)");
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+    frames
+}
+
+// ── pitagoras con params vivos ──────────────────────────────────────────────
+
+/// Pitágoras con params vivos (`tri_size`). Mapa vacío = legacy.
+pub fn render_pitagoras_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_pitagoras_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
+}
+
+fn render_pitagoras_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    if params.is_empty() {
+        return render_pitagoras_frames_impl(width, height, con_rotulo, on_frame);
+    }
+    let size = scene_param_clamped(params, P2_PARAM_TRI_SIZE, 1.0, 0.25, 2.0);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        // Timeline por fases: los cuadrados crecen 0→1 en construcción.
+        let t = fase_alpha(frame);
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        let p1 = to_pixel(w, h, -size, -size);
+        let p2 = to_pixel(w, h, 1.0 * size, -size);
+        let p3 = to_pixel(w, h, 1.0 * size, 0.5 * size);
+        draw_line(&mut buf, w, h, p1, p2, LINE_WHITE);
+        draw_line(&mut buf, w, h, p2, p3, LINE_WHITE);
+        draw_line(&mut buf, w, h, p3, p1, LINE_WHITE);
+        let scale = t;
+        let sq1_p2 = to_pixel(w, h, -size, (-1.0 - 2.0 * scale) * size);
+        let sq1_p3 = to_pixel(w, h, 1.0 * size, (-1.0 - 2.0 * scale) * size);
+        draw_line(&mut buf, w, h, p1, sq1_p2, SQUARE_BLUE);
+        draw_line(&mut buf, w, h, sq1_p2, sq1_p3, SQUARE_BLUE);
+        draw_line(&mut buf, w, h, sq1_p3, p2, SQUARE_BLUE);
+        let sq2_p2 = to_pixel(w, h, (1.0 + 1.5 * scale) * size, -size);
+        let sq2_p3 = to_pixel(w, h, (1.0 + 1.5 * scale) * size, 0.5 * size);
+        draw_line(&mut buf, w, h, p2, sq2_p2, SQUARE_AMBER);
+        draw_line(&mut buf, w, h, sq2_p2, sq2_p3, SQUARE_AMBER);
+        draw_line(&mut buf, w, h, sq2_p3, p3, SQUARE_AMBER);
+        if t > 0.5 {
+            let tt = (t - 0.5) * 2.0;
+            let mid = to_pixel(w, h, (-1.0 - 1.0 * tt) * size, (0.5 + 0.5 * tt) * size);
+            draw_line(&mut buf, w, h, p3, mid, SQUARE_GREEN);
+            draw_line(&mut buf, w, h, mid, p1, SQUARE_GREEN);
+        }
+        if con_rotulo {
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "a^2 + b^2 = c^2");
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+    frames
+}
+
+// ── logistic-bifurcation con params vivos ───────────────────────────────────
+
+/// Logística con params vivos (`r0`, `r1`; se ordenan si `r0 > r1`).
+/// Mapa vacío = legacy.
+pub fn render_logistic_bifurcation_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_logistic_bifurcation_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
+}
+
+fn render_logistic_bifurcation_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    if params.is_empty() {
+        return render_logistic_bifurcation_frames_impl(width, height, con_rotulo, on_frame);
+    }
+    let mut r0 = scene_param_clamped(params, P2_PARAM_R0, 2.5, 2.0, 4.0);
+    let mut r1 = scene_param_clamped(params, P2_PARAM_R1, 4.0, 2.0, 4.0);
+    if r0 > r1 {
+        std::mem::swap(&mut r0, &mut r1);
+    }
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let start = std::time::Instant::now();
+    let max_ms: u128 = 1800;
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        if start.elapsed().as_millis() > max_ms {
+            p2_rellena_con_ultimo(&mut frames, w, h, on_frame);
+            break;
+        }
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        let x0 = w / 12;
+        let x1 = w.saturating_sub(w / 12).max(x0 + 8);
+        let y_top = h / 4;
+        let y_bot = h.saturating_sub(h / 4).max(y_top + 8);
+        let span_x = (x1.saturating_sub(x0)).max(1);
+        let span_y = (y_bot.saturating_sub(y_top)).max(1);
+        let mut sx = x0;
+        while sx < x1 {
+            let r = r0 + (r1 - r0) * (sx.saturating_sub(x0)) as f64 / span_x as f64;
+            let mut x = 0.5;
+            for _ in 0..100 {
+                x = r * x * (1.0 - x);
+            }
+            for _ in 0..16 {
+                x = r * x * (1.0 - x);
+                let frac = x.clamp(0.0, 1.0);
+                let py = y_bot.saturating_sub((frac * span_y as f64) as usize);
+                draw_filled_circle(
+                    &mut buf,
+                    w,
+                    h,
+                    sx,
+                    py.min(h.saturating_sub(1)),
+                    1,
+                    MINT_FAINT,
+                );
+            }
+            sx += 2;
+        }
+        let hx = x0 + ((t * span_x as f64) as usize).min(span_x.saturating_sub(1));
+        draw_line(&mut buf, w, h, (hx, y_top), (hx, y_bot), PAL_ACCENT);
+        let r_h = r0 + (r1 - r0) * t;
+        let mut xh = 0.5;
+        for _ in 0..100 {
+            xh = r_h * xh * (1.0 - xh);
+        }
+        for _ in 0..12 {
+            xh = r_h * xh * (1.0 - xh);
+            let frac = xh.clamp(0.0, 1.0);
+            let py = y_bot.saturating_sub((frac * span_y as f64) as usize);
+            draw_filled_circle(
+                &mut buf,
+                w,
+                h,
+                hx,
+                py.min(h.saturating_sub(1)),
+                2,
+                POINT_RED,
+            );
+        }
+        if con_rotulo {
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "bifurcacion r");
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "bifurcacion r",
+                PAL_FG,
+                text_scale_for_h(h),
+            );
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+    frames
+}
+
+// ── gradient-field con params vivos ─────────────────────────────────────────
+
+/// Gradiente con params vivos (`freq`). Mapa vacío = legacy.
+pub fn render_gradient_field_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_gradient_field_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
+}
+
+fn render_gradient_field_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    if params.is_empty() {
+        return render_gradient_field_frames_impl(width, height, con_rotulo, on_frame);
+    }
+    let freq = scene_param_clamped(params, P2_PARAM_FREQ, 1.0, 0.25, 3.0);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let start = std::time::Instant::now();
+    let max_ms: u128 = 1800;
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        if start.elapsed().as_millis() > max_ms {
+            p2_rellena_con_ultimo(&mut frames, w, h, on_frame);
+            break;
+        }
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        let math_per_px = 6.0 / w.max(1) as f64;
+        for gx in -2..=2 {
+            for gy in -2..=2 {
+                let x = gx as f64 * 0.9;
+                let y = gy as f64 * 0.9;
+                let gfx = (freq * x).cos() * (freq * y).cos();
+                let gfy = -((freq * x).sin() * (freq * y).sin());
+                let mag = (gfx * gfx + gfy * gfy).sqrt();
+                let (dx, dy) = if mag < 1e-9 {
+                    (0.0, 0.0)
+                } else {
+                    (gfx / mag, gfy / mag)
+                };
+                let len_px = 4.0 + 10.0 * (mag / (1.0 + mag));
+                let x2 = (x + dx * len_px * math_per_px).clamp(-3.0, 3.0);
+                let y2 = (y + dy * len_px * math_per_px).clamp(-3.0, 3.0);
+                let a = to_pixel(w, h, x, y);
+                let b = to_pixel(w, h, x2, y2);
+                draw_line(&mut buf, w, h, a, b, PAL_ACCENT);
+                draw_filled_circle(&mut buf, w, h, b.0, b.1, 1, MINT_STRONG);
+                draw_filled_circle(&mut buf, w, h, a.0, a.1, 1, MINT_FAINT);
+            }
+        }
+        for i in 0..6 {
+            let ang = 2.0 * std::f64::consts::PI * (i as f64 / 6.0) + t * 1.4 + i as f64 * 0.35;
+            let rad = 1.25 + 0.3 * (t * std::f64::consts::TAU + i as f64 * 1.3).sin();
+            let x = (rad * ang.cos()).clamp(-2.8, 2.8);
+            let y = (rad * ang.sin() * 0.7).clamp(-2.8, 2.8);
+            let p = to_pixel(w, h, x, y);
+            let pulse = (frame as f64 * 0.4 + i as f64).sin() * 0.5 + 0.5;
+            let col = with_alpha(POINT_RED, (140.0 + 100.0 * pulse) as u8);
+            draw_filled_circle(&mut buf, w, h, p.0, p.1, 3, col);
+        }
+        if con_rotulo {
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "gradiente f");
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "gradiente f",
+                PAL_FG,
+                text_scale_for_h(h),
+            );
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+    frames
+}
+
+// ── mobius-transform con params vivos ───────────────────────────────────────
+
+/// Möbius con params vivos (`mob_amp`). Mapa vacío = legacy.
+pub fn render_mobius_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_mobius_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
+}
+
+fn render_mobius_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    if params.is_empty() {
+        return render_mobius_frames_impl(width, height, con_rotulo, on_frame);
+    }
+    let amp = scene_param_clamped(params, P2_PARAM_MOB_AMP, 0.8, 0.0, 1.5);
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let start = std::time::Instant::now();
+    let max_ms: u128 = 1800;
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        if start.elapsed().as_millis() > max_ms {
+            p2_rellena_con_ultimo(&mut frames, w, h, on_frame);
+            break;
+        }
+        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
+        let t = fase_alpha(frame);
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        let ang_c = 2.0 * std::f64::consts::PI * t;
+        let (cr, ci) = (-0.4 + amp * t, 0.3 * ang_c.sin());
+        let mobius = |x: f64, y: f64| -> Option<(f64, f64)> { mobius_map(x, y, cr, ci) };
+        for gx in -2..=2 {
+            for gy in -2..=2 {
+                let x = gx as f64;
+                let y = gy as f64;
+                let p0 = to_pixel(w, h, x, y);
+                draw_filled_circle(&mut buf, w, h, p0.0, p0.1, 1, MINT_FAINT);
+                if let Some((wx, wy)) = mobius(x, y) {
+                    let p1 = to_pixel(w, h, wx, wy);
+                    draw_filled_circle(&mut buf, w, h, p1.0, p1.1, 2, PAL_ACCENT);
+                }
+            }
+        }
+        let mut prev: Option<(usize, usize)> = None;
+        for k in 0..=60 {
+            let a = 2.0 * std::f64::consts::PI * k as f64 / 60.0;
+            let (zx, zy) = (a.cos(), a.sin());
+            if let Some((wx, wy)) = mobius(zx, zy) {
+                let p = to_pixel(w, h, wx, wy);
+                if let Some(q) = prev {
+                    draw_line(&mut buf, w, h, q, p, CURVE_MAIN);
+                }
+                prev = Some(p);
+            } else {
+                prev = None;
+            }
+        }
+        let pc = to_pixel(w, h, cr * 2.0, ci * 2.0);
+        draw_filled_circle(&mut buf, w, h, pc.0, pc.1, 3, POINT_RED);
+        if con_rotulo {
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "mobius  w(z)");
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                "mobius  w(z)",
+                PAL_FG,
+                text_scale_for_h(h),
+            );
+        }
+        let bar_y = h.saturating_sub(4);
+        // Progreso lineal honesto del frame (la construcción va por fases).
+        let prog = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        let bar_w = (w as f64 * prog) as usize;
+        draw_filled_rect(&mut buf, w, h, 0, bar_y, bar_w, 2, PAL_ACCENT);
+        draw_filled_rect(
+            &mut buf,
+            w,
+            h,
+            bar_w,
+            bar_y,
+            w.saturating_sub(bar_w),
+            2,
+            TRACK,
+        );
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+    frames
+}
+
+/// Dispatcher P2: las 5 plantillas restantes con params vivos; el resto
+/// delega al dispatcher existente (wiring W5 intacto).
+pub fn render_anim_for_concept_with_params_p2(
+    template: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    match resolve_native_template(template, concept) {
+        "conformal-map" => {
+            render_conformal_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "pitagoras" => {
+            render_pitagoras_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "logistic-bifurcation" => render_logistic_bifurcation_frames_with_params_impl(
+            width, height, params, con_rotulo, on_frame,
+        ),
+        "gradient-field" => render_gradient_field_frames_with_params_impl(
+            width, height, params, con_rotulo, on_frame,
+        ),
+        "mobius-transform" => {
+            render_mobius_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        _ => render_anim_with_progress_con_rotulo(
+            template, concept, width, height, params, con_rotulo, on_frame,
+        ),
+    }
+}
+
+// ── always_redraw / updaters genéricos (Manim resto) ────────────────────────
+// En Manim cada `Mobject` con updater se re-evalúa por frame
+// (`always_redraw(f)`); acá los sets nativos son 48 frames precomputados y
+// el seam genérico ya existe (`render_parametric_frames_con_updater`, que
+// acepta `&mut dyn FnMut(usize) -> Option<f64>` como vivo por frame). Este
+// bloque suma la DECISIÓN de redibujo: con `always=true` (default Manim)
+// cada scrub re-renderiza; con `false` solo si el fingerprint de params
+// cambió (ahorra los 48 frames cuando el slider no se movió).
+
+/// Huella FNV-1a de 64 bits de un mapa de params (claves ordenadas por
+/// `BTreeMap` + bits de cada `f64`). Pura, sin pánicos.
+pub fn params_fingerprint(params: &std::collections::BTreeMap<String, f64>) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for (k, v) in params {
+        for byte in k.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        for byte in v.to_bits().to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+/// Decisión de redibujo estilo `always_redraw`.
+///
+/// `always=true` → siempre `true` (Manim default: el updater corre por
+/// frame). `always=false` → `true` solo si el fingerprint cambió desde la
+/// última llamada (el caller guarda el estado entre scrubs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdaterRedraw {
+    /// `true` = re-renderizar siempre (semántica Manim).
+    pub always: bool,
+    /// Último fingerprint visto (`u64::MAX` = ninguno todavía).
+    pub ultimo_hash: u64,
+}
+
+impl UpdaterRedraw {
+    /// Constructor: `UpdaterRedraw::nuevo(true)` = `always_redraw`.
+    pub const fn nuevo(always: bool) -> Self {
+        Self {
+            always,
+            ultimo_hash: u64::MAX,
+        }
+    }
+
+    /// ¿Hay que re-renderizar con estos params? Actualiza `ultimo_hash`.
+    pub fn debe_redibujar(&mut self, params: &std::collections::BTreeMap<String, f64>) -> bool {
+        if self.always {
+            return true;
+        }
+        let hash = params_fingerprint(params);
+        if hash == self.ultimo_hash {
+            false
+        } else {
+            self.ultimo_hash = hash;
+            true
+        }
+    }
+}
+
+// ── fps / bitrate / -qm / -ql (Manim resto, lado Piel) ─────────────────────
+// BLOQUEADOR HONESTO: `AnimRequest` vive en `grafito-anim/src/protocol.rs`
+// (vedado: W4 hecho). Estos helpers leen `fps`/`bitrate_kbps`/`quality` del
+// mapa `params` (el mismo que viaja en el wire) con validación acotada;
+// agregar los CAMPOS al struct es tarea W4. Default intacto: 48 frames.
+// `mp4_fps_for_delay` (delay 8cs → 12 fps) sigue mandando en el export
+// actual; `anim_fps_desde_params` lo espeja cuando el pedido trae `fps`.
+
+/// fps mínimo aceptado (Manim permite 1).
+pub const ANIM_FPS_MIN: u32 = 1;
+/// fps máximo aceptado (60 = tope razonable de preview).
+pub const ANIM_FPS_MAX: u32 = 60;
+/// fps cuando el pedido no trae `fps` (12 = delay 8cs histórico).
+pub const ANIM_FPS_DEFAULT: u32 = 12;
+/// Bitrate mínimo en kbps.
+pub const ANIM_BITRATE_MIN_KBPS: u32 = 100;
+/// Bitrate máximo en kbps (20 Mbps, cota anti-abuso del export).
+pub const ANIM_BITRATE_MAX_KBPS: u32 = 20_000;
+/// Bitrate cuando el pedido no trae `bitrate_kbps`.
+pub const ANIM_BITRATE_DEFAULT_KBPS: u32 = 2000;
+
+/// fps desde `params["fps"]`: ausente/NaN/inf → 12; redondea y clampa 1..=60.
+pub fn anim_fps_desde_params(params: &std::collections::BTreeMap<String, f64>) -> u32 {
+    match params.get(P2_PARAM_FPS).copied() {
+        Some(v) if v.is_finite() => {
+            (v.round()
+                .clamp(f64::from(ANIM_FPS_MIN), f64::from(ANIM_FPS_MAX))) as u32
+        }
+        _ => ANIM_FPS_DEFAULT,
+    }
+}
+
+/// Bitrate kbps desde `params["bitrate_kbps"]`: ausente/NaN/inf → 2000;
+/// clampa 100..=20000.
+pub fn anim_bitrate_desde_params(params: &std::collections::BTreeMap<String, f64>) -> u32 {
+    match params.get(P2_PARAM_BITRATE).copied() {
+        Some(v) if v.is_finite() => {
+            (v.round().clamp(
+                f64::from(ANIM_BITRATE_MIN_KBPS),
+                f64::from(ANIM_BITRATE_MAX_KBPS),
+            )) as u32
+        }
+        _ => ANIM_BITRATE_DEFAULT_KBPS,
+    }
+}
+
+/// Calidad de export (Manim `-ql`/`-qm`; 2 = alta, sin flag Manim).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoQuality {
+    /// `-ql`: rápido y liviano (crf 30, igual que el webm actual).
+    Baja,
+    /// `-qm` (default): equilibrio (crf 23, igual que el mp4 actual).
+    #[default]
+    Media,
+    /// Sin flag Manim: archivo grande y nítido (crf 18, preset fast).
+    Alta,
+}
+
+impl VideoQuality {
+    /// `(crf, preset)` ffmpeg para la calidad.
+    pub const fn flags(self) -> (u8, &'static str) {
+        match self {
+            Self::Baja => (30, "veryfast"),
+            Self::Media => (23, "veryfast"),
+            Self::Alta => (18, "fast"),
+        }
+    }
+}
+
+/// Calidad desde `params["quality"]`: 0 → Baja, 2 → Alta, resto → Media.
+pub fn video_quality_desde_params(
+    params: &std::collections::BTreeMap<String, f64>,
+) -> VideoQuality {
+    match params.get(P2_PARAM_QUALITY).copied() {
+        Some(v) if v.is_finite() && v.round() as i64 == 0 => VideoQuality::Baja,
+        Some(v) if v.is_finite() && v.round() as i64 == 2 => VideoQuality::Alta,
+        _ => VideoQuality::Media,
+    }
+}
+
+/// Argumentos ffmpeg para el export con calidad (espeja los del writer mp4
+/// actual + `-b:v`; el cableado al `Command` real es P3: los writers los
+/// posee W5). Puro.
+pub fn ffmpeg_video_args_con_calidad(
+    fps: u32,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    w: u32,
+    h: u32,
+) -> Vec<String> {
+    let fps = fps.clamp(ANIM_FPS_MIN, ANIM_FPS_MAX);
+    let bitrate_kbps = bitrate_kbps.clamp(ANIM_BITRATE_MIN_KBPS, ANIM_BITRATE_MAX_KBPS);
+    let (crf, preset) = quality.flags();
+    vec![
+        "-y".to_string(),
+        "-f".to_string(),
+        "rawvideo".to_string(),
+        "-pix_fmt".to_string(),
+        "rgba".to_string(),
+        "-s".to_string(),
+        format!("{w}x{h}"),
+        "-framerate".to_string(),
+        fps.to_string(),
+        "-i".to_string(),
+        "pipe:0".to_string(),
+        "-c:v".to_string(),
+        "libx264".to_string(),
+        "-preset".to_string(),
+        preset.to_string(),
+        "-crf".to_string(),
+        crf.to_string(),
+        "-b:v".to_string(),
+        format!("{bitrate_kbps}k"),
+        "-pix_fmt".to_string(),
+        "yuv420p".to_string(),
+        "-vf".to_string(),
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2".to_string(),
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+    ]
+}
+
+// ── Export real con calidad (cableado MP4/WebM) ────────────────────────────
+// `-ql`/`-qm`/`-qh` mapean a Resolución + crf + bitrate reales:
+// - `video_quality_export_size`: lado mayor 640 (Baja) / 1280 (Media) /
+//   nativo ≤4096 (Alta), pares (yuv420p), sin upscale.
+// - crf/preset: `VideoQuality::flags` (30/23/18 + veryfast/veryfast/fast).
+// - bitrate: `bitrate_kbps` del diálogo (100..=20000) a `-b:v {k}k`.
+// Todo puro salvo el reescalado (CPU en el hilo worker, jamás en UI).
+
+/// Lado mayor máximo por calidad (`-ql` 640 / `-qm` 1280 / `-qh` nativo).
+pub const fn video_quality_max_side(quality: VideoQuality) -> u32 {
+    match quality {
+        VideoQuality::Baja => 640,
+        VideoQuality::Media => 1280,
+        VideoQuality::Alta => 4096,
+    }
+}
+
+/// Tamaño de export para la calidad (pares, sin upscale, ≤4096). Puro.
+pub fn video_quality_export_size(w: usize, h: usize, quality: VideoQuality) -> (usize, usize) {
+    let tope = video_quality_max_side(quality) as usize;
+    let mayor = w.max(h);
+    if mayor == 0 || mayor <= tope {
+        return (w - w % 2, h - h % 2);
+    }
+    let (nw, nh) = ((w * tope) / mayor.max(1), (h * tope) / mayor.max(1));
+    let (nw, nh) = (nw.max(2) - (nw.max(2) % 2), nh.max(2) - (nh.max(2) % 2));
+    (nw.max(2), nh.max(2))
+}
+
+/// Reescala los frames al tamaño de la calidad (solo downscale, Lanczos3
+/// vía `image`). Sin upscale: si ya encajan, devuelve clon. Puro en CPU
+/// (llamar en hilo worker).
+fn reescalar_frames_para_calidad(
+    frames: &[egui::ColorImage],
+    quality: VideoQuality,
+) -> Vec<egui::ColorImage> {
+    let primero = frames.first().map(|f| f.size);
+    let Some([bw, bh]) = primero else {
+        return Vec::new();
+    };
+    let (nw, nh) = video_quality_export_size(bw, bh, quality);
+    if (nw, nh) == (bw, bh) || nw == 0 || nh == 0 {
+        return frames.to_vec();
+    }
+    let (nw32, nh32) = (nw as u32, nh as u32);
+    frames
+        .iter()
+        .filter(|f| f.size == [bw, bh])
+        .map(|f| {
+            let bytes: Vec<u8> = f.pixels.iter().flat_map(|p| p.to_array()).collect();
+            let img = image::RgbaImage::from_raw(bw as u32, bh as u32, bytes);
+            let Some(img) = img else {
+                return f.clone();
+            };
+            let chica =
+                image::imageops::resize(&img, nw32, nh32, image::imageops::FilterType::Triangle);
+            let pixeles: Vec<egui::Color32> = chica
+                .pixels()
+                .map(|p| egui::Color32::from_rgba_unmultiplied(p.0[0], p.0[1], p.0[2], p.0[3]))
+                .collect();
+            egui::ColorImage {
+                size: [nw, nh],
+                pixels: pixeles,
+            }
+        })
+        .collect()
+}
+
+/// Re-muestrea los frames al fps pedido con duración fija honesta.
+///
+/// Construye un `Timeline` (1 key por frame sobre la duración total) y lo
+/// muestrea con `Timeline::sample` (lineal) en los instantes del fps
+/// destino: 48 @12fps → 96 @24fps = mismos 4s. Vacío → vacío; fps fuera
+/// de 1..=60 se clampean. Puro (clona frames, sin E/S).
+pub fn remuestrear_frames_para_fps(
+    frames: &[egui::ColorImage],
+    fps_origen: u32,
+    fps_destino: u32,
+) -> Vec<egui::ColorImage> {
+    use grafito_anim::protocol::{Keyframe, Timeline};
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let origen = fps_origen.clamp(ANIM_FPS_MIN, ANIM_FPS_MAX) as u64;
+    let destino = fps_destino.clamp(ANIM_FPS_MIN, ANIM_FPS_MAX) as u64;
+    if origen == destino {
+        return frames.to_vec();
+    }
+    let n = frames.len() as u64;
+    let duracion_ms = n.saturating_mul(1000) / origen.max(1);
+    if duracion_ms == 0 {
+        return frames.to_vec();
+    }
+    let keys: Vec<Keyframe> = (0..n)
+        .map(|i| Keyframe {
+            t_ms: i.saturating_mul(1000) / origen,
+            value: i as f32,
+        })
+        .collect();
+    let timeline = Timeline {
+        duration_ms: duracion_ms.max(1),
+        keyframes: keys,
+    };
+    let total_dest = (duracion_ms.saturating_mul(destino) / 1000).max(1);
+    // Tope anti-abuso: no generar más de 512 frames por re-muestreo (el
+    // preflight de budgets del runner valida igual; esto evita el clon
+    // gigante antes del `Err` honesto).
+    let total_dest = total_dest.min(512) as usize;
+    (0..total_dest)
+        .map(|j| {
+            let t = (j as u64).saturating_mul(1000) / destino;
+            let idx = timeline.sample(t).round().clamp(0.0, (n - 1) as f32) as usize;
+            frames[idx.min(frames.len() - 1)].clone()
+        })
+        .collect()
+}
+
+// ── SVGMobject / ImageMobject (Manim resto, lado Piel) ─────────────────────
+// BLOQUEADOR HONESTO: el enum `Mobject` vive en `grafito-anim/src/scene.rs`
+// (vedado: W4). `usvg` NO es dependencia del workspace (sumarla toca
+// `Cargo.toml`, fuera de este scope); por eso `SVGMobject` se rasteriza por
+// el MISMO subconjunto honesto del `Tex` W5 (`draw_tex_svg_onto`: circle/
+// rect/line sobre viewBox, ≤64 KiB, sin duplicar el parser). `ImageMobject`
+// usa el crate `image` (ya dependencia) con presupuesto propio.
+
+/// Tope de bytes de un `ImageMobject` (1 MiB, paridad con AttachmentLimits).
+pub const MAX_IMAGE_MOBJECT_BYTES: usize = 1_048_576;
+/// Lado máximo decodificado de un `ImageMobject` (paridad `Resolution`).
+pub const MAX_IMAGE_MOBJECT_SIDE: u32 = 4096;
+
+/// Rasteriza un `SVGMobject` sobre el frame con el parser honesto W5.
+/// `false` honesto si el SVG excede presupuesto o no trae formas del
+/// subconjunto (el llamador decide fallback, jamás inventa píxeles).
+pub fn raster_svg_mobject_onto(buf: &mut [u8], w: usize, h: usize, svg: &str) -> bool {
+    if svg.is_empty() || !svg.contains("<svg") {
+        return false;
+    }
+    draw_tex_svg_onto(buf, w, h, svg)
+}
+
+/// Rasteriza un `ImageMobject` (bytes PNG/JPEG) centrado sobre el frame con
+/// alfa real (`mezclar_pixel_alfa`). `false` honesto si los bytes exceden
+/// 1 MiB, no decodifican o el frame no es RGBA `w*h*4`.
+pub fn raster_image_mobject_onto(buf: &mut [u8], w: usize, h: usize, bytes: &[u8]) -> bool {
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE_MOBJECT_BYTES {
+        return false;
+    }
+    if buf.len() != w.checked_mul(h).and_then(|v| v.checked_mul(4)).unwrap_or(0) {
+        return false;
+    }
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return false;
+    };
+    if img.width() == 0 || img.height() == 0 {
+        return false;
+    }
+    if img.width() > MAX_IMAGE_MOBJECT_SIDE || img.height() > MAX_IMAGE_MOBJECT_SIDE {
+        return false;
+    }
+    let chica = img.thumbnail(
+        w.min(MAX_IMAGE_MOBJECT_SIDE as usize) as u32,
+        h.min(MAX_IMAGE_MOBJECT_SIDE as usize) as u32,
+    );
+    let rgba = chica.to_rgba8();
+    let (iw, ih) = (rgba.width() as usize, rgba.height() as usize);
+    if iw == 0 || ih == 0 || iw > w || ih > h {
+        return false;
+    }
+    let ox = (w - iw) / 2;
+    let oy = (h - ih) / 2;
+    for y in 0..ih {
+        for x in 0..iw {
+            let p = rgba.get_pixel(x as u32, y as u32).0;
+            let idx = ((oy + y) * w + (ox + x)) * 4;
+            let Some(slot) = buf.get_mut(idx..idx + 4) else {
+                return false;
+            };
+            let fondo = [slot[0], slot[1], slot[2], slot[3]];
+            let mezcla = mezclar_pixel_alfa(fondo, p);
+            slot.copy_from_slice(&mezcla);
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod p2_tests {
+    use super::*;
+
+    fn mapa(pares: &[(&str, f64)]) -> std::collections::BTreeMap<String, f64> {
+        pares.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn p2_vacio_reproduce_legacy_exactos() {
+        let vacio = mapa(&[]);
+        for (rotulo, legacy, vivo) in [
+            (
+                "conformal-map",
+                render_conformal_frames(64, 64),
+                render_conformal_frames_with_params(64, 64, &vacio),
+            ),
+            (
+                "pitagoras",
+                render_pitagoras_frames(64, 64),
+                render_pitagoras_frames_with_params(64, 64, &vacio),
+            ),
+            (
+                "logistic-bifurcation",
+                render_logistic_bifurcation_frames(64, 64),
+                render_logistic_bifurcation_frames_with_params(64, 64, &vacio),
+            ),
+            (
+                "gradient-field",
+                render_gradient_field_frames(64, 64),
+                render_gradient_field_frames_with_params(64, 64, &vacio),
+            ),
+            (
+                "mobius-transform",
+                render_mobius_frames(64, 64),
+                render_mobius_frames_with_params(64, 64, &vacio),
+            ),
+        ] {
+            assert_eq!(legacy.len(), vivo.len(), "{rotulo}: len");
+            for (i, (a, b)) in legacy.iter().zip(vivo.iter()).enumerate() {
+                assert_eq!(a.pixels, b.pixels, "{rotulo} frame {i}: idéntico a legacy");
+            }
+        }
+    }
+
+    #[test]
+    fn p2_knobs_mueven_los_frames() {
+        let medio = NATIVE_ANIM_FRAME_COUNT / 2;
+        let base = mapa(&[]);
+        let conf_base = render_conformal_frames_with_params(64, 64, &base);
+        let b = render_conformal_frames_with_params(64, 64, &mapa(&[("cr_range", 1.0)]));
+        assert_ne!(
+            conf_base[medio].pixels, b[medio].pixels,
+            "cr_range debe mover el frame"
+        );
+
+        let a = render_pitagoras_frames_with_params(64, 64, &base);
+        let b = render_pitagoras_frames_with_params(64, 64, &mapa(&[("tri_size", 2.0)]));
+        assert_ne!(
+            a[medio].pixels, b[medio].pixels,
+            "tri_size debe mover el frame"
+        );
+
+        let a = render_logistic_bifurcation_frames_with_params(64, 64, &base);
+        let b = render_logistic_bifurcation_frames_with_params(
+            64,
+            64,
+            &mapa(&[("r0", 3.5), ("r1", 4.0)]),
+        );
+        assert_ne!(
+            a[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            b[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "r0/r1 debe mover el frame final"
+        );
+
+        let a = render_gradient_field_frames_with_params(64, 64, &base);
+        let b = render_gradient_field_frames_with_params(64, 64, &mapa(&[("freq", 3.0)]));
+        assert_ne!(a[medio].pixels, b[medio].pixels, "freq debe mover el frame");
+
+        let a = render_mobius_frames_with_params(64, 64, &base);
+        let b = render_mobius_frames_with_params(64, 64, &mapa(&[("mob_amp", 0.0)]));
+        assert_ne!(
+            a[medio].pixels, b[medio].pixels,
+            "mob_amp debe mover el frame"
+        );
+
+        // NaN/inf → defaults = legacy, sin panic.
+        let nan = render_conformal_frames_with_params(
+            64,
+            64,
+            &mapa(&[("cr_range", f64::NAN), ("ci_amp", f64::INFINITY)]),
+        );
+        assert_eq!(conf_base[0].pixels, nan[0].pixels, "NaN/inf → defaults");
+        // r0 > r1 se ordena en vez de romper.
+        let swap = render_logistic_bifurcation_frames_with_params(
+            64,
+            64,
+            &mapa(&[("r0", 4.0), ("r1", 2.5)]),
+        );
+        assert_eq!(
+            swap.len(),
+            NATIVE_ANIM_FRAME_COUNT,
+            "swap honesto, 48 frames"
+        );
+    }
+
+    #[test]
+    fn p2_dispatcher_atiende_las_cinco_y_delega_el_resto() {
+        let knobs = mapa(&[("freq", 2.0)]);
+        let directo = render_gradient_field_frames_with_params(64, 64, &knobs);
+        let via_p2 = render_anim_for_concept_with_params_p2(
+            "gradient-field",
+            "campo",
+            64,
+            64,
+            &knobs,
+            true,
+            &mut |_, _| {},
+        );
+        assert_eq!(directo.len(), via_p2.len(), "P2 despacha gradient-field");
+        for (i, (a, b)) in directo.iter().zip(via_p2.iter()).enumerate() {
+            assert_eq!(a.pixels, b.pixels, "frame {i} idéntico vía P2");
+        }
+        // El resto delega al dispatcher existente (derivative-slope con x0).
+        let x0 = mapa(&[("x0", 1.0)]);
+        let via_p2 = render_anim_for_concept_with_params_p2(
+            "derivative-slope",
+            "derivada",
+            64,
+            64,
+            &x0,
+            true,
+            &mut |_, _| {},
+        );
+        let directo = render_derivative_frames_with_params(64, 64, &x0);
+        assert_eq!(via_p2.len(), directo.len(), "P2 delega derivative-slope");
+        for (i, (a, b)) in via_p2.iter().zip(directo.iter()).enumerate() {
+            assert_eq!(a.pixels, b.pixels, "frame {i} delegado idéntico");
+        }
+    }
+
+    #[test]
+    fn p2_fps_bitrate_quality_acotados() {
+        let vacio = mapa(&[]);
+        assert_eq!(anim_fps_desde_params(&vacio), 12, "default 12 fps");
+        assert_eq!(anim_bitrate_desde_params(&vacio), 2000, "default 2000 kbps");
+        assert_eq!(
+            video_quality_desde_params(&vacio),
+            VideoQuality::Media,
+            "default -qm"
+        );
+        assert_eq!(anim_fps_desde_params(&mapa(&[("fps", 60.0)])), 60);
+        assert_eq!(
+            anim_fps_desde_params(&mapa(&[("fps", 1000.0)])),
+            60,
+            "clamp arriba"
+        );
+        assert_eq!(
+            anim_fps_desde_params(&mapa(&[("fps", 0.0)])),
+            1,
+            "clamp abajo"
+        );
+        assert_eq!(
+            anim_fps_desde_params(&mapa(&[("fps", f64::NAN)])),
+            12,
+            "NaN → default"
+        );
+        assert_eq!(
+            anim_bitrate_desde_params(&mapa(&[("bitrate_kbps", 1e9)])),
+            20_000,
+            "clamp arriba"
+        );
+        assert_eq!(
+            video_quality_desde_params(&mapa(&[("quality", 0.0)])),
+            VideoQuality::Baja,
+            "-ql"
+        );
+        assert_eq!(
+            video_quality_desde_params(&mapa(&[("quality", 2.0)])),
+            VideoQuality::Alta
+        );
+        assert_eq!(
+            VideoQuality::Media.flags(),
+            (23, "veryfast"),
+            "media = mp4 actual"
+        );
+        assert_eq!(
+            VideoQuality::Baja.flags(),
+            (30, "veryfast"),
+            "baja = webm actual"
+        );
+        let args = ffmpeg_video_args_con_calidad(12, 2000, VideoQuality::Media, 640, 480);
+        assert!(args.contains(&"12".to_string()), "lleva el fps");
+        assert!(args.contains(&"2000k".to_string()), "lleva el bitrate");
+        assert!(args.contains(&"23".to_string()), "lleva el crf de -qm");
+    }
+
+    #[test]
+    fn p2_always_redraw_decide_bien() {
+        let a = mapa(&[("freq", 1.0)]);
+        let b = mapa(&[("freq", 2.0)]);
+        assert_ne!(
+            params_fingerprint(&a),
+            params_fingerprint(&b),
+            "hash distingue"
+        );
+        assert_eq!(
+            params_fingerprint(&a),
+            params_fingerprint(&mapa(&[("freq", 1.0)])),
+            "hash estable"
+        );
+        let mut siempre = UpdaterRedraw::nuevo(true);
+        assert!(siempre.debe_redibujar(&a), "always → true");
+        assert!(siempre.debe_redibujar(&a), "always → true otra vez");
+        let mut cambio = UpdaterRedraw::nuevo(false);
+        assert!(cambio.debe_redibujar(&a), "primera vez → true");
+        assert!(
+            !cambio.debe_redibujar(&a),
+            "sin cambio → false (ahorra 48 frames)"
+        );
+        assert!(cambio.debe_redibujar(&b), "cambio → true");
+        assert!(!cambio.debe_redibujar(&b), "otra vez igual → false");
+    }
+
+    #[test]
+    fn p2_svg_e_imagen_rasterizan_honesto() {
+        let w = 64usize;
+        let h = 64usize;
+        // SVG del subconjunto honesto pinta (círculo sobre viewBox 100x100).
+        let mut buf = vec![0u8; w * h * 4];
+        let svg = "<svg viewBox=\"0 0 100 100\"><circle cx=\"50\" cy=\"50\" r=\"20\"/></svg>";
+        assert!(
+            raster_svg_mobject_onto(&mut buf, w, h, svg),
+            "círculo pinta"
+        );
+        assert!(buf.iter().any(|b| *b != 0), "hay píxeles no negros");
+        // Basura → false honesto, sin panic.
+        let mut buf2 = vec![0u8; w * h * 4];
+        assert!(
+            !raster_svg_mobject_onto(&mut buf2, w, h, "hola"),
+            "sin <svg → false"
+        );
+        assert!(
+            !raster_svg_mobject_onto(&mut buf2, w, h, ""),
+            "vacío → false"
+        );
+        // PNG real de 8x8 rojo vía `image` (ya dependencia): centra y blitea.
+        let rojo = image::ImageBuffer::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]));
+        let dyn_img = image::DynamicImage::ImageRgba8(rojo);
+        let mut png: Vec<u8> = Vec::new();
+        dyn_img
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mut buf3 = vec![0u8; w * h * 4];
+        assert!(
+            raster_image_mobject_onto(&mut buf3, w, h, &png),
+            "PNG válido blitea"
+        );
+        let centro = ((h / 2) * w + (w / 2)) * 4;
+        assert_eq!(&buf3[centro..centro + 3], &[255, 0, 0], "centro rojo");
+        // Basura y exceso → false honesto.
+        assert!(
+            !raster_image_mobject_onto(&mut buf3, w, h, b"no-es-imagen"),
+            "basura → false"
+        );
+        assert!(
+            !raster_image_mobject_onto(&mut buf3, w, h, &vec![0u8; MAX_IMAGE_MOBJECT_BYTES + 1]),
+            "exceso → false"
         );
     }
 }

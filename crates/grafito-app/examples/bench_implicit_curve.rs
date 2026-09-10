@@ -5,12 +5,12 @@
 
 use grafito_core::object::{ImplicitCurveObj, RelationOperator};
 use grafito_core::RenderQuality;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 fn main() {
     let ic = ImplicitCurveObj::new("x^3 + y^3", "3*x*y", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let view_bounds = (-3.0, 3.0, -3.0, 3.0);
     let grid_size = 256;
 

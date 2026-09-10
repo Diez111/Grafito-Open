@@ -1963,27 +1963,17 @@ impl GrafitoApp {
             if let Some(local) = current_pos.and_then(|pos| canvas_local_pointer(canvas_rect, pos))
             {
                 if self.current_tool == Tool::Select {
-                    match typed_four_d_phase {
-                        Some(phase) => {
-                            crate::render_3d::select_3d_object_at_pointer_with_typed_four_d_phase(
-                                &mut self.document,
-                                &mut self.selected_object,
-                                &self.camera,
-                                local,
-                                canvas_rect.size(),
-                                Some(phase),
-                            );
-                        }
-                        None => {
-                            crate::render_3d::select_3d_object_at_pointer(
-                                &mut self.document,
-                                &mut self.selected_object,
-                                &self.camera,
-                                local,
-                                canvas_rect.size(),
-                            );
-                        }
-                    }
+                    // Selección por vista: perspectiva orbita, ortográficas
+                    // pickean por rayo exacto (`render_3d::pick_ortho_object`).
+                    crate::canvas::select_3d_object_for_view(
+                        &mut self.document,
+                        &mut self.selected_object,
+                        self.view3d,
+                        &self.camera,
+                        local,
+                        canvas_rect.size(),
+                        typed_four_d_phase,
+                    );
                 } else {
                     self.handle_3d_click(ui, local, canvas_rect.size());
                     self.tool_ghost = None;

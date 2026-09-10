@@ -1,5 +1,9 @@
 //! Integración de proveedores del asistente fuera del hilo de interfaz.
 
+use crate::manim_orchestrator::{
+    attach_media_to_last_assistant_turn, trim_conversation_dropping_pair_media,
+    turn_media_for_completed_job, AnimHistoryCoords,
+};
 use crate::{assistant_credentials, GrafitoApp};
 use grafito_assistant::{
     harness, rate_limit_cooldown_remaining_secs, rate_limit_paused_message,
@@ -150,20 +154,60 @@ pub(crate) fn clasifica_pedido_tangente(pedido: &str, template: &str) -> Tangent
     }
 }
 
+/// Estado del pedido de Taylor frente a la función (Frente A, puro).
+///
+/// Espejo de [`TangentePedido`]: sin función se renderiza la canónica
+/// (`sin(x)` en x=0, orden 3) y la prosa la declara; con función inválida
+/// hay error honesto sin frames ni hilo. Antes la Taylor explícita caía a
+/// traza de `sin(x)` muda.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TaylorPedido {
+    /// No es `taylor-series` o no menciona taylor (flujo intacto).
+    NoAplica,
+    /// Sin función: renderiza la canónica y la prosa la declara.
+    Canonica,
+    /// Con función válida del usuario: serie real que nombra f+centro+orden.
+    Explicita,
+    /// Con función inválida: error honesto sin frames ni hilo.
+    FuncionInvalida(String),
+}
+
+/// Clasifica un pedido de animación Taylor (puro, sin I/O).
+///
+/// Solo actúa cuando la plantilla resuelta es `taylor-series` Y el texto
+/// menciona taylor. El resto → `NoAplica` (nada cambia).
+pub(crate) fn clasifica_pedido_taylor(pedido: &str, template: &str) -> TaylorPedido {
+    if template.trim().to_lowercase() != "taylor-series"
+        || !grafito_anim::parametric::pedido_menciona_taylor(pedido)
+    {
+        return TaylorPedido::NoAplica;
+    }
+    match grafito_anim::parametric::infer_taylor_anim(pedido) {
+        Ok(resuelto) if resuelto.es_canonica() => TaylorPedido::Canonica,
+        Ok(_) => TaylorPedido::Explicita,
+        Err(error) => TaylorPedido::FuncionInvalida(error.to_string()),
+    }
+}
+
 /// Plantilla honesta para un pedido de animación (punto único de resolución).
 ///
 /// Si el pedido menciona integral/área (con typos acotados vía
 /// `pedido_menciona_area`: "integrela"→"integral"), la plantilla es
 /// `integral-area` aunque `detect_template_for_concept` diga `universal`
 /// por el typo. Espejo M1: si menciona derivada/tangente/pendiente (fuzzy
-/// "derivadaa"→"derivada"), es `derivative-slope`. El resto delega al
-/// detector clásico. Puro, sin I/O.
+/// "derivadaa"→"derivada"), es `derivative-slope`. Frente A: si menciona
+/// taylor, es `taylor-series` (después de área/tangente para no robarles
+/// ningún pedido que ya resolvían). El resto delega al detector clásico.
+/// Puro, sin I/O.
 pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
     if grafito_anim::parametric::pedido_menciona_area(pedido) {
         return "integral-area";
     }
     if grafito_anim::parametric::pedido_menciona_tangente(pedido) {
         return "derivative-slope";
+    }
+    if grafito_anim::parametric::pedido_menciona_taylor(pedido) {
+        return "taylor-series";
     }
     crate::anim_native::detect_template_for_concept(pedido)
 }
@@ -334,12 +378,15 @@ pub(crate) fn prosa_para_spec_anim_ia(spec: &SpecAnimIa) -> String {
 
 /// M1 — prosa canónica declarada según plantilla (punto único local).
 ///
-/// Tangente → `TANGENT_CANONICAL_PROSA`, resto → `INTEGRAL_CANONICAL_PROSA`,
-/// siempre con la frase de referencia. La usan Submit, los fallbacks sin
-/// IA y el worker IA-primero: la misma canónica en todos lados. Pura.
+/// Tangente → `TANGENT_CANONICAL_PROSA`, Taylor → `TAYLOR_CANONICAL_PROSA`,
+/// resto → `INTEGRAL_CANONICAL_PROSA`, siempre con la frase de referencia.
+/// La usan Submit, los fallbacks sin IA y el worker IA-primero: la misma
+/// canónica en todos lados. Pura.
 pub(crate) fn prosa_canonica_para_plantilla(plantilla: &str) -> String {
     let canonica = if plantilla.trim().to_lowercase() == "derivative-slope" {
         grafito_anim::parametric::TANGENT_CANONICAL_PROSA
+    } else if plantilla.trim().to_lowercase() == "taylor-series" {
+        grafito_anim::parametric::TAYLOR_CANONICAL_PROSA
     } else {
         grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
     };
@@ -391,6 +438,45 @@ pub(crate) fn prosa_tangente_explicita(expr: &str, pedido: &str) -> String {
     )
 }
 
+/// Frente A — prosa rioplatense para Taylor explícita: nombra f + centro +
+/// orden SIEMPRE (la queja era prosa huérfana sobre senoidal ajena).
+///
+/// Re-infiere el spec del pedido para que la curva nunca quede huérfana;
+/// ante inferencia rota usa la expr dada con centro/orden canónicos.
+/// Sin "pedime otra" (ese marcador es solo de la canónica). Pura, sin I/O.
+pub(crate) fn prosa_taylor_explicita(expr: &str, pedido: &str) -> String {
+    let base = grafito_anim::parametric::infer_taylor_anim(pedido)
+        .map(|resuelto| {
+            grafito_anim::parametric::taylor_prosa(resuelto.spec(), resuelto.es_canonica())
+        })
+        .unwrap_or_else(|_| {
+            let spec = grafito_anim::parametric::TaylorSpec {
+                expr: expr.to_string(),
+                centro: grafito_anim::parametric::TAYLOR_CANONICAL_CENTER,
+                orden: grafito_anim::parametric::TAYLOR_CANONICAL_ORDER,
+            };
+            grafito_anim::parametric::taylor_prosa(&spec, false)
+        });
+    format!(
+        "{base}.\n\n{}",
+        crate::anim_ui::animation_reference_sentence()
+    )
+}
+
+/// Frente A — prosa canónica Taylor desde el pedido: declara el spec
+/// EFECTIVO (la canónica hereda centro/orden del pedido; decir "x=0" cuando
+/// se dibuja x=1 mentiría). Si el pedido no infiere, la const por defecto.
+/// Pura, sin I/O.
+pub(crate) fn prosa_taylor_canonica(pedido: &str) -> String {
+    let base = grafito_anim::parametric::infer_taylor_anim(pedido)
+        .map(|resuelto| grafito_anim::parametric::taylor_prosa(resuelto.spec(), true))
+        .unwrap_or_else(|_| grafito_anim::parametric::TAYLOR_CANONICAL_PROSA.to_string());
+    format!(
+        "{base}.\n\n{}",
+        crate::anim_ui::animation_reference_sentence()
+    )
+}
+
 /// M1 — animación paramétrica explícita del pedido, igual que el agente.
 ///
 /// Si la plantilla es `integral-area`/`derivative-slope` y el texto menciona
@@ -414,6 +500,13 @@ pub(crate) fn anim_parametrica_para_pedido(
         return grafito_anim::parametric::infer_tangent_anim(texto)
             .map(|resuelto| Some(resuelto.anim().clone()))
             .map_err(|error| error.to_string());
+    }
+    // Frente A: Taylor NO va por la vía paramétrica genérica (dibujaría la
+    // traza de f, no f vs su serie). El worker la intercede antes y usa el
+    // renderer dedicado con el motor (`render_taylor_frames_for_spec_impl`).
+    // `Ok(None)` documentado: cae al clásico, que para taylor es el dedicado.
+    if plantilla == "taylor-series" && grafito_anim::parametric::pedido_menciona_taylor(texto) {
+        return Ok(None);
     }
     Ok(None)
 }
@@ -923,7 +1016,8 @@ pub(crate) enum DecisionAnimacion {
 /// Punto único de decisión para animación (puro, sin I/O ni spawn).
 ///
 /// Orden: gatillo → concepto → integral (canónica/explícita/inválida) →
-/// genérico. Sin `unwrap`: los `Err` se vuelven `PreguntarSinMedia`.
+/// tangente (idem) → taylor (idem, Frente A) → genérico. Sin `unwrap`: los
+/// `Err` se vuelven `PreguntarSinMedia`.
 pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
     if !crate::anim_ui::wants_animation_request(pedido) {
         return DecisionAnimacion::NoAnimacion;
@@ -971,9 +1065,33 @@ pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
                     expr,
                 }
             }
-            TangentePedido::NoAplica => DecisionAnimacion::RenderGenerico {
-                plantilla,
-                concepto,
+            // Frente A: la Taylor inválida (`foo(x)`) era traza muda de
+            // `sin(x)`; ahora es guía honesta igual que integral/tangente.
+            TangentePedido::NoAplica => match clasifica_pedido_taylor(pedido, &plantilla) {
+                TaylorPedido::FuncionInvalida(detalle) => {
+                    DecisionAnimacion::PreguntarSinMedia(detalle)
+                }
+                TaylorPedido::Canonica => DecisionAnimacion::RenderCanonico {
+                    plantilla,
+                    concepto,
+                },
+                TaylorPedido::Explicita => {
+                    let expr = match grafito_anim::parametric::infer_taylor_anim(pedido) {
+                        Ok(resuelto) => resuelto.spec().expr.clone(),
+                        Err(error) => {
+                            return DecisionAnimacion::PreguntarSinMedia(error.to_string());
+                        }
+                    };
+                    DecisionAnimacion::RenderExplicito {
+                        plantilla,
+                        concepto,
+                        expr,
+                    }
+                }
+                TaylorPedido::NoAplica => DecisionAnimacion::RenderGenerico {
+                    plantilla,
+                    concepto,
+                },
             },
         },
     }
@@ -1033,6 +1151,82 @@ fn apply_local_assistant_plan(
     Ok(result)
 }
 
+/// Statem del turno del asistente (F4: enum real, antes solo §4.3 en prosa).
+///
+/// Extracción sin lógica: hoy es documentación ejecutable del ciclo
+/// `Idle -> Composing -> Thinking -> AwaitingAuthorization -> Animating`
+/// con terminales `Failed | Cancelled`. `AssistantRuntime` (jobs en vuelo)
+/// aún no se cablea a este enum — ese wiring es P2 (dueño `app.rs`): aquí
+/// solo el tipo + transiciones tipadas + tests, cero cambio de comportamiento.
+/// Sin `Verifying`: el preflight corre síncrono dentro de `Thinking`.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum AssistantTurnState {
+    #[default]
+    Idle,
+    Composing,
+    Thinking,
+    AwaitingAuthorization,
+    Animating {
+        job_id: String,
+    },
+    Failed {
+        reason: String,
+    },
+    Cancelled,
+}
+
+impl AssistantTurnState {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn state_name(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Composing => "Composing",
+            Self::Thinking => "Thinking",
+            Self::AwaitingAuthorization => "AwaitingAuthorization",
+            Self::Animating { .. } => "Animating",
+            Self::Failed { .. } => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(self, Self::Failed { .. } | Self::Cancelled)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn transition_to(&mut self, next: Self) -> Result<(), String> {
+        let legal = matches!(
+            (&*self, &next),
+            (Self::Idle, Self::Composing)
+                | (Self::Composing, Self::Thinking)
+                | (Self::Thinking, Self::AwaitingAuthorization)
+                | (Self::Thinking, Self::Animating { .. })
+                | (Self::Thinking, Self::Failed { .. })
+                | (Self::AwaitingAuthorization, Self::Animating { .. })
+                | (Self::AwaitingAuthorization, Self::Thinking)
+                | (Self::AwaitingAuthorization, Self::Cancelled)
+                | (Self::Animating { .. }, Self::Failed { .. })
+                | (Self::Animating { .. }, Self::Cancelled)
+                | (Self::Animating { .. }, Self::Idle)
+                | (Self::Failed { .. }, Self::Idle)
+                | (Self::Cancelled, Self::Idle)
+                | (Self::Idle, Self::Idle)
+        );
+        if legal {
+            *self = next;
+            Ok(())
+        } else {
+            Err(format!(
+                "transición inválida {} -> {}",
+                self.state_name(),
+                next.state_name()
+            ))
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct AssistantRuntime {
     next_request_id: u64,
@@ -1054,6 +1248,12 @@ pub(crate) struct AssistantRuntime {
     /// Export a GIF de la card en vuelo (B5): `JoinHandle` de
     /// `spawn_gif_export` que `poll_gif_export_job` drena sin bloquear.
     gif_export_job: Option<GifExportJob>,
+    /// Export a PNG-sequence en vuelo (diálogo, formato `PngDir`).
+    png_export_job: Option<PngDirExportJob>,
+    /// Export a MP4 en vuelo (diálogo, formato `Mp4`, exige ffmpeg).
+    mp4_export_job: Option<Mp4ExportJob>,
+    /// Export a WebM en vuelo (diálogo, formato `Webm`, exige ffmpeg).
+    webm_export_job: Option<WebmExportJob>,
     session_api_key: Option<SessionApiKey>,
     /// Sesión Go estable por conversación (`x-opencode-session`, docs Go
     /// 2026-09-08): UUID v4 lazy en el primer request Go, estable entre
@@ -1486,7 +1686,51 @@ impl AssistantRuntime {
                 });
             hubo = true;
         }
+        if let Some(job) = self.png_export_job.take() {
+            // Misma disciplina que el GIF: token + reaper que entierra el
+            // directorio temporal (jamás basura en disco).
+            job.cancel.cancel();
+            let ruta_conocida = job.path.clone();
+            let _ = std::thread::Builder::new()
+                .name("pngdir-export-reaper".into())
+                .spawn(move || {
+                    let _ = job.handle.join();
+                    let _ = std::fs::remove_dir_all(&ruta_conocida);
+                });
+            hubo = true;
+        }
+        if let Some(job) = self.mp4_export_job.take() {
+            job.cancel.cancel();
+            let ruta_conocida = job.path.clone();
+            let _ = std::thread::Builder::new()
+                .name("mp4-export-reaper".into())
+                .spawn(move || {
+                    let _ = job.handle.join();
+                    let _ = std::fs::remove_file(&ruta_conocida);
+                });
+            hubo = true;
+        }
+        if let Some(job) = self.webm_export_job.take() {
+            job.cancel.cancel();
+            let ruta_conocida = job.path.clone();
+            let _ = std::thread::Builder::new()
+                .name("webm-export-reaper".into())
+                .spawn(move || {
+                    let _ = job.handle.join();
+                    let _ = std::fs::remove_file(&ruta_conocida);
+                });
+            hubo = true;
+        }
         hubo
+    }
+
+    /// ¿Hay algún export de la card en vuelo (cualquier formato)?
+    /// Puro sobre los slots, sin I/O.
+    fn any_media_export_in_flight(&self) -> bool {
+        self.gif_export_job.is_some()
+            || self.png_export_job.is_some()
+            || self.mp4_export_job.is_some()
+            || self.webm_export_job.is_some()
     }
 }
 
@@ -1831,6 +2075,14 @@ fn parse_agent_ask_user_pending(
 struct AssistantAnimJob {
     cancellation: CancellationToken,
     receiver: std::sync::mpsc::Receiver<Result<grafito_ui::assistant::AssistantMedia, String>>,
+    /// Coords W1 para historiar Thumb+Replay en el turno recién creado.
+    ///
+    /// `Some` solo en el single normal (plantilla+concepto efectivamente
+    /// renderizados): el drain pega `TurnMediaRef` al último turno
+    /// asistente además del slot vivo. `None` en playlist multi-step (no
+    /// reinyectable honesta por el camino single) y en replay (el turno ya
+    /// tiene su media; basta reinyectar el slot vivo).
+    history: Option<AnimHistoryCoords>,
 }
 
 /// W-B — render listo desde el worker IA-primero (media + prosa coherentes).
@@ -1843,6 +2095,12 @@ pub(crate) struct AnimIaRender {
     pub media: grafito_ui::assistant::AssistantMedia,
     pub prosa: String,
     pub aviso: Option<String>,
+    /// Coords efectivas del replay (plantilla+concepto renderizados, no el
+    /// pedido crudo): del SPEC de la IA (`spec.plantilla`/`spec.expr`) o de
+    /// la canónica de fallback. El drain las historía en el turno junto a
+    /// la media, igual que el job normal.
+    pub template: String,
+    pub concept: String,
 }
 
 /// W-B — job del worker IA-primero (SPEC de la IA + render en un solo hilo).
@@ -1865,6 +2123,59 @@ struct GifExportJob {
     frame_count: usize,
     cancel: grafito_assistant::CancellationToken,
     path: std::path::PathBuf,
+}
+
+/// Export a PNG-sequence de la card en vuelo (mismo contrato que GIF).
+///
+/// Guarda el `JoinHandle` de `spawn_png_dir_export` para drenarlo sin
+/// bloquear. `path` es el directorio temporal (se borra en cancel).
+struct PngDirExportJob {
+    handle:
+        std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::PngDirExportError>>,
+    frame_count: usize,
+    cancel: grafito_assistant::CancellationToken,
+    path: std::path::PathBuf,
+}
+
+/// Export a MP4 de la card en vuelo (vía ffmpeg-sidecar).
+struct Mp4ExportJob {
+    handle: std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::Mp4ExportError>>,
+    frame_count: usize,
+    cancel: grafito_assistant::CancellationToken,
+    path: std::path::PathBuf,
+}
+
+/// Export a WebM de la card en vuelo (vía ffmpeg-sidecar).
+struct WebmExportJob {
+    handle:
+        std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::WebmExportError>>,
+    frame_count: usize,
+    cancel: grafito_assistant::CancellationToken,
+    path: std::path::PathBuf,
+}
+
+/// ¿La plantilla del título soporta vista órbita? (puro, sin I/O).
+///
+/// Solo los títulos 3D habilitan la órbita del diálogo; el resto exporta la
+/// vista plana honesta (el selector muestra el motivo, jamás órbita fake).
+pub(crate) fn export_orbit_supported_for_title(title: &str) -> bool {
+    let norm = title.to_lowercase();
+    [
+        "orbita",
+        "órbita",
+        "3d",
+        "cubo",
+        "esfera",
+        "toro",
+        "cono",
+        "cilindro",
+        "piramide",
+        "pirámide",
+        "prisma",
+        "tetra",
+    ]
+    .iter()
+    .any(|pista| norm.contains(pista))
 }
 
 /// Cota del reaper GIF R1-4: el `join` en el path de cancel nunca bloquea
@@ -2138,6 +2449,9 @@ impl GrafitoApp {
             match job.receiver.try_recv() {
                 Ok(Ok(media)) => {
                     let was_cancelled = job.cancellation.is_cancelled();
+                    // P0-app: las coords viajan en el job (el borrow muere
+                    // acá, antes de tocar `assistant`).
+                    let history = job.history.clone();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     if was_cancelled {
@@ -2150,6 +2464,20 @@ impl GrafitoApp {
                         // `set_media` la instala para el reproductor del
                         // transcript (`ui/assistant.rs:915`, `draw_media_card`
                         // en el último turno). Sin ventana compañera.
+                        // P0-app: además historía Thumb+Replay (W1) en el
+                        // turno asistente recién creado. Playlist/replay
+                        // traen `history=None`: solo slot vivo.
+                        if let Some(coords) = history {
+                            if let Some(ref_media) = turn_media_for_completed_job(&media, &coords) {
+                                attach_media_to_last_assistant_turn(
+                                    &mut self.assistant.conversation,
+                                    ref_media,
+                                );
+                                trim_conversation_dropping_pair_media(
+                                    &mut self.assistant.conversation,
+                                );
+                            }
+                        }
                         self.assistant.set_media(Some(media), ctx);
                         self.notify("Animación lista.", ToastKind::Success);
                     }
@@ -2199,6 +2527,22 @@ impl GrafitoApp {
                     } else {
                         let humano = grafito_ui::assistant::humanize_prose_text(&render.prosa);
                         self.assistant.complete_local_request(humano);
+                        // P0-app: historía Thumb+Replay (W1) del SPEC
+                        // efectivamente renderizado, igual que el job
+                        // normal. Si las coords no validan, el turno queda
+                        // igual con el slot vivo, solo sin mini-card.
+                        let coords =
+                            AnimHistoryCoords::new(render.template.clone(), render.concept.clone());
+                        if let Some(ref_media) = coords
+                            .as_ref()
+                            .and_then(|c| turn_media_for_completed_job(&render.media, c))
+                        {
+                            attach_media_to_last_assistant_turn(
+                                &mut self.assistant.conversation,
+                                ref_media,
+                            );
+                            trim_conversation_dropping_pair_media(&mut self.assistant.conversation);
+                        }
                         self.assistant.set_media(Some(render.media), ctx);
                         if let Some(aviso) = render.aviso {
                             self.notify(aviso, ToastKind::Info);
@@ -2653,7 +2997,13 @@ impl GrafitoApp {
                         self.assistant.problem.clear();
                         // M1: la canónica se declara con SU prosa (punto
                         // único `prosa_canonica_para_plantilla`, jamás cruzada).
-                        let prosa = prosa_canonica_para_plantilla(plantilla);
+                        // Frente A: la canónica Taylor declara el spec
+                        // EFECTIVO (hereda centro/orden del pedido).
+                        let prosa = if plantilla.trim().to_lowercase() == "taylor-series" {
+                            prosa_taylor_canonica(&problem_clone)
+                        } else {
+                            prosa_canonica_para_plantilla(plantilla)
+                        };
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                         self.assistant.complete_local_request(humano);
                         self.assistant.set_media(None, ctx);
@@ -2671,8 +3021,11 @@ impl GrafitoApp {
                         self.assistant.problem.clear();
                         // M1: la explícita nombra SU función y rango (tangente
                         // o integral según plantilla, jamás huérfana).
+                        // Frente A: Taylor nombra f + centro + orden.
                         let prosa = if plantilla.trim().to_lowercase() == "derivative-slope" {
                             prosa_tangente_explicita(expr, &problem_clone)
+                        } else if plantilla.trim().to_lowercase() == "taylor-series" {
+                            prosa_taylor_explicita(expr, &problem_clone)
                         } else {
                             prosa_integral_explicita(expr, &problem_clone)
                         };
@@ -2949,6 +3302,12 @@ impl GrafitoApp {
             }
             AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
             AssistantUiAction::ExportMedia => self.export_assistant_media(ctx),
+            AssistantUiAction::ConfirmExport => self.confirm_export_assistant_media(ctx),
+            AssistantUiAction::CancelExport => self.cancel_export_assistant_media(ctx),
+            AssistantUiAction::CloseExportDialog => {
+                self.assistant.close_export_dialog();
+                ctx.request_repaint();
+            }
             AssistantUiAction::AskNextTopic => {
                 let memory = self.profile.memory();
                 self.assistant.problem = format!(
@@ -3191,6 +3550,9 @@ impl GrafitoApp {
             }
             AssistantUiAction::RequestExercise { topic } => {
                 self.iniciar_ejercicio(ctx, &topic);
+            }
+            AssistantUiAction::ReplayMedia { turn_idx } => {
+                self.replay_assistant_history_media(ctx, turn_idx);
             }
         }
     }
@@ -4129,26 +4491,71 @@ impl GrafitoApp {
         self.run_assistant_animation_with(ctx, "derivative-slope", "derivada como pendiente");
     }
 
-    /// Exporta la animación visible en la card a GIF (B5, botón Exportar).
+    /// Abre el diálogo Exportar de la card (botón Exportar).
     ///
-    /// Cablea al `spawn_gif_export` existente (hilo aparte, probado): la UI
-    /// solo emitió `ExportMedia`, acá corre el trabajo fuera del draw.
+    /// La UI solo emitió `ExportMedia`; acá se detecta fuera del draw y una
+    /// sola vez al abrir: `ffmpeg_available` vía `detect_ffmpeg_available()`
+    /// (lee el PATH, sin spawnear), órbita según plantilla y frames del slot
+    /// vivo. Backend sin audio (W3): el diálogo es de 3 args, sin pista.
+    /// El `Start` posterior spawnea el `spawn_*` del formato.
     /// Jamás mudo:
-    /// - export en curso → aviso y no se duplica;
-    /// - sin animación o sin fotogramas → `Failed` en la card + aviso;
-    /// - preflight (`check_gif_export_budget`: 64 frames / 8 Mpx / dims) →
-    ///   motivo en la card + aviso;
-    /// - el destino es temporal (`temp_dir`, nombre único por instante) y se
-    ///   avisa la ruta al terminar; el delay sale de la velocidad de la card
-    ///   (`gif_delay_for_rate` sobre `GIF_EXPORT_DELAY_CS`).
+    /// - export en curso → aviso y no se duplica (ni se reabre);
+    /// - sin animación o sin fotogramas → `Failed` en la card + aviso.
     fn export_assistant_media(&mut self, ctx: &egui::Context) {
         // D2 lockdown: en examen no sale nada del documento.
         if self.exam_blocks("Export") {
             return;
         }
         use grafito_ui::assistant::MediaExportState;
-        if self.assistant_runtime.gif_export_job.is_some() {
+        if self.assistant_runtime.any_media_export_in_flight() {
             self.notify("Ya se está exportando la animación.", ToastKind::Info);
+            return;
+        }
+        let (frame_count, title) = self.assistant.media.as_ref().map_or_else(
+            || (0, String::new()),
+            |media| (media.frames.len(), media.title.clone()),
+        );
+        if frame_count == 0 {
+            self.assistant.set_media_export(MediaExportState::Failed(
+                "todavía no hay fotogramas para exportar".into(),
+            ));
+            self.notify("No hay animación para exportar.", ToastKind::Error);
+            ctx.request_repaint();
+            return;
+        }
+        // Detección fuera del draw, una vez al abrir (nunca en `Ui::`).
+        let ffmpeg_available = crate::anim_native::detect_ffmpeg_available();
+        let orbit_supported = export_orbit_supported_for_title(&title);
+        self.assistant
+            .open_export_dialog(ffmpeg_available, orbit_supported, frame_count);
+        ctx.request_repaint();
+    }
+
+    /// Confirma el export con la selección validada del diálogo (`Start`).
+    ///
+    /// Corre fuera del draw (evento `ConfirmExport`): valida la selección y
+    /// spawnea el worker del formato en hilo aparte con `CancellationToken`,
+    /// tmp+rename `O_EXCL`, `kill+wait`. Backend sin audio (W3):
+    /// `validate_selection` cubre formato/fps/bitrate/frames/órbita y acá no
+    /// se inventa nada. Presupuestos GIF 64/8M/5MB + default 48 intactos
+    /// (preflight `check_gif_export_budget` dentro de cada worker).
+    fn confirm_export_assistant_media(&mut self, ctx: &egui::Context) {
+        // D2 lockdown: en examen no sale nada del documento.
+        if self.exam_blocks("Export") {
+            return;
+        }
+        use grafito_ui::assistant::{MediaExportFormat, MediaExportState};
+        if self.assistant_runtime.any_media_export_in_flight() {
+            self.notify("Ya se está exportando la animación.", ToastKind::Info);
+            return;
+        }
+        let dialogo = self.assistant.export_dialog_snapshot();
+        if let Err(motivo) = dialogo.validate_selection() {
+            self.assistant.export_dialog_mark_failed(motivo.clone());
+            self.assistant
+                .set_media_export(MediaExportState::Failed(motivo.clone()));
+            self.notify(format!("No se pudo exportar: {motivo}"), ToastKind::Error);
+            ctx.request_repaint();
             return;
         }
         let frames = self
@@ -4157,110 +4564,400 @@ impl GrafitoApp {
             .as_ref()
             .map_or_else(Vec::new, |media| media.frames.clone());
         if frames.is_empty() {
-            self.assistant.set_media_export(MediaExportState::Failed(
-                "todavía no hay fotogramas para exportar".into(),
-            ));
+            let motivo = "todavía no hay fotogramas para exportar";
+            self.assistant.export_dialog_mark_failed(motivo);
+            self.assistant
+                .set_media_export(MediaExportState::Failed(motivo.into()));
             self.notify("No hay animación para exportar.", ToastKind::Error);
             ctx.request_repaint();
             return;
         }
         if let Err(budget) = crate::anim_native::check_gif_export_budget(&frames) {
             let reason = budget.to_string();
+            self.assistant.export_dialog_mark_failed(reason.clone());
             self.assistant
                 .set_media_export(MediaExportState::Failed(reason.clone()));
             self.notify(format!("No se pudo exportar: {reason}"), ToastKind::Error);
             ctx.request_repaint();
             return;
         }
+        // `validate_selection` ya cubrió formato/fps/bitrate/frames/órbita.
         let frame_count = frames.len();
-        let delay_cs = crate::anim_native::gif_delay_for_rate(
-            crate::anim_native::GIF_EXPORT_DELAY_CS,
-            self.assistant.media_playback_rate(),
-        );
+        // GIF: delay de la velocidad de la card (lo que se ve es lo que se
+        // exporta); videos: delay del fps del diálogo (100/fps).
+        let delay_cs = match dialogo.format {
+            MediaExportFormat::Gif => crate::anim_native::gif_delay_for_rate(
+                crate::anim_native::GIF_EXPORT_DELAY_CS,
+                self.assistant.media_playback_rate(),
+            ),
+            _ => (100 / dialogo.fps.max(1)).clamp(1, 100) as u16,
+        };
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
-            "grafito_animacion_{}_{stamp}_{frame_count}.gif",
-            std::process::id()
-        ));
-        let cancel = grafito_assistant::CancellationToken::default();
-        let handle = crate::anim_native::spawn_gif_export_cancelable(
-            frames,
-            path.clone(),
-            delay_cs,
-            cancel.clone(),
-        );
-        self.assistant_runtime.gif_export_job = Some(GifExportJob {
-            handle,
-            frame_count,
-            cancel,
-            path,
-        });
+        let pid = std::process::id();
+        match dialogo.format {
+            MediaExportFormat::Gif => {
+                let path = std::env::temp_dir()
+                    .join(format!("grafito_animacion_{pid}_{stamp}_{frame_count}.gif"));
+                let cancel = grafito_assistant::CancellationToken::default();
+                let handle = crate::anim_native::spawn_gif_export_cancelable(
+                    frames,
+                    path.clone(),
+                    delay_cs,
+                    cancel.clone(),
+                );
+                self.assistant_runtime.gif_export_job = Some(GifExportJob {
+                    handle,
+                    frame_count,
+                    cancel,
+                    path,
+                });
+            }
+            MediaExportFormat::PngDir => {
+                let path = std::env::temp_dir()
+                    .join(format!("grafito_animacion_{pid}_{stamp}_{frame_count}_png"));
+                let cancel = grafito_assistant::CancellationToken::default();
+                let handle =
+                    crate::anim_native::spawn_png_dir_export(frames, path.clone(), cancel.clone());
+                self.assistant_runtime.png_export_job = Some(PngDirExportJob {
+                    handle,
+                    frame_count,
+                    cancel,
+                    path,
+                });
+            }
+            MediaExportFormat::Mp4 => {
+                let path = std::env::temp_dir()
+                    .join(format!("grafito_animacion_{pid}_{stamp}_{frame_count}.mp4"));
+                let cancel = grafito_assistant::CancellationToken::default();
+                // Calidad del diálogo → runner real (`-ql`/`-qm`/`-qh` →
+                // resolución + crf + bitrate en el worker).
+                let calidad = match dialogo.quality {
+                    grafito_ui::assistant::MediaExportQuality::Baja => {
+                        crate::anim_native::VideoQuality::Baja
+                    }
+                    grafito_ui::assistant::MediaExportQuality::Media => {
+                        crate::anim_native::VideoQuality::Media
+                    }
+                    grafito_ui::assistant::MediaExportQuality::Alta => {
+                        crate::anim_native::VideoQuality::Alta
+                    }
+                };
+                let handle = crate::anim_native::spawn_mp4_export(
+                    frames,
+                    path.clone(),
+                    delay_cs,
+                    cancel.clone(),
+                    dialogo.bitrate_kbps,
+                    calidad,
+                );
+                self.assistant_runtime.mp4_export_job = Some(Mp4ExportJob {
+                    handle,
+                    frame_count,
+                    cancel,
+                    path,
+                });
+            }
+            MediaExportFormat::Webm => {
+                let path = std::env::temp_dir().join(format!(
+                    "grafito_animacion_{pid}_{stamp}_{frame_count}.webm"
+                ));
+                let cancel = grafito_assistant::CancellationToken::default();
+                let calidad = match dialogo.quality {
+                    grafito_ui::assistant::MediaExportQuality::Baja => {
+                        crate::anim_native::VideoQuality::Baja
+                    }
+                    grafito_ui::assistant::MediaExportQuality::Media => {
+                        crate::anim_native::VideoQuality::Media
+                    }
+                    grafito_ui::assistant::MediaExportQuality::Alta => {
+                        crate::anim_native::VideoQuality::Alta
+                    }
+                };
+                let handle = crate::anim_native::spawn_webm_export(
+                    frames,
+                    path.clone(),
+                    delay_cs,
+                    cancel.clone(),
+                    dialogo.bitrate_kbps,
+                    calidad,
+                );
+                self.assistant_runtime.webm_export_job = Some(WebmExportJob {
+                    handle,
+                    frame_count,
+                    cancel,
+                    path,
+                });
+            }
+        }
+        self.assistant.export_dialog_mark_started();
         self.assistant.set_media_export(MediaExportState::Exporting);
         ctx.request_repaint();
     }
 
-    /// Drena el export a GIF sin bloquear (B5).
+    /// Cancela el export en curso desde el diálogo (`Cancel`).
+    ///
+    /// Señala el `CancellationToken` del worker en vuelo (cualquier formato);
+    /// el poll drena el resultado honesto (jamás mudo). Fuera del draw.
+    fn cancel_export_assistant_media(&mut self, ctx: &egui::Context) {
+        let mut hubo = false;
+        if let Some(job) = self.assistant_runtime.gif_export_job.as_ref() {
+            job.cancel.cancel();
+            hubo = true;
+        }
+        if let Some(job) = self.assistant_runtime.png_export_job.as_ref() {
+            job.cancel.cancel();
+            hubo = true;
+        }
+        if let Some(job) = self.assistant_runtime.mp4_export_job.as_ref() {
+            job.cancel.cancel();
+            hubo = true;
+        }
+        if let Some(job) = self.assistant_runtime.webm_export_job.as_ref() {
+            job.cancel.cancel();
+            hubo = true;
+        }
+        if !hubo {
+            self.assistant
+                .export_dialog_mark_failed("no había exportación en curso");
+        }
+        ctx.request_repaint();
+    }
+
+    /// Drena los exports de la card sin bloquear (GIF + PNG-dir + MP4 + WebM).
     ///
     /// Solo hace `join` si el hilo terminó (`is_finished`); publica el
-    /// resultado en la card + aviso: éxito con ruta (verificando cota 5 MB
-    /// post-escritura: si excede, se borra y es error honesto), o motivo del
-    /// fallo. Se llama cada frame desde `sync_assistant_for_frame`.
+    /// resultado en el diálogo + la card + aviso: éxito con ruta (verificando
+    /// cota 5 MB post-escritura en archivos: si excede, se borra y es error
+    /// honesto), o motivo del fallo. Se llama cada frame desde
+    /// `sync_assistant_for_frame`. El nombre histórico se conserva (los tests
+    /// lo usan); drena los 4 formatos.
     fn poll_gif_export_job(&mut self, ctx: &egui::Context) {
+        self.poll_media_export_jobs(ctx);
+    }
+
+    /// Drena todos los jobs de export sin bloquear (ver `poll_gif_export_job`).
+    fn poll_media_export_jobs(&mut self, ctx: &egui::Context) {
         use grafito_ui::assistant::MediaExportState;
-        let finished = self
+        if self
             .assistant_runtime
             .gif_export_job
             .as_ref()
-            .is_some_and(|job| job.handle.is_finished());
-        if !finished {
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            let Some(job) = self.assistant_runtime.gif_export_job.take() else {
+                return;
+            };
+            match job.handle.join() {
+                Ok(Ok(path)) => {
+                    let too_big = std::fs::metadata(&path)
+                        .map(|metadata| {
+                            metadata.len() > crate::anim_native::GIF_EXPORT_MAX_FILE_BYTES
+                        })
+                        .unwrap_or(false);
+                    if too_big {
+                        let _ = std::fs::remove_file(&path);
+                        let reason = "el GIF supera 5 MB";
+                        self.assistant.export_dialog_mark_failed(reason);
+                        self.assistant
+                            .set_media_export(MediaExportState::Failed(reason.into()));
+                        self.notify(format!("No se pudo exportar: {reason}."), ToastKind::Error);
+                    } else {
+                        self.assistant.export_dialog_mark_done();
+                        self.assistant.set_media_export(MediaExportState::Done);
+                        self.notify(
+                            format!(
+                                "Se exportaron {} fotogramas a {}.",
+                                job.frame_count,
+                                path.display()
+                            ),
+                            ToastKind::Success,
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    self.assistant.export_dialog_mark_failed(reason.clone());
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(reason.clone()));
+                    self.notify(
+                        format!("No se pudo exportar la animación: {reason}."),
+                        ToastKind::Error,
+                    );
+                }
+                Err(_) => {
+                    self.assistant
+                        .export_dialog_mark_failed("la exportación terminó inesperadamente");
+                    self.assistant.set_media_export(MediaExportState::Failed(
+                        "la exportación terminó inesperadamente".into(),
+                    ));
+                    self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
+                }
+            }
+            ctx.request_repaint();
             return;
         }
-        let Some(job) = self.assistant_runtime.gif_export_job.take() else {
-            return;
-        };
-        match job.handle.join() {
-            Ok(Ok(path)) => {
-                let too_big = std::fs::metadata(&path)
-                    .map(|metadata| metadata.len() > crate::anim_native::GIF_EXPORT_MAX_FILE_BYTES)
-                    .unwrap_or(false);
-                if too_big {
-                    let _ = std::fs::remove_file(&path);
-                    let reason = "el GIF supera 5 MB";
-                    self.assistant
-                        .set_media_export(MediaExportState::Failed(reason.into()));
-                    self.notify(format!("No se pudo exportar: {reason}."), ToastKind::Error);
-                } else {
+        if self
+            .assistant_runtime
+            .png_export_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            let Some(job) = self.assistant_runtime.png_export_job.take() else {
+                return;
+            };
+            match job.handle.join() {
+                Ok(Ok(path)) => {
+                    self.assistant.export_dialog_mark_done();
                     self.assistant.set_media_export(MediaExportState::Done);
                     self.notify(
                         format!(
-                            "Se exportaron {} fotogramas a {}.",
+                            "Se exportaron {} fotogramas a {}/.",
                             job.frame_count,
                             path.display()
                         ),
                         ToastKind::Success,
                     );
                 }
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    self.assistant.export_dialog_mark_failed(reason.clone());
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(reason.clone()));
+                    self.notify(
+                        format!("No se pudo exportar la animación: {reason}."),
+                        ToastKind::Error,
+                    );
+                }
+                Err(_) => {
+                    self.assistant
+                        .export_dialog_mark_failed("la exportación terminó inesperadamente");
+                    self.assistant.set_media_export(MediaExportState::Failed(
+                        "la exportación terminó inesperadamente".into(),
+                    ));
+                    self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
+                }
             }
-            Ok(Err(error)) => {
-                let reason = error.to_string();
-                self.assistant
-                    .set_media_export(MediaExportState::Failed(reason.clone()));
-                self.notify(
-                    format!("No se pudo exportar la animación: {reason}."),
-                    ToastKind::Error,
-                );
-            }
-            Err(_) => {
-                self.assistant.set_media_export(MediaExportState::Failed(
-                    "la exportación terminó inesperadamente".into(),
-                ));
-                self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
-            }
+            ctx.request_repaint();
+            return;
         }
-        ctx.request_repaint();
+        if self
+            .assistant_runtime
+            .mp4_export_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            let Some(job) = self.assistant_runtime.mp4_export_job.take() else {
+                return;
+            };
+            match job.handle.join() {
+                Ok(Ok(path)) => {
+                    let too_big = std::fs::metadata(&path)
+                        .map(|metadata| {
+                            metadata.len() > crate::anim_native::GIF_EXPORT_MAX_FILE_BYTES
+                        })
+                        .unwrap_or(false);
+                    if too_big {
+                        let _ = std::fs::remove_file(&path);
+                        let reason = "el MP4 supera 5 MB";
+                        self.assistant.export_dialog_mark_failed(reason);
+                        self.assistant
+                            .set_media_export(MediaExportState::Failed(reason.into()));
+                        self.notify(format!("No se pudo exportar: {reason}."), ToastKind::Error);
+                    } else {
+                        self.assistant.export_dialog_mark_done();
+                        self.assistant.set_media_export(MediaExportState::Done);
+                        self.notify(
+                            format!(
+                                "Se exportaron {} fotogramas a {}.",
+                                job.frame_count,
+                                path.display()
+                            ),
+                            ToastKind::Success,
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    self.assistant.export_dialog_mark_failed(reason.clone());
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(reason.clone()));
+                    self.notify(
+                        format!("No se pudo exportar la animación: {reason}."),
+                        ToastKind::Error,
+                    );
+                }
+                Err(_) => {
+                    self.assistant
+                        .export_dialog_mark_failed("la exportación terminó inesperadamente");
+                    self.assistant.set_media_export(MediaExportState::Failed(
+                        "la exportación terminó inesperadamente".into(),
+                    ));
+                    self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+        if self
+            .assistant_runtime
+            .webm_export_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            let Some(job) = self.assistant_runtime.webm_export_job.take() else {
+                return;
+            };
+            match job.handle.join() {
+                Ok(Ok(path)) => {
+                    let too_big = std::fs::metadata(&path)
+                        .map(|metadata| {
+                            metadata.len() > crate::anim_native::GIF_EXPORT_MAX_FILE_BYTES
+                        })
+                        .unwrap_or(false);
+                    if too_big {
+                        let _ = std::fs::remove_file(&path);
+                        let reason = "el WebM supera 5 MB";
+                        self.assistant.export_dialog_mark_failed(reason);
+                        self.assistant
+                            .set_media_export(MediaExportState::Failed(reason.into()));
+                        self.notify(format!("No se pudo exportar: {reason}."), ToastKind::Error);
+                    } else {
+                        self.assistant.export_dialog_mark_done();
+                        self.assistant.set_media_export(MediaExportState::Done);
+                        self.notify(
+                            format!(
+                                "Se exportaron {} fotogramas a {}.",
+                                job.frame_count,
+                                path.display()
+                            ),
+                            ToastKind::Success,
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    self.assistant.export_dialog_mark_failed(reason.clone());
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(reason.clone()));
+                    self.notify(
+                        format!("No se pudo exportar la animación: {reason}."),
+                        ToastKind::Error,
+                    );
+                }
+                Err(_) => {
+                    self.assistant
+                        .export_dialog_mark_failed("la exportación terminó inesperadamente");
+                    self.assistant.set_media_export(MediaExportState::Failed(
+                        "la exportación terminó inesperadamente".into(),
+                    ));
+                    self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
+                }
+            }
+            ctx.request_repaint();
+        }
     }
 
     /// W-B — pide el SPEC a la IA de verdad (remoto o agente, 1 request extra).
@@ -4483,6 +5180,8 @@ impl GrafitoApp {
                             media,
                             prosa,
                             aviso: None,
+                            template: spec.plantilla.clone(),
+                            concept: spec.expr.clone(),
                         }),
                         Err(error) => Err(error),
                     }
@@ -4499,6 +5198,8 @@ impl GrafitoApp {
                             media,
                             prosa,
                             aviso: Some(aviso),
+                            template: canonico.plantilla.clone(),
+                            concept: canonico.expr.clone(),
                         }),
                         Err(error) => Err(error),
                     }
@@ -4604,17 +5305,59 @@ impl GrafitoApp {
                             }
                         }
                     }
+                    // Frente A: Taylor en Apply tiene su puerta (explícita
+                    // nombra f+centro+orden, canónica declara, inválida guía
+                    // honesta); el resto cae al genérico local como antes.
                     TangentePedido::NoAplica => {
-                        // El agente propuso `generate_animation` (vía
-                        // `GenerateAnimation` verificado): el hilo genera e
-                        // incrusta como `AssistantMedia` DEL TURNO.
-                        if ultimo_turno_sin_media(&self.assistant.conversation) {
-                            empuja_prosa_apply(
-                                &mut self.assistant.conversation,
-                                crate::anim_ui::animation_reference_sentence(),
-                            );
+                        match clasifica_pedido_taylor(concept, plantilla_efectiva) {
+                            TaylorPedido::FuncionInvalida(detalle) => {
+                                empuja_prosa_apply(&mut self.assistant.conversation, &detalle);
+                                self.notify(detalle, ToastKind::Info);
+                            }
+                            TaylorPedido::Explicita => {
+                                if ultimo_turno_sin_media(&self.assistant.conversation) {
+                                    let expr = grafito_anim::parametric::infer_taylor_anim(concept)
+                                        .map(|resuelto| resuelto.spec().expr.clone())
+                                        .unwrap_or_default();
+                                    empuja_prosa_apply(
+                                        &mut self.assistant.conversation,
+                                        &prosa_taylor_explicita(&expr, concept),
+                                    );
+                                }
+                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                            }
+                            TaylorPedido::Canonica => {
+                                if ultimo_turno_sin_media(&self.assistant.conversation) {
+                                    empuja_prosa_apply(
+                                        &mut self.assistant.conversation,
+                                        crate::anim_ui::animation_reference_sentence(),
+                                    );
+                                }
+                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                                if let Some(turno) = self.assistant.conversation.last_mut() {
+                                    if turno.role == ConversationRole::Assistant
+                                        && !turno.content.contains("pedime otra")
+                                    {
+                                        turno.content.push_str("\n\n");
+                                        turno.content.push_str(
+                                            grafito_anim::parametric::TAYLOR_CANONICAL_PROSA,
+                                        );
+                                    }
+                                }
+                            }
+                            TaylorPedido::NoAplica => {
+                                // El agente propuso `generate_animation` (vía
+                                // `GenerateAnimation` verificado): el hilo genera e
+                                // incrusta como `AssistantMedia` DEL TURNO.
+                                if ultimo_turno_sin_media(&self.assistant.conversation) {
+                                    empuja_prosa_apply(
+                                        &mut self.assistant.conversation,
+                                        crate::anim_ui::animation_reference_sentence(),
+                                    );
+                                }
+                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
+                            }
                         }
-                        self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
                     }
                 }
             }
@@ -4626,6 +5369,19 @@ impl GrafitoApp {
         ctx: &egui::Context,
         template: &str,
         concept: &str,
+    ) {
+        self.run_assistant_animation_with_history(ctx, template, concept, true);
+    }
+
+    /// Single con o sin historiar (P0-app): el replay del historial reusca
+    /// este mismo worker cancelable con `historiar=false` (reinyecta el
+    /// slot vivo sin pegar media nueva: el turno ya tiene la suya).
+    fn run_assistant_animation_with_history(
+        &mut self,
+        ctx: &egui::Context,
+        template: &str,
+        concept: &str,
+        historiar: bool,
     ) {
         // Examen: ni siquiera la animación local corre (igual que playlist).
         if self.exam_blocks("Asistente") {
@@ -4728,6 +5484,42 @@ impl GrafitoApp {
             // lo chequea entre frames y el hilo descarta el resultado rancio.
             let render_native_cancellable =
                 || -> Result<grafito_ui::assistant::AssistantMedia, String> {
+                    // Frente A: Taylor usa el renderer dedicado con el motor
+                    // (f vs su serie REAL, jamás traza muda de sin(x)). Se
+                    // intercede ANTES de la vía paramétrica genérica; `Err`
+                    // honesto sin frames si f no deriva (doble puerta con la
+                    // decisión del Submit). Sin `unwrap`.
+                    if template_owned.trim().to_lowercase() == "taylor-series" {
+                        let spec = match grafito_anim::parametric::infer_taylor_anim(&concept_owned)
+                        {
+                            Ok(resuelto) => resuelto.spec().clone(),
+                            Err(error) => return Err(error.to_string()),
+                        };
+                        let mut saw_cancel = false;
+                        let frames = crate::anim_native::render_taylor_frames_for_spec_impl(
+                            480,
+                            360,
+                            &spec,
+                            false,
+                            &mut |_, _| {
+                                if worker_cancellation.is_cancelled() {
+                                    saw_cancel = true;
+                                }
+                            },
+                        );
+                        if worker_cancellation.is_cancelled() || saw_cancel {
+                            return Err(
+                                "La generación se canceló antes de completarse.".to_string()
+                            );
+                        }
+                        if frames.is_empty() {
+                            return Err(crate::anim_native::error_sin_fotogramas(
+                                "el motor nativo",
+                            ));
+                        }
+                        let title = titulo_curado(&template_owned, &concept_owned, None);
+                        return Ok(grafito_ui::assistant::AssistantMedia { title, frames });
+                    }
                     let explicita =
                         match anim_parametrica_para_pedido(&template_owned, &concept_owned) {
                             Ok(explicita) => explicita,
@@ -4873,13 +5665,54 @@ impl GrafitoApp {
             repaint.request_repaint();
         });
         self.assistant.anim_progress = true;
+        // P0-app: el single normal historía coords W1 para el drain; el
+        // replay (`historiar=false`) solo reinyecta el slot vivo.
+        let history = if historiar {
+            AnimHistoryCoords::new(template.to_string(), concept.clone())
+        } else {
+            None
+        };
         self.assistant_runtime.anim_job = Some(AssistantAnimJob {
             cancellation,
             receiver,
+            history,
         });
         // Z3: sin toast de "generando": la card ya muestra el progreso dentro
         // (barra + "Armando tu animación…"); el único toast del flujo feliz
         // es "Animación lista." (la card lo promete: "Te aviso cuando esté lista.").
+    }
+
+    /// P0-app — replay del historial Thumb+Replay (W1 + W2, sin I/O en UI).
+    ///
+    /// La Piel solo emitió la intención `ReplayMedia{turn_idx}` desde la
+    /// mini-card de un turno no-final. Acá se resuelve contra la
+    /// conversación con `anim_ui::history_replay_request` (`None` honesto
+    /// con aviso si el turno salió por trim, no valida o el thumb no es
+    /// RGBA 96×96) y se reinyecta por el camino single existente con
+    /// `historiar=false`: mismo worker cancelable (`CancellationToken`,
+    /// `render_anim_with_progress` en hilo), slot vivo vía `set_media`,
+    /// sin pegar media nueva (el turno ya tiene la suya) y sin crear
+    /// turno. Presupuestos intactos (MAX_TURNS 6, GIF 64/8M/5MB).
+    fn replay_assistant_history_media(&mut self, ctx: &egui::Context, turn_idx: usize) {
+        // Examen: ni siquiera el replay local corre (igual que el single).
+        if self.exam_blocks("Asistente") {
+            return;
+        }
+        let len = self.assistant.conversation.len();
+        let media = self
+            .assistant
+            .conversation
+            .get(turn_idx)
+            .and_then(|turno| turno.media.clone());
+        let Some(pedido) = crate::anim_ui::history_replay_request(turn_idx, len, media.as_ref())
+        else {
+            self.notify(
+                "Ese turno ya no tiene animación para repetir.",
+                ToastKind::Info,
+            );
+            return;
+        };
+        self.run_assistant_animation_with_history(ctx, &pedido.template, &pedido.concept, false);
     }
 
     /// Reproduce una playlist F2b ("X y después Y") como UNA media (scrub total).
@@ -5087,9 +5920,12 @@ impl GrafitoApp {
             repaint.request_repaint();
         });
         self.assistant.anim_progress = true;
+        // P0-app: la playlist multi-step no historía (no reinyectable
+        // honesta por el camino single): solo slot vivo, sin mini-card.
         self.assistant_runtime.anim_job = Some(AssistantAnimJob {
             cancellation,
             receiver,
+            history: None,
         });
         // Z3: sin toast de "generando" (la card ya muestra el progreso
         // dentro); el único toast del flujo feliz es "Animación lista.".
@@ -5653,7 +6489,7 @@ impl GrafitoApp {
     /// se soltó: un `Done`/`Failed` previo no se toca. Sin I/O en el
     /// llamante. Retorna si había algún job en vuelo.
     fn cancela_turno_anim(&mut self) -> bool {
-        let habia_export = self.assistant_runtime.gif_export_job.is_some();
+        let habia_export = self.assistant_runtime.any_media_export_in_flight();
         let hubo = self.assistant_runtime.cancel_all_assistant_jobs();
         if habia_export && self.assistant_runtime.gif_export_job.is_none() {
             self.assistant
@@ -5846,23 +6682,55 @@ impl GrafitoApp {
                                 );
                             }
                             let text = completion.text;
-                            self.start_remote_proposal_verification(
-                                ctx,
-                                AssistantProposalLaunch {
-                                    id,
-                                    provider,
-                                    model,
-                                    route,
-                                    fusion_fallback_allowed,
-                                    question,
-                                    correction_attempt,
-                                    repair_target_turn,
-                                    document_revision,
-                                    document_digest,
-                                    focus,
-                                    text,
-                                },
-                            );
+                            // Guard socrático post-respuesta: un pedido
+                            // exploratorio ("mostrame un ejemplo…") cuya
+                            // respuesta trae matemática ($..$, `=` numérico)
+                            // es telling igual y exige repair ANTES de
+                            // publicar (cierra el bypass demo, ver
+                            // `SocraticFsm::requires_repair_despite_exploratory`).
+                            // NO toca el guard pre-respuesta del worker.
+                            if SocraticFsm::requires_repair_despite_exploratory(
+                                &question,
+                                SocraticFsm::response_brings_math(&text),
+                            ) {
+                                if correction_attempt > 0 {
+                                    self.assistant.restore_proposal_correction();
+                                }
+                                eprintln!(
+                                    "grafito: socratic repair post-respuesta (no al transcript)"
+                                );
+                                let student = self
+                                    .session_socratic_guard(&question)
+                                    .map(|guard| {
+                                        guard.fsm.repair_student_message(&guard.scaffold)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        "Antes de mostrarte la solución, ¿qué forma te imaginás? Contame qué probaste y lo vemos juntos.".to_owned()
+                                    });
+                                self.assistant.complete_request(student);
+                                self.notify(
+                                    "El tutor repregunta antes de mostrar la solución directa.",
+                                    ToastKind::Info,
+                                );
+                            } else {
+                                self.start_remote_proposal_verification(
+                                    ctx,
+                                    AssistantProposalLaunch {
+                                        id,
+                                        provider,
+                                        model,
+                                        route,
+                                        fusion_fallback_allowed,
+                                        question,
+                                        correction_attempt,
+                                        repair_target_turn,
+                                        document_revision,
+                                        document_digest,
+                                        focus,
+                                        text,
+                                    },
+                                );
+                            }
                         }
                         Err(error) => {
                             // Reparación socrática: el guard detectó telling
@@ -7723,17 +8591,18 @@ mod tests {
         anim_parametrica_para_pedido, append_canonical_integral_prose, apply_local_assistant_plan,
         assistant_graph_perspective, attachment_error_message, aviso_fallback_canonico,
         can_offer_assistant_proposal_correction, clasifica_pedido_integral,
-        clasifica_pedido_tangente, classify_local_assistant_response,
+        clasifica_pedido_tangente, clasifica_pedido_taylor, classify_local_assistant_response,
         commit_assistant_graph_preflight, decide_animacion, esperar_spec_ia_con_timeout,
-        ia_disponible_para_anim, inspect_remote_action_proposals, inspect_remote_proposals,
-        inspect_remote_proposals_cancellable, is_agent_spark_responses_unsupported_error,
-        is_session_or_account_error, is_socratic_repair_error, join_gif_handle_bounded,
-        join_puente_bounded, limpiar_media_si_no_animacion, parsear_spec_anim_ia,
-        plantilla_para_pedido, playlist_para_pedido, pop_provisional_stream_turn,
-        preflight_assistant_flower_scene, preflight_assistant_graph_command,
-        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
-        preflight_assistant_scene, prosa_canonica_para_plantilla, prosa_integral_explicita,
-        prosa_para_spec_anim_ia, prosa_tangente_explicita, read_bounded_attachment,
+        export_orbit_supported_for_title, ia_disponible_para_anim, inspect_remote_action_proposals,
+        inspect_remote_proposals, inspect_remote_proposals_cancellable,
+        is_agent_spark_responses_unsupported_error, is_session_or_account_error,
+        is_socratic_repair_error, join_gif_handle_bounded, join_puente_bounded,
+        limpiar_media_si_no_animacion, parsear_spec_anim_ia, plantilla_para_pedido,
+        playlist_para_pedido, pop_provisional_stream_turn, preflight_assistant_flower_scene,
+        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
+        preflight_assistant_parameter, preflight_assistant_scene, prosa_canonica_para_plantilla,
+        prosa_integral_explicita, prosa_para_spec_anim_ia, prosa_tangente_explicita,
+        prosa_taylor_canonica, prosa_taylor_explicita, read_bounded_attachment,
         remote_error_message, remote_stage_for_job, render_media_desde_spec_ia,
         resolver_turno_anim_ia, should_fallback_agent_spark_to_deepseek,
         should_fallback_remote_spark_to_deepseek, socratic_guard_context,
@@ -7744,8 +8613,9 @@ mod tests {
         AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
         AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
         IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
-        RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, ANIM_IA_SPEC_TIMEOUT_MS,
-        ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS, ANIM_SIN_IA_AVISO,
+        RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido,
+        ANIM_IA_SPEC_TIMEOUT_MS, ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS,
+        ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
@@ -8596,6 +9466,7 @@ mod tests {
         runtime.anim_job = Some(AssistantAnimJob {
             cancellation: anim_cancel.clone(),
             receiver: anim_rx,
+            history: None,
         });
 
         assert!(runtime.cancel_all_assistant_jobs());
@@ -8652,6 +9523,7 @@ mod tests {
         runtime.anim_job = Some(AssistantAnimJob {
             cancellation: anim_cancel.clone(),
             receiver: anim_rx,
+            history: None,
         });
         assert!(!anim_cancel.is_cancelled());
         assert!(runtime.cancel_anim_job());
@@ -8753,6 +9625,64 @@ mod tests {
                 "título sin {id}"
             );
         }
+    }
+
+    #[test]
+    fn p0_historial_drain_historía_y_replay_resuelve() {
+        // P0-app: el drain del job normal pega `TurnMediaRef` al turno
+        // recién creado (además del slot vivo) y el replay lo resuelve
+        // contra la conversación. Headless: render clásico tiny + helpers
+        // puros, sin hilos.
+        use std::collections::BTreeMap;
+        let frames = crate::anim_native::render_anim_with_progress(
+            "derivative-slope",
+            "derivada",
+            64,
+            48,
+            &BTreeMap::new(),
+            &mut |_, _| {},
+        );
+        assert!(!frames.is_empty(), "el nativo debe producir frames");
+        let media = grafito_ui::assistant::AssistantMedia {
+            title: "Derivada (nativa)".to_string(),
+            frames,
+        };
+        let coords = crate::manim_orchestrator::AnimHistoryCoords::new(
+            "derivative-slope".to_string(),
+            "derivada".to_string(),
+        )
+        .expect("coords válidas");
+        let ref_media = crate::manim_orchestrator::turn_media_for_completed_job(&media, &coords)
+            .expect("historía válida");
+        let ctx = egui::Context::default();
+        let mut panel = AssistantPanelState::default();
+        panel.begin_request("derivada con animación".to_string());
+        panel.complete_local_request("la pendiente".to_string());
+        // Lo que hace el drain tras `set_media`: pega + recorta.
+        assert!(
+            crate::manim_orchestrator::attach_media_to_last_assistant_turn(
+                &mut panel.conversation,
+                ref_media,
+            )
+        );
+        crate::manim_orchestrator::trim_conversation_dropping_pair_media(&mut panel.conversation);
+        panel.set_media(Some(media), &ctx);
+        assert!(panel.media.is_some(), "slot vivo instalado");
+        let ultimo = panel.conversation.last().expect("turno asistente");
+        assert!(ultimo.media.is_some(), "turno historíado con thumb");
+        // Lo que hace el brazo `ReplayMedia`: resuelve el pedido W2.
+        let len = panel.conversation.len();
+        let guardada = panel
+            .conversation
+            .last()
+            .and_then(|turno| turno.media.clone());
+        let pedido = crate::anim_ui::history_replay_request(len - 1, len, guardada.as_ref())
+            .expect("replay resuelve");
+        assert_eq!(pedido.template, "derivative-slope");
+        assert_eq!(pedido.concept, "derivada");
+        // Índice fuera de rango o sin media: `None` honesto (aviso, sin hilo).
+        assert!(crate::anim_ui::history_replay_request(len + 1, len, guardada.as_ref()).is_none());
+        assert!(crate::anim_ui::history_replay_request(0, len, None).is_none());
     }
 
     #[test]
@@ -9137,6 +10067,118 @@ mod tests {
             media.frames[0].pixels, media_canonica.frames[0].pixels,
             "x³ no es la canónica x²"
         );
+    }
+
+    // ── Frente A: Taylor honesto + ejes en previews ─────────────────────
+    #[test]
+    fn fa_submit_taylor_explicita_x3_serie_real_no_seno() {
+        // Queja real: "pedí taylor de x³ y me tiró una senoidal nada que
+        // ver". Decisión + render usan `infer_taylor_anim` igual que el
+        // agente; el worker dibuja f vs su serie real.
+        let pedido = "animación de taylor de f(x)=x^3 en x=0 orden 5 con animación";
+        assert_eq!(plantilla_para_pedido(pedido), "taylor-series");
+        assert_eq!(
+            clasifica_pedido_taylor(pedido, "taylor-series"),
+            TaylorPedido::Explicita
+        );
+        match decide_animacion(pedido) {
+            DecisionAnimacion::RenderExplicito {
+                plantilla,
+                concepto: _,
+                expr,
+            } => {
+                assert_eq!(plantilla, "taylor-series");
+                assert_eq!(expr, "x^3");
+            }
+            otra => panic!("explícita debe renderizar, fue {otra:?}"),
+        }
+        // La prosa nombra f + centro + orden (jamás huérfana).
+        let prosa = prosa_taylor_explicita("x^3", pedido);
+        assert!(prosa.contains("x^3"), "{prosa}");
+        assert!(prosa.contains("x=0"), "{prosa}");
+        assert!(prosa.contains("orden 5"), "{prosa}");
+        assert!(!prosa.contains("pedime otra"), "{prosa}");
+        // El render del worker (for_spec) difiere de la canónica senoidal.
+        let spec = grafito_anim::parametric::infer_taylor_anim(pedido)
+            .expect("x^3 infiere")
+            .spec()
+            .clone();
+        let mut progreso = 0;
+        let real = crate::anim_native::render_taylor_frames_for_spec_impl(
+            96,
+            72,
+            &spec,
+            false,
+            &mut |hechos, _| progreso = hechos,
+        );
+        assert_eq!(real.len(), 48);
+        assert_eq!(progreso, 48, "progreso real por frame");
+        let canon = grafito_anim::parametric::TaylorSpec {
+            expr: grafito_anim::parametric::TAYLOR_CANONICAL_EXPR.to_string(),
+            centro: grafito_anim::parametric::TAYLOR_CANONICAL_CENTER,
+            orden: grafito_anim::parametric::TAYLOR_CANONICAL_ORDER,
+        };
+        let media_canonica = crate::anim_native::render_taylor_frames_for_spec_impl(
+            96,
+            72,
+            &canon,
+            false,
+            &mut |_, _| {},
+        );
+        assert_ne!(
+            real[47].pixels, media_canonica[47].pixels,
+            "Taylor de x³ jamás es la senoidal canónica"
+        );
+    }
+
+    #[test]
+    fn fa_submit_taylor_sin_funcion_canonica_declarada() {
+        let pedido = "pedí un ejemplo de animación de taylor";
+        assert_eq!(plantilla_para_pedido(pedido), "taylor-series");
+        assert_eq!(
+            clasifica_pedido_taylor(pedido, "taylor-series"),
+            TaylorPedido::Canonica
+        );
+        match decide_animacion(pedido) {
+            DecisionAnimacion::RenderCanonico { plantilla, .. } => {
+                assert_eq!(plantilla, "taylor-series");
+            }
+            otra => panic!("canónica debe renderizar, fue {otra:?}"),
+        }
+        // La prosa declara la canónica (sin(x), centro y orden efectivos).
+        let prosa = prosa_taylor_canonica(pedido);
+        assert!(prosa.contains("sin(x)"), "{prosa}");
+        assert!(prosa.contains("x=0"), "{prosa}");
+        assert!(prosa.contains("orden 3"), "{prosa}");
+        assert!(prosa.contains("pedime otra"), "{prosa}");
+        // No es un pedido de área/tangente: esas puertas no aplican.
+        assert_eq!(
+            clasifica_pedido_integral(pedido, "taylor-series"),
+            IntegralPedido::NoAplica
+        );
+        assert_eq!(
+            clasifica_pedido_tangente(pedido, "taylor-series"),
+            TangentePedido::NoAplica
+        );
+    }
+
+    #[test]
+    fn fa_taylor_invalida_foo_error_honesto_sin_frames() {
+        let pedido = "taylor de f(x)=foo(x) orden 3 con animación";
+        assert_eq!(plantilla_para_pedido(pedido), "taylor-series");
+        match clasifica_pedido_taylor(pedido, "taylor-series") {
+            TaylorPedido::FuncionInvalida(detalle) => {
+                assert!(detalle.contains("foo(x)"), "{detalle}");
+                assert!(detalle.contains("x^3"), "da ejemplo: {detalle}");
+            }
+            otro => panic!("inválida no clasifica, fue {otro:?}"),
+        }
+        match decide_animacion(pedido) {
+            DecisionAnimacion::PreguntarSinMedia(guia) => {
+                assert!(guia.contains("foo(x)"), "{guia}");
+            }
+            otra => panic!("inválida no renderiza, fue {otra:?}"),
+        }
     }
 
     #[test]
@@ -9795,8 +10837,9 @@ mod tests {
 
     #[test]
     fn export_con_frames_corre_en_hilo_y_publica_exito_con_ruta() {
-        // Cableado real: `spawn_gif_export` escribe un GIF válido y el poll
-        // publica `Done` (ruta avisada por el aviso). Limpia su temporal.
+        // Flujo diálogo: Exportar abre (`ffmpeg` detectado fuera del draw),
+        // Confirmar spawnea el GIF en hilo y el poll publica `Done` (ruta
+        // avisada por el aviso). Limpia su temporal.
         // El prefijo `grafito_animacion_` solo lo crea este export.
         let mut app = crate::app::dummy_grafito_app();
         let ctx = egui::Context::default();
@@ -9809,11 +10852,26 @@ mod tests {
             &ctx,
         );
         app.export_assistant_media(&ctx);
+        assert!(
+            app.assistant.export_dialog_is_open(),
+            "Exportar abre el diálogo"
+        );
+        assert!(app.assistant_runtime.gif_export_job.is_none());
+        app.confirm_export_assistant_media(&ctx);
         assert!(app.assistant_runtime.gif_export_job.is_some());
         assert_eq!(
             *app.assistant.media_export_state(),
             grafito_ui::assistant::MediaExportState::Exporting
         );
+        // Ruta exacta del job (sin barrer /tmp compartido: en paralelo otro
+        // test puede estar exportando a la vez y el conteo colisionaba).
+        let ruta = app
+            .assistant_runtime
+            .gif_export_job
+            .as_ref()
+            .expect("job en vuelo")
+            .path
+            .clone();
         for _ in 0..200 {
             app.poll_gif_export_job(&ctx);
             if app.assistant_runtime.gif_export_job.is_none() {
@@ -9830,6 +10888,48 @@ mod tests {
             grafito_ui::assistant::MediaExportState::Done
         );
         // El GIF existe y es real; se borra para no ensuciar el temporal.
+        let bytes = std::fs::read(&ruta).expect("GIF exportado legible");
+        assert_eq!(&bytes[0..6], b"GIF89a", "GIF real con cabecera");
+        std::fs::remove_file(&ruta).expect("limpia su temporal");
+        assert!(!ruta.exists(), "el temporal quedó limpio");
+    }
+
+    #[test]
+    fn export_dialog_png_dir_corre_en_hilo_y_publica_exito() {
+        // Formato PNG-sequence: sin ffmpeg sale igual; el poll publica `Done`
+        // con el directorio. Limpia su temporal.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        let frames = vec![egui::ColorImage::new([8, 8], egui::Color32::BLUE); 2];
+        app.assistant.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "prueba".into(),
+                frames,
+            }),
+            &ctx,
+        );
+        app.export_assistant_media(&ctx);
+        assert!(app.assistant.export_dialog_is_open());
+        app.assistant
+            .export_dialog_set_format(grafito_ui::assistant::MediaExportFormat::PngDir);
+        app.confirm_export_assistant_media(&ctx);
+        assert!(app.assistant_runtime.png_export_job.is_some());
+        for _ in 0..200 {
+            app.poll_media_export_jobs(&ctx);
+            if app.assistant_runtime.png_export_job.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.assistant_runtime.png_export_job.is_none(),
+            "el hilo debe terminar"
+        );
+        assert_eq!(
+            *app.assistant.media_export_state(),
+            grafito_ui::assistant::MediaExportState::Done
+        );
+        // Limpia los directorios de este export.
         let mut cleaned = 0;
         let entries = std::fs::read_dir(std::env::temp_dir()).expect("temporal legible");
         for entry in entries.filter_map(Result::ok) {
@@ -9837,16 +10937,50 @@ mod tests {
             let is_ours = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("grafito_animacion_"));
+                .is_some_and(|name| {
+                    name.starts_with("grafito_animacion_") && name.ends_with("_png")
+                });
             if !is_ours {
                 continue;
             }
-            let bytes = std::fs::read(&path).expect("GIF exportado legible");
-            assert_eq!(&bytes[0..6], b"GIF89a", "GIF real con cabecera");
-            std::fs::remove_file(&path).expect("limpia su temporal");
+            let frames_out: Vec<_> = std::fs::read_dir(&path)
+                .expect("dir exportado legible")
+                .filter_map(Result::ok)
+                .collect();
+            assert_eq!(frames_out.len(), 2, "dos PNG en el directorio");
+            std::fs::remove_dir_all(&path).expect("limpia su temporal");
             cleaned += 1;
         }
-        assert_eq!(cleaned, 1, "un solo GIF de este export");
+        assert_eq!(cleaned, 1, "un solo directorio de este export");
+    }
+
+    #[test]
+    fn export_orbita_solo_en_plantilla_3d() {
+        // Órbita: solo títulos 3D la habilitan; el resto falla honesto.
+        assert!(export_orbit_supported_for_title("Cubo orbitando"));
+        assert!(export_orbit_supported_for_title("esfera 3D"));
+        assert!(!export_orbit_supported_for_title("derivada como pendiente"));
+        // Mapping al diálogo de 3 args (W3, sin audio): abre y valida.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        let frames = vec![egui::ColorImage::new([8, 8], egui::Color32::RED); 2];
+        app.assistant.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "prueba".into(),
+                frames,
+            }),
+            &ctx,
+        );
+        app.export_assistant_media(&ctx);
+        assert!(app.assistant.export_dialog_is_open());
+        assert!(
+            app.assistant
+                .export_dialog_snapshot()
+                .validate_selection()
+                .is_ok(),
+            "GIF plano con 2 frames valida sin audio"
+        );
+        assert!(!app.assistant_runtime.any_media_export_in_flight());
     }
 
     #[test]
@@ -9858,6 +10992,7 @@ mod tests {
         runtime.anim_job = Some(AssistantAnimJob {
             cancellation: cancel.clone(),
             receiver: rx,
+            history: None,
         });
         assert!(runtime.cancel_anim_job(), "debe haber job");
         assert!(cancel.is_cancelled(), "descartar señala el token");
@@ -11291,5 +12426,53 @@ mod tests {
             mensaje.contains("Reintentá") || mensaje.contains("reformulá"),
             "pide reintentar: {mensaje}"
         );
+    }
+
+    #[test]
+    fn turn_state_ciclo_feliz_y_terminales() {
+        use super::AssistantTurnState;
+        let mut s = AssistantTurnState::default();
+        assert_eq!(s.state_name(), "Idle");
+        assert!(!s.is_terminal());
+        s.transition_to(AssistantTurnState::Composing)
+            .expect("idle->composing");
+        s.transition_to(AssistantTurnState::Thinking)
+            .expect("composing->thinking");
+        s.transition_to(AssistantTurnState::AwaitingAuthorization)
+            .expect("thinking->auth");
+        s.transition_to(AssistantTurnState::Animating {
+            job_id: "job-1".to_string(),
+        })
+        .expect("auth->animating");
+        assert_eq!(s.state_name(), "Animating");
+        assert!(!s.is_terminal());
+        s.transition_to(AssistantTurnState::Idle)
+            .expect("animating->idle");
+    }
+
+    #[test]
+    fn turn_state_rechaza_transiciones_ilegales() {
+        use super::AssistantTurnState;
+        let mut s = AssistantTurnState::default();
+        assert!(
+            s.transition_to(AssistantTurnState::Animating {
+                job_id: "x".to_string(),
+            })
+            .is_err(),
+            "idle->animating es ilegal"
+        );
+        assert!(
+            s.transition_to(AssistantTurnState::Cancelled).is_err(),
+            "idle->cancelled es ilegal"
+        );
+        s.transition_to(AssistantTurnState::Composing).expect("ok");
+        s.transition_to(AssistantTurnState::Thinking).expect("ok");
+        s.transition_to(AssistantTurnState::Failed {
+            reason: "boom".to_string(),
+        })
+        .expect("thinking->failed");
+        assert!(s.is_terminal());
+        s.transition_to(AssistantTurnState::Idle)
+            .expect("failed->idle");
     }
 }

@@ -6,6 +6,10 @@
 //! para generar animaciones 3b1b/manim.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use crate::exercise::{Exercise, ExerciseDifficulty, ExerciseKind, ValidatorKind};
+use crate::feedback::{Feedback, FeedbackEngine};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TeachingTopic {
@@ -123,6 +127,21 @@ impl TeachingTopic {
     }
 }
 
+/// Verificación final de un paso (remate): el estudiante calcula y se corrige
+/// con `FeedbackEngine::assess` (voz Mili la pone la UI, acá solo datos).
+///
+/// API pura para el integrador (asistente): si `step.check` es `Some`, la UI
+/// debe pedir respuesta y corregir con [`TeachingStep::assess_final`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepCheck {
+    /// Consigna (ej. "Si f(x)=x², ¿cuánto vale f'(1)?").
+    pub probe: String,
+    /// Respuesta esperada (ej. "2").
+    pub expected: String,
+    /// Validador (típico `NumericTol(0.02)`).
+    pub validator: ValidatorKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeachingStep {
     pub id: String,
@@ -134,6 +153,23 @@ pub struct TeachingStep {
     /// Template manim sugerido
     pub manim_template: Option<String>,
     pub completed: bool,
+    /// CAS-gate: `true` solo si `math_expr` parseó vía `verify_math_expr`
+    /// (geometry `prepare_function_ast`) al construir la sesión.
+    #[serde(default)]
+    pub verified: bool,
+    /// Binding temporal: la pizarra hidrata este paso cuando el elapsed de la
+    /// sesión supera `cue_ms` (ver `TeachingSession::revealed_steps`). `0` =
+    /// visible desde el inicio (comportamiento histórico).
+    #[serde(default)]
+    pub cue_ms: u64,
+    /// Ventana de frames sugerida sobre el loop de animación (índices
+    /// absolutos; la UI la re-mapea con módulo al total real). `None` = loop
+    /// completo.
+    #[serde(default)]
+    pub frame_range: Option<(u32, u32)>,
+    /// Remate verificable del paso (`None` = paso expositivo).
+    #[serde(default)]
+    pub check: Option<StepCheck>,
 }
 
 impl TeachingStep {
@@ -150,6 +186,10 @@ impl TeachingStep {
             whiteboard_hint: String::new(),
             manim_template: None,
             completed: false,
+            verified: false,
+            cue_ms: 0,
+            frame_range: None,
+            check: None,
         }
     }
     pub fn with_math(mut self, expr: impl Into<String>) -> Self {
@@ -164,6 +204,74 @@ impl TeachingStep {
         self.manim_template = Some(template.into());
         self
     }
+    /// Binding temporal: pizarra de este paso visible con elapsed >= `cue_ms`.
+    pub fn with_cue(mut self, cue_ms: u64) -> Self {
+        self.cue_ms = cue_ms;
+        self
+    }
+    /// Ventana de frames sugerida `[start, end)` sobre el loop de animación.
+    /// Se normaliza: `end <= start` → `None` (loop completo, honesto).
+    pub fn with_frames(mut self, start: u32, end: u32) -> Self {
+        self.frame_range = if end > start {
+            Some((start, end))
+        } else {
+            None
+        };
+        self
+    }
+    /// Remate verificable: consigna + respuesta esperada (corrige con
+    /// `FeedbackEngine::assess`, tolerancia numérica 2 %).
+    pub fn with_final_check(
+        mut self,
+        probe: impl Into<String>,
+        expected: impl Into<String>,
+    ) -> Self {
+        self.check = Some(StepCheck {
+            probe: probe.into(),
+            expected: expected.into(),
+            validator: ValidatorKind::NumericTol(0.02),
+        });
+        self
+    }
+    /// Corrige la respuesta del remate (`None` si el paso no tiene `check`).
+    /// Pura: construye un `Exercise` mínimo y delega a `FeedbackEngine`.
+    pub fn assess_final(&self, answer: &str) -> Option<Feedback> {
+        let check = self.check.as_ref()?;
+        let exercise = Exercise {
+            prompt: check.probe.clone(),
+            solution: check.expected.clone(),
+            kind: ExerciseKind::Numeric,
+            difficulty: ExerciseDifficulty::Easy,
+            lo_id: self.id.clone(),
+            params: BTreeMap::new(),
+            seed: None,
+            validator: check.validator,
+        };
+        Some(FeedbackEngine.assess(&exercise, answer))
+    }
+}
+
+/// CAS-gate puro: ¿`expr` es una expresión computable (no prosa matemática)?
+///
+/// Valida vía geometry `prepare_function_ast` (mismo parser del canvas: la
+/// pizarra jamás muestra como verificada una expresión que el canvas no puede
+/// evaluar). Rechaza vacío, `=` (ecuaciones/derivadas tipo `f'(x)=2x`), prosa
+/// con espacios múltiples/símbolos de integral/suma (`∫`, `Σ`, `→`) y texto
+/// largo. Puro, sin I/O, sin `unwrap`.
+///
+/// Para la UI (MathTex overlay): lo verificado se dibuja con
+/// `grafito_ui::assistant::draw_math` (fuente `$..$`); lo no verificado cae a
+/// texto honesto y `TeachingSession::new` lo descarta (`math_expr = None`).
+pub fn verify_math_expr(expr: &str) -> bool {
+    let text = expr.trim();
+    if text.is_empty() || text.len() > 200 {
+        return false;
+    }
+    if text.contains(['=', '∫', 'Σ', '→', ';', '\n']) {
+        return false;
+    }
+    let vars: BTreeMap<String, f64> = BTreeMap::new();
+    grafito_geometry::expr::prepare_function_ast(text, &vars, &[]).is_ok()
 }
 
 /// Sesión de enseñanza con pasos y pizarra asociada.
@@ -176,7 +284,25 @@ pub struct TeachingSession {
 }
 
 impl TeachingSession {
+    /// Construye aplicando el CAS-gate: cada `math_expr` que no parsea se
+    /// descarta (`None`, `verified = false`); el que parsea queda marcado
+    /// `verified = true`. El paso se conserva siempre (la explicación en
+    /// prosa sigue valiendo).
     pub fn new(topic: TeachingTopic, steps: Vec<TeachingStep>) -> Self {
+        let steps = steps
+            .into_iter()
+            .map(|mut step| {
+                match step.math_expr.as_deref() {
+                    Some(expr) if verify_math_expr(expr) => step.verified = true,
+                    Some(_) => {
+                        step.math_expr = None;
+                        step.verified = false;
+                    }
+                    None => step.verified = false,
+                }
+                step
+            })
+            .collect();
         Self {
             topic,
             steps,
@@ -192,28 +318,31 @@ impl TeachingSession {
     fn steps_for_topic(topic: &TeachingTopic, original: &str) -> Vec<TeachingStep> {
         match topic {
             TeachingTopic::Derivada => vec![
-                TeachingStep::new("d1", "¿Qué es la derivada?", "La derivada es la pendiente instantánea de una curva en un punto. Si tu función es el camino, la derivada te dice cuán inclinado está en cada instante.")
-                    .with_math("f(x)=x², f'(x)=2x").with_whiteboard("Dibuja la curva x² y una secante entre dos puntos").with_manim("derivative-slope"),
-                TeachingStep::new("d2", "Visualicemos la pendiente", "Mirá cómo la secante entre dos puntos se acerca a la tangente cuando los puntos se juntan. Esa tangente es la derivada.")
-                    .with_math("m_sec = (f(x+h)-f(x))/h → f'(x) cuando h→0").with_whiteboard("Secante que colapsa a tangente en x=1").with_manim("derivative-slope"),
+                TeachingStep::new("d1", "¿Qué es la derivada?", "La derivada es la pendiente instantánea de una curva en un punto. Si tu función es el camino, la derivada te dice cuán inclinado está en cada instante. Abajo ves verificada f(x)=x²; su derivada f'(x)=2x la graficamos en el paso 3.")
+                    .with_math("x^2").with_whiteboard("Dibuja la curva x² y una secante entre dos puntos").with_manim("derivative-slope").with_cue(0).with_frames(0, 12),
+                TeachingStep::new("d2", "Visualicemos la pendiente", "Mirá cómo la secante entre dos puntos se acerca a la tangente cuando los puntos se juntan. Esa tangente es la derivada: el cociente diferencial de abajo tiende a f'(x) cuando h→0.")
+                    .with_math("((x+h)^2-x^2)/h").with_whiteboard("Secante que colapsa a tangente en x=1").with_manim("derivative-slope").with_cue(5_000).with_frames(12, 24),
                 TeachingStep::new("d3", "Grafiquemos f y f'", "Arriba: x² (parábola). Abajo: 2x (recta). Notá cómo la pendiente de la parábola crece linealmente.")
-                    .with_math("Gráfica: f(x)=x² y f'(x)=2x").with_whiteboard("Dos ejes: parábola y recta").with_manim("derivative-slope"),
-                TeachingStep::new("d4", "Probemos en la pizarra", "Dibujá tu propia función en la pizarra y calculá la derivada en un punto. Usá la herramienta de tangente.")
-                    .with_whiteboard("Pizarra libre para trazar y medir pendiente"),
+                    .with_math("2*x").with_whiteboard("Dos ejes: parábola y recta").with_manim("derivative-slope").with_cue(10_000).with_frames(24, 36),
+                TeachingStep::new("d4", "Verificá en x=1", "Si f(x)=x², su derivada es f'(x)=2x. Calculá en x=1: debe dar 2. Escribí tu resultado y lo corregimos juntos.")
+                    .with_whiteboard("Ejes con tangente en x=1 marcada").with_cue(15_000).with_frames(36, 48)
+                    .with_final_check("Si f(x)=x², ¿cuánto vale f'(1)?", "2"),
             ],
             TeachingTopic::Integral => vec![
-                TeachingStep::new("i1", "¿Qué es la integral?", "La integral es el área bajo la curva. Si la derivada es la pendiente, la integral es la acumulación.")
-                    .with_math("∫₀² x² dx = 8/3").with_whiteboard("Área bajo x² entre 0 y 2").with_manim("integral-area"),
+                TeachingStep::new("i1", "¿Qué es la integral?", "La integral es el área bajo la curva. Si la derivada es la pendiente, la integral es la acumulación. Abajo ves verificada la función; el área entre 0 y 2 vale 8/3.")
+                    .with_math("x^2").with_whiteboard("Área bajo x² entre 0 y 2").with_manim("integral-area").with_cue(0),
                 TeachingStep::new("i2", "Aproximación con rectángulos", "Suma de rectángulos de ancho pequeño. Cuando el ancho tiende a cero, la suma es el área exacta.")
-                    .with_math("Suma de Riemann: Σ f(xᵢ)Δx").with_whiteboard("Rectángulos bajo la curva").with_manim("integral-area"),
-                TeachingStep::new("i3", "Visualicemos el área", "La región sombreada es la integral. Cambiá los límites y mirá cómo cambia el área.")
-                    .with_whiteboard("Región sombreada con límites móviles"),
+                    .with_whiteboard("Rectángulos bajo la curva").with_manim("integral-area").with_cue(5_000),
+                TeachingStep::new("i3", "Verificá el área", "La región sombreada es la integral. Si el área bajo x² entre 0 y 2 vale 8/3 ≈ 2.67, ¿cuánto vale redondeado a 2 decimales? Escribilo y lo corregimos.")
+                    .with_whiteboard("Región sombreada con límites móviles").with_cue(10_000)
+                    .with_final_check("Área bajo x² entre 0 y 2, a 2 decimales", "2.67"),
             ],
             TeachingTopic::Pitagoras => vec![
-                TeachingStep::new("p1", "Teorema de Pitágoras", "En un triángulo rectángulo, c² = a² + b². La hipotenusa al cuadrado es la suma de los catetos al cuadrado.")
-                    .with_math("c² = a² + b², c = √(a²+b²)").with_whiteboard("Triángulo rectángulo con cuadrados en cada lado").with_manim("pitagoras"),
-                TeachingStep::new("p2", "Demostración visual", "Los dos cuadrados de los catetos juntos tienen la misma área que el cuadrado de la hipotenusa.")
-                    .with_whiteboard("Animación de áreas que se reordenan").with_manim("pitagoras"),
+                TeachingStep::new("p1", "Teorema de Pitágoras", "En un triángulo rectángulo, c² = a² + b². La hipotenusa al cuadrado es la suma de los catetos al cuadrado. Abajo ves verificada la relación.")
+                    .with_math("a^2+b^2").with_whiteboard("Triángulo rectángulo con cuadrados en cada lado").with_manim("pitagoras").with_cue(0),
+                TeachingStep::new("p2", "Verificá con 3-4-5", "Los dos cuadrados de los catetos juntos tienen la misma área que el cuadrado de la hipotenusa. Si a=3 y b=4, ¿cuánto vale c? Escribilo y lo corregimos.")
+                    .with_whiteboard("Animación de áreas que se reordenan").with_manim("pitagoras").with_cue(5_000)
+                    .with_final_check("Si a=3 y b=4, ¿cuánto vale c?", "5"),
             ],
             TeachingTopic::Funcion => vec![
                 TeachingStep::new("f1", "¿Qué es una función?", "Una función asigna a cada x un único y. Pensala como una máquina: entra x, sale f(x).")
@@ -224,26 +353,26 @@ impl TeachingSession {
                     .with_whiteboard("Tabla de valores x→f(x)").with_manim("universal"),
             ],
             TeachingTopic::Limite => vec![
-                TeachingStep::new("l1", "Idea de límite", "El límite describe hacia dónde tiende f(x) cuando x se acerca a un valor, aunque f no esté definida ahí.")
-                    .with_math("lim_{x→a} f(x) = L").with_whiteboard("Recta con hueco en a").with_manim("derivative-slope"),
+                TeachingStep::new("l1", "Idea de límite", "El límite describe hacia dónde tiende f(x) cuando x se acerca a un valor, aunque f no esté definida ahí. Abajo ves verificada la función clásica del hueco removible.")
+                    .with_math("(x^2-1)/(x-1)").with_whiteboard("Recta con hueco en a").with_manim("derivative-slope").with_cue(0),
                 TeachingStep::new("l2", "Acercamiento", "Acerquemos x a a por izquierda y derecha y miremos f(x).")
-                    .with_whiteboard("Flechas hacia a").with_manim("derivative-slope"),
+                    .with_whiteboard("Flechas hacia a").with_manim("derivative-slope").with_cue(5_000),
                 TeachingStep::new("l3", "Calculémoslo", "Usá factorización o sustitución para resolverlo y verificá en la gráfica.")
-                    .with_math(original).with_whiteboard("Pizarra para cálculo paso a paso"),
+                    .with_math(original).with_whiteboard("Pizarra para cálculo paso a paso").with_cue(10_000),
             ],
             TeachingTopic::Fraccion => vec![
                 TeachingStep::new("frac1", "¿Qué es una fracción?", "Una fracción a/b representa partes de un todo. El denominador dice en cuántas partes dividimos, el numerador cuántas tomamos.")
-                    .with_math("1/2, 3/4, 2/3").with_whiteboard("Rectángulo dividido en partes").with_manim("fraccion-visual"),
-                TeachingStep::new("frac2", "Operaciones", "Para sumar, buscá común denominador; para multiplicar, numerador por numerador y denominador por denominador.")
-                    .with_math("1/2 + 1/3 = 5/6").with_whiteboard("Rectángulos con común denominador").with_manim("fraccion-visual"),
+                    .with_math("1/2+1/3").with_whiteboard("Rectángulo dividido en partes").with_manim("fraccion-visual").with_cue(0),
+                TeachingStep::new("frac2", "Operaciones", "Para sumar, buscá común denominador; para multiplicar, numerador por numerador y denominador por denominador. Abajo ves verificada la suma (da 5/6).")
+                    .with_math("1/2+1/3").with_whiteboard("Rectángulos con común denominador").with_manim("fraccion-visual").with_cue(5_000),
                 TeachingStep::new("frac3", "Practiquemos", "Simplificá y compará fracciones dibujando en la pizarra.")
                     .with_whiteboard("Pizarra con fracciones equivalentes"),
             ],
             TeachingTopic::Vector => vec![
-                TeachingStep::new("v1", "¿Qué es un vector?", "Un vector tiene dirección, sentido y módulo. En R² lo pensás como una flecha desde el origen.")
-                    .with_math("v = (2,3), |v| = √(13)").with_whiteboard("Flecha en ejes R²").with_manim("vector-anim"),
+                TeachingStep::new("v1", "¿Qué es un vector?", "Un vector tiene dirección, sentido y módulo. En R² lo pensás como una flecha desde el origen. Abajo ves verificada la norma de (2,3).")
+                    .with_math("sqrt(13)").with_whiteboard("Flecha en ejes R²").with_manim("vector-anim").with_cue(0),
                 TeachingStep::new("v2", "Suma y producto", "Suma componente a componente. Producto escalar da un número, vectorial da otro vector perpendicular.")
-                    .with_math("u·v = |u||v|cosθ").with_whiteboard("Dos flechas y su suma").with_manim("vector-anim"),
+                    .with_math("cos(x)").with_whiteboard("Dos flechas y su suma").with_manim("vector-anim").with_cue(5_000),
                 TeachingStep::new("v3", "Practiquemos", "Dibujá vectores en la pizarra y calculá su norma y ángulo.")
                     .with_whiteboard("Pizarra vectorial libre"),
             ],
@@ -272,24 +401,24 @@ impl TeachingSession {
                     .with_math("f(x)≈ Σ f⁽ⁿ⁾(a)/n! (x-a)ⁿ").with_whiteboard("Polinomios que se acercan a la curva"),
             ],
             TeachingTopic::Ecuacion => vec![
-                TeachingStep::new("ec1", "Ecuación lineal", "Ecuación lineal: a·x+b=0 → x=-b/a. Representa recta que cruza el eje.")
-                    .with_math("2x+3=7 → x=2").with_whiteboard("Recta y corte con eje").with_manim("ecuacion-anim"),
+                TeachingStep::new("ec1", "Ecuación lineal", "Ecuación lineal: a·x+b=0 → x=-b/a. Representa recta que cruza el eje. Abajo ves verificada la función (el cero está en x=-1.5).")
+                    .with_math("2*x+3").with_whiteboard("Recta y corte con eje").with_manim("ecuacion-anim").with_cue(0),
                 TeachingStep::new("ec2", "Cuadrática", "Cuadrática: ax²+bx+c=0 → fórmula con discriminante Δ=b²-4ac.")
                     .with_math("x = (-b±√Δ)/2a").with_whiteboard("Parábola y raíces").with_manim("ecuacion-anim"),
                 TeachingStep::new("ec3", "Sistemas", "Sistemas: dos ecuaciones, dos incógnitas. Resolvé por sustitución o Gauss.")
                     .with_whiteboard("Dos rectas que se cortan"),
             ],
             TeachingTopic::Trigonometria => vec![
-                TeachingStep::new("trig1", "Seno y coseno", "En el círculo unitario, cos es x, sin es y. Hipotenusa 1, catetos cos y sin.")
-                    .with_math("sin²+cos²=1").with_whiteboard("Círculo unitario con ángulo").with_manim("trig-anim"),
+                TeachingStep::new("trig1", "Seno y coseno", "En el círculo unitario, cos es x, sin es y. Hipotenusa 1, catetos cos y sin. Abajo ves verificada la identidad (vale 1 para todo x).")
+                    .with_math("sin(x)^2+cos(x)^2").with_whiteboard("Círculo unitario con ángulo").with_manim("trig-anim").with_cue(0),
                 TeachingStep::new("trig2", "Identidades", "Identidades relacionan ángulos: sin(a+b)=sin a cos b + cos a sin b.")
-                    .with_math("sin(π/2)=1, cos(π)= -1").with_whiteboard("Triángulo y círculo").with_manim("trig-anim"),
+                    .with_math("sin(x)").with_whiteboard("Triángulo y círculo").with_manim("trig-anim").with_cue(5_000),
                 TeachingStep::new("trig3", "Gráficas", "Ondas seno y coseno: periódicas, amplitud 1, período 2π.")
                     .with_whiteboard("Onda seno en ejes"),
             ],
             TeachingTopic::Conica => vec![
-                TeachingStep::new("con1", "Cónicas", "Cónicas: cortás un cono con un plano y obtenés circunferencia, elipse, parábola o hipérbola.")
-                    .with_math("x²/a² + y²/b² =1 (elipse)").with_whiteboard("Cono cortado").with_manim("conica-anim"),
+                TeachingStep::new("con1", "Cónicas", "Cónicas: cortás un cono con un plano y obtenés circunferencia, elipse, parábola o hipérbola. Abajo ves verificada la forma de la elipse (igualada a 1 en la gráfica).")
+                    .with_math("x^2/a^2+y^2/b^2").with_whiteboard("Cono cortado").with_manim("conica-anim").with_cue(0),
                 TeachingStep::new("con2", "Ecuaciones canónicas", "Cada cónica tiene ecuación canónica con centro y ejes. Cambiá parámetros y mirá el gráfico.")
                     .with_whiteboard("Elipse con focos"),
                 TeachingStep::new("con3", "Practiquemos", "Dibujá la cónica en la pizarra y reconocé sus elementos (focos, vértices).")
@@ -344,6 +473,66 @@ impl TeachingSession {
     }
     pub fn progress(&self) -> f32 {
         (self.current as f32 + 1.0) / self.steps.len().max(1) as f32
+    }
+
+    /// Binding temporal: pasos cuya pizarra ya puede hidratarse con
+    /// `elapsed_ms` desde el inicio de la sesión (`cue_ms <= elapsed_ms`).
+    ///
+    /// La UI llama esto en `tick()` e hidrata la pizarra con la unión de los
+    /// hints revelados, en vez de todo el hint de golpe. Puro, sin I/O.
+    /// API para el integrador (asistente): el cableado a `TeachingUiState`
+    /// vive en `grafito-app/src/teaching_ui.rs` (`poll_cues`).
+    pub fn revealed_steps(&self, elapsed_ms: u64) -> Vec<&TeachingStep> {
+        self.steps
+            .iter()
+            .filter(|step| step.cue_ms <= elapsed_ms)
+            .collect()
+    }
+
+    /// Cantidad de pasos revelados (para detectar cambios de cue en `tick`).
+    pub fn revealed_count(&self, elapsed_ms: u64) -> usize {
+        self.steps
+            .iter()
+            .filter(|step| step.cue_ms <= elapsed_ms)
+            .count()
+    }
+
+    /// Hints de pizarra revelados hasta `elapsed_ms`, unidos para hidratar.
+    /// Vacío si nada reveló todavía.
+    pub fn revealed_hints(&self, elapsed_ms: u64) -> String {
+        self.revealed_steps(elapsed_ms)
+            .iter()
+            .map(|step| step.whiteboard_hint.trim())
+            .filter(|hint| !hint.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Índice de frame dentro de `step.frame_range` para `elapsed_ms`.
+    ///
+    /// `fps` típico 12; `total_frames` es el largo real del loop (la ventana
+    /// sugerida se re-mapea con módulo si excede el total). `None` en
+    /// `frame_range` → loop completo (`elapsed*fps % total`). `total == 0` →
+    /// `None`. Puro, sin I/O ni `unwrap`.
+    pub fn cue_frame_index(
+        step: &TeachingStep,
+        elapsed_ms: u64,
+        fps: f32,
+        total_frames: usize,
+    ) -> Option<usize> {
+        if total_frames == 0 || !fps.is_finite() || fps <= 0.0 {
+            return None;
+        }
+        let tick = (elapsed_ms as f32 / 1000.0 * fps) as u64;
+        let total = total_frames as u64;
+        match step.frame_range {
+            None => Some((tick % total) as usize),
+            Some((start, end)) => {
+                let len = end.saturating_sub(start).max(1) as u64;
+                let start_mapped = (start as u64) % total;
+                Some(((start_mapped + tick % len) % total) as usize)
+            }
+        }
     }
 
     /// Crea un FSM socrático inicializado con el tópico de la sesión.
@@ -450,6 +639,103 @@ mod tests {
                 deadline_epoch: 12345
             }
         ));
+    }
+    #[test]
+    fn cas_gate_rechaza_prosa_y_acepta_expresiones() {
+        // Lo que hoy vive en strings sin validar debe rechazarse.
+        for mala in [
+            "f'(x)=2x",
+            "∫₀²x²=8/3",
+            "m_sec = (f(x+h)-f(x))/h → f'(x) cuando h→0",
+            "c² = a² + b², c = √(a²+b²)",
+            "Suma de Riemann: Σ f(xᵢ)Δx",
+            "",
+            "   ",
+        ] {
+            assert!(!verify_math_expr(mala), "debía rechazar: {mala}");
+        }
+        for buena in [
+            "x^2",
+            "2*x",
+            "((x+h)^2-x^2)/h",
+            "(x^2-1)/(x-1)",
+            "1/2+1/3",
+            "sqrt(13)",
+            "sin(x)^2+cos(x)^2",
+            "x^2/a^2+y^2/b^2",
+            "2*x+3",
+            "a^2+b^2",
+        ] {
+            assert!(verify_math_expr(buena), "debía aceptar: {buena}");
+        }
+    }
+    #[test]
+    fn sesion_marca_verified_y_descarta_lo_que_no_parsea() {
+        let s = TeachingSession::for_topic("derivada");
+        assert!(s
+            .steps
+            .iter()
+            .any(|st| st.verified && st.math_expr.is_some()));
+        // Ningún paso conserva math sin verificar.
+        for st in &s.steps {
+            assert!(
+                st.math_expr.is_none() || st.verified,
+                "math sin verificar en {}",
+                st.id
+            );
+        }
+        // Constructor directo también aplica el gate.
+        let trucha = TeachingSession::new(
+            TeachingTopic::Derivada,
+            vec![TeachingStep::new("t", "T", "E").with_math("f'(x)=2x")],
+        );
+        assert!(trucha.steps[0].math_expr.is_none());
+        assert!(!trucha.steps[0].verified);
+    }
+    #[test]
+    fn remate_d4_verifica_con_feedback() {
+        let s = TeachingSession::for_topic("derivada");
+        let d4 = s.steps.iter().find(|st| st.id == "d4").expect("d4 existe");
+        let check = d4.check.as_ref().expect("d4 tiene remate");
+        assert!(check.probe.contains("f'(1)"));
+        assert_eq!(check.expected, "2");
+        let bien = d4.assess_final("2").expect("assess");
+        assert!(bien.correct);
+        let mal = d4.assess_final("5").expect("assess");
+        assert!(!mal.correct);
+        // Paso sin check → None honesto.
+        assert!(s.steps[0].assess_final("2").is_none());
+    }
+    #[test]
+    fn cues_revelan_progresivo_y_frames_en_rango() {
+        let s = TeachingSession::for_topic("derivada");
+        assert_eq!(s.revealed_count(0), 1);
+        assert_eq!(s.revealed_count(4_999), 1);
+        assert_eq!(s.revealed_count(5_000), 2);
+        assert_eq!(s.revealed_count(u64::MAX), s.steps.len());
+        assert!(!s.revealed_hints(0).is_empty());
+        // Frames: d1 ventana [0,12) sobre loop de 48.
+        let d1 = &s.steps[0];
+        assert_eq!(d1.frame_range, Some((0, 12)));
+        let idx = TeachingSession::cue_frame_index(d1, 0, 12.0, 48).expect("idx");
+        assert!(idx < 12, "{idx}");
+        // Sin rango → loop completo; total 0 → None.
+        let sin_rango = TeachingStep::new("x", "X", "E");
+        assert_eq!(
+            TeachingSession::cue_frame_index(&sin_rango, 1000, 12.0, 48),
+            Some(12)
+        );
+        assert_eq!(
+            TeachingSession::cue_frame_index(&sin_rango, 0, 12.0, 0),
+            None
+        );
+        // Rango inválido se normaliza a None.
+        assert_eq!(
+            TeachingStep::new("x", "X", "E")
+                .with_frames(5, 5)
+                .frame_range,
+            None
+        );
     }
     #[test]
     fn lo_id_mapping() {

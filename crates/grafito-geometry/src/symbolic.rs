@@ -16,7 +16,7 @@ use crate::assumptions::{Assumption, Assumptions};
 use crate::ast::{parse_ast, Expr};
 use crate::exact::{ExactRational, ExactRationalError};
 use crate::{MathError, MathOperation, MathResult, MAX_MATH_INPUT_BYTES};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
@@ -5192,7 +5192,7 @@ pub fn substitute(expr: &str, var: &str, value: &str) -> Result<String, String> 
         .or_else(|_| parse_ast(value))
         .map_err(|e| format!("No se pudo parsear el valor '{value}': {e}"))?;
     let result = if let Expr::Const(c) = val_ast {
-        let mut map = HashMap::new();
+        let mut map = BTreeMap::new();
         map.insert(var.to_string(), c);
         simplify_expr(&ast.substitute_vars(&map, &[]))
     } else {

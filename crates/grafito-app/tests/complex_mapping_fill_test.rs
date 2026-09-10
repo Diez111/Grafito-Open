@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(deprecated)]
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use grafito_app::render_2d::{
     complex_mapping_region_contains, complex_mapping_segment_strokes, fill_cache_view_uv,
@@ -12,7 +12,7 @@ use grafito_geometry::Point2;
 #[test]
 fn inversion_maps_unit_disk_inequality_to_exterior() {
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let map = ConformalMap::Inversion;
 
     assert_eq!(
@@ -30,7 +30,7 @@ fn inversion_maps_unit_disk_inequality_to_exterior() {
 #[test]
 fn inversion_maps_unit_exterior_inequality_to_punctured_disk() {
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Greater);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let map = ConformalMap::Inversion;
 
     assert_eq!(

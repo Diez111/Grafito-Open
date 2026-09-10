@@ -7,7 +7,7 @@
 mod scanline_full_tests {
     use grafito_geometry::ast::Expr;
     use grafito_geometry::expr::prepare_function_ast;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     /// Replica exacta del algoritmo de scanline fill con stride.
     /// Devuelve los segmentos `(x_left_world, x_right_world)` por fila.
@@ -105,8 +105,8 @@ mod scanline_full_tests {
         // En y=0, esperamos segmentos (-1, 1).
         // En y=0.5, esperamos segmentos (-0.866, 0.866).
         // En y=0.9, esperamos segmentos (-0.436, 0.436).
-        let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
         let cols = 200;
         let rows = 200;
         let segments = scanline_full(&lhs, &rhs, false, -2.0, 2.0, -2.0, 2.0, cols, rows, 4);
@@ -160,8 +160,8 @@ mod scanline_full_tests {
     #[test]
     fn test_no_fill_outside_disk() {
         // Filas con |y| > 1 no deben tener fill.
-        let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
         let segments = scanline_full(&lhs, &rhs, false, -3.0, 3.0, -3.0, 3.0, 600, 600, 4);
         // Filas con y=2.5 (índice cercano a (2.5+3)/6 * 600 = 550).
         // y en world = -3 + (550 + 0.5) * 6/600 = -3 + 5.505 = 2.505.

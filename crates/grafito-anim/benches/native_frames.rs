@@ -50,6 +50,28 @@ fn bench_native_morph(c: &mut Criterion) {
     );
     assert_eq!(puntos.len(), 5);
 
+    // Pineo de presupuestos (corre en modo --test y full): si alguien
+    // cambia estos topes, el bench falla honesto en vez de regresión
+    // silenciosa. GIF 64/8M/5MB vive en `grafito-app` (fuera de scope
+    // anim) y se verifica por lectura; aquí se pinea lo que anim posee.
+    {
+        use grafito_anim::parametric::{PARAMETRIC_MAX_BYTES, PARAMETRIC_MAX_FRAMES};
+        use grafito_anim::protocol::{AnimDuration, Resolution};
+        assert_eq!(PARAMETRIC_MAX_FRAMES, 48);
+        assert!(FrameCount::try_new(48).is_ok());
+        assert!(FrameCount::try_new(49).is_err());
+        assert_eq!(PARAMETRIC_MAX_BYTES, 64 * 1024 * 1024);
+        assert!(Resolution::try_new(64, 64).is_ok());
+        assert!(Resolution::try_new(4096, 4096).is_ok());
+        assert!(Resolution::try_new(63, 480).is_err());
+        assert!(Resolution::try_new(4097, 480).is_err());
+        assert!(AnimDuration::try_new(0.1).is_ok());
+        assert!(AnimDuration::try_new(30.0).is_ok());
+        assert!(AnimDuration::try_new(0.09).is_err());
+        assert!(AnimDuration::try_new(30.1).is_err());
+        println!("F5-presupuestos: frames=48 set=64MiB res=64..4096 dur=0.1..30s OK");
+    }
+
     c.bench_function("morph_chico_16x5", |b| {
         b.iter(|| {
             let morph = PolylineMorph::try_new(

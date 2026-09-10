@@ -512,6 +512,11 @@ pub struct ConversationTurn {
     /// Procedencia de una respuesta del asistente. No se serializa ni se reenvía.
     #[serde(skip)]
     pub origin: Option<AssistantExecutionOrigin>,
+    /// Media del turno para el historial Thumb+Replay. Se serializa en sesión
+    /// pero nunca viaja al proveedor: el presupuesto de entrada sólo suma
+    /// `content` (ver [`AssistantRequest::validate`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<TurnMediaRef>,
 }
 
 impl ConversationTurn {
@@ -521,6 +526,7 @@ impl ConversationTurn {
             role: ConversationRole::User,
             content: content.into(),
             origin: None,
+            media: None,
         }
     }
 
@@ -530,6 +536,7 @@ impl ConversationTurn {
             role: ConversationRole::Assistant,
             content: content.into(),
             origin: None,
+            media: None,
         }
     }
 
@@ -542,17 +549,164 @@ impl ConversationTurn {
             role: ConversationRole::Assistant,
             content: content.into(),
             origin: Some(origin),
+            media: None,
         }
     }
 
-    /// Comprueba el presupuesto individual del turno.
+    /// Crea un turno con su media de historial ya pegada.
+    pub fn with_media(mut self, media: TurnMediaRef) -> Self {
+        self.media = Some(media);
+        self
+    }
+
+    /// Pega (o reemplaza) la media de historial de este turno.
+    pub fn attach_media(&mut self, media: TurnMediaRef) {
+        self.media = Some(media);
+    }
+
+    /// Retira y devuelve la media de historial de este turno, si la hubiera.
+    pub fn take_media(&mut self) -> Option<TurnMediaRef> {
+        self.media.take()
+    }
+
+    /// Indica si el turno conserva media para Thumb+Replay.
+    pub const fn has_media(&self) -> bool {
+        self.media.is_some()
+    }
+
+    /// Comprueba el presupuesto individual del turno, incluida su media.
     pub fn validate(&self) -> Result<(), String> {
         if self.content.trim().is_empty()
             || self.content.chars().count() > MAX_CONVERSATION_TURN_CHARS
         {
             return Err("assistant conversation turn is outside the allowed size".into());
         }
+        if let Some(media) = &self.media {
+            media.validate()?;
+        }
         Ok(())
+    }
+}
+
+/// Lado en píxeles del thumbnail cuadrado del historial (serializable sin egui/wgpu).
+pub const TURN_MEDIA_THUMB_SIDE_PX: usize = 96;
+/// Tope de bytes del thumbnail: 96×96 píxeles RGBA.
+pub const TURN_MEDIA_THUMB_MAX_BYTES: usize =
+    TURN_MEDIA_THUMB_SIDE_PX * TURN_MEDIA_THUMB_SIDE_PX * 4;
+/// Tope de caracteres de cada campo textual de [`TurnMediaRef`].
+pub const MAX_TURN_MEDIA_FIELD_CHARS: usize = 4_096;
+/// Mínimo de frames que un replay puede declarar.
+pub const TURN_MEDIA_MIN_FRAMES: u8 = 1;
+/// Máximo de frames que un replay puede declarar.
+pub const TURN_MEDIA_MAX_FRAMES: u8 = 64;
+
+/// Referencia de media pegada a un turno: thumbnail de 96px + replay.
+///
+/// Puro Rust, sin egui ni wgpu: `thumb` guarda píxeles RGBA de
+/// 96×96 (`TURN_MEDIA_THUMB_MAX_BYTES` bytes como tope) serializables con
+/// serde. `frame_count` es el replay asociado al turno.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnMediaRef {
+    /// Título visible del historial (no vacío, cap 4096 caracteres).
+    pub title: String,
+    /// Plantilla nativa para el replay (no vacía, cap 4096 caracteres).
+    pub template: String,
+    /// Concepto para el replay (no vacío, cap 4096 caracteres).
+    pub concept: String,
+    /// Píxeles del thumbnail de 96px (no vacío, cap 96×96 RGBA).
+    pub thumb: Vec<u8>,
+    /// Frames del replay, 1..=64.
+    pub frame_count: u8,
+}
+
+impl TurnMediaRef {
+    /// Construye una referencia de media sin validar (usar [`Self::validate`]).
+    pub fn new(
+        title: impl Into<String>,
+        template: impl Into<String>,
+        concept: impl Into<String>,
+        thumb: Vec<u8>,
+        frame_count: u8,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            template: template.into(),
+            concept: concept.into(),
+            thumb,
+            frame_count,
+        }
+    }
+
+    /// Comprueba campos no vacíos, topes y rango de frames antes de historiar.
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, field) in [
+            ("title", &self.title),
+            ("template", &self.template),
+            ("concept", &self.concept),
+        ] {
+            if field.trim().is_empty() {
+                return Err(format!("assistant turn media '{name}' is empty"));
+            }
+            if field.chars().count() > MAX_TURN_MEDIA_FIELD_CHARS {
+                return Err(format!("assistant turn media '{name}' is too long"));
+            }
+        }
+        if self.thumb.is_empty() {
+            return Err("assistant turn media thumb is empty".into());
+        }
+        if self.thumb.len() > TURN_MEDIA_THUMB_MAX_BYTES {
+            return Err("assistant turn media thumb exceeds the allowed size".into());
+        }
+        if !(TURN_MEDIA_MIN_FRAMES..=TURN_MEDIA_MAX_FRAMES).contains(&self.frame_count) {
+            return Err("assistant turn media frame count is outside the allowed range".into());
+        }
+        Ok(())
+    }
+}
+
+/// Recorta el historial a los últimos [`MAX_CONVERSATION_TURNS`] turnos.
+///
+/// Dropea el par completo usuario→asistente más viejo primero para no partir
+/// un intercambio. La media viaja dentro del turno, así que se recorta junto
+/// al par sin reindexado.
+pub fn trim_conversation(conversation: &mut Vec<ConversationTurn>) {
+    while conversation.len() > MAX_CONVERSATION_TURNS {
+        if let Some(index) = conversation.windows(2).position(|pair| {
+            matches!(pair[0].role, ConversationRole::User)
+                && matches!(pair[1].role, ConversationRole::Assistant)
+        }) {
+            let _dropped: Vec<ConversationTurn> = conversation.drain(index..index + 2).collect();
+        } else {
+            let _dropped = conversation.remove(0);
+        }
+    }
+}
+
+/// Vista del historial para Thumb+Replay: índice del turno → media.
+///
+/// Sólo incluye los turnos que conservan media; los índices son los del
+/// `conversation` recibido.
+pub fn turn_media_map(conversation: &[ConversationTurn]) -> BTreeMap<usize, TurnMediaRef> {
+    conversation
+        .iter()
+        .enumerate()
+        .filter_map(|(index, turn)| turn.media.clone().map(|media| (index, media)))
+        .collect()
+}
+
+/// Pega una media ya validada al turno indicado del historial.
+pub fn attach_turn_media(
+    conversation: &mut [ConversationTurn],
+    index: usize,
+    media: TurnMediaRef,
+) -> Result<(), String> {
+    media.validate()?;
+    match conversation.get_mut(index) {
+        Some(turn) => {
+            turn.attach_media(media);
+            Ok(())
+        }
+        None => Err("assistant turn media index is out of range".into()),
     }
 }
 
@@ -675,6 +829,32 @@ pub struct DerivationStep {
     pub rule: String,
     /// Comprobación independiente del paso o del resultado.
     pub verification: String,
+}
+
+impl DerivationStep {
+    /// Preflight F2: ningún campo vacío antes de exponer o aplicar.
+    ///
+    /// Todo número citado por una respuesta local ya pasó `evaluate` +
+    /// residuo ≤ `RESIDUAL_EPSILON * scale` (patrón `equation_verification`
+    /// en `grafito-assistant`); este validador cierra la otra mitad: el paso
+    /// existe con antes/después/regla/verificación no vacíos y acotados.
+    pub fn validate(&self) -> Result<(), String> {
+        const MAX_STEP_FIELD_CHARS: usize = 4_096;
+        for (name, field) in [
+            ("before", &self.before),
+            ("after", &self.after),
+            ("rule", &self.rule),
+            ("verification", &self.verification),
+        ] {
+            if field.trim().is_empty() {
+                return Err(format!("assistant derivation step '{name}' is empty"));
+            }
+            if field.chars().count() > MAX_STEP_FIELD_CHARS {
+                return Err(format!("assistant derivation step '{name}' is too long"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Operaciones deliberadamente estrechas que una propuesta puede solicitar.
@@ -1147,6 +1327,8 @@ impl AssistantResponse {
         let mut display_characters = 0;
         add_display_characters(&mut display_characters, &self.answer)?;
         for step in &self.derivation {
+            // Preflight F2: paso no vacío antes de exponer o aplicar.
+            step.validate()?;
             add_display_characters(&mut display_characters, &step.before)?;
             add_display_characters(&mut display_characters, &step.after)?;
             add_display_characters(&mut display_characters, &step.rule)?;
@@ -1687,5 +1869,212 @@ mod tests {
         ] {
             assert!(!serialized.contains(sensitive_source));
         }
+    }
+
+    #[test]
+    fn derivation_steps_reject_empty_fields_before_apply() {
+        let full = DerivationStep {
+            before: "2*x + 3 = 11".into(),
+            after: "x = 4".into(),
+            rule: "Divide by the non-zero linear coefficient".into(),
+            verification: "At x = 4, both sides evaluate to 11.".into(),
+        };
+        assert!(full.validate().is_ok());
+
+        for broken in [
+            DerivationStep {
+                before: "  ".into(),
+                ..full.clone()
+            },
+            DerivationStep {
+                after: String::new(),
+                ..full.clone()
+            },
+            DerivationStep {
+                rule: String::new(),
+                ..full.clone()
+            },
+            DerivationStep {
+                verification: String::new(),
+                ..full.clone()
+            },
+        ] {
+            assert!(broken.validate().is_err());
+        }
+
+        let mut response = AssistantResponse::message(LocalAssistantStatus::Solved, "x = 4");
+        response.derivation = vec![DerivationStep {
+            verification: String::new(),
+            ..full
+        }];
+        assert!(response.validate(&RequestBudget::default()).is_err());
+    }
+
+    fn sample_turn_media(frame_count: u8) -> TurnMediaRef {
+        TurnMediaRef::new(
+            "Derivada en un punto",
+            "derivative-slope",
+            "derivada",
+            vec![128; 64],
+            frame_count,
+        )
+    }
+
+    #[test]
+    fn turn_media_ref_accepts_bounded_thumb_and_replay() {
+        let media = sample_turn_media(12);
+
+        assert!(media.validate().is_ok());
+        assert_eq!(TURN_MEDIA_THUMB_SIDE_PX, 96);
+        assert_eq!(TURN_MEDIA_THUMB_MAX_BYTES, 96 * 96 * 4);
+    }
+
+    #[test]
+    fn turn_media_ref_rejects_empty_fields_oversized_thumb_and_bad_frames() {
+        let full = sample_turn_media(8);
+        for broken in [
+            TurnMediaRef::new("", &full.template, &full.concept, full.thumb.clone(), 8),
+            TurnMediaRef::new("  ", &full.template, &full.concept, full.thumb.clone(), 8),
+            TurnMediaRef::new(&full.title, "", &full.concept, full.thumb.clone(), 8),
+            TurnMediaRef::new(&full.title, &full.template, "", full.thumb.clone(), 8),
+            TurnMediaRef::new(
+                "x".repeat(MAX_TURN_MEDIA_FIELD_CHARS + 1),
+                &full.template,
+                &full.concept,
+                full.thumb.clone(),
+                8,
+            ),
+            TurnMediaRef::new(&full.title, &full.template, &full.concept, Vec::new(), 8),
+            TurnMediaRef::new(
+                &full.title,
+                &full.template,
+                &full.concept,
+                vec![0; TURN_MEDIA_THUMB_MAX_BYTES + 1],
+                8,
+            ),
+            TurnMediaRef::new(
+                &full.title,
+                &full.template,
+                &full.concept,
+                full.thumb.clone(),
+                0,
+            ),
+            TurnMediaRef::new(
+                &full.title,
+                &full.template,
+                &full.concept,
+                full.thumb.clone(),
+                65,
+            ),
+        ] {
+            assert!(broken.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn conversation_turn_carries_media_and_validates_it() {
+        let mut turn =
+            ConversationTurn::assistant("animación lista").with_media(sample_turn_media(4));
+        assert!(turn.has_media());
+        assert!(turn.validate().is_ok());
+
+        turn.attach_media(TurnMediaRef::new("t", "tpl", "c", Vec::new(), 4));
+        assert!(turn.validate().is_err());
+
+        assert!(turn.take_media().is_some());
+        assert!(!turn.has_media());
+        assert!(turn.validate().is_ok());
+    }
+
+    #[test]
+    fn conversation_turn_media_is_session_only_and_legacy_json_still_parses() {
+        let legacy: ConversationTurn =
+            serde_json::from_str(r#"{"role":"user","content":"hola"}"#).expect("legacy parses");
+        assert!(!legacy.has_media());
+
+        let turn = ConversationTurn::assistant("lista").with_media(sample_turn_media(2));
+        let serialized = serde_json::to_value(&turn).expect("turn serializes");
+        assert_eq!(serialized["content"], "lista");
+        assert!(serialized.get("origin").is_none());
+        assert_eq!(serialized["media"]["frame_count"], 2);
+        let round_trip: ConversationTurn =
+            serde_json::from_value(serialized).expect("turn deserializes");
+        assert_eq!(round_trip, turn);
+    }
+
+    #[test]
+    fn trim_conversation_drops_oldest_pair_with_its_media() {
+        let mut conversation: Vec<ConversationTurn> = (0..MAX_CONVERSATION_TURNS + 2)
+            .map(|index| {
+                if index % 2 == 0 {
+                    ConversationTurn::user(format!("pregunta {index}"))
+                } else {
+                    ConversationTurn::assistant(format!("respuesta {index}"))
+                }
+            })
+            .collect();
+        attach_turn_media(&mut conversation, 1, sample_turn_media(3)).expect("attach oldest");
+        attach_turn_media(
+            &mut conversation,
+            MAX_CONVERSATION_TURNS + 1,
+            sample_turn_media(5),
+        )
+        .expect("attach newest");
+
+        trim_conversation(&mut conversation);
+
+        assert_eq!(conversation.len(), MAX_CONVERSATION_TURNS);
+        assert_eq!(conversation[0].content, "pregunta 2");
+        let map = turn_media_map(&conversation);
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.values()
+                .next()
+                .expect("newest media survives")
+                .frame_count,
+            5
+        );
+    }
+
+    #[test]
+    fn attach_turn_media_rejects_invalid_media_and_out_of_range_index() {
+        let mut conversation = vec![
+            ConversationTurn::user("hola"),
+            ConversationTurn::assistant("sí"),
+        ];
+        assert!(attach_turn_media(&mut conversation, 99, sample_turn_media(2)).is_err());
+        assert!(attach_turn_media(
+            &mut conversation,
+            0,
+            TurnMediaRef::new("t", "tpl", "c", Vec::new(), 2)
+        )
+        .is_err());
+        assert!(!conversation[0].has_media());
+    }
+
+    #[test]
+    fn request_budget_ignores_thumb_bytes_but_validates_media() {
+        let mut request = AssistantRequest::local("derivá x^2", ImmutableDocumentContext::empty(1));
+        request.conversation = vec![
+            ConversationTurn::user("derivá x^2"),
+            ConversationTurn::assistant("listo").with_media(TurnMediaRef::new(
+                "Derivada",
+                "derivative-slope",
+                "derivada",
+                vec![7; TURN_MEDIA_THUMB_MAX_BYTES],
+                TURN_MEDIA_MAX_FRAMES,
+            )),
+        ];
+
+        assert!(request.validate(&AttachmentLimits::default()).is_ok());
+
+        request.conversation[1].attach_media(TurnMediaRef::new(
+            "Derivada",
+            "derivative-slope",
+            "derivada",
+            vec![7; 8],
+            TURN_MEDIA_MAX_FRAMES + 1,
+        ));
+        assert!(request.validate(&AttachmentLimits::default()).is_err());
     }
 }

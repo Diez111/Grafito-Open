@@ -821,7 +821,7 @@ pub fn fit_implicit_expr(
     for name in param_names {
         vars.push(name.as_str());
     }
-    crate::expr::prepare_function_ast(expr, &std::collections::HashMap::new(), &vars)
+    crate::expr::prepare_function_ast(expr, &std::collections::BTreeMap::new(), &vars)
         .map_err(|error| format!("expresión implícita inválida: {error}"))?;
     // Captura owned copies para el closure.
     let expr_owned = expr.to_string();
@@ -975,8 +975,8 @@ where
         let jacobian_transpose = jacobian_mat.transpose();
         let jacobian_t_j = &jacobian_transpose * &jacobian_mat;
         let jacobian_t_r = &jacobian_transpose * &residual_vec;
-        // Resolver JTJ * delta = JTr
-        let svd = jacobian_t_j.clone().svd(true, true);
+        // Resolver JTJ * delta = JTr (mueve: `svd` consume por valor, sin `clone`).
+        let svd = jacobian_t_j.svd(true, true);
         if svd.singular_values.is_empty() {
             return Err("SVD vacío en Gauss-Newton".to_string());
         }
@@ -1254,9 +1254,10 @@ fn polynomial_regression_result(xs: &[f64], ys: &[f64], degree: usize) -> Result
         return Err("no se pudo evaluar el número de condición".to_string());
     }
     // Resolver mínimos cuadrados V * coeff = y vía SVD (estable, con pivote implícito).
+    // Mueve `dm`: `svd` consume por valor, sin `clone` del denso n×p por ajuste.
     let dm = DMatrix::from_row_slice(n, p, &vand.data);
     let y_vec = DVector::from_column_slice(ys);
-    let svd = dm.clone().svd(true, true);
+    let svd = dm.svd(true, true);
     if svd.singular_values.is_empty() {
         return Err("descomposición SVD vacía".to_string());
     }

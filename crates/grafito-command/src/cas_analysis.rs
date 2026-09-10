@@ -14,7 +14,7 @@ use grafito_geometry::Point2;
 
 use crate::cas_parse::CasCmd;
 use crate::commands::CommandOutcome;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn try_insert_typed(document: &mut Document, object: GeoObject) -> Result<(), String> {
     let label = object.label().to_string();
@@ -38,7 +38,7 @@ fn require_finite_local(value: Result<f64, String>) -> Result<f64, String> {
     }
 }
 
-fn parse_numeric_arg_local(s: &str, variables: &HashMap<String, f64>) -> Result<f64, String> {
+fn parse_numeric_arg_local(s: &str, variables: &BTreeMap<String, f64>) -> Result<f64, String> {
     crate::commands::parse_numeric_arg(s, variables)
 }
 

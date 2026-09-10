@@ -7,7 +7,7 @@ fn main() {
     let steps = 1000;
     let step = (max_x - min_x) / steps as f64;
     let xs = (0..=steps).map(|i| min_x + i as f64 * step);
-    let variables = std::collections::HashMap::new();
+    let variables = std::collections::BTreeMap::new();
 
     let mut samples: Vec<(f64, Option<f64>)> = Vec::with_capacity(steps + 1);
     match grafito_geometry::expr::eval_function_batch(expr, xs.clone(), &variables) {

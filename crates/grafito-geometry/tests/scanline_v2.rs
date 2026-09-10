@@ -6,7 +6,7 @@
 mod scanline_v2_tests {
     use grafito_geometry::ast::Expr;
     use grafito_geometry::expr::prepare_function_ast;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     /// Simula el scanline fill. Devuelve el número total de píxeles
     /// "dentro" (cuenta el área rellenada).
@@ -67,8 +67,8 @@ mod scanline_v2_tests {
     #[test]
     fn test_circle_fill_count_consistent_with_stride() {
         // x^2 + y^2 <= 1: disco.
-        let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
         let cols = 200;
         let rows = 200;
 

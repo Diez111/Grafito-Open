@@ -385,13 +385,13 @@ fn test_save_load_roundtrip() {
 fn test_save_load_constraint_params_roundtrip() {
     use grafito_core::*;
     use grafito_geometry::*;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     let mut doc = Document::new();
     let a = doc.add_object(GeoObject::Point(
         PointObj::new(Point2::new(0.0, 0.0)).with_label("A"),
     ));
-    let mut params = HashMap::new();
+    let mut params = BTreeMap::new();
     params.insert("dx".to_string(), 2.0);
     params.insert("dy".to_string(), 3.0);
     let (_p, cons_id) = doc.add_constructed_object_with_params(
@@ -747,7 +747,7 @@ fn four_d_tools_are_discoverable_from_the_3d_tools_panel_and_3d_click_route() {
         .find("pub fn handle_3d_click")
         .expect("3D click handler");
     let construction_point = render_3d
-        .find("let Some(c) = construction_point_from_canvas")
+        .find("let Some(c) = construction_point_for_view(")
         .expect("position-based 3D construction route");
     let centered_handler_route = &render_3d[handler_start..construction_point];
     assert!(
@@ -3501,7 +3501,7 @@ fn unversioned_legacy_visibility_refreshes_all_gpu_graphable_objects_and_caches(
         ParametricCurve2DObj, PointObj, PolarCurveObj, VectorField2DObj,
     };
     use grafito_geometry::Point2;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     let mut document = grafito_core::Document::new();
     let target = document.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
@@ -3532,7 +3532,7 @@ fn unversioned_legacy_visibility_refreshes_all_gpu_graphable_objects_and_caches(
         function_obj,
         (-1.0, 1.0),
         32,
-        &HashMap::new(),
+        &BTreeMap::new(),
     ));
     assert!(function_obj
         .cached_key
@@ -4293,7 +4293,7 @@ fn typed_four_d_phase_leaves_legacy_and_general_five_d_bounds_static() {
             grafito_geometry::RegularPolytopeFamily::Hypercube,
             4,
         ));
-    let variables = std::collections::HashMap::new();
+    let variables = std::collections::BTreeMap::new();
 
     assert_eq!(
         crate::render_3d::typed_four_d_phase_for_object(&legacy, phase_snapshot),

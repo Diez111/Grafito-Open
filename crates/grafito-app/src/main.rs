@@ -8,6 +8,14 @@
 )]
 
 fn main() {
+    // Fuente única de versión/help: `grafito_app` (app.rs). Acá solo se
+    // intercepta antes de abrir la GUI para no pagar el arranque gráfico.
+    if grafito_app::handle_version_args(std::env::args().skip(1)) {
+        return;
+    }
+    // Log de arranque: una línea a stderr con la versión visible para
+    // distinguir el binario nuevo (/usr/local/bin) del viejo (/usr/bin).
+    eprintln!("{}", grafito_app::grafito_version_string());
     install_crash_log_hook();
     if let Err(e) = grafito_app::run_app() {
         log::error!("Failed to run Grafito: {}", e);
@@ -153,5 +161,39 @@ mod crash_hook_tests {
         };
         assert!(prefijo.is_char_boundary(prefijo.len()));
         assert!(emojis.starts_with(prefijo));
+    }
+}
+
+#[cfg(test)]
+mod version_visible_tests {
+    // La fuente única vive en el lib (`grafito_app::handle_version_args` y
+    // `grafito_version_string`, con sus tests en app.rs): acá solo se pinnea
+    // que el binario delega en ella (misma decisión, sin GUI).
+    #[test]
+    fn args_version_no_abren_gui() {
+        assert!(grafito_app::handle_version_args(["--help".to_owned()]));
+        assert!(grafito_app::handle_version_args(["-h".to_owned()]));
+        assert!(grafito_app::handle_version_args(["--version".to_owned()]));
+        assert!(grafito_app::handle_version_args(["-V".to_owned()]));
+        // --help gana sobre --version.
+        assert!(grafito_app::handle_version_args([
+            "--version".to_owned(),
+            "--help".to_owned()
+        ]));
+    }
+
+    #[test]
+    fn args_comunes_siguen_a_run_app() {
+        assert!(!grafito_app::handle_version_args(["nota.json".to_owned()]));
+        assert!(!grafito_app::handle_version_args(Vec::<String>::new()));
+        assert!(!grafito_app::handle_version_args(["--profile".to_owned()]));
+    }
+
+    #[test]
+    fn version_del_binario_lleva_build_id() {
+        let visible = grafito_app::grafito_version_string();
+        assert!(visible.starts_with("Grafito v"));
+        assert!(visible.contains(env!("CARGO_PKG_VERSION")));
+        assert!(visible.contains('(') && visible.ends_with(')'));
     }
 }

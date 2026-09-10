@@ -7,7 +7,7 @@ use grafito_geometry::{
     MAX_REGULAR_POLYTOPE_DIMENSION, MIN_REGULAR_POLYTOPE_DIMENSION,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
@@ -2130,7 +2130,7 @@ impl ImplicitSurface3DObj {
     }
 
     /// Clave del cómputo: expresión + cotas + resolución + variables ordenadas.
-    fn cache_key(&self, variables: &HashMap<String, f64>) -> u64 {
+    fn cache_key(&self, variables: &BTreeMap<String, f64>) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.expr.hash(&mut hasher);
         self.x_min.to_bits().hash(&mut hasher);
@@ -2154,7 +2154,7 @@ impl ImplicitSurface3DObj {
     /// → `implicit_surface_mesh` devuelve `FieldUndefined` honesto.
     pub fn compute_mesh(
         &self,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Result<grafito_geometry::TriangleMesh3D, grafito_geometry::MeshError> {
         let parsed =
             grafito_geometry::expr::prepare_function_ast(&self.expr, variables, &["x", "y", "z"])
@@ -2193,7 +2193,7 @@ impl ImplicitSurface3DObj {
     /// cotas, presupuesto) es honesto: el llamador dibuja cero triángulos.
     pub fn mesh_snapshot(
         &self,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Result<grafito_geometry::TriangleMesh3D, grafito_geometry::MeshError> {
         let key = self.cache_key(variables);
         if let Ok(guard) = self.mesh_slots.read() {
@@ -3774,7 +3774,7 @@ impl ImplicitCurveObj {
     /// sobreescribían mutuamente, devolviendo el AST incorrecto.
     pub fn get_cached_asts(
         &self,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
         var_names: &[&str],
     ) -> Option<(grafito_geometry::ast::Expr, grafito_geometry::ast::Expr)> {
         // Hash combinado de lhs + rhs + variables (orden determinista).
@@ -3855,7 +3855,7 @@ impl ImplicitCurveObj {
         &self,
         view_bounds: (f64, f64, f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> ImplicitCurveCacheKey {
         let mut hasher = DefaultHasher::new();
         if let Some(levels) = &self.contour_levels {
@@ -4852,7 +4852,7 @@ impl TransformedObj {
         crate::validation::validate_transformed_depth_typed(0)?;
         let ast = grafito_geometry::expr::prepare_function_ast(
             expr,
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
             &["z"],
         )
         .map_err(|reason| CoreError::InvalidExpression {
@@ -5154,7 +5154,7 @@ mod tests {
         // Llamar get_cached_asts dos veces con la misma expresión debe
         // devolver los mismos ASTs cacheados.
         let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let (lhs1, rhs1) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         let (lhs2, rhs2) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         assert_eq!(lhs1, lhs2);
@@ -5167,7 +5167,7 @@ mod tests {
         // lhs y rhs y se sobreescribían. Verificamos que ahora cada slot
         // tiene el AST correcto.
         let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let (lhs, rhs) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         // lhs debe evaluar como x²+y² (en (0,0) es 0).
         assert_eq!(lhs.eval_2d("x", 0.0, "y", 0.0), 0.0);
@@ -5181,7 +5181,7 @@ mod tests {
     fn test_implicit_curve_cache_invalidates_on_change() {
         // Cambiar la expresión debe reparsear.
         let mut ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let _ = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         ic.expr_lhs = "x^2 + y^2 + 1".to_string();
         let (lhs_new, _) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
@@ -5195,7 +5195,7 @@ mod tests {
         // scanline fill no debe ejecutarse (Eq es solo contorno). El cache
         // no debería romperse con esta configuración.
         let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let (lhs, rhs) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         assert_eq!(lhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
         assert_eq!(rhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
@@ -5344,7 +5344,7 @@ mod tests {
         // tris/celda cruzada del Kuhn; se calibra a 1500..=7500 (ver BLOCKERS).
         let surface =
             ImplicitSurface3DObj::new("x^2+y^2+z^2-1", (-1.5, 1.5, -1.5, 1.5, -1.5, 1.5), 24);
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let mesh = surface.compute_mesh(&vars).expect("esfera implícita");
         assert!(
             (1_500..=7_500).contains(&mesh.triangle_count()),
@@ -5374,9 +5374,9 @@ mod tests {
         // clave expulsa el slot más viejo y la caché sigue acotada.
         let surface =
             ImplicitSurface3DObj::new("x*x+y*y+z*z-a", (-2.0, 2.0, -2.0, 2.0, -2.0, 2.0), 8);
-        let vars_a = HashMap::from([("a".to_string(), 0.25)]);
-        let vars_b = HashMap::from([("a".to_string(), 1.0)]);
-        let vars_c = HashMap::from([("a".to_string(), 4.0)]);
+        let vars_a = BTreeMap::from([("a".to_string(), 0.25)]);
+        let vars_b = BTreeMap::from([("a".to_string(), 1.0)]);
+        let vars_c = BTreeMap::from([("a".to_string(), 4.0)]);
         let mesh_a = surface.mesh_snapshot(&vars_a).expect("malla A");
         let mesh_b = surface.mesh_snapshot(&vars_b).expect("malla B");
         assert_ne!(mesh_a.triangle_count(), 0);
@@ -5421,7 +5421,7 @@ mod tests {
             24,
         );
         let mesh = surface
-            .compute_mesh(&HashMap::new())
+            .compute_mesh(&BTreeMap::new())
             .expect("toro sin FieldUndefined");
         assert!(!mesh.triangles().is_empty());
         assert!(a1_is_watertight(mesh.triangles()), "el toro debe cerrar");
@@ -5445,7 +5445,7 @@ mod tests {
         let surface =
             ImplicitSurface3DObj::new("sqrt(x)+y+z", (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0), 8);
         let error = surface
-            .compute_mesh(&HashMap::new())
+            .compute_mesh(&BTreeMap::new())
             .expect_err("campo no definido en x<0");
         assert!(
             matches!(error, grafito_geometry::MeshError::FieldUndefined { .. }),

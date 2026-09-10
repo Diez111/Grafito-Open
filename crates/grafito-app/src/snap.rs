@@ -21,7 +21,7 @@ use grafito_core::analyzable::{analyze_object, default_analysis_features};
 use grafito_core::Document;
 use grafito_geometry::analysis::AnalysisFeature;
 use grafito_geometry::Point2;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Configuración persistente del snap, guardada en `AppConfig`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -213,7 +213,7 @@ fn snap_to_feature(
         view_bounds.3,
     );
 
-    let vars: HashMap<String, f64> = document.variables.clone();
+    let vars: BTreeMap<String, f64> = document.variables.clone();
     let features = tool_filter.unwrap_or_else(default_analysis_features);
     let mut best: Option<(f64, Point2, AnalysisFeature, String)> = None;
     for (_, obj) in document.objects_iter() {
@@ -522,7 +522,7 @@ fn snap_to_curve(
             | grafito_core::GeoObject::Pencil(_)
             | grafito_core::GeoObject::ParametricCurve2D(_) => {}
             grafito_core::GeoObject::PolarCurve(c) => {
-                let vars: HashMap<String, f64> = document.variables.clone();
+                let vars: BTreeMap<String, f64> = document.variables.clone();
                 if let Some(pt) = closest_point_on_polar(c, world, &vars) {
                     if pt.distance(&world) * view_scale <= tol_screen {
                         return Some(SnapResult {
@@ -544,7 +544,7 @@ fn snap_to_curve(
         // Aproximación rápida: si el cursor está "razonablemente" cerca en
         // coordenadas de mundo, proyectamos. La heurística de selección fina
         // se delega a `evaluate_curve_at`.
-        let vars: HashMap<String, f64> = document.variables.clone();
+        let vars: BTreeMap<String, f64> = document.variables.clone();
         if let Some(proj) = grafito_core::analyzable::evaluate_curve_at(obj, world, &vars) {
             if let grafito_core::GeoObject::Function(_) = obj {
                 let y = proj;
@@ -715,7 +715,7 @@ fn closest_point_on_pencil_windowed(
 fn closest_point_on_polar(
     c: &grafito_core::PolarCurveObj,
     world: Point2,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
 ) -> Option<Point2> {
     if !(c.t_min.is_finite() && c.t_max.is_finite()) || c.t_max <= c.t_min {
         return None;
@@ -809,7 +809,7 @@ pub struct TangentNormalGhost {
 /// Pendiente f'(x) por diferencia central con h = 1e-6 (como
 /// `intersections.rs::newton`): `(f(x+h) − f(x−h)) / 2h`. Devuelve `None` si
 /// alguna evaluación no es finita (singularidad, dominio inválido).
-pub fn tangent_slope_central(expr: &str, x: f64, vars: &HashMap<String, f64>) -> Option<f64> {
+pub fn tangent_slope_central(expr: &str, x: f64, vars: &BTreeMap<String, f64>) -> Option<f64> {
     if !x.is_finite() {
         return None;
     }
@@ -828,7 +828,7 @@ pub fn tangent_slope_central(expr: &str, x: f64, vars: &HashMap<String, f64>) ->
 /// Solo es accesible sin variables extra del documento (`curvature_at` evalúa
 /// con entorno vacío); con variables (deslizadores) devuelve `None` en lugar
 /// de mentir con un número calculado en otro entorno.
-fn ghost_curvature(expr: &str, x: f64, vars: &HashMap<String, f64>) -> Option<f64> {
+fn ghost_curvature(expr: &str, x: f64, vars: &BTreeMap<String, f64>) -> Option<f64> {
     if !vars.is_empty() {
         return None;
     }
@@ -845,7 +845,7 @@ fn ghost_curvature(expr: &str, x: f64, vars: &HashMap<String, f64>) -> Option<f6
 pub fn tangent_normal_ghost(
     expr: &str,
     x0: f64,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     view_scale: f64,
 ) -> Option<TangentNormalGhost> {
     if !x0.is_finite() || !view_scale.is_finite() || view_scale <= 0.0 {
@@ -889,7 +889,7 @@ pub fn tangent_ghost_at_hover(
     if !world.x.is_finite() || !world.y.is_finite() {
         return None;
     }
-    let vars: HashMap<String, f64> = document.variables.clone();
+    let vars: BTreeMap<String, f64> = document.variables.clone();
     let mut best: Option<(f64, String)> = None; // (distancia_px, expr)
     for (_, obj) in document.objects_iter() {
         if let grafito_core::GeoObject::Function(f) = obj {
@@ -1187,7 +1187,7 @@ mod tests {
 
     #[test]
     fn tangente_horizontal_en_extremo_derivada_cero() {
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         // y = x² tiene un extremo en x = 0 con f'(0) = 0 (tangente horizontal).
         let m = tangent_slope_central("x^2", 0.0, &vars).expect("pendiente en el vértice");
         assert!(m.abs() < 1e-4, "derivada en extremo ≈ 0, fue {m}");

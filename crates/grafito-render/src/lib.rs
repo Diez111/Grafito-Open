@@ -34,10 +34,11 @@ use lyon::{
     path::Path,
     tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers},
 };
+use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 pub mod complex_compute;
@@ -54,14 +55,21 @@ pub mod vector_compute;
 #[cfg(test)]
 mod tests;
 
-type TransformedCacheMap = HashMap<u64, (Vec<Vertex>, Vec<u32>)>;
+// LRU real (antes `HashMap` + desalojo aleatorio de la mitad): los hits hacen
+// bump O(1) y el `Arc` evita clonar los buffers en la bookkeeping del hit.
+type TransformedCacheMap =
+    lru::LruCache<u64, (std::sync::Arc<Vec<Vertex>>, std::sync::Arc<Vec<u32>>)>;
 thread_local! {
     #[allow(clippy::type_complexity)]
     static FILL_TESS: RefCell<FillTessellator> = RefCell::new(FillTessellator::new());
     #[allow(clippy::type_complexity)]
-    static TRANSFORMED_CACHE: RefCell<TransformedCacheMap> = RefCell::new(HashMap::new());
+    static TRANSFORMED_CACHE: RefCell<TransformedCacheMap> =
+        RefCell::new(lru::LruCache::new(TRANSFORMED_CACHE_SIZE));
 }
 const TRANSFORMED_CACHE_CAP: usize = 64;
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const TRANSFORMED_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(TRANSFORMED_CACHE_CAP) };
 
 /// Timeout for synchronous GPU readbacks. The caller already bounds this to
 /// one attempt per frame via `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` in
@@ -423,7 +431,7 @@ fn transformed_cache_key(
 }
 
 fn sample_environment(
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
     local_names: &[&str],
 ) -> Vec<(String, f64)> {
     let mut environment: Vec<_> = variables
@@ -488,7 +496,7 @@ pub(crate) fn phase_portrait_capacity_for_density(density: u32) -> Option<usize>
 /// segmentos en coordenadas matemáticas `(x, y)`.
 pub fn sample_phase_portrait(
     portrait: &PhasePortraitObj,
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<(Point2, Point2)> {
     if ![
         portrait.x_min,
@@ -563,7 +571,7 @@ pub(crate) fn vector_field_3d_sample_count(field: &VectorField3DObj) -> Option<u
 /// 40 % de la menor celda del dominio.
 pub fn sample_vector_field_3d(
     field: &VectorField3DObj,
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<(Point3D, Point3D)> {
     if ![
         field.x_min,
@@ -653,30 +661,59 @@ pub fn transform_complex_mapping_segments(
     t_val: f64,
 ) -> Vec<(Point2, Point2)> {
     let subdivisions = subdivisions.max(1);
-    let mut strokes = Vec::new();
-    for (a, b) in segments {
-        let mut prev: Option<Point2> = None;
-        for i in 0..=subdivisions {
-            let t = i as f64 / subdivisions as f64;
-            let z_orig = num_complex::Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
-            let z_mapped = map.apply(z_orig);
-            let current = match z_mapped {
-                Some(w) if w.re.is_finite() && w.im.is_finite() => {
-                    Some(interpolate_complex_mapping_point(
-                        Point2::new(z_orig.re, z_orig.im),
-                        Point2::new(w.re, w.im),
-                        t_val,
-                    ))
-                }
-                _ => None,
-            };
-            if let (Some(prev), Some(current)) = (prev, current) {
-                strokes.push((prev, current));
-            }
-            prev = current;
-        }
+    // P2-perf: segmentos independientes → rayon SOLO sobre el umbral
+    // (convención del repo: 1024 celdas, igual que `RAYON_BATCH_THRESHOLD`
+    // en geometría). Debajo, secuencial: el dispatch (~15 µs medido en el
+    // morph) costaría más que el trabajo. `ConformalMap: Copy + Sync`,
+    // cuenta pura por celda; ambas ramas dan salida idéntica y ordenada.
+    let cells = segments
+        .len()
+        .saturating_mul(subdivisions.saturating_add(1));
+    if cells >= 1024 {
+        segments
+            .par_iter()
+            .flat_map(|(a, b)| transform_un_segmento_conforme(map, a, b, subdivisions, t_val))
+            .collect()
+    } else {
+        segments
+            .iter()
+            .flat_map(|(a, b)| transform_un_segmento_conforme(map, a, b, subdivisions, t_val))
+            .collect()
     }
-    strokes
+}
+
+/// Un segmento subdividido y mapeado (trabajo por celda de
+/// [`transform_complex_mapping_segments`], extraído para compartir el
+/// camino secuencial y el paralelo sin duplicar). Puro.
+fn transform_un_segmento_conforme(
+    map: ConformalMap,
+    a: &Point2,
+    b: &Point2,
+    subdivisions: usize,
+    t_val: f64,
+) -> Vec<(Point2, Point2)> {
+    let mut prev: Option<Point2> = None;
+    let mut tramos = Vec::new();
+    for i in 0..=subdivisions {
+        let t = i as f64 / subdivisions as f64;
+        let z_orig = num_complex::Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+        let z_mapped = map.apply(z_orig);
+        let current = match z_mapped {
+            Some(w) if w.re.is_finite() && w.im.is_finite() => {
+                Some(interpolate_complex_mapping_point(
+                    Point2::new(z_orig.re, z_orig.im),
+                    Point2::new(w.re, w.im),
+                    t_val,
+                ))
+            }
+            _ => None,
+        };
+        if let (Some(prev), Some(current)) = (prev, current) {
+            tramos.push((prev, current));
+        }
+        prev = current;
+    }
+    tramos
 }
 
 /// Interpola un punto con el mismo factor usado por los caminos CPU y GPU.
@@ -687,7 +724,103 @@ pub fn interpolate_complex_mapping_point(source: Point2, mapped: Point2, factor:
     )
 }
 
-/// Cálculo simple de iluminación para objetos 3D
+/// Luz centralizada del render (único dueño de los coeficientes).
+///
+/// Antes los coeficientes vivían desperdigados: `calculate_lighting` usaba
+/// ambient 0.45 + diffuse 0.65 en este archivo mientras `render_3d.rs` (app,
+/// NO tocado por perf) hardcodeaba `light_dir=(0.5,1.0,0.3)` en 6 lugares +
+/// un `ambient 0.4` manual divergente. Este struct es el canon: el dueño 3D
+/// debe migrar a `Light::DEFAULT` cuando abra su archivo.
+///
+/// Look: `shade` = legacy (ambient+diffuse) + especular Blinn-Phong acotado
+/// por `specular` (máx. +0.30/canal solo si la normal bisecea luz/vista).
+/// En frontal +Z el delta es ~+0.002 (imperceptible); el test dorado
+/// `lighting_golden_pinea_canon_con_specular` lo pinea como canon nuevo.
+#[derive(Debug, Clone, Copy)]
+pub struct Light {
+    /// Dirección cruda (se normaliza al usar; canon `(0.5,1.0,0.3)`).
+    pub dir: glam::Vec3,
+    /// Luz ambiente legacy (0.45, preservada para no romper el look base).
+    pub ambient: f32,
+    /// Coeficiente difuso legacy (0.65, preservado).
+    pub diffuse: f32,
+    /// Techo del brillo especular Blinn-Phong (0.30).
+    pub specular: f32,
+    /// Exponente de brillo (32.0, plástico mate).
+    pub shininess: f32,
+}
+
+impl Light {
+    /// Dirección de luz canon (la que `render_3d.rs` hardcodea 6 veces).
+    pub const DEFAULT_DIR: glam::Vec3 = glam::Vec3::new(0.5, 1.0, 0.3);
+
+    /// Canon actual: legacy 0.45/0.65 + especular 0.30/32.
+    pub const DEFAULT: Self = Self {
+        dir: Self::DEFAULT_DIR,
+        ambient: 0.45,
+        diffuse: 0.65,
+        specular: 0.30,
+        shininess: 32.0,
+    };
+
+    /// Vista asumida para el especular: cámara mirando `-Z` (ortho 2D del
+    /// render estático). El path 3D con cámara real debe pasar su view-dir
+    /// a `shade_with_view` cuando migre a este struct.
+    const ASSUMED_VIEW_DIR: glam::Vec3 = glam::Vec3::new(0.0, 0.0, 1.0);
+
+    /// ¿Vale la pena sombrear este color? Falso si es transparente o trae
+    /// componentes no finitos (el sombreado solo amplificaría basura).
+    pub fn should_apply_shading(&self, color: Color) -> bool {
+        let _ = self;
+        color.a > 0.0 && color.to_array().iter().all(|c| c.is_finite())
+    }
+
+    /// Sombreado completo Blinn-Phong con la vista asumida (+Z).
+    pub fn shade(&self, base_color: Color, normal: glam::Vec3) -> Color {
+        self.shade_with_view(base_color, normal, Self::ASSUMED_VIEW_DIR)
+    }
+
+    /// Sombreado completo Blinn-Phong con view-dir explícita.
+    pub fn shade_with_view(
+        &self,
+        base_color: Color,
+        normal: glam::Vec3,
+        view_dir: glam::Vec3,
+    ) -> Color {
+        if !self.should_apply_shading(base_color) {
+            return base_color;
+        }
+        let normal = normal.normalize();
+        let light_dir = self.dir.normalize();
+        let view_dir = view_dir.normalize();
+
+        let dot = normal.dot(light_dir).max(0.0);
+        let half = (light_dir + view_dir).normalize();
+        let spec_angle = normal.dot(half).max(0.0);
+        let spec = spec_angle.powf(self.shininess) * self.specular;
+        let intensity = self.ambient + self.diffuse * dot + spec;
+
+        Color::new(
+            (base_color.r * intensity).min(1.0),
+            (base_color.g * intensity).min(1.0),
+            (base_color.b * intensity).min(1.0),
+            base_color.a,
+        )
+    }
+}
+
+impl Default for Light {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Cálculo legacy de iluminación para objetos 3D (INTACTO a propósito).
+///
+/// Preserva `ambient 0.45 + diffuse 0.65*dot` byte a byte: los 6 call sites
+/// de `render_3d.rs` (app) siguen viendo el mismo color hasta que su dueño
+/// migre a `Light::shade`. El path interno del render
+/// (`add_solid_triangle_3d`) ya usa el canon nuevo con especular.
 pub fn calculate_lighting(base_color: Color, normal: glam::Vec3, light_dir: glam::Vec3) -> Color {
     let ambient = 0.45;
     let diffuse = 0.65;
@@ -972,7 +1105,7 @@ fn apply_complex_transform_cpu(
     vertices: &mut [Vertex],
     view: &ViewTransform,
     expression: &str,
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
     complex_symbol: &str,
 ) -> bool {
     let Ok(ast) = grafito_complex::math::complex_expr::parse(expression) else {
@@ -2374,24 +2507,72 @@ impl Renderer {
         dark_mode: bool,
         depth: usize,
     ) -> (Vec<Vertex>, Vec<u32>) {
+        // Compat: los callers actuales (`render_2d.rs`, tests) piden `Vec`s.
+        // El costo es 1 clon por hit/miss, idéntico al anterior; el path
+        // cero-copia es `build_transformed_geometry_static_shared`.
+        let (verts, idx) = Self::build_transformed_geometry_shared_at(
+            document,
+            transformed,
+            view,
+            dark_mode,
+            depth,
+        );
+        ((*verts).clone(), (*idx).clone())
+    }
+
+    /// Hit de caché cero-copia: devuelve los `Arc` del LRU (cap 64) sin
+    /// clonar los `Vec`s. El miss tampoco clona: envuelve los `Vec` recién
+    /// construidos (antes `Arc::unwrap_or_clone` con refcount 2 clonaba
+    /// siempre 1 vez en el miss).
+    pub fn build_transformed_geometry_static_shared(
+        document: &Document,
+        transformed: &TransformedObj,
+        view: &ViewTransform,
+        dark_mode: bool,
+    ) -> (std::sync::Arc<Vec<Vertex>>, std::sync::Arc<Vec<u32>>) {
+        Self::build_transformed_geometry_shared_at(document, transformed, view, dark_mode, 0)
+    }
+
+    fn build_transformed_geometry_shared_at(
+        document: &Document,
+        transformed: &TransformedObj,
+        view: &ViewTransform,
+        dark_mode: bool,
+        depth: usize,
+    ) -> (std::sync::Arc<Vec<Vertex>>, std::sync::Arc<Vec<u32>>) {
         if depth >= grafito_core::validation::MAX_TRANSFORM_DEPTH {
-            return (Vec::new(), Vec::new());
+            return (
+                std::sync::Arc::new(Vec::new()),
+                std::sync::Arc::new(Vec::new()),
+            );
         }
 
         // Cache keyed por document.version+view+expr para evitar `document.clone()` y recompute
         let cache_key = transformed_cache_key(document, transformed, view, dark_mode, depth);
-        if let Some(cached) = TRANSFORMED_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
-            return cached;
+        if let Some((verts, idx)) =
+            TRANSFORMED_CACHE.with(|c| c.borrow_mut().get(&cache_key).cloned())
+        {
+            // HIT: `Arc::clone` ya ocurrió en el `.cloned()` del `get` —
+            // ningún `Vec` se copia.
+            return (verts, idx);
         }
 
         let (mut vertices, indices) = match transformed.inner.as_ref() {
-            GeoObject::Transformed(inner) => Self::build_transformed_geometry_static_at(
-                document,
-                inner,
-                view,
-                dark_mode,
-                depth + 1,
-            ),
+            GeoObject::Transformed(inner) => {
+                let (shared_v, shared_i) = Self::build_transformed_geometry_shared_at(
+                    document,
+                    inner,
+                    view,
+                    dark_mode,
+                    depth + 1,
+                );
+                // Exclusivo aquí en la práctica (`shared` solo lo toca este
+                // frame): `unwrap_or_clone` no copia salvo alias real.
+                (
+                    std::sync::Arc::unwrap_or_clone(shared_v),
+                    std::sync::Arc::unwrap_or_clone(shared_i),
+                )
+            }
             GeoObject::Point(point) => {
                 let mut vertices = Vec::new();
                 let mut indices = Vec::new();
@@ -2414,19 +2595,22 @@ impl Renderer {
         );
         TRANSFORMED_CACHE.with(|c| {
             let mut cache = c.borrow_mut();
-            if cache.len() >= TRANSFORMED_CACHE_CAP {
-                let keys: Vec<u64> = cache
-                    .keys()
-                    .copied()
-                    .take(TRANSFORMED_CACHE_CAP / 2)
-                    .collect();
-                for k in keys {
-                    cache.remove(&k);
-                }
-            }
-            cache.insert(cache_key, (vertices.clone(), indices.clone()));
-        });
-        (vertices, indices)
+            // `LruCache::push` desaloja la entrada menos usada si llena (cap 64):
+            // sin el barrido aleatorio de media caché previo.
+            let shared_v = std::sync::Arc::new(vertices);
+            let shared_i = std::sync::Arc::new(indices);
+            cache.push(
+                cache_key,
+                (
+                    std::sync::Arc::clone(&shared_v),
+                    std::sync::Arc::clone(&shared_i),
+                ),
+            );
+            // MISS cero-copia: se devuelven los `Arc` (refcount 2: caché +
+            // caller); ningún `Vec` se clona — antes `unwrap_or_clone` con
+            // refcount 2 clonaba el `Vec` completo 1 vez por miss.
+            (shared_v, shared_i)
+        })
     }
 
     fn build_isolated_geometry_static(
@@ -4507,7 +4691,7 @@ impl Renderer {
                     }
                 }
 
-                let vars = std::collections::HashMap::new();
+                let vars = std::collections::BTreeMap::new();
                 if let Some(colors) = dc_pipeline.evaluate(
                     device,
                     queue,
@@ -5020,8 +5204,6 @@ impl Renderer {
                 }
             }
             GeoObject::ParametricCurve2D(pc) => {
-                let mut vars = document.variables.clone();
-                vars.insert("t".to_string(), 0.0);
                 if let (Ok(ast_x), Ok(ast_y)) = (
                     grafito_geometry::expr::prepare_function_ast(
                         &pc.expr_x,
@@ -5057,8 +5239,6 @@ impl Renderer {
                 }
             }
             GeoObject::PolarCurve(pc) => {
-                let mut vars = document.variables.clone();
-                vars.insert("t".to_string(), 0.0);
                 if let Ok(ast_r) = grafito_geometry::expr::prepare_function_ast(
                     &pc.expr_r,
                     &document.variables,
@@ -6876,7 +7056,7 @@ impl Renderer {
         indices: &mut Vec<u32>,
         camera: &Camera3D,
         surface: &grafito_core::Surface3DObj,
-        variables: &std::collections::HashMap<String, f64>,
+        variables: &std::collections::BTreeMap<String, f64>,
         screen_w: f32,
         screen_h: f32,
     ) {
@@ -7012,10 +7192,25 @@ impl Renderer {
         screen_w: f32,
         screen_h: f32,
     ) {
-        let light_dir = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
-        let c0 = calculate_lighting(fill_color, n0, light_dir);
-        let c1 = calculate_lighting(fill_color, n1, light_dir);
-        let c2 = calculate_lighting(fill_color, n2, light_dir);
+        // Canon nuevo: `Light::DEFAULT` (legacy + especular Blinn-Phong).
+        // `calculate_lighting` legacy queda solo para los call sites de
+        // `render_3d.rs` hasta que su dueño migre.
+        let light = Light::DEFAULT;
+        let c0 = if light.should_apply_shading(fill_color) {
+            light.shade(fill_color, n0)
+        } else {
+            fill_color
+        };
+        let c1 = if light.should_apply_shading(fill_color) {
+            light.shade(fill_color, n1)
+        } else {
+            fill_color
+        };
+        let c2 = if light.should_apply_shading(fill_color) {
+            light.shade(fill_color, n2)
+        } else {
+            fill_color
+        };
         if let (Some(s0), Some(s1), Some(s2)) = (
             camera.project(p0, screen_w, screen_h),
             camera.project(p1, screen_w, screen_h),
@@ -7052,7 +7247,6 @@ impl Renderer {
     ) {
         let level = 2;
         let (mesh_positions, mesh_indices) = Self::icosphere(level);
-        let _light_dir = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
         for tri in mesh_indices.chunks(3) {
             let i0 = tri[0] as usize;
             let i1 = tri[1] as usize;
@@ -7374,7 +7568,6 @@ impl Renderer {
             }
             grid.push(row);
         }
-        let _light_dir = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
         for i in 0..u_steps {
             for j in 0..v_steps {
                 let (p00, n00) = grid[i][j];

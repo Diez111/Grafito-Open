@@ -12,7 +12,7 @@ use crate::object::{
 use grafito_geometry::expr;
 use grafito_geometry::Point3D;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::RwLockReadGuard;
 
@@ -23,8 +23,9 @@ const MAX_CURVE_STEPS: usize = 4000;
 const MAX_SURFACE_RES: usize = 128;
 
 /// Hash document variables for use in cache keys — determinista.
-/// Ordena por clave para evitar no-determinismo de HashMap (SipHash random).
-pub fn variables_hash(variables: &HashMap<String, f64>) -> u64 {
+/// `variables` ya es `BTreeMap` (iteración ordenada); el sort defensivo queda
+/// como invariante explícito barato.
+pub fn variables_hash(variables: &BTreeMap<String, f64>) -> u64 {
     let mut hasher = DefaultHasher::new();
     let mut pairs: Vec<_> = variables.iter().collect();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
@@ -43,7 +44,7 @@ fn finite_clamp(v: f64) -> f64 {
     }
 }
 
-fn resolve_expr(expr: Option<&str>, fallback: f64, variables: &HashMap<String, f64>) -> f64 {
+fn resolve_expr(expr: Option<&str>, fallback: f64, variables: &BTreeMap<String, f64>) -> f64 {
     match expr {
         Some(e) => {
             let vars: Vec<(String, f64)> = variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
@@ -114,7 +115,7 @@ fn eval_ast_or_compiled(
 pub fn evaluate_parametric_curve_2d(
     pc: &ParametricCurve2DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Curve2DSamples {
     let steps = steps.clamp(1, MAX_CURVE_STEPS);
     let t_min = resolve_expr(pc.t_min_expr.as_deref(), pc.t_min, variables);
@@ -166,7 +167,7 @@ pub fn evaluate_parametric_curve_2d(
 pub fn evaluate_parametric_curve_3d(
     pc: &ParametricCurve3DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Curve3DSamples {
     let steps = steps.clamp(1, MAX_CURVE_STEPS);
     let t_min = resolve_expr(pc.t_min_expr.as_deref(), pc.t_min, variables);
@@ -233,7 +234,7 @@ pub fn evaluate_parametric_curve_3d(
 pub fn evaluate_polar_curve(
     pol: &PolarCurveObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Curve2DSamples {
     let steps = steps.clamp(1, MAX_CURVE_STEPS);
     let t_min = resolve_expr(pol.t_min_expr.as_deref(), pol.t_min, variables);
@@ -275,7 +276,7 @@ pub fn evaluate_polar_curve(
 pub fn evaluate_surface_3d(
     surf: &Surface3DObj,
     res: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> SurfaceSamples {
     let res = res.clamp(1, MAX_SURFACE_RES);
     if surf.is_parametric {
@@ -424,7 +425,7 @@ pub fn evaluate_surface_3d(
 pub fn samples_or_compute_curve_2d<'a>(
     pc: &'a ParametricCurve2DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> RwLockReadGuard<'a, Curve2DSamples> {
     let t_min = resolve_expr(pc.t_min_expr.as_deref(), pc.t_min, variables);
     let t_max = resolve_expr(pc.t_max_expr.as_deref(), pc.t_max, variables);
@@ -466,7 +467,7 @@ pub fn samples_or_compute_curve_2d<'a>(
 pub fn samples_or_compute_curve_3d<'a>(
     pc: &'a ParametricCurve3DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> RwLockReadGuard<'a, Curve3DSamples> {
     let t_min = resolve_expr(pc.t_min_expr.as_deref(), pc.t_min, variables);
     let t_max = resolve_expr(pc.t_max_expr.as_deref(), pc.t_max, variables);
@@ -508,7 +509,7 @@ pub fn samples_or_compute_curve_3d<'a>(
 pub fn samples_or_compute_polar<'a>(
     pol: &'a PolarCurveObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> RwLockReadGuard<'a, Curve2DSamples> {
     let t_min = resolve_expr(pol.t_min_expr.as_deref(), pol.t_min, variables);
     let t_max = resolve_expr(pol.t_max_expr.as_deref(), pol.t_max, variables);
@@ -550,7 +551,7 @@ pub fn samples_or_compute_polar<'a>(
 pub fn samples_or_compute_surface<'a>(
     surf: &'a Surface3DObj,
     res: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> RwLockReadGuard<'a, SurfaceSamples> {
     let (x_min, x_max, y_min, y_max) = if surf.is_parametric {
         (surf.u_min, surf.u_max, surf.v_min, surf.v_max)

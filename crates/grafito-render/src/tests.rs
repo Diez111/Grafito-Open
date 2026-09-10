@@ -3,9 +3,9 @@
 mod tests {
     use grafito_core::{
         CircleObj, Document, Fractal2DObj, GeoObject, ImplicitCurveObj, LineObj, PointObj,
-        PolygonObj, Quadric3DObj, RelationOperator,
+        PolygonObj, Quadric3DObj, RelationOperator, TransformedObj,
     };
-    use grafito_geometry::{Camera3D, Point2, ViewTransform};
+    use grafito_geometry::{Camera3D, Color, Point2, ViewTransform};
 
     #[test]
     fn test_build_geometry_empty_document() {
@@ -575,5 +575,131 @@ mod tests {
             crate::apply_quadric_axis_permutation([2, 0, 1], [1.0, 2.0, 3.0]),
             Some([2.0, 3.0, 1.0])
         );
+    }
+
+    #[test]
+    fn presupuestos_render_pineados() {
+        // Si alguien cambia estos topes, el test falla honesto en vez de
+        // regresión silenciosa (GIF 64/8M/5MB + nativo 48/64MiB viven en
+        // app/anim, fuera de scope render; se verifican por lectura).
+        assert_eq!(crate::TRANSFORMED_CACHE_CAP, 64);
+        assert_eq!(crate::MAX_GEOMETRY_VERTICES, 1_000_000);
+        assert_eq!(crate::MAX_GEOMETRY_INDICES, 3_000_000);
+        assert_eq!(crate::MAX_PRISM_BASE_VERTICES, 64);
+        assert!(crate::domain_coloring_compute::domain_cells_within_budget(
+            250_000
+        ));
+        assert!(!crate::domain_coloring_compute::domain_cells_within_budget(
+            250_001
+        ));
+    }
+
+    #[test]
+    fn light_default_centraliza_coeficientes_legacy() {
+        let light = crate::Light::DEFAULT;
+        assert_eq!(light.dir, crate::Light::DEFAULT_DIR);
+        assert_eq!(light.dir, glam::Vec3::new(0.5, 1.0, 0.3));
+        assert_eq!((light.ambient, light.diffuse), (0.45, 0.65));
+        assert_eq!((light.specular, light.shininess), (0.30, 32.0));
+        // `calculate_lighting` legacy intacto: el dueño 3D (app) sigue viendo
+        // el mismo color hasta migrar a `Light::shade`.
+        let legacy = crate::calculate_lighting(
+            Color::RED,
+            glam::Vec3::new(0.0, 0.0, 1.0),
+            crate::Light::DEFAULT_DIR,
+        );
+        let dir = crate::Light::DEFAULT_DIR.normalize();
+        let expected_intensity = 0.45 + 0.65 * dir.z.max(0.0);
+        for (got, base) in [(legacy.r, 0.9), (legacy.g, 0.2), (legacy.b, 0.2)] {
+            assert!(
+                (got - base * expected_intensity).abs() < 1e-6,
+                "legacy cambió sin aviso: {got} vs {}",
+                base * expected_intensity
+            );
+        }
+        assert_eq!(legacy.a, 1.0);
+    }
+
+    #[test]
+    fn lighting_golden_pinea_canon_con_specular() {
+        // Canon NUEVO (justificación: el especular Blinn-Phong añade brillo
+        // acotado +0.30/canal solo cuando la normal bisecea luz/vista; en
+        // frontal +Z el delta es ~+0.002, imperceptible, y en grazing
+        // atenúa el apagado total del legacy. Pineado aquí, no regresión).
+        let light = crate::Light::DEFAULT;
+        let base = Color::new(0.9, 0.2, 0.2, 1.0);
+        let normal = glam::Vec3::new(0.0, 0.0, 1.0);
+        let legacy = crate::calculate_lighting(base, normal, crate::Light::DEFAULT_DIR);
+        let nuevo = light.shade(base, normal);
+        println!("DORADO legacy={legacy:?} nuevo={nuevo:?}");
+        // Canon pineado 2026-09-10 (f32, frontal +Z, base 0.9/0.2/0.2):
+        // legacy (0.5566089, 0.123690866) → nuevo (+0.0001645, +0.0000366).
+        // Delta imperceptible pero NO cero: si cambia, es cambio de look y
+        // debe justificarse aquí, no pasar como regresión silenciosa.
+        for (got, canon) in [
+            (legacy.r, 0.5566089),
+            (legacy.g, 0.123690866),
+            (nuevo.r, 0.5567734),
+            (nuevo.g, 0.12372743),
+        ] {
+            assert!(
+                (got - canon).abs() < 1e-6,
+                "canon de iluminación cambió: {got} vs {canon}"
+            );
+        }
+        // El especular nunca oscurece respecto al legacy.
+        assert!(nuevo.r >= legacy.r && nuevo.g >= legacy.g && nuevo.b >= legacy.b);
+        // ...y está acotado por `specular` (aquí base.r=0.9 → techo +0.27).
+        assert!((nuevo.r - legacy.r) <= 0.9 * light.specular + 1e-6);
+        assert_eq!(nuevo.a, base.a);
+        // should_apply_shading: transparente o no-finito no se sombrea.
+        assert!(light.should_apply_shading(base));
+        assert!(!light.should_apply_shading(Color::new(0.9, 0.2, 0.2, 0.0)));
+        assert!(!light.should_apply_shading(Color::new(f32::NAN, 0.2, 0.2, 1.0)));
+        assert_eq!(light.shade(Color::new(0.9, 0.2, 0.2, 0.0), normal).r, 0.9);
+    }
+
+    #[test]
+    fn transformed_shared_hit_cero_copia_y_equivale_al_clon() {
+        let view = ViewTransform::new(800.0, 600.0);
+        let transformed = TransformedObj::new(
+            GeoObject::Line(LineObj::new(Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0))),
+            "z + 2",
+        );
+        let mut document = Document::new();
+        document.add_object(GeoObject::Transformed(transformed.clone()));
+
+        // Miss compartido: contenido útil y guardado en el LRU.
+        let (miss_v, miss_i) = crate::Renderer::build_transformed_geometry_static_shared(
+            &document,
+            &transformed,
+            &view,
+            false,
+        );
+        assert!(!miss_v.is_empty() && !miss_i.is_empty());
+
+        // Hit compartido: MISMO `Arc` (puntero idéntico, cero copia de `Vec`).
+        let (hit_v, hit_i) = crate::Renderer::build_transformed_geometry_static_shared(
+            &document,
+            &transformed,
+            &view,
+            false,
+        );
+        assert!(std::sync::Arc::ptr_eq(&miss_v, &hit_v));
+        assert!(std::sync::Arc::ptr_eq(&miss_i, &hit_i));
+
+        // El path `Vec` legacy sigue devolviendo el mismo contenido.
+        let (clon_v, clon_i) = crate::Renderer::build_transformed_geometry_static(
+            &document,
+            &transformed,
+            &view,
+            false,
+        );
+        assert_eq!(clon_v.len(), miss_v.len());
+        assert_eq!(clon_i.as_slice(), miss_i.as_slice());
+        for (a, b) in clon_v.iter().zip(miss_v.iter()) {
+            assert_eq!(a.position, b.position);
+            assert_eq!(a.color, b.color);
+        }
     }
 }

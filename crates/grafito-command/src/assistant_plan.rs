@@ -691,6 +691,126 @@ fn is_variable_name(name: &str) -> bool {
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
+// ── Export de animación (puro, sin mutar documento ni historial) ─────────────
+//
+// Paridad con el diálogo `MediaExportDialog` (grafito-ui) y el plan
+// `generate_animation` (grafito-assistant/agent): 4 formatos × 3 calidades,
+// fps 1..=60, vista plana/orbita. Todo validación sin E/S: la app ejecuta el
+// export fuera del draw y `replay_plan` re-stagea sobre la copia, así que los
+// thumbs y el historial quedan intactos.
+
+/// Formatos de exportación válidos (wire `ExportFormat`).
+pub const ANIMATION_EXPORT_FORMATS: &[&str] = &["gif", "png", "mp4", "webm"];
+/// Calidades válidas (espejo `MediaExportQuality`).
+pub const ANIMATION_EXPORT_QUALITIES: &[&str] = &["baja", "media", "alta"];
+/// Vistas válidas (espejo `MediaExportView`).
+pub const ANIMATION_EXPORT_VIEWS: &[&str] = &["plana", "orbita"];
+/// FPS válido del export (paridad diálogo 1..=60).
+pub const ANIMATION_EXPORT_FPS_MIN: u32 = 1;
+/// FPS máximo del export.
+pub const ANIMATION_EXPORT_FPS_MAX: u32 = 60;
+
+/// Pedido de exportación de animación ya resuelto por el asistente.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimationExportSpec {
+    /// Formato canónico: gif/png/mp4/webm.
+    pub format: String,
+    /// Calidad canónica: baja/media/alta.
+    pub quality: String,
+    /// FPS 1..=60.
+    pub fps: u32,
+    /// Vista canónica: plana/orbita.
+    pub view: String,
+}
+
+impl AnimationExportSpec {
+    /// Construye validando cada campo (nombres con trim, sin mayúsculas).
+    pub fn try_new(format: &str, quality: &str, fps: u32, view: &str) -> Result<Self, String> {
+        let format = match format.trim().to_lowercase().as_str() {
+            "gif" => "gif",
+            "png" | "png-sequence" | "pngsequence" | "pngdir" | "secuencia" => "png",
+            "mp4" | "h264" => "mp4",
+            "webm" | "vp9" => "webm",
+            _ => {
+                return Err(format!(
+                    "formato desconocido '{format}' (válidos: gif, png, mp4, webm)"
+                ));
+            }
+        };
+        let quality = match quality.trim().to_lowercase().as_str() {
+            "baja" | "baja calidad" | "low" => "baja",
+            "media" | "medium" => "media",
+            "alta" | "alta calidad" | "high" => "alta",
+            _ => {
+                return Err(format!(
+                    "calidad desconocida '{quality}' (válidas: baja, media, alta)"
+                ));
+            }
+        };
+        if !(ANIMATION_EXPORT_FPS_MIN..=ANIMATION_EXPORT_FPS_MAX).contains(&fps) {
+            return Err(format!("fps {fps} fuera de 1..=60"));
+        }
+        let view = match view.trim().to_lowercase().as_str() {
+            "plana" | "plano" | "2d" | "flat" => "plana",
+            "orbita" | "órbita" | "orbit" | "3d" => "orbita",
+            _ => {
+                return Err(format!(
+                    "vista desconocida '{view}' (válidas: plana, orbita)"
+                ));
+            }
+        };
+        Ok(Self {
+            format: format.to_string(),
+            quality: quality.to_string(),
+            fps,
+            view: view.to_string(),
+        })
+    }
+
+    /// Bitrate sugerido en kbps (paridad UI 500/2000/8000, rango 100..=20000).
+    pub fn bitrate_kbps(&self) -> u32 {
+        match self.quality.as_str() {
+            "baja" => 500,
+            "alta" => 8000,
+            _ => 2000,
+        }
+    }
+
+    /// ¿La vista pide órbita? La UI la habilita solo en plantillas 3D.
+    pub fn orbit_requested(&self) -> bool {
+        self.view == "orbita"
+    }
+}
+
+/// Vista previa textual del replay/export sin mutar el documento.
+///
+/// Lee solo `&Document` (revisión actual) y describe el plan cubriendo los 4
+/// formatos × 3 calidades; el historial queda intacto porque jamás toma `&mut`.
+pub fn replay_animation_export_preview(
+    document: &Document,
+    template: &str,
+    spec: &AnimationExportSpec,
+) -> Result<String, String> {
+    if template.trim().is_empty() {
+        return Err("replay de animación requiere 'template' no vacío".into());
+    }
+    let context = document_context(document);
+    let mut out = format!(
+        "replay «{}» en {} calidad {} ({} kbps) a {} fps vista {} (doc r{}); formatos válidos: gif, png, mp4, webm; calidades: baja, media, alta; historial intacto",
+        template.trim(),
+        spec.format,
+        spec.quality,
+        spec.bitrate_kbps(),
+        spec.fps,
+        spec.view,
+        context.revision,
+    );
+    if spec.orbit_requested() {
+        out.push_str("; órbita pedida: la UI la habilita solo en plantillas 3D, si no exporta la vista plana");
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,5 +984,41 @@ mod tests {
 
         assert!(apply_plan(&mut document, &plan).is_err());
         assert_eq!(snapshot(&document), before);
+    }
+
+    #[test]
+    fn animation_export_cubre_formatos_y_calidades_sin_mutar() {
+        let document = Document::new();
+        let before = snapshot(&document);
+        for formato in ["gif", "png", "mp4", "webm"] {
+            for calidad in ["baja", "media", "alta"] {
+                let spec = AnimationExportSpec::try_new(formato, calidad, 12, "plana")
+                    .expect("spec válido");
+                let preview = replay_animation_export_preview(&document, "derivative-slope", &spec)
+                    .expect("preview");
+                assert!(preview.contains(formato), "{preview}");
+                assert!(preview.contains(calidad), "{preview}");
+                assert!(preview.contains("historial intacto"), "{preview}");
+            }
+        }
+        let orbita = AnimationExportSpec::try_new("webm", "alta", 24, "orbita").expect("orbita");
+        assert!(orbita.orbit_requested());
+        assert_eq!(orbita.bitrate_kbps(), 8000);
+        let preview = replay_animation_export_preview(&document, "conformal-map", &orbita)
+            .expect("preview orbita");
+        assert!(preview.contains("plantillas 3D"), "{preview}");
+        assert_eq!(snapshot(&document), before);
+    }
+
+    #[test]
+    fn animation_export_rechaza_campos_invalidos() {
+        assert!(AnimationExportSpec::try_new("exe", "media", 12, "plana").is_err());
+        assert!(AnimationExportSpec::try_new("gif", "ultra", 12, "plana").is_err());
+        assert!(AnimationExportSpec::try_new("gif", "media", 0, "plana").is_err());
+        assert!(AnimationExportSpec::try_new("gif", "media", 61, "plana").is_err());
+        assert!(AnimationExportSpec::try_new("gif", "media", 12, "holograma").is_err());
+        let document = Document::new();
+        let spec = AnimationExportSpec::try_new("gif", "media", 12, "plana").expect("spec");
+        assert!(replay_animation_export_preview(&document, "  ", &spec).is_err());
     }
 }

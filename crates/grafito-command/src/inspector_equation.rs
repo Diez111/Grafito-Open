@@ -17,7 +17,7 @@
 
 use grafito_core::{Document, GeoObject, ObjectId, RelationOperator};
 use grafito_geometry::Point2;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Presupuesto de texto editable (igual que `validation::MAX_EXPR_LENGTH`).
@@ -264,7 +264,7 @@ fn validate_expr_syntax(expr: &str, vars: &[&str], what: &str) -> Result<(), Equ
             Some(char_column(expr, byte_idx)),
         ));
     }
-    let empty: HashMap<String, f64> = HashMap::new();
+    let empty: BTreeMap<String, f64> = BTreeMap::new();
     match grafito_geometry::expr::prepare_function_ast(expr, &empty, vars) {
         Ok(_) => Ok(()),
         Err(reason) => {

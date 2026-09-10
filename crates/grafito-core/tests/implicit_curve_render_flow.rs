@@ -7,12 +7,12 @@
 use grafito_core::implicit_curve::segments_or_compute;
 use grafito_core::RenderQuality;
 use grafito_core::{ImplicitCurveObj, RelationOperator};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn test_render_flow_x2_y2_eq_1() {
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let view_bounds = (-2.0, 2.0, -2.0, 2.0);
     let _guard = segments_or_compute(&ic, view_bounds, 256, &vars, RenderQuality::Normal);
     // El cache debe estar lleno.
@@ -45,7 +45,7 @@ fn test_render_flow_x2_y2_eq_1() {
 #[test]
 fn test_render_flow_x2_y2_lt_1() {
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
     let view_bounds = (-2.0, 2.0, -2.0, 2.0);
     let _g = segments_or_compute(&ic, view_bounds, 256, &vars, RenderQuality::Normal);
     let cached = ic.cached_segments.read().unwrap();
@@ -68,7 +68,7 @@ fn test_explicit_implicitcurve_creation() {
         &ic,
         (-2.0, 2.0, -2.0, 2.0),
         256,
-        &HashMap::new(),
+        &BTreeMap::new(),
         RenderQuality::Normal,
     );
     let cached = ic.cached_segments.read().unwrap();

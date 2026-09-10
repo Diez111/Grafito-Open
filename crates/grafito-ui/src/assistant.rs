@@ -13,8 +13,8 @@ use grafito_anim::protocol::Timeline;
 use grafito_assistant_types::{
     AssistantExecutionOrigin, AssistantFocus, AssistantRepairFeedback, AttachmentLimits,
     ConversationRole, ConversationTurn, ImageAttachment, ImmutableDocumentContext, ProposedPlan,
-    ProviderProfile, RequestBudget, MAX_CONVERSATION_TURNS, MAX_CONVERSATION_TURN_CHARS,
-    REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES,
+    ProviderProfile, RequestBudget, TurnMediaRef, MAX_CONVERSATION_TURNS,
+    MAX_CONVERSATION_TURN_CHARS, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES, TURN_MEDIA_THUMB_SIDE_PX,
 };
 pub use grafito_command::assistant_proposals::{AssistantParameterAssignment, AssistantProposal};
 
@@ -440,6 +440,88 @@ struct RetiredMediaBatch {
     frames_left: u32,
 }
 
+/// Lado del thumb histórico en píxeles lógicos (paridad con
+/// `TURN_MEDIA_THUMB_SIDE_PX`: el thumb serializado es RGBA 96×96, jamás un
+/// `Vec<ColorImage>` completo por turno — 48 frames a 480px ~30 MiB = OOM).
+pub const HISTORY_THUMB_SIDE_PX: f32 = TURN_MEDIA_THUMB_SIDE_PX as f32;
+
+/// Tope de texturas históricas vivas (1 `TextureHandle` chico por turno).
+/// El historial tiene como máximo `MAX_CONVERSATION_TURNS` (6) turnos, así que
+/// el estado estable usa ≤6 << 96; la cota solo muerde ráfagas patológicas.
+/// Paridad con `RETENTION_MAX_PENDING` de `app::anim_ui` (la Piel no puede
+/// depender de la app, DAG `ui → app`, por eso se duplica con pin de test).
+pub const HISTORY_THUMB_MAX_TEXTURES: usize = 96;
+
+/// Tope de texturas retenidas en gracia (vivas + retiradas). Misma cota 96:
+/// al superarla se evicta el batch más viejo primero (best-effort bajo
+/// presión, documentado como en `app::anim_ui::RetentionQueue::retire`).
+pub const HISTORY_RETIRED_MAX_TEXTURES: usize = 96;
+
+/// Título de la tarjeta histórica (1-2 líneas, elide con `…`).
+const HISTORY_MINI_CARD_TITLE_MAX_CHARS: usize = 48;
+
+/// Entrada del caché de thumbs históricos: huella del `TurnMediaRef` + textura.
+#[derive(Clone)]
+struct HistoryThumbEntry {
+    fingerprint: u64,
+    texture: egui::TextureHandle,
+}
+
+/// Huella FNV-1a 64 del `TurnMediaRef` para validar el caché de thumbs.
+///
+/// Paridad con `app::anim_ui::history_thumb_fingerprint` (mismo algoritmo, la
+/// Piel no puede depender de la app). Pura, sin I/O.
+pub(crate) fn history_thumb_fingerprint(media: &TurnMediaRef) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    const FIELD_SEPARATOR: u8 = 0xff;
+    let mut hash = FNV_OFFSET_BASIS;
+    for field in [&media.title, &media.template, &media.concept] {
+        for byte in field.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= u64::from(FIELD_SEPARATOR);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for byte in &media.thumb {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash ^= u64::from(media.frame_count);
+    hash.wrapping_mul(FNV_PRIME)
+}
+
+/// ¿Este turno lleva tarjeta histórica? Solo turnos con media que no son
+/// el último: el último usa el slot vivo (`set_media`/`draw_media_card`).
+/// Puro (`&Estado`), sin I/O. La usa el dibujado y los tests de política.
+pub(crate) fn turn_has_history_mini_card(
+    turn_idx: usize,
+    turn_count: usize,
+    turn: &ConversationTurn,
+) -> bool {
+    turn.media.is_some()
+        && turn_count > 0
+        && turn_idx < turn_count
+        && turn_idx.saturating_add(1) != turn_count
+}
+
+/// Índices de turnos que llevan tarjeta histórica: con media y no finales.
+///
+/// El último turno usa el slot vivo (`set_media`/`draw_media_card`), jamás
+/// tarjeta. Puro (`&Estado`), sin I/O. Solo tests: el dibujado usa la
+/// versión por turno (`turn_has_history_mini_card`).
+#[cfg(test)]
+pub(crate) fn history_mini_card_indices(conversation: &[ConversationTurn]) -> Vec<usize> {
+    let count = conversation.len();
+    conversation
+        .iter()
+        .enumerate()
+        .filter(|(index, turn)| turn_has_history_mini_card(*index, count, turn))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// Alto máximo del preview inline de la card (D2).
 ///
 /// Derivado de tokens (`SPACE_XXL * 7 = 280`): evita retratos gigantes sin
@@ -458,11 +540,13 @@ const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 pub const MAX_PREVIEW_UPSCALE: f32 = 1.5;
 
 /// Tooltips cortos de la toolbar única v3 (≤60 chars, sin cortes).
-const MEDIA_TIP_SPEED: &str = "Cambia la velocidad: 0.5x, 1x, 2x";
+const MEDIA_TIP_SPEED: &str = "Velocidad: elegí 0.5x, 1x o 2x";
 const MEDIA_TIP_FULLSCREEN: &str = "Ver grande. Esc para cerrar";
-const MEDIA_TIP_EXPORT: &str = "Guarda la animación como GIF";
-const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual";
-const MEDIA_TIP_PLAY: &str = "Retoma donde quedó";
+const MEDIA_TIP_EXPORT: &str = "Exportar: elegís formato y calidad";
+const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual (Espacio)";
+const MEDIA_TIP_PLAY: &str = "Retoma donde quedó (Espacio)";
+const MEDIA_TIP_STEP_BACK: &str = "Fotograma anterior (←)";
+const MEDIA_TIP_STEP_FWD: &str = "Fotograma siguiente (→)";
 
 /// Velocidad del reproductor de la card (B5).
 ///
@@ -480,6 +564,9 @@ pub enum MediaPlaybackSpeed {
 }
 
 impl MediaPlaybackSpeed {
+    /// Las 3 del menú explícito, en orden visible.
+    pub const ALL: [Self; 3] = [Self::Half, Self::Normal, Self::Double];
+
     /// Factor sobre `MEDIA_CARD_BASE_FPS` (la app lo usa para el delay del GIF).
     pub fn rate(self) -> f32 {
         match self {
@@ -498,7 +585,8 @@ impl MediaPlaybackSpeed {
         }
     }
 
-    /// Rota media → normal → rápida → media (botón de velocidad).
+    /// Rota media → normal → rápida → media (compat: lo usan tests y el
+    /// menú lo ofrece explícito sin depender del ciclo).
     pub fn cycle(self) -> Self {
         match self {
             Self::Half => Self::Normal,
@@ -524,6 +612,284 @@ pub enum MediaExportState {
     Done,
     /// Falló con motivo en rioplatense (jamás mudo).
     Failed(String),
+}
+
+/// Formato de export del diálogo (espejo UI de
+/// `app::anim_native::VideoExportFormat`).
+///
+/// La Piel no puede depender de la app (DAG `ui -> app`): se duplica el enum
+/// mínimo y la app lo mapea al real al spawnear. Paridad pineada en tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaExportFormat {
+    /// GIF animado (siempre disponible, sin ffmpeg).
+    #[default]
+    Gif,
+    /// Secuencia PNG en directorio (siempre disponible, sin ffmpeg).
+    PngDir,
+    /// MP4 H.264 vía ffmpeg-sidecar.
+    Mp4,
+    /// WebM VP9/AV1 vía ffmpeg-sidecar.
+    Webm,
+}
+
+impl MediaExportFormat {
+    /// Los 4 del selector, en orden visible.
+    pub const ALL: [Self; 4] = [Self::Gif, Self::PngDir, Self::Mp4, Self::Webm];
+
+    /// Nombre visible del selector.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Gif => "GIF",
+            Self::PngDir => "PNG-sequence",
+            Self::Mp4 => "MP4",
+            Self::Webm => "WebM",
+        }
+    }
+
+    /// ¿Necesita ffmpeg en el PATH?
+    pub const fn needs_ffmpeg(self) -> bool {
+        match self {
+            Self::Gif | Self::PngDir => false,
+            Self::Mp4 | Self::Webm => true,
+        }
+    }
+}
+
+/// Calidad del diálogo (espejo UI de `app::anim_native::VideoQuality`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaExportQuality {
+    Baja,
+    #[default]
+    Media,
+    Alta,
+}
+
+impl MediaExportQuality {
+    /// Las 3 del selector, en orden visible.
+    pub const DIALOG_ALL: [Self; 3] = [Self::Baja, Self::Media, Self::Alta];
+
+    /// Nombre visible.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Baja => "Baja",
+            Self::Media => "Media",
+            Self::Alta => "Alta",
+        }
+    }
+
+    /// Bitrate sugerido en kbps (dentro de 100..=20000).
+    pub const fn suggested_bitrate_kbps(self) -> u32 {
+        match self {
+            Self::Baja => 500,
+            Self::Media => 2000,
+            Self::Alta => 8000,
+        }
+    }
+}
+
+/// Vista de la animación (selector del diálogo, si cabe sin romper).
+///
+/// `Orbita` solo habilitada si la plantilla lo soporta (3D): si no,
+/// `validate_selection` falla honesto. No re-renderiza nada: el export usa
+/// los fotogramas visibles del slot vivo (`set_media` intacto).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaExportView {
+    /// Vista plana 2D (defecto, siempre disponible).
+    #[default]
+    Plana,
+    /// Órbita 3D (solo plantillas 3D).
+    Orbita,
+}
+
+impl MediaExportView {
+    /// Nombre visible del selector.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Plana => "Plana 2D",
+            Self::Orbita => "Órbita 3D",
+        }
+    }
+}
+
+/// Motivo visible cuando MP4/WebM están deshabilitados sin ffmpeg.
+/// Paridad con `app::anim_native::FFMPEG_MISSING_HINT`.
+pub const MEDIA_EXPORT_FFMPEG_HINT: &str = "MP4/WebM requieren ffmpeg — se exporta GIF";
+/// Nota Tex del diálogo: SVG real con fallback `ab_glyph`.
+pub const MEDIA_EXPORT_TEX_NOTE: &str =
+    "Tex usa SVG real; si no hay formas, fallback ab_glyph (texto visible, jamás curva inventada).";
+/// Motivo visible de la órbita sin plantilla 3D.
+pub const MEDIA_EXPORT_ORBITA_SOLO_3D_HINT: &str =
+    "la órbita solo vale en plantillas 3D — se exporta la vista plana";
+/// Tope de frames del diálogo (paridad GIF `GIF_EXPORT_MAX_FRAMES` 64).
+pub const MEDIA_EXPORT_MAX_FRAMES: usize = 64;
+/// FPS del diálogo (paridad `ANIM_EXPORT_FPS_MIN/MAX` 1..=60, default 12).
+pub const MEDIA_EXPORT_FPS_MIN: u32 = 1;
+pub const MEDIA_EXPORT_FPS_MAX: u32 = 60;
+pub const MEDIA_EXPORT_DEFAULT_FPS: u32 = 12;
+/// Bitrate del diálogo en kbps (paridad 100..=20000).
+pub const MEDIA_EXPORT_BITRATE_MIN_KBPS: u32 = 100;
+pub const MEDIA_EXPORT_BITRATE_MAX_KBPS: u32 = 20_000;
+
+/// Estado puro del diálogo Exportar (`fn render(&Estado) -> Frame`).
+///
+/// Sin I/O, sin spawn: la card lo dibuja y la app ejecuta el `spawn_*`
+/// correspondiente fuera del draw. Interior mutável vía `RefCell` en el
+/// estado porque la Piel dibuja con `&Estado` (igual que playhead/velocidad).
+#[derive(Debug, Clone)]
+pub struct MediaExportDialog {
+    /// ¿Ventana visible?
+    pub open: bool,
+    /// Formato elegido en el selector.
+    pub format: MediaExportFormat,
+    /// Calidad elegida (aplica bitrate sugerido al cambiar).
+    pub quality: MediaExportQuality,
+    /// FPS del video (1..=60, default 12).
+    pub fps: u32,
+    /// Bitrate en kbps (100..=20000).
+    pub bitrate_kbps: u32,
+    /// Frames a exportar (los del slot vivo, 1..=64).
+    pub frame_count: usize,
+    /// ¿Hay ffmpeg? Lo setea la app con `detect_ffmpeg_available()`
+    /// fuera del draw, una vez al abrir.
+    pub ffmpeg_available: bool,
+    /// Progreso 0.0..=1.0 mientras exporta (`None` = indeterminado/spinner).
+    pub progress: Option<f32>,
+    /// Error honesto visible (`None` = sin error). Nada fake mudo.
+    pub error: Option<String>,
+    /// ¿Hay export en curso? (la UI deshabilita Exportar y muestra progreso).
+    pub exporting: bool,
+    /// Vista elegida (Plana siempre, Órbita solo si `orbit_supported`).
+    pub view: MediaExportView,
+    /// ¿La plantilla soporta órbita? Lo setea la app al abrir.
+    pub orbit_supported: bool,
+}
+
+impl Default for MediaExportDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MediaExportDialog {
+    /// Diálogo nuevo: cerrado, GIF + Media + 12fps, sin ffmpeg.
+    /// Puro.
+    pub fn new() -> Self {
+        Self {
+            open: false,
+            format: MediaExportFormat::Gif,
+            quality: MediaExportQuality::Media,
+            fps: MEDIA_EXPORT_DEFAULT_FPS,
+            bitrate_kbps: MediaExportQuality::Media.suggested_bitrate_kbps(),
+            frame_count: 0,
+            ffmpeg_available: false,
+            progress: None,
+            error: None,
+            exporting: false,
+            view: MediaExportView::Plana,
+            orbit_supported: false,
+        }
+    }
+
+    /// Abre el diálogo con lo detectado fuera del draw (ffmpeg una vez +
+    /// soporte de órbita + frames del slot vivo). Puro.
+    pub fn open_with(&mut self, ffmpeg_available: bool, orbit_supported: bool, frame_count: usize) {
+        self.open = true;
+        self.ffmpeg_available = ffmpeg_available;
+        self.orbit_supported = orbit_supported;
+        self.frame_count = frame_count;
+        self.exporting = false;
+        self.progress = None;
+        self.error = None;
+        if !orbit_supported {
+            self.view = MediaExportView::Plana;
+        }
+        if self.format.needs_ffmpeg() && !ffmpeg_available {
+            self.format = MediaExportFormat::Gif;
+        }
+    }
+
+    /// Cierra y deja de mostrar progreso/error viejos. Puro.
+    pub fn close(&mut self) {
+        self.open = false;
+        self.exporting = false;
+        self.progress = None;
+    }
+
+    /// ¿El formato está habilitado? MP4/WebM exigen ffmpeg.
+    pub fn is_format_enabled(&self, format: MediaExportFormat) -> bool {
+        if format.needs_ffmpeg() {
+            self.ffmpeg_available
+        } else {
+            true
+        }
+    }
+
+    /// Motivo visible del formato deshabilitado (`None` = habilitado).
+    pub fn format_disabled_reason(&self, format: MediaExportFormat) -> Option<&'static str> {
+        if self.is_format_enabled(format) {
+            None
+        } else {
+            Some(MEDIA_EXPORT_FFMPEG_HINT)
+        }
+    }
+
+    /// ¿La vista órbita está habilitada? Exige plantilla 3D.
+    pub fn is_orbit_enabled(&self) -> bool {
+        self.orbit_supported
+    }
+
+    /// Valida la selección actual. `Ok` = se puede spawnear el worker;
+    /// `Err` = motivo honesto para mostrar (jamás export fake mudo).
+    pub fn validate_selection(&self) -> Result<(), String> {
+        if !self.is_format_enabled(self.format) {
+            return Err(MEDIA_EXPORT_FFMPEG_HINT.to_string());
+        }
+        if !(MEDIA_EXPORT_FPS_MIN..=MEDIA_EXPORT_FPS_MAX).contains(&self.fps) {
+            return Err(format!(
+                "fps {} fuera de {}..={}",
+                self.fps, MEDIA_EXPORT_FPS_MIN, MEDIA_EXPORT_FPS_MAX
+            ));
+        }
+        if !(MEDIA_EXPORT_BITRATE_MIN_KBPS..=MEDIA_EXPORT_BITRATE_MAX_KBPS)
+            .contains(&self.bitrate_kbps)
+        {
+            return Err(format!(
+                "bitrate {} fuera de {}..={}",
+                self.bitrate_kbps, MEDIA_EXPORT_BITRATE_MIN_KBPS, MEDIA_EXPORT_BITRATE_MAX_KBPS
+            ));
+        }
+        if self.frame_count == 0 || self.frame_count > MEDIA_EXPORT_MAX_FRAMES {
+            return Err(format!(
+                "frames {} fuera de 1..={}",
+                self.frame_count, MEDIA_EXPORT_MAX_FRAMES
+            ));
+        }
+        if self.view == MediaExportView::Orbita && !self.orbit_supported {
+            return Err(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT.to_string());
+        }
+        Ok(())
+    }
+
+    /// Marca inicio de export (limpia error, progreso indeterminado). Puro.
+    pub fn mark_started(&mut self) {
+        self.exporting = true;
+        self.error = None;
+        self.progress = None;
+    }
+
+    /// Marca fallo honesto visible. Puro.
+    pub fn mark_failed(&mut self, reason: impl Into<String>) {
+        self.exporting = false;
+        self.progress = None;
+        self.error = Some(reason.into());
+    }
+
+    /// Marca éxito (cierra el spinner, sin error). Puro.
+    pub fn mark_done(&mut self) {
+        self.exporting = false;
+        self.progress = Some(1.0);
+        self.error = None;
+    }
 }
 
 /// Fila de actividad de una herramienta del asistente mientras el agente trabaja.
@@ -726,6 +1092,14 @@ pub struct AssistantPanelState {
     /// vuelo ya terminado). `RefCell` porque la Piel dibuja con `&Estado`.
     /// Estado estable: como máximo 1 set viejo.
     retired_media_textures: std::cell::RefCell<Vec<RetiredMediaBatch>>,
+    /// Thumbs históricos: 1 `TextureHandle` chico (96px) por turno con media.
+    /// `RefCell` porque la Piel dibuja con `&Estado`; la huella detecta
+    /// reemplazos (`attach_media`) sin guardar `Vec<ColorImage>` por turno.
+    history_thumb_textures:
+        std::cell::RefCell<std::collections::BTreeMap<usize, HistoryThumbEntry>>,
+    /// Instante del último tick de gracia: varios mini-cards + slot vivo en el
+    /// mismo frame comparten UN tick (la gracia son frames dibujados, no cards).
+    retire_tick_time_s: std::cell::Cell<Option<f64>>,
     /// Guarda si ya se construyeron las texturas de la media actual.
     media_textures_ready: bool,
     /// Fotograma actual del reproductor en ms acumulados (B5). Avanza con el
@@ -743,6 +1117,13 @@ pub struct AssistantPanelState {
     media_paused: std::cell::Cell<bool>,
     /// Velocidad por card (media/lenta/rápida); sin global mutable.
     media_speed: std::cell::Cell<MediaPlaybackSpeed>,
+    /// Easing del scrub por nombre del wire (`EASING_NAMES` de
+    /// `grafito-anim`): el deslizador aplica esta curva a la fracción del
+    /// segmento antes del lerp (`Timeline::sample_with`), la misma que
+    /// `RateFunc` en los casos exactos. Desconocido → `linear` honesto
+    /// (lo resuelve `easing::by_name` al samplear). Se reinicia en
+    /// `set_media` como la velocidad.
+    pub media_easing_name: String,
     /// Último fotograma pintado (D2): gate anti-parpadeo. La textura sólo
     /// se re-selecciona si el índice cambió; el rect es estable (ancho
     /// total, aspecto preservado) así el scroll no salta. `Cell` porque la
@@ -755,6 +1136,11 @@ pub struct AssistantPanelState {
     /// Exportación a GIF de la card (la app la actualiza desde el hilo de
     /// export; la UI solo la renderiza, cero I/O/spawn en `Ui::`).
     media_export: MediaExportState,
+    /// Diálogo Exportar profesional (formato/audio/calidad/vista/Tex).
+    /// `RefCell` porque la Piel dibuja con `&Estado`; la app lo abre con lo
+    /// detectado fuera del draw (ffmpeg una vez + pista del pedido).
+    /// Se cierra en `set_media` (card nueva = diálogo fresco).
+    export_dialog: std::cell::RefCell<MediaExportDialog>,
     /// Confirmación del usuario de que el modelo elegido admite imágenes.
     pub vision_enabled: bool,
     /// Autoriza explícitamente una revisión con el modelo de razonamiento
@@ -851,14 +1237,18 @@ impl Default for AssistantPanelState {
             media: None,
             media_textures: Vec::new(),
             retired_media_textures: std::cell::RefCell::new(Vec::new()),
+            history_thumb_textures: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            retire_tick_time_s: std::cell::Cell::new(None),
             media_textures_ready: false,
             media_playhead_ms: std::cell::Cell::new(0),
             media_last_tick_s: std::cell::Cell::new(None),
             media_paused: std::cell::Cell::new(false),
             media_speed: std::cell::Cell::new(MediaPlaybackSpeed::default()),
+            media_easing_name: "linear".to_owned(),
             media_last_shown: std::cell::Cell::new(None),
             media_fullscreen: std::cell::Cell::new(false),
             media_export: MediaExportState::default(),
+            export_dialog: std::cell::RefCell::new(MediaExportDialog::new()),
             anim_progress: false,
             tutor_level: 0,
             tutor_covered: 0,
@@ -982,6 +1372,7 @@ impl AssistantPanelState {
     /// Descarta el historial local y las propuestas asociadas a esa conversación.
     pub fn clear_conversation(&mut self) {
         self.conversation.clear();
+        self.retire_all_history_thumbs();
         self.reveal_pending = false;
         self.reveal_started_at = None;
         self.clear_proposal_cards();
@@ -1449,9 +1840,12 @@ impl AssistantPanelState {
         self.media_last_tick_s.set(None);
         self.media_paused.set(false);
         self.media_speed.set(MediaPlaybackSpeed::default());
+        self.media_easing_name = "linear".to_owned();
         self.media_last_shown.set(None);
         self.media_fullscreen.set(false);
         self.media_export = MediaExportState::default();
+        // Card nueva = diálogo fresco: no arrastra formato/error de la anterior.
+        self.export_dialog.borrow_mut().close();
         if let Some(media) = &self.media {
             self.media_textures = media
                 .frames
@@ -1472,16 +1866,24 @@ impl AssistantPanelState {
     }
 
     /// Retira un set viejo a la cola de gracia (no lo destruye).
+    ///
+    /// Acotado (`HISTORY_RETIRED_MAX_TEXTURES` = 96, paridad con
+    /// `RETENTION_MAX_PENDING`): si la suma supera el tope se evicta el batch
+    /// más viejo primero (drop inmediato, best-effort bajo presión).
     fn retire_media_textures(&self, textures: Vec<egui::TextureHandle>) {
         if textures.is_empty() {
             return;
         }
-        self.retired_media_textures
-            .borrow_mut()
-            .push(RetiredMediaBatch {
-                textures,
-                frames_left: MEDIA_TEXTURE_GRACE_FRAMES,
-            });
+        let mut queue = self.retired_media_textures.borrow_mut();
+        queue.push(RetiredMediaBatch {
+            textures,
+            frames_left: MEDIA_TEXTURE_GRACE_FRAMES,
+        });
+        let mut total: usize = queue.iter().map(|batch| batch.textures.len()).sum();
+        while total > HISTORY_RETIRED_MAX_TEXTURES && !queue.is_empty() {
+            let dropped = queue.remove(0);
+            total = total.saturating_sub(dropped.textures.len());
+        }
     }
 
     /// Dropea solo los sets cuya gracia ya expiró (sin descontar).
@@ -1532,6 +1934,98 @@ impl AssistantPanelState {
         (&self.media_textures, self.media_textures_ready)
     }
 
+    /// Avanza la gracia UNA vez por frame (idempotente por instante egui).
+    ///
+    /// El transcript puede dibujar N mini-cards + el slot vivo en el mismo
+    /// frame: sin este gate cada card descontaría 1 y la gracia de 3 se
+    /// agotaría antes del submit en vuelo (use-after-free wgpu de vuelta).
+    pub(crate) fn reap_retired_media_tick_once(&self, now_s: f64) {
+        if self.retire_tick_time_s.get() == Some(now_s) {
+            return;
+        }
+        self.retire_tick_time_s.set(Some(now_s));
+        self.reap_retired_media_tick();
+    }
+
+    /// Textura del thumb histórico del turno (1 por turno, 96px).
+    ///
+    /// Reutiliza el caché si la huella coincide; ante cambio (`attach_media`)
+    /// retira la vieja con gracia y sube la nueva. `None` honesto si la media
+    /// no valida o el thumb no trae los RGBA exactos de 96×96 (placeholder en
+    /// la card, jamás pánico). Cero I/O/spawn: solo subida GPU como `set_media`.
+    fn ensure_history_thumb(
+        &self,
+        turn_idx: usize,
+        media: &TurnMediaRef,
+        ctx: &egui::Context,
+    ) -> Option<egui::TextureHandle> {
+        if media.validate().is_err() {
+            return None;
+        }
+        if media.thumb.len() != TURN_MEDIA_THUMB_SIDE_PX * TURN_MEDIA_THUMB_SIDE_PX * 4 {
+            return None;
+        }
+        let fingerprint = history_thumb_fingerprint(media);
+        let cached = self
+            .history_thumb_textures
+            .borrow()
+            .get(&turn_idx)
+            .map(|entry| (entry.fingerprint, entry.texture.clone()));
+        if let Some((cached_fingerprint, texture)) = cached {
+            if cached_fingerprint == fingerprint {
+                return Some(texture);
+            }
+        }
+        let mut cache = self.history_thumb_textures.borrow_mut();
+        if let Some(old) = cache.remove(&turn_idx) {
+            self.retire_media_textures(vec![old.texture]);
+        }
+        while cache.len() >= HISTORY_THUMB_MAX_TEXTURES {
+            let Some(oldest) = cache.keys().next().copied() else {
+                break;
+            };
+            if let Some(evicted) = cache.remove(&oldest) {
+                self.retire_media_textures(vec![evicted.texture]);
+            }
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [TURN_MEDIA_THUMB_SIDE_PX, TURN_MEDIA_THUMB_SIDE_PX],
+            &media.thumb,
+        );
+        let texture = ctx.load_texture(
+            format!("assistant_history_thumb_{turn_idx}_{fingerprint:016x}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        cache.insert(
+            turn_idx,
+            HistoryThumbEntry {
+                fingerprint,
+                texture: texture.clone(),
+            },
+        );
+        Some(texture)
+    }
+
+    /// Retira TODO el caché histórico con gracia (sin dropear en el frame).
+    ///
+    /// `trim_conversation` corre los índices al drenar el par más viejo, así
+    /// que cualquier recorte invalida el caché completo: son ≤6 thumbs de
+    /// 36 KiB que se reconstruyen lazy en el próximo frame. La media viaja
+    /// dentro del turno, por eso se recorta junto al par sin reindexado.
+    fn retire_all_history_thumbs(&self) {
+        let old_map = std::mem::take(&mut *self.history_thumb_textures.borrow_mut());
+        if !old_map.is_empty() {
+            self.retire_media_textures(old_map.into_values().map(|entry| entry.texture).collect());
+        }
+    }
+
+    /// Thumbs históricos cacheados (solo tests / debug).
+    #[cfg(test)]
+    pub(crate) fn history_thumb_cached_count(&self) -> usize {
+        self.history_thumb_textures.borrow().len()
+    }
+
     /// Factor de velocidad actual del reproductor (lo usa la app para el
     /// delay del GIF exportado). Puro, sin I/O.
     pub fn media_playback_rate(&self) -> f32 {
@@ -1549,6 +2043,71 @@ impl AssistantPanelState {
         self.media_export = state;
     }
 
+    /// Abre el diálogo Exportar con lo detectado fuera del draw por la app
+    /// (`ffmpeg_available` vía `detect_ffmpeg_available()` una vez al abrir,
+    /// órbita según plantilla, frames del slot vivo). Puro, sin I/O. Toma
+    /// `&self` (interior mutável) para que el evento de la app lo llame sin
+    /// pelear borrows del draw.
+    pub fn open_export_dialog(
+        &self,
+        ffmpeg_available: bool,
+        orbit_supported: bool,
+        frame_count: usize,
+    ) {
+        self.export_dialog
+            .borrow_mut()
+            .open_with(ffmpeg_available, orbit_supported, frame_count);
+    }
+
+    /// Cierra el diálogo (descarta progreso/error viejos). Puro.
+    pub fn close_export_dialog(&self) {
+        self.export_dialog.borrow_mut().close();
+    }
+
+    /// ¿El diálogo está visible?
+    pub fn export_dialog_is_open(&self) -> bool {
+        self.export_dialog.borrow().open
+    }
+
+    /// Snapshot del diálogo para que la app valide y spawnee fuera del draw.
+    /// Puro (clon barato: solo escalares + `Option<String>`).
+    pub fn export_dialog_snapshot(&self) -> MediaExportDialog {
+        self.export_dialog.borrow().clone()
+    }
+
+    /// Marca inicio de export en el diálogo (la app, desde el evento
+    /// `ConfirmExport`; la UI solo lo renderiza).
+    pub fn export_dialog_mark_started(&self) {
+        self.export_dialog.borrow_mut().mark_started();
+    }
+
+    /// Marca fallo honesto visible en el diálogo (jamás mudo).
+    pub fn export_dialog_mark_failed(&self, reason: impl Into<String>) {
+        self.export_dialog.borrow_mut().mark_failed(reason);
+    }
+
+    /// Marca éxito del export en el diálogo.
+    pub fn export_dialog_mark_done(&self) {
+        self.export_dialog.borrow_mut().mark_done();
+    }
+
+    /// Fija el formato del diálogo (tests + atajos de la app).
+    pub fn export_dialog_set_format(&self, format: MediaExportFormat) {
+        self.export_dialog.borrow_mut().format = format;
+    }
+
+    /// Fija el easing del scrub por nombre del wire (`EASING_NAMES`).
+    /// Vacío → `linear`; desconocido lo resuelve `easing::by_name` al
+    /// samplear (también `linear`, honesto). Piel pura, sin I/O.
+    pub fn set_media_easing_name(&mut self, name: &str) {
+        let trimmed = name.trim();
+        self.media_easing_name = if trimmed.is_empty() {
+            "linear".to_owned()
+        } else {
+            trimmed.to_owned()
+        };
+    }
+
     /// Avanza el reloj del reproductor y devuelve el índice a mostrar (B5).
     ///
     /// - Sin frames o sin texturas listas: arma el reloj y devuelve `None`.
@@ -1557,9 +2116,9 @@ impl AssistantPanelState {
     /// - Reproduciendo: suma `dt * rate` con `dt` capado a 250 ms
     ///   (volver de segundo plano no salta) y loopea el playhead.
     ///
-    /// El índice sale de `media_frame_at` (`Timeline::sample` + round +
-    /// clamp). Puro estado UI, sin I/O ni spawn. Toma `&self`: el cursor vive
-    /// en `Cell` (detalle local de render, ver campos).
+    /// El índice sale de `media_frame_at_with_ease` (easing del scrub +
+    /// round + clamp). Puro estado UI, sin I/O ni spawn. Toma `&self`: el
+    /// cursor vive en `Cell` (detalle local de render, ver campos).
     pub(crate) fn advance_media_playhead(
         &self,
         now_s: f64,
@@ -1572,12 +2131,14 @@ impl AssistantPanelState {
         }
         let timeline = media_scrub_timeline(frame_count, MEDIA_CARD_BASE_FPS)?;
         let duration_ms = timeline.duration_ms;
+        let ease = media_scrub_easing(&self.media_easing_name);
         let last = self.media_last_tick_s.replace(Some(now_s));
         if self.media_paused.get() {
-            return Some(media_frame_at(
+            return Some(media_frame_at_with_ease(
                 &timeline,
                 self.media_playhead_ms.get(),
                 frame_count,
+                ease,
             ));
         }
         if let Some(previous_s) = last {
@@ -1594,10 +2155,11 @@ impl AssistantPanelState {
                 }
             }
         }
-        Some(media_frame_at(
+        Some(media_frame_at_with_ease(
             &timeline,
             self.media_playhead_ms.get(),
             frame_count,
+            media_scrub_easing(&self.media_easing_name),
         ))
     }
 
@@ -1744,6 +2306,7 @@ impl AssistantPanelState {
     }
 
     fn trim_conversation(&mut self) {
+        let before = self.conversation.len();
         while self.conversation.len() > MAX_CONVERSATION_TURNS {
             if let Some(index) = self.conversation.windows(2).position(is_complete_exchange) {
                 let drained: Vec<ConversationTurn> =
@@ -1772,6 +2335,12 @@ impl AssistantPanelState {
                     0.3,
                 ));
             }
+        }
+        if self.conversation.len() != before {
+            // El drenaje corre los índices: el caché de thumbs (clave = índice)
+            // se retira completo con gracia y se reconstruye lazy. La media
+            // viaja dentro del turno, así que se recorta junto al par.
+            self.retire_all_history_thumbs();
         }
     }
 
@@ -1842,6 +2411,7 @@ impl AssistantPanelState {
 
     fn clear_remote_history(&mut self) {
         self.conversation.clear();
+        self.retire_all_history_thumbs();
         self.reveal_pending = false;
         self.reveal_started_at = None;
         self.clear_proposal_cards();
@@ -2642,12 +3212,34 @@ pub enum AssistantUiAction {
     AgentModeChanged(bool),
     /// Generar una animación del objeto/expresión y reproducirla en el chat.
     RunAnimation,
-    /// Exportar la animación visible en la card a GIF (B5).
+    /// Abrir el diálogo Exportar de la animación visible en la card.
     ///
-    /// Piel pura: la card emite la intención; la app la ejecuta en el hilo
-    /// de export existente (`spawn_gif_export`) y publica progreso/error en
-    /// `MediaExportState`. Sin I/O ni spawn en `Ui::`.
+    /// Piel pura: la card emite la intención; la app abre el diálogo con lo
+    /// detectado fuera del draw (`ffmpeg_available` una vez + pista del
+    /// pedido) y el `Start` posterior spawnea el `spawn_*` del formato
+    /// elegido. Sin I/O ni spawn en `Ui::`.
     ExportMedia,
+    /// Confirmar el export con la selección validada del diálogo (`Start`).
+    ///
+    /// La emite el botón Exportar del diálogo; la app spawnea fuera del draw
+    /// el worker del formato (`Gif`/`PngDir`/`Mp4`/`Webm`, con audio solo si
+    /// hay pista tildada) y publica progreso/error en el diálogo +
+    /// `MediaExportState`. Sin I/O ni spawn en `Ui::`.
+    ConfirmExport,
+    /// Cancelar el export en curso desde el diálogo (`Cancel`).
+    ///
+    /// La app señala el `CancellationToken` del worker en vuelo; el poll
+    /// publica el resultado honesto (jamás mudo). Sin I/O ni spawn en `Ui::`.
+    CancelExport,
+    /// Cerrar el diálogo sin exportar (descarta la selección).
+    CloseExportDialog,
+    /// Reproducir de nuevo la animación de un turno del historial (P0-UI).
+    ///
+    /// La emite la tarjeta de un turno no final con `TurnMediaRef`; la app
+    /// resuelve el pedido contra la conversación (`history_replay_request` en
+    /// `app::anim_ui`) y reinyecta los frames por el camino existente
+    /// (`set_media`, slot vivo). Sin I/O ni spawn en `Ui::`.
+    ReplayMedia { turn_idx: usize },
     /// Preguntarle al tutor qué estudiar a continuación.
     AskNextTopic,
     /// Feedback del usuario: la última explicación le sirvió.
@@ -4874,16 +5466,65 @@ pub fn media_scrub_timeline(frame_count: usize, fps: f32) -> Option<Timeline> {
 /// Índice a mostrar en `t_ms` vía `Timeline::sample` (B5).
 ///
 /// Lerp + round + clamp a `0..N`: slider→frame sin saltos ni panic.
-/// Timeline vacío o `frame_count == 0` → 0. Pura.
+/// Timeline vacío o `frame_count == 0` → 0. Pura. El easing vive en
+/// [`media_frame_at_with_ease`]; acá el histórico lineal queda intacto.
 pub fn media_frame_at(timeline: &Timeline, t_ms: u64, frame_count: usize) -> usize {
+    media_frame_at_with_ease(
+        timeline,
+        t_ms,
+        frame_count,
+        crate::animation::easing::linear,
+    )
+}
+
+/// Índice a mostrar en `t_ms` con easing aplicado a la fracción del segmento.
+///
+/// Lo que el comentario del scrub promete: la curva (`easing::by_name`, p.
+/// ej. `cubic_in_out`) modula la fracción antes del lerp vía
+/// `Timeline::sample_with` — misma curva que `RateFunc` en los casos
+/// exactos. Lerp + round + clamp a `0..N`; `frame_count == 0` → 0. Pura.
+pub fn media_frame_at_with_ease(
+    timeline: &Timeline,
+    t_ms: u64,
+    frame_count: usize,
+    ease: fn(f32) -> f32,
+) -> usize {
     if frame_count == 0 {
         return 0;
     }
-    let value = timeline.sample(t_ms);
+    let value = timeline.sample_with(t_ms, ease);
     if !value.is_finite() {
         return 0;
     }
     (value.round() as usize).min(frame_count.saturating_sub(1))
+}
+
+/// Easing vigente del scrub por su nombre del wire. Desconocido o vacío →
+/// `linear` honesto. Pura.
+pub fn media_scrub_easing(name: &str) -> fn(f32) -> f32 {
+    crate::animation::easing::by_name(name)
+}
+
+/// Instante del timeline donde `media_frame_at` muestra `index` (player pro).
+///
+/// Inversa exacta del mapeo lerp+round: `t = index * duración / (N-1)`.
+/// `frame_count <= 1` o duración 0 → 0; índice fuera de rango clampea.
+/// No finitos → 0. Pura, sin panic.
+pub fn media_frame_time_ms(index: usize, duration_ms: u64, frame_count: usize) -> u64 {
+    if frame_count <= 1 || duration_ms == 0 {
+        return 0;
+    }
+    let last = frame_count.saturating_sub(1) as f64;
+    let duration_f = duration_ms as f64;
+    if !last.is_finite() || last <= 0.0 || !duration_f.is_finite() || duration_f <= 0.0 {
+        return 0;
+    }
+    let clamped = index.min(frame_count.saturating_sub(1)) as f64;
+    let t = (clamped * duration_f / last).round();
+    if !t.is_finite() || t <= 0.0 {
+        return 0;
+    }
+    (t as u64).min(duration_ms)
 }
 
 /// Textos del contador de la card (N2): compacto `42/48` para la toolbar +
@@ -5256,6 +5897,88 @@ fn draw_media_header(
     });
 }
 
+/// Tarjeta del historial para un turno con `TurnMediaRef` que no es el último.
+/// Render puro con tokens de tipografía, espacio y radio: dibuja el thumb de
+/// 96px, el título y el botón Ver de nuevo que emite la acción de replay con
+/// el índice del turno. Cero I/O y cero spawn en la UI, solo subida GPU del
+/// thumb como hace `set_media`. Sin media válida devuelve `None`; con thumb
+/// inválido dibuja un placeholder honesto y jamás una etiqueta fantasma.
+fn draw_history_mini_card(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    turn_idx: usize,
+    turn: &ConversationTurn,
+) -> Option<AssistantUiAction> {
+    let media = turn.media.as_ref()?;
+    // Tick de gracia compartido y único por frame (ver `reap_retired_media_tick_once`).
+    let now_s = ui.input(|input| input.time);
+    state.reap_retired_media_tick_once(now_s);
+    let theme = current_theme(ui.ctx());
+    let title_full = media.title.clone();
+    let title = media_elided_title(&title_full, HISTORY_MINI_CARD_TITLE_MAX_CHARS);
+    let thumb = state.ensure_history_thumb(turn_idx, media, ui.ctx());
+    let frame_count = media.frame_count;
+    let mut action = None;
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(RADIUS_MD)
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let side = HISTORY_THUMB_SIDE_PX;
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                if let Some(texture) = &thumb {
+                    ui.painter().image(
+                        texture.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::Rounding::same(RADIUS_SM),
+                        theme.separator.gamma_multiply(0.35),
+                    );
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Sin vista previa",
+                        egui::FontId::new(TYPE_XS, egui::FontFamily::Proportional),
+                        theme.text_tertiary,
+                    );
+                }
+                ui.add_space(SPACE_SM);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(title)
+                            .color(theme.text_primary)
+                            .size(TYPE_SM)
+                            .strong(),
+                    )
+                    .on_hover_text(title_full);
+                    ui.label(
+                        egui::RichText::new(format!("{frame_count} fotogramas · miniatura 96px"))
+                            .color(theme.text_tertiary)
+                            .size(TYPE_2XS),
+                    );
+                    ui.add_space(SPACE_XS);
+                    if ui
+                        .button(egui::RichText::new("Ver de nuevo").size(TYPE_XS).strong())
+                        .on_hover_text("Vuelve a reproducir esta animación en el visor")
+                        .clicked()
+                    {
+                        action = Some(AssistantUiAction::ReplayMedia { turn_idx });
+                    }
+                });
+            });
+        });
+    action
+}
+
 /// Vista inmutable para la toolbar única v3 (todo copiado: la toolbar solo
 /// lee `Cell`s y emite intención; el export real lo ejecuta la app).
 struct MediaToolbarView<'a> {
@@ -5274,20 +5997,22 @@ struct MediaToolbarOutcome {
     close_requested: bool,
 }
 
-/// Toolbar ÚNICA v3: una fila en panel ancho, dos filas limpias en angosto.
+/// Toolbar ÚNICA v3: una fila en panel ancho, tres filas limpias en angosto.
 ///
-/// Ancha (`SingleRow`): `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
-/// Angosta (`TwoRows`, ver `media_toolbar_layout`): arriba `[▶/⏸]
-/// [deslizador + N/M]`, abajo `[1x▾] [⛶/Cerrar] [Exportar]` a la derecha.
+/// Ancha (`SingleRow`): `[▶/⏸] [◀][▶] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
+/// Angosta (`TwoRows`, ver `media_toolbar_layout`): arriba `[▶/⏸] [◀][▶]
+/// [N/M]`, al medio el deslizador a todo el ancho (piso
+/// `MEDIA_TOOLBAR_MIN_SLIDER_W` garantizado: no compite con botones),
+/// abajo `[1x▾] [⛶/Cerrar] [Exportar]` a la derecha.
 /// E2: si ni la segunda fila entra (`media_needs_overflow`), velocidad y
 /// grande/cerrar colapsan al menú explícito `···`; `Exportar` siempre queda
-/// visible como botón, jamás cortado al borde. El deslizador usa el espacio
-/// restante real sin piso forzado (el piso vive en la decisión, no en el
-/// dibujo: forzar un mínimo acá empujaba Exportar fuera del panel → el
-/// "Expor…" cortado del screenshot). Sin `.text()` lateral (apretaba la
-/// fila): la posición se lee en `N/M` + hover con el texto largo. UN solo
-/// contador (vive en `draw_media_counter_slot`, jamás etiqueta suelta).
-/// Piel pura: muta solo `Cell`s, emite `ExportMedia`.
+/// visible como botón, jamás cortado al borde. La velocidad es menú
+/// explícito (0.5x/1x/2x), no solo ciclo. Teclas locales (sin globales que
+/// choquen, ver `app::shortcuts`): Espacio play/pausa, `←/→` paso frame a
+/// frame con pausa; solo cuando ningún editor pide teclado y consumidas para
+/// no duplicar con el slider/botón enfocado. UN solo contador (vive en
+/// `draw_media_counter_slot`, jamás etiqueta suelta). Piel pura: muta solo
+/// `Cell`s, emite `ExportMedia`.
 fn draw_media_toolbar(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -5295,17 +6020,19 @@ fn draw_media_toolbar(
 ) -> MediaToolbarOutcome {
     let mut action = None;
     let mut close_requested = false;
+    handle_media_player_keys(ui, state, view);
     if media_toolbar_layout(ui.available_width(), view.frame_count) == MediaToolbarLayout::TwoRows {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
             draw_media_play_button(ui, state);
-            // Solo el contador a la derecha: el deslizador se queda con un
-            // resto holgado (play + contador son lo único fijo acá).
+            draw_media_step_buttons(ui, state, view);
+            // Solo el contador a la derecha: el deslizador vive en su propia
+            // fila a todo el ancho (piso garantizado en angosto).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 draw_media_counter_slot(ui, view);
             });
-            draw_media_scrub_slider(ui, state, view);
         });
+        draw_media_scrub_slider(ui, state, view);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5329,6 +6056,7 @@ fn draw_media_toolbar(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
             draw_media_play_button(ui, state);
+            draw_media_step_buttons(ui, state, view);
             // Botones derechos primero: el deslizador ocupa lo que quede.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 draw_media_right_buttons(ui, state, view, &mut action, &mut close_requested);
@@ -5359,6 +6087,113 @@ fn draw_media_play_button(ui: &mut egui::Ui, state: &AssistantPanelState) {
     }
 }
 
+/// Botones de paso frame a frame del player pro (pausan al pisar).
+///
+/// `◀`/`▶` mueven un fotograma exacto vía `media_frame_time_ms` (inversa
+/// del mapeo del slider, sin derivas) y dejan en pausa: retomar es
+/// explícito con `▶`/Espacio. Sin frames no hacen nada. Piel pura.
+fn draw_media_step_buttons(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    view: &MediaToolbarView,
+) {
+    if ui
+        .small_button("◀")
+        .on_hover_text(MEDIA_TIP_STEP_BACK)
+        .clicked()
+    {
+        step_media_frame(state, view, -1);
+    }
+    if ui
+        .small_button("▶")
+        .on_hover_text(MEDIA_TIP_STEP_FWD)
+        .clicked()
+    {
+        step_media_frame(state, view, 1);
+    }
+}
+
+/// Mueve el playhead `delta` fotogramas exactos y pausa (player pro).
+///
+/// Índice actual vía `media_frame_at`, destino clampado a `0..N`, instante
+/// vía `media_frame_time_ms`: el slider muestra el mismo frame que el botón
+/// pisó. Reloj al día para retomar sin salto. Puro estado UI.
+fn step_media_frame(state: &AssistantPanelState, view: &MediaToolbarView, delta: i32) {
+    let total = view.frame_count;
+    if total <= 1 {
+        return;
+    }
+    let Some(timeline) = media_scrub_timeline(total, MEDIA_CARD_BASE_FPS) else {
+        return;
+    };
+    let actual = media_frame_at_with_ease(
+        &timeline,
+        state.media_playhead_ms.get(),
+        total,
+        media_scrub_easing(&state.media_easing_name),
+    );
+    let destino = (actual as i32 + delta).clamp(0, total.saturating_sub(1) as i32) as usize;
+    state
+        .media_playhead_ms
+        .set(media_frame_time_ms(destino, view.duration_ms, total));
+    state.media_paused.set(true);
+}
+
+/// Teclas locales del player pro: Espacio play/pausa, `←/→` paso con pausa.
+///
+/// Solo cuando ningún editor pide teclado (`!wants_keyboard_input`: el
+/// composer escribe espacios y flechas sin que el player robe nada) y sin
+/// popup abierto (el menú de velocidad usa las flechas). Ningún atajo
+/// global usa estas teclas (ver `app::shortcuts`), así que no hay choque:
+/// se consumen para que el slider/botón enfocado no reaccione doble en el
+/// mismo frame. Piel pura: solo `Cell`s.
+fn handle_media_player_keys(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    view: &MediaToolbarView,
+) {
+    if view.frame_count == 0
+        || ui.ctx().wants_keyboard_input()
+        || ui.ctx().memory(|memoria| memoria.any_popup_open())
+    {
+        return;
+    }
+    let (espacio, izquierda, derecha) = ui.input(|entrada| {
+        (
+            entrada.key_pressed(egui::Key::Space),
+            entrada.key_pressed(egui::Key::ArrowLeft),
+            entrada.key_pressed(egui::Key::ArrowRight),
+        )
+    });
+    if !(espacio || izquierda || derecha) {
+        return;
+    }
+    ui.ctx().input_mut(|entrada| {
+        if espacio {
+            entrada.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+        }
+        if izquierda {
+            entrada.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft);
+        }
+        if derecha {
+            entrada.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight);
+        }
+    });
+    // Reloj al día para retomar sin salto tras el paso manual.
+    state
+        .media_last_tick_s
+        .set(Some(ui.input(|entrada| entrada.time)));
+    if espacio {
+        state.media_paused.set(!state.media_paused.get());
+    }
+    if izquierda {
+        step_media_frame(state, view, -1);
+    }
+    if derecha {
+        step_media_frame(state, view, 1);
+    }
+}
+
 /// Único contador visible `N/M` en slot fijo (solo f(frame_count)): si el
 /// label midiera su texto, `9/48 → 10/48` movería el deslizador.
 fn draw_media_counter_slot(ui: &mut egui::Ui, view: &MediaToolbarView) {
@@ -5378,6 +6213,7 @@ fn draw_media_counter_slot(ui: &mut egui::Ui, view: &MediaToolbarView) {
 
 /// Botones derechos de la toolbar (velocidad, grande/cerrar, exportar).
 /// Sin contador: el único vive en `draw_media_counter_slot`.
+/// La velocidad es menú explícito con las 3 opciones (no solo ciclo).
 fn draw_media_right_buttons(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -5401,13 +6237,30 @@ fn draw_media_right_buttons(
     {
         state.media_fullscreen.set(true);
     }
-    if ui
-        .small_button(format!("{} ▾", view.speed_label))
-        .on_hover_text(MEDIA_TIP_SPEED)
-        .clicked()
-    {
-        state.media_speed.set(state.media_speed.get().cycle());
-    }
+    draw_media_speed_menu(ui, state, view);
+}
+
+/// Menú explícito de velocidad del player pro (0.5x/1x/2x).
+///
+/// Reemplaza el ciclo ciego del botón: cada opción visible elige directo.
+/// Piel pura: solo lee/escribe el `Cell` de velocidad.
+fn draw_media_speed_menu(ui: &mut egui::Ui, state: &AssistantPanelState, view: &MediaToolbarView) {
+    let mut velocidad = state.media_speed.get();
+    ui.menu_button(format!("{} ▾", view.speed_label), |ui| {
+        for opcion in MediaPlaybackSpeed::ALL {
+            if ui
+                .selectable_label(velocidad == opcion, opcion.label())
+                .on_hover_text(MEDIA_TIP_SPEED)
+                .clicked()
+            {
+                velocidad = opcion;
+                ui.close_menu();
+            }
+        }
+    })
+    .response
+    .on_hover_text(MEDIA_TIP_SPEED);
+    state.media_speed.set(velocidad);
 }
 
 /// Botón `Exportar` (extraído para reuso en overflow: siempre visible).
@@ -5446,14 +6299,21 @@ fn draw_media_right_buttons_overflow(
 ) {
     draw_media_export_button(ui, view, action);
     ui.menu_button("···", |ui| {
-        if ui
-            .small_button(format!("Velocidad: {} ▾", view.speed_label))
-            .on_hover_text(MEDIA_TIP_SPEED)
-            .clicked()
-        {
-            state.media_speed.set(state.media_speed.get().cycle());
-            ui.close_menu();
+        let mut velocidad = state.media_speed.get();
+        for opcion in MediaPlaybackSpeed::ALL {
+            if ui
+                .selectable_label(
+                    velocidad == opcion,
+                    format!("Velocidad: {}", opcion.label()),
+                )
+                .on_hover_text(MEDIA_TIP_SPEED)
+                .clicked()
+            {
+                velocidad = opcion;
+                ui.close_menu();
+            }
         }
+        state.media_speed.set(velocidad);
         if view.in_fullscreen {
             if ui
                 .small_button("Cerrar (Esc)")
@@ -5475,21 +6335,21 @@ fn draw_media_right_buttons_overflow(
     .response
     .on_hover_text("Más acciones de la animación");
 }
-/// Deslizador de scrub en el hueco restante, sin ancho mínimo forzado.
+/// Deslizador de scrub con piso en angosto (player pro).
 ///
-/// El piso `MEDIA_TOOLBAR_MIN_SLIDER_W` vive en `media_toolbar_layout`
-/// (decisión): acá se usa el resto tal cual — forzar un mínimo empujaba los
-/// botones fuera del panel. Resto no positivo → no se dibuja (jamás desborda).
+/// En `TwoRows` vive en su propia fila a todo el ancho: el piso
+/// `MEDIA_TOOLBAR_MIN_SLIDER_W` no compite con ningún botón (no hay
+/// "Expor…" cortado). En `SingleRow` la decisión (`media_toolbar_layout`)
+/// ya garantiza resto ≥ piso. Resto no positivo → no se dibuja.
 fn draw_media_scrub_slider(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
     view: &MediaToolbarView,
 ) {
     if view.frame_count > 1 && view.duration_ms > 0 {
-        let slider_w = ui.available_width();
-        if slider_w <= 0.0 {
-            return;
-        }
+        // Piso garantizado: en su propia fila (angosto) o con resto
+        // suficiente (ancho, ver `media_toolbar_layout`).
+        let slider_w = ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W);
         let mut fraction = (state.media_playhead_ms.get().min(view.duration_ms) as f32)
             / (view.duration_ms as f32);
         fraction = fraction.clamp(0.0, 1.0);
@@ -5519,17 +6379,21 @@ fn draw_media_scrub_slider(
 ///   primer frame); la textura solo se re-selecciona si cambió el frame; sin
 ///   textura lista se reserva el mismo rect con placeholder centrado (jamás
 ///   etiqueta suelta fuera de rango).
-/// - UNA toolbar: una fila en panel ancho, dos filas limpias en angosto
+/// - UNA toolbar: una fila en panel ancho, tres filas limpias en angosto
 ///   (ver `media_toolbar_layout`); UN solo contador `N/M`, jamás duplicado.
-/// - Botón Exportar emite `AssistantUiAction::ExportMedia` (la app ejecuta
-///   en el hilo existente; cero I/O/spawn en `Ui::`). Progreso/error de
-///   export vía `MediaExportState`, jamás mudo. Prosa sin IDs literales.
+///   Player pro: menú explícito 0.5x/1x/2x, paso `◀/▶` + `←/→` con pausa,
+///   Espacio play/pausa, slider a todo el ancho en angosto.
+/// - Botón Exportar emite `AssistantUiAction::ExportMedia` (la app abre el
+///   diálogo con ffmpeg detectado fuera del draw; cero I/O/spawn en `Ui::`).
+///   El diálogo emite `ConfirmExport`/`CancelExport`/`CloseExportDialog`.
+///   Progreso/error de export vía diálogo + `MediaExportState`, jamás mudo.
+///   Prosa sin IDs literales.
 fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<AssistantUiAction> {
-    // Tick de gracia SIEMPRE (haya o no frame listo): la retención diferida
-    // libera el set viejo tras N frames dibujados, nunca en `set_media`.
-    state.reap_retired_media_tick();
-    let theme = current_theme(ui.ctx());
+    // Tick de gracia único por frame (haya o no frame listo): la retención
+    // diferida libera el set viejo tras N frames dibujados, nunca en `set_media`.
     let now_s = ui.input(|input| input.time);
+    state.reap_retired_media_tick_once(now_s);
+    let theme = current_theme(ui.ctx());
     // Snapshot barato sin retener borrows (los controles piden `&mut` y la
     // pintura solo necesita el handle clonado).
     let (title, frame_count) = state.media.as_ref().map_or_else(
@@ -5792,7 +6656,222 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         ui.ctx()
             .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
     }
+    // Diálogo Exportar: vive sobre la card (ventana centrada) y solo emite
+    // intenciones (la app spawnea/cancela fuera del draw). Sin I/O ni spawn.
+    if action.is_none() {
+        action = draw_media_export_dialog(ui, state);
+    }
     action
+}
+
+/// Diálogo Exportar profesional (`fn render(&Estado) -> Frame`).
+///
+/// Dibuja el `MediaExportDialog` del estado SIN I/O ni spawn: solo muta el
+/// estado puro y devuelve la intención (`ConfirmExport`/`CancelExport`/
+/// `CloseExportDialog`). La app ejecuta el `spawn_*` del formato fuera del
+/// draw y publica progreso/error (jamás mudo).
+///
+/// - Formatos: radio por formato con `add_enabled` + motivo cuando falta
+///   ffmpeg (`MEDIA_EXPORT_FFMPEG_HINT`).
+/// - Calidad: 3 radios + `DragValue` de bitrate/fps acotados.
+/// - Vista: Plana 2D siempre; Órbita 3D solo si la plantilla lo soporta.
+/// - Nota Tex: SVG real con fallback `ab_glyph` (siempre visible).
+/// - Progreso (`ProgressBar`/spinner) + error honesto en rojo suave.
+/// - Botones [Exportar]/[Cancelar]/[Cerrar]: Exportar valida y devuelve
+///   `ConfirmExport`; si no valida, setea el error visible y no devuelve nada.
+fn draw_media_export_dialog(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+) -> Option<AssistantUiAction> {
+    if !state.export_dialog_is_open() {
+        return None;
+    }
+    let mut pending: Option<AssistantUiAction> = None;
+    let mut close_window = false;
+    egui::Window::new("Exportar animación")
+        .id(egui::Id::new("assistant_media_export_dialog"))
+        .collapsible(false)
+        .resizable(true)
+        .constrain(true)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .default_width(380.0)
+        .frame(
+            egui::Frame::window(&ui.ctx().style())
+                .fill(current_theme(ui.ctx()).panel_bg)
+                .stroke(egui::Stroke::new(1.0, current_theme(ui.ctx()).separator))
+                .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
+                .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG)),
+        )
+        .show(ui.ctx(), |ui| {
+            let mut dialog = state.export_dialog.borrow_mut();
+            ui.label(
+                egui::RichText::new("Exportar animación")
+                    .size(TYPE_SM)
+                    .strong(),
+            );
+            ui.add_space(SPACE_XS);
+            // ── Formato (selector visible, 4 opciones) ──
+            ui.label(egui::RichText::new("Formato").size(TYPE_XS).strong());
+            for formato in MediaExportFormat::ALL {
+                let habilitado = dialog.is_format_enabled(formato);
+                let mut radio = ui.add_enabled(
+                    habilitado,
+                    egui::RadioButton::new(dialog.format == formato, formato.display_name()),
+                );
+                if !habilitado {
+                    if let Some(motivo) = dialog.format_disabled_reason(formato) {
+                        radio = radio.on_hover_text(motivo);
+                    }
+                }
+                if radio.clicked() && habilitado {
+                    dialog.format = formato;
+                    dialog.error = None;
+                }
+            }
+            if !dialog.ffmpeg_available {
+                ui.label(
+                    egui::RichText::new(MEDIA_EXPORT_FFMPEG_HINT)
+                        .size(TYPE_XS)
+                        .italics(),
+                );
+            }
+            ui.add_space(SPACE_XS);
+            // ── Calidad + bitrate + fps ──
+            ui.label(egui::RichText::new("Calidad").size(TYPE_XS).strong());
+            ui.horizontal(|ui| {
+                for calidad in MediaExportQuality::DIALOG_ALL {
+                    if ui
+                        .radio(dialog.quality == calidad, calidad.display_name())
+                        .clicked()
+                    {
+                        dialog.quality = calidad;
+                        dialog.bitrate_kbps = calidad.suggested_bitrate_kbps();
+                        dialog.error = None;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Bitrate (kbps)").size(TYPE_XS));
+                let respuesta = ui.add(
+                    egui::DragValue::new(&mut dialog.bitrate_kbps)
+                        .range(MEDIA_EXPORT_BITRATE_MIN_KBPS..=MEDIA_EXPORT_BITRATE_MAX_KBPS)
+                        .speed(100),
+                );
+                if respuesta.changed() {
+                    dialog.error = None;
+                }
+                ui.label(egui::RichText::new("FPS").size(TYPE_XS));
+                let respuesta_fps = ui.add(
+                    egui::DragValue::new(&mut dialog.fps)
+                        .range(MEDIA_EXPORT_FPS_MIN..=MEDIA_EXPORT_FPS_MAX),
+                );
+                if respuesta_fps.changed() {
+                    dialog.error = None;
+                }
+            });
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} fps · {} kbps · {} frames",
+                    dialog.fps, dialog.bitrate_kbps, dialog.frame_count
+                ))
+                .size(TYPE_XS),
+            );
+            ui.add_space(SPACE_XS);
+            // ── Vista 2D/Órbita (si cabe sin romper) ──
+            ui.label(egui::RichText::new("Vista").size(TYPE_XS).strong());
+            let orbita_habilitada = dialog.is_orbit_enabled();
+            ui.horizontal(|ui| {
+                if ui
+                    .radio(
+                        dialog.view == MediaExportView::Plana,
+                        MediaExportView::Plana.display_name(),
+                    )
+                    .clicked()
+                {
+                    dialog.view = MediaExportView::Plana;
+                    dialog.error = None;
+                }
+                let mut radio_orbita = ui.add_enabled(
+                    orbita_habilitada,
+                    egui::RadioButton::new(
+                        dialog.view == MediaExportView::Orbita,
+                        MediaExportView::Orbita.display_name(),
+                    ),
+                );
+                if !orbita_habilitada {
+                    radio_orbita = radio_orbita.on_hover_text(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT);
+                }
+                if radio_orbita.clicked() && orbita_habilitada {
+                    dialog.view = MediaExportView::Orbita;
+                    dialog.error = None;
+                }
+            });
+            if !orbita_habilitada {
+                ui.label(
+                    egui::RichText::new(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT)
+                        .size(TYPE_XS)
+                        .italics(),
+                );
+            }
+            ui.add_space(SPACE_XS);
+            // ── Nota Tex (siempre visible) ──
+            ui.label(
+                egui::RichText::new(MEDIA_EXPORT_TEX_NOTE)
+                    .size(TYPE_XS)
+                    .italics(),
+            );
+            ui.add_space(SPACE_SM);
+            // ── Progreso + error honesto visible ──
+            if dialog.exporting {
+                if let Some(progreso) = dialog.progress {
+                    ui.add(egui::ProgressBar::new(progreso.clamp(0.0, 1.0)).show_percentage());
+                } else {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("Exportando…").size(TYPE_XS).italics());
+                }
+                ui.add_space(SPACE_XS);
+            }
+            if let Some(error) = dialog.error.clone() {
+                ui.label(
+                    egui::RichText::new(error)
+                        .size(TYPE_XS)
+                        .color(egui::Color32::RED),
+                );
+                ui.add_space(SPACE_XS);
+            }
+            // ── Acciones (intención, sin spawn) ──
+            ui.horizontal(|ui| {
+                let exportar_habilitado = !dialog.exporting;
+                if ui
+                    .add_enabled(exportar_habilitado, egui::Button::new("Exportar"))
+                    .clicked()
+                {
+                    match dialog.validate_selection() {
+                        Ok(()) => {
+                            dialog.mark_started();
+                            pending = Some(AssistantUiAction::ConfirmExport);
+                        }
+                        Err(motivo) => {
+                            dialog.mark_failed(motivo);
+                        }
+                    }
+                }
+                if dialog.exporting {
+                    if ui.button("Cancelar").clicked() {
+                        dialog.mark_failed("exportación cancelada");
+                        pending = Some(AssistantUiAction::CancelExport);
+                    }
+                } else if ui.button("Cerrar").clicked() {
+                    pending = Some(AssistantUiAction::CloseExportDialog);
+                    close_window = true;
+                }
+            });
+        });
+    if close_window {
+        state.close_export_dialog();
+        return pending.or(Some(AssistantUiAction::CloseExportDialog));
+    }
+    pending
 }
 
 fn retain_first_assistant_action(
@@ -6995,7 +8074,8 @@ fn draw_conversation_turn(
                 turn_index,
                 cache,
             );
-            // Integración de animación dentro del mensaje: progreso o media del último turno
+            // Integración de animación dentro del mensaje: progreso o media del último turno.
+            // El slot vivo (`set_media`) sigue exclusivo del último turno.
             if is_last {
                 if state.anim_progress {
                     ui.add_space(SPACE_SM);
@@ -7007,6 +8087,13 @@ fn draw_conversation_turn(
                     ui.add_space(SPACE_SM);
                     retain_first_assistant_action(&mut action, draw_media_card(ui, state));
                 }
+            } else if turn_has_history_mini_card(turn_index, state.conversation.len(), turn) {
+                // P0-UI historial Thumb+Replay: mini-card 96px + [Ver de nuevo].
+                ui.add_space(SPACE_SM);
+                retain_first_assistant_action(
+                    &mut action,
+                    draw_history_mini_card(ui, state, turn_index, turn),
+                );
             }
             // Paso a paso: siempre visible, nunca mudo. Si el contenido no es
             // complejo, el botón queda deshabilitado con su motivo (tooltip +
@@ -8520,7 +9607,11 @@ impl MathLayout {
     }
 }
 
-fn draw_math(ui: &mut egui::Ui, source: &str) -> egui::Response {
+/// Dibuja una expresión del subset `DisplayMath` (puro, sin I/O ni spawn).
+///
+/// Reusable desde el overlay pedagógico: si el parse falla, muestra la
+/// fuente como texto con tooltip (jamás inventa glifos).
+pub fn draw_math(ui: &mut egui::Ui, source: &str) -> egui::Response {
     let theme = current_theme(ui.ctx());
     let Some(expression) = MathParser::parse(source) else {
         return ui
@@ -9822,11 +10913,13 @@ mod tests {
                     role: ConversationRole::User,
                     content: "graficá y=x²".to_owned(),
                     origin: None,
+                    media: None,
                 },
                 ConversationTurn {
                     role: ConversationRole::Assistant,
                     content: "Listo: parábola con vértice en el origen.".to_owned(),
                     origin: None,
+                    media: None,
                 },
             ],
             ..Default::default()
@@ -9840,6 +10933,7 @@ mod tests {
                 role: ConversationRole::User,
                 content: "hola".to_owned(),
                 origin: None,
+                media: None,
             }],
             ..Default::default()
         };
@@ -9855,6 +10949,7 @@ mod tests {
                     role: ConversationRole::Assistant,
                     content: content.to_owned(),
                     origin: None,
+                    media: None,
                 }],
                 ..Default::default()
             }
@@ -10411,6 +11506,52 @@ mod tests {
     }
 
     #[test]
+    fn media_scrub_aplica_easing_a_la_fraccion_antes_del_frame() {
+        // 48 frames a 12 fps → 4000 ms. A t=1000 (fracción 0.25) el lineal
+        // da round(0.25·47)=12; con cubic_in_out la fracción se frena a
+        // 4·0.25³=0.0625 → round(0.0625·47)=3. Mismo instante, distinto
+        // frame: el easing sí modula el scrub.
+        let timeline =
+            media_scrub_timeline(48, MEDIA_CARD_BASE_FPS).expect("con frames hay timeline");
+        let lineal = crate::animation::easing::linear;
+        let cubic = crate::animation::easing::cubic_in_out;
+        assert_eq!(media_frame_at_with_ease(&timeline, 1_000, 48, lineal), 12);
+        assert_eq!(media_frame_at_with_ease(&timeline, 1_000, 48, cubic), 3);
+        // Extremos fijos por construcción (easing 0→0, 1→1).
+        assert_eq!(media_frame_at_with_ease(&timeline, 0, 48, cubic), 0);
+        assert_eq!(media_frame_at_with_ease(&timeline, 4_000, 48, cubic), 47);
+        // Nombre desconocido o vacío → linear honesto (mismo frame).
+        assert_eq!(
+            media_frame_at_with_ease(&timeline, 1_000, 48, media_scrub_easing("wiggle-mal")),
+            12
+        );
+        assert_eq!(
+            media_frame_at_with_ease(&timeline, 1_000, 48, media_scrub_easing("")),
+            12
+        );
+        assert_eq!(
+            media_frame_at_with_ease(&timeline, 1_000, 48, media_scrub_easing("cubic_in_out")),
+            3
+        );
+        // Sin frames → 0 con cualquier easing, jamás panic.
+        assert_eq!(media_frame_at_with_ease(&timeline, 0, 0, cubic), 0);
+    }
+
+    #[test]
+    fn media_easing_por_defecto_es_lineal_y_se_reinicia_en_set_media() {
+        let mut state = AssistantPanelState::default();
+        assert_eq!(state.media_easing_name, "linear");
+        state.set_media_easing_name("cubic_in_out");
+        assert_eq!(state.media_easing_name, "cubic_in_out");
+        state.set_media_easing_name("   ");
+        assert_eq!(state.media_easing_name, "linear");
+        // Card nueva = reproductor fresco (igual que la velocidad).
+        state.set_media_easing_name("cubic_in_out");
+        state.set_media(None, &egui::Context::default());
+        assert_eq!(state.media_easing_name, "linear");
+    }
+
+    #[test]
     fn media_playback_speed_rota_y_reporta_factor() {
         assert_eq!(MediaPlaybackSpeed::default(), MediaPlaybackSpeed::Normal);
         assert_eq!(MediaPlaybackSpeed::Half.rate(), 0.5);
@@ -10425,6 +11566,50 @@ mod tests {
             MediaPlaybackSpeed::Double
         );
         assert_eq!(MediaPlaybackSpeed::Double.cycle(), MediaPlaybackSpeed::Half);
+    }
+
+    #[test]
+    fn media_playback_speed_menu_explicito_cubre_las_3() {
+        // El menú ofrece las 3 sin depender del ciclo: etiquetas y factores
+        // alineados con `rate`/`label`.
+        assert_eq!(MediaPlaybackSpeed::ALL.len(), 3);
+        let etiquetas: Vec<&str> = MediaPlaybackSpeed::ALL
+            .iter()
+            .map(|velocidad| velocidad.label())
+            .collect();
+        assert_eq!(etiquetas, vec!["0.5x", "1x", "2x"]);
+        let factores: Vec<f32> = MediaPlaybackSpeed::ALL
+            .iter()
+            .map(|velocidad| velocidad.rate())
+            .collect();
+        assert_eq!(factores, vec![0.5, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn media_frame_time_ms_invierte_el_mapeo_del_slider() {
+        // Ida y vuelta exacta: el instante del frame k muestra k.
+        for total in [2usize, 3, 12, 48] {
+            let linea =
+                media_scrub_timeline(total, MEDIA_CARD_BASE_FPS).expect("con frames hay línea");
+            let duracion = media_loop_duration_ms(total, MEDIA_CARD_BASE_FPS);
+            for indice in 0..total {
+                let instante = media_frame_time_ms(indice, duracion, total);
+                assert_eq!(
+                    media_frame_at(&linea, instante, total),
+                    indice,
+                    "total {total} índice {indice}"
+                );
+            }
+            // Fuera de rango clampea al último, jamás panic.
+            assert_eq!(
+                media_frame_at(&linea, media_frame_time_ms(999, duracion, total), total),
+                total - 1
+            );
+        }
+        // Bordes: sin frames o un solo frame no hay instante que buscar.
+        assert_eq!(media_frame_time_ms(0, 1000, 0), 0);
+        assert_eq!(media_frame_time_ms(0, 1000, 1), 0);
+        assert_eq!(media_frame_time_ms(5, 0, 48), 0);
     }
 
     #[test]
@@ -10450,6 +11635,69 @@ mod tests {
             .advance_media_playhead(99.0, 12, true)
             .expect("índice");
         assert!(before < 12, "capa el salto, fue {before}");
+    }
+
+    #[test]
+    fn export_dialog_abre_con_detectado_y_valida_honesto() {
+        // El botón Exportar abre el diálogo (la app llama `open_export_dialog`
+        // con ffmpeg detectado fuera del draw); el `Start` valida sin spawn
+        // en la UI.
+        let state = AssistantPanelState::default();
+        assert!(!state.export_dialog_is_open());
+        // Sin ffmpeg: MP4/WebM deshabilitados con motivo, GIF sale.
+        state.open_export_dialog(false, false, 48);
+        assert!(state.export_dialog_is_open());
+        let dialogo = state.export_dialog_snapshot();
+        assert!(!dialogo.ffmpeg_available);
+        assert!(!dialogo.orbit_supported);
+        assert_eq!(dialogo.frame_count, 48);
+        assert_eq!(dialogo.format, MediaExportFormat::Gif);
+        assert!(dialogo.validate_selection().is_ok());
+        // Órbita sin plantilla 3D = error honesto.
+        state.export_dialog.borrow_mut().view = MediaExportView::Orbita;
+        let err = state
+            .export_dialog_snapshot()
+            .validate_selection()
+            .expect_err("órbita sin 3D debe fallar");
+        assert!(err.contains("3D"), "fue: {err}");
+        // Card nueva cierra el diálogo (sin arrastrar error viejo).
+        let context = egui::Context::default();
+        let mut state = state;
+        state.set_media(
+            Some(AssistantMedia {
+                title: "otra".into(),
+                frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
+            }),
+            &context,
+        );
+        assert!(!state.export_dialog_is_open());
+    }
+
+    #[test]
+    fn export_dialog_paridad_formatos_y_presupuestos() {
+        // Paridad con `app::anim_native`: 4 formatos, GIF/PNG sin ffmpeg,
+        // MP4/WebM con ffmpeg; presupuestos 64 frames / 1..=60fps /
+        // 100..=20000kbps + default 48 intactos.
+        assert_eq!(MediaExportFormat::ALL.len(), 4);
+        assert_eq!(MEDIA_EXPORT_MAX_FRAMES, 64);
+        assert_eq!(MEDIA_EXPORT_DEFAULT_FPS, 12);
+        assert_eq!(MEDIA_EXPORT_FPS_MIN, 1);
+        assert_eq!(MEDIA_EXPORT_FPS_MAX, 60);
+        assert_eq!(MEDIA_EXPORT_BITRATE_MIN_KBPS, 100);
+        assert_eq!(MEDIA_EXPORT_BITRATE_MAX_KBPS, 20_000);
+        assert_eq!(MediaExportQuality::Media.suggested_bitrate_kbps(), 2000);
+        let state = AssistantPanelState::default();
+        state.open_export_dialog(true, true, 48);
+        let dialogo = state.export_dialog_snapshot();
+        for formato in MediaExportFormat::ALL {
+            assert!(dialogo.is_format_enabled(formato), "{formato:?} con ffmpeg");
+            assert_eq!(dialogo.format_disabled_reason(formato), None);
+        }
+        assert!(dialogo.is_orbit_enabled());
+        assert!(dialogo.validate_selection().is_ok());
+        // Nota Tex siempre presente (SVG real + fallback ab_glyph).
+        assert!(MEDIA_EXPORT_TEX_NOTE.contains("SVG"));
+        assert!(MEDIA_EXPORT_TEX_NOTE.contains("ab_glyph"));
     }
 
     #[test]
@@ -10573,6 +11821,191 @@ mod tests {
             state.reap_retired_media_tick();
         }
         assert_eq!(state.retired_media_pending_textures(), 0);
+    }
+
+    // ── P0-UI historial Thumb+Replay ─────────────────────────────────────
+    fn muestra_historial(title: &str) -> TurnMediaRef {
+        TurnMediaRef::new(
+            title,
+            "derivada",
+            "pendiente de la tangente",
+            vec![128_u8; TURN_MEDIA_THUMB_SIDE_PX * TURN_MEDIA_THUMB_SIDE_PX * 4],
+            8,
+        )
+    }
+
+    #[test]
+    fn history_mini_card_solo_no_last_con_media() {
+        let conv = vec![
+            ConversationTurn::user("q1"),
+            ConversationTurn::assistant("r1").with_media(muestra_historial("t1")),
+            ConversationTurn::user("q2"),
+            ConversationTurn::assistant("r2").with_media(muestra_historial("t2")),
+        ];
+        // Solo el turno 1: el último con media usa el slot vivo.
+        assert_eq!(history_mini_card_indices(&conv), vec![1]);
+        assert!(history_mini_card_indices(&[]).is_empty());
+        let sin_media = vec![
+            ConversationTurn::user("q"),
+            ConversationTurn::assistant("r"),
+        ];
+        assert!(history_mini_card_indices(&sin_media).is_empty());
+    }
+
+    #[test]
+    fn history_thumb_cachea_una_textura_y_rechaza_bytes_invalidos() {
+        let context = egui::Context::default();
+        let state = AssistantPanelState::default();
+        let invalida = TurnMediaRef::new("t", "derivada", "concepto", vec![1_u8; 100], 8);
+        assert!(
+            state.ensure_history_thumb(0, &invalida, &context).is_none(),
+            "thumb no-96×96 nunca sube"
+        );
+        assert_eq!(state.history_thumb_cached_count(), 0);
+        let valida = muestra_historial("Tangente");
+        let primera = state
+            .ensure_history_thumb(1, &valida, &context)
+            .expect("thumb válido sube");
+        assert_eq!(state.history_thumb_cached_count(), 1);
+        let segunda = state
+            .ensure_history_thumb(1, &valida, &context)
+            .expect("reutiliza el caché");
+        assert_eq!(primera.id(), segunda.id(), "misma huella, misma textura");
+        assert_eq!(state.history_thumb_cached_count(), 1);
+        // Reemplazo: la vieja se retira con gracia, no se dropea en el frame.
+        let otra = muestra_historial("Integral");
+        let _ = state
+            .ensure_history_thumb(1, &otra, &context)
+            .expect("reemplazo sube");
+        assert_eq!(state.history_thumb_cached_count(), 1);
+        assert_eq!(state.retired_media_pending_textures(), 1);
+    }
+
+    #[test]
+    fn trim_conversation_dropea_thumbs_con_el_par() {
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        // Llena el historial al tope (6) con media en el par más viejo.
+        for ronda in 0..3 {
+            state.begin_request(format!("q{ronda}"));
+            state.complete_request(format!("r{ronda}"));
+        }
+        assert_eq!(state.conversation.len(), MAX_CONVERSATION_TURNS);
+        state.conversation[1].attach_media(muestra_historial("Vieja"));
+        let _ = state
+            .ensure_history_thumb(1, &muestra_historial("Vieja"), &context)
+            .expect("thumb viejo cacheado");
+        assert_eq!(state.history_thumb_cached_count(), 1);
+        // Un intercambio más: el trim drena el par más viejo con su thumb
+        // (el push impar deja 5, el complete cierra el par en 6).
+        state.begin_request("nueva".into());
+        state.complete_request("respuesta nueva".into());
+        assert_eq!(state.conversation.len(), MAX_CONVERSATION_TURNS);
+        assert_eq!(
+            state.history_thumb_cached_count(),
+            0,
+            "el trim invalida el caché corrido"
+        );
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            1,
+            "el thumb dropeado queda en gracia, no liberado en el frame"
+        );
+        for _ in 0..MEDIA_TEXTURE_GRACE_FRAMES {
+            state.reap_retired_media_tick();
+        }
+        assert_eq!(state.retired_media_pending_textures(), 0);
+    }
+
+    #[test]
+    fn replay_media_action_lleva_turn_idx() {
+        let action = AssistantUiAction::ReplayMedia { turn_idx: 1 };
+        assert!(matches!(
+            action,
+            AssistantUiAction::ReplayMedia { turn_idx: 1 }
+        ));
+    }
+
+    #[test]
+    fn reap_once_no_doble_descuenta_en_el_mismo_frame() {
+        // N mini-cards + slot vivo comparten UN tick por frame: dos llamadas
+        // con el mismo instante egui descuentan una sola vez.
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        let frame = egui::ColorImage::new([2, 2], egui::Color32::WHITE);
+        state.set_media(
+            Some(AssistantMedia {
+                title: "a".into(),
+                frames: vec![frame],
+            }),
+            &context,
+        );
+        state.set_media(None, &context);
+        assert_eq!(state.retired_media_pending_textures(), 1);
+        state.reap_retired_media_tick_once(10.0);
+        state.reap_retired_media_tick_once(10.0);
+        state.reap_retired_media_tick_once(10.5);
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            1,
+            "mismo instante = un solo tick"
+        );
+        state.reap_retired_media_tick_once(11.0);
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            0,
+            "tres instantes distintos agotan la gracia de 3"
+        );
+    }
+
+    #[test]
+    fn retencion_ui_acota_96_texturas_y_gracia_3() {
+        let context = egui::Context::default();
+        let state = AssistantPanelState::default();
+        // Ráfaga patológica: 200 sets de 1 textura sin un solo tick.
+        for ronda in 0..200 {
+            let tex = context.load_texture(
+                format!("retencion_ui_{ronda}"),
+                egui::ColorImage::new([2, 2], egui::Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            state.retire_media_textures(vec![tex]);
+            let total: usize = state
+                .retired_media_textures
+                .borrow()
+                .iter()
+                .map(|batch| batch.textures.len())
+                .sum();
+            assert!(
+                total <= HISTORY_RETIRED_MAX_TEXTURES,
+                "ronda {ronda}: {total} > 96"
+            );
+        }
+        assert_eq!(HISTORY_RETIRED_MAX_TEXTURES, 96);
+        assert_eq!(HISTORY_THUMB_MAX_TEXTURES, 96, "6 turnos << 96");
+        for _ in 0..MEDIA_TEXTURE_GRACE_FRAMES {
+            state.reap_retired_media_tick();
+        }
+        assert_eq!(state.retired_media_pending_textures(), 0);
+    }
+
+    #[test]
+    fn history_consts_en_paridad_con_tipos_y_gif_intacto() {
+        assert_eq!(
+            HISTORY_THUMB_SIDE_PX, TURN_MEDIA_THUMB_SIDE_PX as f32,
+            "thumb 96px en ambos lados"
+        );
+        assert_eq!(MEDIA_TEXTURE_GRACE_FRAMES, 3);
+        assert_eq!(
+            grafito_assistant_types::TURN_MEDIA_MAX_FRAMES,
+            64,
+            "64 frames por replay, intacto"
+        );
+        assert_eq!(
+            grafito_assistant_types::TURN_MEDIA_THUMB_MAX_BYTES,
+            TURN_MEDIA_THUMB_SIDE_PX * TURN_MEDIA_THUMB_SIDE_PX * 4,
+            "tope del tipo = RGBA 96×96"
+        );
     }
 
     #[test]

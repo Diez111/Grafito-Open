@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod speed_tests {
     use grafito_geometry::expr::prepare_function_ast;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::time::Instant;
 
     // P1b: gate informativo separado (no bloquea PR). Son mediciones
@@ -13,7 +13,7 @@ mod speed_tests {
     #[test]
     #[ignore]
     fn bench_eval_2d_simple() {
-        let ast = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
+        let ast = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
         let n = 2_000_000usize;
         let start = Instant::now();
         let mut sum = 0.0f64;

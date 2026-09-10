@@ -1,9 +1,12 @@
 //! Protocolo JSON v1 entre Grafito y el motor de animaciones externo.
 //!
-//! Wire protocol (líneas JSON sobre stdio, `\n` terminado, UTF-8):
+//! Wire protocol (líneas JSON sobre stdio, `\n` terminado, UTF-8).
+//! F0: el worker Python está jubilado; el wire v1 se conserva SOLO para los
+//! tests del puente (`engine.rs` usa stubs `sh`). El render productivo es
+//! 100 % nativo Rust (`grafito-app::anim_native`).
 //!
-//! - Rust → Python: `render_request`, `ping`, `shutdown`.
-//! - Python → Rust: `hello`, `pong`, `progress`, `render_result`, `error`.
+//! - Rust → motor: `render_request`, `ping`, `shutdown`.
+//! - Motor → Rust: `hello`, `pong`, `progress`, `render_result`, `error`.
 //!
 //! Ejemplos (cada línea termina en `\n`):
 //! ```text
@@ -216,7 +219,8 @@ pub struct Resolution {
 }
 
 impl Resolution {
-    /// Crea una resolución validada (64..=4096 por lado, coincide con python MIN/MAX).
+    /// Crea una resolución validada (64..=4096 por lado, presupuesto histórico
+    /// del worker jubilado, hoy nativo).
     pub fn try_new(width: u32, height: u32) -> Result<Self, ProtocolError> {
         if width < 64 || height < 64 {
             return Err(ProtocolError::InvalidCanvas(format!(
@@ -327,12 +331,9 @@ impl AnimParams {
 
 /// Formato de exportación pedido al motor.
 ///
-/// TODO(v3-webm): WebM NO soportado. Sería trivial solo si ffmpeg ya estuviera
-/// cableado en el worker python (hoy el worker solo escribe gif/png/mp4 vía
-/// placeholder + manim); añadir `Webm` aquí exige: (1) rama en el worker +
-/// `ALLOW_EXPORT`, (2) validación de `ffmpeg` presente, (3) tests de wire.
-/// El test `export_format_solo_tres_variantes` pinnea el estado actual: "webm"
-/// se rechaza en deserialización.
+/// P1-core: `Webm` existe en el wire (serde + `from_str`/`to_str`). El render
+/// sin `ffmpeg` en PATH falla honesto en la Piel (`anim_native`, crate
+/// `grafito-app`), NO acá: este crate solo tipa y valida el pedido.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
     #[serde(rename = "gif")]
@@ -341,6 +342,8 @@ pub enum ExportFormat {
     PngSequence,
     #[serde(rename = "mp4")]
     Mp4,
+    #[serde(rename = "webm")]
+    Webm,
 }
 
 impl ExportFormat {
@@ -349,6 +352,27 @@ impl ExportFormat {
             Self::Gif => "gif",
             Self::PngSequence => "png",
             Self::Mp4 => "mp4",
+            Self::Webm => "webm",
+        }
+    }
+
+    /// Alias estable de [`ExportFormat::as_str`] (simetría con `FromStr`).
+    pub const fn to_str(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+impl std::str::FromStr for ExportFormat {
+    type Err = ProtocolError;
+    /// Parsea el nombre del wire (`gif`/`png`/`mp4`/`webm`, con trim y sin
+    /// importar mayúsculas). `Err` honesto si no matchea.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_lowercase().as_str() {
+            "gif" => Ok(Self::Gif),
+            "png" => Ok(Self::PngSequence),
+            "mp4" => Ok(Self::Mp4),
+            "webm" => Ok(Self::Webm),
+            otro => Err(ProtocolError::UnsupportedExport(otro.to_string())),
         }
     }
 }
@@ -374,6 +398,9 @@ pub struct AnimRequest {
     /// Duración en ms (propagada desde AnimParams::duration). Default 2000 si falta (compat v1).
     #[serde(default = "default_duration_ms")]
     pub duration_ms: u64,
+    // NOTA: el audio se borró del núcleo (inventario P0-a). El wire viejo
+    // con campo `audio` sigue deserializando: serde ignora campos
+    // desconocidos por defecto y el pedido queda mudo (honesto).
 }
 
 fn default_duration_ms() -> u64 {
@@ -420,7 +447,8 @@ impl AnimRequest {
         if w < 64 || h < 64 {
             return Err(ProtocolError::InvalidCanvas(format!("{w}x{h} < 64")));
         }
-        // Límite estricto 4096: coincide con Resolution::try_new y con el motor Python (MIN/MAX_CANVAS).
+        // Límite estricto 4096: coincide con Resolution::try_new (presupuesto
+        // histórico del motor jubilado; hoy nativo).
         // Antes 8192 se aceptaba silencioso y el motor clampaba sin error — ahora es error tipado.
         if w > 4096 || h > 4096 {
             return Err(ProtocolError::InvalidCanvas(format!(
@@ -436,6 +464,120 @@ impl AnimRequest {
         }
         Ok(())
     }
+
+    /// Validación con contención de rutas contra `base` (directorio de
+    /// trabajo del render): hoy equivale a [`AnimRequest::validate`] (el
+    /// audio se borró del núcleo; la contención de PNG-sequence vive en
+    /// [`PngDir::validate_en`]). Se conserva la firma para compat.
+    /// Puro salvo `canonicalize` de lectura (nunca crea directorios).
+    pub fn validate_en(&self, _base: &std::path::Path) -> Result<(), ProtocolError> {
+        self.validate()
+    }
+}
+
+// ── PNG-sequence (P1-core formatos; el audio se borró del núcleo) ───────
+// Cerebro puro: sin egui, sin wgpu, sin red. `validate()` es sintáctico y
+// total (sin I/O, sin pánicos); `validate_en(base)` suma contención de rutas
+// de solo-lectura (nunca crea directorios: el render crea tras validar).
+
+/// Largo máximo de una ruta de medio en chars (anti-OOM de wire).
+/// Reubicado acá tras borrar el audio (antes junto a `AudioTrack`): lo usan
+/// [`PngDir`] y `valida_ruta_sintactica`.
+pub const MAX_MEDIA_PATH_CHARS: usize = 1024;
+
+/// Directorio de salida de una PNG-sequence (`frame_0000.png`, …).
+///
+/// La secuencia en sí ya viaja por el wire (`ExportFormat::PngSequence`);
+/// este tipo valida el DIRECTORIO que la contiene (ruta contenida, sin NUL).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PngDir {
+    /// Directorio de los frames (relativo al workdir o absoluto contenido).
+    pub dir: String,
+}
+
+impl PngDir {
+    /// Constructor validado (sintáctico, sin I/O).
+    pub fn try_new(dir: String) -> Result<Self, ProtocolError> {
+        let png = Self { dir };
+        png.validate()?;
+        Ok(png)
+    }
+
+    /// Validación sintáctica: no vacía (≤1024 chars, sin NUL). Sin I/O.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        valida_ruta_sintactica(&self.dir, "png_dir")?;
+        Ok(())
+    }
+
+    /// Además de [`PngDir::validate`], exige contención dentro de `base`
+    /// (solo lectura, nunca crea directorios: el render crea tras validar).
+    pub fn validate_en(&self, base: &std::path::Path) -> Result<(), ProtocolError> {
+        self.validate()?;
+        if !ruta_contenida_en(base, &self.dir) {
+            return Err(ProtocolError::InvalidField {
+                field: "png_dir",
+                reason: "fuera del área de trabajo: usá ruta relativa contenida".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Sintaxis de ruta de medio: no vacía, ≤1024 chars, sin NUL. Pura.
+fn valida_ruta_sintactica(raw: &str, campo: &'static str) -> Result<(), ProtocolError> {
+    if raw.is_empty() {
+        return Err(ProtocolError::InvalidField {
+            field: campo,
+            reason: "ruta vacía".into(),
+        });
+    }
+    if raw.contains('\0') {
+        return Err(ProtocolError::InvalidField {
+            field: campo,
+            reason: "ruta con byte NUL".into(),
+        });
+    }
+    if raw.chars().count() > MAX_MEDIA_PATH_CHARS {
+        return Err(ProtocolError::InvalidField {
+            field: campo,
+            reason: format!("excede {MAX_MEDIA_PATH_CHARS} chars"),
+        });
+    }
+    Ok(())
+}
+
+/// ¿`raw` (relativa a `base` o absoluta) queda dentro de `base`?
+///
+/// Espejo de solo-lectura de `engine::validate_media_path`: NUL/vacía →
+///
+/// `false`; se resuelve contra `base`, se canonicaliza el ancestro existente
+/// más cercano y se exige prefijo. Nunca crea directorios (el render crea
+/// tras validar). Puro salvo `canonicalize` de lectura.
+fn ruta_contenida_en(base: &std::path::Path, raw: &str) -> bool {
+    if raw.is_empty() || raw.contains('\0') {
+        return false;
+    }
+    let candidato = {
+        let p = std::path::Path::new(raw);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            base.join(p)
+        }
+    };
+    let Ok(cwd) = base.canonicalize() else {
+        return false;
+    };
+    let mut sonda: &std::path::Path = &candidato;
+    loop {
+        match sonda.canonicalize() {
+            Ok(canon) => return canon.starts_with(&cwd),
+            Err(_) => match sonda.parent() {
+                Some(arriba) if !arriba.as_os_str().is_empty() => sonda = arriba,
+                _ => return false,
+            },
+        }
+    }
 }
 
 // ── Params vivos v3 ─────────────────────────────────────────────────────
@@ -449,12 +591,14 @@ impl AnimRequest {
 // | `a`     | integral-area     | cota inferior en [-3, 3]       | 0.0     |
 // | `b`     | integral-area     | cota superior en [-3, 3]       | 2.0     |
 // | `terms` | euler / fourier   | nº máx. parciales/armónicos    | 7 / 6   |
+// | `terms` | taylor-series     | orden del polinomio (F1)       | 3 (1..=7)|
 //
-// NOTA: `taylor-series` IGNORA `terms` (su animación es un fade de orden 3
-// fijo, no un conteo; cambiarlo rompería el histórico — TODO si se quiere
-// orden paramétrico). El resto de plantillas también ignoran params por ahora
-// (TODO); el dispatcher con params (`render_anim_for_concept_with_params`)
-// documenta cuáles atienden y cuáles delegan sin cambios.
+// `taylor-series` LEE `terms` como orden 1..=7 vía `taylor_anim_order`
+// (F1 Manim-en-Rust; `render_taylor_frames_inner` en W3 lo consume para
+// dibujar `P_n` con el orden pedido; mapa vacío = histórico orden 3).
+// El resto de plantillas también ignoran params por ahora (TODO); el
+// dispatcher con params (`render_anim_for_concept_with_params`) documenta
+// cuáles atienden y cuáles delegan sin cambios.
 //
 // Reglas: valor ausente / NaN / inf → default; fuera de rango → clamp.
 // Un mapa vacío reproduce el comportamiento histórico exacto (los wrappers
@@ -470,8 +614,35 @@ pub const SCENE_PARAM_SPAN: &str = "span";
 pub const SCENE_PARAM_A: &str = "a";
 /// Clave de la cota superior del área (integral-area).
 pub const SCENE_PARAM_B: &str = "b";
-/// Clave del nº máximo de parciales/armónicos (euler [1,7] / fourier [1,6]).
+/// Clave del nº máximo de parciales/armónicos (euler [1,7] / fourier [1,6])
+/// y del orden del polinomio (`taylor-series` [1,7] vía `taylor_anim_order`).
 pub const SCENE_PARAM_TERMS: &str = "terms";
+
+/// Orden mínimo del `taylor-series` animado (F1).
+pub const TAYLOR_ANIM_ORDER_MIN: usize = 1;
+/// Orden máximo del `taylor-series` animado (el slider vivo llega a 10;
+/// la animación corta en 7 para que el set de 48 frames siga legible).
+pub const TAYLOR_ANIM_ORDER_MAX: usize = 7;
+/// Orden histórico cuando `terms` falta o no es finito.
+pub const TAYLOR_ANIM_ORDER_DEFAULT: usize = 3;
+
+/// Orden animado desde un `terms` crudo (`None`/NaN/inf → 3; trunca como
+/// el slider y clampa a 1..=7). Puro, sin pánicos. Lo consume
+/// `render_taylor_frames_inner` (W3) para dibujar `P_n` con el orden pedido.
+pub fn taylor_anim_order(terms: Option<f64>) -> usize {
+    match terms {
+        Some(v) if v.is_finite() => {
+            (v as usize).clamp(TAYLOR_ANIM_ORDER_MIN, TAYLOR_ANIM_ORDER_MAX)
+        }
+        _ => TAYLOR_ANIM_ORDER_DEFAULT,
+    }
+}
+
+/// Orden animado desde `AnimRequest.params["terms"]` (ausente → 3).
+/// Pura, sin pánicos.
+pub fn taylor_anim_order_from_params(params: &std::collections::BTreeMap<String, f64>) -> usize {
+    taylor_anim_order(params.get(SCENE_PARAM_TERMS).copied())
+}
 
 /// Lee un param finito o devuelve el default (ausente/NaN/inf → default).
 pub fn scene_param(
@@ -597,9 +768,12 @@ impl Timeline {
         Ok(())
     }
 
-    /// Muestra el valor en `t_ms` (lerp lineal, clamp en los extremos).
-    /// Total aunque el timeline no esté validado: nunca panics.
-    pub fn sample(&self, t_ms: u64) -> f32 {
+    /// Muestra el valor en `t_ms` con easing aplicado a la fracción del
+    /// segmento (`ease`: `0..1 → 0..1`; si devuelve no finito se usa 0).
+    /// Clamp en los extremos; total aunque no esté validado: nunca panics.
+    /// `sample` delega acá con la identidad (lineal histórico intacto);
+    /// `scene.rs::PropertyTrack` y `RateFunc` pasan su easing por track.
+    pub fn sample_with(&self, t_ms: u64, ease: fn(f32) -> f32) -> f32 {
         let keys = &self.keyframes;
         if keys.is_empty() {
             return 0.0;
@@ -624,10 +798,82 @@ impl Timeline {
                     return a.value;
                 }
                 let f = (t_ms.saturating_sub(a.t_ms) as f32) / (span as f32);
-                return a.value + (b.value - a.value) * f;
+                let f = f.clamp(0.0, 1.0);
+                let e = ease(f);
+                let e = if e.is_finite() {
+                    e.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                return a.value + (b.value - a.value) * e;
             }
         }
         keys.last().map_or(0.0, |k| k.value)
+    }
+
+    /// Muestra el valor en `t_ms` (lerp lineal, clamp en los extremos).
+    /// Delega en [`Timeline::sample_with`] con la identidad: el histórico
+    /// lineal queda intacto y el easing por track vive en `scene.rs`.
+    /// Total aunque el timeline no esté validado: nunca panics.
+    pub fn sample(&self, t_ms: u64) -> f32 {
+        fn lineal(f: f32) -> f32 {
+            if f.is_finite() {
+                f
+            } else {
+                0.0
+            }
+        }
+        self.sample_with(t_ms, lineal)
+    }
+}
+
+#[cfg(test)]
+mod timeline_f1_tests {
+    use super::*;
+
+    #[test]
+    fn sample_delega_en_sample_with_lineal() {
+        let tl = Timeline {
+            duration_ms: 1000,
+            keyframes: vec![
+                Keyframe {
+                    t_ms: 0,
+                    value: 0.0,
+                },
+                Keyframe {
+                    t_ms: 1000,
+                    value: 10.0,
+                },
+            ],
+        };
+        fn lineal(f: f32) -> f32 {
+            f
+        }
+        for t in [0, 1, 250, 500, 750, 999, 1000, 5000] {
+            assert_eq!(tl.sample(t), tl.sample_with(t, lineal), "t={t}");
+        }
+        // Easing por track: smooth arranca más lento que lineal.
+        fn suave(f: f32) -> f32 {
+            f * f * (3.0 - 2.0 * f)
+        }
+        assert!(tl.sample_with(250, suave) < tl.sample(250));
+        assert!((tl.sample_with(500, suave) - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn taylor_anim_order_clampa_1_a_7() {
+        use std::collections::BTreeMap;
+        assert_eq!(taylor_anim_order(None), 3);
+        assert_eq!(taylor_anim_order(Some(f64::NAN)), 3);
+        assert_eq!(taylor_anim_order(Some(1.0)), 1);
+        assert_eq!(taylor_anim_order(Some(7.0)), 7);
+        assert_eq!(taylor_anim_order(Some(99.0)), 7);
+        assert_eq!(taylor_anim_order(Some(0.0)), 1);
+        let vacia = BTreeMap::new();
+        assert_eq!(taylor_anim_order_from_params(&vacia), 3);
+        let mut params = BTreeMap::new();
+        params.insert(SCENE_PARAM_TERMS.to_string(), 5.0);
+        assert_eq!(taylor_anim_order_from_params(&params), 5);
     }
 }
 
@@ -915,6 +1161,10 @@ pub fn template_for_concept(concept: &str) -> &'static str {
 /// `grafito-app`) se pinean iguales por test, en el mismo orden.
 /// `limit-epsilon` / `ode-*` NO están aquí: no tienen renderer propio y caen
 /// al fallback por concepto (ver `native_dispatch_for` en `anim_native`).
+///
+/// F0: el worker Python está jubilado y su divergencia 11/6 ya no existe.
+/// La paridad vive en `native_templates_once_y_wire_v1_paridad` (tests
+/// abajo): las 11 son nativas y el wire v1 hace roundtrip solo para tests.
 pub const CANONICAL_TEMPLATES: &[&str] = &[
     "derivative-slope",
     "integral-area",
@@ -929,24 +1179,6 @@ pub const CANONICAL_TEMPLATES: &[&str] = &[
     "universal",
 ];
 
-/// Plantillas que el worker Python SÍ renderiza (M3-10, espejo documentado
-/// de `ALLOW_TEMPLATE` en
-/// `crates/grafito-anim/engines/python/manim_engine/__main__.py`).
-///
-/// NO se puede generar desde `CANONICAL_TEMPLATES`: el worker es otro
-/// proceso con 6 renderers (sin euler/fourier/logistic/gradient/mobius,
-/// que solo existen en el nativo Rust). La divergencia queda pineada en
-/// `python_worker_divergencia_11_vs_6_documentada`: si el worker suma una
-/// plantilla, este const + el test Python `TestParidad11_6` gritan juntos.
-pub const PYTHON_WORKER_TEMPLATES: &[&str] = &[
-    "derivative-slope",
-    "integral-area",
-    "taylor-series",
-    "conformal-map",
-    "pitagoras",
-    "universal",
-];
-
 /// Sanitiza un template libre a uno conocido; si es desconocido, elige por concepto.
 pub fn sanitize_template(template: &str, concept: &str) -> String {
     let t = template.trim().to_lowercase();
@@ -957,8 +1189,7 @@ pub fn sanitize_template(template: &str, concept: &str) -> String {
     // Canónicas v3 con renderer nativo propio (sync con anim_native):
     // pasan literales para que el dispatcher nativo las atienda en vez
     // de degradarlas por concepto. "universal" también pasa literal: el
-    // nativo lo renderiza (placeholder neutro honesto) y python lo mapea
-    // por concepto.
+    // nativo lo renderiza (placeholder neutro honesto).
     if CANONICAL_TEMPLATES.contains(&t.as_str()) {
         return t;
     }
@@ -1231,18 +1462,73 @@ mod universal_tests {
     }
 
     #[test]
-    fn export_format_solo_tres_variantes_webm_todo() {
-        // Pinnea estado actual: gif/png/mp4 roundtrip; "webm" se rechaza.
+    fn export_format_cuatro_variantes_con_webm() {
+        // P1-core: gif/png/mp4/webm roundtrip; el render sin ffmpeg falla
+        // honesto en la Piel (anim_native), no en el wire.
+        use std::str::FromStr as _;
         for (f, s) in [
             (ExportFormat::Gif, "\"gif\""),
             (ExportFormat::PngSequence, "\"png\""),
             (ExportFormat::Mp4, "\"mp4\""),
+            (ExportFormat::Webm, "\"webm\""),
         ] {
             let v = serde_json::to_string(&f).unwrap();
             assert_eq!(v, s);
         }
-        let webm: Result<ExportFormat, _> = serde_json::from_str("\"webm\"");
-        assert!(webm.is_err(), "webm aún no soportado (TODO v3-webm)");
+        let webm: ExportFormat = serde_json::from_str("\"webm\"").unwrap();
+        assert_eq!(webm, ExportFormat::Webm);
+        assert_eq!(ExportFormat::from_str("webm").unwrap(), ExportFormat::Webm);
+        assert_eq!(ExportFormat::from_str("  MP4 ").unwrap(), ExportFormat::Mp4);
+        assert_eq!(ExportFormat::Gif.to_str(), "gif");
+        assert_eq!(ExportFormat::Webm.to_str(), "webm");
+        assert!(ExportFormat::from_str("exe").is_err());
+        // Compat vieja intacta: "exe" tampoco deserializa.
+        let exe: Result<ExportFormat, _> = serde_json::from_str("\"exe\"");
+        assert!(exe.is_err());
+    }
+
+    #[test]
+    fn audio_borrado_del_nucleo_wire_viejo_queda_mudo() {
+        // P0-a: `AudioTrack` ya no existe en el crate (ni campo `audio`).
+        // El wire viejo con `audio` sigue deserializando: serde ignora el
+        // campo desconocido y el pedido queda mudo (honesto, sin pista).
+        let con_audio_viejo: AnimRequest = serde_json::from_str(
+            r#"{"template":"t","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000,"audio":{"path":"a.mp3","offset_ms":100,"gain":1.5}}"#,
+        )
+        .unwrap();
+        assert!(con_audio_viejo.validate().is_ok());
+        let v: serde_json::Value = serde_json::to_value(&con_audio_viejo).unwrap();
+        assert!(v.get("audio").is_none(), "el wire nuevo no emite audio");
+    }
+
+    #[test]
+    fn png_dir_valida_sintaxis_y_contencion() {
+        assert!(PngDir::try_new("frames/escena1".to_string()).is_ok());
+        assert!(PngDir::try_new(String::new()).is_err());
+        assert!(PngDir::try_new("f\0rames".to_string()).is_err());
+        let base = std::env::temp_dir();
+        assert!(PngDir::try_new("frames/a".to_string())
+            .unwrap()
+            .validate_en(&base)
+            .is_ok());
+        assert!(PngDir::try_new("../afuera".to_string())
+            .unwrap()
+            .validate_en(&base)
+            .is_err());
+    }
+
+    #[test]
+    fn anim_request_sin_audio_valida_igual() {
+        // P0-a: ya no hay campo `audio`; el pedido sin audio valida igual y
+        // el wire mínimo sigue deserializando con defaults (duration 2000).
+        let req = request_for_concept("derivada", "");
+        assert!(req.validate().is_ok());
+        let minimo: AnimRequest = serde_json::from_str(
+            r#"{"template":"t","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000}"#,
+        )
+        .unwrap();
+        assert!(minimo.validate().is_ok());
+        assert_eq!(minimo.duration_ms, 2000);
     }
 
     #[test]
@@ -1271,32 +1557,124 @@ mod universal_tests {
     }
 
     #[test]
-    fn python_worker_divergencia_11_vs_6_documentada() {
-        // M3-10: el worker Python no se genera desde CANONICAL (otro
-        // proceso, 6 renderers). La divergencia explícita es exactamente
-        // estas 5 nativo-solo; pedirlas al worker da `error unsupported`
-        // (ver `CANONICAL_SOLO_RUST` + `preparar_render` en `__main__.py`
-        // y `TestParidad11_6` del lado Python).
+    fn native_templates_once_y_wire_v1_paridad() {
+        // F0: jubilado el worker Python, la divergencia 11/6 ya no existe.
+        // Paridad portada del viejo `TestParidad11_6` (Python, borrado):
+        // las 11 canónicas son las soportadas y el wire v1 hace roundtrip
+        // para los 5 mensajes que el puente lee (hello/pong/progress/
+        // render_result/error). Presupuestos pineados: canvas 64..=4096,
+        // duration 0.1..=30 s, line_cap 64 KiB (engine), mensaje 500 chars.
         use std::collections::BTreeSet;
-        assert_eq!(PYTHON_WORKER_TEMPLATES.len(), 6);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 11);
         let canon: BTreeSet<&&str> = CANONICAL_TEMPLATES.iter().collect();
-        let worker: BTreeSet<&&str> = PYTHON_WORKER_TEMPLATES.iter().collect();
-        assert!(
-            worker.is_subset(&canon),
-            "el worker no puede ofrecer fuera de CANONICAL"
-        );
-        let solo_rust: BTreeSet<&&str> = canon.difference(&worker).copied().collect();
-        let esperadas: BTreeSet<&str> = [
+        assert_eq!(canon.len(), 11, "canónicas sin duplicados");
+        // Las 5 ex-"solo Rust" hoy son nativas como el resto: sanitize las
+        // pasa literales en lugar de degradarlas por concepto.
+        for t in [
             "euler",
             "fourier",
             "logistic-bifurcation",
             "gradient-field",
             "mobius-transform",
-        ]
-        .into_iter()
-        .collect();
-        let obtenidas: BTreeSet<&str> = solo_rust.into_iter().copied().collect();
-        assert_eq!(obtenidas, esperadas, "divergencia 11/6 pineada");
+        ] {
+            assert_eq!(sanitize_template(t, "cualquier concepto"), t, "{t}");
+        }
+        // Wire v1: cada mensaje documentado en el head del módulo parsea.
+        let hello = serde_json::json!({
+            "type": "hello", "protocol_version": 1,
+            "capabilities": ["derivative-slope", "integral-area"],
+        });
+        assert!(matches!(
+            try_downcast(&hello),
+            Ok(WireMessage::Hello {
+                protocol_version: 1,
+                ..
+            })
+        ));
+        let pong = serde_json::json!({ "type": "pong" });
+        assert!(matches!(try_downcast(&pong), Ok(WireMessage::Pong)));
+        let progress = serde_json::json!({
+            "type": "progress", "job_id": "job-1",
+            "step": "render", "percent": 60,
+        });
+        match try_downcast(&progress) {
+            Ok(WireMessage::Progress(p)) => assert!((p.fraction() - 0.6).abs() < 1e-6),
+            other => panic!("esperaba Progress, got {other:?}"),
+        }
+        let result = serde_json::json!({
+            "type": "render_result", "job_id": "job-1",
+            "media_path": "/tmp/w/job-1.png", "frames": 1, "duration_ms": 120,
+        });
+        assert!(matches!(try_downcast(&result), Ok(WireMessage::Result(_))));
+        let error = serde_json::json!({
+            "type": "error", "job_id": "job-1",
+            "code": "render_failed", "message": "boom",
+        });
+        assert!(matches!(
+            try_downcast(&error),
+            Ok(WireMessage::Error { .. })
+        ));
+        // Versión ajena se rechaza tipado (compat v1 solo para tests).
+        let v2 = serde_json::json!({
+            "type": "hello", "protocol_version": 2, "capabilities": [],
+        });
+        assert!(matches!(
+            try_downcast(&v2),
+            Err(ProtocolError::UnsupportedVersion { got: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn preparar_render_paridad_validacion_honesta() {
+        // Port del viejo `TestPrepararRender` (Python, borrado): todo pedido
+        // inválido es `Err` honesto en español, jamás imagen falsa.
+        // Export inválido no deserializa (el tipo solo admite gif/png/mp4).
+        let exe: Result<ExportFormat, _> = serde_json::from_str("\"exe\"");
+        assert!(exe.is_err(), "export exe debe rechazarse");
+        // Canvas inválidos (cero, gigante, asimétrico corto).
+        for canvas in [(0u32, 0u32), (99999, 99999), (640, 0), (63, 480)] {
+            let req = AnimRequest {
+                template: "derivative-slope".into(),
+                concept: "derivada".into(),
+                params: std::collections::BTreeMap::new(),
+                spec: None,
+                export: ExportFormat::PngSequence,
+                canvas,
+                duration_ms: 2000,
+            };
+            assert!(req.validate().is_err(), "canvas {canvas:?} debe rechazarse");
+        }
+        // job_id inválido (espejo del viejo JOB_RE).
+        assert!(AnimJobId::try_new("../escape".to_string()).is_err());
+        assert!(AnimJobId::try_new(String::new()).is_err());
+        assert!(AnimJobId::try_new("job-1".to_string()).is_ok());
+        // Alias histórico pythagoras → pitagoras.
+        assert_eq!(sanitize_template("pythagoras", "hola"), "pitagoras");
+        // Template desconocido: ruteo por concepto, jamás plantilla con
+        // renderer falso para un pedido que no la menciona.
+        assert_eq!(
+            sanitize_template("no-existe-xyz", "integral de riemann"),
+            "integral-area"
+        );
+        assert_eq!(
+            sanitize_template("no-existe-xyz", "tarea sin matemática"),
+            "universal"
+        );
+        // Pedido legítimo pasa con canvas y duración de presupuesto.
+        let ok = AnimRequest {
+            template: "derivative-slope".into(),
+            concept: "derivada".into(),
+            params: std::collections::BTreeMap::new(),
+            spec: None,
+            export: ExportFormat::PngSequence,
+            canvas: (640, 480),
+            duration_ms: 2000,
+        };
+        assert!(ok.validate().is_ok());
+        // Duración fuera de 0.1..=30 s se rechaza.
+        let mut mala = ok.clone();
+        mala.duration_ms = 90_000;
+        assert!(mala.validate().is_err());
     }
 }
 
@@ -1744,9 +2122,10 @@ pub fn playlist_frame_at(timeline: &Timeline, t_ms: u64, total_frames: usize) ->
 ///   `lag_ratio * run_ms` tras la anterior (`0` = todo junto, `1` = una tras
 ///   otra); el runner FIFO los ejecuta en orden con estos offsets
 ///   (`start_offsets_ms` / `span_ms`);
-/// - píxeles: `composicion_esperada` valida que los sets referenciados tengan
-///   el MISMO N y el MISMO viewport (si difieren → `Err` honesto, jamás
-///   reescaleo silencioso) y `mezclar_pixel_alfa` es el over con el que
+/// - píxeles: `composicion_esperada` remuestrea los sets referenciados al
+///   N común (máximo, vecino más cercano vía `plan_remuestreo`) exigiendo
+///   el MISMO viewport (si difiere → `Err` honesto, jamás reescaleo
+///   silencioso) y `mezclar_pixel_alfa` es el over con el que
 ///   `grafito-app/src/anim_native.rs::componer_grupo_nativo` los fusiona
 ///   frame a frame (`sets[0]` fondo → último frente).
 ///
@@ -1857,20 +2236,65 @@ impl AnimationGroup {
     }
 
     /// Valida la composición simultánea de los sets que el grupo referencia
-    /// (M4, cara píxeles del `Group`).
+    /// (M4, cara píxeles del `Group`; P1-g: re-muestreo temporal).
     ///
     /// `conteos` = frames por step de la playlist y `tamanos` = `(w, h)` por
     /// step, ambos indexados por posición de playlist. Exige: mismos largos
-    /// de arreglo, índices dentro, al menos 2 sets referenciados, todos con
-    /// el MISMO N (> 0) y el MISMO viewport (lados 1..=4096); el set
-    /// compuesto debe entrar en `GROUP_MAX_SET_BYTES`. Si algo difiere →
-    /// `Err` honesto en español (jamás reescaleo silencioso). Devuelve
-    /// `(N, (w, h))` del compuesto. Puro, sin pánicos.
+    /// de arreglo, índices dentro, al menos 2 sets referenciados, cada uno
+    /// con N ≥ 1, y el MISMO viewport (lados 1..=4096); el N distinto se
+    /// remuestrea al máximo (vecino más cercano vía `plan_remuestreo`, sin
+    /// inventar píxeles) y el set compuesto debe entrar en
+    /// `GROUP_MAX_SET_BYTES`. Si el viewport difiere → `Err` honesto en
+    /// español (jamás reescaleo silencioso). Devuelve `(n_comun, (w, h))`
+    /// del compuesto. Puro, sin pánicos.
     pub fn composicion_esperada(
         &self,
         conteos: &[usize],
         tamanos: &[(usize, usize)],
     ) -> Result<(usize, (usize, usize)), ProtocolError> {
+        let plan = self.plan_remuestreo(conteos, tamanos)?;
+        Ok((plan.n_comun, plan.viewport))
+    }
+}
+
+/// Tope del set compuesto en RAM (M4, paridad con `PARAMETRIC_MAX_BYTES` y
+/// `NATIVE_MAX_SET_BYTES`): 64 MiB. El compuesto tiene N frames (no N×sets),
+/// pero cada capa suma I/O de lectura; la cota cubre el peor caso honesto.
+pub const GROUP_MAX_SET_BYTES: usize = 64 * 1024 * 1024;
+
+/// Plan de remuestreo temporal para componer sets con N distinto (P1-g).
+///
+/// `n_comun` = frames del compuesto (el máximo de los sets); cada set se
+/// muestrea con `indices_por_set[i][j]` (vecino más cercano, sin inventar
+/// píxeles: el compositado lee el frame original indicado). La validación
+/// de resolución se mantiene intacta (mismo viewport 1..=4096 en todos).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRemuestreo {
+    /// Frames del compuesto (máximo de los sets, 1..=96).
+    pub n_comun: usize,
+    /// Viewport común validado.
+    pub viewport: (usize, usize),
+    /// Por cada set del grupo (en el orden de `indices`): `n_comun` índices
+    /// en `0..conteo` (vecino más cercano, bordes clampados).
+    pub indices_por_set: Vec<Vec<usize>>,
+}
+
+impl AnimationGroup {
+    /// Arma el plan de remuestreo temporal (P1-g): acepta N distinto por set
+    /// (vecino más cercano a `n_comun` = máximo) y mantiene la validación
+    /// de resolución + presupuesto. [`AnimationGroup::composicion_esperada`]
+    /// delega acá y devuelve `(n_comun, viewport)`.
+    ///
+    /// `conteos`/`tamanos` indexados por posición de playlist. Exige: mismos
+    /// largos, índices dentro, ≥2 sets, cada conteo ≥1, MISMO viewport
+    /// (lados 1..=4096; si difiere → `Err`, jamás reescaleo silencioso) y
+    /// `n_comun` (= máximo) con `w*h*4*n_comun ≤ GROUP_MAX_SET_BYTES`.
+    /// Puro, sin pánicos.
+    pub fn plan_remuestreo(
+        &self,
+        conteos: &[usize],
+        tamanos: &[(usize, usize)],
+    ) -> Result<PlanRemuestreo, ProtocolError> {
         if conteos.len() != tamanos.len() {
             return Err(ProtocolError::InvalidField {
                 field: "group.composicion",
@@ -1885,51 +2309,22 @@ impl AnimationGroup {
         if self.indices.len() < 2 {
             return Err(ProtocolError::InvalidField {
                 field: "group.indices",
-                reason: "el compuesto necesita al menos 2 animaciones".into(),
+                reason: "el remuestreo necesita al menos 2 animaciones".into(),
             });
         }
         let primero = self.indices[0];
-        let n0 = match conteos.get(primero) {
-            Some(n) => *n,
-            None => {
-                return Err(ProtocolError::InvalidField {
-                    field: "group.indices",
-                    reason: format!(
-                        "índice {primero} fuera de la playlist de {} steps",
-                        conteos.len()
-                    ),
-                });
-            }
-        };
-        if n0 == 0 {
-            return Err(ProtocolError::InvalidField {
-                field: "group.frames",
-                reason: format!("el set {primero} está vacío: sin frames no hay qué componer"),
-            });
-        }
-        let t0 = match tamanos.get(primero) {
-            Some(t) => *t,
-            None => {
-                return Err(ProtocolError::InvalidField {
-                    field: "group.indices",
-                    reason: format!(
-                        "índice {primero} fuera de la playlist de {} steps",
-                        conteos.len()
-                    ),
-                });
-            }
-        };
+        let t0 = tamanos.get(primero).copied().unwrap_or((0, 0));
         valida_lado_compuesto(t0)?;
+        let mut n_comun: usize = 1;
         for index in &self.indices {
             let n = conteos.get(*index).copied().unwrap_or(0);
-            if n != n0 {
+            if n == 0 {
                 return Err(ProtocolError::InvalidField {
                     field: "group.frames",
-                    reason: format!(
-                        "el set {index} trae {n} frames y el grupo pide {n0}: igualá N (sin reescaleo silencioso)"
-                    ),
+                    reason: format!("el set {index} está vacío: sin frames no hay qué componer"),
                 });
             }
+            n_comun = n_comun.max(n);
             let t = tamanos.get(*index).copied().unwrap_or((0, 0));
             valida_lado_compuesto(t)?;
             if t != t0 {
@@ -1942,32 +2337,70 @@ impl AnimationGroup {
                 });
             }
         }
+        if n_comun == 0 || n_comun > PLAYLIST_MAX_FRAMES_TOTAL {
+            return Err(ProtocolError::InvalidField {
+                field: "group.frames",
+                reason: format!(
+                    "{n_comun} frames remuestreados exceden el tope de {PLAYLIST_MAX_FRAMES_TOTAL}: bajá los frames por step"
+                ),
+            });
+        }
         match t0
             .0
             .checked_mul(t0.1)
             .and_then(|v| v.checked_mul(PLAYLIST_BYTES_PER_PIXEL))
-            .and_then(|v| v.checked_mul(n0))
+            .and_then(|v| v.checked_mul(n_comun))
         {
-            Some(got) if got <= GROUP_MAX_SET_BYTES => Ok((n0, t0)),
-            other => Err(ProtocolError::InvalidField {
-                field: "group.presupuesto",
-                reason: match other {
-                    Some(got) => format!(
-                        "el compuesto estimado ({got} bytes) excede el tope de {GROUP_MAX_SET_BYTES}: bajá resolución o fotogramas"
-                    ),
-                    None => format!(
-                        "el compuesto estimado desborda el contador (tope {GROUP_MAX_SET_BYTES}): bajá resolución o fotogramas"
-                    ),
-                },
-            }),
+            Some(got) if got <= GROUP_MAX_SET_BYTES => {}
+            other => {
+                return Err(ProtocolError::InvalidField {
+                    field: "group.presupuesto",
+                    reason: match other {
+                        Some(got) => format!(
+                            "el compuesto remuestreado ({got} bytes) excede el tope de {GROUP_MAX_SET_BYTES}: bajá resolución o fotogramas"
+                        ),
+                        None => format!(
+                            "el compuesto remuestreado desborda el contador (tope {GROUP_MAX_SET_BYTES}): bajá resolución o fotogramas"
+                        ),
+                    },
+                });
+            }
         }
+        let mut indices_por_set = Vec::with_capacity(self.indices.len());
+        for index in &self.indices {
+            let n = conteos.get(*index).copied().unwrap_or(0);
+            indices_por_set.push(indice_vecino_mas_cercano(n, n_comun));
+        }
+        Ok(PlanRemuestreo {
+            n_comun,
+            viewport: t0,
+            indices_por_set,
+        })
     }
 }
 
-/// Tope del set compuesto en RAM (M4, paridad con `PARAMETRIC_MAX_BYTES` y
-/// `NATIVE_MAX_SET_BYTES`): 64 MiB. El compuesto tiene N frames (no N×sets),
-/// pero cada capa suma I/O de lectura; la cota cubre el peor caso honesto.
-pub const GROUP_MAX_SET_BYTES: usize = 64 * 1024 * 1024;
+/// Grilla de vecino más cercano: `n_comun` índices en `0..n_set`.
+/// `n_comun==1` → `[0]`; bordes clampados. Pura, sin pánicos.
+fn indice_vecino_mas_cercano(n_set: usize, n_comun: usize) -> Vec<usize> {
+    if n_comun == 0 || n_set == 0 {
+        return Vec::new();
+    }
+    if n_comun == 1 || n_set == 1 {
+        return vec![0; n_comun.min(PLAYLIST_MAX_FRAMES_TOTAL.max(1))];
+    }
+    let mut out = Vec::with_capacity(n_comun.min(PLAYLIST_MAX_FRAMES_TOTAL));
+    for j in 0..n_comun {
+        let pos =
+            (j as f64) * ((n_set.saturating_sub(1)) as f64) / ((n_comun.saturating_sub(1)) as f64);
+        let idx = if pos.is_finite() {
+            (pos.round() as usize).min(n_set.saturating_sub(1))
+        } else {
+            0
+        };
+        out.push(idx);
+    }
+    out
+}
 
 /// Valida un lado del compuesto (1..=4096 por lado, paridad con `Resolution`).
 fn valida_lado_compuesto(t: (usize, usize)) -> Result<(), ProtocolError> {
@@ -2261,19 +2694,25 @@ mod group_compose_m4_tests {
     use super::*;
 
     #[test]
-    fn composicion_exige_mismo_n_y_viewport() {
+    fn composicion_remuestrea_n_distinto_y_exige_viewport() {
         let grupo = AnimationGroup::try_new(vec![0, 1], 0.0).unwrap();
         // Caso feliz: mismo N y mismo viewport.
         assert_eq!(
             grupo.composicion_esperada(&[48, 48], &[(64, 48), (64, 48)]),
             Ok((48, (64, 48)))
         );
-        // N distinto → Err honesto (sin reescaleo silencioso).
-        let err = grupo
-            .composicion_esperada(&[48, 24], &[(64, 48), (64, 48)])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("24") && err.contains("48"), "got: {err}");
+        // N distinto → re-muestreo al máximo (P1-g): 48 + 24 → (48, viewport).
+        // Paridad con `plan_remuestreo` (delegación directa).
+        assert_eq!(
+            grupo.composicion_esperada(&[48, 24], &[(64, 48), (64, 48)]),
+            Ok((48, (64, 48)))
+        );
+        assert_eq!(
+            grupo.composicion_esperada(&[48, 24], &[(64, 48), (64, 48)]),
+            grupo
+                .plan_remuestreo(&[48, 24], &[(64, 48), (64, 48)])
+                .map(|p| (p.n_comun, p.viewport))
+        );
         // Viewport distinto → Err honesto.
         let err = grupo
             .composicion_esperada(&[48, 48], &[(64, 48), (96, 72)])
@@ -2293,6 +2732,44 @@ mod group_compose_m4_tests {
         assert!(grupo
             .composicion_esperada(&[48, 48], &[(4096, 4096), (4096, 4096)])
             .is_err());
+    }
+
+    #[test]
+    fn remuestreo_temporal_acepta_n_distinto_y_mantiene_viewport() {
+        // P1-g: 48 + 24 → compuesto de 48; `composicion_esperada` delega en
+        // `plan_remuestreo` (mismo N común, viewport y presupuesto).
+        let grupo = AnimationGroup::try_new(vec![0, 1], 0.0).unwrap();
+        assert_eq!(
+            grupo.composicion_esperada(&[48, 24], &[(64, 48), (64, 48)]),
+            Ok((48, (64, 48)))
+        );
+        let plan = grupo
+            .plan_remuestreo(&[48, 24], &[(64, 48), (64, 48)])
+            .unwrap();
+        assert_eq!(plan.n_comun, 48);
+        assert_eq!(plan.viewport, (64, 48));
+        assert_eq!(plan.indices_por_set.len(), 2);
+        // El set completo mapea identidad; el corto interpola bordes exactos.
+        assert_eq!(plan.indices_por_set[0].len(), 48);
+        assert_eq!(plan.indices_por_set[0][0], 0);
+        assert_eq!(plan.indices_por_set[0][47], 47);
+        assert_eq!(plan.indices_por_set[1].len(), 48);
+        assert_eq!(plan.indices_por_set[1][0], 0);
+        assert_eq!(plan.indices_por_set[1][47], 23);
+        assert!(plan.indices_por_set[1].iter().all(|i| *i < 24));
+        // Mismo N → identidades.
+        let plan2 = grupo
+            .plan_remuestreo(&[48, 48], &[(64, 48), (64, 48)])
+            .unwrap();
+        assert_eq!(plan2.indices_por_set[0], plan2.indices_por_set[1]);
+        // Viewport distinto y set vacío siguen fallando honesto.
+        assert!(grupo
+            .plan_remuestreo(&[48, 48], &[(64, 48), (96, 72)])
+            .is_err());
+        assert!(grupo
+            .plan_remuestreo(&[48, 0], &[(64, 48), (64, 48)])
+            .is_err());
+        assert!(grupo.plan_remuestreo(&[48], &[(64, 48)]).is_err());
     }
 
     #[test]

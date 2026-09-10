@@ -357,7 +357,7 @@ mod tests_module {
             "sin(x)",
             "x",
             xs.into_iter(),
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
         );
         assert!(res.is_ok());
         let res_vals = res.unwrap();
@@ -371,7 +371,7 @@ mod tests_module {
             "x",
             "y",
             pts.into_iter(),
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
         );
         assert!(res2.is_ok());
         let res2_vals = res2.unwrap();

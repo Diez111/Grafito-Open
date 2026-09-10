@@ -10,7 +10,7 @@ use grafito_geometry::{
     Point2, Point3D, RegularPolychoron, RegularPolytopeFamily, MAX_REGULAR_POLYTOPE_DIMENSION,
     MAX_WORLD_COORDINATE, MIN_REGULAR_POLYTOPE_DIMENSION,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn assert_persistence_rejects(object: GeoObject, expected_message: &str) {
     let id = object.id();
@@ -119,21 +119,21 @@ fn persistence_rejects_numeric_constraints_with_incompatible_inputs() {
         1.0,
     )));
 
-    let mut distance = HashMap::new();
+    let mut distance = BTreeMap::new();
     distance.insert("distance".to_string(), 1.0);
-    let mut angle = HashMap::new();
+    let mut angle = BTreeMap::new();
     angle.insert("angle".to_string(), 90.0);
 
     for (name, inputs, params) in [
         ("Distance", vec![point, line], distance),
         ("Angle", vec![point, line], angle),
-        ("Tangent", vec![point, line], HashMap::new()),
-        ("Coincident", vec![point, line], HashMap::new()),
-        ("Horizontal", vec![point], HashMap::new()),
-        ("Vertical", vec![point], HashMap::new()),
-        ("EqualLength", vec![line, circle], HashMap::new()),
-        ("Symmetry", vec![point, line, other_point], HashMap::new()),
-        ("Distance", vec![point], HashMap::new()),
+        ("Tangent", vec![point, line], BTreeMap::new()),
+        ("Coincident", vec![point, line], BTreeMap::new()),
+        ("Horizontal", vec![point], BTreeMap::new()),
+        ("Vertical", vec![point], BTreeMap::new()),
+        ("EqualLength", vec![line, circle], BTreeMap::new()),
+        ("Symmetry", vec![point, line, other_point], BTreeMap::new()),
+        ("Distance", vec![point], BTreeMap::new()),
     ] {
         let mut persisted = document.clone();
         persisted

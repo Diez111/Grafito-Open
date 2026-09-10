@@ -7,7 +7,7 @@
 //! hits consecutivos para los mismos parámetros y misses cuando los
 //! `view_bounds` cambian (invalidación del caché).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use grafito_app::render_2d::{compute_fill_cache_key, fill_cache_texture_size};
 use grafito_core::implicit_curve::padded_snapped_bounds;
@@ -21,7 +21,7 @@ const SNAP_CELLS: usize = 64;
 #[test]
 fn fill_cache_key_stable_for_same_view_bounds() {
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-    let vars = HashMap::<String, f64>::new();
+    let vars = BTreeMap::<String, f64>::new();
     let fill_color = Color::new(0.4, 0.3, 0.8, 0.5);
     let canvas_size = (800_u32, 600_u32);
 
@@ -43,7 +43,7 @@ fn fill_cache_reuse_within_padded_region() {
     // cambian levemente pero caen dentro de la región padded/snapped, así
     // que la cache key (que usa padded_bounds) debe coincidir.
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-    let vars = HashMap::<String, f64>::new();
+    let vars = BTreeMap::<String, f64>::new();
     let fill_color = Color::new(0.4, 0.3, 0.8, 0.5);
     let canvas_size = (800_u32, 600_u32);
 
@@ -78,7 +78,7 @@ fn fill_cache_invalidates_on_large_view_change() {
     // padded debe invalidar el caché (producir una key diferente o fallar
     // el check de contención de región).
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-    let vars = HashMap::<String, f64>::new();
+    let vars = BTreeMap::<String, f64>::new();
     let fill_color = Color::new(0.4, 0.3, 0.8, 0.5);
     let canvas_size = (800_u32, 600_u32);
 
@@ -99,7 +99,7 @@ fn fill_cache_invalidates_on_large_view_change() {
 
 #[test]
 fn fill_cache_invalidates_on_expression_change() {
-    let vars = HashMap::<String, f64>::new();
+    let vars = BTreeMap::<String, f64>::new();
     let fill_color = Color::new(0.4, 0.3, 0.8, 0.5);
     let canvas_size = (800_u32, 600_u32);
     let view_bounds = (-5.0, 5.0, -4.0, 4.0);
@@ -116,7 +116,7 @@ fn fill_cache_invalidates_on_expression_change() {
 
 #[test]
 fn fill_cache_invalidates_on_operator_change() {
-    let vars = HashMap::<String, f64>::new();
+    let vars = BTreeMap::<String, f64>::new();
     let fill_color = Color::new(0.4, 0.3, 0.8, 0.5);
     let canvas_size = (800_u32, 600_u32);
     let view_bounds = (-5.0, 5.0, -4.0, 4.0);
@@ -137,7 +137,7 @@ fn fill_cache_invalidates_on_operator_change() {
 #[test]
 fn fill_cache_invalidates_on_canvas_size_change() {
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-    let vars = HashMap::<String, f64>::new();
+    let vars = BTreeMap::<String, f64>::new();
     let fill_color = Color::new(0.4, 0.3, 0.8, 0.5);
     let view_bounds = (-5.0, 5.0, -4.0, 4.0);
     let padded = padded_snapped_bounds(view_bounds, PAD_FACTOR, SNAP_CELLS);
@@ -154,7 +154,7 @@ fn fill_cache_invalidates_on_canvas_size_change() {
 #[test]
 fn fill_cache_invalidates_on_fill_color_change() {
     let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
-    let vars = HashMap::<String, f64>::new();
+    let vars = BTreeMap::<String, f64>::new();
     let canvas_size = (800_u32, 600_u32);
     let view_bounds = (-5.0, 5.0, -4.0, 4.0);
     let padded = padded_snapped_bounds(view_bounds, PAD_FACTOR, SNAP_CELLS);
@@ -179,7 +179,7 @@ fn fill_cache_invalidates_on_variables_change() {
     let view_bounds = (-5.0, 5.0, -4.0, 4.0);
     let padded = padded_snapped_bounds(view_bounds, PAD_FACTOR, SNAP_CELLS);
 
-    let mut vars_empty = HashMap::new();
+    let mut vars_empty = BTreeMap::new();
     let key_empty = compute_fill_cache_key(&ic, padded, canvas_size, &vars_empty, fill_color);
 
     vars_empty.insert("r".to_string(), 2.0);

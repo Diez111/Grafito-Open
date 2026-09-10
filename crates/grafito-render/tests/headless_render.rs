@@ -10,7 +10,7 @@ use grafito_render::{
     depth_3d::{project_regular_polychoron, project_regular_polytope_nd},
     sample_phase_portrait, sample_vector_field_3d, transform_complex_mapping_segments, Renderer,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn view_800x600() -> ViewTransform {
@@ -700,7 +700,7 @@ fn shared_vector_field_3d_sampling_uses_document_variables_and_xyz() {
     let mut field = VectorField3DObj::new("0", "a", "0");
     field.density = 3;
     field = field.with_bounds((1.0, 4.0), (10.0, 13.0), (100.0, 103.0));
-    let variables = HashMap::from([("a".to_string(), 2.0)]);
+    let variables = BTreeMap::from([("a".to_string(), 2.0)]);
 
     let segments = sample_vector_field_3d(&field, &variables);
 
@@ -728,7 +728,7 @@ fn world_mesh_vector_field_3d_receives_document_variables() {
 fn shared_phase_portrait_sampling_receives_document_variables() {
     let mut portrait = PhasePortraitObj::new("a", "0", 0.0, 5.0, 0.0, 5.0);
     portrait.density = 5;
-    let variables = HashMap::from([("a".to_string(), 2.0)]);
+    let variables = BTreeMap::from([("a".to_string(), 2.0)]);
 
     let segments = sample_phase_portrait(&portrait, &variables);
 
@@ -1097,6 +1097,9 @@ fn depth_test_camera() -> Camera3D {
         near: 0.1,
         far: 100.0,
         aspect: 4.0 / 3.0,
+        gamma: 0.0,
+        focal_distance: 10.0,
+        frame_center: [0.0, 0.0],
     }
 }
 
@@ -1671,7 +1674,7 @@ fn gpu_complex_transform_reads_the_second_constant_pair() {
             &queue,
             &expr,
             &[Point2::new(1.0, 0.0)],
-            &HashMap::new(),
+            &BTreeMap::new(),
         )?;
         Some(result)
     });
@@ -1747,7 +1750,7 @@ fn gpu_complex_transform_falls_back_for_cpu_only_opcodes() {
             &queue,
             &expr,
             &[Point2::new(1.0, 0.0)],
-            &HashMap::new(),
+            &BTreeMap::new(),
         ))
     });
 
@@ -1774,7 +1777,7 @@ fn test_gpu_function_no_stale_bytecode() {
             .ok()?;
         let compute =
             grafito_render::function_compute::FunctionComputePipeline::new(&device, &queue, 10000);
-        let variables = HashMap::new();
+        let variables = BTreeMap::new();
         let domain = (-std::f64::consts::PI, std::f64::consts::PI);
         let grid_size = 100;
 
@@ -1822,7 +1825,7 @@ fn gpu_function_cache_keeps_a_finite_million_constant() {
             &function,
             (-1.0, 1.0),
             32,
-            &HashMap::new(),
+            &BTreeMap::new(),
         );
         let samples = function.cached_samples.read().ok()?.clone();
         Some((populated, samples))

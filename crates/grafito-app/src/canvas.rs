@@ -7,7 +7,7 @@
 use egui::epaint::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
 use grafito_core::{Document, GeoObject, ObjectId, RenderQuality};
-use grafito_geometry::Camera3D;
+use grafito_geometry::{Camera3D, Point3D};
 use grafito_render::function_compute::{
     resolve_function_job, FunctionDispatchOutcome, PendingFunctionJob,
 };
@@ -1203,9 +1203,178 @@ impl CallbackTrait for CanvasCallback {
     }
 }
 
+/// Vista 3D del canvas (dueño canvas.rs): perspectiva orbital u ortográfica.
+///
+/// Espeja `render_3d::OrthoProjection` (piel) y
+/// `grafito_core::symbolic::OrthoView` (cerebro, sin perspectiva); el comando
+/// `Vista3D[…]` (dueño command/) valida los mismos nombres es/en.
+/// El estado vivo es `GrafitoApp::view3d` (dueño app.rs); el selector del
+/// panel Vista lo escribe y el dibujo/pick lo leen por frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View3D {
+    /// Perspectiva con cámara orbital (defecto GeoGebra).
+    #[default]
+    Perspective,
+    /// Alzado: plano XY.
+    Front,
+    /// Planta: plano XZ.
+    Top,
+    /// Perfil: plano YZ.
+    Side,
+}
+
+impl View3D {
+    /// Las cuatro vistas en orden estable para el selector del canvas 3D
+    /// (mismo orden que `render_3d::OrthoProjection::all`).
+    pub const fn all() -> [Self; 4] {
+        [Self::Perspective, Self::Front, Self::Top, Self::Side]
+    }
+
+    /// Nombre estable es para UI, comandos y mensajes.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Perspective => "perspectiva",
+            Self::Front => "alzado",
+            Self::Top => "planta",
+            Self::Side => "perfil",
+        }
+    }
+
+    /// Indica si la vista es ortográfica (sin fuga de perspectiva).
+    pub const fn is_orthographic(self) -> bool {
+        !matches!(self, Self::Perspective)
+    }
+
+    /// Parsea un nombre es/en como el comando `Vista3D[…]` y
+    /// `render_3d::parse_ortho_projection`. `None` honesto si se desconoce.
+    #[allow(dead_code)] // 3D-A2: wiring selector de vista en canvas/app (P2).
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "perspectiva" | "perspective" | "orbital" => Some(Self::Perspective),
+            "alzado" | "front" | "frontal" | "xy" => Some(Self::Front),
+            "planta" | "top" | "cenital" | "xz" => Some(Self::Top),
+            "perfil" | "side" | "lateral" | "yz" => Some(Self::Side),
+            _ => None,
+        }
+    }
+
+    /// Puente a `render_3d::OrthoProjection` para dibujo/pick.
+    pub(crate) const fn to_ortho_projection(self) -> crate::render_3d::OrthoProjection {
+        match self {
+            Self::Perspective => crate::render_3d::OrthoProjection::Perspective,
+            Self::Front => crate::render_3d::OrthoProjection::Front,
+            Self::Top => crate::render_3d::OrthoProjection::Top,
+            Self::Side => crate::render_3d::OrthoProjection::Side,
+        }
+    }
+}
+
+/// Proyecta un punto 3D a píxeles egui según la vista del canvas: delega en
+/// `render_3d::project_with_view` (perspectiva = cámara orbital, ortográficas
+/// = píxeles con escala y centro). `None` honesto si no proyecta.
+#[allow(dead_code)] // 3D-A2: wiring dibujo por vista en canvas/app (P2).
+pub fn project_for_view3d(
+    point: Point3D,
+    view: View3D,
+    camera: &Camera3D,
+    canvas_w: f32,
+    canvas_h: f32,
+    pixels_per_unit: f32,
+    center: egui::Pos2,
+) -> Option<egui::Pos2> {
+    crate::render_3d::project_with_view(
+        point,
+        view.to_ortho_projection(),
+        camera,
+        canvas_w,
+        canvas_h,
+        pixels_per_unit,
+        center,
+    )
+}
+
+/// Pick 3D según la vista del canvas: perspectiva por cámara orbital,
+/// ortográficas por rayo exacto de la vista (`render_3d::pick_ortho_object`:
+/// malla exacta o hit 2D según el objeto, misma política de desempate).
+/// `typed_four_d_phase` es el snapshot de la fase tipada del frame.
+pub fn pick_for_view3d(
+    document: &Document,
+    view: View3D,
+    camera: &Camera3D,
+    local_pointer: egui::Vec2,
+    canvas_size: egui::Vec2,
+    typed_four_d_phase: Option<f64>,
+) -> Option<ObjectId> {
+    crate::render_3d::pick_3d_object_for_view(
+        document,
+        view.to_ortho_projection(),
+        camera,
+        local_pointer,
+        canvas_size,
+        typed_four_d_phase,
+    )
+}
+
+/// Selección 3D según la vista con la misma política que en 2D (un solo
+/// seleccionado; click vacío limpia). La usa el input del canvas 3D.
+pub fn select_3d_object_for_view(
+    document: &mut Document,
+    selected_object: &mut Option<ObjectId>,
+    view: View3D,
+    camera: &Camera3D,
+    local_pointer: egui::Vec2,
+    canvas_size: egui::Vec2,
+    typed_four_d_phase: Option<f64>,
+) -> Option<ObjectId> {
+    let picked = pick_for_view3d(
+        document,
+        view,
+        camera,
+        local_pointer,
+        canvas_size,
+        typed_four_d_phase,
+    );
+    document.clear_selection();
+    if let Some(id) = picked {
+        document.select(id);
+    }
+    *selected_object = picked;
+    picked
+}
+
+/// Tick de rotación ambiental para la vista 3D (paridad Manim auto-rotación):
+/// solo la perspectiva orbita `theta` a `rate_rad_per_s`; las ortográficas no
+/// tienen azimut y devuelven `false` sin tocar la cámara. Lo llama el advance
+/// loop (`app.rs::advance_multidimensional_motion`) por frame con el `dt` real.
+pub fn tick_view3d_ambient(
+    view: View3D,
+    camera: &mut Camera3D,
+    dt_s: f32,
+    rate_rad_per_s: f32,
+) -> bool {
+    if view.is_orthographic() {
+        return false;
+    }
+    let Some(rotation) = crate::render_3d::AmbientRotation::try_new(rate_rad_per_s) else {
+        return false;
+    };
+    let next = rotation.tick_theta(camera.theta, dt_s);
+    if next == camera.theta {
+        return false;
+    }
+    camera.theta = next;
+    true
+}
+
 pub struct Canvas3DCallback {
     pub document: Arc<Document>,
     pub camera: Camera3D,
+    /// Vista 3D seleccionada (perspectiva u ortográfica). La malla GPU se
+    /// sigue construyendo en perspectiva; la vista gobierna el overlay CPU
+    /// (dibujo/pick vía proyector y `pick_for_view3d`). La setea app.rs desde
+    /// `GrafitoApp::view3d` por frame (snapshot para futuro trabajo GPU).
+    #[allow(dead_code)] // Snapshot por frame; el overlay CPU lee el estado vivo.
+    pub view3d: View3D,
     pub dark_mode: bool,
     pub screen_w: f32,
     pub screen_h: f32,
@@ -1556,8 +1725,8 @@ mod tests {
         Scene3DReadiness,
     };
     use grafito_core::{
-        GeoObject, ObjectId, ParametricCurve2DObj, ParametricCurve3DObj, RegularPolychoron4DObj,
-        RenderQuality, Sphere3DObj, Surface3DObj, Torus3DObj,
+        Document, GeoObject, ObjectId, ParametricCurve2DObj, ParametricCurve3DObj,
+        RegularPolychoron4DObj, RenderQuality, Sphere3DObj, Surface3DObj, Torus3DObj,
     };
     use grafito_geometry::{Camera3D, Color, Point3D, RegularPolychoron, ViewTransform};
 
@@ -1572,6 +1741,122 @@ mod tests {
             &hex[20..]
         );
         serde_json::from_str(&format!("\"{uuid}\"")).unwrap()
+    }
+
+    #[test]
+    fn view3d_parsea_selector_y_proyecta_por_vista() {
+        // Selector: 4 vistas, nombres estables, parse es/en honesto.
+        assert_eq!(super::View3D::all().len(), 4);
+        assert_eq!(super::View3D::parse("Planta"), Some(super::View3D::Top));
+        assert_eq!(
+            super::View3D::parse("orbital"),
+            Some(super::View3D::Perspective)
+        );
+        assert_eq!(super::View3D::parse("isometrica"), None);
+        assert_eq!(super::View3D::Front.name(), "alzado");
+        assert!(!super::View3D::Perspective.is_orthographic());
+        assert!(super::View3D::Side.is_orthographic());
+
+        let camera = Camera3D::new(4.0 / 3.0);
+        let center = egui::Pos2::new(400.0, 300.0);
+        let point = Point3D::new(1.0, 2.0, 3.0);
+        // Alzado = plano XY con escala 50: (400+50·1, 300−50·2).
+        let front = super::project_for_view3d(
+            point,
+            super::View3D::Front,
+            &camera,
+            800.0,
+            600.0,
+            50.0,
+            center,
+        )
+        .expect("alzado proyecta");
+        assert!((front.x - 450.0).abs() < 1e-3, "x alzado: {front:?}");
+        assert!((front.y - 200.0).abs() < 1e-3, "y alzado: {front:?}");
+        // Perspectiva delega en la cámara orbital (píxel finito).
+        assert!(
+            super::project_for_view3d(
+                point,
+                super::View3D::Perspective,
+                &camera,
+                800.0,
+                600.0,
+                50.0,
+                center,
+            )
+            .is_some(),
+            "perspectiva delega en cámara"
+        );
+        // Pick ortográfico EXACTO: documento vacío → None honesto; con
+        // esfera al origen, el píxel central la pega en las tres vistas
+        // ortográficas (mismo desempate que en perspectiva).
+        let doc = Document::new();
+        assert!(
+            super::pick_for_view3d(
+                &doc,
+                super::View3D::Top,
+                &camera,
+                egui::Vec2::new(400.0, 300.0),
+                egui::Vec2::new(800.0, 600.0),
+                None,
+            )
+            .is_none(),
+            "sin objetos no hay pick"
+        );
+        let mut doc = Document::new();
+        let sphere_id = doc.add_object(GeoObject::Sphere3D(Sphere3DObj::new(
+            Point3D::new(0.0, 0.0, 0.0),
+            1.0,
+        )));
+        for view in [
+            super::View3D::Front,
+            super::View3D::Top,
+            super::View3D::Side,
+        ] {
+            assert_eq!(
+                super::pick_for_view3d(
+                    &doc,
+                    view,
+                    &camera,
+                    egui::Vec2::new(400.0, 300.0),
+                    egui::Vec2::new(800.0, 600.0),
+                    None,
+                ),
+                Some(sphere_id),
+                "pick ortográfico exacto en {}",
+                view.name()
+            );
+        }
+        // Lejos de la esfera no hay impacto (sin caja inventada).
+        assert!(
+            super::pick_for_view3d(
+                &doc,
+                super::View3D::Front,
+                &camera,
+                egui::Vec2::new(10.0, 10.0),
+                egui::Vec2::new(800.0, 600.0),
+                None,
+            )
+            .is_none(),
+            "fuera de la esfera no pickea"
+        );
+        // Tick ambiental: orto no orbita, perspectiva sí.
+        let mut ortho_cam = camera;
+        assert!(!super::tick_view3d_ambient(
+            super::View3D::Front,
+            &mut ortho_cam,
+            0.1,
+            0.5
+        ));
+        assert_eq!(ortho_cam.theta, camera.theta);
+        let mut orbit_cam = camera;
+        assert!(super::tick_view3d_ambient(
+            super::View3D::Perspective,
+            &mut orbit_cam,
+            0.1,
+            0.5
+        ));
+        assert_ne!(orbit_cam.theta, camera.theta);
     }
 
     #[test]

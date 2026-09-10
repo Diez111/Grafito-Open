@@ -13,7 +13,7 @@
 use crate::implicit_compute::{compile_expr, f32_bounds_have_precision, BytecodeProgram};
 use grafito_core::object::{VectorField2DObj, VectorFieldSamples};
 use grafito_core::vector_field_sampling;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Cota del lado de la grilla (paridad con `MAX_IMPLICIT_GRID_SIZE`):
 /// con 1024 el buffer máximo es 1025²·4·4 B ≈ 16,8 MB, sin desborde posible.
@@ -213,7 +213,7 @@ impl VectorComputePipeline {
         vf: &VectorField2DObj,
         bounds: (f64, f64, f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<VectorFieldSamples> {
         if grid_size > self.max_grid {
             return None;
@@ -377,7 +377,7 @@ pub fn maybe_compute_vector_field_on_gpu(
     queue: &wgpu::Queue,
     vf: &VectorField2DObj,
     view: &grafito_geometry::ViewTransform,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
     let world_br = view.screen_to_world(view.screen_size);

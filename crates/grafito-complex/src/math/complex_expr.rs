@@ -330,13 +330,19 @@ impl ComplexExpr {
                 Ok(ComplexMatrix::from_complex(complex_bessel_y(0.0, z)).to_complex())
             }
             ComplexExpr::DerivZ(a) => {
-                let vars_base_symbol = if vars.contains_key("z") {
-                    "z"
+                // Prioridad z > w > primera clave ordenada (determinista:
+                // HashMap itera en orden arbitrario, el fallback debe ser estable).
+                let base_owned: String = if vars.contains_key("z") {
+                    "z".to_string()
                 } else if vars.contains_key("w") {
-                    "w"
+                    "w".to_string()
                 } else {
-                    vars.keys().next().map(|k| k.as_str()).unwrap_or("z")
+                    vars.keys()
+                        .min()
+                        .cloned()
+                        .unwrap_or_else(|| "z".to_string())
                 };
+                let vars_base_symbol: &str = base_owned.as_str();
                 let z = vars
                     .get(vars_base_symbol)
                     .copied()
@@ -383,13 +389,17 @@ impl ComplexExpr {
                 Ok(df_dz)
             }
             ComplexExpr::DerivZConj(a) => {
-                let vars_base_symbol = if vars.contains_key("z") {
-                    "z"
+                let base_owned: String = if vars.contains_key("z") {
+                    "z".to_string()
                 } else if vars.contains_key("w") {
-                    "w"
+                    "w".to_string()
                 } else {
-                    vars.keys().next().map(|k| k.as_str()).unwrap_or("z")
+                    vars.keys()
+                        .min()
+                        .cloned()
+                        .unwrap_or_else(|| "z".to_string())
                 };
+                let vars_base_symbol: &str = base_owned.as_str();
                 let z = vars
                     .get(vars_base_symbol)
                     .copied()
@@ -1284,7 +1294,7 @@ pub fn eval_complex_batch(
     expr: &str,
     base_symbol: &str,
     points: impl Iterator<Item = Complex64>,
-    vars: &HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
 ) -> Result<Vec<Option<Complex64>>, String> {
     let ast = parse(expr)?;
     let mut cmap = HashMap::new();

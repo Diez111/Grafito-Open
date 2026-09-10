@@ -511,6 +511,10 @@ pub fn morph_shapes(
     if ra.len() != rb.len() || ra.is_empty() {
         return Err(MorphError::FormaVacia { cual: "A/B" });
     }
+    // P2-perf MEDIDO: se probó `par_iter` por frames y EMPEORA (bench
+    // `morph_64x48`: 6.99 µs secuencial vs 22.5 µs en paralelo; el dispatch
+    // de rayon cuesta más que los ~3k lerps). Con el tope de 512×48 el
+    // trabajo máximo sigue siendo microsegundos: secuencial es lo correcto.
     let mut frames: Vec<Vec<Point2>> = Vec::with_capacity(cfg.frames);
     for fi in 0..cfg.frames {
         let s = if cfg.frames <= 1 {

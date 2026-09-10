@@ -526,7 +526,7 @@ mod tests {
             kind: ExerciseKind::Numeric,
             difficulty: ExerciseDifficulty::Easy,
             lo_id: "test".into(),
-            params: std::collections::HashMap::new(),
+            params: std::collections::BTreeMap::new(),
             seed: None,
             validator: crate::exercise::ValidatorKind::Exact,
         }
@@ -540,7 +540,7 @@ mod tests {
             kind: ExerciseKind::Numeric,
             difficulty: ExerciseDifficulty::Easy,
             lo_id: "".into(),
-            params: std::collections::HashMap::new(),
+            params: std::collections::BTreeMap::new(),
             seed: None,
             validator: crate::exercise::ValidatorKind::Exact,
         };

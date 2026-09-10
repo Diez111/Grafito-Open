@@ -14,6 +14,8 @@
 //! sin egui: puro y headless-testeable. El trabajo pesado corre en threads,
 //! la UI solo renderiza.
 
+use grafito_assistant_types::TurnMediaRef;
+
 /// ¿El pedido pide animación? Heurística honesta sobre el texto.
 ///
 /// Cubre "con animación", "animalo/anímalo", "anima/animá/animar" y
@@ -160,6 +162,21 @@ pub fn animation_reference_sentence() -> &'static str {
     grafito_ui::prosa::ANIMATION_REFERENCE_SENTENCE
 }
 
+// ── Easing por nombre del wire (F1 Manim-en-Rust) ──────────────────────────
+// El easing NO vive en el protocolo (`Timeline::sample_with` recibe la fn):
+// la Piel resuelve el nombre a la fn existente vía
+// `grafito_ui::animation::easing::by_name` (desconocido → `linear` honesto).
+// El scrub del deslizador aplica esta fn a la fracción del segmento antes
+// del lerp — misma curva que `RateFunc` en los casos exactos (ver test de
+// paridad en `grafito-ui/src/animation.rs`). Puro, sin egui, sin E/S.
+
+/// Mapea un nombre del wire (`EASING_NAMES`) a su easing de la Piel.
+///
+/// Desconocido o vacío → `linear` honesto (no inventa curva). Puro.
+pub fn easing_fn_for_name(name: &str) -> fn(f32) -> f32 {
+    grafito_ui::animation::easing::by_name(name)
+}
+
 // ── Retención diferida de texturas egui (fix use-after-free wgpu) ───────────
 // El render GPU va un frame atrás: destruir una textura gestionada por egui
 // (`TextureHandle` drop → `TexturesDelta::free` → `renderer.free_texture` →
@@ -271,6 +288,123 @@ impl<T> RetentionQueue<T> {
     }
 }
 
+// ── P0-UI historial Thumb+Replay (contrato app-side, puro sin egui) ─────────
+// El modelo W1 (`assistant-types`: `ConversationTurn.media: Option<TurnMediaRef>`,
+// `turn_media_map()`, `trim_conversation()`) pega al turno un thumb RGBA de
+// 96×96 + los campos del replay. La Piel (`grafito-ui/src/assistant.rs`)
+// dibuja una mini-card por turno no-last con ese thumb (1 `TextureHandle`
+// chico por turno) + botón [Ver de nuevo] → `AssistantUiAction::ReplayMedia`.
+// El slot vivo (`set_media`) sigue siendo el único reproductor full.
+// Todo lo de acá es puro y headless-testeable: la app resuelve el pedido de
+// replay contra la conversación y reinyecta frames por el camino existente
+// (`set_media`), sin guardar `Vec<ColorImage>` completo por turno en memoria
+// (48 frames a 480px ~30 MiB = OOM).
+//
+// Presupuestos intactos (no se redefinen, se pinean en tests): GIF 64 frames,
+// 8 M píxeles totales, archivo ≤5 MiB; retención 96 con gracia 3.
+
+/// Lado del thumb histórico en píxeles (paridad con `TURN_MEDIA_THUMB_SIDE_PX`).
+pub const HISTORY_THUMB_SIDE_PX: usize = 96;
+
+/// Bytes RGBA exactos del thumb histórico (96×96×4).
+pub const HISTORY_THUMB_EXPECTED_RGBA_BYTES: usize =
+    HISTORY_THUMB_SIDE_PX * HISTORY_THUMB_SIDE_PX * 4;
+
+/// Tope de thumbs históricos cacheados (1 textura por turno; el historial
+/// tiene como máximo `MAX_CONVERSATION_TURNS` = 6 turnos, 6 << 96).
+/// Paridad con `RETENTION_MAX_PENDING`.
+pub const HISTORY_THUMB_MAX_TEXTURES: usize = 96;
+
+/// Pedido de replay resuelto contra un turno del historial.
+///
+/// Puro: la app lo construye con `history_replay_request` y reinyecta los
+/// frames por el camino existente (`set_media`); la UI solo emitió la
+/// intención `ReplayMedia{turn_idx}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryReplayRequest {
+    /// Índice del turno en la conversación al momento del click.
+    pub turn_idx: usize,
+    /// Título visible del historial.
+    pub title: String,
+    /// Plantilla nativa para regenerar los frames.
+    pub template: String,
+    /// Concepto para regenerar los frames.
+    pub concept: String,
+    /// Frames declarados por el turno (1..=64, ya validado).
+    pub frame_count: u8,
+}
+
+/// ¿El thumb trae exactamente los RGBA de 96×96?
+///
+/// `TurnMediaRef::validate` acepta cualquier largo ≤36 KiB; para subirlo como
+/// `ColorImage` se exige el tamaño exacto (sin adivinar dimensiones).
+pub fn history_thumb_rgba_valid(thumb: &[u8]) -> bool {
+    thumb.len() == HISTORY_THUMB_EXPECTED_RGBA_BYTES
+}
+
+/// ¿Este turno lleva tarjeta histórica? Solo turnos con media que no son el
+/// último: el último usa el slot vivo (`set_media`/`draw_media_card`).
+pub fn is_history_mini_card(turn_idx: usize, turn_count: usize, has_media: bool) -> bool {
+    has_media && turn_count > 0 && turn_idx < turn_count && turn_idx.saturating_add(1) != turn_count
+}
+
+/// Resuelve un pedido de replay contra el turno indicado.
+///
+/// `None` honesto si el índice está fuera de rango, no hay media, la media no
+/// valida o el thumb no trae los RGBA exactos. Puro, sin I/O.
+pub fn history_replay_request(
+    turn_idx: usize,
+    turn_count: usize,
+    media: Option<&TurnMediaRef>,
+) -> Option<HistoryReplayRequest> {
+    let media = media?;
+    if turn_idx >= turn_count {
+        return None;
+    }
+    if media.validate().is_err() || !history_thumb_rgba_valid(&media.thumb) {
+        return None;
+    }
+    Some(HistoryReplayRequest {
+        turn_idx,
+        title: media.title.clone(),
+        template: media.template.clone(),
+        concept: media.concept.clone(),
+        frame_count: media.frame_count,
+    })
+}
+
+/// Huella FNV-1a 64 del `TurnMediaRef` para el caché de thumbs.
+///
+/// Paridad con `grafito_ui::assistant::history_thumb_fingerprint` (la Piel no
+/// puede depender de la app, DAG `ui → app`, por eso se duplica el algoritmo;
+/// ambas se pinean con el mismo vector en sus tests).
+pub fn history_thumb_fingerprint(media: &TurnMediaRef) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    const FIELD_SEPARATOR: u8 = 0xff;
+    let mut hash = FNV_OFFSET_BASIS;
+    for field in [&media.title, &media.template, &media.concept] {
+        for byte in field.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= u64::from(FIELD_SEPARATOR);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for byte in &media.thumb {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash ^= u64::from(media.frame_count);
+    hash.wrapping_mul(FNV_PRIME)
+}
+
+// ── Diálogo Exportar profesional (Piel, `fn render(&Estado) -> Frame`) ─────
+// El estado vivo es `grafito_ui::assistant::MediaExportDialog` (ver su
+// `draw` en `grafito-ui`): el duplicado local (`AnimExportDialog` +
+// `draw_anim_export_dialog`) se eliminó con el audio (W1). Este módulo
+// conserva heurística de pedidos, texturas y reproductor de la card.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +484,29 @@ mod tests {
         for id in IDS_PROHIBIDOS {
             assert!(!frase.contains(id), "frase no debe traer {id}");
         }
+    }
+
+    // ── F1: easing por nombre del wire ───────────────────────────────────
+    #[test]
+    fn easing_por_nombre_cubre_los_8_y_falla_a_linear() {
+        // Los 8 `EASING_NAMES` resuelven a fn finita con endpoints 0/1.
+        for name in grafito_anim::protocol::EASING_NAMES {
+            let f = easing_fn_for_name(name);
+            for t in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+                assert!(f(t).is_finite(), "{name}({t}) finito");
+            }
+            assert!((f(0.0)).abs() < 1e-6, "{name}(0)==0");
+            assert!((f(1.0) - 1.0).abs() < 1e-6, "{name}(1)==1");
+        }
+        // Desconocido/vacío → linear (el fallback honesto de la Piel).
+        let lin = grafito_ui::animation::easing::linear;
+        assert_eq!(easing_fn_for_name("wiggle-mal")(0.3), lin(0.3));
+        assert_eq!(easing_fn_for_name("")(0.7), lin(0.7));
+        // El scrub usa la fn sobre la fracción del segmento: cubic_in_out
+        // es monótono y suaviza extremos (0.5 exacto por simetría).
+        let f = easing_fn_for_name("cubic_in_out");
+        assert!((f(0.5) - 0.5).abs() < 1e-6);
+        assert!(f(0.25) < 0.25 && f(0.75) > 0.75, "in-out frena extremos");
     }
 
     #[test]
@@ -458,5 +615,184 @@ mod tests {
             );
         }
         assert_eq!(cola.pending(), RETENTION_MAX_PENDING);
+    }
+
+    // ── P0-UI historial Thumb+Replay ─────────────────────────────────────
+    fn muestra_historial(title: &str) -> TurnMediaRef {
+        TurnMediaRef::new(
+            title,
+            "derivada",
+            "pendiente de la tangente",
+            vec![128_u8; HISTORY_THUMB_EXPECTED_RGBA_BYTES],
+            8,
+        )
+    }
+
+    #[test]
+    fn historial_mini_card_solo_no_last_con_media() {
+        // 4 turnos: mini-card en 1, el último con media usa el slot vivo.
+        assert!(is_history_mini_card(1, 4, true));
+        assert!(!is_history_mini_card(3, 4, true), "el último es slot vivo");
+        assert!(!is_history_mini_card(0, 4, false), "sin media no hay card");
+        assert!(!is_history_mini_card(0, 0, true), "vacío nunca");
+        assert!(!is_history_mini_card(5, 4, true), "fuera de rango nunca");
+    }
+
+    #[test]
+    fn thumb_rgba_exige_96x96_exactos() {
+        assert!(history_thumb_rgba_valid(&vec![
+            0_u8;
+            HISTORY_THUMB_EXPECTED_RGBA_BYTES
+        ]));
+        assert!(!history_thumb_rgba_valid(&[]));
+        assert!(!history_thumb_rgba_valid(&vec![
+            0_u8;
+            HISTORY_THUMB_EXPECTED_RGBA_BYTES
+                - 1
+        ]));
+        assert!(!history_thumb_rgba_valid(&vec![
+            0_u8;
+            HISTORY_THUMB_EXPECTED_RGBA_BYTES
+                + 1
+        ]));
+    }
+
+    #[test]
+    fn replay_request_valida_y_rechaza_honesto() {
+        let media = muestra_historial("Tangente móvil");
+        let pedido = history_replay_request(1, 4, Some(&media)).expect("válido resuelve");
+        assert_eq!(pedido.turn_idx, 1);
+        assert_eq!(pedido.title, "Tangente móvil");
+        assert_eq!(pedido.template, "derivada");
+        assert_eq!(pedido.frame_count, 8);
+        assert!(history_replay_request(1, 4, None).is_none(), "sin media");
+        assert!(
+            history_replay_request(9, 4, Some(&media)).is_none(),
+            "índice fuera de rango"
+        );
+        let sin_titulo = TurnMediaRef::new(
+            "",
+            "derivada",
+            "concepto",
+            vec![1_u8; HISTORY_THUMB_EXPECTED_RGBA_BYTES],
+            8,
+        );
+        assert!(
+            history_replay_request(0, 2, Some(&sin_titulo)).is_none(),
+            "media inválida no resuelve"
+        );
+        let thumb_corto = TurnMediaRef::new("t", "derivada", "concepto", vec![1_u8; 100], 8);
+        assert!(
+            history_replay_request(0, 2, Some(&thumb_corto)).is_none(),
+            "thumb no-96×96 no resuelve"
+        );
+    }
+
+    #[test]
+    fn fingerprint_determinista_y_sensible_a_campos() {
+        let base = muestra_historial("Tangente");
+        assert_eq!(
+            history_thumb_fingerprint(&base),
+            history_thumb_fingerprint(&base)
+        );
+        let otro_titulo = muestra_historial("Integral");
+        assert_ne!(
+            history_thumb_fingerprint(&base),
+            history_thumb_fingerprint(&otro_titulo),
+            "cambia el título, cambia la huella"
+        );
+        let otros_frames = TurnMediaRef::new(
+            "Tangente",
+            "derivada",
+            "pendiente de la tangente",
+            vec![128_u8; HISTORY_THUMB_EXPECTED_RGBA_BYTES],
+            9,
+        );
+        assert_ne!(
+            history_thumb_fingerprint(&base),
+            history_thumb_fingerprint(&otros_frames),
+            "cambia el frame_count, cambia la huella"
+        );
+    }
+
+    #[test]
+    fn dos_animaciones_turno_viejo_conserva_mini_card_con_replay_y_trim_invariante() {
+        use grafito_assistant_types::{
+            attach_turn_media, trim_conversation, turn_media_map, ConversationTurn,
+            MAX_CONVERSATION_TURNS,
+        };
+        // Escenario usuario: pide una animación, luego pide otra. La anterior
+        // no debe desaparecer: queda mini-card con replay en su turno.
+        let mut conversacion = vec![
+            ConversationTurn::user("explica la derivada con animación"),
+            ConversationTurn::assistant("tangente lista"),
+            ConversationTurn::user("ahora la integral con animación"),
+            ConversationTurn::assistant("integral lista"),
+        ];
+        attach_turn_media(&mut conversacion, 1, muestra_historial("Tangente"))
+            .expect("pega media al turno viejo");
+        attach_turn_media(&mut conversacion, 3, muestra_historial("Integral"))
+            .expect("pega media al turno nuevo");
+        assert_eq!(turn_media_map(&conversacion).len(), 2);
+        // El viejo es mini-card (no-last con media) y su replay resuelve.
+        assert!(is_history_mini_card(1, conversacion.len(), true));
+        let vieja = turn_media_map(&conversacion)
+            .remove(&1)
+            .expect("el turno viejo conserva su media");
+        let pedido = history_replay_request(1, conversacion.len(), Some(&vieja))
+            .expect("el replay del turno viejo resuelve");
+        assert_eq!(pedido.title, "Tangente");
+        assert_eq!(pedido.template, "derivada");
+        assert_eq!(pedido.frame_count, 8);
+        // El último usa el slot vivo, jamás mini-card.
+        assert!(!is_history_mini_card(3, conversacion.len(), true));
+        // Trim: crece más allá del tope y el invariante se mantiene (pares
+        // user→assistant completos, media pegada al turno, sin reindexado).
+        while conversacion.len() < MAX_CONVERSATION_TURNS + 2 {
+            let n = conversacion.len();
+            conversacion.push(ConversationTurn::user(format!("q{n}")));
+            conversacion.push(ConversationTurn::assistant(format!("r{n}")));
+        }
+        trim_conversation(&mut conversacion);
+        assert_eq!(conversacion.len(), MAX_CONVERSATION_TURNS);
+        for par in conversacion.chunks_exact(2) {
+            assert!(matches!(
+                par[0].role,
+                grafito_assistant_types::ConversationRole::User
+            ));
+            assert!(matches!(
+                par[1].role,
+                grafito_assistant_types::ConversationRole::Assistant
+            ));
+            assert!(par[0].validate().is_ok() && par[1].validate().is_ok());
+        }
+        for media in turn_media_map(&conversacion).values() {
+            assert_eq!(media.thumb.len(), HISTORY_THUMB_EXPECTED_RGBA_BYTES);
+        }
+    }
+
+    #[test]
+    fn consts_historial_en_paridad_y_gif_intacto() {
+        assert_eq!(HISTORY_THUMB_SIDE_PX, 96);
+        assert_eq!(
+            HISTORY_THUMB_EXPECTED_RGBA_BYTES,
+            96 * 96 * 4,
+            "36 KiB por thumb, jamás Vec<ColorImage> por turno"
+        );
+        assert_eq!(HISTORY_THUMB_MAX_TEXTURES, 96, "6 turnos << 96");
+        assert_eq!(TEXTURE_GRACE_FRAMES, 3);
+        assert_eq!(RETENTION_MAX_PENDING, 96);
+        // Presupuestos GIF intactos (no redefinidos acá, pineados).
+        assert_eq!(crate::anim_native::GIF_EXPORT_MAX_TOTAL_PIXELS, 8_000_000);
+        assert_eq!(
+            grafito_assistant_types::TURN_MEDIA_MAX_FRAMES,
+            64,
+            "64 frames por replay"
+        );
+        assert_eq!(
+            grafito_assistant_types::TURN_MEDIA_THUMB_MAX_BYTES,
+            HISTORY_THUMB_EXPECTED_RGBA_BYTES,
+            "tope del tipo = RGBA 96×96"
+        );
     }
 }

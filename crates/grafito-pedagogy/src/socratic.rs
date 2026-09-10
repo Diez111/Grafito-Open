@@ -6,7 +6,7 @@
 //! - Máximo 3 intentos, luego `Summarize` (`TooManyAttempts`).
 
 use crate::level::PedagogicalLevel;
-use crate::scaffold::{Scaffold, ScaffoldEngine, Turn};
+use crate::scaffold::{is_exploratory_request, Scaffold, ScaffoldEngine, Turn};
 use serde::{Deserialize, Serialize};
 
 /// Estado del diálogo socrático.
@@ -282,9 +282,75 @@ impl SocraticFsm {
             || lower.contains("la respuesta")
     }
 
-    /// ¿Es telling? `true` si `!can_reveal && contains_solution_marker`.
+    /// Heurística determinista: ¿el texto del LLM contiene un `=` numérico?
+    ///
+    /// `true` si alguna línea tiene `=` seguido (tras espacios) de un número
+    /// (`x=1`, `resultado = -2.5`). Tras `HeuristicQ`, soltar el valor es
+    /// telling aunque no haya framing explícito. Pura, sin regex ni `unwrap`.
+    pub fn contains_numeric_answer(text: &str) -> bool {
+        text.split('\n').any(|line| {
+            let mut parts = line.split('=');
+            // Necesita al menos un `=` con algo a la izquierda.
+            let first = parts.next().unwrap_or("");
+            if first.trim().is_empty() {
+                return false;
+            }
+            parts.any(|rhs| {
+                let rhs = rhs.trim_start_matches([' ', '\t']);
+                let digits = rhs.strip_prefix('-').unwrap_or(rhs);
+                digits.starts_with(|c: char| c.is_ascii_digit())
+            })
+        })
+    }
+
+    /// Marcadores de solución según el estado del diálogo.
+    ///
+    /// Base (framing explícito) siempre; tras `HeuristicQ` (`HeuristicQ` con
+    /// intentos, `AwaitStudent`, `Rectify`, `Summarize`) se suma el `=`
+    /// numérico: si ya se preguntó, dar el número es revelar. En `Review`
+    /// (aún no se preguntó nada) y `Done` rige solo la base — evita el falso
+    /// `0` punitivo del conteo viejo y preserva `contains_solution_marker`.
+    pub fn contains_solution_marker_for_state(state: &SocraticState, text: &str) -> bool {
+        if Self::contains_solution_marker(text) {
+            return true;
+        }
+        match state {
+            SocraticState::Review { .. } | SocraticState::Done => false,
+            _ => Self::contains_numeric_answer(text),
+        }
+    }
+
+    /// ¿Es telling? `true` si `!can_reveal` y hay marcador para el estado
+    /// actual (framing explícito siempre + `=` numérico tras `HeuristicQ`).
+    /// Voz Mili y umbral `attempts >= 2` intactos.
     pub fn is_telling(&self, response_text: &str) -> bool {
-        !self.can_reveal_answer() && Self::contains_solution_marker(response_text)
+        !self.can_reveal_answer()
+            && Self::contains_solution_marker_for_state(&self.state, response_text)
+    }
+
+    /// ¿El pedido es exploratorio pero igual exige repair? Cierra el bypass
+    /// `is_exploratory_request` (demo, no evaluación) cuando la respuesta del
+    /// modelo trae matemática (`math_expr`/`$..$`/`=` numérico): un "ejemplo"
+    /// que suelta el valor es telling igual.
+    ///
+    /// Pura para el dueño del guard en app (`session_socratic_guard`,
+    /// `assistant.rs` — ESTE crate no lo toca):
+    /// ```ignore
+    /// if is_exploratory_request(question) && !SocraticFsm::requires_repair_despite_exploratory(question, response_trae_math) {
+    ///     return None; // bypass demo real
+    /// }
+    /// // …sigue guard normal (repair con voz Mili, attempts>=2)
+    /// ```
+    pub fn requires_repair_despite_exploratory(question: &str, response_brings_math: bool) -> bool {
+        is_exploratory_request(question) && response_brings_math
+    }
+
+    /// ¿La respuesta trae matemática (para `requires_repair_despite_exploratory`)?
+    /// Heurística barata y pura: `$..$`, `=` numérico o framing explícito.
+    pub fn response_brings_math(response_text: &str) -> bool {
+        response_text.contains('$')
+            || Self::contains_numeric_answer(response_text)
+            || Self::contains_solution_marker(response_text)
     }
 
     /// Guarda telling para uso remoto: `TellingTooEarly` si es telling con `attempts<2`.
@@ -687,6 +753,41 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn igual_numerico_es_telling_tras_heuristicq() {
+        // En Review (sin pregunta previa) el `=` suelto NO es telling.
+        let fresh = SocraticFsm::new("derivada");
+        assert!(!fresh.is_telling("Intentá con x=1"));
+        // Tras HeuristicQ, soltar el valor SÍ es telling.
+        let mut asked = SocraticFsm::new("derivada");
+        asked.ask().expect("ask");
+        assert!(asked.is_telling("Da x=2, fijate"));
+        assert!(asked.is_telling("resultado = -2.5"));
+        assert!(!asked.is_telling("¿Cómo lo pensaste? Contame tu idea"));
+        // Con attempts>=2 se puede revelar (umbral intacto).
+        asked.record_attempt(None);
+        asked.record_attempt(None);
+        assert!(!asked.is_telling("Da x=2, fijate"));
+        // Base intacta: framing explícito sigue siendo telling en Review.
+        assert!(fresh.is_telling("la solución es x = 4"));
+    }
+    #[test]
+    fn exploratorio_con_math_exige_repair() {
+        let demo = "hola haceme ejemplos para probar las capacidades de graficacion";
+        assert!(SocraticFsm::requires_repair_despite_exploratory(demo, true));
+        assert!(!SocraticFsm::requires_repair_despite_exploratory(
+            demo, false
+        ));
+        assert!(!SocraticFsm::requires_repair_despite_exploratory(
+            "¿qué es la derivada de x^2?",
+            true
+        ));
+        assert!(SocraticFsm::response_brings_math("miralo: $x^2$"));
+        assert!(SocraticFsm::response_brings_math("da x=2"));
+        assert!(!SocraticFsm::response_brings_math(
+            "contame cómo lo pensaste"
+        ));
+    }
     #[test]
     fn is_telling_respects_can_reveal() {
         let mut fsm = SocraticFsm::new("derivada");

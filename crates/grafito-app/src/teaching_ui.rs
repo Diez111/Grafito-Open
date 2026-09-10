@@ -16,7 +16,9 @@ use grafito_pedagogy::{
     Curriculum, Exercise, ExerciseGenerator, LearningObjective, PedagogicalLevel, TeachingSession,
 };
 use grafito_profile::StudentProfile;
-use grafito_ui::assistant::{humanize_prose_text, AssistantBlocksCache, AssistantMessageBlock};
+use grafito_ui::assistant::{
+    draw_math, humanize_prose_text, AssistantBlocksCache, AssistantMessageBlock,
+};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_whiteboard::{WhiteboardDoc, WhiteboardElement};
 use std::time::{Duration, Instant};
@@ -57,6 +59,15 @@ pub struct TeachingUiState {
     /// Parser del transcript (misma gramática que el asistente): evita
     /// re-parsear el paso en cada frame. Fuente única de markdown.
     bloques: AssistantBlocksCache,
+    /// Inicio de la sesión para el binding temporal por cue
+    /// (`TeachingSession::revealed_*`): la pizarra hidrata por cue en
+    /// `poll_cues`, en vez de todo el hint de golpe.
+    session_started_at: Option<Instant>,
+    /// Última cantidad revelada (evita re-hidratar sin cambio de cue).
+    last_revealed: usize,
+    /// El usuario navegó manualmente (advance/retroceder): los cues ya no
+    /// pisan la pizarra (manda la navegación explícita).
+    navigated: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -75,6 +86,9 @@ impl Default for TeachingUiState {
             cached_hash: 0,
             cached_len: 0,
             bloques: AssistantBlocksCache::default(),
+            session_started_at: None,
+            last_revealed: 0,
+            navigated: false,
         }
     }
 }
@@ -1527,10 +1541,10 @@ pub fn estado_pizarra(hint: &str, doc_vacia: bool) -> EstadoPizarra {
 }
 
 /// Dibuja texto con la gramática del transcript (mismo parser, sin duplicar:
-/// `AssistantBlocksCache` + `humanize_prose_text`). Los bloques de código,
-/// tabla y matemática caen a marco monoespaciado honesto (el renderer
-/// matemático completo vive en el panel del asistente).
-/// Cero I/O y cero spawn: sólo CPU en memoria.
+/// `AssistantBlocksCache` + `humanize_prose_text`). Código y tabla caen a
+/// marco monoespaciado honesto; la matemática (`$..$`) se dibuja con el
+/// renderer del asistente (`grafito_ui::assistant::draw_math`, con fallback
+/// a texto si el parse falla). Cero I/O y cero spawn: sólo CPU en memoria.
 pub fn draw_bloques_markdown(ui: &mut egui::Ui, texto: &str, cache: &mut AssistantBlocksCache) {
     let tema = grafito_ui::theme::current_theme(ui.ctx());
     let bloques = cache.blocks(texto);
@@ -1594,7 +1608,7 @@ pub fn draw_bloques_markdown(ui: &mut egui::Ui, texto: &str, cache: &mut Assista
                 );
             }
             AssistantMessageBlock::DisplayMath(math) => {
-                marco_monoespaciado(ui, "Expresión", math);
+                draw_math(ui, math);
             }
             AssistantMessageBlock::Code { language: _, text } => {
                 marco_monoespaciado(ui, "Código", text);
@@ -1808,6 +1822,15 @@ impl TeachingUiState {
         }
         self.session = Some(session);
         self.opened_at = Some(Instant::now());
+        // Binding temporal: los cues arrancan acá; el primer tick hidrata
+        // por cue (paso 1, cue 0) igual que el hidratar directo de arriba.
+        self.session_started_at = self.opened_at;
+        self.last_revealed = self
+            .session
+            .as_ref()
+            .map(|s| s.revealed_count(0))
+            .unwrap_or(0);
+        self.navigated = false;
         self.anim_frames = None;
         self.clear_anim_textures_only(None);
     }
@@ -1830,6 +1853,8 @@ impl TeachingUiState {
             }
             // Reinicia morph para el nuevo paso (burbuja entra de nuevo)
             self.opened_at = Some(Instant::now());
+            // Navegación explícita: los cues ya no pisan la pizarra.
+            self.navigated = true;
             ok
         } else {
             false
@@ -1858,10 +1883,14 @@ impl TeachingUiState {
             self.hidratar_pizarra(&nuevo_hint);
         }
         self.opened_at = Some(Instant::now());
+        self.navigated = true;
         true
     }
     pub fn close(&mut self) {
         self.session = None;
+        self.session_started_at = None;
+        self.last_revealed = 0;
+        self.navigated = false;
         self.orchestrator.cancel();
         self.opened_at = None;
         self.anim_frames = None;
@@ -1870,12 +1899,19 @@ impl TeachingUiState {
 
     pub fn close_with_ctx(&mut self, ctx: &egui::Context) {
         self.session = None;
+        self.session_started_at = None;
+        self.last_revealed = 0;
+        self.navigated = false;
         self.orchestrator.cancel();
         self.opened_at = None;
         self.anim_frames = None;
         self.clear_anim_textures_only(Some(ctx));
     }
     pub fn tick(&mut self, now: Instant) {
+        // Binding temporal por cue: hidrata la pizarra con los hints
+        // revelados hasta el elapsed (en vez de todo el hint de golpe).
+        // No pisa navegación manual (`advance`/`retroceder`).
+        self.poll_cues(now);
         if let Some(state) = self.orchestrator.tick(now) {
             // Al completar, generar fallback nativo via anim_native si no hay artefacto real
             if matches!(state, OrchestratorState::Completed { .. }) && self.anim_frames.is_none() {
@@ -1888,6 +1924,36 @@ impl TeachingUiState {
             }
             let _ = state;
         }
+    }
+    /// Hidrata por cue: unión de los hints revelados hasta el elapsed de la
+    /// sesión. Solo re-hidrata cuando cambia la cantidad revelada; nunca si
+    /// el usuario navegó manualmente. Puro estado local, sin I/O.
+    fn poll_cues(&mut self, now: Instant) {
+        if self.navigated {
+            return;
+        }
+        let (Some(session), Some(started)) = (self.session.as_ref(), self.session_started_at)
+        else {
+            return;
+        };
+        let elapsed_ms = now
+            .duration_since(started)
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        let revealed = session.revealed_count(elapsed_ms);
+        if revealed == self.last_revealed {
+            return;
+        }
+        self.last_revealed = revealed;
+        // Reconstruye acumulando por hint (cada hint se clasifica por
+        // separado: unir los strings rompería `hint_for_topic`).
+        let mut doc = WhiteboardDoc::default();
+        for step in session.revealed_steps(elapsed_ms) {
+            for elem in whiteboard_elements_for_hint(&step.whiteboard_hint) {
+                doc.add(elem);
+            }
+        }
+        self.whiteboard.doc = doc;
     }
     /// Progreso 0..=1 del morph burbuja (ANIM_MICRO 180ms ease-out).
     pub fn morph_progress(&self) -> f32 {
@@ -2141,11 +2207,16 @@ pub fn draw_teaching_overlay(
                                         ))
                                         .show(ui, |ui| {
                                             ui.label(
-                                                egui::RichText::new(texto_plano_inline(expr))
-                                                    .monospace()
-                                                    .size(grafito_ui::tokens::TYPE_SM)
-                                                    .color(theme.text_primary),
+                                                egui::RichText::new("Expresión verificada")
+                                                    .strong()
+                                                    .size(grafito_ui::tokens::TYPE_XS)
+                                                    .color(theme.accent),
                                             );
+                                            // MathTex overlay: mismo renderer del asistente
+                                            // (`draw_math`, fuente `$..$`); con fallback a
+                                            // texto si el parse falla. Solo llega acá lo
+                                            // verificado por el CAS-gate (`verified`).
+                                            draw_math(ui, expr);
                                         });
                                 }
                             });
@@ -2221,8 +2292,26 @@ pub fn draw_teaching_overlay(
                         // Animación nativa fallback (si completó)
                         if !anim_textures.is_empty() {
                             ui.add_space(grafito_ui::tokens::SPACE_SM);
-                            let time = ui.input(|i| i.time);
-                            let idx = ((time * 12.0) as usize) % anim_textures.len();
+                            // Playback por cue: el paso actual puede traer
+                            // `frame_range` (ventana sobre el loop); sin rango
+                            // es el loop completo de 12 fps de siempre.
+                            let elapsed_ms = opened_at
+                                .map(|t| {
+                                    Instant::now()
+                                        .duration_since(t)
+                                        .as_millis()
+                                        .min(u64::MAX as u128)
+                                        as u64
+                                })
+                                .unwrap_or(0);
+                            let len = anim_textures.len();
+                            let idx = current_step
+                                .as_ref()
+                                .and_then(|st| {
+                                    TeachingSession::cue_frame_index(st, elapsed_ms, 12.0, len)
+                                })
+                                .unwrap_or(0)
+                                .min(len.saturating_sub(1));
                             debug_assert!(idx < anim_textures.len());
                             let tex = &anim_textures[idx];
                             let max_w = ui
@@ -2446,6 +2535,41 @@ mod tests {
         assert!(con_sesion.session.is_none(), "cerrar limpia la sesión");
     }
 
+    #[test]
+    fn cues_hidratan_progresivo_y_navegacion_manda() {
+        // Binding temporal: la pizarra hidrata por cue, no todo de golpe; la
+        // navegación manual congela los cues.
+        let mut ui = TeachingUiState {
+            session: Some(TeachingSession::for_topic("derivada")),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        ui.session_started_at = Some(t0);
+        ui.last_revealed = 0;
+        ui.poll_cues(t0);
+        assert_eq!(ui.last_revealed, 1, "cue 0 revela el paso 1");
+        let n1 = ui.whiteboard.doc.len();
+        assert!(n1 > 0, "paso 1 hidrata dibujo útil");
+        // Sin cambio de cue no re-hidrata (mismo conteo).
+        ui.poll_cues(t0 + Duration::from_millis(100));
+        assert_eq!(ui.last_revealed, 1);
+        // Cue de 5 s revela el paso 2 y acumula elementos.
+        ui.poll_cues(t0 + Duration::from_millis(5_000));
+        assert_eq!(ui.last_revealed, 2);
+        assert!(
+            ui.whiteboard.doc.len() >= n1,
+            "cues acumulan, no reemplazan"
+        );
+        // Navegación manual: los cues ya no pisan.
+        ui.advance();
+        let tras_avance = ui.whiteboard.doc.len();
+        ui.poll_cues(t0 + Duration::from_millis(60_000));
+        assert_eq!(
+            ui.whiteboard.doc.len(),
+            tras_avance,
+            "navegar congela los cues"
+        );
+    }
     #[test]
     fn presupuestos_texto_pedagogico_pinneados() {
         // Onda 2: pinnea los topes user-facing de la tarjeta de ejercicio
@@ -2764,7 +2888,7 @@ mod tests {
             kind: grafito_pedagogy::ExerciseKind::Numeric,
             difficulty: grafito_pedagogy::ExerciseDifficulty::Medium,
             lo_id: "x".into(),
-            params: std::collections::HashMap::new(),
+            params: std::collections::BTreeMap::new(),
             seed: Some(1),
             validator: grafito_pedagogy::ValidatorKind::NumericTol(0.02),
         };

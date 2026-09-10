@@ -3,7 +3,7 @@
 use crate::curriculum::LearningObjective;
 use crate::level::PedagogicalLevel;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExerciseKind {
@@ -39,7 +39,7 @@ pub struct Exercise {
     pub difficulty: ExerciseDifficulty,
     pub lo_id: String,
     #[serde(default)]
-    pub params: HashMap<String, f64>,
+    pub params: BTreeMap<String, f64>,
     #[serde(default)]
     pub seed: Option<u64>,
     #[serde(default)]
@@ -137,7 +137,7 @@ impl ExerciseGenerator {
                 let prompt = format!("Deriva f(x)={}*x^2 + {}*x en x=1", a, b);
                 let sol_val = 2 * a + b;
                 let solution = sol_val.to_string();
-                let mut params = HashMap::new();
+                let mut params = BTreeMap::new();
                 params.insert("a".to_string(), a as f64);
                 params.insert("b".to_string(), b as f64);
                 // variante por seed%5 documentada: ya implícita en a,b
@@ -162,7 +162,7 @@ impl ExerciseGenerator {
                     // Dejamos representación decimal completa para parse numérico
                     format!("{val}")
                 };
-                let mut params = HashMap::new();
+                let mut params = BTreeMap::new();
                 params.insert("a".to_string(), a as f64);
                 (
                     prompt,
@@ -181,7 +181,7 @@ impl ExerciseGenerator {
                     3 => ("¿Cuánto vale sin(3·π/2)?".to_string(), "-1".to_string()),
                     _ => ("¿Cuánto vale sin(0)?".to_string(), "0".to_string()),
                 };
-                let mut params = HashMap::new();
+                let mut params = BTreeMap::new();
                 params.insert("k".to_string(), k as f64);
                 // también guardamos ángulo en radianes
                 let angle = k as f64 * std::f64::consts::FRAC_PI_2;
@@ -203,7 +203,7 @@ impl ExerciseGenerator {
                 let prompt = format!("Si f(x)={}*x+{}, evalúa en x={}", a, b, c);
                 let sol = a * c + b;
                 let solution = sol.to_string();
-                let mut params = HashMap::new();
+                let mut params = BTreeMap::new();
                 params.insert("a".to_string(), a as f64);
                 params.insert("b".to_string(), b as f64);
                 params.insert("c".to_string(), c as f64);

@@ -8,8 +8,7 @@
 use crate::object::{VectorField2DObj, VectorFieldCacheKey, VectorFieldSamples};
 use grafito_geometry::expr;
 use rayon::prelude::*;
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::collections::BTreeMap;
 use std::sync::RwLockReadGuard;
 
 /// Expande los límites visibles por `pad_factor` y los alinea a una grilla
@@ -65,19 +64,14 @@ pub fn cache_key(
     vf: &VectorField2DObj,
     bounds: (f64, f64, f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> VectorFieldCacheKey {
-    let mut hasher = DefaultHasher::new();
-    for (k, v) in variables.iter() {
-        k.hash(&mut hasher);
-        v.to_bits().hash(&mut hasher);
-    }
     VectorFieldCacheKey {
         expr_u: vf.expr_u.clone(),
         expr_v: vf.expr_v.clone(),
         view_bounds: bounds,
         grid_size,
-        variables_hash: hasher.finish(),
+        variables_hash: crate::parametric_sampling::variables_hash(variables),
     }
 }
 
@@ -89,7 +83,7 @@ pub fn evaluate_vector_field_2d(
     vf: &VectorField2DObj,
     bounds: (f64, f64, f64, f64),
     _view: &grafito_geometry::ViewTransform,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> VectorFieldSamples {
     let (x_min, x_max, y_min, y_max) = bounds;
     if !x_min.is_finite()
@@ -110,6 +104,18 @@ pub fn evaluate_vector_field_2d(
 
     let ast_u = expr::prepare_function_ast(&vf.expr_u, variables, &["x", "y"]).ok();
     let ast_v = expr::prepare_function_ast(&vf.expr_v, variables, &["x", "y"]).ok();
+    // Base de variables fuera del hot loop: evita iterar+clonar el mapa
+    // (con Strings) en cada celda; el fallback solo clona este Vec lineal.
+    let base_vars: Vec<(String, f64)> = variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let eval_fallback_base = |expr_str: &str, x: f64, y: f64| -> Option<f64> {
+        let mut vars = base_vars.clone();
+        vars.push(("x".to_string(), x));
+        vars.push(("y".to_string(), y));
+        expr::evaluate(expr_str, &vars)
+            .ok()
+            .map(finite_clamp)
+            .filter(|v| v.is_finite())
+    };
 
     (0..=grid_size)
         .into_par_iter()
@@ -122,13 +128,13 @@ pub fn evaluate_vector_field_2d(
                     let u = ast_u
                         .as_ref()
                         .map(|ast| finite_clamp(ast.eval_2d("x", x, "y", y)))
-                        .or_else(|| eval_fallback(&vf.expr_u, x, y, variables))
+                        .or_else(|| eval_fallback_base(&vf.expr_u, x, y))
                         .unwrap_or(f64::NAN);
 
                     let v = ast_v
                         .as_ref()
                         .map(|ast| finite_clamp(ast.eval_2d("x", x, "y", y)))
-                        .or_else(|| eval_fallback(&vf.expr_v, x, y, variables))
+                        .or_else(|| eval_fallback_base(&vf.expr_v, x, y))
                         .unwrap_or(f64::NAN);
 
                     (x, y, u, v)
@@ -146,22 +152,12 @@ fn finite_clamp(v: f64) -> f64 {
     }
 }
 
-fn eval_fallback(expr: &str, x: f64, y: f64, variables: &HashMap<String, f64>) -> Option<f64> {
-    let mut vars: Vec<(String, f64)> = variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    vars.push(("x".to_string(), x));
-    vars.push(("y".to_string(), y));
-    expr::evaluate(expr, &vars)
-        .ok()
-        .map(finite_clamp)
-        .filter(|v| v.is_finite())
-}
-
 /// Obtiene las muestras cacheadas o las computa si cambió la clave.
 pub fn samples_or_compute<'a>(
     vf: &'a VectorField2DObj,
     view_bounds: (f64, f64, f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> RwLockReadGuard<'a, VectorFieldSamples> {
     let grid_size = grid_size.clamp(5, 128);
     let padded_bounds = padded_snapped_bounds(view_bounds, 2.0, 64);

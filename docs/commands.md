@@ -289,6 +289,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `cuadrica`, `cuádrica`.
 - `ImplicitSurface[expr, x0, x1, y0, y1, z0, z1, res]`: Crea una superficie implícita F(x,y,z)=0 en la caja dada (marching-tetra, res 8..=32, 16 por defecto). Mutacion: crea objetos. Riesgo: medio. Alias: `superficieimplicita`, `implicitsurface3d`.
 - `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Cubo (polígono ortográfico; resto de poliedros stub honesto). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
+- `Vista3D[vista]`: Pide la vista del canvas 3D: perspectiva (orbital) o alzado/planta/perfil (ortográficas vía OrthoView del cerebro). Solo consulta: no crea ni muta objetos. Mutacion: solo consulta. Riesgo: bajo. Alias: `vista`, `view3d`.
 ## Crear
 
 - `Arc[centro, radio, inicio, fin]`: Crea un arco por centro/radio/ángulos o por tres puntos. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Arc[P1, P2, P3]`. Alias: `arco`.

@@ -53,13 +53,14 @@ pub struct EngineConfig {
 }
 
 impl Default for EngineConfig {
+    /// Por defecto `native://`: el worker Python está jubilado (F0 Pureza
+    /// Rust). `spawn` con este comando falla honesto e indica la vía nativa
+    /// (`anim_native`) o cómo configurar un motor externo vía `GRAFITO_ANIM_*`
+    /// / `EngineConfig { command, .. }`. Presupuestos intactos: 90 s / 8 s /
+    /// 64 KiB.
     fn default() -> Self {
         Self {
-            command: vec![
-                "python3".to_string(),
-                "-m".to_string(),
-                "grafito_manim_engine".to_string(),
-            ],
+            command: vec!["native://".to_string()],
             working_dir: None,
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
             job_timeout: Duration::from_secs(DEFAULT_JOB_TIMEOUT_SECS),
@@ -319,8 +320,18 @@ pub struct AnimEngine {
 
 impl AnimEngine {
     /// Lanza el proceso del motor y empieza a leer sus mensajes.
+    ///
+    /// F0: `native://` (el default) NO spawnea nada: falla honesto. La vía
+    /// nativa vive en `grafito-app::anim_native`; este puente solo habla con
+    /// motores externos configurados explícitamente (`command` real).
     pub fn spawn(config: EngineConfig) -> Result<Self, String> {
         config.validate()?;
+        if config.command[0] == "native://" {
+            return Err(
+                "motor externo jubilado (native://): usá el render nativo o configurá un motor externo en EngineConfig { command, .. }"
+                    .to_string(),
+            );
+        }
         for arg in &config.command {
             if arg.contains('\0') {
                 return Err("el comando del motor contiene byte NUL".into());
@@ -1044,46 +1055,49 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
 
+    // Stub de wire v1 en POSIX sh (F0: sin Python). Habla el mismo protocolo
+    // que el worker jubilado: hello → ping/pong → render_request →
+    // progress + PNG 1x1 válido → render_result (o error/timeout según
+    // `concept`). El PNG viaja en base64 (coreutils) para no pelear con
+    // escapes del shell.
     const STUB: &str = r#"
-import json, sys, os, time
-def send(o):
-    sys.stdout.write(json.dumps(o) + "\n")
-    sys.stdout.flush()
-send({"type":"hello","protocol_version":1,"capabilities":["derivative-slope"]})
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        msg = json.loads(line)
-    except Exception:
-        continue
-    t = msg.get("type")
-    if t == "ping":
-        send({"type":"pong"})
-    elif t == "shutdown":
-        break
-    elif t == "render_request":
-        jid = msg["job_id"]
-        if msg.get("concept") == "fail":
-            send({"type":"error","job_id":jid,"code":"render_failed","message":"boom"})
-            continue
-        if msg.get("concept") == "never":
-            time.sleep(120)
-            continue
-        send({"type":"progress","job_id":jid,"step":"render","percent":50})
-        out_dir = os.getcwd()
-        path = os.path.join(out_dir, jid + ".png")
-        # M3-9: PNG 1x1 válido (67 B), no la firma de 8 B: el test
-        # `stub_png_decodifica_honesto` lo valida estructuralmente.
-        with open(path, "wb") as fh:
-            fh.write(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63000100000500010d0a2db40000000049454e44ae426082"))
-        send({"type":"render_result","job_id":jid,"media_path":path,"frames":1,"duration_ms":120})
+printf '%s\n' '{"type":"hello","protocol_version":1,"capabilities":["derivative-slope"]}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"ping"'*)
+      printf '%s\n' '{"type":"pong"}'
+      ;;
+    *'"type":"shutdown"'*)
+      break
+      ;;
+    *'"type":"render_request"'*)
+      jid=$(printf '%s' "$line" | sed -n 's/.*"job_id"[ ]*:[ ]*"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *fail*)
+          printf '%s\n' "{\"type\":\"error\",\"job_id\":\"$jid\",\"code\":\"render_failed\",\"message\":\"boom\"}"
+          ;;
+        *never*)
+          sleep 120
+          ;;
+        *)
+          printf '%s\n' "{\"type\":\"progress\",\"job_id\":\"$jid\",\"step\":\"render\",\"percent\":50}"
+          out="$(pwd)/$jid.png"
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d > "$out"
+          printf '%s\n' "{\"type\":\"render_result\",\"job_id\":\"$jid\",\"media_path\":\"$out\",\"frames\":1,\"duration_ms\":120}"
+          ;;
+      esac
+      ;;
+  esac
+done
 "#;
 
-    fn python_available() -> bool {
-        Command::new("python3")
-            .arg("--version")
+    /// ¿Hay shell POSIX para los stubs de wire v1? (F0: reemplaza al viejo
+    /// `python_available`; si no hay `sh`, los tests de IPC se saltan honesto
+    /// en lugar de fallar, igual que antes con python3 ausente).
+    fn shell_available() -> bool {
+        Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -1107,14 +1121,10 @@ for line in sys.stdin:
             std::thread::current().id()
         ));
         fs::create_dir_all(&dir).unwrap();
-        let stub_path = dir.join("stub_engine.py");
+        let stub_path = dir.join("stub_engine.sh");
         fs::write(&stub_path, STUB).unwrap();
         let config = EngineConfig {
-            command: vec![
-                "python3".to_string(),
-                "-u".to_string(),
-                stub_path.to_string_lossy().to_string(),
-            ],
+            command: vec!["sh".to_string(), stub_path.to_string_lossy().to_string()],
             working_dir: Some(dir.clone()),
             ..Default::default()
         };
@@ -1135,8 +1145,8 @@ for line in sys.stdin:
 
     #[test]
     fn health_check_and_job_roundtrip_over_an_external_stub() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1196,8 +1206,8 @@ for line in sys.stdin:
 
     #[test]
     fn stub_png_decodifica_honesto() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1225,8 +1235,8 @@ for line in sys.stdin:
 
     #[test]
     fn run_job_propagates_engine_errors() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1244,8 +1254,8 @@ for line in sys.stdin:
 
     #[test]
     fn run_job_times_out_when_the_engine_never_answers() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, mut config) = stub_engine();
@@ -1301,8 +1311,8 @@ for line in sys.stdin:
 
     #[test]
     fn statem_rejects_submit_before_ready() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1355,8 +1365,8 @@ for line in sys.stdin:
 
     #[test]
     fn engine_tracks_real_progress_from_stub() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1395,24 +1405,19 @@ for line in sys.stdin:
     }
 
     // ── T2 Cancelación cooperativa <200 ms ────────────────────────────────
+    // Stub que ignora `shutdown` (para probar el kill <200 ms), en sh.
     const IGNORING_STUB: &str = r#"
-import json, sys, time
-def send(o):
-    sys.stdout.write(json.dumps(o) + "\n")
-    sys.stdout.flush()
-send({"type":"hello","protocol_version":1,"capabilities":[]})
-for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    try: msg=json.loads(line)
-    except Exception: continue
-    t=msg.get("type")
-    if t=="ping":
-        send({"type":"pong"})
-    elif t=="shutdown":
-        continue
-    elif t=="render_request":
-        time.sleep(30)
+printf '%s\n' '{"type":"hello","protocol_version":1,"capabilities":[]}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"ping"'*)
+      printf '%s\n' '{"type":"pong"}'
+      ;;
+    *'"type":"render_request"'*)
+      sleep 30
+      ;;
+  esac
+done
 "#;
 
     fn stub_engine_with(source: &str) -> (TempDirGuard, EngineConfig) {
@@ -1426,14 +1431,10 @@ for line in sys.stdin:
             std::thread::current().id()
         ));
         fs::create_dir_all(&dir).unwrap();
-        let stub_path = dir.join("stub_engine.py");
+        let stub_path = dir.join("stub_engine.sh");
         fs::write(&stub_path, source).unwrap();
         let config = EngineConfig {
-            command: vec![
-                "python3".to_string(),
-                "-u".to_string(),
-                stub_path.to_string_lossy().to_string(),
-            ],
+            command: vec!["sh".to_string(), stub_path.to_string_lossy().to_string()],
             working_dir: Some(dir.clone()),
             ..Default::default()
         };
@@ -1442,8 +1443,8 @@ for line in sys.stdin:
 
     #[test]
     fn cancel_kills_ignoring_worker_within_200ms() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, config) = stub_engine_with(IGNORING_STUB);
@@ -1473,6 +1474,24 @@ for line in sys.stdin:
     }
 
     // ── T3 Timeouts configurables + line_cap ─────────────────────────────
+    #[test]
+    fn default_es_native_y_spawn_falla_honesto() {
+        // F0: sin Python el default es `native://` y NO spawnea nada.
+        let cfg = EngineConfig::default();
+        assert_eq!(cfg.command, vec!["native://".to_string()]);
+        assert_eq!(cfg.job_timeout, Duration::from_secs(90));
+        assert_eq!(cfg.idle_timeout, Duration::from_secs(8));
+        assert_eq!(cfg.line_cap_bytes, 64 * 1024);
+        assert!(cfg.validate().is_ok(), "native:// es config válida");
+        match AnimEngine::spawn(cfg) {
+            Ok(_) => panic!("native:// no debe spawnear nada"),
+            Err(err) => assert!(
+                err.contains("jubilado") && err.contains("native://"),
+                "fallo honesto esperado, got: {err}"
+            ),
+        }
+    }
+
     #[test]
     fn engine_config_validates_ranges() {
         let mut cfg = EngineConfig::default();
@@ -1532,36 +1551,34 @@ for line in sys.stdin:
         }
     }
 
+    // Stub de línea gigante (100 KiB > line_cap 64 KiB) en sh: emite la
+    // línea oversized, luego progress + PNG + result normales.
     const GIANT_STUB: &str = r#"
-import json, sys, os
-def send(o):
-    sys.stdout.write(json.dumps(o) + "\n")
-    sys.stdout.flush()
-send({"type":"hello","protocol_version":1,"capabilities":[]})
-for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    try: msg=json.loads(line)
-    except Exception: continue
-    t=msg.get("type")
-    if t=="ping":
-        send({"type":"pong"})
-    elif t=="shutdown":
-        break
-    elif t=="render_request":
-        jid=msg["job_id"]
-        sys.stdout.write("A"*(100*1024) + "\n")
-        sys.stdout.flush()
-        send({"type":"progress","job_id":jid,"step":"render","percent":10})
-        out=os.path.join(os.getcwd(), jid+".png")
-        open(out,"wb").write(b"\x89PNG\r\n\x1a\n")
-        send({"type":"render_result","job_id":jid,"media_path":out,"frames":1,"duration_ms":10})
+printf '%s\n' '{"type":"hello","protocol_version":1,"capabilities":[]}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"ping"'*)
+      printf '%s\n' '{"type":"pong"}'
+      ;;
+    *'"type":"shutdown"'*)
+      break
+      ;;
+    *'"type":"render_request"'*)
+      jid=$(printf '%s' "$line" | sed -n 's/.*"job_id"[ ]*:[ ]*"\([^"]*\)".*/\1/p')
+      head -c 102400 /dev/zero | tr '\0' 'A'; printf '\n'
+      printf '%s\n' "{\"type\":\"progress\",\"job_id\":\"$jid\",\"step\":\"render\",\"percent\":10}"
+      out="$(pwd)/$jid.png"
+      printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d > "$out"
+      printf '%s\n' "{\"type\":\"render_result\",\"job_id\":\"$jid\",\"media_path\":\"$out\",\"frames\":1,\"duration_ms\":10}"
+      ;;
+  esac
+done
 "#;
 
     #[test]
     fn line_cap_rejects_giant_line_as_protocol_error() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, mut config) = stub_engine_with(GIANT_STUB);
@@ -1624,137 +1641,80 @@ for line in sys.stdin:
         }
     }
 
-    // ── T5 Sandbox Python: 2 tests de escape ─────────────────────────────
-    fn python_engine_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("engines/python")
-    }
-
-    fn run_sandbox_check(script: &str) -> Result<String, String> {
-        let out = Command::new("python3")
-            .arg("-c")
-            .arg(script)
-            .env(
-                "PYTHONPATH",
-                python_engine_dir().to_string_lossy().to_string(),
-            )
-            .output()
-            .map_err(|e| format!("no se pudo lanzar python3: {e}"))?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).to_string())
-        } else {
-            Err(format!(
-                "sandbox check falló: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ))
+    // ── F0: paridad sandbox en Rust puro (sin Python) ───────────────────
+    // Espejo de lo que cubrían los viejos checks `validate_expr`/`safe_path`
+    // del worker jubilado: job_id con traversal se rechaza (`AnimJobId`
+    // pineado a `^[A-Za-z0-9_-]{1,64}$`), artefactos fuera del workdir se
+    // rechazan (`validate_media_path` fail-closed) y el caso legítimo pasa.
+    #[test]
+    fn job_id_rechaza_traversal_como_el_viejo_job_re() {
+        use crate::protocol::AnimJobId;
+        for evil in [
+            "../escape",
+            "/abs",
+            "a/b",
+            "",
+            "a;b",
+            "a b",
+            "con espacios",
+            "x".repeat(65).as_str(),
+        ] {
+            assert!(
+                AnimJobId::try_new(evil.to_string()).is_err(),
+                "job_id debe rechazar {evil:?}"
+            );
         }
+        assert!(AnimJobId::try_new("job-1".to_string()).is_ok());
+        assert!(AnimJobId::try_new("a".repeat(64)).is_ok());
     }
 
     #[test]
-    fn sandbox_rejects_code_injection_import_dunder() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
-            return;
+    fn media_path_rechaza_traversal_y_symlink_escape() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER3: AtomicU64 = AtomicU64::new(50_000);
+        let id = COUNTER3.fetch_add(1, Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("grafito_media_f0_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("wd")).unwrap();
+        let wd = base.join("wd");
+        // 1) traversal directo.
+        for evil in ["../escape.png", "/abs/out.png", "../../evil_f0/p.png", ""] {
+            assert!(!validate_media_path(&wd, evil), "debe rechazar {evil:?}");
         }
-        // Cubre: import, dunder (__import__/__class__), Attribute, Call no
-        // permitida y Subscript. El sandbox debe rechazar TODO lo listado y
-        // aceptar solo "x**2 + sin(x)".
-        let script = r#"
-import sys
-from manim_engine.__main__ import validate_expr
-bad = [
-    "__import__('os').system('echo pwned')",
-    "import os",
-    "x.__class__.__bases__[0]",
-    "open('/etc/passwd').read()",
-    "eval('1+1')",
-    "getattr(x, 'real')",
-    "x[0]",
-    "(lambda x: x)(1)",
-    "sin(__import__('os').name)",
-]
-for expr in bad:
-    try:
-        validate_expr(expr)
-    except ValueError:
-        continue
-    print(f"ESCAPE NO BLOQUEADO: {expr!r}")
-    sys.exit(1)
-# Expresión legítima debe pasar
-assert validate_expr("x**2 + sin(x)") == "x**2 + sin(x)"
-# MAX_EXPR_LEN=500: 501 chars debe fallar
-try:
-    validate_expr("x+" + "1"*600)
-    print("ESCAPE LONGITUD NO BLOQUEADA")
-    sys.exit(1)
-except ValueError:
-    pass
-print("sandbox code-injection OK")
-"#;
-        run_sandbox_check(script).unwrap();
-    }
-
-    #[test]
-    fn sandbox_rejects_path_traversal_and_symlink_escape() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
-            return;
+        // 2) caso legítimo pasa y queda dentro.
+        assert!(validate_media_path(&wd, "job-1.png"));
+        // 3) symlink escape: subdir que apunta fuera → el parent canónico
+        // queda fuera del cwd y se rechaza sin crear nada fuera.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let fuera = base.join("fuera_f0");
+            fs::create_dir_all(&fuera).unwrap();
+            let link = wd.join("eslabon");
+            let _ = symlink(&fuera, &link);
+            if link.exists() || fs::read_link(&link).is_ok() {
+                assert!(
+                    !validate_media_path(&wd, "eslabon/out.png"),
+                    "symlink escape debe rechazarse"
+                );
+                assert!(
+                    !fuera.join("out.png").exists(),
+                    "nada debe materializarse fuera"
+                );
+            }
         }
-        // Cubre: path traversal vía job_id ("../escape", "/abs", "a/b") y
-        // symlink escape (job-1.png → /etc/passwd debe rechazarse por
-        // resolve()+relative_to). También MAX_NODES y export inválido.
-        let script = r#"
-import pathlib, sys, tempfile, os
-from manim_engine.__main__ import safe_path, validate_expr
-with tempfile.TemporaryDirectory() as td:
-    wd = pathlib.Path(td)
-    # 1) job_id con traversal debe fallar (JOB_RE ^[A-Za-z0-9_-]{1,64}$)
-    for evil in ["../escape", "/abs", "a/b", "", "x"*65, "a;b", "a b"]:
-        try:
-            safe_path(wd, evil, "png")
-        except ValueError:
-            continue
-        print(f"TRAVERSAL NO BLOQUEADO: {evil!r}")
-        sys.exit(1)
-    # 2) export inválido debe fallar
-    try:
-        safe_path(wd, "job-1", "exe")
-        print("EXPORT NO BLOQUEADO")
-        sys.exit(1)
-    except ValueError:
-        pass
-    # 3) caso legítimo pasa y queda dentro del workdir
-    p = safe_path(wd, "job-1", "png")
-    assert str(p).startswith(str(wd.resolve())), p
-    # 4) symlink escape: pre-crear job-1.png -> /etc/passwd debe rechazarse
-    link = wd / "job-1.png"
-    try:
-        link.symlink_to("/etc/passwd")
-    except (OSError, NotImplementedError) as e:
-        print(f"sin symlink en este FS, salto parcial OK ({e})")
-    else:
-        try:
-            safe_path(wd, "job-1", "png")
-            print("SYMLINK ESCAPE NO BLOQUEADO")
-            sys.exit(1)
-        except ValueError:
-            pass
-    # 5) MAX_NODES=200: expresión gigante debe fallar
-    try:
-        validate_expr("+".join(["x"]*500))
-        print("MAX_NODES NO BLOQUEADO")
-        sys.exit(1)
-    except ValueError:
-        pass
-print("sandbox path-traversal OK")
-"#;
-        run_sandbox_check(script).unwrap();
+        // 4) export inválido no existe en el tipo: `"exe"` no deserializa.
+        let exe: Result<crate::protocol::ExportFormat, _> = serde_json::from_str("\"exe\"");
+        assert!(exe.is_err(), "export exe debe rechazarse");
+        fs::remove_dir_all(&base).unwrap();
     }
 
     // ── v3: sin cola FIFO (single-flight) ───────────────────────────────
     #[test]
     fn submit_while_running_is_rejected_no_fifo_queue() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1773,8 +1733,8 @@ print("sandbox path-traversal OK")
     // ── v4: cancel cableado hasta run_job (ANIM-REVIVE) ───────────────────
     #[test]
     fn run_job_honors_cancel_closure_like_cancellation_token() {
-        if !python_available() {
-            eprintln!("skipping: python3 not available");
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
             return;
         }
         // La firma YA soporta tokens: cualquier `&dyn Fn() -> bool` (p. ej.
@@ -1980,6 +1940,86 @@ pub fn run_playlist_sequential(
         return Err("playlist: conteo interno inconsistente, nada parcial".to_string());
     }
     Ok(results)
+}
+
+// ── F1: puente escena→playlist (puro, sin I/O) ─────────────────────────────
+// Una `Scene` Manim corre sus `Animation` en `Succession`: este puente arma
+// la `Playlist` con los `run_time_ms` de cada animación (`rate` vive en la
+// escena, el motor solo ordena y drena). Reusa `PlaylistStep::anim` +
+// `Playlist::try_new` (presupuestos 8 steps / run 100..=30000 / espera
+// 0..=10000 intactos). Puro, sin `unwrap`.
+
+/// Arma una `Playlist` (`Succession`) desde steps de escena.
+///
+/// `items`: `(request, run_time_ms, wait_after_ms)` por animación de la
+/// escena (`run_time_ms` sale de `Animation::run_time_ms`). Todo `Err`
+/// honesto en español, nada parcial.
+pub fn playlist_desde_escena(
+    items: Vec<(AnimRequest, u64, u64)>,
+) -> Result<crate::protocol::Playlist, String> {
+    if items.is_empty() {
+        return Err("la escena no trae animaciones: pasame al menos 1".to_string());
+    }
+    if items.len() > crate::protocol::PLAYLIST_MAX_STEPS {
+        return Err(format!(
+            "{} animaciones exceden el tope de {}: partí la escena en dos",
+            items.len(),
+            crate::protocol::PLAYLIST_MAX_STEPS
+        ));
+    }
+    let mut steps = Vec::with_capacity(items.len());
+    for (orden, (request, run_ms, espera_ms)) in items.into_iter().enumerate() {
+        request
+            .validate()
+            .map_err(|e| format!("la animación {orden} trae pedido inválido: {e}"))?;
+        let step = crate::protocol::PlaylistStep::anim(request, run_ms, espera_ms)
+            .map_err(|e| format!("la animación {orden} trae timing inválido: {e}"))?;
+        steps.push(step);
+    }
+    crate::protocol::Playlist::try_new(steps)
+        .map_err(|e| format!("playlist de escena inválida: {e}"))
+}
+
+#[cfg(test)]
+mod escena_f1_tests {
+    use super::*;
+    use crate::protocol::{ExportFormat, PlaylistStep};
+    use std::collections::BTreeMap;
+
+    fn pedido(template: &str) -> AnimRequest {
+        AnimRequest {
+            template: template.to_string(),
+            concept: template.to_string(),
+            params: BTreeMap::new(),
+            spec: None,
+            export: ExportFormat::Gif,
+            canvas: (640, 480),
+            duration_ms: 2000,
+        }
+    }
+
+    #[test]
+    fn puente_escena_armada_succession_validada() {
+        let lista = playlist_desde_escena(vec![
+            (pedido("derivative-slope"), 2000, 0),
+            (pedido("integral-area"), 1000, 500),
+        ])
+        .unwrap();
+        assert_eq!(lista.len(), 2);
+        assert_eq!(lista.total_duration_ms(), 3500);
+        // Es la misma cuenta que el builder con timings (mismo orden).
+        let directa = crate::protocol::Playlist::try_new(vec![
+            PlaylistStep::anim(pedido("derivative-slope"), 2000, 0).unwrap(),
+            PlaylistStep::anim(pedido("integral-area"), 1000, 500).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(lista.total_duration_ms(), directa.total_duration_ms());
+        // Vacia, de más y run fuera de rango fallan honesto.
+        assert!(playlist_desde_escena(vec![]).is_err());
+        let muchas: Vec<(AnimRequest, u64, u64)> = (0..9).map(|_| (pedido("d"), 1000, 0)).collect();
+        assert!(playlist_desde_escena(muchas).is_err());
+        assert!(playlist_desde_escena(vec![(pedido("d"), 50, 0)]).is_err());
+    }
 }
 
 #[cfg(test)]

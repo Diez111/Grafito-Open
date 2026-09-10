@@ -5,7 +5,7 @@ use grafito_core::{
     GeoObject, ImplicitCurveObj, ObjectId, OperationBatch, RelationOperator,
 };
 use grafito_geometry::Point2;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn semantic_snapshot(document: &Document) -> serde_json::Value {
     serde_json::to_value(document).expect("document should serialize")
@@ -60,9 +60,12 @@ fn validation_failure_leaves_the_document_and_revision_unchanged() {
     let missing = ObjectId::new();
     let mut batch = OperationBatch::new();
     batch.push(move |document| {
-        document
-            .constraints
-            .add_constraint("Missing input", vec![missing], vec![], HashMap::new());
+        document.constraints.add_constraint(
+            "Missing input",
+            vec![missing],
+            vec![],
+            BTreeMap::new(),
+        );
         Ok(())
     });
 

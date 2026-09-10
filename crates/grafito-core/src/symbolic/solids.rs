@@ -349,6 +349,26 @@ pub fn cube_edges() -> [[usize; 2]; 12] {
     ]
 }
 
+/// Triángulos del cubo por índices en [`cube_vertices`] (12, 2 por cara),
+/// con winding saliente. Baratos para picking exacto con malla
+/// (`ray_mesh_hit` es doble cara, el winding solo ordena el dibujo).
+pub fn cube_triangles() -> [[usize; 3]; 12] {
+    [
+        [0, 3, 1],
+        [0, 2, 3],
+        [4, 5, 7],
+        [4, 7, 6],
+        [0, 1, 5],
+        [0, 5, 4],
+        [2, 6, 7],
+        [2, 7, 3],
+        [0, 4, 6],
+        [0, 6, 2],
+        [1, 3, 7],
+        [1, 7, 5],
+    ]
+}
+
 /// Vista ortográfica que mejor muestra un plano de normal `normal`:
 /// dominante X→perfil, Y→planta, Z→alzado. Espeja
 /// `render_3d::OrthoProjection` (piel) para que el polígono 2D no colapse.
@@ -606,5 +626,37 @@ mod tests {
         assert!(plane_cube_section((0.0, 0.0, 0.0, 0.0), [0.0, 0.0, 0.0], 2.0).is_none());
         assert!(cube_vertices([0.0, 0.0, 0.0], 0.0).is_none());
         assert_eq!(cube_edges().len(), 12);
+    }
+
+    #[test]
+    fn cube_triangles_cubren_seis_caras_con_winding_saliente() {
+        let vertices = cube_vertices([0.0, 0.0, 0.0], 2.0).expect("cubo fixture");
+        let triangles = cube_triangles();
+        assert_eq!(triangles.len(), 12);
+        for triangle in triangles {
+            for index in triangle {
+                assert!(index < 8, "índice fuera de vértices: {triangle:?}");
+            }
+        }
+        // Cada triángulo mira hacia afuera: normal · (centro_cara − centro_cubo) > 0.
+        for triangle in triangles {
+            let a = vertices[triangle[0]];
+            let b = vertices[triangle[1]];
+            let c = vertices[triangle[2]];
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let normal = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            let center = [
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ];
+            let outward = normal[0] * center[0] + normal[1] * center[1] + normal[2] * center[2];
+            assert!(outward > 0.0, "winding entrante en {triangle:?}");
+        }
     }
 }

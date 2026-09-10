@@ -482,16 +482,27 @@ impl Cylinder3D {
 }
 
 /// Orbit camera for 3D view.
+///
+/// `theta` es azimuth (rad, wrap en TAU), `phi` es elevación (rad) clampada a
+/// ±(π/2−0.01) en `sanitize`/`orbit`: la cámara nunca baja del plano.
+/// Paridad Manim pide polar 0..=π (`phi=0` cenit); conversión pura
+/// `polar = π/2 − phi` (ver `render_3d::phi_elevation_to_polar` en la piel).
+/// `gamma` es roll sobre el eje de vista (rad, sin clamp: giro libre),
+/// `focal_distance` la distancia focal del pinhole (>0) y `frame_center` el
+/// centro del encuadre en el plano de proyección.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Camera3D {
     pub theta: f32,    // azimuth angle (radians)
-    pub phi: f32,      // elevation angle (radians)
+    pub phi: f32,      // elevation angle (radians, ±(π/2−0.01); polar = π/2−phi)
     pub distance: f32, // distance from target
     pub target: Vec3,  // look-at point
     pub fov: f32,      // vertical field of view in degrees
     pub near: f32,
     pub far: f32,
     pub aspect: f32,
+    pub gamma: f32,             // roll sobre el eje de vista (radians)
+    pub focal_distance: f32,    // distancia focal del pinhole (>0)
+    pub frame_center: [f32; 2], // centro del encuadre en el plano de proyección
 }
 
 impl Default for Camera3D {
@@ -505,6 +516,9 @@ impl Default for Camera3D {
             near: 0.1,
             far: 10000.0,
             aspect: 1.6,
+            gamma: 0.0,
+            focal_distance: 10.0,
+            frame_center: [0.0, 0.0],
         }
     }
 }
@@ -582,6 +596,16 @@ impl Camera3D {
         }
         if !self.far.is_finite() || self.far <= self.near {
             self.far = 10000.0;
+        }
+        if !self.gamma.is_finite() {
+            self.gamma = 0.0;
+        }
+        if !self.focal_distance.is_finite() || self.focal_distance <= 0.0 {
+            self.focal_distance = 10.0;
+        }
+        self.focal_distance = self.focal_distance.clamp(1e-6, 1e9);
+        if !self.frame_center.iter().all(|value| value.is_finite()) {
+            self.frame_center = [0.0, 0.0];
         }
         // Mantén near/far en rango efectivo si están muy desfasados de la distancia (infinito).
         let (eff_near, eff_far) = self.effective_clip();

@@ -136,7 +136,8 @@ fn oleada1_todos_visibles_en_paleta() {
     // Total actualizado por Q2 (+3 visibles S): 284 → 287.
     // Frente trig+racionalización (+4 visibles S): 287 → 291.
     // Frente R3.1 (Rename stub→visible): 291 → 292.
-    assert_eq!(command_registry::palette_commands().count(), 292);
+    // Frente 3D-A2 (Vista3D visible S): 292 → 293.
+    assert_eq!(command_registry::palette_commands().count(), 293);
 }
 
 #[test]

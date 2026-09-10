@@ -291,7 +291,7 @@ pub fn find_root<F: Fn(f64) -> f64>(f: F, range: (f64, f64)) -> Option<f64> {
 pub fn solve_expression(
     expr: &str,
     var: f64,
-    vars: &std::collections::HashMap<String, f64>,
+    vars: &std::collections::BTreeMap<String, f64>,
     a: f64,
     b: f64,
 ) -> Result<f64, String> {

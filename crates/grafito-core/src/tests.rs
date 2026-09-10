@@ -4,7 +4,7 @@ mod tests {
     use crate::*;
     use crate::{function_sampling, implicit_curve};
     use grafito_geometry::*;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_object_id_creation() {
@@ -136,7 +136,7 @@ mod tests {
         let ic = ImplicitCurveObj::new("x^2 + y^2", "r^2", RelationOperator::Eq);
         let bounds = (-2.0, 2.0, -2.0, 2.0);
 
-        let mut vars = HashMap::new();
+        let mut vars = BTreeMap::new();
         vars.insert("r".to_string(), 1.0);
         drop(crate::implicit_curve::segments_or_compute(
             &ic,
@@ -164,7 +164,7 @@ mod tests {
     fn implicit_curve_cache_invalidates_on_contour_change() {
         let mut ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
         let bounds = (-2.0, 2.0, -2.0, 2.0);
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
 
         ic.contour_levels = Some(vec![0.0]);
         drop(crate::implicit_curve::segments_or_compute(
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn parametric_curve_cache_invalidates_on_expression_change() {
         let mut pc = ParametricCurve2DObj::new("t", "t", 0.0, 1.0);
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
 
         let first_last_y = {
             let samples = crate::parametric_sampling::samples_or_compute_curve_2d(&pc, 8, &vars);
@@ -314,7 +314,7 @@ mod tests {
         let m = ObjectId::new();
         cg.add_free_object(a);
         cg.add_free_object(b);
-        let cons_id = cg.add_constraint("Midpoint", vec![a, b], vec![m], HashMap::new());
+        let cons_id = cg.add_constraint("Midpoint", vec![a, b], vec![m], BTreeMap::new());
         assert_eq!(cg.constraint_count(), 1);
         assert!(!cg.is_free(&m));
         assert!(cg.is_free(&a));
@@ -331,9 +331,9 @@ mod tests {
         cg.add_free_object(a);
         cg.add_free_object(b);
         // M = Midpoint[A, B]
-        cg.add_constraint("Midpoint", vec![a, b], vec![m], HashMap::new());
+        cg.add_constraint("Midpoint", vec![a, b], vec![m], BTreeMap::new());
         // M2 = Midpoint[M, B]
-        cg.add_constraint("Midpoint", vec![m, b], vec![m2], HashMap::new());
+        cg.add_constraint("Midpoint", vec![m, b], vec![m2], BTreeMap::new());
 
         // When A changes, both constraints should be in update order
         let order = cg.get_update_order(&[a]);
@@ -350,15 +350,15 @@ mod tests {
 
         // C1: A -> B
         let c1 = cg
-            .try_add_constraint("C1", vec![a], vec![b], HashMap::new())
+            .try_add_constraint("C1", vec![a], vec![b], BTreeMap::new())
             .expect("first constraint should be accepted");
         // C2: B -> C
         let c2 = cg
-            .try_add_constraint("C2", vec![b], vec![c], HashMap::new())
+            .try_add_constraint("C2", vec![b], vec![c], BTreeMap::new())
             .expect("second constraint should be accepted");
         // C3: C -> B (creates a cycle B -> C -> B)
         let error = cg
-            .try_add_constraint("C3", vec![c], vec![b], HashMap::new())
+            .try_add_constraint("C3", vec![c], vec![b], BTreeMap::new())
             .expect_err("a second creator must be rejected before it can form a cycle");
         assert!(error.contains("already has a creating constraint"));
 
@@ -393,7 +393,7 @@ mod tests {
         let second_input = doc.add_point(Point2::new(2.0, 0.0));
         for _ in 0..crate::constraints::MAX_CONSTRAINTS {
             doc.constraints
-                .try_add_constraint("Existing", vec![input], Vec::new(), HashMap::new())
+                .try_add_constraint("Existing", vec![input], Vec::new(), BTreeMap::new())
                 .expect("constraint below the limit should be accepted");
         }
 
@@ -432,7 +432,7 @@ mod tests {
         let input = doc.add_point(Point2::new(0.0, 0.0));
         let second_input = doc.add_point(Point2::new(2.0, 0.0));
         doc.constraints
-            .add_constraint("Existing", vec![input], Vec::new(), HashMap::new());
+            .add_constraint("Existing", vec![input], Vec::new(), BTreeMap::new());
 
         let mut persisted = serde_json::to_value(&doc).expect("serialize document");
         let constraints = persisted["constraints"]["constraints"]
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn test_implicit_curve_evaluation_and_caching() {
         let ic = ImplicitCurveObj::new("x^3 + y^3", "3*x*y", RelationOperator::Eq);
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let view_bounds = (-3.0, 3.0, -3.0, 3.0);
         let grid_size = 40;
 
@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn test_implicit_curve_cache_reuses_for_small_pan() {
         let ic = ImplicitCurveObj::new("x^3 + y^3", "3*x*y", RelationOperator::Eq);
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let view_bounds = (-3.0, 3.0, -3.0, 3.0);
         let grid_size = 40;
 
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn test_implicit_curve_cache_recomputes_for_far_pan() {
         let ic = ImplicitCurveObj::new("x^3 + y^3", "3*x*y", RelationOperator::Eq);
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let view_bounds = (-3.0, 3.0, -3.0, 3.0);
         let grid_size = 40;
 
@@ -685,7 +685,7 @@ mod tests {
     fn test_constraint_params_serialize_roundtrip() {
         let mut doc = Document::new();
         let a = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("dx".to_string(), 3.0);
         params.insert("dy".to_string(), 4.0);
         let (_p, cons_id) = doc.add_constructed_object_with_params(
@@ -753,7 +753,7 @@ mod tests {
         let source = doc.add_object(GeoObject::Point(
             PointObj::new(Point2::new(2.0, 0.0)).with_label("A"),
         ));
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("angle".to_string(), 90.0);
         let (rotated, _) = doc
             .try_add_constructed_object_with_params(
@@ -798,7 +798,7 @@ mod tests {
                 GeoObject::Point(PointObj::new(Point2::new(2.0, 0.0))),
                 "Dilate",
                 &[source],
-                HashMap::from([("center_x".to_string(), 0.0), ("center_y".to_string(), 0.0)]),
+                BTreeMap::from([("center_x".to_string(), 0.0), ("center_y".to_string(), 0.0)]),
             )
             .expect_err("Dilate without a factor must fail");
         assert!(error.contains("factor"), "{error}");
@@ -851,7 +851,7 @@ mod tests {
     fn test_circle_by_center_radius_constraint() {
         let mut doc = Document::new();
         let center = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(2.0, 3.0))));
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("radius".to_string(), 5.0);
         let (circle, _) = doc.add_constructed_object_with_params(
             GeoObject::Circle(CircleObj::new(Point2::new(0.0, 0.0), 1.0).with_label("C")),
@@ -1115,7 +1115,7 @@ mod tests {
     #[test]
     fn test_function_samples_caching() {
         let fun = FunctionObj::new("sin(x)");
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let domain = (0.0, std::f64::consts::TAU);
         let grid_size = 100;
 
@@ -1137,7 +1137,7 @@ mod tests {
     #[test]
     fn test_function_samples_pan_reuse() {
         let fun = FunctionObj::new("sin(x)");
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         // Use non-symmetric bounds so the padded/snapped region does not sit
         // exactly on snap-cell boundaries; a tiny pan then reuses the cache.
         let domain = (0.1, 6.1);
@@ -1164,7 +1164,7 @@ mod tests {
     #[test]
     fn test_function_samples_far_domain_recompute() {
         let fun = FunctionObj::new("sin(x)");
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let domain = (0.0, std::f64::consts::TAU);
         let grid_size = 100;
 
@@ -1207,7 +1207,7 @@ mod tests {
     #[test]
     fn test_parametric_curve_2d_caching() {
         let pc = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, std::f64::consts::TAU);
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let steps = 200;
 
         let samples1 = {
@@ -1229,7 +1229,7 @@ mod tests {
     #[test]
     fn test_polar_curve_caching() {
         let pol = PolarCurveObj::new("1", 0.0, std::f64::consts::TAU);
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let steps = 200;
 
         let samples1 = {
@@ -1251,7 +1251,7 @@ mod tests {
     #[test]
     fn test_surface_3d_caching() {
         let surf = Surface3DObj::new("x^2 + y^2", (-1.0, 1.0), (-1.0, 1.0));
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let res = 40;
 
         let grid1 = {
@@ -1279,7 +1279,7 @@ mod tests {
             (0.0, 1.0),
             (0.0, std::f64::consts::FRAC_PI_2),
         );
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let grid = parametric_sampling::evaluate_surface_3d(&surf, 8, &vars);
 
         assert_eq!(grid.len(), 9);
@@ -1677,7 +1677,7 @@ mod tests {
     #[test]
     fn test_vector_field_cache_reuse() {
         let vf = VectorField2DObj::new("x", "y");
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let view = ViewTransform::new(800.0, 600.0);
         let view_bounds = (-3.0, 3.0, -3.0, 3.0);
         let grid_size = 20;
@@ -1719,7 +1719,7 @@ mod tests {
     #[test]
     fn test_vector_field_padded_domain() {
         let vf = VectorField2DObj::new("x", "y");
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let view_bounds = (-3.0, 3.0, -3.0, 3.0);
         let grid_size = 20;
 
@@ -1812,7 +1812,7 @@ mod tests {
 
     #[test]
     fn test_cpu_function_evaluation_no_cross_contamination() {
-        let vars = std::collections::HashMap::new();
+        let vars = std::collections::BTreeMap::new();
         let domain = (-std::f64::consts::PI, std::f64::consts::PI);
         let grid_size = 100;
 
@@ -1845,7 +1845,7 @@ mod tests {
         let fun = FunctionObj::new("x^2").as_integral("x", 0.0);
         let domain = (0.0, 3.0);
         let grid_size = 100;
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let samples = function_sampling::samples_or_compute(&fun, domain, grid_size, &vars);
         assert!(!samples.is_empty(), "integral samples should not be empty");
 
@@ -1880,7 +1880,7 @@ mod tests {
         let fun = FunctionObj::new("piecewise(x<0, x^2, x>=0, sqrt(x))");
         let domain = (-2.0, 2.0);
         let grid_size = 200;
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let samples = function_sampling::samples_or_compute(&fun, domain, grid_size, &vars);
         assert!(!samples.is_empty(), "piecewise samples should not be empty");
 

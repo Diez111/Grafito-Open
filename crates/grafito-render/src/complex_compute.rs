@@ -1,7 +1,7 @@
 //! GPU compute pipeline for complex expressions on vertices.
 
 use bytemuck::{Pod, Zeroable};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use grafito_complex::math::complex_expr::ComplexExpr;
 use grafito_complex::math::complex_opcode::{compile_complex_expr, ComplexBytecodeProgram};
@@ -267,7 +267,7 @@ impl ComplexComputePipeline {
         queue: &wgpu::Queue,
         expr: &ComplexExpr,
         in_points: &[grafito_geometry::Point2],
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<Vec<grafito_geometry::Point2>> {
         if in_points.is_empty() {
             return Some(Vec::new());

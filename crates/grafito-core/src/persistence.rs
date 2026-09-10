@@ -79,9 +79,9 @@ pub fn serialize_document(document: &Document) -> Result<String, DocumentPersist
         producer_version: env!("CARGO_PKG_VERSION").to_string(),
         document: validated.into_inner(),
     };
-    // P1a-3 determinista: `to_value` normaliza los HashMap (`variables`,
+    // P1a-3 determinista: `to_value` normaliza los mapas (`variables`,
     // `variables_assumptions`, `variable_meta`, `next_label_number`,
-    // `spreadsheet_coordinate_points`) a `serde_json::Map` (BTreeMap ordenado
+    // `spreadsheet_coordinate_points`, todos BTreeMap) a `serde_json::Map` (BTreeMap ordenado
     // sin `preserve_order`), así 2 saves del mismo contenido son byte-iguales.
     // `objects` ya es BTreeMap en el struct.
     let value = serde_json::to_value(&envelope)?;
@@ -1520,7 +1520,7 @@ mod tests {
             "Rotate",
             vec![source],
             vec![output],
-            std::collections::HashMap::new(),
+            std::collections::BTreeMap::new(),
         );
 
         let save_error = serialize_document(&document)
@@ -1550,7 +1550,7 @@ mod tests {
             "Perpendicular",
             vec![source, point],
             vec![output],
-            std::collections::HashMap::new(),
+            std::collections::BTreeMap::new(),
         );
 
         let error = serialize_document(&document)
@@ -1568,7 +1568,7 @@ mod tests {
             "Midpoint",
             vec![input, second_input],
             vec![output],
-            std::collections::HashMap::new(),
+            std::collections::BTreeMap::new(),
         );
         let mut legacy: Value = serde_json::to_value(&document).expect("serialize document");
         let constraints = legacy["constraints"]
@@ -1605,13 +1605,13 @@ mod tests {
             "First",
             vec![input],
             vec![output],
-            std::collections::HashMap::new(),
+            std::collections::BTreeMap::new(),
         );
         document.constraints.add_constraint(
             "Second",
             vec![input],
             vec![output],
-            std::collections::HashMap::new(),
+            std::collections::BTreeMap::new(),
         );
 
         let save_error = serialize_document(&document)
@@ -1634,13 +1634,13 @@ mod tests {
             "First",
             vec![input, second_output],
             vec![first_output],
-            std::collections::HashMap::new(),
+            std::collections::BTreeMap::new(),
         );
         document.constraints.add_constraint(
             "Second",
             vec![first_output],
             vec![second_output],
-            std::collections::HashMap::new(),
+            std::collections::BTreeMap::new(),
         );
 
         let save_error =
@@ -1707,7 +1707,7 @@ mod tests {
             "Invalid",
             vec![crate::ObjectId::new()],
             Vec::new(),
-            std::collections::HashMap::new(),
+            std::collections::BTreeMap::new(),
         );
         let path = temporary_path("invalid.json");
 

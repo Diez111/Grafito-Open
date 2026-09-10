@@ -3152,6 +3152,20 @@ const COMMANDS: &[CommandSpec] = &[
         ]
     ),
     command!(
+        "geometry.view-3d",
+        "Vista3D",
+        ["vista", "view3d"],
+        "3D",
+        "Pide la vista del canvas 3D: perspectiva (orbital) o alzado/planta/perfil (ortográficas vía OrthoView del cerebro). Solo consulta: no crea ni muta objetos.",
+        ReadOnly,
+        Low,
+        true,
+        "Vista3D",
+        [
+            signature!("Vista3D[vista]"; "vista": Expression required)
+        ]
+    ),
+    command!(
         "geometry.arc",
         "Arc",
         ["arco"],
@@ -5246,6 +5260,7 @@ mod registry_tests {
             "Quadric",
             "ImplicitSurface",
             "Intersection3D",
+            "Vista3D",
             "Projection3D",
             "PlaneThroughLines",
             "PlaneThroughLinePoint",
@@ -5715,11 +5730,15 @@ mod registry_tests {
         // Frente R4 (f10-plan-total): +0 comandos (Delaunay ya era real vía
         // spade; Voronoi stub→dual real con recorte a envolvente; solo helps
         // + mensajes + docs/commands.md; conteos intactos 337/292/25).
-        assert_eq!(all().len(), 337, "COMMANDS registrados (docs §8)");
+        // Frente 3D-A2 (follow-up worker 3D): +1 visible S (Vista3D, solo
+        // consulta ReadOnly que valida perspectiva/alzado/planta/perfil
+        // contra grafito_core::symbolic::OrthoView con brazo en commands.rs;
+        // architecture.md §8/§13 queda BLOCKER por alcance del frente).
+        assert_eq!(all().len(), 338, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            292,
-            "comandos visibles en paleta (docs §8: 292 + 15 UI = 307)"
+            293,
+            "comandos visibles en paleta (docs §8: 293 + 15 UI = 308)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

@@ -30,7 +30,7 @@ pub use level::{UTNProgram, UdlProfile, UdlRepresentation};
 pub use scaffold::NO_CONCEPT_FALLBACK_QUESTION;
 pub use scaffold::{extract_concept, is_exploratory_request, Scaffold, ScaffoldEngine, Turn};
 pub use socratic::{GuardError, SocraticFsm, SocraticRepair, SocraticState};
-pub use teaching::{TeachingSession, TeachingStep, TeachingTopic};
+pub use teaching::{verify_math_expr, StepCheck, TeachingSession, TeachingStep, TeachingTopic};
 
 /// Error tipado del motor pedagógico (siempre en español o código tipado).
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]

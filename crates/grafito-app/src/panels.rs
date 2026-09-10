@@ -19,7 +19,7 @@ use grafito_ui::tokens::{
     PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM,
     SPACE_XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -1296,7 +1296,7 @@ pub(crate) fn wc_taylor_remainder_line(
     centro: &str,
     orden: i32,
     x: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
 ) -> Option<String> {
     let centro: f64 = centro.trim().parse().ok()?;
     let x: f64 = x.trim().parse().ok()?;
@@ -1838,6 +1838,41 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     )
                                     .on_hover_text(
                                         "Muestra los números de los ejes con pasos lindos 1/2/5×10^n y skip anti-solape",
+                                    );
+                                },
+                            );
+                            ui.add_space(CARD_SPACING);
+
+                            // Vista 3D (dueño canvas.rs): perspectiva orbital u
+                            // ortográficas. Escribe `app.view3d`; el dibujo y
+                            // el pick del canvas 3D la leen por frame.
+                            draw_inspector_section(
+                                ui,
+                                "Vista 3D",
+                                "Perspectiva u ortográficas (alzado, planta, perfil).",
+                                |ui| {
+                                    let mut vista = app.view3d;
+                                    egui::ComboBox::from_id_salt("view3d_selector")
+                                        .selected_text(vista.name())
+                                        .show_ui(ui, |ui| {
+                                            for candidata in crate::canvas::View3D::all() {
+                                                ui.selectable_value(
+                                                    &mut vista,
+                                                    candidata,
+                                                    candidata.name(),
+                                                );
+                                            }
+                                        });
+                                    if vista != app.view3d {
+                                        app.view3d = vista;
+                                        ui.ctx().request_repaint();
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "En ortográficas la cámara no orbita; el zoom y el paneo se conservan.",
+                                        )
+                                        .color(current_theme(ui.ctx()).text_tertiary)
+                                        .size(TYPE_XS),
                                     );
                                 },
                             );
@@ -6962,7 +6997,7 @@ mod gc_piel_tests {
         MAX_GEOMETRIC_K, MAX_PANEL_DF, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     #[test]
     fn normal_standard_values_are_honest() {
@@ -7259,7 +7294,7 @@ mod gc_piel_tests {
 
     #[test]
     fn wc_taylor_remainder_line_muestra_resto_y_falla_honesto() {
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let line = wc_taylor_remainder_line("sin(x)", "0", 5, "0.5", &vars).expect("resto");
         assert!(line.contains("P5(0.5)"), "rotula orden y punto: {line}");
         assert!(line.contains("resto"), "muestra resto: {line}");

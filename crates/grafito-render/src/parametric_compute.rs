@@ -17,7 +17,7 @@ use grafito_core::object::{
     Surface3DObj, SurfaceSamples,
 };
 use grafito_core::parametric_sampling;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Presupuesto de muestras por curva paramétrica: una curva densa se evalúa en
 /// UN solo dispatch de `steps + 1 <= MAX_CURVE_STEPS + 1` workgroups (64 hilos
@@ -130,7 +130,7 @@ fn curve_expression_has_unsafe_f32_exp(
     expression: &str,
     parameter: &str,
     bounds: (f64, f64),
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     let Ok(expression) = grafito_geometry::ast::parse_ast(expression) else {
         return false;
@@ -148,7 +148,7 @@ fn surface_expression_has_unsafe_f32_exp(
     expression: &str,
     x_bounds: (f64, f64),
     y_bounds: (f64, f64),
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     let Ok(expression) = grafito_geometry::ast::parse_ast(expression) else {
         return false;
@@ -176,7 +176,7 @@ fn prepare_curve_2d(
     pc: &ParametricCurve2DObj,
     steps: usize,
     max_curve_samples: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Option<PreparedCurve> {
     let steps = steps.clamp(1, max_curve_samples);
     let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
@@ -222,7 +222,7 @@ fn prepare_curve_3d(
     pc: &ParametricCurve3DObj,
     steps: usize,
     max_curve_samples: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Option<PreparedCurve> {
     let steps = steps.clamp(1, max_curve_samples);
     let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
@@ -280,7 +280,7 @@ fn prepare_polar(
     pol: &PolarCurveObj,
     steps: usize,
     max_curve_samples: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Option<PreparedCurve> {
     let steps = steps.clamp(1, max_curve_samples);
     let t_min = ParametricComputePipeline::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
@@ -641,7 +641,7 @@ impl ParametricComputePipeline {
 
     fn compile_parametric_expr(
         expr: &str,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
         var: &str,
         prog: &mut BytecodeProgram,
     ) -> Result<(), CompileError> {
@@ -650,7 +650,11 @@ impl ParametricComputePipeline {
         compile_expr_with_mapping(&ast, variables, &[(var, 0)], prog)
     }
 
-    fn resolve_expr(expr: &Option<String>, fallback: f64, variables: &HashMap<String, f64>) -> f64 {
+    fn resolve_expr(
+        expr: &Option<String>,
+        fallback: f64,
+        variables: &BTreeMap<String, f64>,
+    ) -> f64 {
         match expr {
             Some(e) => {
                 let vars: Vec<(String, f64)> =
@@ -671,7 +675,7 @@ impl ParametricComputePipeline {
         queue: &wgpu::Queue,
         pc: &ParametricCurve2DObj,
         steps: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<Curve2DSamples> {
         let prepared = prepare_curve_2d(pc, steps, self.max_curve_samples, variables)?;
         let values = self.dispatch_and_readback(
@@ -691,7 +695,7 @@ impl ParametricComputePipeline {
         queue: &wgpu::Queue,
         pc: &ParametricCurve3DObj,
         steps: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<Curve3DSamples> {
         let prepared = prepare_curve_3d(pc, steps, self.max_curve_samples, variables)?;
         let values = self.dispatch_and_readback(
@@ -711,7 +715,7 @@ impl ParametricComputePipeline {
         queue: &wgpu::Queue,
         pol: &PolarCurveObj,
         steps: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<Curve2DSamples> {
         let prepared = prepare_polar(pol, steps, self.max_curve_samples, variables)?;
         let values = self.dispatch_and_readback(
@@ -731,7 +735,7 @@ impl ParametricComputePipeline {
         queue: &wgpu::Queue,
         surf: &Surface3DObj,
         res: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<SurfaceSamples> {
         if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
             return None;
@@ -815,7 +819,7 @@ impl ParametricComputePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         curves: &[(&ParametricCurve2DObj, usize)],
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Vec<Option<Curve2DSamples>> {
         let jobs: Vec<Option<PreparedCurve>> = curves
             .iter()
@@ -840,7 +844,7 @@ impl ParametricComputePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         curves: &[(&ParametricCurve3DObj, usize)],
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Vec<Option<Curve3DSamples>> {
         let jobs: Vec<Option<PreparedCurve>> = curves
             .iter()
@@ -865,7 +869,7 @@ impl ParametricComputePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         curves: &[(&PolarCurveObj, usize)],
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Vec<Option<Curve2DSamples>> {
         let jobs: Vec<Option<PreparedCurve>> = curves
             .iter()
@@ -1036,7 +1040,7 @@ impl ParametricComputePipeline {
 
 fn compile_curve_3d_program(
     pc: &ParametricCurve3DObj,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<BytecodeProgram, CompileError> {
     let mut prog = BytecodeProgram::default();
     let parameter = pc.parameter.as_str();
@@ -1057,7 +1061,7 @@ fn compile_curve_3d_program(
 fn curve_3d_samples_preserve_f32_resolution(
     pc: &ParametricCurve3DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     let samples = parametric_sampling::evaluate_parametric_curve_3d(pc, steps, variables);
     if samples.len() < 2 {
@@ -1117,7 +1121,7 @@ fn nonfinite_curve_2d_samples_match_cpu(
     gpu: &Curve2DSamples,
     pc: &ParametricCurve2DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     if gpu.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
         return true;
@@ -1130,7 +1134,7 @@ fn nonfinite_curve_3d_samples_match_cpu(
     gpu: &Curve3DSamples,
     pc: &ParametricCurve3DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     if gpu
         .iter()
@@ -1146,7 +1150,7 @@ fn nonfinite_polar_samples_match_cpu(
     gpu: &Curve2DSamples,
     pol: &PolarCurveObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     if gpu.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
         return true;
@@ -1166,7 +1170,7 @@ pub fn maybe_compute_curve_2d_on_gpu(
     queue: &wgpu::Queue,
     pc: &ParametricCurve2DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     let steps = steps.min(MAX_CURVE_STEPS);
     let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
@@ -1215,7 +1219,7 @@ pub fn maybe_compute_curve_3d_on_gpu(
     queue: &wgpu::Queue,
     pc: &ParametricCurve3DObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     let steps = steps.min(MAX_CURVE_STEPS);
     let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
@@ -1264,7 +1268,7 @@ pub fn maybe_compute_polar_on_gpu(
     queue: &wgpu::Queue,
     pol: &PolarCurveObj,
     steps: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     let steps = steps.min(MAX_CURVE_STEPS);
     let t_min = ParametricComputePipeline::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
@@ -1313,7 +1317,7 @@ pub fn maybe_compute_surface_on_gpu(
     queue: &wgpu::Queue,
     surf: &Surface3DObj,
     res: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
         return false;
@@ -1397,7 +1401,7 @@ pub fn maybe_compute_curves_2d_on_gpu_batched(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     curves: &[(&ParametricCurve2DObj, usize)],
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Vec<bool> {
     let mut results = vec![false; curves.len()];
     let mut batch: Vec<Curve2DBatchEntry<'_>> = Vec::new();
@@ -1466,7 +1470,7 @@ pub fn maybe_compute_curves_3d_on_gpu_batched(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     curves: &[(&ParametricCurve3DObj, usize)],
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Vec<bool> {
     let mut results = vec![false; curves.len()];
     let mut batch: Vec<Curve3DBatchEntry<'_>> = Vec::new();
@@ -1535,7 +1539,7 @@ pub fn maybe_compute_polars_on_gpu_batched(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     curves: &[(&PolarCurveObj, usize)],
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Vec<bool> {
     let mut results = vec![false; curves.len()];
     let mut batch: Vec<PolarBatchEntry<'_>> = Vec::new();
@@ -1605,7 +1609,7 @@ mod tests {
     #[test]
     fn curve_3d_compilation_keeps_its_declared_parameter_dynamic() {
         let curve = ParametricCurve3DObj::new("s", "s + 1", "s^2", 0.0, 1.0).with_parameter("s");
-        let variables = HashMap::from([("s".to_string(), 99.0)]);
+        let variables = BTreeMap::from([("s".to_string(), 99.0)]);
 
         let program = compile_curve_3d_program(&curve, &variables).unwrap();
 
@@ -1626,12 +1630,12 @@ mod tests {
             ParametricCurve3DObj::new("999999+s", "0", "0", 0.0, 0.01).with_parameter("s");
         let variable_offset =
             ParametricCurve3DObj::new("offset+s", "0", "0", 0.0, 0.01).with_parameter("s");
-        let variables = HashMap::from([("offset".to_string(), 999999.0)]);
+        let variables = BTreeMap::from([("offset".to_string(), 999999.0)]);
 
         assert!(!curve_3d_samples_preserve_f32_resolution(
             &constant_offset,
             4,
-            &HashMap::new(),
+            &BTreeMap::new(),
         ));
         assert!(!curve_3d_samples_preserve_f32_resolution(
             &variable_offset,
@@ -1665,7 +1669,7 @@ mod tests {
         // MAX_CURVE_STEPS 4000: una curva densa se evalúa en un solo dispatch
         // de `steps + 1` muestras; el preflight recorta a 4000 sin rechazar.
         let curve = ParametricCurve2DObj::new("t", "t", 0.0, 1.0);
-        let prepared = prepare_curve_2d(&curve, MAX_CURVE_STEPS + 500, 4000, &HashMap::new())
+        let prepared = prepare_curve_2d(&curve, MAX_CURVE_STEPS + 500, 4000, &BTreeMap::new())
             .expect("steps por encima del presupuesto se recortan a 4000");
         assert_eq!(prepared.params.n, (MAX_CURVE_STEPS + 1) as u32);
         assert_eq!(prepared.output_count, (MAX_CURVE_STEPS + 1) * 2);
@@ -1679,7 +1683,7 @@ mod tests {
 
         let jobs: Vec<Option<PreparedCurve>> = [&circle, &line, &reversed]
             .iter()
-            .map(|pc| prepare_curve_2d(pc, 8, 4000, &HashMap::new()))
+            .map(|pc| prepare_curve_2d(pc, 8, 4000, &BTreeMap::new()))
             .collect();
 
         assert!(jobs[0].is_some());

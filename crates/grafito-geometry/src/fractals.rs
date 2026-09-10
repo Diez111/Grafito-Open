@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FractalType {
@@ -119,7 +119,9 @@ struct FractalCacheKey {
 
 struct FractalCacheEntry {
     key: FractalCacheKey,
-    pixels: Vec<FractalPixel>,
+    // `Arc`: el bump LRU (`remove`+`push_back`) y el hit clonan el puntero
+    // en vez de todo el `Vec<FractalPixel>` (hasta 160k píxeles).
+    pixels: Arc<Vec<FractalPixel>>,
 }
 
 fn fractal_cache() -> &'static Mutex<VecDeque<FractalCacheEntry>> {
@@ -166,18 +168,18 @@ fn cache_key(
     }
 }
 
-fn cached_pixels(key: FractalCacheKey) -> Option<Vec<FractalPixel>> {
+fn cached_pixels(key: FractalCacheKey) -> Option<Arc<Vec<FractalPixel>>> {
     let mut cache = fractal_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let index = cache.iter().position(|entry| entry.key == key)?;
     let entry = cache.remove(index)?;
-    let pixels = entry.pixels.clone();
+    let pixels = Arc::clone(&entry.pixels);
     cache.push_back(entry);
     Some(pixels)
 }
 
-fn cache_pixels(key: FractalCacheKey, pixels: Vec<FractalPixel>) {
+fn cache_pixels(key: FractalCacheKey, pixels: Arc<Vec<FractalPixel>>) {
     if pixels.len() > MAX_CACHED_FRACTAL_PIXELS {
         return;
     }
@@ -395,7 +397,7 @@ pub fn try_compute_fractal(
 
     let key = cache_key(fractal, x_min, x_max, y_min, y_max, width, height);
     if let Some(pixels) = cached_pixels(key) {
-        return Ok(pixels);
+        return Ok(std::sync::Arc::unwrap_or_clone(pixels));
     }
 
     let dx = (x_max - x_min) / width as f64;
@@ -427,8 +429,11 @@ pub fn try_compute_fractal(
                 .collect::<Vec<_>>()
         })
         .collect();
-    cache_pixels(key, pixels.clone());
-    Ok(pixels)
+    // Un solo `Arc` para la caché; `unwrap_or_clone` evita el clon extra del
+    // `pixels.clone()` previo cuando nadie más retiene el buffer.
+    let shared = std::sync::Arc::new(pixels);
+    cache_pixels(key, std::sync::Arc::clone(&shared));
+    Ok(std::sync::Arc::unwrap_or_clone(shared))
 }
 
 /// Compatibilidad para los renderizadores existentes: entradas que exceden el

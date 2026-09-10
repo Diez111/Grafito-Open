@@ -4,13 +4,13 @@
 #[cfg(test)]
 mod scanline_thin_tests {
     use grafito_geometry::expr::prepare_function_ast;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_thin_strip_detected() {
         // Una franja delgada: x entre -0.1 y 0.1.
-        let lhs = prepare_function_ast("x^2", &HashMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("0.01", &HashMap::new(), &["x", "y"]).unwrap();
+        let lhs = prepare_function_ast("x^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+        let rhs = prepare_function_ast("0.01", &BTreeMap::new(), &["x", "y"]).unwrap();
         let cols = 300;
         let rows = 100;
         let dx = 3.0 / cols as f64;

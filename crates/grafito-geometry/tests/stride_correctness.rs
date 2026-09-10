@@ -3,7 +3,7 @@
 
 use grafito_geometry::ast::Expr;
 use grafito_geometry::expr::prepare_function_ast;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[allow(clippy::too_many_arguments)]
 fn scanline_full_count(
@@ -95,8 +95,8 @@ fn scanline_full_count(
 
 #[test]
 fn test_disk_visible_normal_view_with_stride2() {
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let segs = scanline_full_count(&lhs, &rhs, false, -1.5, 1.5, -1.0, 1.0, 1000, 600, 2);
     let total_segs: usize = segs.iter().map(|s| s.len()).sum();
     println!("stride=2, view normal: total segments = {}", total_segs);
@@ -110,8 +110,8 @@ fn test_disk_visible_normal_view_with_stride2() {
 
 #[test]
 fn test_disk_visible_zoom_out_with_stride2() {
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let segs = scanline_full_count(&lhs, &rhs, false, -15.0, 15.0, -10.0, 10.0, 1000, 600, 2);
     let total_segs: usize = segs.iter().map(|s| s.len()).sum();
     println!("stride=2, zoom out 10x: total segments = {}", total_segs);
@@ -128,8 +128,8 @@ fn test_disk_visible_zoom_out_with_stride2() {
 #[test]
 fn test_disk_visible_extreme_zoom_out_with_stride2() {
     // View [-150, 150] x [-100, 100]. El disco es 1/300 del view.
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     let segs = scanline_full_count(
         &lhs, &rhs, false, -150.0, 150.0, -100.0, 100.0, 1000, 600, 2,
     );

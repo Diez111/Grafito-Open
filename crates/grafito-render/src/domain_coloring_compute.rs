@@ -5,7 +5,7 @@
 //! This offloads the O(N²) per-cell evaluation from CPU to GPU.
 
 use bytemuck::{Pod, Zeroable};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use grafito_complex::math::complex_expr::ComplexExpr;
 use grafito_complex::math::complex_opcode::{compile_complex_expr, ComplexBytecodeProgram};
@@ -255,7 +255,7 @@ impl DomainColoringComputePipeline {
         queue: &wgpu::Queue,
         expr: &ComplexExpr,
         points: &[(f64, f64)],
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
         dc_mode: u32,
     ) -> Option<GridColors> {
         if points.is_empty() {

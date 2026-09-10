@@ -894,7 +894,7 @@ impl Expr {
     /// Evaluate numerically by substituting var=value
     pub fn substitute_vars(
         &self,
-        vars: &std::collections::HashMap<String, f64>,
+        vars: &std::collections::BTreeMap<String, f64>,
         ignore: &[&str],
     ) -> Expr {
         use Expr::*;

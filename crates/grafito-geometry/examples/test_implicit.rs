@@ -1,10 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(deprecated)]
 use grafito_geometry::expr::eval_batch_2d;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn main() {
-    let vars = HashMap::new();
+    let vars = BTreeMap::new();
 
     // Simulating what render_2d.rs does for x^2+y^2=9
     // LHS = "x^2+y^2", RHS = "9"

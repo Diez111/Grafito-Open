@@ -60,6 +60,14 @@ fn main() -> io::Result<()> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("dev-{}", env!("CARGO_PKG_VERSION")));
     println!("cargo:rustc-env=GRAFITO_BUILD_HASH={hash}");
+    // Alias con el nombre pedido por el reporte (fecha+hash visibles): el
+    // histórico GRAFITO_BUILD_HASH se conserva porque app.rs/tests lo leen.
+    println!("cargo:rustc-env=GRAFITO_GIT_HASH={hash}");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    match build_date_yyyymmdd() {
+        Some(date) => println!("cargo:rustc-env=GRAFITO_BUILD_DATE={date}"),
+        None => println!("cargo:rustc-env=GRAFITO_BUILD_DATE=dev"),
+    }
 
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "windows" {
         return Ok(());
@@ -110,6 +118,42 @@ fn main() -> io::Result<()> {
     }
 
     resource.compile()
+}
+
+/// Fecha de build `YYYY-MM-DD` sin dependencias externas (MSRV 1.92).
+///
+/// Prefiere `SOURCE_DATE_EPOCH` (builds reproducibles); si no está, usa el
+/// reloj de la máquina que compila. Devuelve `None` si no hay reloj útil y
+/// el llamador emite el fallback `"dev"`.
+fn build_date_yyyymmdd() -> Option<String> {
+    let secs: u64 = match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(epoch) => epoch,
+            Err(_) => return None,
+        },
+        Err(_) => match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(elapsed) => elapsed.as_secs(),
+            Err(_) => return None,
+        },
+    };
+    Some(civil_date_yyyymmdd(secs / 86_400))
+}
+
+/// Convierte días desde 1970-01-01 a `YYYY-MM-DD` (inversa de
+/// Howard Hinnant `days_from_civil`; aritmética entera, sin deps).
+fn civil_date_yyyymmdd(days_since_epoch: u64) -> String {
+    let days: i64 = days_since_epoch.min(i64::MAX as u64) as i64;
+    let z: i64 = days + 719_468;
+    let era: i64 = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe: i64 = z - era * 146_097;
+    let yoe: i64 = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y: i64 = yoe + era * 400;
+    let doy: i64 = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp: i64 = (5 * doy + 2) / 153;
+    let d: i64 = doy - (153 * mp + 2) / 5 + 1;
+    let m: i64 = if mp < 10 { mp + 3 } else { mp - 9 };
+    y += i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn write_png_icon(source: &Path, destination: &Path) -> io::Result<()> {

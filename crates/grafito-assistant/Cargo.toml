@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+alkahest-cas = { version = "3", optional = true }
 base64.workspace = true
 grafito-agent.workspace = true
 grafito-anim.workspace = true
@@ -29,6 +30,18 @@ url.workspace = true
 # stubs honestos `NoNetwork` en `request_remote*` (ver lib.rs).
 default = ["assistant-net"]
 assistant-net = ["dep:reqwest"]
+# F2: CAS experto opt-in (alkahest-cas 3: Expr hash-consed, UniPoly/MultiPoly,
+# ArbBall, Gröbner F4, to_smtlib, export Lean4). VERIFICADO en el box 2026-09-10:
+# su build.rs exige FLINT del sistema (>= 2.9, hard dep sin fallback pure-Rust;
+# `flint3` sólo elige la API, no lo hace opcional) además de la C transitiva
+# `gmp-mpfr-sys`/`rug`. Por eso es OPT-IN y no default: el build default sigue
+# 100% Rust (sin C) con el fallback `grafito-geometry::symbolic::*_typed` +
+# `grafito-core::symbolic::groebner_gate` (Buchberger acotado 2×2; F4 queda
+# como stub honesto hasta cablear `GbPoly`). Para activarlo:
+#   sudo apt-get install libflint-dev   (o FLINT_LIB_DIR/FLINT_INCLUDE_DIR)
+#   cargo check -p grafito-assistant --features cas-nativo
+# MSRV 1.92: el build default no compila ni enlaza C, sigue verde.
+cas-nativo = ["dep:alkahest-cas"]
 
 [dev-dependencies]
 # F5: bench SSE-truncado informativo (sin gate). Misma version que grafito-geometry.

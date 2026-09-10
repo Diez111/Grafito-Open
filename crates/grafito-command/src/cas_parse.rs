@@ -8,7 +8,7 @@
 use grafito_core::{Document, GeoObject, ObjectId};
 use grafito_geometry::expr::evaluate;
 use grafito_geometry::symbolic;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 pub(crate) fn sanitize_unicode_input(raw_text: &str) -> String {
     raw_text
@@ -812,7 +812,7 @@ fn require_finite(value: Result<f64, String>) -> Result<f64, String> {
     }
 }
 
-fn parse_numeric_arg(s: &str, variables: &HashMap<String, f64>) -> Result<f64, String> {
+fn parse_numeric_arg(s: &str, variables: &BTreeMap<String, f64>) -> Result<f64, String> {
     let arg = s.trim();
     if let Ok(val) = arg.parse::<f64>() {
         return Ok(val);

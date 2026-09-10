@@ -9,7 +9,7 @@
 
 use crate::ObjectId;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Maximum number of constraints accepted in one document or serialized graph.
 pub const MAX_CONSTRAINTS: usize = 5_000;
@@ -33,7 +33,7 @@ pub struct Constraint {
     pub order: usize,
     /// Named parameters for this constraint (e.g., translation delta, rotation angle).
     #[serde(default)]
-    pub params: HashMap<String, f64>,
+    pub params: BTreeMap<String, f64>,
 }
 
 /// The constraint graph: a DAG of dependencies between geometric objects.
@@ -184,7 +184,7 @@ impl ConstraintGraph {
                 MAX_CONSTRAINTS
             ));
         }
-        let mut creators = HashMap::new();
+        let mut creators = BTreeMap::new();
         let mut orders = HashSet::new();
         for (id, constraint) in &self.constraints {
             if *id == usize::MAX {
@@ -377,7 +377,7 @@ impl ConstraintGraph {
         name: &str,
         inputs: &[ObjectId],
         outputs: &[ObjectId],
-        params: &HashMap<String, f64>,
+        params: &BTreeMap<String, f64>,
     ) -> Result<(), String> {
         if self.constraints.len() >= MAX_CONSTRAINTS {
             return Err(format!(
@@ -422,7 +422,7 @@ impl ConstraintGraph {
         name: &str,
         inputs: Vec<ObjectId>,
         outputs: Vec<ObjectId>,
-        params: HashMap<String, f64>,
+        params: BTreeMap<String, f64>,
     ) -> Result<usize, String> {
         self.validate_new_constraint(name, &inputs, &outputs, &params)?;
 
@@ -470,7 +470,7 @@ impl ConstraintGraph {
         name: &str,
         inputs: Vec<ObjectId>,
         outputs: Vec<ObjectId>,
-        params: HashMap<String, f64>,
+        params: BTreeMap<String, f64>,
     ) -> usize {
         match self.try_add_constraint(name, inputs.clone(), outputs.clone(), params.clone()) {
             Ok(id) => id,
@@ -749,7 +749,7 @@ mod tests {
         graph.add_free_object(a);
         graph.add_free_object(b);
 
-        let id = graph.add_constraint("Midpoint", vec![a, b], vec![out], HashMap::new());
+        let id = graph.add_constraint("Midpoint", vec![a, b], vec![out], BTreeMap::new());
 
         assert_eq!(graph.constraint_count(), 1);
         assert_eq!(id, 0);
@@ -779,9 +779,9 @@ mod tests {
         let o3 = ObjectId::new();
         graph.add_free_object(o0);
 
-        let c1 = graph.add_constraint("C1", vec![o0], vec![o1], HashMap::new());
-        let c2 = graph.add_constraint("C2", vec![o1], vec![o2], HashMap::new());
-        let c3 = graph.add_constraint("C3", vec![o2], vec![o3], HashMap::new());
+        let c1 = graph.add_constraint("C1", vec![o0], vec![o1], BTreeMap::new());
+        let c2 = graph.add_constraint("C2", vec![o1], vec![o2], BTreeMap::new());
+        let c3 = graph.add_constraint("C3", vec![o2], vec![o3], BTreeMap::new());
 
         let order = graph.get_update_order(&[o0]);
         // All three constraints must be scheduled.
@@ -800,7 +800,12 @@ mod tests {
 
         for _ in 0..1_024 {
             let output = ObjectId::new();
-            expected.push(graph.add_constraint("Chain", vec![input], vec![output], HashMap::new()));
+            expected.push(graph.add_constraint(
+                "Chain",
+                vec![input],
+                vec![output],
+                BTreeMap::new(),
+            ));
             input = output;
         }
 
@@ -816,18 +821,19 @@ mod tests {
         let third_output = ObjectId::new();
         graph.add_free_object(source);
 
-        let first = graph.add_constraint("First", vec![source], vec![first_output], HashMap::new());
+        let first =
+            graph.add_constraint("First", vec![source], vec![first_output], BTreeMap::new());
         let second = graph.add_constraint(
             "Second",
             vec![first_output],
             vec![second_output],
-            HashMap::new(),
+            BTreeMap::new(),
         );
         let third = graph.add_constraint(
             "Third",
             vec![second_output],
             vec![third_output],
-            HashMap::new(),
+            BTreeMap::new(),
         );
 
         let mut persisted = serde_json::to_value(&graph).expect("serialize graph");
@@ -859,7 +865,7 @@ mod tests {
         let input = ObjectId::new();
         let output = ObjectId::new();
         graph.add_free_object(input);
-        graph.add_constraint("C", vec![input], vec![output], HashMap::new());
+        graph.add_constraint("C", vec![input], vec![output], BTreeMap::new());
 
         let mut persisted = serde_json::to_value(&graph).expect("serialize graph");
         let constraints = persisted
@@ -882,14 +888,15 @@ mod tests {
         let output = ObjectId::new();
         let next_output = ObjectId::new();
         graph.add_free_object(input);
-        graph.add_constraint("C", vec![input], vec![output], HashMap::new());
+        graph.add_constraint("C", vec![input], vec![output], BTreeMap::new());
 
         let mut persisted = serde_json::to_value(&graph).expect("serialize graph");
         persisted["constraints"]["0"]["order"] = serde_json::json!(usize::MAX);
 
         let mut restored: ConstraintGraph =
             serde_json::from_value(persisted).expect("saturated orders are canonicalized");
-        let next = restored.add_constraint("Next", vec![output], vec![next_output], HashMap::new());
+        let next =
+            restored.add_constraint("Next", vec![output], vec![next_output], BTreeMap::new());
 
         assert_ne!(next, usize::MAX);
         assert!(restored.get_constraint(next).expect("new constraint").order < usize::MAX);
@@ -902,8 +909,8 @@ mod tests {
         let o1 = ObjectId::new();
         let o2 = ObjectId::new();
         graph.add_free_object(o0);
-        graph.add_constraint("C1", vec![o0], vec![o1], HashMap::new());
-        graph.add_constraint("C2", vec![o1], vec![o2], HashMap::new());
+        graph.add_constraint("C1", vec![o0], vec![o1], BTreeMap::new());
+        graph.add_constraint("C2", vec![o1], vec![o2], BTreeMap::new());
 
         // Derivar o0 (ancestro) de o2 (descendiente) cerraría el ciclo.
         assert!(graph.would_create_cycle(&[o2], &[o0]));
@@ -924,9 +931,9 @@ mod tests {
         let other_out = ObjectId::new();
         graph.add_free_object(o0);
         graph.add_free_object(other);
-        graph.add_constraint("C1", vec![o0], vec![o1], HashMap::new());
-        graph.add_constraint("C2", vec![o1], vec![o2], HashMap::new());
-        graph.add_constraint("C3", vec![other], vec![other_out], HashMap::new());
+        graph.add_constraint("C1", vec![o0], vec![o1], BTreeMap::new());
+        graph.add_constraint("C2", vec![o1], vec![o2], BTreeMap::new());
+        graph.add_constraint("C3", vec![other], vec![other_out], BTreeMap::new());
 
         assert_eq!(graph.downstream_depth(&[o0]), 2);
         assert_eq!(graph.downstream_depth(&[other]), 1);
@@ -943,8 +950,8 @@ mod tests {
         let o2 = ObjectId::new();
         graph.add_free_object(o0);
 
-        let c1 = graph.add_constraint("C1", vec![o0, o2], vec![o1], HashMap::new());
-        let c2 = graph.add_constraint("C2", vec![o1], vec![o2], HashMap::new());
+        let c1 = graph.add_constraint("C1", vec![o0, o2], vec![o1], BTreeMap::new());
+        let c2 = graph.add_constraint("C2", vec![o1], vec![o2], BTreeMap::new());
 
         // This must not hang / overflow the stack.
         let order = graph.get_update_order(&[o0]);
@@ -968,7 +975,7 @@ mod tests {
                     inputs: vec![input],
                     outputs: vec![output],
                     order: id,
-                    params: HashMap::new(),
+                    params: BTreeMap::new(),
                 },
             );
             input = output;
@@ -986,7 +993,7 @@ mod tests {
         let a = ObjectId::new();
         let out = ObjectId::new();
         graph.add_free_object(a);
-        let _id = graph.add_constraint("Midpoint", vec![a], vec![out], HashMap::new());
+        let _id = graph.add_constraint("Midpoint", vec![a], vec![out], BTreeMap::new());
         assert_eq!(graph.constraint_count(), 1);
 
         graph.remove_object(out);
@@ -1003,8 +1010,8 @@ mod tests {
         let c = ObjectId::new();
         graph.add_free_object(a);
 
-        graph.add_constraint("C1", vec![a], vec![b], HashMap::new());
-        graph.add_constraint("C2", vec![b], vec![c], HashMap::new());
+        graph.add_constraint("C1", vec![a], vec![b], BTreeMap::new());
+        graph.add_constraint("C2", vec![b], vec![c], BTreeMap::new());
 
         let orphaned = graph.remove_object(a);
         assert!(orphaned.contains(&b));
@@ -1028,9 +1035,9 @@ mod tests {
         graph.add_free_object(b);
         graph.add_free_object(c);
         // Tres constraints independientes, sin dependencias entre sí.
-        let c1 = graph.add_constraint("C1", vec![a], vec![out1], HashMap::new());
-        let c2 = graph.add_constraint("C2", vec![b], vec![out2], HashMap::new());
-        let c3 = graph.add_constraint("C3", vec![c], vec![out3], HashMap::new());
+        let c1 = graph.add_constraint("C1", vec![a], vec![out1], BTreeMap::new());
+        let c2 = graph.add_constraint("C2", vec![b], vec![out2], BTreeMap::new());
+        let c3 = graph.add_constraint("C3", vec![c], vec![out3], BTreeMap::new());
 
         // changed en orden permutado debe dar mismo resultado ordenado.
         let order_abc = graph.get_update_order(&[a, b, c]);
@@ -1061,9 +1068,9 @@ mod tests {
         let m2 = ObjectId::new();
         let m3 = ObjectId::new();
         graph2.add_free_object(s);
-        let d1 = graph2.add_constraint("D1", vec![s], vec![m1], HashMap::new());
-        let d2 = graph2.add_constraint("D2", vec![m1], vec![m2], HashMap::new());
-        let d3 = graph2.add_constraint("D3", vec![m2], vec![m3], HashMap::new());
+        let d1 = graph2.add_constraint("D1", vec![s], vec![m1], BTreeMap::new());
+        let d2 = graph2.add_constraint("D2", vec![m1], vec![m2], BTreeMap::new());
+        let d3 = graph2.add_constraint("D3", vec![m2], vec![m3], BTreeMap::new());
         let order_chain = graph2.get_update_order(&[s]);
         assert_eq!(
             order_chain,

@@ -12,7 +12,7 @@ use crate::expr::{
 };
 use crate::integral::composite_simpson;
 use crate::{line_param_at_point, LineKind, Point2};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 const DEFAULT_SAMPLES: usize = 800;
@@ -130,7 +130,7 @@ impl Default for AnalysisOptions {
 /// presupuesto de muestras; use [`try_analyze_function`] para el error.
 pub fn analyze_function(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     opts: &AnalysisOptions,
 ) -> Vec<AnalysisResult> {
     try_analyze_function(expr, vars, opts).unwrap_or_default()
@@ -139,7 +139,7 @@ pub fn analyze_function(
 /// Fallible variant of [`analyze_function`] with an explicit sampling budget.
 pub fn try_analyze_function(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     opts: &AnalysisOptions,
 ) -> Result<Vec<AnalysisResult>, AnalysisError> {
     let samples = opts.samples.max(4);
@@ -209,11 +209,11 @@ pub fn try_analyze_function(
     Ok(results)
 }
 
-fn f64_or_nan(expr: &str, x: f64, vars: &HashMap<String, f64>) -> f64 {
+fn f64_or_nan(expr: &str, x: f64, vars: &BTreeMap<String, f64>) -> f64 {
     eval_function_with_vars(expr, x, vars).unwrap_or(f64::NAN)
 }
 
-fn f64_or_nan_var(expr: &str, var: &str, t: f64, vars: &HashMap<String, f64>) -> f64 {
+fn f64_or_nan_var(expr: &str, var: &str, t: f64, vars: &BTreeMap<String, f64>) -> f64 {
     eval_batch_1d(expr, var, std::iter::once(t), vars)
         .ok()
         .and_then(|mut res| res.pop().flatten())
@@ -224,7 +224,7 @@ fn finite_or_nan(y: Option<f64>) -> f64 {
     y.filter(|v| v.is_finite()).unwrap_or(f64::NAN)
 }
 
-fn derivative_var(expr: &str, var: &str, t: f64, vars: &HashMap<String, f64>) -> f64 {
+fn derivative_var(expr: &str, var: &str, t: f64, vars: &BTreeMap<String, f64>) -> f64 {
     let h = (t.abs().max(1.0) * EPS).max(1e-12);
     let f = |t: f64| f64_or_nan_var(expr, var, t, vars);
     let f1 = f(t - 2.0 * h);
@@ -238,7 +238,7 @@ fn derivative_var(expr: &str, var: &str, t: f64, vars: &HashMap<String, f64>) ->
     }
 }
 
-fn second_derivative_var(expr: &str, var: &str, t: f64, vars: &HashMap<String, f64>) -> f64 {
+fn second_derivative_var(expr: &str, var: &str, t: f64, vars: &BTreeMap<String, f64>) -> f64 {
     let h = (t.abs().max(1.0) * EPS).max(1e-12);
     let f = |t: f64| f64_or_nan_var(expr, var, t, vars);
     let fm = f(t - h);
@@ -251,11 +251,11 @@ fn second_derivative_var(expr: &str, var: &str, t: f64, vars: &HashMap<String, f
     }
 }
 
-fn derivative(expr: &str, x: f64, vars: &HashMap<String, f64>) -> f64 {
+fn derivative(expr: &str, x: f64, vars: &BTreeMap<String, f64>) -> f64 {
     derivative_var(expr, "x", x, vars)
 }
 
-fn second_derivative(expr: &str, x: f64, vars: &HashMap<String, f64>) -> f64 {
+fn second_derivative(expr: &str, x: f64, vars: &BTreeMap<String, f64>) -> f64 {
     second_derivative_var(expr, "x", x, vars)
 }
 
@@ -302,7 +302,7 @@ fn bisect<F: Fn(f64) -> f64>(f: F, mut a: f64, mut b: f64, max_iter: usize) -> O
 
 fn extract_roots(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     xs: &[f64],
     ys: &[Option<f64>],
     _opts: &AnalysisOptions,
@@ -344,7 +344,7 @@ fn extract_roots(
 
 fn extract_extrema(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     xs: &[f64],
     _ys: &[Option<f64>],
     _opts: &AnalysisOptions,
@@ -407,7 +407,7 @@ fn extract_extrema(
 
 fn extract_inflections(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     xs: &[f64],
     _ys: &[Option<f64>],
     _opts: &AnalysisOptions,
@@ -463,7 +463,7 @@ fn extract_inflections(
 
 fn find_asymptotes(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     domain_min: f64,
     domain_max: f64,
     samples: usize,
@@ -645,7 +645,7 @@ pub fn analyze_parametric_curve2d(
     expr_y: &str,
     t_min: f64,
     t_max: f64,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let mut results = Vec::new();
@@ -836,7 +836,7 @@ pub fn analyze_polar_curve(
     expr_r: &str,
     t_min: f64,
     t_max: f64,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let mut results = Vec::new();
@@ -925,7 +925,7 @@ pub fn analyze_implicit_curve(
     lhs: &str,
     rhs: &str,
     view_bounds: (f64, f64, f64, f64),
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let mut results = Vec::new();
@@ -995,7 +995,7 @@ pub fn analyze_vector_field2d(
     expr_u: &str,
     expr_v: &str,
     view_bounds: (f64, f64, f64, f64),
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let mut results = Vec::new();
@@ -1224,7 +1224,7 @@ pub fn taylor_coefficients_from_ast(
 /// Calcula los coeficientes del polinomio de Taylor de orden `n` alrededor de `center`.
 pub fn taylor_coefficients(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     center: f64,
     order: usize,
 ) -> Result<Vec<f64>, String> {
@@ -1238,7 +1238,7 @@ pub fn taylor_coefficients(
 /// Genera una cadena legible para el polinomio de Taylor.
 pub fn taylor_series_string(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     center: f64,
     order: usize,
 ) -> Result<String, String> {
@@ -1831,7 +1831,7 @@ pub fn analyze_intersection(
     a: &IntersectionCurve<'_>,
     b: &IntersectionCurve<'_>,
     view_bounds: (f64, f64, f64, f64),
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
 ) -> Vec<Point2> {
     match (a, b) {
         (
@@ -1966,7 +1966,7 @@ fn function_function_intersection(
     expr_a: &str,
     expr_b: &str,
     view_bounds: (f64, f64, f64, f64),
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
 ) -> Vec<Point2> {
     let (xmin, xmax, _, _) = view_bounds;
     let f = |x: f64| -> f64 {
@@ -2035,7 +2035,7 @@ fn function_line_intersection(
     s: Point2,
     e: Point2,
     view_bounds: (f64, f64, f64, f64),
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
 ) -> Vec<Point2> {
     let (xmin, xmax, _, _) = view_bounds;
     let dx = e.x - s.x;
@@ -2113,7 +2113,7 @@ pub fn analyze_vector_field_equilibrium_class(
     expr_u: &str,
     expr_v: &str,
     point: Point2,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
 ) -> Option<String> {
     let h = 1e-5;
     let eval_u = |x: f64, _y: f64| -> f64 {
@@ -2299,7 +2299,7 @@ pub fn arc_length(expr: &str, a: f64, b: f64) -> Result<f64, String> {
     // punto es solo `eval_at` sobre el AST ya preparado (sin allocs).
     // Fallback a `eval_function` solo si el AST no se pudo preparar, para no
     // perder la sintaxis que únicamente cubre el path lento de evalexpr.
-    let prepared = prepare_function_ast(&d, &HashMap::new(), &["x"]).ok();
+    let prepared = prepare_function_ast(&d, &BTreeMap::new(), &["x"]).ok();
     let g = |xv: f64| {
         let dp = match &prepared {
             Some(ast) => ast.eval_at("x", xv),
@@ -2353,7 +2353,7 @@ pub fn volume_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
     }
     // Hoist idéntico al de `arc_length`: AST preparado una vez, `eval_at` por
     // punto; fallback a `eval_function` si el AST no se pudo preparar.
-    let prepared = prepare_function_ast(expr, &HashMap::new(), &["x"]).ok();
+    let prepared = prepare_function_ast(expr, &BTreeMap::new(), &["x"]).ok();
     let g = |xv: f64| {
         let y = match &prepared {
             Some(ast) => ast.eval_at("x", xv),
@@ -2386,8 +2386,8 @@ pub fn surface_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> 
     // Hoist doble: `f` y `f'` se preparan una vez fuera del loop (antes eran
     // 2×2000 re-parseos por llamada); fallback a `eval_function` por punto
     // solo si algún AST no se pudo preparar.
-    let prepared_f = prepare_function_ast(expr, &HashMap::new(), &["x"]).ok();
-    let prepared_d = prepare_function_ast(&d, &HashMap::new(), &["x"]).ok();
+    let prepared_f = prepare_function_ast(expr, &BTreeMap::new(), &["x"]).ok();
+    let prepared_d = prepare_function_ast(&d, &BTreeMap::new(), &["x"]).ok();
     let g = |xv: f64| {
         let y = match &prepared_f {
             Some(ast) => ast.eval_at("x", xv),
@@ -2410,8 +2410,8 @@ pub fn surface_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> 
 mod tests {
     use super::*;
 
-    fn empty_vars() -> HashMap<String, f64> {
-        HashMap::new()
+    fn empty_vars() -> BTreeMap<String, f64> {
+        BTreeMap::new()
     }
 
     #[test]

@@ -2696,7 +2696,7 @@ fn sampled_ellipse(center: Point2, rx: f64, ry: f64, angle: f64) -> Vec<Point2> 
 
 fn phase_portrait_has_finite_sample(
     portrait: &grafito_core::PhasePortraitObj,
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
 ) -> bool {
     let prepared_dx =
         grafito_geometry::expr::prepare_function_ast(&portrait.expr_dx, variables, &["x", "y"])
@@ -6738,5 +6738,127 @@ mod gc_text_export_tests {
         assert!(out.contains("</html>"));
         assert!(out.contains("f"), "fue: {out:?}");
         assert!(!out.contains("<script"), "sin scripts: {out:?}");
+    }
+}
+
+// ── P1-render: Tex SVG honesto (cota 64KiB + texto fallback) ────────────────
+// La escena animada (`anim_native::Mobject::Tex`) trae SVG ya tipografiado
+// (≤64 KiB, sin LaTeX): este módulo aporta los dos primitivos puros que el
+// raster usa —chequeo de presupuesto y extracción de texto visible para el
+// fallback `ab_glyph` cuando el SVG no trae formas parseables—. Sin I/O,
+// sin pánicos, sin dependencias nuevas (tiny-skia ya alcanza).
+
+/// ¿El SVG de un `Tex` entra en presupuesto? (no vacío, ≤64 KiB).
+///
+/// Espejo de `grafito_anim::scene::MAX_TEX_SVG_BYTES`: el raster lo exige
+/// antes de parsear; el que excede cae al fallback de texto honesto.
+pub(crate) fn tex_svg_within_budget(svg: &str) -> bool {
+    !svg.is_empty() && svg.len() <= grafito_anim::MAX_TEX_SVG_BYTES
+}
+
+/// Texto visible de un SVG para el fallback `ab_glyph`.
+///
+/// Quita tags (`<…>`), desescapa las 5 entidades XML y trunca a `max_chars`
+/// (chars, no bytes: sin partir UTF-8). `None` si no queda texto visible o
+/// `max_chars == 0`. Puro, sin I/O ni pánicos.
+pub(crate) fn extract_svg_text_content(svg: &str, max_chars: usize) -> Option<String> {
+    if max_chars == 0 {
+        return None;
+    }
+    let mut visible = String::new();
+    let mut dentro_tag = false;
+    for ch in svg.chars() {
+        match ch {
+            '<' => dentro_tag = true,
+            '>' => dentro_tag = false,
+            _ if !dentro_tag => visible.push(ch),
+            _ => {}
+        }
+    }
+    let desescapado = visible
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&");
+    let recortado: String = desescapado.split_whitespace().collect::<Vec<_>>().join(" ");
+    if recortado.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = recortado.chars().collect();
+    if chars.len() > max_chars {
+        Some(chars[..max_chars].iter().collect())
+    } else {
+        Some(recortado)
+    }
+}
+
+#[cfg(test)]
+mod p1_tex_tests {
+    use super::{extract_svg_text_content, tex_svg_within_budget};
+
+    #[test]
+    fn tex_budget_pinnea_cota_64kib() {
+        assert!(!tex_svg_within_budget(""));
+        assert!(tex_svg_within_budget("<svg></svg>"));
+        let tope = "a".repeat(grafito_anim::MAX_TEX_SVG_BYTES);
+        assert!(tex_svg_within_budget(&tope));
+        let exceso = "a".repeat(grafito_anim::MAX_TEX_SVG_BYTES + 1);
+        assert!(!tex_svg_within_budget(&exceso));
+    }
+
+    #[test]
+    fn tex_texto_extrae_visible_y_desentidades() {
+        let svg = "<svg><text x=\"1\">hola &lt;mundo&gt; &amp; chau</text></svg>";
+        assert_eq!(
+            extract_svg_text_content(svg, 48),
+            Some("hola <mundo> & chau".to_string())
+        );
+    }
+
+    #[test]
+    fn tex_texto_honesto_en_vacio_solo_formas_y_cero() {
+        assert_eq!(extract_svg_text_content("<svg><circle/></svg>", 48), None);
+        assert_eq!(extract_svg_text_content("   ", 48), None);
+        assert_eq!(
+            extract_svg_text_content("<svg><text>hola</text></svg>", 0),
+            None
+        );
+    }
+
+    #[test]
+    fn tex_texto_trunca_por_chars_sin_romper_utf8() {
+        let svg = "<svg><text>áéíóúñ</text></svg>";
+        let out = extract_svg_text_content(svg, 3).expect("truncado");
+        assert_eq!(out, "áéí");
+        assert!(out.len() < "áéíóúñ".len() || out == "áéí");
+    }
+}
+
+// ── Diálogo Exportar animación: presupuestos pineados (piel-ui) ────────────
+// El diálogo vivo es `grafito_ui::assistant::MediaExportDialog` (topes y
+// validadores compartidos en `anim_native`); acá se pinnean los topes que el
+// diálogo respeta (GIF 64 frames / 8M px / 5MB + default 48) para que un
+// cambio silencioso falle fuerte. Sin I/O, sin spawn.
+#[cfg(test)]
+mod anim_export_budget_tests {
+    use crate::anim_native::{
+        ANIM_EXPORT_BITRATE_MAX_KBPS, ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_DEFAULT_FRAMES,
+        ANIM_EXPORT_FPS_MAX, ANIM_EXPORT_FPS_MIN, GIF_EXPORT_MAX_FILE_BYTES, GIF_EXPORT_MAX_FRAMES,
+        GIF_EXPORT_MAX_TOTAL_PIXELS, NATIVE_ANIM_FRAME_COUNT,
+    };
+
+    #[test]
+    fn budgets_64_8m_5mb_y_default_48_pineados() {
+        assert_eq!(GIF_EXPORT_MAX_FRAMES, 64);
+        assert_eq!(GIF_EXPORT_MAX_TOTAL_PIXELS, 8_000_000);
+        assert_eq!(GIF_EXPORT_MAX_FILE_BYTES, 5 * 1024 * 1024);
+        assert_eq!(ANIM_EXPORT_DEFAULT_FRAMES, 48);
+        assert_eq!(ANIM_EXPORT_DEFAULT_FRAMES, NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!(
+            (ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_BITRATE_MAX_KBPS),
+            (100, 20_000)
+        );
+        assert_eq!((ANIM_EXPORT_FPS_MIN, ANIM_EXPORT_FPS_MAX), (1, 60));
     }
 }

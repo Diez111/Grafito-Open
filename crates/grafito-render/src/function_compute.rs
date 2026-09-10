@@ -15,7 +15,7 @@ use crate::implicit_compute::{
 };
 use grafito_core::function_sampling;
 use grafito_core::object::{FunctionCacheKey, FunctionObj, FunctionSamples};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc};
 
 const OP_PUSH_VAR_MASK: u32 = 0xFF;
@@ -25,7 +25,7 @@ const OP_PUSH_VAR_VALUE: u32 = 2;
 /// variables other than `x`.
 fn compile_function_expr(
     expr: &grafito_geometry::ast::Expr,
-    document_vars: &HashMap<String, f64>,
+    document_vars: &BTreeMap<String, f64>,
     prog: &mut BytecodeProgram,
 ) -> Result<(), CompileError> {
     compile_expr(expr, document_vars, prog)?;
@@ -227,7 +227,7 @@ impl FunctionComputePipeline {
         expr: &str,
         domain: (f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<FunctionSubmit> {
         if grid_size > self.max_grid {
             return None;
@@ -376,7 +376,7 @@ impl FunctionComputePipeline {
         expr: &str,
         domain: (f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<PendingFunctionEval> {
         let submit = self.plan_submit(expr, domain, grid_size, variables)?;
         let map_ok = self.submit_buffers(device, queue, &submit, grid_size);
@@ -421,7 +421,7 @@ impl FunctionComputePipeline {
         expr: &str,
         domain: (f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<Vec<f64>> {
         let submit = self.plan_submit(expr, domain, grid_size, variables)?;
         let map_ok = self.submit_buffers(device, queue, &submit, grid_size);
@@ -446,7 +446,7 @@ impl FunctionComputePipeline {
         fun: &FunctionObj,
         domain: (f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<Vec<f64>> {
         self.evaluate_expr(device, queue, &fun.expr, domain, grid_size, variables)
     }
@@ -467,7 +467,7 @@ pub fn evaluate_function_batch_gpu(
     a: f64,
     b: f64,
     samples: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<Vec<f64>, String> {
     if samples < 2 {
         return Err("samples must be at least 2".to_string());
@@ -516,7 +516,7 @@ pub fn dispatch_function_on_gpu(
     fun: &FunctionObj,
     domain: (f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> FunctionDispatchOutcome {
     if fun.is_integral {
         // Integral functions need adaptive quadrature; GPU only evaluates the integrand.
@@ -560,7 +560,7 @@ pub fn dispatch_function_on_gpu(
 pub fn resolve_function_job(
     compute: &FunctionComputePipeline,
     fun: &FunctionObj,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
     job: PendingFunctionJob,
 ) -> bool {
     let PendingFunctionJob {
@@ -641,7 +641,7 @@ pub fn maybe_compute_function_on_gpu(
     fun: &FunctionObj,
     domain: (f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     if fun.is_integral {
         // Integral functions need adaptive quadrature; GPU only evaluates the integrand.

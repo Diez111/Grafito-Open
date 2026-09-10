@@ -9,7 +9,7 @@ use crate::object::{FunctionCacheKey, FunctionObj, FunctionSamples};
 use crate::RenderQuality;
 use grafito_geometry::expr;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use grafito_geometry::expr::eval_integral_batch;
 
@@ -273,7 +273,7 @@ pub fn samples_or_compute<'a>(
     fun: &'a FunctionObj,
     domain: (f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> std::sync::RwLockReadGuard<'a, FunctionSamples> {
     let padded_domain = padded_snapped_domain(domain, 2.0, 64);
     let key = cache_key(fun, padded_domain, grid_size, variables);
@@ -315,20 +315,13 @@ pub fn cache_key(
     fun: &FunctionObj,
     domain: (f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> FunctionCacheKey {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    for (k, v) in variables.iter() {
-        k.hash(&mut hasher);
-        v.to_bits().hash(&mut hasher);
-    }
     FunctionCacheKey {
         expr: fun.expr.clone(),
         domain,
         grid_size,
-        variables_hash: hasher.finish(),
+        variables_hash: crate::parametric_sampling::variables_hash(variables),
         is_integral: fun.is_integral,
         integral_var: fun.integral_var.clone(),
         integral_lower: fun.integral_lower,
@@ -345,7 +338,7 @@ fn evaluate_function_samples(
     fun: &FunctionObj,
     domain: (f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> FunctionSamples {
     let (min, max) = domain;
     if grid_size == 0 || !min.is_finite() || !max.is_finite() || min >= max {

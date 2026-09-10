@@ -14,19 +14,19 @@
 //! Gate P3: optimizar solo si el bench avala ≥10%.
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use grafito_core::ImplicitSurface3DObj;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 fn sphere(cells: usize) -> ImplicitSurface3DObj {
     ImplicitSurface3DObj::new("x*x+y*y+z*z-1", (-2.0, 2.0, -2.0, 2.0, -2.0, 2.0), cells)
 }
 
-fn vars_a() -> HashMap<String, f64> {
-    HashMap::from([("a".to_string(), 1.0)])
+fn vars_a() -> BTreeMap<String, f64> {
+    BTreeMap::from([("a".to_string(), 1.0)])
 }
 
-fn vars_b() -> HashMap<String, f64> {
-    HashMap::from([("a".to_string(), 2.0)])
+fn vars_b() -> BTreeMap<String, f64> {
+    BTreeMap::from([("a".to_string(), 2.0)])
 }
 
 /// Malla fresca sin caché (referencia del costo de marching).

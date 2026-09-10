@@ -22,19 +22,22 @@ impl Interval {
     }
 
     pub fn crosses_zero(&self) -> bool {
-        self.lo.to_f64() <= 0.0 && 0.0 <= self.hi.to_f64()
+        // Comparación en DD directo: `to_f64` redondea y un intervalo DD
+        // diminuto alrededor de 0 podría clasificarse mal tras el redondeo.
+        self.lo <= DD::from_f64(0.0) && DD::from_f64(0.0) <= self.hi
     }
 
     pub fn contains(&self, val: f64) -> bool {
-        self.lo.to_f64() <= val && val <= self.hi.to_f64()
+        let v = DD::from_f64(val);
+        self.lo <= v && v <= self.hi
     }
 
     pub fn is_definitely_positive(&self) -> bool {
-        self.lo.to_f64() > 0.0
+        self.lo > DD::from_f64(0.0)
     }
 
     pub fn is_definitely_negative(&self) -> bool {
-        self.hi.to_f64() < 0.0
+        self.hi < DD::from_f64(0.0)
     }
 
     /// Punto medio overflow-safe: `lo + (hi - lo) / 2`.
@@ -42,9 +45,9 @@ impl Interval {
     /// Nunca se usa `(lo + hi) / 2`, que desborda con extremos grandes
     /// (`hi = f64::MAX`) o pierde precisión con rangos asimétricos.
     pub fn midpoint(&self) -> f64 {
-        let lo = self.lo.to_f64();
-        let hi = self.hi.to_f64();
-        lo + (hi - lo) * 0.5
+        // Aritmética en DD y una sola conversión final: evita el desborde
+        // de `(lo+hi)/2` y conserva precisión con rangos asimétricos.
+        (self.lo + (self.hi - self.lo) * DD::from_f64(0.5)).to_f64()
     }
 }
 

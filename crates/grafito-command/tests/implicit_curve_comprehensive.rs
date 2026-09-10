@@ -5,7 +5,7 @@
 
 use grafito_command::commands::{process_input, CommandOutcome};
 use grafito_core::{GeoObject, RelationOperator};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn test_create_circle_eq_via_command() {
@@ -30,7 +30,7 @@ fn test_create_circle_eq_via_command() {
     assert_eq!(ic.expr_rhs, "1");
     assert_eq!(ic.operator, RelationOperator::Eq);
     // Verificar que el cache se puede llenar.
-    let (lhs, rhs) = ic.get_cached_asts(&HashMap::new(), &["x", "y"]).unwrap();
+    let (lhs, rhs) = ic.get_cached_asts(&BTreeMap::new(), &["x", "y"]).unwrap();
     assert_eq!(lhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
     assert_eq!(rhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
 }
@@ -57,7 +57,7 @@ fn test_create_disk_lt_via_command() {
     assert_eq!(ic.expr_lhs, "x^2 + y^2");
     assert_eq!(ic.expr_rhs, "1");
     assert_eq!(ic.operator, RelationOperator::Less);
-    let (lhs, rhs) = ic.get_cached_asts(&HashMap::new(), &["x", "y"]).unwrap();
+    let (lhs, rhs) = ic.get_cached_asts(&BTreeMap::new(), &["x", "y"]).unwrap();
     // f(0,0) = 0 - 1 = -1, dentro.
     let l = lhs.eval_2d("x", 0.0, "y", 0.0);
     let r = rhs.eval_2d("x", 0.0, "y", 0.0);

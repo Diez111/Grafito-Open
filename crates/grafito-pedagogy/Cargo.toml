@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Motor pedagógico puro de Grafito: niveles, currículum UTN, scaffold socrático, ejercicios y feedback formativo"
 
 [dependencies]
+grafito-geometry.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(deprecated)]
 use grafito_geometry::expr::eval_batch_2d;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 fn main() {
     let mut points = Vec::new();
     for j in 0..251 {
@@ -10,6 +10,6 @@ fn main() {
         }
     }
     let start = std::time::Instant::now();
-    let _res = eval_batch_2d("x^2+y^2", "x", "y", points.into_iter(), &HashMap::new());
+    let _res = eval_batch_2d("x^2+y^2", "x", "y", points.into_iter(), &BTreeMap::new());
     println!("Elapsed: {:?}", start.elapsed());
 }

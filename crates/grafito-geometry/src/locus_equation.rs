@@ -122,6 +122,21 @@ fn nullspace_via_svd(matrix: &DMatrix<f64>) -> Result<Vec<f64>, String> {
         return Err("muestras insuficientes para el grado".to_string());
     }
     let svd = matrix.clone().svd(true, true);
+    // Nullspace solo existe si la matriz es rango-deficiente: con rango
+    // columna completo el único vector nulo es el trivial y la "ecuación"
+    // sería regresión espuria. Se valida con el menor valor singular.
+    if svd.singular_values.is_empty() {
+        return Err("descomposición SVD vacía".to_string());
+    }
+    let sigma_max = svd.singular_values[0];
+    let sigma_min = svd.singular_values[svd.singular_values.len() - 1];
+    if !sigma_max.is_finite() || !sigma_min.is_finite() {
+        return Err("valores singulares no finitos en locus".to_string());
+    }
+    let rank_tol = crate::matrices::dimension_relative_epsilon(n_rows, n_cols) * sigma_max;
+    if sigma_min > rank_tol {
+        return Err("rango columna completo: sin espacio nulo no trivial".to_string());
+    }
     let Some(v_t) = svd.v_t else {
         return Err("descomposición SVD falló (V^T)".to_string());
     };

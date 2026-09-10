@@ -15,7 +15,7 @@ use grafito_core::object::{
 };
 use grafito_core::RenderQuality;
 use grafito_geometry::ViewTransform;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{
     atomic::AtomicBool,
     mpsc::{sync_channel, Receiver},
@@ -152,7 +152,7 @@ impl std::error::Error for CompileError {}
 /// present in `document_vars` or compilation fails.
 pub(crate) fn compile_expr_with_mapping(
     expr: &grafito_geometry::ast::Expr,
-    document_vars: &HashMap<String, f64>,
+    document_vars: &BTreeMap<String, f64>,
     var_map: &[(&str, u32)],
     prog: &mut BytecodeProgram,
 ) -> Result<(), CompileError> {
@@ -448,7 +448,7 @@ pub(crate) fn compile_expr_with_mapping(
 /// mapping: `x` -> operand 0, `y` -> operand 1.
 pub(crate) fn compile_expr(
     expr: &grafito_geometry::ast::Expr,
-    document_vars: &HashMap<String, f64>,
+    document_vars: &BTreeMap<String, f64>,
     prog: &mut BytecodeProgram,
 ) -> Result<(), CompileError> {
     compile_expr_with_mapping(expr, document_vars, &[("x", 0), ("y", 1)], prog)
@@ -456,7 +456,7 @@ pub(crate) fn compile_expr(
 
 fn prepare_implicit_field(
     ic: &ImplicitCurveObj,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Option<grafito_geometry::ast::Expr> {
     let lhs =
         grafito_geometry::expr::prepare_function_ast(&ic.expr_lhs, variables, &["x", "y"]).ok()?;
@@ -479,7 +479,7 @@ fn nonfinite_gpu_field_matches_cpu(
     rows: &[Vec<f64>],
     bounds: (f64, f64, f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> bool {
     if rows.iter().flatten().all(|value| value.is_finite()) {
         return true;
@@ -791,7 +791,7 @@ impl ImplicitComputePipeline {
         ic: &ImplicitCurveObj,
         view_bounds: (f64, f64, f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<ImplicitSubmit> {
         let combined = prepare_implicit_field(ic, variables)?;
 
@@ -956,7 +956,7 @@ impl ImplicitComputePipeline {
         ic: &ImplicitCurveObj,
         view_bounds: (f64, f64, f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<PendingImplicitEval> {
         let submit = self.plan_submit(ic, view_bounds, grid_size, variables)?;
         let grid_size = submit.sample_axis.saturating_sub(1);
@@ -1001,7 +1001,7 @@ impl ImplicitComputePipeline {
         ic: &ImplicitCurveObj,
         view_bounds: (f64, f64, f64, f64),
         grid_size: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<Vec<Vec<f64>>> {
         let submit = self.plan_submit(ic, view_bounds, grid_size, variables)?;
         let grid_size = submit.sample_axis.saturating_sub(1);
@@ -1082,7 +1082,7 @@ pub fn dispatch_implicit_on_gpu(
     queue: &wgpu::Queue,
     ic: &ImplicitCurveObj,
     view: &ViewTransform,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
     quality: RenderQuality,
 ) -> ImplicitDispatchOutcome {
     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
@@ -1132,7 +1132,7 @@ pub fn dispatch_implicit_on_gpu(
 pub fn advance_implicit_job(
     compute: &ImplicitComputePipeline,
     ic: &ImplicitCurveObj,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
     job: PendingImplicitJob,
 ) -> ImplicitResolveStep {
     let PendingImplicitJob {
@@ -1212,7 +1212,7 @@ pub fn maybe_compute_on_gpu(
     queue: &wgpu::Queue,
     ic: &ImplicitCurveObj,
     view: &ViewTransform,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
     quality: RenderQuality,
 ) -> bool {
     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
@@ -1267,7 +1267,7 @@ mod tests {
     fn greater_relations_prepare_the_cpu_field_for_nonzero_contours() {
         for operator in [RelationOperator::Greater, RelationOperator::GreaterEq] {
             let curve = ImplicitCurveObj::new("y", "3", operator);
-            let field = prepare_implicit_field(&curve, &HashMap::new()).unwrap();
+            let field = prepare_implicit_field(&curve, &BTreeMap::new()).unwrap();
 
             assert_eq!(field.eval_2d("x", 0.0, "y", 1.0), 2.0);
             assert_eq!(field.eval_2d("x", 0.0, "y", 3.0), 0.0);
@@ -1293,11 +1293,11 @@ mod tests {
             format!("min(x, {expression})")
         });
         let expression =
-            grafito_geometry::expr::prepare_function_ast(&expression, &HashMap::new(), &["x"])
+            grafito_geometry::expr::prepare_function_ast(&expression, &BTreeMap::new(), &["x"])
                 .expect("the exact-stack expression must parse");
         let mut program = BytecodeProgram::default();
 
-        compile_expr(&expression, &HashMap::new(), &mut program)
+        compile_expr(&expression, &BTreeMap::new(), &mut program)
             .expect("the compiler must accept the shader's 32-slot stack limit");
         assert_eq!(program.code.len(), 63);
     }
@@ -1306,14 +1306,14 @@ mod tests {
     fn gpu_bytecode_rejects_bessel_expressions_for_cpu_domain_handling() {
         let expression = grafito_geometry::expr::prepare_function_ast(
             "besselj(n, x)",
-            &HashMap::new(),
+            &BTreeMap::new(),
             &["x", "n"],
         )
         .unwrap();
         let mut program = BytecodeProgram::default();
 
         assert!(matches!(
-            compile_expr(&expression, &HashMap::new(), &mut program),
+            compile_expr(&expression, &BTreeMap::new(), &mut program),
             Err(CompileError::UnsupportedNode(_))
         ));
     }
@@ -1322,14 +1322,14 @@ mod tests {
     fn compiler_rejects_clamps_with_runtime_bounds() {
         let expression = grafito_geometry::expr::prepare_function_ast(
             "clamp(x, x + 1, x)",
-            &HashMap::new(),
+            &BTreeMap::new(),
             &["x"],
         )
         .expect("runtime-bound clamp must parse");
         let mut program = BytecodeProgram::default();
 
         assert!(matches!(
-            compile_expr(&expression, &HashMap::new(), &mut program),
+            compile_expr(&expression, &BTreeMap::new(), &mut program),
             Err(CompileError::RuntimeClampBounds)
         ));
     }
@@ -1338,14 +1338,14 @@ mod tests {
     fn compiler_rejects_valid_clamp_bounds_that_collapse_to_f32() {
         let expression = grafito_geometry::expr::prepare_function_ast(
             "clamp(x, 1, 1.00000001)",
-            &HashMap::new(),
+            &BTreeMap::new(),
             &["x"],
         )
         .expect("near-equal clamp must parse");
         let mut program = BytecodeProgram::default();
 
         assert!(matches!(
-            compile_expr(&expression, &HashMap::new(), &mut program),
+            compile_expr(&expression, &BTreeMap::new(), &mut program),
             Err(CompileError::PrecisionLoss)
         ));
     }

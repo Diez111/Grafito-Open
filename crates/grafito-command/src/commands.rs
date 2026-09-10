@@ -42,7 +42,7 @@ use grafito_geometry::{
     PlanePlaneIntersection, PlaneThroughLines,
 };
 use grafito_geometry::{Color, Point2, Point3D, RegularPolychoron, RegularPolytopeFamily};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
 /// Reemplaza una variable por otra solo en límites de palabra (identificadores completos).
@@ -124,7 +124,7 @@ pub trait GpuFunctionEvaluator: Send + Sync {
         a: f64,
         b: f64,
         samples: usize,
-        variables: &HashMap<String, f64>,
+        variables: &BTreeMap<String, f64>,
     ) -> Option<Vec<f64>>;
 }
 
@@ -379,7 +379,7 @@ pub fn insert_implicit_multiplication(text: &str) -> String {
 ///
 /// Tries `f64::from_str` first, then applies implicit multiplication and
 /// evaluates with `grafito_geometry::expr::evaluate`.
-pub fn parse_numeric_arg(s: &str, variables: &HashMap<String, f64>) -> Result<f64, String> {
+pub fn parse_numeric_arg(s: &str, variables: &BTreeMap<String, f64>) -> Result<f64, String> {
     let arg = s.trim();
     // Fast path: pure number literal
     if let Ok(val) = arg.parse::<f64>() {
@@ -537,7 +537,7 @@ fn parse_finite_command_arg(
     command: &str,
     field: &str,
     value: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<f64, CommandOutcome> {
     require_finite(parse_numeric_arg(value, variables))
         .map_err(|_| CommandOutcome::Error(format!("{command}: {field} debe ser un número finito")))
@@ -549,7 +549,7 @@ fn parse_optional_finite_command_arg(
     args: &[String],
     index: usize,
     default: f64,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<f64, CommandOutcome> {
     args.get(index).map_or(Ok(default), |value| {
         parse_finite_command_arg(command, field, value, variables)
@@ -559,7 +559,7 @@ fn parse_optional_finite_command_arg(
 fn parse_positive_regular_polytope_scale(
     command: &str,
     argument: Option<&String>,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<f64, CommandOutcome> {
     let scale = match argument {
         Some(argument) => require_finite(parse_numeric_arg(argument, variables)),
@@ -578,7 +578,7 @@ fn parse_exact_regular_polytope_rotations(
     command: &str,
     argument: Option<&String>,
     expected_count: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<Vec<f64>, CommandOutcome> {
     let Some(argument) = argument else {
         return Ok(vec![0.0; expected_count]);
@@ -597,7 +597,7 @@ fn parse_exact_regular_polytope_rotations(
 fn parse_regular_polychoron_4d_command_args(
     command: &str,
     args: &[String],
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<(f64, [f64; REGULAR_POLYCHORON_4D_ROTATION_ANGLE_COUNT]), CommandOutcome> {
     let scale = parse_positive_regular_polytope_scale(command, args.first(), variables)?;
     let rotations = parse_exact_regular_polytope_rotations(
@@ -615,7 +615,7 @@ fn parse_regular_polychoron_4d_command_args(
 fn parse_regular_polytope_nd_command_args(
     command: &str,
     args: &[String],
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<(usize, f64, Vec<f64>), CommandOutcome> {
     let dimension = args
         .first()
@@ -669,7 +669,7 @@ fn require_finite_outputs(command: &str, outputs: &[f64]) -> Result<(), CommandO
 fn parse_data_command_arg(
     command: &str,
     value: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<Vec<f64>, CommandOutcome> {
     parse_brace_list(value, variables)
         .map_err(|error| CommandOutcome::Error(format!("{command}: {error}")))
@@ -845,7 +845,7 @@ fn require_ordered_domain(
 fn parse_rect_bounds(
     command: &str,
     args: &[String],
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
     defaults: (f64, f64, f64, f64),
 ) -> Result<(f64, f64, f64, f64), CommandOutcome> {
     let x_min = args.get(1).map_or(Ok(defaults.0), |value| {
@@ -911,7 +911,7 @@ fn normalize_parametric_surface_components(
 fn validate_parametric_surface_expression(
     component: &str,
     name: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<(), CommandOutcome> {
     prepare_function_ast(component.trim(), variables, &["u", "v"]).map_err(|error| {
         CommandOutcome::Error(format!(
@@ -925,7 +925,7 @@ fn validate_curve_3d_expression(
     component: &str,
     name: &str,
     parameter: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<(), CommandOutcome> {
     prepare_function_ast(component.trim(), variables, &[parameter]).map_err(|error| {
         CommandOutcome::Error(format!(
@@ -1004,7 +1004,7 @@ fn validate_fractal_command_budget(
 fn parse_financial_tipo(
     command: &str,
     arg: Option<&String>,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<i32, CommandOutcome> {
     let Some(value) = arg else {
         return Ok(0);
@@ -1356,7 +1356,7 @@ fn finance_rate(nper: f64, pmt: f64, pv: f64, fv: f64, tipo: i32) -> Result<f64,
 /// Convierte una etiqueta de columna (A, B, AA) o índice numérico a índice 0-based.
 fn parse_spreadsheet_column_index(
     col_arg: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<usize, CommandOutcome> {
     let trimmed = col_arg
         .trim()
@@ -1405,7 +1405,7 @@ fn parse_spreadsheet_column_index(
 /// Parsea un índice de fila (1-based) desde argumento numérico o expresión.
 fn parse_spreadsheet_row_index(
     row_arg: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<usize, CommandOutcome> {
     let trimmed = row_arg
         .trim()
@@ -1725,7 +1725,7 @@ fn resolve_cell_range(document: &Document, range: ((usize, usize), (usize, usize
 fn parse_attractor_params(
     command: &str,
     args: &[String],
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
     defaults: &[f64],
 ) -> Result<Vec<f64>, CommandOutcome> {
     if args.len() > defaults.len() {
@@ -2387,7 +2387,7 @@ fn handle_primitive_commands(
                     }
                 } else if let Some(center) = center_id {
                     let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
-                    let params = HashMap::from([("radius".to_string(), radius)]);
+                    let params = BTreeMap::from([("radius".to_string(), radius)]);
                     if let Err(error) = document.try_add_constructed_object_with_params(
                         output,
                         "CircleByCenterRadius",
@@ -2414,7 +2414,7 @@ fn handle_primitive_commands(
                     };
                 if let Some(center) = center_id {
                     let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
-                    let params = HashMap::from([("radius".to_string(), radius)]);
+                    let params = BTreeMap::from([("radius".to_string(), radius)]);
                     if let Err(error) = document.try_add_constructed_object_with_params(
                         output,
                         "CircleByCenterRadius",
@@ -2706,7 +2706,7 @@ fn handle_intersect_command(
                 let steps = 400;
                 let mut prev_diff: Option<f64> = None;
                 let mut prev_x = 0.0;
-                let mut vars2 = HashMap::new();
+                let mut vars2 = BTreeMap::new();
                 for i in 0..=steps {
                     let x = -20.0 + (40.0 * i as f64) / steps as f64;
                     vars2.insert("x".to_string(), x);
@@ -3763,7 +3763,7 @@ fn handle_remaining_cas_commands(
                     }
                 } else if let Some(center) = center_id {
                     let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
-                    let params = HashMap::from([("radius".to_string(), radius)]);
+                    let params = BTreeMap::from([("radius".to_string(), radius)]);
                     if let Err(error) = document.try_add_constructed_object_with_params(
                         output,
                         "CircleByCenterRadius",
@@ -3790,7 +3790,7 @@ fn handle_remaining_cas_commands(
                     };
                 if let Some(center) = center_id {
                     let output = GeoObject::Circle(CircleObj::new(center_pos, radius));
-                    let params = HashMap::from([("radius".to_string(), radius)]);
+                    let params = BTreeMap::from([("radius".to_string(), radius)]);
                     if let Err(error) = document.try_add_constructed_object_with_params(
                         output,
                         "CircleByCenterRadius",
@@ -4008,6 +4008,9 @@ fn handle_remaining_cas_commands(
         "FunctionStudy" | "EstudioFuncion" if cmd.args.len() == 1 => {
             return run_function_study_command(document, input_text, cmd.args[0].trim());
         }
+        "Vista3D" if cmd.args.len() == 1 => {
+            return run_vista3d_command(input_text, cmd.args[0].trim());
+        }
         "Intersect" if cmd.args.len() == 2 => {
             let id1 = find_object_by_label(document, cmd.args[0].trim());
             let id2 = find_object_by_label(document, cmd.args[1].trim());
@@ -4054,7 +4057,7 @@ fn handle_remaining_cas_commands(
                         let steps = 400;
                         let mut prev_diff: Option<f64> = None;
                         let mut prev_x = 0.0;
-                        let mut vars2 = HashMap::new();
+                        let mut vars2 = BTreeMap::new();
                         for i in 0..=steps {
                             let x = -20.0 + (40.0 * i as f64) / steps as f64;
                             vars2.insert("x".to_string(), x);
@@ -4944,7 +4947,7 @@ fn handle_remaining_cas_commands(
                 format!("{}'", point.label)
             };
             let label = unique_object_label(document, &base_label);
-            let params = HashMap::from([
+            let params = BTreeMap::from([
                 ("dx".to_string(), displacement.x),
                 ("dy".to_string(), displacement.y),
             ]);
@@ -4994,7 +4997,7 @@ fn handle_remaining_cas_commands(
             if !position.x.is_finite() || !position.y.is_finite() {
                 return CommandOutcome::Error("Rotate produjo coordenadas no finitas".into());
             }
-            let mut params = HashMap::from([
+            let mut params = BTreeMap::from([
                 ("angle".to_string(), angle),
                 ("center_x".to_string(), center.x),
                 ("center_y".to_string(), center.y),
@@ -6452,7 +6455,7 @@ fn handle_remaining_cas_commands(
                     "CircleByCenterRadius: el radio debe ser positivo".into(),
                 );
             }
-            let params = HashMap::from([("radius".to_string(), radius)]);
+            let params = BTreeMap::from([("radius".to_string(), radius)]);
             if let Err(error) = document.try_add_constructed_object_with_params(
                 GeoObject::Circle(
                     CircleObj::new(Point2::new(0.0, 0.0), radius)
@@ -6550,7 +6553,7 @@ fn handle_remaining_cas_commands(
                 let output = GeoObject::Line(
                     LineObj::new_with_kind(start, end, LineKind::Segment).with_label("v"),
                 );
-                let params = HashMap::from([("kind".to_string(), 1.0)]);
+                let params = BTreeMap::from([("kind".to_string(), 1.0)]);
                 if let Err(error) = document.try_add_constructed_object_with_params(
                     output,
                     "LineByTwoPoints",
@@ -6578,7 +6581,7 @@ fn handle_remaining_cas_commands(
                 let output = GeoObject::Line(
                     LineObj::new_with_kind(start, end, LineKind::Ray).with_label("r"),
                 );
-                let params = HashMap::from([("kind".to_string(), 2.0)]);
+                let params = BTreeMap::from([("kind".to_string(), 2.0)]);
                 if let Err(error) = document.try_add_constructed_object_with_params(
                     output,
                     "LineByTwoPoints",
@@ -6607,7 +6610,7 @@ fn handle_remaining_cas_commands(
                 let output = GeoObject::Line(
                     LineObj::new_with_kind(start, end, LineKind::Line).with_label("l"),
                 );
-                let params = HashMap::from([("kind".to_string(), 0.0)]);
+                let params = BTreeMap::from([("kind".to_string(), 0.0)]);
                 if let Err(error) = document.try_add_constructed_object_with_params(
                     output,
                     "LineByTwoPoints",
@@ -6635,7 +6638,7 @@ fn handle_remaining_cas_commands(
                 let output = GeoObject::Line(
                     LineObj::new_with_kind(start, end, LineKind::Segment).with_label("s"),
                 );
-                let params = HashMap::from([("kind".to_string(), 1.0)]);
+                let params = BTreeMap::from([("kind".to_string(), 1.0)]);
                 if let Err(error) = document.try_add_constructed_object_with_params(
                     output,
                     "LineByTwoPoints",
@@ -6748,7 +6751,7 @@ fn handle_remaining_cas_commands(
             }
             let output = GeoObject::Point(PointObj::new(position).with_label(label));
             if let Some(point_id) = point_id {
-                let mut params = HashMap::from([
+                let mut params = BTreeMap::from([
                     ("factor".to_string(), factor),
                     ("center_x".to_string(), center.x),
                     ("center_y".to_string(), center.y),
@@ -6765,7 +6768,7 @@ fn handle_remaining_cas_commands(
                     return CommandOutcome::Error(format!("Dilate: {error}"));
                 }
             } else if let Some(center_id) = center_id {
-                let params = HashMap::from([
+                let params = BTreeMap::from([
                     ("factor".to_string(), factor),
                     ("source_x".to_string(), point.x),
                     ("source_y".to_string(), point.y),
@@ -7984,7 +7987,7 @@ fn handle_remaining_cas_commands(
             let mut vertices = Vec::new();
             for i in 0..=steps {
                 let x = -range + 2.0 * range * i as f64 / steps as f64;
-                let mut vars = HashMap::new();
+                let mut vars = BTreeMap::new();
                 vars.insert("x".to_string(), x);
                 if let Ok(y) = evaluate(
                     expr,
@@ -8348,7 +8351,7 @@ fn handle_remaining_cas_commands(
                             (1, Segment3DObj::new(b, bn)),
                             (2, Segment3DObj::new(t, tn)),
                         ] {
-                            let mut params = HashMap::new();
+                            let mut params = BTreeMap::new();
                             params.insert("height".to_string(), height);
                             params.insert("edge_index".to_string(), i as f64);
                             params.insert("edge_kind".to_string(), edge_kind as f64);
@@ -12385,7 +12388,7 @@ fn handle_remaining_cas_commands(
                 input_text.clear();
                 return CommandOutcome::Error("Function: se requiere una expresión".into());
             }
-            if let Ok(ast) = prepare_function_ast(expr, &HashMap::new(), &["x"]) {
+            if let Ok(ast) = prepare_function_ast(expr, &BTreeMap::new(), &["x"]) {
                 if let Err(error) = ast.validate_static_bessel_orders() {
                     return CommandOutcome::Error(format!("Function: {error}"));
                 }
@@ -15427,7 +15430,7 @@ fn try_intersect_3d_via_generic(
 
 // ── P1.4 helpers para Prism/Net/Quadric ──
 
-fn parse_3d_vector_arg(arg: &str, variables: &HashMap<String, f64>) -> Option<Point3D> {
+fn parse_3d_vector_arg(arg: &str, variables: &BTreeMap<String, f64>) -> Option<Point3D> {
     let trimmed = arg.trim();
     // Soporta formatos: "(1,2,3)", "{1,2,3}", "[1,2,3]" o "1,2,3" con espacios opcionales.
     let inner = if (trimmed.starts_with('(') && trimmed.ends_with(')'))
@@ -16704,6 +16707,29 @@ fn run_analysis_command(
 ///
 /// Todo acotado: como máximo 64 cortes; signos no finitos salen como
 /// `?` honesto en vez de inventarse. Sin `unwrap`, sin matemática nueva.
+/// Vista 3D pedida (dueño command/): valida el nombre contra
+/// `grafito_core::symbolic::OrthoView` (cerebro) más la perspectiva orbital.
+/// Solo consulta: no toca el documento (respeta DAG command⇏app — la app
+/// aplica la vista vía su selector en canvas, wiring P2).
+fn run_vista3d_command(input_text: &mut String, raw: &str) -> CommandOutcome {
+    let ortho = match raw.trim().to_ascii_lowercase().as_str() {
+        "perspectiva" | "perspective" | "orbital" => None,
+        "alzado" | "front" | "frontal" | "xy" => Some(grafito_core::symbolic::OrthoView::Front),
+        "planta" | "top" | "cenital" | "xz" => Some(grafito_core::symbolic::OrthoView::Top),
+        "perfil" | "side" | "lateral" | "yz" => Some(grafito_core::symbolic::OrthoView::Side),
+        _ => {
+            return CommandOutcome::Error(format!(
+                "Vista3D: vista desconocida '{raw}' (válidas: perspectiva, alzado, planta, perfil)"
+            ));
+        }
+    };
+    let name = ortho.map_or("perspectiva", grafito_core::symbolic::OrthoView::name);
+    input_text.clear();
+    CommandOutcome::Message(format!(
+        "Vista3D: {name} (vista solicitada; el canvas 3D la aplica vía su selector)"
+    ))
+}
+
 fn run_function_study_command(
     document: &mut Document,
     input_text: &mut String,
@@ -16804,7 +16830,7 @@ pub(crate) fn function_study_cuts(results: &[AnalysisResult]) -> Vec<f64> {
 
 /// Signo de `expr` en `x`: `Some(1)`/`Some(-1)`/`Some(0)` (|y| ≤ 1e-12 es
 /// cero), `None` si no se puede evaluar o no es finito. Puro, sin `unwrap`.
-pub(crate) fn function_sign_at(expr: &str, vars: &HashMap<String, f64>, x: f64) -> Option<i8> {
+pub(crate) fn function_sign_at(expr: &str, vars: &BTreeMap<String, f64>, x: f64) -> Option<i8> {
     if !x.is_finite() {
         return None;
     }
@@ -16829,7 +16855,7 @@ pub(crate) fn function_sign_at(expr: &str, vars: &HashMap<String, f64>, x: f64) 
 /// Cortes vacíos → `signos: R:+/-/?` global en x=0 (o `?` si no evalúa).
 pub(crate) fn function_sign_table(
     expr: &str,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
     results: &[AnalysisResult],
 ) -> String {
     fn fmt_x(x: f64) -> String {
@@ -16919,7 +16945,7 @@ pub fn taylor_remainder_observed(
     center: f64,
     order: usize,
     x: f64,
-    vars: &HashMap<String, f64>,
+    vars: &BTreeMap<String, f64>,
 ) -> Option<TaylorRemainder> {
     if !center.is_finite() || !x.is_finite() || order > MAX_TAYLOR_ORDER {
         return None;
@@ -17059,7 +17085,7 @@ pub fn parse_point_str(s: &str) -> Result<(f64, f64), String> {
 
 fn parse_finite_point_arg(
     argument: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<Point2, String> {
     let argument = argument.trim();
     let inner = argument
@@ -17263,7 +17289,7 @@ pub fn parse_preview(input_text: &str) -> Option<GeoObject> {
     None
 }
 
-fn parse_brace_list(s: &str, variables: &HashMap<String, f64>) -> Result<Vec<f64>, String> {
+fn parse_brace_list(s: &str, variables: &BTreeMap<String, f64>) -> Result<Vec<f64>, String> {
     let s = s.trim();
     let inner = s
         .strip_prefix('{')
@@ -17329,7 +17355,7 @@ fn format_list(elems: &[ListElem]) -> String {
 /// Usa `split_args` para respetar `{` `}` anidados y valida longitud.
 fn parse_generic_list_literal(
     s: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<Vec<ListElem>, String> {
     let trimmed = s.trim().trim_matches('"').trim_matches('\'').trim();
     let inner = trimmed
@@ -18402,7 +18428,7 @@ fn distance_point_to_object(p: Point2, obj: &GeoObject) -> Result<f64, String> {
     }
 }
 
-fn parse_matrix_arg_strict(s: &str, variables: &HashMap<String, f64>) -> Result<Matrix, String> {
+fn parse_matrix_arg_strict(s: &str, variables: &BTreeMap<String, f64>) -> Result<Matrix, String> {
     let s = s.trim();
     if !s.starts_with('[') || !s.ends_with(']') {
         return Err("se esperaba matriz con sintaxis [[...],[...]]".into());
@@ -18437,7 +18463,10 @@ fn parse_matrix_arg_strict(s: &str, variables: &HashMap<String, f64>) -> Result<
     Matrix::from_rows(rows).ok_or_else(|| "filas con longitudes incompatibles".into())
 }
 
-fn parse_vector_or_matrix_arg(s: &str, variables: &HashMap<String, f64>) -> Result<Matrix, String> {
+fn parse_vector_or_matrix_arg(
+    s: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Result<Matrix, String> {
     let s = s.trim();
     if !s.starts_with('[') || !s.ends_with(']') {
         return Err("se esperaba vector [a,b,c] o matriz [[...]]".into());
@@ -18515,7 +18544,7 @@ fn parse_expression_matrix_arg(s: &str) -> Result<Vec<Vec<String>>, String> {
 
 fn evaluate_expression_vector(
     entries: &[String],
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<Vec<f64>, String> {
     entries
         .iter()
@@ -18525,7 +18554,7 @@ fn evaluate_expression_vector(
 
 fn evaluate_expression_matrix(
     rows: &[Vec<String>],
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<Matrix, String> {
     let mut numeric_rows = Vec::with_capacity(rows.len());
     for row in rows {
@@ -18538,7 +18567,10 @@ fn evaluate_expression_matrix(
     Matrix::from_rows(numeric_rows).ok_or_else(|| "matriz inválida".into())
 }
 
-fn parse_numeric_vector_arg(s: &str, variables: &HashMap<String, f64>) -> Result<Vec<f64>, String> {
+fn parse_numeric_vector_arg(
+    s: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Result<Vec<f64>, String> {
     let entries = parse_expression_vector_arg(s)?;
     let values = evaluate_expression_vector(&entries, variables)?;
     if values.iter().any(|v| !v.is_finite()) {
@@ -18549,7 +18581,7 @@ fn parse_numeric_vector_arg(s: &str, variables: &HashMap<String, f64>) -> Result
 
 fn eval_multivar_expr(
     expr: &str,
-    base_vars: &HashMap<String, f64>,
+    base_vars: &BTreeMap<String, f64>,
     assignments: &[(&str, f64)],
 ) -> Result<f64, String> {
     let mut vars = base_vars.clone();
@@ -19833,7 +19865,7 @@ pub(crate) fn run_trapezoid_simpson_command(
     n: usize,
     quadrature: &str,
     method_label: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> CommandOutcome {
     let dx = (b - a) / n as f64;
     if !dx.is_finite() {
@@ -20246,7 +20278,7 @@ fn eval_sequence_term(
     expr: &str,
     var: &str,
     n: f64,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Result<f64, String> {
     eval_multivar_expr(expr, variables, &[(var, n)])
 }
@@ -20420,11 +20452,11 @@ fn is_valid_parameter_name(name: &str) -> bool {
 
 fn linearized_parameter_system<F>(
     params: &[String],
-    base_vars: &HashMap<String, f64>,
+    base_vars: &BTreeMap<String, f64>,
     eval_equations: F,
 ) -> Result<(Option<Matrix>, Option<Matrix>), String>
 where
-    F: Fn(&HashMap<String, f64>) -> Result<Vec<f64>, String>,
+    F: Fn(&BTreeMap<String, f64>) -> Result<Vec<f64>, String>,
 {
     let mut vars = base_vars.clone();
     for param in params {
@@ -20467,7 +20499,9 @@ where
 }
 
 fn format_parameter_solution(params: &[String], a: &Matrix, b: &Matrix) -> String {
-    let aug = augment_matrix(a, b);
+    let Some(aug) = augment_matrix(a, b) else {
+        return "No parameter solution: matriz aumentada inválida".to_string();
+    };
     let (rref, pivots) = rref_with_pivots_partitioned(&aug, params.len(), 1e-10);
     if has_inconsistent_augmented_row(&rref, params.len(), 1e-10) {
         return format!(
@@ -20512,7 +20546,9 @@ fn solve_linear_command(a: &Matrix, b: &Matrix) -> CommandOutcome {
         return CommandOutcome::Error("LinearSolve: RHS matricial no resoluble".into());
     }
 
-    let aug = augment_matrix(a, b);
+    let Some(aug) = augment_matrix(a, b) else {
+        return CommandOutcome::Error("LinearSolve: matriz aumentada inválida".into());
+    };
     let (rref, pivots) = rref_with_pivots_partitioned(&aug, a.cols, 1e-10);
     if has_inconsistent_augmented_row(&rref, a.cols, 1e-10) {
         return CommandOutcome::Message(format!(
@@ -20536,8 +20572,7 @@ fn solve_linear_command(a: &Matrix, b: &Matrix) -> CommandOutcome {
     ))
 }
 
-#[allow(clippy::unwrap_used)]
-fn augment_matrix(a: &Matrix, b: &Matrix) -> Matrix {
+fn augment_matrix(a: &Matrix, b: &Matrix) -> Option<Matrix> {
     let mut rows = Vec::with_capacity(a.rows);
     for r in 0..a.rows {
         let mut row = Vec::with_capacity(a.cols + b.cols);
@@ -20549,7 +20584,7 @@ fn augment_matrix(a: &Matrix, b: &Matrix) -> Matrix {
         }
         rows.push(row);
     }
-    Matrix::from_rows(rows).unwrap()
+    Matrix::from_rows(rows)
 }
 
 fn rref_with_pivots(m: &Matrix, eps: f64) -> (Matrix, Vec<usize>) {
@@ -20834,7 +20869,9 @@ fn run_p2_dependence(args: &[String], document: &Document) -> CommandOutcome {
         Ok(p) => p,
         Err(e) => return CommandOutcome::Error(format!("P2Dependence: {e}")),
     };
-    let matrix = coefficient_columns_matrix(&polys);
+    let Some(matrix) = coefficient_columns_matrix(&polys) else {
+        return CommandOutcome::Error("P2Dependence: matriz de coeficientes inválida".into());
+    };
     let r = rank(&matrix).unwrap_or(0);
     if r == polys.len() {
         CommandOutcome::Message(format!("Independent in P2; dimension = {r}"))
@@ -20958,15 +20995,14 @@ fn p2_coefficients(expr: &str, var: &str, document: &Document) -> Result<Vec<f64
     Ok(vec![a, b, c])
 }
 
-#[allow(clippy::unwrap_used)]
-fn coefficient_columns_matrix(polys: &[P2Polynomial]) -> Matrix {
+fn coefficient_columns_matrix(polys: &[P2Polynomial]) -> Option<Matrix> {
     let mut rows = vec![Vec::new(), Vec::new(), Vec::new()];
     for p in polys {
         for (i, coeff) in p.coeffs.iter().enumerate() {
             rows[i].push(*coeff);
         }
     }
-    Matrix::from_rows(rows).unwrap()
+    Matrix::from_rows(rows)
 }
 
 fn fmt_polynomial_relation(coeffs: &[f64]) -> String {
@@ -21113,7 +21149,7 @@ fn run_solve_line_3d_parameters(args: &[String], document: &Document) -> Command
         );
     }
 
-    let equations = |vars: &HashMap<String, f64>| -> Result<Vec<f64>, String> {
+    let equations = |vars: &BTreeMap<String, f64>| -> Result<Vec<f64>, String> {
         let d = evaluate_expression_vector(&direction_exprs, vars)?;
         let v = evaluate_expression_vector(&target_exprs, vars)?;
         match relation.as_str() {
@@ -21242,14 +21278,16 @@ fn matrix_rows(m: &Matrix) -> Vec<Vec<f64>> {
         .collect()
 }
 
-#[allow(clippy::unwrap_used)]
 fn independent_row_indices(rows: &[Vec<f64>]) -> Vec<usize> {
     let mut selected = Vec::new();
     let mut current_rank = 0;
     let mut current_rows: Vec<Vec<f64>> = Vec::new();
     for (idx, row) in rows.iter().enumerate() {
         current_rows.push(row.clone());
-        let candidate = Matrix::from_rows(current_rows.clone()).unwrap();
+        let Some(candidate) = Matrix::from_rows(current_rows.clone()) else {
+            current_rows.pop();
+            continue;
+        };
         let r = rank(&candidate).unwrap_or(0);
         if r > current_rank {
             current_rank = r;
@@ -21343,7 +21381,9 @@ fn run_gauss_jordan_solve_command(args: &[String], document: &Document) -> Comma
     if b.cols != 1 || b.rows != a.rows {
         return CommandOutcome::Error("GaussJordanSolve: dimensiones incompatibles".into());
     }
-    let aug = augment_matrix(&a, &b);
+    let Some(aug) = augment_matrix(&a, &b) else {
+        return CommandOutcome::Error("GaussJordanSolve: matriz aumentada inválida".into());
+    };
     let (rref, pivots) = rref_with_pivots_partitioned(&aug, a.cols, 1e-10);
     if has_inconsistent_augmented_row(&rref, a.cols, 1e-10) {
         return CommandOutcome::Message(format!("GaussJordanSolve: no solution\nRREF:\n{rref}"));
@@ -21387,7 +21427,9 @@ fn run_cramer_command(args: &[String], document: &Document) -> CommandOutcome {
     let mut solution = Vec::with_capacity(a.cols);
     let mut details = Vec::with_capacity(a.cols);
     for col in 0..a.cols {
-        let replaced = replace_matrix_column(&a, col, &b);
+        let Some(replaced) = replace_matrix_column(&a, col, &b) else {
+            return CommandOutcome::Error("Cramer: columna reemplazada inválida".into());
+        };
         let det_i = replaced.determinant().unwrap_or(f64::NAN);
         let value = det_i / det_a;
         if !value.is_finite() {
@@ -22233,8 +22275,7 @@ fn has_inconsistent_augmented_row(rref: &Matrix, vars: usize, eps: f64) -> bool 
         .any(|r| (0..vars).all(|c| rref.get(r, c).abs() <= eps) && rref.get(r, vars).abs() > eps)
 }
 
-#[allow(clippy::unwrap_used)]
-fn replace_matrix_column(a: &Matrix, col: usize, b: &Matrix) -> Matrix {
+fn replace_matrix_column(a: &Matrix, col: usize, b: &Matrix) -> Option<Matrix> {
     Matrix::from_rows(
         (0..a.rows)
             .map(|r| {
@@ -22244,7 +22285,6 @@ fn replace_matrix_column(a: &Matrix, col: usize, b: &Matrix) -> Matrix {
             })
             .collect(),
     )
-    .unwrap()
 }
 
 fn minor_matrix(m: &Matrix, row: usize, col: usize) -> Option<Matrix> {
@@ -22316,10 +22356,43 @@ mod tests {
     use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
 
     #[test]
+    fn matrices_fail_closed_sin_unwrap() {
+        // F4: los 4 helpers con `Matrix::from_rows` retornan `Option` en vez
+        // de `unwrap()` — el fallo es `None`/`Error` honesto, nunca pánico.
+        let a = Matrix::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).expect("a 2x2");
+        let b = Matrix::new(2, 1, vec![3.0, 4.0]).expect("b 2x1");
+        let aug = augment_matrix(&a, &b).expect("aumentada válida");
+        assert_eq!((aug.rows, aug.cols), (2, 3));
+        // Cero filas → `from_rows(vec![])` es `None`, no pánico.
+        let vacia_a = Matrix::new(0, 2, vec![]).expect("0x2 representable");
+        let vacia_b = Matrix::new(0, 1, vec![]).expect("0x1 representable");
+        assert!(
+            augment_matrix(&vacia_a, &vacia_b).is_none(),
+            "aumentada de 0 filas es None fail-closed"
+        );
+        // Filas dispares no hacen pánico: se salta la candidata inválida.
+        let idx = independent_row_indices(&[vec![1.0, 0.0], vec![1.0]]);
+        assert_eq!(idx, vec![0], "fila dispar salteada sin pánico");
+        // Columna reemplazada válida conserva dimensiones.
+        let rep = replace_matrix_column(&a, 0, &b).expect("reemplazo válido");
+        assert_eq!((rep.rows, rep.cols), (2, 2));
+        assert!(replace_matrix_column(&vacia_a, 0, &vacia_b).is_none());
+        // Coeficientes incompletos → filas dispares → `None` honesto.
+        let raro = P2Polynomial {
+            expr: "x".to_string(),
+            coeffs: vec![1.0],
+        };
+        assert!(
+            coefficient_columns_matrix(&[raro]).is_none(),
+            "polinomio rengo da None, no pánico"
+        );
+    }
+
+    #[test]
     fn wc_function_sign_table_marca_signos_entre_cortes() {
         use grafito_geometry::analysis::{AnalysisFeature, AnalysisResult};
         use grafito_geometry::Point2;
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let root = |x: f64| AnalysisResult {
             feature: AnalysisFeature::Root,
             point: Point2::new(x, 0.0),
@@ -22385,9 +22458,41 @@ mod tests {
     }
 
     #[test]
+    fn vista3d_valida_vistas_sin_mutar_documento() {
+        // Vista3D[perspectiva|alzado|planta|perfil]: solo consulta, cero objetos.
+        let mut doc = Document::new();
+        for (raw, esperado) in [
+            ("perspectiva", "perspectiva"),
+            ("orbital", "perspectiva"),
+            ("alzado", "alzado"),
+            ("Planta", "planta"),
+            ("PERFIL", "perfil"),
+            ("top", "planta"),
+        ] {
+            let mut input = format!("Vista3D[{raw}]");
+            match process_input(&mut doc, &mut input) {
+                CommandOutcome::Message(m) => {
+                    assert!(m.contains(esperado), "{raw} → {esperado}, fue: {m}");
+                }
+                other => panic!("Vista3D[{raw}] debe responder Message: {other:?}"),
+            }
+        }
+        assert_eq!(
+            doc.objects_iter().count(),
+            0,
+            "Vista3D no crea objetos (ReadOnly)"
+        );
+        let mut input = "Vista3D[isometrica]".to_string();
+        match process_input(&mut doc, &mut input) {
+            CommandOutcome::Error(m) => assert!(m.contains("válidas"), "ayuda honesta: {m}"),
+            other => panic!("vista desconocida debe fallar honesto: {other:?}"),
+        }
+    }
+
+    #[test]
     fn wc_riemann_trapecio_simpson_aproximan_un_tercio() {
         // T2: x² en [0,1] = 1/3. Trapecio n=100 → 0.333367, Simpson → 0.333333.
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let out = run_trapezoid_simpson_command(
             "x^2",
             "x",
@@ -22432,7 +22537,7 @@ mod tests {
     #[test]
     fn wc_taylor_remainder_observado_converge_y_falla_honesto() {
         // T3: sin(x) en a=0, orden 5, x=0.5 → resto observado diminuto.
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         let r =
             taylor_remainder_observed("sin(x)", "x", 0.0, 5, 0.5, &vars).expect("sin tiene Taylor");
         assert!(
@@ -23062,7 +23167,7 @@ mod tests {
             other => panic!("Trace debe dar Error, dio {other:?}"),
         }
         // Fila no entera.
-        let vars = HashMap::new();
+        let vars = BTreeMap::new();
         match parse_spreadsheet_row_index("1.5", &vars) {
             Err(CommandOutcome::Error(msg)) => {
                 assert!(msg.contains("fila debe ser entero"), "fue: {msg}");

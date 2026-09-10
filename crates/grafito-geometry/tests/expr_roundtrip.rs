@@ -2,7 +2,7 @@
 use grafito_geometry::ast::{parse_ast, Expr};
 use grafito_geometry::expr::{evaluate, evaluate_cached, CompiledExpr};
 use grafito_geometry::symbolic;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn assert_constant_round_trip(value: f64) {
     let printed = Expr::Const(value).to_expr_string();
@@ -22,7 +22,7 @@ fn assert_semantic_round_trip(source: &str, variables: &[(&str, f64)]) {
     let reparsed = parse_ast(&printed)
         .unwrap_or_else(|error| panic!("failed to reparse {source:?} as {printed:?}: {error}"));
 
-    let values: HashMap<String, f64> = variables
+    let values: BTreeMap<String, f64> = variables
         .iter()
         .map(|(name, value)| ((*name).to_string(), *value))
         .collect();
@@ -78,7 +78,7 @@ fn scientific_literals_parse_and_evaluate_without_becoming_euler_products() {
             "evaluate_cached({source:?})"
         );
         assert!(
-            CompiledExpr::new(source, &HashMap::new()).is_err(),
+            CompiledExpr::new(source, &BTreeMap::new()).is_err(),
             "CompiledExpr::new({source:?})"
         );
     }
@@ -131,7 +131,7 @@ fn trig_simplification_compares_structure_not_printed_collisions() {
 
     assert_ne!(simplified, Expr::Const(1.0));
     let variables = [("x", 2.0), ("y", 2.0), ("z", 3.0)];
-    let values: HashMap<String, f64> = variables
+    let values: BTreeMap<String, f64> = variables
         .into_iter()
         .map(|(name, value)| (name.to_string(), value))
         .collect();
@@ -148,7 +148,7 @@ fn structural_simplification_distinguishes_signed_zero() {
     let source = "sin(atan2(0,x)/3+0.3)^2 + cos(atan2(-0.0,x)/3+0.3)^2";
     let expression = parse_ast(source).unwrap();
     let simplified = expression.simplify();
-    let variables = HashMap::from([("x".to_string(), -1.0)]);
+    let variables = BTreeMap::from([("x".to_string(), -1.0)]);
     let expected = expression
         .substitute_vars(&variables, &[])
         .eval_at("__unused", 0.0);

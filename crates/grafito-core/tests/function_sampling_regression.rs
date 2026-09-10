@@ -1,21 +1,21 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(deprecated)]
 use grafito_core::{function_sampling, FunctionObj};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn samples(expr: &str) -> Vec<(f64, Option<f64>)> {
     samples_with_grid(expr, 100)
 }
 
 fn samples_with_grid(expr: &str, grid_size: usize) -> Vec<(f64, Option<f64>)> {
-    samples_in_domain(expr, (-1.0, 1.0), grid_size, &HashMap::new())
+    samples_in_domain(expr, (-1.0, 1.0), grid_size, &BTreeMap::new())
 }
 
 fn samples_in_domain(
     expr: &str,
     domain: (f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Vec<(f64, Option<f64>)> {
     let function = FunctionObj::new(expr);
     let samples =
@@ -67,18 +67,18 @@ fn cpu_sampling_marks_invalid_bessel_orders_as_gaps_without_order_zero_points() 
         "besselj(1001, x)",
         "bessely(-2147483648, x)",
     ] {
-        let values = samples_in_domain(expr, (1.0, 2.0), 32, &HashMap::new());
+        let values = samples_in_domain(expr, (1.0, 2.0), 32, &BTreeMap::new());
         assert!(
             values.iter().all(|(_, value)| value.is_none()),
             "{expr} produced a finite plot point: {values:?}"
         );
     }
 
-    let dynamic_invalid = HashMap::from([("n".to_string(), 1.5)]);
+    let dynamic_invalid = BTreeMap::from([("n".to_string(), 1.5)]);
     let values = samples_in_domain("besselj(n, x)", (1.0, 2.0), 32, &dynamic_invalid);
     assert!(values.iter().all(|(_, value)| value.is_none()));
 
-    let dynamic_valid = HashMap::from([("n".to_string(), 2.0)]);
+    let dynamic_valid = BTreeMap::from([("n".to_string(), 2.0)]);
     let values = samples_in_domain("besselj(n, x)", (1.0, 2.0), 32, &dynamic_valid);
     assert!(values
         .iter()
@@ -99,7 +99,7 @@ fn cpu_sampling_preserves_valid_bessel_curves_in_high_precision_mode() {
         "piecewise(x < 0, besselj(x + 1e-20, x), besselj(2, tan(x)))",
         "piecewise(gamma(x) < 0, besselj(x + 1e-20, x), besselj(2, tan(x)))",
     ]
-    .map(|expr| samples_in_domain(expr, (1.0, 2.0), 32, &HashMap::new()));
+    .map(|expr| samples_in_domain(expr, (1.0, 2.0), 32, &BTreeMap::new()));
     // This differs from an integer only in DD precision. A f64 fallback would
     // incorrectly round it to the current x value and produce finite samples.
     let invalid_samples = [
@@ -107,7 +107,7 @@ fn cpu_sampling_preserves_valid_bessel_curves_in_high_precision_mode() {
         "bessely(x + 1e-20, x)",
         "besseli(x + 1e-20, x)",
     ]
-    .map(|expr| samples_in_domain(expr, (1.0, 2.0), 32, &HashMap::new()));
+    .map(|expr| samples_in_domain(expr, (1.0, 2.0), 32, &BTreeMap::new()));
     set_high_precision_mode(previous_mode);
 
     assert!(

@@ -8,6 +8,11 @@
 //! F3.2 — PedagogyDispatcher: 6 tools pedagógicas puras (scaffold, generate_exercise,
 //! assess_answer, get_curriculum, suggest_next, generate_animation) orquestables
 //! vía OpenCode Go sin salir del chat. Todas son puras, sin I/O ni mutación de Document.
+//!
+//! F2 — harness experto: 8 tools matemáticas puras (`math_tool_schemas`:
+//! verify_step, diff, integrate, limit, solve_poly, solve_system,
+//! interval_check, groebner_gate) sobre el CAS tipado nativo con segunda
+//! opinión `cas_nativo` (alkahest-cas 3 tras el feature `cas-nativo`).
 
 use crate::ProviderSettings;
 use grafito_agent::ledger::{JSpaceLedger, MAX_LEDGER_RENDER_BYTES};
@@ -244,6 +249,15 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
         "evaluate_expr" => evaluate_expr_tool(call),
         "grafito_docs" => grafito_docs_tool(call),
         "ask_user" => ask_user_tool(call),
+        // Math tools (F2) — puras, sin Document, sin I/O
+        "verify_step" => verify_step_tool(call),
+        "diff" => diff_tool(call),
+        "integrate" => integrate_tool(call),
+        "limit" => limit_tool(call),
+        "solve_poly" => solve_poly_tool(call),
+        "solve_system" => solve_system_tool(call),
+        "interval_check" => interval_check_tool(call),
+        "groebner_gate" => groebner_gate_tool(call),
         // Pedagogy tools (F3.2) — puras, sin Document, sin I/O
         "scaffold" => scaffold_tool(call),
         "generate_exercise" => generate_exercise_tool(call),
@@ -420,6 +434,429 @@ fn grafito_docs_tool(call: &ToolCall) -> ToolResult {
         );
     }
     ToolResult::text(&call.id, true, catalog)
+}
+
+// ── Tools matemáticas F2 (puras, sin Document, sin I/O) ─────────────────────
+
+/// Expresión obligatoria no vacía de hasta 2000 bytes.
+fn math_expr_arg(call: &ToolCall, key: &str) -> Result<String, String> {
+    match call.arguments.get(key).and_then(Value::as_str) {
+        Some(raw) if !raw.trim().is_empty() => {
+            if raw.len() > grafito_geometry::expr::MAX_EXPR_LENGTH {
+                Err(format!(
+                    "argument '{key}' exceeds {} byte limit",
+                    grafito_geometry::expr::MAX_EXPR_LENGTH
+                ))
+            } else {
+                Ok(raw.to_owned())
+            }
+        }
+        _ => Err(format!("tool requires a non-empty '{key}' string")),
+    }
+}
+
+/// Variable opcional (default `x`): identificador ASCII corto.
+fn math_var_arg(call: &ToolCall) -> Result<String, String> {
+    let raw = call
+        .arguments
+        .get("variable")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("x");
+    let mut chars = raw.chars();
+    let head_ok = chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
+    if raw.len() <= 64 && head_ok && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        Ok(raw.to_owned())
+    } else {
+        Err("variable must be a short ASCII identifier".into())
+    }
+}
+
+/// Número finito obligatorio.
+fn math_finite_arg(call: &ToolCall, key: &str) -> Result<f64, String> {
+    match call.arguments.get(key).and_then(Value::as_f64) {
+        Some(value) if value.is_finite() => Ok(value),
+        _ => Err(format!("tool requires a finite '{key}' number")),
+    }
+}
+
+fn math_err(call: &ToolCall, message: String) -> ToolResult {
+    ToolResult::text(&call.id, false, message)
+}
+
+/// Mapea `MathResult` a `ToolResult` sin exponer internos: éxito con el valor,
+/// fallo honesto con la causa acotada.
+fn math_outcome_to_tool<T: std::fmt::Display>(
+    call: &ToolCall,
+    operation: &str,
+    outcome: grafito_geometry::outcome::MathResult<T>,
+) -> ToolResult {
+    use grafito_geometry::outcome::MathResult;
+    match outcome {
+        MathResult::Exact(value) => ToolResult::text(&call.id, true, value.to_string()),
+        MathResult::Approximate {
+            value,
+            error_estimate,
+        } => ToolResult::text(
+            &call.id,
+            true,
+            format!("{value} ± {error_estimate} (aproximado)"),
+        ),
+        MathResult::DomainError(error) => {
+            math_err(call, format!("{operation}: fuera de dominio ({error:?})"))
+        }
+        MathResult::NotConverged(error) => {
+            math_err(call, format!("{operation}: no convergió ({error:?})"))
+        }
+        MathResult::Unsupported(error) => {
+            math_err(call, format!("{operation}: no soportado ({error:?})"))
+        }
+        MathResult::ResourceLimit(error) => {
+            math_err(call, format!("{operation}: excede presupuesto ({error:?})"))
+        }
+    }
+}
+
+/// verify_step(a, b) — `simplify(a-b) == 0` vía `cas_nativo` + fallback local.
+fn verify_step_tool(call: &ToolCall) -> ToolResult {
+    let (a, b) = match (math_expr_arg(call, "a"), math_expr_arg(call, "b")) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(error), _) | (_, Err(error)) => return math_err(call, error),
+    };
+    match crate::cas_nativo::verify_equivalence(&a, &b) {
+        Ok(equivalent) => ToolResult::text(
+            &call.id,
+            true,
+            json!({
+                "equivalent": equivalent,
+                "backend": crate::cas_nativo::backend_name(),
+            })
+            .to_string(),
+        ),
+        Err(error) => math_err(call, error),
+    }
+}
+
+/// diff(expression, variable?) — derivada simbólica tipada.
+fn diff_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let outcome = grafito_geometry::symbolic::derivative_typed(&expression, &variable);
+    math_outcome_to_tool(call, "diff", outcome)
+}
+
+/// integrate(expression, variable?, a?, b?) — indefinida o definida tipada.
+fn integrate_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let lower = call
+        .arguments
+        .get("a")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite());
+    let upper = call
+        .arguments
+        .get("b")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite());
+    match (lower, upper) {
+        (Some(a), Some(b)) => {
+            let outcome =
+                grafito_geometry::symbolic::integrate_definite_typed(&expression, &variable, a, b);
+            match outcome {
+                grafito_geometry::outcome::MathResult::Exact(value)
+                | grafito_geometry::outcome::MathResult::Approximate {
+                    value,
+                    error_estimate: _,
+                } if value.is_finite() => {
+                    ToolResult::text(&call.id, true, crate::format_number(value))
+                }
+                grafito_geometry::outcome::MathResult::Exact(_)
+                | grafito_geometry::outcome::MathResult::Approximate { .. } => {
+                    math_err(call, "integrate: resultado no finito".into())
+                }
+                other => math_outcome_to_tool(call, "integrate", other),
+            }
+        }
+        _ => {
+            let outcome = grafito_geometry::symbolic::integrate_typed(&expression, &variable);
+            math_outcome_to_tool(call, "integrate", outcome)
+        }
+    }
+}
+
+/// limit(expression, variable?, at?) — límite tipado en punto finito.
+fn limit_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let at = call
+        .arguments
+        .get("at")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
+    let outcome = grafito_geometry::symbolic::limit_typed(&expression, &variable, at);
+    match outcome {
+        grafito_geometry::outcome::MathResult::Exact(value)
+        | grafito_geometry::outcome::MathResult::Approximate {
+            value,
+            error_estimate: _,
+        } if value.is_finite() => ToolResult::text(&call.id, true, crate::format_number(value)),
+        grafito_geometry::outcome::MathResult::Exact(_)
+        | grafito_geometry::outcome::MathResult::Approximate { .. } => {
+            math_err(call, "limit: resultado no finito".into())
+        }
+        other => math_outcome_to_tool(call, "limit", other),
+    }
+}
+
+/// solve_poly(expression, variable?) — todas las raíces reales (`solve_all_real`).
+fn solve_poly_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    match grafito_geometry::solve::solve_all_real(&expression, &variable) {
+        Ok(roots) => ToolResult::text(
+            &call.id,
+            true,
+            json!({
+                "roots": roots.roots.iter().map(|root| crate::format_number(*root)).collect::<Vec<_>>(),
+                "count": roots.roots.len(),
+                "method": format!("{:?}", roots.method),
+                "complex_count": roots.complex_count,
+                "notice": roots.notice,
+            })
+            .to_string(),
+        ),
+        Err(error) => math_err(call, format!("solve_poly: {error}")),
+    }
+}
+
+/// Lee un vector o matriz JSON de números finitos.
+fn math_number_matrix(value: &Value) -> Option<Vec<Vec<f64>>> {
+    let outer = value.as_array()?;
+    if outer.is_empty() {
+        return None;
+    }
+    if outer.iter().all(|item| item.as_f64().is_some()) {
+        let row: Option<Vec<f64>> = outer
+            .iter()
+            .map(|item| item.as_f64().filter(|value| value.is_finite()))
+            .collect();
+        return row.map(|row| vec![row]);
+    }
+    let mut rows = Vec::with_capacity(outer.len());
+    for item in outer {
+        let inner = item.as_array()?;
+        if inner.is_empty() {
+            return None;
+        }
+        let row: Option<Vec<f64>> = inner
+            .iter()
+            .map(|cell| cell.as_f64().filter(|value| value.is_finite()))
+            .collect();
+        rows.push(row?);
+    }
+    let width = rows[0].len();
+    if rows.iter().any(|row| row.len() != width) {
+        return None;
+    }
+    Some(rows)
+}
+
+/// solve_system(a, b) — `A·x = b` con `ValidatedMatrix` (fail-closed).
+fn solve_system_tool(call: &ToolCall) -> ToolResult {
+    let Some(a_rows) = call.arguments.get("a").and_then(math_number_matrix) else {
+        return math_err(
+            call,
+            "solve_system requiere 'a' como matriz finita no vacía".into(),
+        );
+    };
+    let Some(b_rows) = call.arguments.get("b").and_then(math_number_matrix) else {
+        return math_err(
+            call,
+            "solve_system requiere 'b' como vector/columna finito".into(),
+        );
+    };
+    if b_rows.len() != 1 && b_rows[0].len() != 1 {
+        return math_err(call, "solve_system: 'b' debe ser vector o columna".into());
+    }
+    let rows = a_rows.len();
+    let cols = a_rows[0].len();
+    // 'b' como columna n×1 en orden de filas.
+    let b_data: Vec<f64> = if b_rows.len() == 1 {
+        b_rows[0].clone()
+    } else {
+        b_rows.iter().map(|row| row[0]).collect()
+    };
+    if b_data.len() != rows {
+        return math_err(
+            call,
+            format!(
+                "solve_system: 'b' tiene {} filas pero 'a' tiene {rows}",
+                b_data.len()
+            ),
+        );
+    }
+    let a_data: Vec<f64> = a_rows.into_iter().flatten().collect();
+    let (Some(a_matrix), Some(b_matrix)) = (
+        grafito_geometry::matrices::Matrix::new(rows, cols, a_data),
+        grafito_geometry::matrices::Matrix::new(rows, 1, b_data),
+    ) else {
+        return math_err(
+            call,
+            "solve_system: dimensiones fuera de presupuesto".into(),
+        );
+    };
+    // Fail-closed: singular, no finita o fuera de rango se rechaza acá.
+    let validated = match grafito_geometry::matrices::ValidatedMatrix::try_new(a_matrix) {
+        Ok(valid) => valid,
+        Err(error) => return math_err(call, format!("solve_system: matriz inválida ({error})")),
+    };
+    match grafito_geometry::matrices::solve_linear_system(&validated.0, &b_matrix) {
+        Some(solution) => ToolResult::text(
+            &call.id,
+            true,
+            json!({
+                "x": solution.data.iter().map(|value| crate::format_number(*value)).collect::<Vec<_>>(),
+                "rows": solution.rows,
+                "cols": solution.cols,
+            })
+            .to_string(),
+        ),
+        None => math_err(call, "solve_system: sin solución única".into()),
+    }
+}
+
+/// interval_check(expression, variable?, min, max, n?) — `safe_sample` acotado.
+fn interval_check_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let (min, max) = match (math_finite_arg(call, "min"), math_finite_arg(call, "max")) {
+        (Ok(min), Ok(max)) if min < max => (min, max),
+        _ => return math_err(call, "interval_check requiere min < max finitos".into()),
+    };
+    let n = call
+        .arguments
+        .get("n")
+        .and_then(Value::as_u64)
+        .unwrap_or(64);
+    if !(2..=100_000).contains(&n) {
+        return math_err(call, "interval_check: 'n' debe estar en 2..=100000".into());
+    }
+    let samples = grafito_geometry::interval::safe_sample(
+        |x| {
+            grafito_geometry::expr::evaluate(&expression, &[(variable.clone(), x)])
+                .unwrap_or(f64::NAN)
+        },
+        min,
+        max,
+        n as usize,
+    );
+    if samples.is_empty() {
+        return math_err(call, "interval_check: rango no muestreable".into());
+    }
+    let mut finite = 0_usize;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (_, value) in &samples {
+        if let Some(y) = value {
+            finite += 1;
+            min_y = min_y.min(*y);
+            max_y = max_y.max(*y);
+        }
+    }
+    ToolResult::text(
+        &call.id,
+        true,
+        json!({
+            "n": samples.len(),
+            "finite": finite,
+            "non_finite": samples.len() - finite,
+            "min_y": if finite > 0 { Some(crate::format_number(min_y)) } else { None },
+            "max_y": if finite > 0 { Some(crate::format_number(max_y)) } else { None },
+        })
+        .to_string(),
+    )
+}
+
+/// groebner_gate(polys, vars) — Buchberger acotado (2×2 hoy, F4 después).
+fn groebner_gate_tool(call: &ToolCall) -> ToolResult {
+    let polys: Option<Vec<String>> = call
+        .arguments
+        .get("polys")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str().filter(|text| {
+                        !text.trim().is_empty()
+                            && text.len() <= grafito_geometry::expr::MAX_EXPR_LENGTH
+                    })
+                })
+                .map(|text| text.map(str::to_owned))
+                .collect()
+        })
+        .filter(|polys: &Vec<String>| !polys.is_empty());
+    let vars: Option<Vec<String>> = call
+        .arguments
+        .get("vars")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str().filter(|text| !text.trim().is_empty()))
+                .map(|text| text.map(str::to_owned))
+                .collect()
+        })
+        .filter(|vars: &Vec<String>| !vars.is_empty());
+    let (Some(polys), Some(vars)) = (polys, vars) else {
+        return math_err(
+            call,
+            "groebner_gate requiere 'polys' y 'vars' no vacíos".into(),
+        );
+    };
+    match grafito_core::symbolic::groebner_gate(&polys, &vars) {
+        Ok(basis) => ToolResult::text(
+            &call.id,
+            true,
+            json!({"basis": basis, "backend": "buchberger acotado (F4 después)"}).to_string(),
+        ),
+        Err(error) => math_err(call, format!("groebner_gate: {error}")),
+    }
 }
 
 // ── Tools pedagógicas F3.2 ──────────────────────────────────────────────────
@@ -727,6 +1164,373 @@ fn canvas_from_call(call: &ToolCall) -> (u32, u32) {
     }
 }
 
+/// FPS del plan de animación (paridad diálogo `MediaExportDialog` 1..=60, default 12).
+pub const ANIM_FPS_MIN: u32 = 1;
+/// FPS máximo del plan de animación.
+pub const ANIM_FPS_MAX: u32 = 60;
+/// FPS por defecto del plan de animación.
+pub const ANIM_FPS_DEFAULT: u32 = 12;
+
+/// Normaliza `quality` (default `media`); `Err` honesto si no es baja/media/alta.
+///
+/// Espejo UI de `MediaExportQuality` (bitrate 500/2000/8000 kbps).
+pub fn parse_anim_quality(raw: Option<&str>) -> Result<&'static str, String> {
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("media");
+    match text.to_lowercase().as_str() {
+        "baja" | "baja calidad" | "low" => Ok("baja"),
+        "media" | "medium" => Ok("media"),
+        "alta" | "alta calidad" | "high" => Ok("alta"),
+        _ => Err(format!(
+            "calidad desconocida '{text}' (válidas: baja, media, alta)"
+        )),
+    }
+}
+
+/// Bitrate sugerido en kbps por calidad (paridad UI, rango 100..=20000).
+pub fn anim_bitrate_kbps(quality: &str) -> u32 {
+    match quality {
+        "baja" => 500,
+        "alta" => 8000,
+        _ => 2000,
+    }
+}
+
+/// Normaliza `view` (default `plana`); `Err` honesto si no es plana/orbita.
+pub fn parse_anim_view(raw: Option<&str>) -> Result<&'static str, String> {
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("plana");
+    match text.to_lowercase().as_str() {
+        "plana" | "plano" | "2d" | "flat" => Ok("plana"),
+        "orbita" | "órbita" | "orbit" | "3d" => Ok("orbita"),
+        _ => Err(format!(
+            "vista desconocida '{text}' (válidas: plana, orbita)"
+        )),
+    }
+}
+
+/// Normaliza `effect` de creación (default `none`); `Err` honesto si es desconocido.
+pub fn parse_anim_effect(raw: Option<&str>) -> Result<&'static str, String> {
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("none");
+    match text.to_lowercase().as_str() {
+        "create" | "crear" | "traza" => Ok("create"),
+        "write" | "escribir" | "revelado" => Ok("write"),
+        "fade" | "alfa" | "aparicion" | "aparición" => Ok("fade"),
+        "grow" | "growfromcenter" | "grow_from_center" | "crecer" => Ok("grow"),
+        "indicate" | "pulso" | "indicar" => Ok("indicate"),
+        "none" | "ninguno" | "morph" | "transform" => Ok("none"),
+        _ => Err(format!(
+            "efecto desconocido '{text}' (válidos: create, write, fade, grow, indicate, none)"
+        )),
+    }
+}
+
+/// Brazo `PlayItem` del player para un `effect` ya validado (routing puro, sin Document).
+pub fn play_kind_for_effect(effect: &str) -> &'static str {
+    match effect {
+        "create" => "Create",
+        "write" => "Write",
+        "fade" => "Fade",
+        "grow" => "GrowFromCenter",
+        "indicate" => "Indicate",
+        _ => "Transform",
+    }
+}
+
+/// Normaliza `format` de exportación (default `gif`) al wire `ExportFormat`.
+pub fn parse_anim_format(raw: Option<&str>) -> Result<grafito_anim::ExportFormat, String> {
+    use std::str::FromStr;
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("gif");
+    let canonical = match text.to_lowercase().as_str() {
+        "gif" => "gif",
+        "png" | "png-sequence" | "pngsequence" | "pngdir" | "secuencia" => "png",
+        "mp4" | "h264" => "mp4",
+        "webm" | "vp9" => "webm",
+        _ => {
+            return Err(format!(
+                "formato desconocido '{text}' (válidos: gif, png, mp4, webm)"
+            ));
+        }
+    };
+    grafito_anim::ExportFormat::from_str(canonical).map_err(|e| e.to_string())
+}
+
+/// Extrae `duration_s` (default 2.0) validada contra `AnimDuration` 0.1..=30 s.
+pub fn parse_anim_duration_s(arguments: &Value) -> Result<f64, String> {
+    let secs = arguments
+        .get("duration_s")
+        .or_else(|| arguments.get("duration"))
+        .and_then(Value::as_f64)
+        .unwrap_or(2.0);
+    grafito_anim::AnimDuration::try_new(secs)
+        .map(|d| d.as_secs())
+        .map_err(|e| e.to_string())
+}
+
+/// Extrae `fps` (default 12) validado 1..=60 (paridad diálogo).
+pub fn parse_anim_fps(arguments: &Value) -> Result<u32, String> {
+    let fps = arguments
+        .get("fps")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::from(ANIM_FPS_DEFAULT));
+    if !(u64::from(ANIM_FPS_MIN)..=u64::from(ANIM_FPS_MAX)).contains(&fps) {
+        return Err(format!("fps {fps} fuera de 1..=60"));
+    }
+    Ok(fps as u32)
+}
+
+/// Resuelve `easing` vía `RateFunc::from_name` (default `smooth`); `Err` honesto si no existe.
+///
+/// Expone las 18 rate_funcs del núcleo al routing puro sin ejecutar nada.
+pub fn parse_anim_easing(raw: Option<&str>) -> Result<grafito_anim::RateFunc, String> {
+    let text = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("smooth");
+    grafito_anim::RateFunc::from_name(text)
+        .ok_or_else(|| format!("easing desconocido '{text}' (probá smooth, linear o ease_in_out)"))
+}
+
+/// Plan del tracker (`ValueTracker` + `TrackerMap`), si el LLM lo pide.
+///
+/// Acepta `tracker: {start, end, map}` con bordes finitos y `map` en
+/// opacity/scale/center_x/center_y. `None` = sin tracker (histórico).
+/// Construye los tipos reales del núcleo para validar; jamás ejecuta el player.
+pub fn parse_anim_tracker(
+    arguments: &Value,
+) -> Result<Option<(f64, f64, grafito_anim::TrackerMap)>, String> {
+    let Some(obj) = arguments.get("tracker").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let start = obj
+        .get("start")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| "tracker.start requiere número finito".to_string())?;
+    let end = obj
+        .get("end")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| "tracker.end requiere número finito".to_string())?;
+    let map_raw = obj
+        .get("map")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("opacity");
+    let map = match map_raw.to_lowercase().as_str() {
+        "opacity" | "opacidad" | "alfa" => grafito_anim::TrackerMap::Opacity { lo: 0.0, hi: 1.0 },
+        "scale" | "escala" => grafito_anim::TrackerMap::Scale { lo: 0.5, hi: 1.5 },
+        "center_x" | "centerx" | "x" => grafito_anim::TrackerMap::CenterX { lo: -4.0, hi: 4.0 },
+        "center_y" | "centery" | "y" => grafito_anim::TrackerMap::CenterY { lo: -4.0, hi: 4.0 },
+        _ => {
+            return Err(format!(
+                "tracker.map desconocido '{map_raw}' (válidos: opacity, scale, center_x, center_y)"
+            ));
+        }
+    };
+    // Puerta real del núcleo: el mapa valida rangos y el tracker fija el borde.
+    map.validate().map_err(|e| e.to_string())?;
+    let mut tracker = grafito_anim::ValueTracker::try_new(start).map_err(|e| e.to_string())?;
+    tracker.set_value(end).map_err(|e| e.to_string())?;
+    Ok(Some((start, end, map)))
+}
+
+/// Preflight puro del player: frames por item 1..=48 y total ≤96.
+///
+/// Reusa el patrón del CAS (`cas_*_spot_check` en `lib.rs`): valida con los
+/// constructores reales antes de declarar el plan ejecutable.
+pub fn preflight_player_frames(items: &[usize]) -> Result<usize, String> {
+    if items.is_empty() {
+        return Err("sin items: pasame al menos 1 animación".to_string());
+    }
+    let mut total = 0_usize;
+    for (i, frames) in items.iter().enumerate() {
+        if *frames == 0 || *frames > grafito_anim::PLAYER_MAX_FRAMES {
+            return Err(format!(
+                "el item {i} trae {frames} frames (válido 1..={})",
+                grafito_anim::PLAYER_MAX_FRAMES
+            ));
+        }
+        total = total.saturating_add(*frames);
+        if total > grafito_anim::PLAYER_MAX_TOTAL_FRAMES {
+            return Err(format!(
+                "el total {total} excede {}: partí la escena en dos",
+                grafito_anim::PLAYER_MAX_TOTAL_FRAMES
+            ));
+        }
+    }
+    Ok(total)
+}
+
+/// Preflight puro del colocado: arma un `PlacedMobject` real de muestra.
+///
+/// Opacidad 0..=1, escala >0 finita, centro finito (mismo `try_new` del render).
+pub fn preflight_placed_sample(opacity: f32, scale: f32, center: [f64; 2]) -> Result<(), String> {
+    let mobject = grafito_anim::Mobject::Dot { x: 0.0, y: 0.0 };
+    grafito_anim::PlacedMobject::try_new(mobject, opacity, scale, center)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Preflight puro de la órbita: vista válida; `orbita` se declara pedida y la
+/// UI decide soporte según plantilla 3D (acá nunca se inventa soporte).
+pub fn preflight_orbit_view(view: &str) -> Result<bool, String> {
+    match view {
+        "plana" => Ok(false),
+        "orbita" => Ok(true),
+        _ => Err(format!(
+            "vista desconocida '{view}' (válidas: plana, orbita)"
+        )),
+    }
+}
+
+/// Preflight puro de una creación: construye el `PlayItem` real de muestra con
+/// 2 puntos finitos y los frames estimados (clamp 1..=48).
+///
+/// Cubre `create/write/fade/grow/indicate`; `none` valida el morph histórico
+/// (`Transform` necesita ≥2 puntos, la muestra los trae).
+pub fn preflight_creation_effect(
+    effect: &str,
+    frames: usize,
+    run_ms: u64,
+    rate: grafito_anim::RateFunc,
+) -> Result<&'static str, String> {
+    let frames = frames.clamp(1, grafito_anim::PLAYER_MAX_FRAMES);
+    let poly = vec![[0.0, 0.0], [1.0, 0.0]];
+    let dot = grafito_anim::Mobject::Dot { x: 0.0, y: 0.0 };
+    // Muestra de `Write`: polígono finito (el `try_new` solo exige `validate`;
+    // el revelado de texto/SVG lo decide el player real con el mobject del plan).
+    let write_sample = grafito_anim::Mobject::Polygon { pts: poly.clone() };
+    match effect {
+        "create" => grafito_anim::CreateAnim::try_new(poly, frames, run_ms, rate, false)
+            .map(|_| "Create")
+            .map_err(|e| e.to_string()),
+        "write" => grafito_anim::WriteAnim::try_new(write_sample, frames, run_ms, rate)
+            .map(|_| "Write")
+            .map_err(|e| e.to_string()),
+        "fade" => grafito_anim::FadeAnim::try_new(dot, true, frames, run_ms, rate)
+            .map(|_| "Fade")
+            .map_err(|e| e.to_string()),
+        "grow" => grafito_anim::GrowFromCenterAnim::try_new(dot, frames, run_ms, rate)
+            .map(|_| "GrowFromCenter")
+            .map_err(|e| e.to_string()),
+        "indicate" => grafito_anim::IndicateAnim::try_new(dot, frames, run_ms, rate)
+            .map(|_| "Indicate")
+            .map_err(|e| e.to_string()),
+        _ => Ok("Transform"),
+    }
+}
+
+/// Chat explicativo consume un paso con cues: prosa + matemática verificada.
+///
+/// Si `step.check` es `Some`, agrega la consigna pidiendo respuesta al
+/// estudiante (se corrige con [`assess_teaching_step_answer`], que delega en
+/// `assess_final`). `math_expr` solo se cita para dibujar con
+/// `grafito_ui::assistant::draw_math` si `step.verified` es `true` (CAS-gate
+/// `verify_math_expr`); si no, se omite sin inventar dibujo. Puro, sin I/O.
+pub fn explain_teaching_step(step: &grafito_pedagogy::TeachingStep) -> String {
+    let mut out = String::new();
+    if !step.title.trim().is_empty() {
+        out.push_str("## ");
+        out.push_str(step.title.trim());
+        out.push_str("\n\n");
+    }
+    out.push_str(step.explanation.trim());
+    if let Some(expr) = step.math_expr.as_deref().filter(|e| !e.trim().is_empty()) {
+        if step.verified && grafito_pedagogy::verify_math_expr(expr) {
+            out.push_str("\n\n$");
+            out.push_str(expr.trim());
+            out.push('$');
+            out.push_str(" _(verificada: la pizarra la dibuja con `draw_math`)_");
+        }
+    }
+    if let Some(check) = step.check.as_ref() {
+        out.push_str("\n\n**Probá vos:** ");
+        out.push_str(check.probe.trim());
+        out.push_str(" Escribí tu respuesta y la corregimos juntos.");
+    }
+    out
+}
+
+/// Corrige la respuesta del remate de un paso (`None` si no tiene `check`).
+///
+/// Delegación pura en `TeachingStep::assess_final` (tolerancia numérica 2 %):
+/// devuelve mensaje listo para el chat explicativo.
+pub fn assess_teaching_step_answer(
+    step: &grafito_pedagogy::TeachingStep,
+    answer: &str,
+) -> Option<String> {
+    let feedback = step.assess_final(answer)?;
+    let veredicto = if feedback.correct {
+        "Bien"
+    } else {
+        "Todavía no"
+    };
+    Some(format!(
+        "{veredicto}: {} Siguiente: {}",
+        feedback.message.trim(),
+        feedback.next_step.trim()
+    ))
+}
+
+/// Valida un spec de exportación (formatos + calidades del diálogo).
+///
+/// Formatos gif/png/mp4/webm, calidades baja/media/alta, fps 1..=60, vista
+/// plana/orbita. Puro: la UI ejecuta el export fuera del draw; el historial
+/// (`Thumb` + `Replay`) queda intacto porque acá no se toca ningún slot.
+pub fn validate_animation_export(
+    format: &str,
+    quality: &str,
+    fps: u32,
+    view: &str,
+) -> Result<(String, u32, u32, String), String> {
+    let export = parse_anim_format(Some(format))?;
+    let quality = parse_anim_quality(Some(quality))?;
+    if !(ANIM_FPS_MIN..=ANIM_FPS_MAX).contains(&fps) {
+        return Err(format!("fps {fps} fuera de 1..=60"));
+    }
+    let orbit_requested = preflight_orbit_view(view)?;
+    Ok((
+        export.as_str().to_string(),
+        anim_bitrate_kbps(quality),
+        fps,
+        if orbit_requested {
+            "orbita".to_string()
+        } else {
+            "plana".to_string()
+        },
+    ))
+}
+
+/// Describe el replay de un plan de animación cubriendo formatos y calidades.
+///
+/// Puro y sin mutar historial: enumera los 4 formatos × 3 calidades válidos y
+/// marca el elegido; la app re-ejecuta el staging sobre la copia (patrón
+/// `replay_plan`) y los thumbs se conservan.
+pub fn describe_animation_replay(
+    template: &str,
+    format: &str,
+    quality: &str,
+    fps: u32,
+    view: &str,
+) -> Result<String, String> {
+    let (export, bitrate, fps, view) = validate_animation_export(format, quality, fps, view)?;
+    Ok(format!(
+        "replay «{template}» en {export} calidad {quality} ({bitrate} kbps) a {fps} fps vista {view}; formatos válidos: gif, png, mp4, webm; calidades: baja, media, alta; historial intacto"
+    ))
+}
+
 /// generate_animation(template, concept, params, pedido) — valida sin ejecutar motor.
 ///
 /// Dos vías (puras, sin Python):
@@ -770,14 +1574,69 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
     let canvas = canvas_from_call(call);
     let resolution =
         grafito_anim::protocol::Resolution::try_new(canvas.0, canvas.1).unwrap_or_default();
-    let duration = grafito_anim::protocol::AnimDuration::try_new(2.0).unwrap_or_default();
+    // Parámetros extendidos (puros, validados contra presupuestos del núcleo).
+    let quality = match parse_anim_quality(call.arguments.get("quality").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let view = match parse_anim_view(call.arguments.get("view").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let effect = match parse_anim_effect(call.arguments.get("effect").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let export = match parse_anim_format(call.arguments.get("format").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let duration_s = match parse_anim_duration_s(&call.arguments) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let fps = match parse_anim_fps(&call.arguments) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let easing = match parse_anim_easing(call.arguments.get("easing").and_then(Value::as_str)) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let tracker = match parse_anim_tracker(&call.arguments) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let duration = grafito_anim::protocol::AnimDuration::try_new(duration_s).unwrap_or_default();
+    // Routing puro: effect → brazo PlayItem, tracker → plan ValueTracker, view → órbita.
+    let orbit_requested = match preflight_orbit_view(view) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let estimated_frames =
+        ((duration_s * f64::from(fps)).round() as usize).clamp(1, grafito_anim::PLAYER_MAX_FRAMES);
+    if let Err(error) = preflight_player_frames(&[estimated_frames]) {
+        return ToolResult::text(&call.id, false, error);
+    }
+    let play_kind =
+        match preflight_creation_effect(effect, estimated_frames, duration.as_millis(), easing) {
+            Ok(kind) => kind,
+            Err(error) => return ToolResult::text(&call.id, false, error),
+        };
+    if play_kind_for_effect(effect) != play_kind && effect != "none" {
+        return ToolResult::text(
+            &call.id,
+            false,
+            format!("routing interno inconsistente para '{effect}'"),
+        );
+    }
     let anim_params = grafito_anim::protocol::AnimParams {
         template: template.clone(),
         concept: normalized_concept.clone(),
         params: params_map.clone(),
         duration,
         resolution,
-        export: grafito_anim::ExportFormat::Gif,
+        export,
         spec: None,
     };
     let request = anim_params.into_request();
@@ -790,9 +1649,35 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
         "params": params_map,
         "export": request.export.as_str(),
         "canvas": request.canvas,
+        "duration_ms": request.duration_ms,
+        "duration_s": duration_s,
+        "fps": fps,
+        "frames": estimated_frames,
+        "quality": quality,
+        "bitrate_kbps": anim_bitrate_kbps(quality),
+        "view": view,
+        "orbit_requested": orbit_requested,
+        "orbit_supported": false,
+        "effect": effect,
+        "play_kind": play_kind,
+        "easing": easing.as_str(),
         "protocol_version": grafito_anim::protocol::ANIM_PROTOCOL_VERSION,
         "note": "solicitud validada; el motor de animación se ejecuta en la capa UI tras aprobación explícita"
     });
+    if let Some((start, end, map)) = tracker {
+        let map_name = match map {
+            grafito_anim::TrackerMap::Opacity { .. } => "opacity",
+            grafito_anim::TrackerMap::Scale { .. } => "scale",
+            grafito_anim::TrackerMap::CenterX { .. } => "center_x",
+            grafito_anim::TrackerMap::CenterY { .. } => "center_y",
+        };
+        payload["tracker"] = json!({"start": start, "end": end, "map": map_name});
+    }
+    if orbit_requested {
+        payload["orbit_note"] = json!(
+            "órbita pedida; la UI la habilita solo en plantillas 3D, si no exporta la vista plana"
+        );
+    }
     // N1: la vía template/concept de integral no trae función: declara la
     // canónica que va a renderizar (f(x)=x^2 en [0,2]) para que la prosa no
     // pregunte lo que la vista ya muestra.
@@ -808,6 +1693,20 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
             grafito_anim::parametric::INTEGRAL_CANONICAL_P1
         ]);
         payload["canonical_prose"] = json!(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+    }
+    // Frente A: la vía template/concept de taylor sin función declara la
+    // canónica que va a renderizar (sin(x) en x=0, orden 3), igual que la
+    // integral declara la suya.
+    if payload
+        .get("template")
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| t == "taylor-series")
+    {
+        payload["canonical"] = json!(true);
+        payload["canonical_expr"] = json!(grafito_anim::parametric::TAYLOR_CANONICAL_EXPR);
+        payload["canonical_center"] = json!(grafito_anim::parametric::TAYLOR_CANONICAL_CENTER);
+        payload["canonical_order"] = json!(grafito_anim::parametric::TAYLOR_CANONICAL_ORDER);
+        payload["canonical_prose"] = json!(grafito_anim::parametric::TAYLOR_CANONICAL_PROSA);
     }
     ToolResult::text(&call.id, true, payload.to_string())
 }
@@ -840,6 +1739,12 @@ fn propose_parametric_tool(call_id: &str, pedido: &str) -> ToolResult {
     }
     if grafito_anim::parametric::pedido_menciona_tangente(pedido) {
         return propose_tangent_tool(call_id, pedido);
+    }
+    // Frente A: Taylor con función explícita (serie real vía el motor) o
+    // canónica declarada. Después de área/tangente para no robarles ningún
+    // pedido que ya resolvían (antes Taylor caía al genérico y pedía tipo).
+    if grafito_anim::parametric::pedido_menciona_taylor(pedido) {
+        return propose_taylor_tool(call_id, pedido);
     }
     match grafito_anim::parametric::infer_parametric_anim(pedido) {
         Err(error) => ToolResult::text(call_id, false, error.to_string()),
@@ -897,6 +1802,33 @@ fn propose_area_tool(call_id: &str, pedido: &str) -> ToolResult {
     }
 }
 
+/// Propuesta de Taylor: canónica declarada, explícita o `Err`.
+///
+/// Espejo de `propose_area_tool`: sin función va la canónica `sin(x)` en
+/// x=0 orden 3 (lo que el renderer histórico mostraba); con f válida, la
+/// serie REAL de f vía el motor (el render la dibuja, jamás `sin(x)` en
+/// silencio). La prosa (`hint`) nombra f + centro + orden siempre. Puro,
+/// sin E/S ni motor.
+fn propose_taylor_tool(call_id: &str, pedido: &str) -> ToolResult {
+    match grafito_anim::parametric::infer_taylor_anim(pedido) {
+        Err(error) => ToolResult::text(call_id, false, error.to_string()),
+        Ok(resuelto) => {
+            let spec = resuelto.spec();
+            let hint = grafito_anim::parametric::taylor_prosa(spec, resuelto.es_canonica());
+            let payload = json!({
+                "template": "taylor-series",
+                "expr": spec.expr,
+                "centro": spec.centro,
+                "orden": spec.orden,
+                "canonical": resuelto.es_canonica(),
+                "hint": hint,
+                "protocol_version": grafito_anim::protocol::ANIM_PROTOCOL_VERSION,
+                "note": "plan Taylor validado en Rust nativo; la vista previa dibuja f vs su serie real tras aprobación explícita"
+            });
+            ToolResult::text(call_id, true, payload.to_string())
+        }
+    }
+}
 /// Propuesta de tangente/derivada: canónica declarada, explícita o `Err`.
 ///
 /// Espejo de `propose_area_tool`: sin función va la canónica `x^2 [-1.5,1.5]`
@@ -1014,7 +1946,7 @@ pub fn suggest_next_tool_schema() -> ToolSchema {
     )
 }
 
-/// Schema de `generate_animation(template, concept, params, pedido)`.
+/// Schema de `generate_animation(template, concept, params, pedido, quality, view, effect, format, duration_s, fps, easing, tracker)`.
 ///
 /// `canvas`/`width`/`height` son opcionales; si vienen del LLM se usan con validación
 /// 64..=4096, con fallback a 640x480.
@@ -1024,10 +1956,14 @@ pub fn suggest_next_tool_schema() -> ToolSchema {
 /// precedencia sobre template/concept; si falta algo, el error dice qué
 /// falta. El tamaño va dentro del pedido («en 320x240»); canvas/width/height
 /// se ignoran en la vía pedido.
+///
+/// `quality`/`view`/`effect`/`format`/`duration_s`/`fps`/`easing`/`tracker`
+/// solo aplican a la vía template/concept: se validan contra `AnimDuration`
+/// 0.1..=30 s y fps 1..=60 sin ejecutar el motor.
 pub fn generate_animation_tool_schema() -> ToolSchema {
     ToolSchema::new(
         "generate_animation",
-        "Valida y propone una solicitud de animación didáctica (template, concept, params) sin ejecutar el motor; usa protocolo AnimRequest. Con 'pedido' en lenguaje natural propone un plan paramétrico 100% Rust (barrido, traza, transición, lugar, tangente o área móvil) sin Python.",
+        "Valida y propone una solicitud de animación didáctica (template, concept, params, quality, view, effect, format, duration_s, fps, easing, tracker) sin ejecutar el motor; usa protocolo AnimRequest. Con 'pedido' en lenguaje natural propone un plan paramétrico 100% Rust (barrido, traza, transición, lugar, tangente o área móvil) sin Python.",
         json!({
             "type": "object",
             "properties": {
@@ -1037,7 +1973,15 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
                 "pedido": {"type": "string", "description": "Pedido libre para plan paramétrico, ej. barrido de f(x)=x^2+p·x con p en [-2,2] (tiene precedencia; el tamaño puede ir dentro, ej. en 320x240)"},
                 "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096 (solo vía template/concept)", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
                 "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640; solo vía template/concept)"},
-                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480; solo vía template/concept)"}
+                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480; solo vía template/concept)"},
+                "quality": {"type": "string", "description": "Calidad opcional: baja, media (default), alta (bitrate 500/2000/8000 kbps; solo vía template/concept)"},
+                "view": {"type": "string", "description": "Vista opcional: plana (default) u orbita (órbita 3D; la UI la habilita solo en plantillas 3D)"},
+                "effect": {"type": "string", "description": "Efecto de creación opcional: create, write, fade, grow, indicate, none (default; none = morph histórico)"},
+                "format": {"type": "string", "description": "Formato de exportación opcional: gif (default), png, mp4, webm (mp4/webm requieren ffmpeg en la UI)"},
+                "duration_s": {"type": "number", "description": "Duración opcional en segundos 0.1..=30 (default 2.0; solo vía template/concept)"},
+                "fps": {"type": "integer", "description": "Fotogramas por segundo 1..=60 (default 12; solo vía template/concept)"},
+                "easing": {"type": "string", "description": "Easing opcional vía RateFunc::from_name, ej. smooth (default), linear, ease_in_out"},
+                "tracker": {"type": "object", "description": "Tracker opcional {start: number, end: number, map: opacity|scale|center_x|center_y} estilo ValueTracker", "properties": {"start": {"type": "number"}, "end": {"type": "number"}, "map": {"type": "string"}}, "required": ["start", "end"]}
             },
             "required": []
         }),
@@ -1053,6 +1997,122 @@ pub fn pedagogy_tool_schemas() -> Vec<ToolSchema> {
         get_curriculum_tool_schema(),
         suggest_next_tool_schema(),
         generate_animation_tool_schema(),
+    ]
+}
+
+/// Tools matemáticas puras F2 (harness experto, voto usuario alkahest-cas).
+///
+/// Sin `Document`, sin I/O: `verify_step` (simplify(a-b)==0 vía
+/// `cas_nativo`, con fallback local), `diff`/`integrate`/`limit`
+/// (`symbolic::*_typed`), `solve_poly` (`solve_all_real`),
+/// `solve_system` (`solve_linear_system` + `ValidatedMatrix`),
+/// `interval_check` (`safe_sample`, n ≤ 100k) y `groebner_gate`
+/// (Buchberger acotado 2×2 hoy; F4 después). Todas exigen expresiones de
+/// hasta 2000 bytes, valores finitos y dominio válido.
+pub fn math_tool_schemas() -> Vec<ToolSchema> {
+    vec![
+        ToolSchema::new(
+            "verify_step",
+            "Verifica un paso algebraico: simplifica (a)-(b) y confirma si da 0 (backend alkahest-cas con fallback local).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string", "description": "Expresión izquierda (máx 2000 bytes)"},
+                    "b": {"type": "string", "description": "Expresión derecha (máx 2000 bytes)"}
+                },
+                "required": ["a", "b"]
+            }),
+        ),
+        ToolSchema::new(
+            "diff",
+            "Derivada simbólica d/dvar de una expresión (CAS nativo tipado).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable, default x"}
+                },
+                "required": ["expression"]
+            }),
+        ),
+        ToolSchema::new(
+            "integrate",
+            "Integral simbólica (indefinida) o definida si se dan a y b finitos (CAS nativo tipado).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable, default x"},
+                    "a": {"type": "number", "description": "Límite inferior finito (opcional)"},
+                    "b": {"type": "number", "description": "Límite superior finito (opcional)"}
+                },
+                "required": ["expression"]
+            }),
+        ),
+        ToolSchema::new(
+            "limit",
+            "Límite de una expresión cuando la variable tiende a un punto finito (CAS nativo tipado).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable, default x"},
+                    "at": {"type": "number", "description": "Punto finito, default 0"}
+                },
+                "required": ["expression"]
+            }),
+        ),
+        ToolSchema::new(
+            "solve_poly",
+            "Todas las raíces reales de un polinomio (grado ≤ 16; trascendentes derivan a NSolve honesto).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string", "description": "Polinomio, admite lhs = rhs"},
+                    "variable": {"type": "string", "description": "Variable, default x"}
+                },
+                "required": ["expression"]
+            }),
+        ),
+        ToolSchema::new(
+            "solve_system",
+            "Resuelve A·x = b con matriz validada (rechaza singulares y no finitos).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "array", "description": "Matriz [[..],[..]] de números finitos", "items": {"type": "array", "items": {"type": "number"}}},
+                    "b": {"type": "array", "description": "Vector [..] o columna [[..]] de números finitos"}
+                },
+                "required": ["a", "b"]
+            }),
+        ),
+        ToolSchema::new(
+            "interval_check",
+            "Muestrea una expresión en [min, max] con safe_sample (2..=100000 puntos) y reporta valores finitos.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable, default x"},
+                    "min": {"type": "number"},
+                    "max": {"type": "number"},
+                    "n": {"type": "integer", "description": "Puntos 2..=100000, default 64"}
+                },
+                "required": ["expression", "min", "max"]
+            }),
+        ),
+        ToolSchema::new(
+            "groebner_gate",
+            "Base de Gröbner por Buchberger acotado (2×2 lineal hoy; sistemas mayores o no polinómicos fallan honesto hacia Eliminate; F4 nativo después).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "polys": {"type": "array", "description": "Polinomios (máx 2000 bytes cada uno)", "items": {"type": "string"}},
+                    "vars": {"type": "array", "description": "Variables", "items": {"type": "string"}}
+                },
+                "required": ["polys", "vars"]
+            }),
+        ),
     ]
 }
 
@@ -1095,6 +2155,7 @@ pub fn all_safe_tool_schemas() -> Vec<ToolSchema> {
         .with_consent(true),
     ];
     schemas.extend(pedagogy_tool_schemas());
+    schemas.extend(math_tool_schemas());
     schemas
 }
 
@@ -3327,6 +4388,71 @@ mod tests {
         assert_eq!(value["kind_label"], "recta tangente móvil");
     }
 
+    // ── Frente A: Taylor con función explícita ──────────────────────────
+    #[test]
+    fn generate_animation_pedido_taylor_explicita_ok() {
+        // La queja real: taylor de x³ dibujaba sin(x). El plan trae la f.
+        let call = ToolCall {
+            id: "fa-taylor-1".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "animación de taylor de f(x)=x^3 en x=0 orden 5"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["template"], "taylor-series");
+        assert_eq!(value["expr"], "x^3");
+        assert_eq!(value["centro"], 0.0);
+        assert_eq!(value["orden"], 5);
+        assert_eq!(value["canonical"], false);
+        let hint = value["hint"].as_str().unwrap_or("");
+        assert!(hint.contains("x^3"), "la prosa nombra f: {hint}");
+        assert!(hint.contains("x=0"), "la prosa nombra el centro: {hint}");
+        assert!(hint.contains("orden 5"), "la prosa nombra el orden: {hint}");
+    }
+
+    #[test]
+    fn generate_animation_pedido_taylor_sin_funcion_es_canonica_declarada() {
+        let call = ToolCall {
+            id: "fa-taylor-2".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "pedí un ejemplo de animación de taylor"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["template"], "taylor-series");
+        assert_eq!(value["canonical"], true);
+        assert_eq!(
+            value["expr"],
+            grafito_anim::parametric::TAYLOR_CANONICAL_EXPR
+        );
+        let hint = value["hint"].as_str().unwrap_or("");
+        assert_eq!(
+            hint,
+            grafito_anim::parametric::TAYLOR_CANONICAL_PROSA,
+            "la canónica se declara tal cual: {hint}"
+        );
+    }
+
+    #[test]
+    fn generate_animation_template_taylor_declara_canonica() {
+        // Vía template/concept sin pedido: declara lo que va a renderizar.
+        let call = ToolCall {
+            id: "fa-taylor-3".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"template": "taylor-series", "concept": "serie de taylor"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["canonical"], true);
+        assert_eq!(
+            value["canonical_prose"],
+            json!(grafito_anim::parametric::TAYLOR_CANONICAL_PROSA)
+        );
+    }
+
     #[test]
     fn generate_animation_pedido_mixto_area_tangente_pide_desambiguar() {
         // Frente agente traga mixtos: "área bajo la tangente" matcheaba área
@@ -3359,6 +4485,183 @@ mod tests {
             "debe pedir desambiguar: {}",
             result.content
         );
+    }
+
+    #[test]
+    fn generate_animation_parametros_extendidos_validos() {
+        let call = ToolCall {
+            id: "anim-ext-1".into(),
+            name: "generate_animation".into(),
+            arguments: json!({
+                "concept": "derivada como pendiente",
+                "template": "derivative-slope",
+                "quality": "alta",
+                "view": "plana",
+                "effect": "create",
+                "format": "mp4",
+                "duration_s": 3.0,
+                "fps": 24,
+                "easing": "smooth",
+                "tracker": {"start": 0.0, "end": 1.0, "map": "opacity"},
+            }),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["quality"], "alta");
+        assert_eq!(value["bitrate_kbps"], 8000);
+        assert_eq!(value["view"], "plana");
+        assert_eq!(value["orbit_requested"], false);
+        assert_eq!(value["effect"], "create");
+        assert_eq!(value["play_kind"], "Create");
+        assert_eq!(value["export"], "mp4");
+        assert_eq!(value["duration_s"], 3.0);
+        assert_eq!(value["duration_ms"], 3000);
+        assert_eq!(value["fps"], 24);
+        assert_eq!(value["tracker"]["map"], "opacity");
+    }
+
+    #[test]
+    fn generate_animation_orbita_y_tracker_center_x() {
+        let call = ToolCall {
+            id: "anim-ext-2".into(),
+            name: "generate_animation".into(),
+            arguments: json!({
+                "concept": "mapa conforme",
+                "template": "conformal-map",
+                "view": "orbita",
+                "effect": "grow",
+                "tracker": {"start": -4.0, "end": 4.0, "map": "center_x"},
+            }),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["view"], "orbita");
+        assert_eq!(value["orbit_requested"], true);
+        assert_eq!(value["orbit_supported"], false);
+        assert!(
+            value["orbit_note"].is_string(),
+            "órbita honesta: {}",
+            result.content
+        );
+        assert_eq!(value["play_kind"], "GrowFromCenter");
+        assert_eq!(value["tracker"]["map"], "center_x");
+    }
+
+    #[test]
+    fn generate_animation_rechaza_fps_duracion_efecto_invalidos() {
+        for arguments in [
+            json!({"concept": "derivada", "fps": 0}),
+            json!({"concept": "derivada", "fps": 61}),
+            json!({"concept": "derivada", "duration_s": 0.05}),
+            json!({"concept": "derivada", "duration_s": 31.0}),
+            json!({"concept": "derivada", "effect": "explotar"}),
+            json!({"concept": "derivada", "view": "holograma"}),
+            json!({"concept": "derivada", "quality": "ultra"}),
+            json!({"concept": "derivada", "format": "exe"}),
+            json!({"concept": "derivada", "easing": "hiper-espacio"}),
+            json!({"concept": "derivada", "tracker": {"start": 0.0, "end": 1.0, "map": "rotar"}}),
+            json!({"concept": "derivada", "tracker": {"start": 0.0}}),
+        ] {
+            let call = ToolCall {
+                id: "anim-ext-err".into(),
+                name: "generate_animation".into(),
+                arguments,
+            };
+            let result = dispatch_safe_tool(&call);
+            assert!(!result.ok, "debía rechazar: {}", result.content);
+        }
+    }
+
+    #[test]
+    fn preflights_nuevos_caminos_con_puertas_reales() {
+        assert_eq!(preflight_player_frames(&[12, 24]).expect("frames"), 36);
+        assert!(preflight_player_frames(&[]).is_err());
+        assert!(preflight_player_frames(&[0]).is_err());
+        assert!(preflight_player_frames(&[49]).is_err());
+        assert!(preflight_player_frames(&[48, 48, 1]).is_err());
+        assert!(preflight_placed_sample(1.0, 1.0, [0.0, 0.0]).is_ok());
+        assert!(preflight_placed_sample(2.0, 1.0, [0.0, 0.0]).is_err());
+        assert!(preflight_placed_sample(1.0, 0.0, [0.0, 0.0]).is_err());
+        assert!(preflight_placed_sample(1.0, 1.0, [f64::NAN, 0.0]).is_err());
+        assert!(!preflight_orbit_view("plana").expect("plana"));
+        assert!(preflight_orbit_view("orbita").expect("orbita"));
+        assert!(preflight_orbit_view("holograma").is_err());
+        let rate = grafito_anim::RateFunc::from_name("smooth").expect("smooth");
+        for (effect, kind) in [
+            ("create", "Create"),
+            ("write", "Write"),
+            ("fade", "Fade"),
+            ("grow", "GrowFromCenter"),
+            ("indicate", "Indicate"),
+            ("none", "Transform"),
+        ] {
+            assert_eq!(
+                preflight_creation_effect(effect, 12, 2000, rate).expect("efecto"),
+                kind
+            );
+            assert_eq!(play_kind_for_effect(effect), kind);
+        }
+        assert!(parse_anim_easing(Some("no-existe")).is_err());
+        assert_eq!(anim_bitrate_kbps("baja"), 500);
+        assert_eq!(anim_bitrate_kbps("media"), 2000);
+        assert_eq!(anim_bitrate_kbps("alta"), 8000);
+    }
+
+    #[test]
+    fn chat_explicativo_consume_cues_y_corrige_con_assess_final() {
+        use grafito_pedagogy::{TeachingSession, TeachingStep, TeachingTopic};
+        let mut paso = TeachingStep::new("d4", "Verificá en x=1", "Si f(x)=x², calculá en x=1.")
+            .with_math("x^2")
+            .with_final_check("Si f(x)=x², ¿cuánto vale f'(1)?", "2");
+        paso.verified = grafito_pedagogy::verify_math_expr("x^2");
+        let texto = explain_teaching_step(&paso);
+        assert!(texto.contains("Probá vos"), "pide respuesta: {texto}");
+        assert!(
+            texto.contains("draw_math"),
+            "cita dibujo verificado: {texto}"
+        );
+        let bien = assess_teaching_step_answer(&paso, "2").expect("corrige");
+        assert!(bien.contains("Bien"), "{bien}");
+        let mal = assess_teaching_step_answer(&paso, "5").expect("corrige");
+        assert!(mal.contains("Todavía no"), "{mal}");
+        // Paso sin check: prosa sin consigna y sin corrección.
+        let expositivo = TeachingStep::new("g1", "Concepto", "Solo prosa.");
+        assert!(!explain_teaching_step(&expositivo).contains("Probá vos"));
+        assert!(assess_teaching_step_answer(&expositivo, "2").is_none());
+        // Matemática no verificada: se omite sin inventar dibujo.
+        let mut sin_verificar = TeachingStep::new("x", "X", "E").with_math("f'(x)=2x");
+        sin_verificar.verified = false;
+        assert!(!explain_teaching_step(&sin_verificar).contains("draw_math"));
+        // Cues: la sesión revela por `cue_ms` y mapea ventana de frames.
+        let con_cue = TeachingStep::new("d2", "Visualicemos", "Mirálos juntarse.")
+            .with_cue(1000)
+            .with_frames(0, 12);
+        let sesion = TeachingSession::new(TeachingTopic::Derivada, vec![paso.clone(), con_cue]);
+        assert_eq!(sesion.revealed_steps(0).len(), 1);
+        assert_eq!(sesion.revealed_steps(2000).len(), 2);
+        let indice = TeachingSession::cue_frame_index(&sesion.steps[1], 1000, 12.0, 48);
+        assert!(indice.is_some(), "el cue mapea a un frame");
+    }
+
+    #[test]
+    fn replay_export_cubre_formatos_y_calidades_sin_tocar_historial() {
+        let descripcion =
+            describe_animation_replay("derivative-slope", "webm", "alta", 24, "plana")
+                .expect("replay");
+        assert!(descripcion.contains("webm"), "{descripcion}");
+        assert!(descripcion.contains("alta"), "{descripcion}");
+        assert!(descripcion.contains("8000"), "{descripcion}");
+        assert!(descripcion.contains("historial intacto"), "{descripcion}");
+        for formato in ["gif", "png", "mp4", "webm"] {
+            assert!(describe_animation_replay("t", formato, "media", 12, "plana").is_ok());
+        }
+        assert!(describe_animation_replay("t", "exe", "media", 12, "plana").is_err());
+        assert!(describe_animation_replay("t", "gif", "ultra", 12, "plana").is_err());
+        assert!(describe_animation_replay("t", "gif", "media", 0, "plana").is_err());
+        assert!(describe_animation_replay("t", "gif", "media", 61, "plana").is_err());
+        assert!(describe_animation_replay("t", "gif", "media", 12, "holograma").is_err());
     }
 
     #[test]
@@ -3567,8 +4870,260 @@ mod tests {
         }
     }
 
-    // ── Tests Responses API (Muse Spark, sin imágenes) ───────────────────────
+    // ── Tools matemáticas F2: schemas, dispatch puro y paridad ──────────────
 
+    #[test]
+    fn math_schemas_are_valid_openai_tools() {
+        for schema in math_tool_schemas() {
+            assert!(schema.validate().is_ok(), "schema {} invalid", schema.name);
+            let openai = schema.openai_tool().expect("openai_tool");
+            assert_eq!(openai["type"], "function");
+            assert_eq!(openai["function"]["name"], schema.name);
+        }
+        assert_eq!(math_tool_schemas().len(), 8);
+        // 3 base + 6 pedagógicas + 8 matemáticas.
+        assert_eq!(all_safe_tool_schemas().len(), 17);
+    }
+
+    fn math_call(name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: "math".into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn math_tools_dispatch_purely_without_document_or_io() {
+        let cases: &[(&str, Value)] = &[
+            ("verify_step", json!({"a": "x", "b": "x"})),
+            ("diff", json!({"expression": "x^2"})),
+            ("integrate", json!({"expression": "x^2"})),
+            (
+                "integrate",
+                json!({"expression": "x^2", "a": 0.0, "b": 1.0}),
+            ),
+            ("limit", json!({"expression": "sin(x)/x", "at": 0.0})),
+            ("solve_poly", json!({"expression": "x^2 - 5*x + 6 = 0"})),
+            (
+                "solve_system",
+                json!({"a": [[1.0, 1.0], [1.0, -1.0]], "b": [3.0, 1.0]}),
+            ),
+            (
+                "interval_check",
+                json!({"expression": "x^2", "min": -1.0, "max": 1.0}),
+            ),
+            (
+                "groebner_gate",
+                json!({"polys": ["x + y - 3", "x - y - 1"], "vars": ["x", "y"]}),
+            ),
+        ];
+        for (name, arguments) in cases {
+            let result = dispatch_safe_tool(&math_call(name, arguments.clone()));
+            assert!(
+                !result.content.contains("not available"),
+                "tool {name} should be available, got {}",
+                result.content
+            );
+            assert!(result.ok, "tool {name} failed: {}", result.content);
+        }
+    }
+
+    #[test]
+    fn verify_step_confirms_identity_and_rejects_difference() {
+        let same = dispatch_safe_tool(&math_call("verify_step", json!({"a": "x", "b": "x"})));
+        assert!(same.ok, "{}", same.content);
+        let value: Value = serde_json::from_str(&same.content).expect("json");
+        assert_eq!(value["equivalent"], true);
+
+        let different =
+            dispatch_safe_tool(&math_call("verify_step", json!({"a": "x", "b": "x + 1"})));
+        assert!(different.ok, "{}", different.content);
+        let value: Value = serde_json::from_str(&different.content).expect("json");
+        assert_eq!(value["equivalent"], false);
+    }
+
+    #[test]
+    fn solve_poly_finds_both_real_roots() {
+        let result = dispatch_safe_tool(&math_call(
+            "solve_poly",
+            json!({"expression": "x^2 - 5*x + 6 = 0"}),
+        ));
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("json");
+        let roots: Vec<f64> = value["roots"]
+            .as_array()
+            .expect("roots array")
+            .iter()
+            .map(|root| {
+                root.as_str()
+                    .expect("root string")
+                    .parse::<f64>()
+                    .expect("root number")
+            })
+            .collect();
+        assert!(roots.contains(&2.0) && roots.contains(&3.0));
+    }
+
+    #[test]
+    fn solve_system_rejects_singular_matrices_fail_closed() {
+        let singular = dispatch_safe_tool(&math_call(
+            "solve_system",
+            json!({"a": [[1.0, 2.0], [2.0, 4.0]], "b": [3.0, 6.0]}),
+        ));
+        assert!(!singular.ok, "singular debe fallar: {}", singular.content);
+    }
+
+    #[test]
+    fn math_tools_reject_oversized_nonfinite_and_empty_input() {
+        let big = "x".repeat(2_001);
+        let oversized = dispatch_safe_tool(&math_call("diff", json!({"expression": big})));
+        assert!(!oversized.ok);
+
+        let empty = dispatch_safe_tool(&math_call("diff", json!({"expression": "  "})));
+        assert!(!empty.ok);
+
+        let bad_interval = dispatch_safe_tool(&math_call(
+            "interval_check",
+            json!({"expression": "x", "min": 1.0, "max": -1.0}),
+        ));
+        assert!(!bad_interval.ok);
+
+        let bad_n = dispatch_safe_tool(&math_call(
+            "interval_check",
+            json!({"expression": "x", "min": 0.0, "max": 1.0, "n": 1}),
+        ));
+        assert!(!bad_n.ok);
+
+        // NaN no viaja en JSON (serde_json lo mapea a Null): la tool debe
+        // rechazarlo por no finito sin pánico.
+        let mut nan_args = json!({"a": [[1.0, 0.0], [0.0, 1.0]]});
+        nan_args["b"] = Value::Array(vec![Value::from(f64::NAN), Value::from(0.0)]);
+        let non_finite = dispatch_safe_tool(&math_call("solve_system", nan_args));
+        assert!(
+            !non_finite.ok,
+            "NaN debe rechazarse: {}",
+            non_finite.content
+        );
+    }
+
+    /// Paridad F2: `grafito-agent::tools` (réplica autocontenida: wyhash +
+    /// tolerancia 2 %) vs este dispatcher (delega en `grafito-pedagogy`).
+    /// Una sola fuente es imposible sin romper el DAG (el núcleo es hoja y no
+    /// puede depender de `pedagogy`); estos tests son la pinza de paridad.
+    #[test]
+    fn agent_tools_parity_exercise_determinism() {
+        use grafito_agent::loop_engine::ToolDispatcher;
+        let replica = grafito_agent::tools::PedagogyDispatcher;
+        let native = PedagogyDispatcher;
+        for lo_id in ["am1-der", "am1-int", "sec-trig"] {
+            for seed in [0_u64, 1, 7, 42] {
+                let arguments = json!({"lo_id": lo_id, "seed": seed});
+                let from_replica = replica.dispatch(&ToolCall {
+                    id: "par".into(),
+                    name: "generate_exercise".into(),
+                    arguments: arguments.clone(),
+                });
+                let from_native = native.dispatch(&ToolCall {
+                    id: "par".into(),
+                    name: "generate_exercise".into(),
+                    arguments,
+                });
+                assert!(
+                    from_replica.ok,
+                    "réplica {lo_id}/{seed}: {}",
+                    from_replica.content
+                );
+                assert!(
+                    from_native.ok,
+                    "nativo {lo_id}/{seed}: {}",
+                    from_native.content
+                );
+                let replica_value: Value =
+                    serde_json::from_str(&from_replica.content).expect("json réplica");
+                let native_value: Value =
+                    serde_json::from_str(&from_native.content).expect("json nativo");
+                assert_eq!(
+                    replica_value["prompt"], native_value["prompt"],
+                    "prompt diverge en {lo_id}/{seed}"
+                );
+                assert_eq!(
+                    replica_value["solution"], native_value["solution"],
+                    "solution diverge en {lo_id}/{seed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_tools_parity_assess_tolerance_bands() {
+        use grafito_agent::loop_engine::ToolDispatcher;
+        let replica = grafito_agent::tools::PedagogyDispatcher;
+        let native = PedagogyDispatcher;
+        // am1-der seed 0: Deriva f(x)=a*x^2 + b*x en x=1, solución 2a+b.
+        let exercise = native.dispatch(&ToolCall {
+            id: "par-ex".into(),
+            name: "generate_exercise".into(),
+            arguments: json!({"lo_id": "am1-der", "seed": 0}),
+        });
+        assert!(exercise.ok, "{}", exercise.content);
+        let value: Value = serde_json::from_str(&exercise.content).expect("json");
+        let solution: f64 = value["solution"]
+            .as_str()
+            .expect("solution string")
+            .parse()
+            .expect("solution number");
+
+        let assess_both = |answer: String| {
+            let arguments = json!({"lo_id": "am1-der", "seed": 0, "answer": answer});
+            let from_replica = replica.dispatch(&ToolCall {
+                id: "par-a".into(),
+                name: "assess_answer".into(),
+                arguments: arguments.clone(),
+            });
+            let from_native = native.dispatch(&ToolCall {
+                id: "par-b".into(),
+                name: "assess_answer".into(),
+                arguments,
+            });
+            assert!(from_replica.ok && from_native.ok);
+            let replica_value: Value =
+                serde_json::from_str(&from_replica.content).expect("json réplica");
+            let native_value: Value =
+                serde_json::from_str(&from_native.content).expect("json nativo");
+            (
+                replica_value["correct"].as_bool().expect("bool"),
+                native_value["correct"].as_bool().expect("bool"),
+                replica_value["veredicto"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_owned(),
+            )
+        };
+
+        // Respuesta exacta: ambas correctas.
+        let (replica_ok, native_ok, _) = assess_both(solution.to_string());
+        assert!(replica_ok && native_ok);
+
+        // Error 5 % (dentro de ambas bandas parciales: 2–10 % pedagogy,
+        // 2–15 % réplica): ambas incorrectas pero cercanas.
+        let (replica_ok, native_ok, _) = assess_both(format!("{}", solution * 1.05));
+        assert!(!replica_ok && !native_ok);
+
+        // Error 12 %: divergencia DOCUMENTADA (réplica parcial hasta 15 %,
+        // pedagogy corta en 10 %). La pinza la fija por escrito en vez de
+        // ocultar el solape.
+        let replica_close = replica.dispatch(&ToolCall {
+            id: "par-c".into(),
+            name: "assess_answer".into(),
+            arguments: json!({"lo_id": "am1-der", "seed": 0, "answer": format!("{}", solution * 1.12)}),
+        });
+        let replica_value: Value =
+            serde_json::from_str(&replica_close.content).expect("json réplica");
+        assert_eq!(replica_value["veredicto"], "parcial");
+    }
+
+    // ── Tests Responses API (Muse Spark, sin imágenes) ───────────────────────
     #[cfg(feature = "assistant-net")]
     fn spark_stub_settings(port: u16) -> ProviderSettings {
         ProviderSettings::for_profile(crate::ProviderProfile::OllamaLocal, "muse-spark-test")

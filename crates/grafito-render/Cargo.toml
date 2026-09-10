@@ -17,6 +17,7 @@ glam.workspace = true
 lyon.workspace = true
 bytemuck.workspace = true
 log.workspace = true
+lru = "0.12"
 anyhow.workspace = true
 rayon.workspace = true
 num-complex.workspace = true
@@ -36,6 +37,10 @@ harness = false
 
 [[bench]]
 name = "ast_cache_acceptance"
+harness = false
+
+[[bench]]
+name = "lighting_cache"
 harness = false
 
 [lints]

@@ -3,7 +3,7 @@
 //! correctamente con el cache key completo.
 
 use grafito_geometry::expr::prepare_function_ast;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Genera el cache key manualmente para verificar la condición del cache.
 fn make_key(
@@ -27,8 +27,8 @@ fn make_key(
 
 #[test]
 fn test_eq_outline_parses_and_evaluates() {
-    let lhs = prepare_function_ast("x^2 + y^2", &HashMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &HashMap::new(), &["x", "y"]).unwrap();
+    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
+    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
     // Para x=1, y=0: f = 1 - 1 = 0 (en el contorno).
     let f = lhs.eval_2d("x", 1.0, "y", 0.0) - rhs.eval_2d("x", 1.0, "y", 0.0);
     assert!((f - 0.0).abs() < 1e-9, "f en (1,0) debe ser 0, es {}", f);

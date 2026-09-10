@@ -2,11 +2,11 @@
 //! Verifica que el parser maneja `y²` (sin x antes).
 
 use grafito_geometry::expr::prepare_function_ast;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[test]
 fn test_y_squared_parses() {
-    let result = prepare_function_ast("y²", &HashMap::new(), &["y"]);
+    let result = prepare_function_ast("y²", &BTreeMap::new(), &["y"]);
     match result {
         Ok(ast) => {
             let v = ast.eval_at("y", 3.0);
@@ -19,7 +19,7 @@ fn test_y_squared_parses() {
 
 #[test]
 fn test_x2_plus_y2_parses() {
-    let result = prepare_function_ast("x^2 + y²", &HashMap::new(), &["x", "y"]);
+    let result = prepare_function_ast("x^2 + y²", &BTreeMap::new(), &["x", "y"]);
     match result {
         Ok(ast) => {
             let v = ast.eval_2d("x", 1.0, "y", 2.0);

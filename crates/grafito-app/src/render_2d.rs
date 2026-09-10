@@ -16,7 +16,7 @@ use grafito_geometry::{Color, Point2, ViewTransform};
 use grafito_ui::theme::current_theme;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 // La gracia cubre el submit GPU en vuelo (N≥2); verificado a compile-time
@@ -73,7 +73,7 @@ fn fractal_render_cache_key(document_version: u64, fr: &grafito_core::Fractal2DO
 fn phase_render_cache_key(
     document_version: u64,
     portrait: &grafito_core::PhasePortraitObj,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -150,7 +150,7 @@ fn cached_try_compute_fractal(
 /// re-evaluar la malla vectorial (density² evaluaciones) cada frame.
 fn cached_sample_phase_portrait(
     portrait: &grafito_core::PhasePortraitObj,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
     document_version: u64,
 ) -> PhasePortraitSegments {
     let key = phase_render_cache_key(document_version, portrait, variables);
@@ -177,7 +177,7 @@ fn cached_sample_phase_portrait(
 fn refine_function_samples(
     samples: impl IntoIterator<Item = (f64, Option<f64>)>,
     expr: &str,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
 ) -> Vec<(f64, Option<f64>)> {
     let mut iter = samples.into_iter().peekable();
     let mut refined = Vec::new();
@@ -661,7 +661,7 @@ fn implicit_curve_cache_matches_request(
     curve: &ImplicitCurveObj,
     view_bounds: (f64, f64, f64, f64),
     grid_size: usize,
-    variables: &HashMap<String, f64>,
+    variables: &BTreeMap<String, f64>,
     quality: grafito_core::RenderQuality,
 ) -> bool {
     let grid_size = match quality {
@@ -1819,7 +1819,7 @@ pub fn compute_fill_cache_key(
     ic: &ImplicitCurveObj,
     padded_bounds: (f64, f64, f64, f64),
     canvas_size: (u32, u32),
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
     fill_color: Color,
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -1857,7 +1857,7 @@ pub fn compute_complex_fill_cache_key(
     map: &ConformalMap,
     padded_bounds: (f64, f64, f64, f64),
     canvas_size: (u32, u32),
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
     fill_color: Color,
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -1881,7 +1881,7 @@ pub fn compute_complex_fill_cache_key(
 pub fn complex_mapping_region_contains(
     ic: &ImplicitCurveObj,
     map: ConformalMap,
-    variables: &std::collections::HashMap<String, f64>,
+    variables: &std::collections::BTreeMap<String, f64>,
     output_x: f64,
     output_y: f64,
 ) -> Option<bool> {
