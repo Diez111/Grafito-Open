@@ -249,15 +249,21 @@ impl Default for Resolution {
 }
 
 /// Duración validada de una animación en segundos (type-safe).
+///
+/// P0.1 long-form: 0.1..=60 s (`duration_ms` 100..=60000,
+/// `MAX_TIMELINE_DURATION_MS = 60_000`). El job del engine va a 90 s por
+/// defecto (`DEFAULT_JOB_TIMEOUT_SECS` = 60 s de timeline + 30 s de margen
+/// de handshake/drenaje; por env hasta 600 s): el frente nunca pide más de
+/// 60 s de timeline por request.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AnimDuration(pub f64);
 
 impl AnimDuration {
     pub fn try_new(secs: f64) -> Result<Self, ProtocolError> {
-        if !secs.is_finite() || !(0.1..=30.0).contains(&secs) {
+        if !secs.is_finite() || !(0.1..=60.0).contains(&secs) {
             return Err(ProtocolError::InvalidField {
                 field: "duration",
-                reason: format!("{secs} fuera de 0.1..=30"),
+                reason: format!("{secs} fuera de 0.1..=60"),
             });
         }
         Ok(Self(secs))
@@ -310,7 +316,7 @@ impl AnimParams {
                 });
             }
         }
-        // duration ya validada en try_new 0.1..=30s; resolution 64..=4096.
+        // duration ya validada en try_new 0.1..=60s; resolution 64..=4096.
         // Re-validar aquí para detectar构造 via struct literal que bypasee try_new.
         Resolution::try_new(self.resolution.width, self.resolution.height)?;
         AnimDuration::try_new(self.duration.0)?;
@@ -329,7 +335,59 @@ impl AnimParams {
     }
 }
 
+/// Tope de frames del preview corto (`gif`/`png`, P0.1): 64.
+/// El nativo histórico da 48 por plantilla; 64 deja un set corto con resto.
+pub const PREVIEW_SHORT_MAX_FRAMES: usize = 64;
+/// Tope de frames del video largo (`mp4`/`webm`, P0.1): 1500
+/// (= 50 s a 30 fps vía [`frames_for_duration`]). Más allá se parte el
+/// pedido en dos videos, jamás un `Vec` total en memoria.
+pub const VIDEO_LONGFORM_MAX_FRAMES: usize = 1500;
+/// Tope de bytes por chunk del set largo en RAM (P0.1): 64 MiB
+/// (paridad con `GROUP_MAX_SET_BYTES` y el set del player). El frente
+/// calcula el chunk con [`max_chunk_frames`] y compone por partes.
+pub const LONGFORM_CHUNK_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Estima los bytes RGBA del set (`w*h*4*frames`). `None` si desborda
+/// (`checked`, sin pánicos). Puro, sin allocs.
+pub fn estimate_chunk_bytes(w: usize, h: usize, frames: usize) -> Option<usize> {
+    w.checked_mul(h)
+        .and_then(|v| v.checked_mul(4))
+        .and_then(|v| v.checked_mul(frames))
+}
+
+/// ¿Cuántos frames de `w`×`h` entran en `chunk_bytes`? (P0.1, puro.)
+///
+/// División entera hacia abajo sobre RGBA (`w*h*4`); lados 0 o desborde →
+/// 0 honesto (nada que componer). Pineado: 1280×720→18, 1080×1920→8,
+/// 640×480→54 con 64 MiB. El frente lo llama con
+/// `LONGFORM_CHUNK_MAX_BYTES` y drena cada chunk a disco antes del siguiente.
+pub fn max_chunk_frames(w: usize, h: usize, chunk_bytes: usize) -> usize {
+    let bytes_por_frame = w.checked_mul(h).and_then(|v| v.checked_mul(4)).unwrap_or(0);
+    if bytes_por_frame == 0 {
+        return 0;
+    }
+    chunk_bytes / bytes_por_frame
+}
+
+/// Frames para una duración a `fps` cuadros/s (P0.1, puro):
+/// `duration_ms * fps / 1000` (entera hacia abajo, saturada a `u64`).
+/// Pineado: 50 s a 30 fps = 1500 (= `VIDEO_LONGFORM_MAX_FRAMES`).
+/// `fps` 0 → 0 honesto (sin división por cero: no hay división).
+pub fn frames_for_duration(duration_ms: u64, fps: u32) -> u64 {
+    if fps == 0 {
+        return 0;
+    }
+    duration_ms.saturating_mul(u64::from(fps)) / 1000
+}
+
 /// Formato de exportación pedido al motor.
+///
+/// CONTRATO P0.1 para el frente (long-form): el tope de frames sale de
+/// `max_frames()` (corto 64 / largo 1500), los chunks salen de
+/// `max_chunk_frames(w, h, LONGFORM_CHUNK_MAX_BYTES)` (jamás se arma el
+/// `Vec` total en long-form: se compone por chunks y se drena a disco), y
+/// el job va a 90 s por defecto (`DEFAULT_JOB_TIMEOUT_SECS` en `engine.rs`
+/// = 60 s de timeline + 30 s de margen; por env hasta 600 s).
 ///
 /// P1-core: `Webm` existe en el wire (serde + `from_str`/`to_str`). El render
 /// sin `ffmpeg` en PATH falla honesto en la Piel (`anim_native`, crate
@@ -359,6 +417,26 @@ impl ExportFormat {
     /// Alias estable de [`ExportFormat::as_str`] (simetría con `FromStr`).
     pub const fn to_str(self) -> &'static str {
         self.as_str()
+    }
+
+    /// ¿Es formato largo (video)? `mp4`/`webm` sí; `gif`/`png` son preview
+    /// corto. Puro, sin pánicos.
+    pub const fn is_longform(self) -> bool {
+        match self {
+            Self::Mp4 | Self::Webm => true,
+            Self::Gif | Self::PngSequence => false,
+        }
+    }
+
+    /// Tope de frames del pedido según formato (contrato P0.1 para el
+    /// frente): corto 64, largo 1500. El frente pide el tope con esto y
+    /// parte en chunks con [`max_chunk_frames`]; jamás arma el `Vec` total
+    /// en long-form.
+    pub const fn max_frames(self) -> usize {
+        match self {
+            Self::Mp4 | Self::Webm => VIDEO_LONGFORM_MAX_FRAMES,
+            Self::Gif | Self::PngSequence => PREVIEW_SHORT_MAX_FRAMES,
+        }
     }
 }
 
@@ -471,13 +549,13 @@ impl AnimRequest {
                 "{w}x{h} > 4096 (máximo soportado)"
             )));
         }
-        // Valida duration_ms propagada (0.1..30s → 100..30000ms), sin
-        // excepción del 0 (R6d: el 0 antes pasaba y el motor lo defaulteaba
-        // en silencio a 2000; hoy es `Err` honesto).
-        if self.duration_ms < 100 || self.duration_ms > 30000 {
+        // Valida duration_ms propagada (0.1..60s → 100..60000ms, P0.1
+        // long-form), sin excepción del 0 (R6d: el 0 antes pasaba y el motor
+        // lo defaulteaba en silencio a 2000; hoy es `Err` honesto).
+        if self.duration_ms < 100 || self.duration_ms > 60_000 {
             return Err(ProtocolError::InvalidField {
                 field: "duration_ms",
-                reason: format!("{} fuera de 100..=30000", self.duration_ms),
+                reason: format!("{} fuera de 100..=60000", self.duration_ms),
             });
         }
         Ok(())
@@ -490,6 +568,48 @@ impl AnimRequest {
     /// Puro salvo `canonicalize` de lectura (nunca crea directorios).
     pub fn validate_en(&self, _base: &std::path::Path) -> Result<(), ProtocolError> {
         self.validate()
+    }
+
+    /// Tope de frames del pedido según su formato (P0.1, puro): corto
+    /// (`gif`/`png`) 64, largo (`mp4`/`webm`) 1500. Delega en
+    /// [`ExportFormat::max_frames`]; el frente lo usa antes de pedir.
+    pub const fn max_frames(&self) -> usize {
+        self.export.max_frames()
+    }
+
+    /// Valida un conteo de frames contra el tope del formato (P0.1, puro).
+    ///
+    /// `0` → `Err` honesto (sin frames no hay qué renderizar); corto
+    /// (`gif`/`png`) con más de 64 → `Err` que sugiere `mp4` (el `gif`
+    /// largo se parte o se cambia de formato, jamás se arma en memoria de
+    /// una); largo (`mp4`/`webm`) con más de 1500 → `Err` (partí el pedido
+    /// en dos videos). Todo en español, sin pánicos.
+    pub fn validate_frames(&self, frames: usize) -> Result<(), ProtocolError> {
+        let tope = self.max_frames();
+        if frames == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: "0 frames: pasame al menos 1".into(),
+            });
+        }
+        if frames > tope {
+            let razon = if self.export.is_longform() {
+                format!(
+                    "{frames} frames exceden el tope de {tope} para {}: partí el pedido en dos videos",
+                    self.export.as_str()
+                )
+            } else {
+                format!(
+                    "{frames} frames exceden el tope de {tope} para {}: usá mp4 para el largo o bajá los frames",
+                    self.export.as_str()
+                )
+            };
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: razon,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -698,8 +818,8 @@ pub fn scene_param_clamped(
 
 /// Tope de keyframes por timeline (acota memoria de la UI).
 pub const MAX_TIMELINE_KEYFRAMES: usize = 64;
-/// Duración máxima de un timeline (igual que `AnimDuration` 30 s).
-pub const MAX_TIMELINE_DURATION_MS: u64 = 30_000;
+/// Duración máxima de un timeline (igual que `AnimDuration` 60 s, P0.1 long-form).
+pub const MAX_TIMELINE_DURATION_MS: u64 = 60_000;
 
 /// Vocabulario compartido de easings: 1:1 con `grafito-ui/src/animation.rs`
 /// (`easing::{linear, quadratic_in, quadratic_out, cubic_in, cubic_out,
@@ -1647,7 +1767,7 @@ mod universal_tests {
         // las 11 canónicas son las soportadas y el wire v1 hace roundtrip
         // para los 5 mensajes que el puente lee (hello/pong/progress/
         // render_result/error). Presupuestos pineados: canvas 64..=4096,
-        // duration 0.1..=30 s, line_cap 64 KiB (engine), mensaje 500 chars.
+        // duration 0.1..=60 s (P0.1 long-form), line_cap 64 KiB (engine), mensaje 500 chars.
         use std::collections::BTreeSet;
         assert_eq!(CANONICAL_TEMPLATES.len(), 11);
         let canon: BTreeSet<&&str> = CANONICAL_TEMPLATES.iter().collect();
@@ -1765,9 +1885,14 @@ mod universal_tests {
             duration_ms: 2000,
         };
         assert!(ok.validate().is_ok());
-        // Duración fuera de 0.1..=30 s se rechaza.
+        // Duración fuera de 0.1..=60 s se rechaza (P0.1 long-form: 60000
+        // pasa, 60001 no).
         let mut mala = ok.clone();
         mala.duration_ms = 90_000;
+        assert!(mala.validate().is_err());
+        mala.duration_ms = 60_000;
+        assert!(mala.validate().is_ok());
+        mala.duration_ms = 60_001;
         assert!(mala.validate().is_err());
         // R6d: el 0 ya no pasa (antes defaulteaba en silencio a 2000).
         mala.duration_ms = 0;
@@ -1815,7 +1940,7 @@ pub const PLAYLIST_MAX_STEPS: usize = 8;
 pub const PLAYLIST_MAX_FRAMES_TOTAL: usize = 96;
 /// `run_time` mínimo por step animado (igual que `AnimDuration` 0.1 s).
 pub const PLAYLIST_MIN_RUN_MS: u64 = 100;
-/// `run_time` máximo por step animado (igual que `AnimDuration` 30 s).
+/// `run_time` máximo por step animado (igual que `AnimDuration` 60 s, P0.1 long-form).
 pub const PLAYLIST_MAX_RUN_MS: u64 = MAX_TIMELINE_DURATION_MS;
 /// Silencio máximo por espera (`wait_after` o pausa sola).
 pub const PLAYLIST_MAX_WAIT_MS: u64 = 10_000;
@@ -1830,7 +1955,7 @@ pub const PLAYLIST_BYTES_PER_PIXEL: usize = 4;
 pub struct PlaylistStep {
     /// `None` = pausa silenciosa (ver `PlaylistStep::pausa`).
     pub request: Option<AnimRequest>,
-    /// Tiempo de corrida en ms (anim: 100..=30000; pausa: 1..=10000).
+    /// Tiempo de corrida en ms (anim: 100..=60000; pausa: 1..=10000).
     pub run_time_ms: u64,
     /// Silencio posterior en ms (0..=10000, congela el último frame).
     pub wait_after_ms: u64,
@@ -2162,6 +2287,66 @@ impl Playlist {
         Ok(total)
     }
 
+    /// Valida el presupuesto de frames contra un tope dado (P0.1, puro):
+    /// misma regla que [`Playlist::validate_frame_counts`] (`len` igual a
+    /// steps, pausas con 0, animados con ≥1, suma chequeada) pero el total se
+    /// compara con `tope` en vez de `PLAYLIST_MAX_FRAMES_TOTAL`. El frente
+    /// la llama con el tope del formato (`request.max_frames()`: 64 corto /
+    /// 1500 largo); el corto histórico sigue usando `validate_frame_counts`
+    /// (tope 96 del set concatenado). Todo `Err` honesto, sin pánicos.
+    pub fn validate_frame_counts_con_tope(
+        &self,
+        frames_per_step: &[usize],
+        tope: usize,
+    ) -> Result<usize, ProtocolError> {
+        if frames_per_step.len() != self.steps.len() {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: format!(
+                    "tenés {} conteos para {} steps: pasalos 1 a 1",
+                    frames_per_step.len(),
+                    self.steps.len()
+                ),
+            });
+        }
+        for (index, (step, count)) in self.steps.iter().zip(frames_per_step.iter()).enumerate() {
+            if step.is_wait() {
+                if *count != 0 {
+                    return Err(ProtocolError::InvalidField {
+                        field: "playlist.frames",
+                        reason: format!("el step {index} es pausa (0 frames), no {count}"),
+                    });
+                }
+            } else if *count == 0 {
+                return Err(ProtocolError::InvalidField {
+                    field: "playlist.frames",
+                    reason: format!("el step {index} animado necesita al menos 1 frame"),
+                });
+            }
+        }
+        let Some(total) = Self::checked_total_frames(frames_per_step) else {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: "la suma de frames desborda el contador: achicá los steps".into(),
+            });
+        };
+        if total == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: "la playlist no tiene ningún frame: agregá un step animado".into(),
+            });
+        }
+        if total > tope {
+            return Err(ProtocolError::InvalidField {
+                field: "playlist.frames",
+                reason: format!(
+                    "{total} frames exceden el tope de {tope}: sacá un step o bajá los frames por step"
+                ),
+            });
+        }
+        Ok(total)
+    }
+
     /// Timeline global de scrub para `frames_per_step` (extiende el scrub por
     /// animación a tiempo global sin tocar la UI).
     ///
@@ -2407,6 +2592,23 @@ impl AnimationGroup {
         conteos: &[usize],
         tamanos: &[(usize, usize)],
     ) -> Result<PlanRemuestreo, ProtocolError> {
+        self.plan_remuestreo_con_tope(conteos, tamanos, PLAYLIST_MAX_FRAMES_TOTAL)
+    }
+
+    /// Arma el plan de remuestreo temporal contra un tope dado (P0.1, puro):
+    /// misma regla que [`AnimationGroup::plan_remuestreo`] (N distinto por
+    /// set → vecino más cercano a `n_comun` = máximo, mismo viewport
+    /// 1..=4096, `w*h*4*n_comun ≤ GROUP_MAX_SET_BYTES`) pero `n_comun` se
+    /// compara con `tope` en vez de `PLAYLIST_MAX_FRAMES_TOTAL`. El frente
+    /// la llama con el tope del formato (64 corto / 1500 largo) y compone
+    /// por chunks de `max_chunk_frames` (jamás el `Vec` total en long-form).
+    /// Todo `Err` honesto, sin pánicos.
+    pub fn plan_remuestreo_con_tope(
+        &self,
+        conteos: &[usize],
+        tamanos: &[(usize, usize)],
+        tope: usize,
+    ) -> Result<PlanRemuestreo, ProtocolError> {
         if conteos.len() != tamanos.len() {
             return Err(ProtocolError::InvalidField {
                 field: "group.composicion",
@@ -2449,11 +2651,11 @@ impl AnimationGroup {
                 });
             }
         }
-        if n_comun == 0 || n_comun > PLAYLIST_MAX_FRAMES_TOTAL {
+        if n_comun == 0 || n_comun > tope {
             return Err(ProtocolError::InvalidField {
                 field: "group.frames",
                 reason: format!(
-                    "{n_comun} frames remuestreados exceden el tope de {PLAYLIST_MAX_FRAMES_TOTAL}: bajá los frames por step"
+                    "{n_comun} frames remuestreados exceden el tope de {tope}: bajá los frames por step"
                 ),
             });
         }
@@ -2481,7 +2683,7 @@ impl AnimationGroup {
         let mut indices_por_set = Vec::with_capacity(self.indices.len());
         for index in &self.indices {
             let n = conteos.get(*index).copied().unwrap_or(0);
-            indices_por_set.push(indice_vecino_mas_cercano(n, n_comun));
+            indices_por_set.push(indice_vecino_mas_cercano_con_tope(n, n_comun, tope));
         }
         Ok(PlanRemuestreo {
             n_comun,
@@ -2491,16 +2693,20 @@ impl AnimationGroup {
     }
 }
 
-/// Grilla de vecino más cercano: `n_comun` índices en `0..n_set`.
-/// `n_comun==1` → `[0]`; bordes clampados. Pura, sin pánicos.
-fn indice_vecino_mas_cercano(n_set: usize, n_comun: usize) -> Vec<usize> {
-    if n_comun == 0 || n_set == 0 {
+/// Grilla de vecino más cercano contra un tope (P0.1, pura): `n_comun`
+/// índices en `0..n_set` (`n_comun==1` → `[0]`; bordes clampados).
+/// `tope` acota la capacidad pre-reservada (el corto histórico usa
+/// `PLAYLIST_MAX_FRAMES_TOTAL`; el largo usa su tope de formato).
+/// `n_comun == 0`, `n_set == 0` o `tope == 0` → vacío honesto. Sin pánicos.
+pub fn indice_vecino_mas_cercano_con_tope(n_set: usize, n_comun: usize, tope: usize) -> Vec<usize> {
+    if n_comun == 0 || n_set == 0 || tope == 0 {
         return Vec::new();
     }
+    let techo = tope.max(1);
     if n_comun == 1 || n_set == 1 {
-        return vec![0; n_comun.min(PLAYLIST_MAX_FRAMES_TOTAL.max(1))];
+        return vec![0; n_comun.min(techo)];
     }
-    let mut out = Vec::with_capacity(n_comun.min(PLAYLIST_MAX_FRAMES_TOTAL));
+    let mut out = Vec::with_capacity(n_comun.min(techo));
     for j in 0..n_comun {
         let pos =
             (j as f64) * ((n_set.saturating_sub(1)) as f64) / ((n_comun.saturating_sub(1)) as f64);
@@ -2562,7 +2768,7 @@ pub fn mezclar_pixel_alfa(fondo: [u8; 4], frente: [u8; 4]) -> [u8; 4] {
 
 /// Timings estilo Manim (`run_time` + `wait` por animación).
 ///
-/// `items`: `(request, run_secs, wait_after_secs)` con `run` 0.1..=30 y
+/// `items`: `(request, run_secs, wait_after_secs)` con `run` 0.1..=60 y
 /// `wait` 0..=10 (finitos). Convierte a ms con round y arma la `Succession`
 /// validada (1..=8 steps, cada request validado). Todo `Err` honesto.
 pub fn build_animations_with_timings(
@@ -2585,10 +2791,10 @@ pub fn build_animations_with_timings(
     }
     let mut steps = Vec::with_capacity(items.len());
     for (orden, (request, run_s, wait_s)) in items.into_iter().enumerate() {
-        if !run_s.is_finite() || !(0.1..=30.0).contains(&run_s) {
+        if !run_s.is_finite() || !(0.1..=60.0).contains(&run_s) {
             return Err(ProtocolError::InvalidField {
                 field: "playlist.run_time_ms",
-                reason: format!("el step {orden} pide run_time {run_s}s (válido 0.1..=30)"),
+                reason: format!("el step {orden} pide run_time {run_s}s (válido 0.1..=60)"),
             });
         }
         if !wait_s.is_finite() || !(0.0..=10.0).contains(&wait_s) {
@@ -2605,7 +2811,7 @@ pub fn build_animations_with_timings(
 }
 
 /// `Succession` validada (R6d): cada request se valida (`validate`, que
-/// exige template canónico y `duration_ms` 100..=30000) y corre su
+/// exige template canónico y `duration_ms` 100..=60000) y corre su
 /// `duration_ms` sin espera posterior. Nada se defaultea en silencio
 /// (el 0 antes pasaba a 2000 ms sin error).
 pub fn build_succession(requests: Vec<AnimRequest>) -> Result<Playlist, ProtocolError> {
@@ -2738,9 +2944,11 @@ mod playlist_f2b_tests {
         // Conteos desparejos o step animado sin frames.
         assert!(lista.validate_frame_counts(&[48]).is_err());
         assert!(lista.validate_frame_counts(&[0, 48]).is_err());
-        // run_time fuera de rango y espera gigante.
+        // run_time fuera de rango y espera gigante (P0.1: el tope animado
+        // es 60000; 31000 ya pasa y 61000 no).
         assert!(PlaylistStep::anim(pedido("derivative-slope", "d"), 50, 0).is_err());
-        assert!(PlaylistStep::anim(pedido("derivative-slope", "d"), 31_000, 0).is_err());
+        assert!(PlaylistStep::anim(pedido("derivative-slope", "d"), 60_000, 0).is_ok());
+        assert!(PlaylistStep::anim(pedido("derivative-slope", "d"), 61_000, 0).is_err());
         assert!(PlaylistStep::anim(pedido("derivative-slope", "d"), 1000, 99_999).is_err());
         assert!(PlaylistStep::pausa(0).is_err());
         assert!(PlaylistStep::pausa(99_999).is_err());
@@ -2929,5 +3137,195 @@ mod group_compose_m4_tests {
         assert!((m[0] as i16 - 128).abs() <= 1, "r={}", m[0]);
         assert_eq!(m[1], 0);
         assert!((m[2] as i16 - 127).abs() <= 1, "b={}", m[2]);
+    }
+}
+
+// ── P0.1: long-form 60 s + topes por formato + chunks ────────────────────
+#[cfg(test)]
+mod p01_longform_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn pedido_con(formato: ExportFormat, duration_ms: u64) -> AnimRequest {
+        AnimRequest {
+            template: "derivative-slope".to_string(),
+            concept: "derivada".to_string(),
+            params: BTreeMap::new(),
+            spec: None,
+            export: formato,
+            canvas: (640, 480),
+            duration_ms,
+        }
+    }
+
+    #[test]
+    fn duration_60s_pasa_y_61s_no() {
+        assert!(AnimDuration::try_new(0.1).is_ok());
+        assert!(AnimDuration::try_new(30.0).is_ok());
+        assert!(AnimDuration::try_new(60.0).is_ok());
+        assert!(AnimDuration::try_new(60.5).is_err());
+        assert!(AnimDuration::try_new(30.5).is_ok(), "30.5 ya pasa en P0.1");
+        assert_eq!(
+            AnimDuration::try_new(60.0).expect("60 s").as_millis(),
+            60_000
+        );
+        assert_eq!(MAX_TIMELINE_DURATION_MS, 60_000);
+        assert_eq!(PLAYLIST_MAX_RUN_MS, 60_000);
+        // Timeline y steps aceptan 60 s.
+        let tl = Timeline {
+            duration_ms: 60_000,
+            keyframes: vec![
+                Keyframe {
+                    t_ms: 0,
+                    value: 0.0,
+                },
+                Keyframe {
+                    t_ms: 60_000,
+                    value: 1.0,
+                },
+            ],
+        };
+        assert!(tl.validate().is_ok());
+        assert!(pedido_con(ExportFormat::Gif, 60_000).validate().is_ok());
+        assert!(pedido_con(ExportFormat::Gif, 60_001).validate().is_err());
+        assert!(PlaylistStep::anim(pedido_con(ExportFormat::Mp4, 2000), 60_000, 0).is_ok());
+        assert!(build_animations_with_timings(vec![(
+            pedido_con(ExportFormat::Gif, 2000),
+            60.0,
+            0.0
+        )])
+        .is_ok());
+        assert!(build_animations_with_timings(vec![(
+            pedido_con(ExportFormat::Gif, 2000),
+            60.5,
+            0.0
+        )])
+        .is_err());
+    }
+
+    #[test]
+    fn resolution_64_4096_intacto() {
+        assert!(Resolution::try_new(1280, 720).is_ok());
+        assert!(Resolution::try_new(1080, 1920).is_ok());
+        assert!(Resolution::try_new(64, 64).is_ok());
+        assert!(Resolution::try_new(4096, 4096).is_ok());
+        assert!(Resolution::try_new(63, 480).is_err());
+        assert!(Resolution::try_new(4097, 480).is_err());
+    }
+
+    #[test]
+    fn topes_por_formato() {
+        assert_eq!(PREVIEW_SHORT_MAX_FRAMES, 64);
+        assert_eq!(VIDEO_LONGFORM_MAX_FRAMES, 1500);
+        assert_eq!(LONGFORM_CHUNK_MAX_BYTES, 64 * 1024 * 1024);
+        assert!(!ExportFormat::Gif.is_longform());
+        assert!(!ExportFormat::PngSequence.is_longform());
+        assert!(ExportFormat::Mp4.is_longform());
+        assert!(ExportFormat::Webm.is_longform());
+        assert_eq!(ExportFormat::Gif.max_frames(), 64);
+        assert_eq!(ExportFormat::PngSequence.max_frames(), 64);
+        assert_eq!(ExportFormat::Mp4.max_frames(), 1500);
+        assert_eq!(ExportFormat::Webm.max_frames(), 1500);
+        // AnimRequest delega.
+        assert_eq!(pedido_con(ExportFormat::Gif, 2000).max_frames(), 64);
+        assert_eq!(pedido_con(ExportFormat::Mp4, 2000).max_frames(), 1500);
+        // GIF>64 → Err que sugiere mp4.
+        let gif = pedido_con(ExportFormat::Gif, 2000);
+        assert!(gif.validate_frames(64).is_ok());
+        let err = gif.validate_frames(65).unwrap_err().to_string();
+        assert!(err.contains("mp4"), "sugiere mp4, got: {err}");
+        // Video>1500 → Err.
+        let mp4 = pedido_con(ExportFormat::Mp4, 2000);
+        assert!(mp4.validate_frames(1500).is_ok());
+        assert!(mp4.validate_frames(1501).is_err());
+        // 0 siempre es Err.
+        assert!(gif.validate_frames(0).is_err());
+        assert!(mp4.validate_frames(0).is_err());
+    }
+
+    #[test]
+    fn chunks_pineados() {
+        let mib64 = LONGFORM_CHUNK_MAX_BYTES;
+        assert_eq!(max_chunk_frames(1280, 720, mib64), 18);
+        assert_eq!(max_chunk_frames(1080, 1920, mib64), 8);
+        assert_eq!(max_chunk_frames(640, 480, mib64), 54);
+        assert_eq!(max_chunk_frames(0, 480, mib64), 0);
+        assert_eq!(max_chunk_frames(usize::MAX, usize::MAX, mib64), 0);
+        assert_eq!(estimate_chunk_bytes(640, 480, 54), Some(640 * 480 * 4 * 54));
+        assert_eq!(estimate_chunk_bytes(usize::MAX, 480, 96), None);
+        // 50 s a 30 fps = 1500 = tope largo.
+        assert_eq!(frames_for_duration(50_000, 30), 1500);
+        assert_eq!(
+            frames_for_duration(50_000, 30),
+            VIDEO_LONGFORM_MAX_FRAMES as u64
+        );
+        assert_eq!(frames_for_duration(2000, 30), 60);
+        assert_eq!(frames_for_duration(2000, 0), 0);
+    }
+
+    #[test]
+    fn validate_con_tope_respeta_el_formato() {
+        let lista = build_succession(vec![
+            pedido_con(ExportFormat::Mp4, 2000),
+            pedido_con(ExportFormat::Mp4, 2000),
+        ])
+        .expect("playlist");
+        // Corto histórico intacto: 96.
+        assert_eq!(lista.validate_frame_counts(&[48, 48]).expect("96"), 96);
+        assert!(lista.validate_frame_counts(&[48, 49]).is_err());
+        // Con tope largo: 1500 pasa, 1501 no.
+        assert_eq!(
+            lista
+                .validate_frame_counts_con_tope(&[750, 750], 1500)
+                .expect("1500"),
+            1500
+        );
+        assert!(lista
+            .validate_frame_counts_con_tope(&[750, 751], 1500)
+            .is_err());
+        // Con tope corto: 64.
+        assert!(lista.validate_frame_counts_con_tope(&[32, 32], 64).is_ok());
+        assert!(lista.validate_frame_counts_con_tope(&[33, 32], 64).is_err());
+        // Pausa con 0 intacta también con tope.
+        let mixta = Playlist::try_new(vec![
+            PlaylistStep::anim(pedido_con(ExportFormat::Mp4, 1000), 1000, 0).expect("anim"),
+            PlaylistStep::pausa(500).expect("pausa"),
+        ])
+        .expect("mixta");
+        assert_eq!(
+            mixta
+                .validate_frame_counts_con_tope(&[10, 0], 1500)
+                .expect("10"),
+            10
+        );
+        assert!(mixta
+            .validate_frame_counts_con_tope(&[10, 1], 1500)
+            .is_err());
+    }
+
+    #[test]
+    fn remuestreo_con_tope_largo() {
+        let grupo = AnimationGroup::try_new(vec![0, 1], 0.0).expect("grupo");
+        // Corto histórico intacto: 97 ya no entra con tope 96.
+        assert!(grupo
+            .plan_remuestreo(&[97, 97], &[(64, 48), (64, 48)])
+            .is_err());
+        // Con tope largo sí: 750+750 → común 750.
+        let plan = grupo
+            .plan_remuestreo_con_tope(&[750, 750], &[(64, 48), (64, 48)], 1500)
+            .expect("largo");
+        assert_eq!(plan.n_comun, 750);
+        assert_eq!(plan.indices_por_set[0].len(), 750);
+        // Más allá del tope → Err honesto.
+        assert!(grupo
+            .plan_remuestreo_con_tope(&[751, 750], &[(64, 48), (64, 48)], 750)
+            .is_err());
+        // Vecino con tope: equivalencia con el histórico en tope 96.
+        assert_eq!(
+            indice_vecino_mas_cercano_con_tope(24, 48, 96),
+            indice_vecino_mas_cercano_con_tope(24, 48, 1500)
+        );
+        assert!(indice_vecino_mas_cercano_con_tope(24, 48, 0).is_empty());
+        assert!(indice_vecino_mas_cercano_con_tope(0, 48, 1500).is_empty());
     }
 }

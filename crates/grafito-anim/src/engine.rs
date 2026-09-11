@@ -14,6 +14,13 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
 /// Timeout por defecto para completar un job (90 s).
+///
+/// P0.1 long-form: cubre el timeline máximo de 60 s
+/// (`MAX_TIMELINE_DURATION_MS`) + 30 s de margen de handshake/drenaje.
+/// El frente nunca pide más de 60 s de timeline por request; el largo real
+/// (hasta 1500 frames) se parte en chunks de `max_chunk_frames` y cada
+/// chunk corre su propio job dentro de este timeout. Por env
+/// (`GRAFITO_ANIM_JOB_TIMEOUT_SECS`) hasta 600 s (`MAX_JOB_TIMEOUT_SECS`).
 pub const DEFAULT_JOB_TIMEOUT_SECS: u64 = 90;
 /// Timeout por defecto para handshake/apagado cooperativo (8 s).
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 8;
@@ -1946,8 +1953,8 @@ pub fn run_playlist_sequential(
 // Una `Scene` Manim corre sus `Animation` en `Succession`: este puente arma
 // la `Playlist` con los `run_time_ms` de cada animación (`rate` vive en la
 // escena, el motor solo ordena y drena). Reusa `PlaylistStep::anim` +
-// `Playlist::try_new` (presupuestos 8 steps / run 100..=30000 / espera
-// 0..=10000 intactos). Puro, sin `unwrap`.
+// `Playlist::try_new` (presupuestos 8 steps / run 100..=60000 P0.1 long-form
+// / espera 0..=10000 intactos). Puro, sin `unwrap`.
 
 /// Arma una `Playlist` (`Succession`) desde steps de escena.
 ///

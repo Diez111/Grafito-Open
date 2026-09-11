@@ -25,9 +25,14 @@
 //!   [`WriteAnim`]).
 //!
 //! Presupuestos intactos: frames por anim 1..=48, total del `play` ≤96
-//! (paridad con playlist), set 64 MiB (estimación honesta en `try_play`),
-//! timeline 64 keys/30 s (los tracks que alimentan al player), capas 32,
-//! `Resolution` 64..=4096, `AnimDuration` 0.1..=30 s (`run_ms` 100..=30000).
+//! (paridad con playlist; corto histórico), set 64 MiB (estimación honesta
+//! en `try_play`), timeline 64 keys/60 s (P0.1 long-form; los tracks que
+//! alimentan al player), capas 32, `Resolution` 64..=4096,
+//! `AnimDuration` 0.1..=60 s (`run_ms` 100..=60000).
+//!
+//! El long-form (hasta 1500 frames por formato video) NO pasa por acá de
+//! una: el frente compone por chunks de `max_chunk_frames` (jamás el `Vec`
+//! total) y cada chunk respeta estos topes cortos.
 
 use crate::scene::{
     par_remuestreado, Animation, Mobject, PathFunc, RateFunc, Scene, SceneError, SceneResult,
@@ -262,9 +267,11 @@ pub fn centroide_de(m: &Mobject) -> [f64; 2] {
 // Todas implementan `Animation` (begin/interpolate/finish) para que el player
 // las corra por el mismo camino que `TransformAnim`.
 
-/// Tope de frames por anim del player (paridad con `PARAMETRIC_MAX_FRAMES`).
+/// Tope de frames por anim del player (paridad con `PARAMETRIC_MAX_FRAMES`;
+/// corto histórico intacto en P0.1: el largo va por chunks del frente).
 pub const PLAYER_MAX_FRAMES: usize = 48;
-/// Tope de frames totales de un `play` (paridad con playlist: 96).
+/// Tope de frames totales de un `play` (paridad con playlist: 96;
+/// corto histórico intacto en P0.1).
 pub const PLAYER_MAX_TOTAL_FRAMES: usize = 96;
 
 fn valida_frames_run(frames: usize, run_ms: u64, donde: &'static str) -> SceneResult<()> {
@@ -275,9 +282,9 @@ fn valida_frames_run(frames: usize, run_ms: u64, donde: &'static str) -> SceneRe
             ),
         });
     }
-    if !(100..=30_000).contains(&run_ms) {
+    if !(100..=60_000).contains(&run_ms) {
         return Err(SceneError::MorphInvalido {
-            detalle: format!("{donde}: run_time {run_ms} ms fuera de 100..=30000"),
+            detalle: format!("{donde}: run_time {run_ms} ms fuera de 100..=60000"),
         });
     }
     Ok(())
@@ -1686,6 +1693,18 @@ mod player_tests {
             TrackerMap::Opacity { lo: 0.0, hi: 1.0 },
         )
         .is_err());
+    }
+
+    #[test]
+    fn p01_run_60s_y_frames_cortos_intactos() {
+        // P0.1: `run` acepta 60 s (60001 no); frames 48/96 corto intactos.
+        assert_eq!(PLAYER_MAX_FRAMES, 48);
+        assert_eq!(PLAYER_MAX_TOTAL_FRAMES, 96);
+        let m = Mobject::Dot { x: 0.0, y: 0.0 };
+        assert!(FadeAnim::try_new(m.clone(), true, 4, 60_000, RateFunc::Linear).is_ok());
+        assert!(FadeAnim::try_new(m.clone(), true, 4, 60_001, RateFunc::Linear).is_err());
+        assert!(FadeAnim::try_new(m.clone(), true, 49, 1000, RateFunc::Linear).is_err());
+        assert!(FadeAnim::try_new(m, true, 4, 99, RateFunc::Linear).is_err());
     }
 
     #[test]

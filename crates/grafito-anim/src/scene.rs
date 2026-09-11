@@ -38,8 +38,12 @@
 //!
 //! Presupuestos (intactos, paridad con el resto del crate):
 //! `samples` 2..=512, `frames` 1..=48, set 64 MiB, playlist 8 steps/96 frames,
-//! timeline 64 keys/30 s, capas 32, `Resolution` 64..=4096,
-//! `AnimDuration` 0.1..=30 s.
+//! timeline 64 keys/60 s (P0.1 long-form), tracks 1..=60000 ms, capas 32,
+//! `Resolution` 64..=4096, `AnimDuration` 0.1..=60 s.
+//!
+//! `SCENE_MORPH_MAX_SAMPLES = 512` es ESPACIAL (puntos por forma
+//! remuestreada), no temporal: P0.1 no lo toca (el tiempo largo va por
+//! `MAX_TRACK_DURATION_MS` y por chunks del frente, jamás por más muestras).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1064,7 +1068,7 @@ impl Camera {
 pub struct MovingCamera {
     pub from: Camera,
     pub to: Camera,
-    /// Duración en ms (1..=30000, paridad con tracks).
+    /// Duración en ms (1..=60000, paridad con tracks, P0.1 long-form).
     pub duration_ms: u64,
     /// Easing del travelling.
     pub easing: RateFunc,
@@ -1072,7 +1076,7 @@ pub struct MovingCamera {
 
 impl MovingCamera {
     /// Constructor validado: misma variante en `from`/`to`, duración
-    /// 1..=30000. Todo `Err` honesto.
+    /// 1..=60000 (P0.1 long-form). Todo `Err` honesto.
     pub fn try_new(
         from: Camera,
         to: Camera,
@@ -1238,7 +1242,7 @@ impl Scene {
 /// para indexar sus frames vía [`TransformAnim::frame_at`]. `begin`/`finish`
 /// dejan el estado listo/limpio (acá no-ops puros: el cerebro no toca la UI).
 pub trait Animation {
-    /// Duración de corrida en ms (100..=30000, paridad con `AnimDuration`).
+    /// Duración de corrida en ms (100..=60000, paridad con `AnimDuration`, P0.1 long-form).
     fn run_time_ms(&self) -> u64;
     /// Rate-func de la animación.
     fn rate(&self) -> RateFunc;
@@ -1389,7 +1393,7 @@ pub(crate) fn par_remuestreado(
 
 impl TransformAnim {
     /// Constructor validado (`samples` 2..=512, `frames` 1..=48, `run`
-    /// 100..=30000 ms, puntos finitos y acotados).
+    /// 100..=60000 ms, puntos finitos y acotados).
     pub fn try_new(
         from: Vec<[f64; 2]>,
         to: Vec<[f64; 2]>,
@@ -1414,9 +1418,9 @@ impl TransformAnim {
                 ),
             });
         }
-        if !(100..=30_000).contains(&run_ms) {
+        if !(100..=60_000).contains(&run_ms) {
             return Err(SceneError::MorphInvalido {
-                detalle: format!("run_time {run_ms} ms fuera de 100..=30000"),
+                detalle: format!("run_time {run_ms} ms fuera de 100..=60000"),
             });
         }
         valida_puntos(&from, "from")?;
@@ -1825,8 +1829,8 @@ pub fn matching_shapes_frames(
 
 /// Tope de keys por track (paridad con `MAX_TIMELINE_KEYFRAMES`).
 pub const MAX_TRACK_KEYS: usize = 64;
-/// Duración máxima de un track (paridad con `MAX_TIMELINE_DURATION_MS`).
-pub const MAX_TRACK_DURATION_MS: u64 = 30_000;
+/// Duración máxima de un track (paridad con `MAX_TIMELINE_DURATION_MS`, P0.1 long-form: 60 s).
+pub const MAX_TRACK_DURATION_MS: u64 = 60_000;
 
 /// Un key en `t_ms` con `value`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1844,7 +1848,7 @@ pub struct PropertyTrack {
     pub prop_id: String,
     /// 1..=64 keys estrictamente crecientes en `0..=duration_ms`.
     pub keys: Vec<TrackKey>,
-    /// Duración del track en ms (1..=30000).
+    /// Duración del track en ms (1..=60000, P0.1 long-form).
     pub duration_ms: u64,
     /// Easing propio del track.
     pub easing: RateFunc,
@@ -2686,5 +2690,54 @@ mod scene_f1_tests {
         let timeline = lista.global_timeline(&[48, 48]).unwrap();
         assert_eq!(frame_at_global(&timeline, 0, 96), 0);
         assert_eq!(frame_at_global(&timeline, 3000, 96), 95);
+    }
+
+    #[test]
+    fn p01_tracks_y_anim_60s() {
+        // P0.1 long-form: tracks/cámara/anim aceptan 60 s (60001 no);
+        // `SCENE_MORPH_MAX_SAMPLES` sigue espacial en 512.
+        assert_eq!(MAX_TRACK_DURATION_MS, 60_000);
+        assert_eq!(SCENE_MORPH_MAX_SAMPLES, 512);
+        let keys = vec![
+            TrackKey {
+                t_ms: 0,
+                value: 0.0,
+            },
+            TrackKey {
+                t_ms: 60_000,
+                value: 1.0,
+            },
+        ];
+        assert!(
+            PropertyTrack::try_new("x".to_string(), keys.clone(), 60_000, RateFunc::Linear).is_ok()
+        );
+        assert!(PropertyTrack::try_new("x".to_string(), keys, 60_001, RateFunc::Linear).is_err());
+        let cam = MovingCamera::try_new(
+            Camera::Ortho(Ortho::default_16_9()),
+            Camera::Ortho(Ortho::default_16_9()),
+            60_000,
+            RateFunc::Linear,
+        );
+        assert!(cam.is_ok());
+        assert!(MovingCamera::try_new(
+            Camera::Ortho(Ortho::default_16_9()),
+            Camera::Ortho(Ortho::default_16_9()),
+            60_001,
+            RateFunc::Linear,
+        )
+        .is_err());
+        let a = vec![[0.0, 0.0], [1.0, 1.0]];
+        let b = vec![[1.0, 0.0], [0.0, 1.0]];
+        assert!(TransformAnim::try_new(
+            a.clone(),
+            b.clone(),
+            8,
+            4,
+            60_000,
+            RateFunc::Linear,
+            false
+        )
+        .is_ok());
+        assert!(TransformAnim::try_new(a, b, 8, 4, 60_001, RateFunc::Linear, false).is_err());
     }
 }

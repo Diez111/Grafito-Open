@@ -33,13 +33,15 @@ pub use player::{
     ValueTracker, WaitAnim, WriteAnim, PLAYER_MAX_FRAMES, PLAYER_MAX_TOTAL_FRAMES,
 };
 pub use protocol::{
-    downcast, kinds, localize_worker_error, normalize_concept, request_for_concept,
+    downcast, estimate_chunk_bytes, frames_for_duration, indice_vecino_mas_cercano_con_tope, kinds,
+    localize_worker_error, max_chunk_frames, normalize_concept, request_for_concept,
     sanitize_error_code, sanitize_template, taylor_anim_order, taylor_anim_order_from_params,
     template_for_concept, truncate_worker_message, AnimDuration, AnimJobId, AnimParams,
     AnimRequest, AnimResult, AnimationGroup, ExportFormat, PlanRemuestreo, PngDir, RenderProgress,
-    Resolution, WireMessage, WorkerError, MAX_ERROR_CODE_LEN, MAX_MEDIA_PATH_CHARS,
-    MAX_WORKER_MESSAGE_LEN, TAYLOR_ANIM_ORDER_DEFAULT, TAYLOR_ANIM_ORDER_MAX,
-    TAYLOR_ANIM_ORDER_MIN,
+    Resolution, WireMessage, WorkerError, LONGFORM_CHUNK_MAX_BYTES, MAX_ERROR_CODE_LEN,
+    MAX_MEDIA_PATH_CHARS, MAX_TIMELINE_DURATION_MS, MAX_WORKER_MESSAGE_LEN,
+    PREVIEW_SHORT_MAX_FRAMES, TAYLOR_ANIM_ORDER_DEFAULT, TAYLOR_ANIM_ORDER_MAX,
+    TAYLOR_ANIM_ORDER_MIN, VIDEO_LONGFORM_MAX_FRAMES,
 };
 pub use scene::{
     bezier_suaviza, frame_at_global, matching_shapes_frames, resample_arclen, sample_playlist,
@@ -47,5 +49,5 @@ pub use scene::{
     Clock, Mobject, MovingCamera, Ortho, PathFunc, PropertyTrack, RateFunc, Scene, SceneError,
     TrackKey, TransformAnim, MANIM_EXP_HALF_LIFE, MANIM_NOT_QUITE_PROPORTION, MANIM_PAUSE_RATIO,
     MANIM_RUNNING_PULL, MAX_GROUP_CHILDREN, MAX_GROUP_DEPTH, MAX_MOBJECT_POINTS, MAX_SCENE_LAYERS,
-    MAX_TEX_SVG_BYTES, MAX_TRACK_KEYS, SCENE_MORPH_MAX_SAMPLES,
+    MAX_TEX_SVG_BYTES, MAX_TRACK_DURATION_MS, MAX_TRACK_KEYS, SCENE_MORPH_MAX_SAMPLES,
 };
