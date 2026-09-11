@@ -538,7 +538,9 @@ pub fn history_thumb_uv_rect(src_w: u32, src_h: u32) -> egui::Rect {
 
 /// ¿Este turno lleva tarjeta histórica? Solo turnos con media que no son
 /// el último: el último usa el slot vivo (`set_media`/`draw_media_card`).
-/// Puro (`&Estado`), sin I/O. La usa el dibujado y los tests de política.
+/// Puro (`&Estado`), sin I/O. Solo tests: el dibujado usa el kind por turno
+/// (`live_slot_kind_for_turn`).
+#[cfg(test)]
 pub(crate) fn turn_has_history_mini_card(
     turn_idx: usize,
     turn_count: usize,
@@ -570,19 +572,47 @@ pub(crate) enum LiveSlotKind {
     History,
 }
 
-/// Clasifica qué dibuja el último turno a partir de su `media` propia y del
-/// slot global. Puro, sin I/O. La usa el dibujado y los tests de política.
-pub(crate) fn live_slot_kind_for_last_turn(
+/// Clasifica qué dibuja cada turno a partir de su `media` propia, del slot
+/// global y del dueño del slot. Puro, sin I/O. La usa el dibujado y los
+/// tests de política.
+///
+/// Reglas (dueño manda):
+/// - `Slot`/`Progress`: el turno es el dueño (`media_owner == Some(idx)`),
+///   o no hay dueño y es el último sin `media` propia con slot/progreso.
+/// - `History`: el turno tiene `media` propia y NO es el dueño (mini-card).
+/// - `Hidden`: resto. Garantía intacta: ningún turno que no sea dueño dibuja
+///   el slot (anti "tarjeta vieja bajo prosa nueva").
+///
+/// El caso que arregla: replay de un turno con `media` propia — la app
+/// reinjecta por `set_media` y setea el dueño, así ese turno dibuja el
+/// player en vez de su mini-card (antes `turn.media.is_some()` mandaba a
+/// `History` y "Ver de nuevo" no hacía nada visible).
+pub(crate) fn live_slot_kind_for_turn(
+    turn_idx: usize,
+    last_idx: usize,
     turn_has_media: bool,
     anim_progress: bool,
     slot_has_media: bool,
+    media_owner: Option<usize>,
 ) -> LiveSlotKind {
-    if turn_has_media {
+    if media_owner == Some(turn_idx) {
+        if anim_progress {
+            LiveSlotKind::Progress
+        } else if slot_has_media {
+            LiveSlotKind::Slot
+        } else {
+            LiveSlotKind::Hidden
+        }
+    } else if turn_has_media {
         LiveSlotKind::History
-    } else if anim_progress {
-        LiveSlotKind::Progress
-    } else if slot_has_media {
-        LiveSlotKind::Slot
+    } else if media_owner.is_none() && turn_idx == last_idx {
+        if anim_progress {
+            LiveSlotKind::Progress
+        } else if slot_has_media {
+            LiveSlotKind::Slot
+        } else {
+            LiveSlotKind::Hidden
+        }
     } else {
         LiveSlotKind::Hidden
     }
@@ -1633,6 +1663,14 @@ pub struct AssistantPanelState {
     pub media: Option<AssistantMedia>,
     /// Verdadero mientras el job de animación está en curso (progreso en vivo).
     pub anim_progress: bool,
+    /// Dueño del slot vivo: índice en `conversation` del turno que lo pidió.
+    ///
+    /// El slot (`media`/`anim_progress`) es global y no sabe a qué turno
+    /// pertenece; sin dueño, el último turno con `media` propia mostraba su
+    /// mini-card aunque el slot trajera su replay ("Ver de nuevo" muerto:
+    /// reinjectaba pero el draw lo ignoraba). `set_media` lo resetea a `None`;
+    /// la app lo setea después cuando corresponde. Privado + setter/getter.
+    media_owner_turn: Option<usize>,
     /// Memoria del tutor en el panel: nivel, ramas y siguiente recomendación.
     pub tutor_level: u32,
     pub tutor_covered: usize,
@@ -1837,6 +1875,7 @@ impl Default for AssistantPanelState {
             media_export: MediaExportState::default(),
             export_dialog: std::cell::RefCell::new(MediaExportDialog::new()),
             anim_progress: false,
+            media_owner_turn: None,
             tutor_level: 0,
             tutor_covered: 0,
             tutor_total: 0,
@@ -1959,6 +1998,8 @@ impl AssistantPanelState {
     /// Descarta el historial local y las propuestas asociadas a esa conversación.
     pub fn clear_conversation(&mut self) {
         self.conversation.clear();
+        // Sin turnos no hay dueño: un índice rancio reclamaría el player.
+        self.media_owner_turn = None;
         self.retire_all_history_thumbs();
         self.reveal_pending = false;
         self.reveal_started_at = None;
@@ -2410,6 +2451,20 @@ pub fn verified_models_detail_text() -> &'static str {
 }
 
 impl AssistantPanelState {
+    /// Fija el turno dueño del slot vivo (`None` = sin dueño).
+    ///
+    /// La app lo setea al pedir una animación o al reinjectar un replay
+    /// (`ReplayMedia` → `set_media` + este setter con el `turn_idx`). Puro,
+    /// sin I/O.
+    pub fn set_media_owner_turn(&mut self, owner: Option<usize>) {
+        self.media_owner_turn = owner;
+    }
+
+    /// Dueño actual del slot vivo (`None` = sin dueño). Puro, sin I/O.
+    pub fn media_owner_turn(&self) -> Option<usize> {
+        self.media_owner_turn
+    }
+
     /// Establece la animación a reproducir y prepara sus texturas de frames.
     ///
     /// Retención diferida: el set anterior NO se destruye acá (un submit
@@ -2424,6 +2479,10 @@ impl AssistantPanelState {
         }
         self.drop_expired_retired_media();
         self.media = media;
+        // Slot nuevo = dueño reseteado: la app lo setea después cuando
+        // corresponde (pedido nuevo o replay reinjectado). Sin esto, un
+        // `turn_idx` rancio se quedaría con el player de otra animación.
+        self.media_owner_turn = None;
         self.media_textures_ready = false;
         self.media_window_base.set(0);
         self.media_generation
@@ -4034,11 +4093,6 @@ pub enum AssistantUiAction {
     RunMiniExam,
     /// Abrir Configuración en la pestaña Perfil/Mascota.
     OpenMascotConfig,
-    /// Explícame paso a paso — inicia enseñanza interactiva con burbujas, gráfica y pizarra.
-    ExplainStepwise(String),
-    /// B7 — Pedir un ejercicio del tema (botón «Andamiar» / CTA de vacío).
-    /// La app lo genera en background y muestra la tarjeta con corrección.
-    RequestExercise { topic: String },
     /// Aplicar comando raw grafito directamente (fallback cuando no hay preflight)
     ApplyRawCommand(String),
     /// Guardar cambios de avatar y nombre de perfil (unificado).
@@ -8761,38 +8815,6 @@ fn conversation_turn_appearance(
     }
 }
 
-/// Motivo por el que "Explícame paso a paso" queda deshabilitado, si aplica.
-///
-/// Puro (`&Estado -> Option`): `None` = habilitado. El render nunca es mudo:
-/// con `Some` muestra botón deshabilitado + tooltip + texto con este motivo.
-/// `has_animation` = el turno trae animación en curso o media instalada: una
-/// explicación matemática con animación siempre habilita (Z3).
-fn stepwise_disabled_reason(
-    blocks: &[AssistantMessageBlock],
-    content: &str,
-    has_animation: bool,
-) -> Option<&'static str> {
-    if should_show_stepwise(blocks, content, has_animation) {
-        return None;
-    }
-    Some("Se habilita en explicaciones con matemática, tabla, código o desarrollo largo")
-}
-
-/// B7 — Tema por defecto de «Andamiar» cuando el turno viene vacío.
-/// Existe en el currículum (`am1-der`), así que siempre resuelve a un
-/// ejercicio real en vez de caer en error.
-pub const ANDAMIAR_DEFAULT_TOPIC: &str = "derivada";
-
-/// B7 — Tema para «Andamiar» desde un turno: primera línea acotada a 60
-/// (mismo recorte que el botón paso a paso). Puro, testeable.
-pub fn andamiar_topic_for_content(content: &str) -> String {
-    let primera = content.lines().next().unwrap_or("").trim();
-    if primera.is_empty() {
-        return ANDAMIAR_DEFAULT_TOPIC.to_string();
-    }
-    primera.chars().take(60).collect()
-}
-
 /// W3 — Saludos sin camino («hola»): respuesta con siguiente paso ofrecido.
 ///
 /// Pura: minúsculas, recorta signos de puntuación, lista cerrada de saludos.
@@ -8849,167 +8871,6 @@ pub fn last_user_question(conversation: &[ConversationTurn]) -> Option<String> {
 /// deje de ser críptico. Testeable.
 pub fn over_budget_hint(budget: usize) -> String {
     format!("Acortá un poco para enviar (límite {budget}).")
-}
-
-/// Decide si una respuesta merece el botón "Explícame paso a paso".
-/// Solo para contenido complejo: headings, math, tablas o cuerpo largo.
-/// `has_animation` cubre la explicación matemática con animación (Z3): la
-/// animación ya es la marcha visual, así que la matemática en prosa o en
-/// bloque alcanza aunque el texto sea corto y sin marcha escrita.
-fn should_show_stepwise(
-    blocks: &[AssistantMessageBlock],
-    content: &str,
-    has_animation: bool,
-) -> bool {
-    if blocks.is_empty() {
-        return content.chars().count() > 400;
-    }
-    let has_heading = blocks
-        .iter()
-        .any(|b| matches!(b, AssistantMessageBlock::Heading { .. }));
-    let has_math = blocks.iter().any(|b| {
-        matches!(
-            b,
-            AssistantMessageBlock::DisplayMath(_) | AssistantMessageBlock::Table(_)
-        )
-    });
-    let has_code = blocks
-        .iter()
-        .any(|b| matches!(b, AssistantMessageBlock::Code { .. }));
-    let long = content.chars().count() > 680;
-    let lower = content.to_lowercase();
-    let is_teaching_topic = lower.contains("integral")
-        || lower.contains("derivada")
-        || lower.contains("taylor")
-        || lower.contains("pitágoras")
-        || lower.contains("pitagoras")
-        || lower.contains("límite")
-        || lower.contains("limite")
-        || lower.contains("función")
-        || lower.contains("funcion");
-    // Para temas de enseñanza, basta con tener math para ofrecer paso a paso
-    if is_teaching_topic && has_math {
-        return true;
-    }
-    // Z3: explicación matemática CON animación habilita aunque sea corta y
-    // sin bloques ricos ni marcha escrita: la animación es la marcha visual
-    // (antes este caso quedaba deshabilitado).
-    if has_animation && (has_math || is_teaching_topic || mentions_math_text(&lower)) {
-        return true;
-    }
-    // R1: explicación con marcha (pasos/proceso a aplicar) + matemática
-    // habilita aunque sea corta y sin bloques ricos: es justo el caso de una
-    // explicación real ("En 4D Grafito hace una proyección por CPU…").
-    // Saludos vacíos ("hola") no mencionan ni marcha ni matemática.
-    if mentions_step_march(&lower)
-        && (has_math
-            || has_code
-            || mentions_math_text(&lower)
-            || blocks.len() >= 2
-            || content.chars().count() > 200)
-    {
-        return true;
-    }
-    // Muy estricto para el resto: solo para explicaciones largas y estructuradas. Evita botón en respuestas puntuales 3D/4D
-    let signals = has_heading as u8
-        + has_math as u8
-        + has_code as u8
-        + (blocks.len() >= 4) as u8
-        + (long as u8);
-    signals >= 3
-}
-
-/// Menciona una marcha a seguir (pasos, proceso, orden de aplicación).
-///
-/// Puro, minúsculas ya normalizadas por el llamador. Acotado a pie a
-/// expresiones de procedimiento para no habilitar en saludos o preguntas
-/// sueltas sin desarrollo.
-fn mentions_step_march(lower: &str) -> bool {
-    [
-        "paso a paso",
-        "paso ",
-        "pasos",
-        "proceso",
-        "procedimiento",
-        "primero",
-        "después",
-        "despues",
-        "luego",
-        "elegí",
-        "elegis",
-        "elegi ",
-        "aplicarla",
-        "aplicalo",
-        "aplicalas",
-        "seguí",
-        "seguis",
-        "seguí ",
-        "arrastrá",
-        "arrastra",
-        "activá",
-        "activa ",
-    ]
-    .iter()
-    .any(|cue| lower.contains(cue))
-}
-
-/// Menciona matemática en prosa (sin necesidad de bloque rico).
-///
-/// Cubre dimensiones/siglas del dominio (`4d`, `cpu`, `proyección`) y
-/// vocabulario matemático más símbolos sueltos. Puro.
-fn mentions_math_text(lower: &str) -> bool {
-    const CUES: &[&str] = &[
-        "proyecci",
-        "4d",
-        "3d",
-        "2d",
-        "cpu",
-        "matriz",
-        "vector",
-        "funci",
-        "deriv",
-        "integr",
-        "taylor",
-        "pitág",
-        "pitag",
-        "límite",
-        "limite",
-        "gráf",
-        "graf",
-        "fórm",
-        "formul",
-        "cálc",
-        "calc",
-        "ecuaci",
-        "geometr",
-        "dimensi",
-        "matemá",
-        "matema",
-        "trigonom",
-        "seno",
-        "coseno",
-        "tangente",
-        "pendiente",
-        "raíz",
-        "raiz",
-        "fracci",
-        "polinom",
-        "cociente",
-        "teorema",
-        "demostra",
-        "ejercicio",
-        "resolv",
-        "esfera",
-        "cubo",
-        "cono",
-        "cilindro",
-    ];
-    if CUES.iter().any(|cue| lower.contains(cue)) {
-        return true;
-    }
-    ["√", "∫", "∑", "≈", "⇒", "→", "∞", "≠", "≤", "≥", "±"]
-        .iter()
-        .any(|symbol| lower.contains(symbol))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9091,125 +8952,41 @@ fn draw_conversation_turn(
                 turn_index,
                 cache,
             );
-            // Integración de animación dentro del mensaje: progreso o media del último turno.
-            // Gate por dueño (P0): el slot vivo es global y no sabe a qué
-            // turno pertenece. El último turno solo lo usa si no tiene media
-            // propia; si ya tiene `turn.media` (historia), muestra la suya y
-            // jamás el slot. El slot nunca contradice el turno visible.
-            if is_last {
-                match live_slot_kind_for_last_turn(
-                    turn.media.is_some(),
-                    state.anim_progress,
-                    state.media.is_some(),
-                ) {
-                    LiveSlotKind::Progress => {
-                        ui.add_space(SPACE_SM);
-                        retain_first_assistant_action(
-                            &mut action,
-                            draw_animation_progress(ui, state, visuals),
-                        );
-                    }
-                    LiveSlotKind::Slot => {
-                        ui.add_space(SPACE_SM);
-                        retain_first_assistant_action(&mut action, draw_media_card(ui, state));
-                    }
-                    LiveSlotKind::History => {
-                        ui.add_space(SPACE_SM);
-                        retain_first_assistant_action(
-                            &mut action,
-                            draw_history_mini_card(ui, state, turn_index, turn),
-                        );
-                    }
-                    LiveSlotKind::Hidden => {}
+            // Integración de animación dentro del mensaje, por turno y por
+            // dueño: el turno dueño del slot dibuja el player
+            // (`draw_media_card` con toolbar/slider); el resto con `media`
+            // propia dibuja su mini-card con [Ver de nuevo]. Ningún turno que
+            // no sea dueño dibuja el slot (anti "tarjeta vieja bajo prosa
+            // nueva"). El "Ver de nuevo" del dueño no aplica: ya tiene el
+            // player; en mini-cards de otros turnos queda como está.
+            let last_idx = state.conversation.len().saturating_sub(1);
+            match live_slot_kind_for_turn(
+                turn_index,
+                last_idx,
+                turn.media.is_some(),
+                state.anim_progress,
+                state.media.is_some(),
+                state.media_owner_turn(),
+            ) {
+                LiveSlotKind::Progress => {
+                    ui.add_space(SPACE_SM);
+                    retain_first_assistant_action(
+                        &mut action,
+                        draw_animation_progress(ui, state, visuals),
+                    );
                 }
-            } else if turn_has_history_mini_card(turn_index, state.conversation.len(), turn) {
-                // P0-UI historial Thumb+Replay: mini-card 96px + [Ver de nuevo].
-                ui.add_space(SPACE_SM);
-                retain_first_assistant_action(
-                    &mut action,
-                    draw_history_mini_card(ui, state, turn_index, turn),
-                );
-            }
-            // Paso a paso: siempre visible, nunca mudo. Si el contenido no es
-            // complejo, el botón queda deshabilitado con su motivo (tooltip +
-            // texto) en vez de desaparecer sin explicación.
-            let blocks_for_gate = cache.blocks(&turn.content);
-            // Z3: el turno con animación (en curso o ya instalada) habilita
-            // el paso a paso si la explicación trae matemática. La media
-            // propia del turno cuenta (el slot global ya no manda solo: con
-            // gate por dueño el turno con historia habilita aunque el slot
-            // esté vacío).
-            let has_animation =
-                turn.media.is_some() || state.anim_progress || state.media.is_some();
-            let stepwise_reason =
-                stepwise_disabled_reason(&blocks_for_gate, &turn.content, has_animation);
-            ui.add_space(SPACE_SM);
-            // Botón ghost Scandinavian integrado, full-width dentro del flujo
-            let stepwise_btn = || {
-                egui::Button::new(
-                    egui::RichText::new("Explícame paso a paso")
-                        .color(theme.accent)
-                        .size(TYPE_XS)
-                        .strong(),
-                )
-                .rounding(crate::tokens::RADIUS_MD)
-                .fill(theme.accent.gamma_multiply(0.08))
-                .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)))
-            };
-            // Ocupa todo el ancho disponible, no clamp — aprovecha espacio
-            if let Some(reason) = stepwise_reason {
-                ui.add_enabled_ui(false, |ui| {
-                    ui.add_sized(egui::vec2(ui.available_width(), 28.0), stepwise_btn())
-                        .on_disabled_hover_text(reason);
-                });
-                ui.add_space(SPACE_XS);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(reason)
-                            .color(theme.text_tertiary)
-                            .size(TYPE_2XS)
-                            .weak(),
-                    )
-                    .wrap(),
-                );
-            } else if ui
-                .add_sized(egui::vec2(ui.available_width(), 28.0), stepwise_btn())
-                .on_hover_text("Abre enseñanza interactiva con pizarra y gráfica")
-                .clicked()
-            {
-                let topic = turn
-                    .content
-                    .lines()
-                    .next()
-                    .unwrap_or("concepto")
-                    .chars()
-                    .take(60)
-                    .collect::<String>();
-                action = Some(AssistantUiAction::ExplainStepwise(topic));
-            }
-            // B7 — Andamiar: siempre habilitado, nunca mudo. Genera un
-            // ejercicio del tema en background y muestra la tarjeta con
-            // corrección + próximo paso.
-            ui.add_space(SPACE_XS);
-            let andamiar_btn = || {
-                egui::Button::new(
-                    egui::RichText::new("Andamiar")
-                        .color(theme.accent)
-                        .size(TYPE_XS)
-                        .strong(),
-                )
-                .rounding(crate::tokens::RADIUS_MD)
-                .fill(theme.accent.gamma_multiply(0.08))
-                .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)))
-            };
-            if ui
-                .add_sized(egui::vec2(ui.available_width(), 28.0), andamiar_btn())
-                .on_hover_text("Genero un ejercicio del tema y lo corregimos juntos")
-                .clicked()
-            {
-                action = Some(AssistantUiAction::RequestExercise {
-                    topic: andamiar_topic_for_content(&turn.content),
-                });
+                LiveSlotKind::Slot => {
+                    ui.add_space(SPACE_SM);
+                    retain_first_assistant_action(&mut action, draw_media_card(ui, state));
+                }
+                LiveSlotKind::History => {
+                    ui.add_space(SPACE_SM);
+                    retain_first_assistant_action(
+                        &mut action,
+                        draw_history_mini_card(ui, state, turn_index, turn),
+                    );
+                }
+                LiveSlotKind::Hidden => {}
             }
         });
     // A11Y live-region (D1): anuncia la última respuesta del asistente sobre
@@ -11608,24 +11385,6 @@ mod tests {
     }
 
     #[test]
-    fn b7_andamiar_topic_primera_linea_acotada_con_fallback() {
-        assert_eq!(
-            andamiar_topic_for_content("La derivada de x^2\nmás texto largo"),
-            "La derivada de x^2"
-        );
-        assert_eq!(andamiar_topic_for_content(""), ANDAMIAR_DEFAULT_TOPIC);
-        assert_eq!(
-            andamiar_topic_for_content("   \n  "),
-            ANDAMIAR_DEFAULT_TOPIC
-        );
-        let largo = "a".repeat(200);
-        assert_eq!(andamiar_topic_for_content(&largo).chars().count(), 60);
-        // El fallback siempre resuelve a un LO real del currículum.
-        let los = grafito_pedagogy::Curriculum::find_for_concept(ANDAMIAR_DEFAULT_TOPIC);
-        assert!(los.iter().any(|lo| lo.id == "am1-der"));
-    }
-
-    #[test]
     fn w3_greeting_answer_ofrece_siguiente_paso() {
         for saludo in ["hola", "Hola", "¡hola!", "buenas", "qué tal"] {
             let respuesta = greeting_answer(saludo).expect("saludo con camino");
@@ -13600,33 +13359,124 @@ mod tests {
 
     #[test]
     fn live_slot_por_dueno_nunca_contradicte_turn_media() {
-        // P0 tarjeta vieja bajo prosa nueva: el último turno solo usa el
-        // slot vivo si no tiene media propia; con media propia muestra la
-        // suya (History), aunque haya progreso/slot globales en vuelo.
+        // P0 tarjeta vieja bajo prosa nueva: sin dueño, el último turno solo
+        // usa el slot vivo si no tiene media propia; con media propia muestra
+        // la suya (History), aunque haya progreso/slot globales en vuelo.
+        let last = 3;
         assert_eq!(
-            live_slot_kind_for_last_turn(false, false, false),
+            live_slot_kind_for_turn(last, last, false, false, false, None),
             LiveSlotKind::Hidden
         );
         assert_eq!(
-            live_slot_kind_for_last_turn(false, true, false),
+            live_slot_kind_for_turn(last, last, false, true, false, None),
             LiveSlotKind::Progress
         );
         assert_eq!(
-            live_slot_kind_for_last_turn(false, false, true),
+            live_slot_kind_for_turn(last, last, false, false, true, None),
             LiveSlotKind::Slot
         );
         assert_eq!(
-            live_slot_kind_for_last_turn(false, true, true),
+            live_slot_kind_for_turn(last, last, false, true, true, None),
             LiveSlotKind::Progress,
             "progreso manda sobre slot quieto"
         );
         for (progreso, slot) in [(false, false), (true, false), (false, true), (true, true)] {
             assert_eq!(
-                live_slot_kind_for_last_turn(true, progreso, slot),
+                live_slot_kind_for_turn(last, last, true, progreso, slot, None),
                 LiveSlotKind::History,
-                "con media propia (progreso={progreso}, slot={slot}): su mini-card, jamás el slot"
+                "con media propia sin dueño (progreso={progreso}, slot={slot}): su mini-card, jamás el slot"
             );
         }
+        // Sin dueño, un turno NO último sin media propia jamás toca el slot.
+        for (progreso, slot) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                live_slot_kind_for_turn(1, last, false, progreso, slot, None),
+                LiveSlotKind::Hidden,
+                "no-owner no-último sin media: nada (progreso={progreso}, slot={slot})"
+            );
+        }
+    }
+
+    #[test]
+    fn slot_owner_dibuja_player_aunque_tenga_media_propia() {
+        // Bug replay muerto: al terminar una animación el último turno con
+        // `media` propia mostraba su mini-card y "Ver de nuevo" no hacía
+        // nada visible (el slot reinjectado se ignoraba). Con dueño, ese
+        // turno dibuja el player (Slot/Progress) en vez de History.
+        let last = 3;
+        assert_eq!(
+            live_slot_kind_for_turn(last, last, true, false, true, Some(last)),
+            LiveSlotKind::Slot,
+            "owner último con media propia + slot reinjectado: player"
+        );
+        assert_eq!(
+            live_slot_kind_for_turn(last, last, true, true, true, Some(last)),
+            LiveSlotKind::Progress,
+            "owner último en curso: progreso"
+        );
+        // Replay de un turno viejo: el owner viejo dibuja el player aunque ya
+        // no sea el último.
+        assert_eq!(
+            live_slot_kind_for_turn(1, last, true, false, true, Some(1)),
+            LiveSlotKind::Slot,
+            "owner viejo con media propia + slot: player (replay)"
+        );
+        // El resto con media propia sigue en mini-card con su botón.
+        assert_eq!(
+            live_slot_kind_for_turn(1, last, true, false, true, Some(last)),
+            LiveSlotKind::History,
+            "no-owner con media: mini-card, no pierde su botón"
+        );
+        // Dueño ajeno al turno: el último sin media propia NO toca el slot.
+        assert_eq!(
+            live_slot_kind_for_turn(last, last, false, false, true, Some(1)),
+            LiveSlotKind::Hidden,
+            "slot con dueño viejo: el último no lo dibuja"
+        );
+        // Dueño sin slot ni progreso: nada (prosa sola, sin player fantasma).
+        assert_eq!(
+            live_slot_kind_for_turn(last, last, true, false, false, Some(last)),
+            LiveSlotKind::Hidden
+        );
+    }
+
+    #[test]
+    fn media_owner_set_get_y_reset_en_set_media() {
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        assert_eq!(state.media_owner_turn(), None);
+        state.set_media_owner_turn(Some(3));
+        assert_eq!(state.media_owner_turn(), Some(3));
+        state.set_media_owner_turn(None);
+        assert_eq!(state.media_owner_turn(), None);
+        // `set_media` resetea: la app lo setea después cuando corresponde.
+        state.set_media_owner_turn(Some(1));
+        let frame = egui::ColorImage::new([2, 2], egui::Color32::WHITE);
+        state.set_media(
+            Some(AssistantMedia {
+                title: "nueva".into(),
+                frames: vec![frame],
+            }),
+            &context,
+        );
+        assert_eq!(state.media_owner_turn(), None);
+    }
+
+    #[test]
+    fn botones_paso_a_paso_y_andamiar_eliminados_de_fuentes() {
+        // El usuario pidió eliminarlos: ni el draw ni teaching los nombran.
+        // Los needles se arman por partes para que este mismo test no
+        // autodetecte sus literales en `include_str!`.
+        let stepwise = ["Explícame", "paso a paso"].join(" ");
+        let andamiar = ["Andami", "ar"].join("");
+        let ui = include_str!("assistant.rs");
+        assert!(!ui.contains(&stepwise), "botón paso a paso eliminado");
+        assert!(!ui.contains(&andamiar), "botón andamiar eliminado");
+        let teaching = include_str!("teaching.rs");
+        assert!(
+            !teaching.contains(&stepwise),
+            "teaching sin botón paso a paso"
+        );
     }
 
     #[test]
@@ -13642,9 +13492,9 @@ mod tests {
         assert_eq!(history_mini_card_indices(&conv), vec![1]);
         let ultimo = &conv[3];
         assert_eq!(
-            live_slot_kind_for_last_turn(ultimo.media.is_some(), true, true),
+            live_slot_kind_for_turn(3, 3, ultimo.media.is_some(), true, true, None),
             LiveSlotKind::History,
-            "el último con media propia ignora progreso/slot globales"
+            "el último con media propia y sin dueño ignora progreso/slot globales"
         );
         assert!(turn_has_history_mini_card(1, conv.len(), &conv[1]));
     }
@@ -15508,17 +15358,6 @@ mod tests {
     }
 
     #[test]
-    fn stepwise_reason_is_never_silent() {
-        // Bug 4: deshabilitado sin explicación → motivo; complejo → None.
-        let short = parse_assistant_blocks("Sí, es correcto.");
-        assert!(stepwise_disabled_reason(&short, "Sí, es correcto.", false).is_some());
-        let complex = parse_assistant_blocks(
-            "# Derivada\n\n$$\\frac{d}{dx} x^2$$\n\n```grafito\nFunction[x^2]\n```\n\nTexto largo de cierre con desarrollo suficiente para superar el umbral de longitud mínima exigida por el gate de contenido complejo del asistente matemático.",
-        );
-        assert_eq!(stepwise_disabled_reason(&complex, "x", false), None);
-    }
-
-    #[test]
     fn truncated_renderer_degrades_gracefully() {
         // Bug 6: cercas sin cerrar, tabla a medio partir, bold sin cerrar.
         // Jamás pánico, jamás corte a mitad de scalar UTF-8. La cerca sin
@@ -15659,44 +15498,6 @@ mod tests {
         assert_eq!(inline_plain_text("__doble__"), "doble");
         // `$` solo se conserva (puede ser moneda), no es marcador a pelar.
         assert!(inline_plain_text("cuesta $5").contains('$'));
-    }
-
-    #[test]
-    fn r1_stepwise_enables_on_real_math_explanation_but_not_greetings() {
-        // Bug R1.2: "Explícame paso a paso" deshabilitado en explicación real.
-        let content = "Vamos con calma, paso a paso. En 4D Grafito hace una proyección por CPU a 3D/2D, vos elegís si aplicarla:";
-        let blocks = parse_assistant_blocks(content);
-        assert_eq!(
-            stepwise_disabled_reason(&blocks, content, false),
-            None,
-            "marcha + matemática debe habilitar"
-        );
-        // Negativo: saludos vacíos siguen disabled con motivo (nunca mudo).
-        let hola = parse_assistant_blocks("hola");
-        assert!(stepwise_disabled_reason(&hola, "hola", false).is_some());
-        let empty: Vec<AssistantMessageBlock> = Vec::new();
-        assert!(stepwise_disabled_reason(&empty, "", false).is_some());
-    }
-
-    #[test]
-    fn z3_stepwise_enables_math_explanation_with_animation() {
-        // Z3: explicación matemática corta CON animación habilita aunque no
-        // traiga marcha escrita ni bloques ricos (la animación es la marcha
-        // visual). Sin animación el mismo contenido sigue deshabilitado.
-        let content = "Mirá cómo se mueve la tangente.\n\n$$y = 2x + 1$$";
-        let blocks = parse_assistant_blocks(content);
-        assert!(
-            stepwise_disabled_reason(&blocks, content, false).is_some(),
-            "sin animación sigue deshabilitado: {blocks:?}"
-        );
-        assert_eq!(
-            stepwise_disabled_reason(&blocks, content, true),
-            None,
-            "matemática + animación debe habilitar"
-        );
-        // Sin matemática ni siquiera la animación habilita (no es explicación).
-        let hola = parse_assistant_blocks("hola");
-        assert!(stepwise_disabled_reason(&hola, "hola", true).is_some());
     }
 
     #[test]

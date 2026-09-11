@@ -1990,6 +1990,11 @@ pub(crate) struct AssistantRuntime {
     /// T1 — dueño del job `anim_ia_job`: índice FUTURO del turno asistente
     /// (`len` al spawnear, el `complete_local_request` del drain lo crea).
     pub(crate) anim_ia_owner: Option<usize>,
+    /// W2 — replay del historial (`ReplayMedia{turn_idx}`): el turno viejo
+    /// reinjectado por el camino single con `historiar=false`. El drain
+    /// publica el slot vivo con dueño = este turno (no el último);
+    /// `None` = job normal (dueño = último, puerta `es_dueno_vivo`).
+    pub(crate) anim_replay_owner: Option<usize>,
     /// Export a PDF matemático en vuelo (diálogo, formato `Pdf`, exige LaTeX).
     /// Fuente = título de la card (hilo worker, `LatexMissing` honesto).
     pdf_export_job: Option<PdfExportJob>,
@@ -2429,8 +2434,11 @@ impl AssistantRuntime {
             hubo = true;
         }
         // T1: el cancel limpia los dueños (sin job no hay drain que los tome).
+        // W2: el marcador de replay cae con ellos (un job normal posterior
+        // jamás debe drenar por la rama del turno viejo).
         self.anim_owner = None;
         self.anim_ia_owner = None;
+        self.anim_replay_owner = None;
         // P2: la voz en vuelo muere con el turno; la persistida solo cae si
         // había media viva de animación (`tenia_anim` de arriba: un cancel
         // solo-remoto no borra la narración del guion que sigue en pantalla).
@@ -3533,6 +3541,9 @@ impl GrafitoApp {
                     // T1: el dueño se toma al resolver (Empty conserva
                     // job + dueño para el próximo poll).
                     let owner = self.assistant_runtime.anim_owner.take();
+                    // W2: el marcador de replay se consume con el dueño (un
+                    // solo drain lo ve; el próximo submit lo re-taggea).
+                    let replay_owner = self.assistant_runtime.anim_replay_owner.take();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     if was_cancelled {
@@ -3544,6 +3555,38 @@ impl GrafitoApp {
                         self.assistant_runtime.anim_voiceover_rx = None;
                         self.assistant_runtime.ultimo_voiceover = None;
                         self.notify("Generación cancelada.", ToastKind::Info);
+                    } else if let Some(replay_idx) = replay_owner {
+                        // W2 — replay del historial Thumb+Replay: el dueño es
+                        // el turno viejo, no el último. Fail-closed: índice
+                        // válido + turno asistente con su mini-card (si el
+                        // trim lo movió o cayó, descarte honesto sin tocar
+                        // el slot vigente).
+                        let vive =
+                            self.assistant
+                                .conversation
+                                .get(replay_idx)
+                                .is_some_and(|turno| {
+                                    turno.role == ConversationRole::Assistant
+                                        && turno.media.is_some()
+                                });
+                        if vive {
+                            // La media reinyectada no narra (paridad con el
+                            // single: suelta la voz en vuelo y no persiste
+                            // narración vieja sobre frames nuevos).
+                            self.assistant_runtime.anim_voiceover_rx = None;
+                            self.assistant_runtime.ultimo_voiceover = None;
+                            self.assistant.set_media(Some(media), ctx);
+                            // `set_media` resetea el dueño a `None`: se
+                            // setea DESPUÉS para que el player viva en el
+                            // turno viejo (mini-card → player en ese turno).
+                            self.assistant.set_media_owner_turn(Some(replay_idx));
+                            self.notify("Animación lista.", ToastKind::Success);
+                        } else {
+                            self.notify(
+                                "Se descartó una animación desactualizada.",
+                                ToastKind::Info,
+                            );
+                        }
                     } else if !es_dueno_vivo(&self.assistant.conversation, owner) {
                         // Stale (reemplazo o pregunta nueva en el medio):
                         // se descarta sin contaminar ni revivir el slot.
@@ -3614,6 +3657,10 @@ impl GrafitoApp {
                                 .take()
                                 .and_then(|voz_rx| voz_rx.try_recv().ok());
                             self.assistant.set_media(Some(media), ctx);
+                            // `set_media` resetea el dueño a `None`: se
+                            // setea DESPUÉS para que el player viva en el
+                            // turno dueño (último, re-chequeado arriba).
+                            self.assistant.set_media_owner_turn(owner);
                             self.notify("Animación lista.", ToastKind::Success);
                         } else {
                             self.notify(
@@ -3628,6 +3675,9 @@ impl GrafitoApp {
                     let was_cancelled =
                         job.cancellation.is_cancelled() || error.to_lowercase().contains("cancel");
                     let owner = self.assistant_runtime.anim_owner.take();
+                    // W2: se consume el marcador aunque falle (un replay
+                    // fallido no deja marca para el próximo job normal).
+                    let replay_owner = self.assistant_runtime.anim_replay_owner.take();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     // P2: el guion fallido no deja narración (la media se
@@ -3636,6 +3686,13 @@ impl GrafitoApp {
                     self.assistant_runtime.ultimo_voiceover = None;
                     if was_cancelled {
                         self.notify("Generación cancelada.", ToastKind::Info);
+                    } else if replay_owner.is_some() {
+                        // W2 — replay fallido: el turno viejo conserva su
+                        // mini-card y el slot queda como estaba (no se borra
+                        // la media vigente de otro turno).
+                        let message = format!("No se pudo repetir la animación: {error}");
+                        self.notify(&message, ToastKind::Error);
+                        self.show_assistant_error(message);
                     } else {
                         // T1: el fallo queda anexado al turno dueño además
                         // del banner global (no flota huérfano).
@@ -3651,6 +3708,9 @@ impl GrafitoApp {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     let was_cancelled = job.cancellation.is_cancelled();
                     let owner = self.assistant_runtime.anim_owner.take();
+                    // W2: se consume el marcador (hilo muerto = replay
+                    // muerto, sin marca para el próximo job).
+                    let replay_owner = self.assistant_runtime.anim_replay_owner.take();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     // P2: sin hilo no hay voz en camino; la persistida cae
@@ -3658,15 +3718,23 @@ impl GrafitoApp {
                     self.assistant_runtime.anim_voiceover_rx = None;
                     self.assistant_runtime.ultimo_voiceover = None;
                     if !was_cancelled {
-                        anexar_error_a_dueno(
-                            &mut self.assistant.conversation,
-                            owner,
-                            "la generación terminó inesperadamente antes de responder",
-                        );
-                        self.assistant.set_media(None, ctx);
-                        self.show_assistant_error(
-                            "La generación terminó inesperadamente antes de responder.",
-                        );
+                        if replay_owner.is_some() {
+                            // W2 — replay sin hilo: el turno viejo conserva
+                            // su mini-card; el slot queda como estaba.
+                            self.show_assistant_error(
+                                "No se pudo repetir la animación: la generación terminó inesperadamente.",
+                            );
+                        } else {
+                            anexar_error_a_dueno(
+                                &mut self.assistant.conversation,
+                                owner,
+                                "la generación terminó inesperadamente antes de responder",
+                            );
+                            self.assistant.set_media(None, ctx);
+                            self.show_assistant_error(
+                                "La generación terminó inesperadamente antes de responder.",
+                            );
+                        }
                     }
                     ctx.request_repaint();
                 }
@@ -3747,6 +3815,9 @@ impl GrafitoApp {
                                 self.assistant_runtime.anim_voiceover_rx = None;
                                 self.assistant_runtime.ultimo_voiceover = None;
                                 self.assistant.set_media(Some(render.media), ctx);
+                                // `set_media` resetea el dueño a `None`: se
+                                // setea DESPUÉS (dueño = turno recién creado).
+                                self.assistant.set_media_owner_turn(owner);
                                 if let Some(aviso) = render.aviso {
                                     self.notify(aviso, ToastKind::Info);
                                 } else {
@@ -4802,14 +4873,6 @@ impl GrafitoApp {
                 }
                 ctx.request_repaint();
             }
-            AssistantUiAction::ExplainStepwise(topic) => {
-                // teaching_ui.start ya inicia el orchestrator con el template del primer paso
-                self.teaching_ui.start(&topic);
-                self.notify(format!("Enseñanza iniciada: {topic}"), ToastKind::Info);
-            }
-            AssistantUiAction::RequestExercise { topic } => {
-                self.iniciar_ejercicio(ctx, &topic);
-            }
             AssistantUiAction::PickExportAudio => self.elegir_audio_para_export(ctx),
             AssistantUiAction::ClearExportAudio => {
                 self.assistant.export_dialog_clear_audio();
@@ -5230,6 +5293,10 @@ impl GrafitoApp {
     /// Genera una animación didáctica con el motor externo y la reproduce en el chat.
     /// B7 — Arranca el ciclo de ejercicio: tema crudo → concepto → job en
     /// background → tarjeta visible bajo el chat. Sin I/O en la UI.
+    ///
+    /// Tope local del tema cuando el crudo viene vacío (W1 borró el const
+    /// compartido `ANDAMIAR_DEFAULT_TOPIC` de la Piel; el fallback vive acá).
+    const EJERCICIO_TEMA_POR_DEFECTO: &str = "derivada";
     fn iniciar_ejercicio(&mut self, ctx: &egui::Context, tema_crudo: &str) {
         // D2 lockdown: el tutor también es ayuda en examen.
         if self.exam_blocks("Ejercicios") {
@@ -5242,7 +5309,7 @@ impl GrafitoApp {
                 .take(crate::teaching_ui::MAX_TEMA_CHARS)
                 .collect();
             if recorte.is_empty() {
-                grafito_ui::assistant::ANDAMIAR_DEFAULT_TOPIC.to_string()
+                Self::EJERCICIO_TEMA_POR_DEFECTO.to_string()
             } else {
                 recorte
             }
@@ -6563,6 +6630,8 @@ impl GrafitoApp {
         });
         self.assistant.anim_progress = true;
         // T1: dueño FUTURO (el drain lo crea con `complete_local_request`).
+        // W2: un job IA nunca es replay: el marcador queda en `None`.
+        self.assistant_runtime.anim_replay_owner = None;
         self.assistant_runtime.anim_ia_owner = Some(self.assistant.conversation.len());
         // F2-jobs: `cancela_turno_anim` de arriba ya soltó el slot.
         debug_assert!(self.assistant_runtime.anim_ia_job.is_none());
@@ -6879,6 +6948,9 @@ impl GrafitoApp {
         });
         self.assistant.anim_progress = true;
         // T1: el guion también drena por dueño (`len-1`, igual que el single).
+        // W2: submit normal (no replay): el marcador queda en `None` para
+        // que el drain use la puerta del último turno.
+        self.assistant_runtime.anim_replay_owner = None;
         self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
         // F2-jobs: reemplazo siempre tras `cancela_turno_anim` (slot libre).
         debug_assert!(self.assistant_runtime.anim_job.is_none());
@@ -7198,6 +7270,10 @@ impl GrafitoApp {
         };
         // T1: tag del dueño (`len-1`: el turno asistente recién completado;
         // `None` honesto en conversación vacía → el drain descarta).
+        // W2: submit normal (no replay): el marcador queda en `None`. El
+        // replay (`replay_assistant_history_media`) lo re-taggea a su turno
+        // viejo DESPUÉS de este submit.
+        self.assistant_runtime.anim_replay_owner = None;
         self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
         // F2-jobs: reemplazo siempre tras `cancela_turno_anim` (slot libre).
         debug_assert!(self.assistant_runtime.anim_job.is_none());
@@ -7242,6 +7318,13 @@ impl GrafitoApp {
             return;
         };
         self.run_assistant_animation_with_history(ctx, &pedido.template, &pedido.concept, false);
+        // W2 — el submit taggea dueño=len-1; el replay es del turno viejo:
+        // se re-taggea dueño + marcador solo si el worker arrancó (con
+        // examen el submit retorna sin job y no se toca nada).
+        if self.assistant_runtime.anim_job.is_some() {
+            self.assistant_runtime.anim_owner = Some(turn_idx);
+            self.assistant_runtime.anim_replay_owner = Some(turn_idx);
+        }
     }
 
     /// Reproduce una playlist F2b ("X y después Y") como UNA media (scrub total).
@@ -7451,6 +7534,8 @@ impl GrafitoApp {
         // P0-app: la playlist multi-step no historía (no reinyectable
         // honesta por el camino single): solo slot vivo, sin mini-card.
         // T1: igual drena por dueño (`len-1`).
+        // W2: submit normal (no replay): el marcador queda en `None`.
+        self.assistant_runtime.anim_replay_owner = None;
         self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
         // F2-jobs: reemplazo siempre tras `cancela_turno_anim` (slot libre).
         debug_assert!(self.assistant_runtime.anim_job.is_none());
@@ -9805,6 +9890,85 @@ mod tests {
         // Índice fuera de rango o sin media: `None` honesto (aviso, sin hilo).
         assert!(crate::anim_ui::history_replay_request(len + 1, len, guardada.as_ref()).is_none());
         assert!(crate::anim_ui::history_replay_request(0, len, None).is_none());
+    }
+
+    #[test]
+    fn w2_replay_punta_a_punta_setea_dueno_en_turno_viejo() {
+        // W2: dos animaciones reales + replay de la vieja por el drain de
+        // verdad (`sync_assistant_for_frame`). Pinea: la vieja conserva su
+        // mini-card, el job normal deja dueño=última, y el replay deja
+        // dueño=vieja con el player allí (no en la última).
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        let drenar = |app: &mut crate::app::GrafitoApp, ctx: &egui::Context| {
+            let inicio = std::time::Instant::now();
+            while app.assistant_runtime.anim_job.is_some() {
+                app.sync_assistant_for_frame(ctx);
+                assert!(
+                    inicio.elapsed() < std::time::Duration::from_secs(60),
+                    "el hilo nativo debe publicar"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        // Turno 1: animación normal → dueño = última (0).
+        app.assistant
+            .complete_local_request("la derivada como pendiente".to_string());
+        app.run_assistant_animation_with(&ctx, "derivative-slope", "derivada");
+        drenar(&mut app, &ctx);
+        assert!(app.assistant.media.is_some(), "slot con media vieja");
+        assert_eq!(app.assistant.media_owner_turn(), Some(0));
+        assert!(
+            app.assistant.conversation[0].media.is_some(),
+            "turno viejo con mini-card"
+        );
+        // Turno 2: otra animación normal → dueño = última (1), la vieja
+        // conserva su mini-card.
+        app.assistant
+            .complete_local_request("el área bajo la curva".to_string());
+        app.run_assistant_animation_with(&ctx, "integral-area", "integral de x");
+        drenar(&mut app, &ctx);
+        assert!(app.assistant.media.is_some(), "slot con media nueva");
+        assert_eq!(
+            app.assistant.media_owner_turn(),
+            Some(1),
+            "sin replay el player queda en la última"
+        );
+        assert!(
+            app.assistant.conversation[0].media.is_some(),
+            "la vieja conserva su mini-card"
+        );
+        assert!(
+            app.assistant.conversation[1].media.is_some(),
+            "la última tiene su mini-card"
+        );
+        // Replay de la vieja: reinjecta por el camino single y el drain
+        // setea dueño=0 (el player va a ESE turno, no a la última).
+        app.replay_assistant_history_media(&ctx, 0);
+        assert!(
+            app.assistant_runtime.anim_job.is_some(),
+            "el replay spawnea worker"
+        );
+        assert_eq!(app.assistant_runtime.anim_replay_owner, Some(0));
+        drenar(&mut app, &ctx);
+        assert!(app.assistant.media.is_some(), "slot reinyectado");
+        assert_eq!(
+            app.assistant.media_owner_turn(),
+            Some(0),
+            "tras el replay el player vive en el turno viejo"
+        );
+        assert!(
+            app.assistant_runtime.anim_replay_owner.is_none(),
+            "el marcador se consume en el drain"
+        );
+        assert!(
+            app.assistant.conversation[0].media.is_some(),
+            "la vieja sigue con mini-card"
+        );
+        assert!(
+            app.assistant.conversation[1].media.is_some(),
+            "la última sigue con mini-card"
+        );
     }
 
     #[test]
