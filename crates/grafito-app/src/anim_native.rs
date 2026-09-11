@@ -7126,12 +7126,15 @@ mod tests {
     }
     #[test]
     fn detect_conocidos_no_caen_a_fallback() {
-        // Regresión T2: cada concepto conocido resuelve a su plantilla con
-        // renderer propio; ninguno cae a `universal`.
+        // Regresión T2 + R6d: cada concepto conocido resuelve a su plantilla
+        // con renderer propio; los catch-alls sin token explícito
+        // ("probabilidad binomial" sin histograma/densidad, "vector campo"
+        // sin conforme/complejo) van al `universal` honesto, jamás a curva
+        // falsa (ver `template_for_concept` en el protocolo).
         for (concepto, esperado) in [
             ("teorema de pitágoras", "pitagoras"),
             ("integral área bajo curva", "integral-area"),
-            ("probabilidad binomial n=10", "integral-area"),
+            ("probabilidad binomial n=10", "universal"),
             ("serie de Taylor de sin(x)", "taylor-series"),
             ("mapeo conforme complejo", "conformal-map"),
             ("derivada pendiente tangente", "derivative-slope"),
@@ -7144,7 +7147,7 @@ mod tests {
             ("ecuación cuadrática", "derivative-slope"),
             ("círculo unitario", "taylor-series"),
             ("elipse cónica", "conformal-map"),
-            ("vector campo F(x,y)=(-y,x)", "conformal-map"),
+            ("vector campo F(x,y)=(-y,x)", "universal"),
         ] {
             assert_eq!(
                 detect_template_for_concept(concepto),
@@ -10544,7 +10547,12 @@ mod p1_video_tests {
             cy: 0.0,
             r: 1.0,
         };
-        let lleno = render_placed_objects(&[PlacedMobject::opaco(circ.clone())], 64, 64, ortho);
+        let lleno = render_placed_objects(
+            &[PlacedMobject::opaco(circ.clone()).unwrap()],
+            64,
+            64,
+            ortho,
+        );
         assert_ne!(lleno.pixels, vacio.pixels, "el objeto debe pintar");
         // Opacidad 0 → idéntico al fondo.
         let mudo =
@@ -10585,7 +10593,7 @@ mod p1_video_tests {
         let linea = M::Polygon {
             pts: vec![[-2.0, -2.0], [2.0, 2.0]],
         };
-        let pl = render_placed_objects(&[PlacedMobject::opaco(linea)], 64, 64, ortho);
+        let pl = render_placed_objects(&[PlacedMobject::opaco(linea).unwrap()], 64, 64, ortho);
         assert_ne!(pl.pixels, vacio.pixels, "polilínea debe pintar");
         // VMobject real aplanado a polilínea: pinta.
         let vm = grafito_anim::VMobject::try_new(
@@ -10595,7 +10603,7 @@ mod p1_video_tests {
         )
         .expect("vm válido");
         let plano = vmobject_como_polilinea(&vm).expect("aplana");
-        let pv = render_placed_objects(&[PlacedMobject::opaco(plano)], 64, 64, ortho);
+        let pv = render_placed_objects(&[PlacedMobject::opaco(plano).unwrap()], 64, 64, ortho);
         assert_ne!(pv.pixels, vacio.pixels, "VMobject aplanado debe pintar");
         // VMobject vacío → None honesto.
         let vacio_vm = grafito_anim::VMobject {
@@ -10607,7 +10615,7 @@ mod p1_video_tests {
         // Perspective: sin ejes 2D pero el objeto igual se rasteriza.
         let persp = Camera::perspective(50.0, [5.0, 2.0, 5.0], [0.0, 0.0, 0.0]).unwrap();
         let p3 = render_placed_objects(
-            &[PlacedMobject::opaco(M::Dot { x: 0.0, y: 0.0 })],
+            &[PlacedMobject::opaco(M::Dot { x: 0.0, y: 0.0 }).unwrap()],
             64,
             64,
             persp,

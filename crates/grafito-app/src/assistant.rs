@@ -1376,8 +1376,8 @@ pub(crate) fn split_playlist_request(pedido: &str) -> Option<(String, String)> {
 /// o playlist entera o una sola animación, jamás nada parcial en silencio).
 pub(crate) fn playlist_para_pedido(pedido: &str) -> Option<grafito_anim::protocol::Playlist> {
     let (a, b) = split_playlist_request(pedido)?;
-    let req_a = grafito_anim::protocol::request_for_concept(&a, plantilla_para_pedido(&a));
-    let req_b = grafito_anim::protocol::request_for_concept(&b, plantilla_para_pedido(&b));
+    let req_a = grafito_anim::protocol::request_for_concept(&a, plantilla_para_pedido(&a)).ok()?;
+    let req_b = grafito_anim::protocol::request_for_concept(&b, plantilla_para_pedido(&b)).ok()?;
     grafito_anim::protocol::build_animations_with_timings(vec![
         (req_a, 2.0, 0.5),
         (req_b, 2.0, 0.0),
