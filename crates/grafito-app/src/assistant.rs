@@ -1632,34 +1632,88 @@ fn apply_single_run_command_via_bridge(
 
 // ── P1-app-wiring: export narrado (voz + subtítulos, solo video) ───────────
 // La Piel (`MediaExportDialog`) solo guarda la selección; todo lo de acá corre
-// fuera del draw y el I/O vive en el hilo worker. Sin guion persistido el
-// voiceover es `false` honesto (ver `hay_voiceover_en_media_actual`): Piper y
+// fuera del draw y el I/O vive en el hilo worker. Sin guion exitoso el
+// voiceover es `None` honesto (ver `hay_voiceover_en_media_actual`): Piper y
 // los subtítulos fallan visible hasta que el runtime guarde el último guion.
 
-/// ¿El media actual trae guion con texto de narración? Hoy `false` honesto.
+// ── P2: narración persistida (Piper + captions de punta a punta) ─────────
+// El hilo del guion computa texto + pista con las duraciones reales de sus
+// pasos y el drain los guarda en `AssistantRuntime::ultimo_voiceover`.
+// Sin guion exitoso no hay nada que narrar ni subtitular: Piper y los
+// subtítulos fallan visible con el hint honesto.
+
+/// ¿La última media trae narración persistida? Lee el runtime, no el panel:
+/// `TurnMediaRef`/`AssistantMedia` no guardan voz en ningún lado.
+fn hay_voiceover_en_media_actual(runtime: &AssistantRuntime) -> bool {
+    runtime
+        .ultimo_voiceover
+        .as_ref()
+        .is_some_and(|(texto, _)| !texto.trim().is_empty())
+}
+
+/// Texto de narración persistido para Piper (acotado a
+/// `VOICE_MAX_TEXT_CHARS` al computar). `None` honesto sin guion exitoso.
+fn texto_voiceover_actual(runtime: &AssistantRuntime) -> Option<String> {
+    runtime
+        .ultimo_voiceover
+        .as_ref()
+        .map(|(texto, _)| texto.clone())
+        .filter(|texto| !texto.trim().is_empty())
+}
+
+/// Pista de subtítulos persistida. `None` honesto sin guion o con pista
+/// vacía (todo silencioso).
+fn pista_subtitulos_actual(
+    runtime: &AssistantRuntime,
+) -> Option<grafito_anim::captions::CaptionTrack> {
+    runtime
+        .ultimo_voiceover
+        .as_ref()
+        .map(|(_, pista)| pista.clone())
+        .filter(|pista| !pista.is_empty())
+}
+
+/// Narración + pista de un guion validado (puro, sin I/O).
 ///
-/// `TurnMediaRef` solo guarda título/plantilla/concepto+thumb
-/// (`assistant-types`, sin campo de guion ni voz), `AssistantMedia` es
-/// título+frames y `AnimHistoryCoords` plantilla+concepto: no hay texto de
-/// voz persistido en ningún lado del runtime. Sin texto no hay nada que
-/// narrar ni subtitular (ver `texto_voiceover_actual` / `pista_subtitulos_actual`).
-fn hay_voiceover_en_media_actual(_panel: &AssistantPanelState) -> bool {
-    false
-}
-
-/// Texto de narración del guion actual para Piper. `None` honesto hoy (ver
-/// `hay_voiceover_en_media_actual`): cuando el runtime persista el último
-/// guion, vuelve `Some` con los `voiceover` de sus pasos acotados a
-/// `VOICE_MAX_TEXT_CHARS`.
-fn texto_voiceover_actual(_panel: &AssistantPanelState) -> Option<String> {
-    None
-}
-
-/// Pista de subtítulos del guion actual. `None` honesto hoy: deriva de los
-/// `voiceover` vía `voiceover_segments`, y sin guion persistido no hay pista
-/// que escribir ni quemar.
-fn pista_subtitulos_actual() -> Option<grafito_anim::captions::CaptionTrack> {
-    None
+/// Une los `voiceover` de cada paso con `\n\n`, acota a
+/// `VOICE_MAX_TEXT_CHARS` y reparte la pista con las duraciones reales
+/// (`run_ms + wait_after_ms` por paso, igual que `duracion_total_ms`).
+/// `None` honesto sin voz; si el reparto falla (ventana imposible), guarda
+/// pista vacía para que Piper igual narre y los captions fallen visible.
+/// Sin `unwrap`, sin pánicos.
+fn narracion_y_pista_del_guion(
+    guion: &grafito_anim::guion::Guion,
+) -> Option<(String, grafito_anim::captions::CaptionTrack)> {
+    let pasos: Vec<grafito_anim::guion::PasoGuion> = guion
+        .actos()
+        .iter()
+        .flat_map(|acto| acto.pasos.iter().cloned())
+        .collect();
+    let texto: String = pasos
+        .iter()
+        .filter_map(|paso| paso.voiceover.as_deref())
+        .map(str::trim)
+        .filter(|voz| !voz.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let texto: String = texto
+        .chars()
+        .take(crate::anim_native::voice::VOICE_MAX_TEXT_CHARS)
+        .collect();
+    if texto.trim().is_empty() {
+        return None;
+    }
+    let duraciones: Vec<u32> = pasos
+        .iter()
+        .map(|paso| {
+            paso.run_ms
+                .saturating_add(paso.wait_after_ms)
+                .min(u64::from(u32::MAX)) as u32
+        })
+        .collect();
+    let pista = grafito_anim::captions::voiceover_segments(&pasos, &duraciones)
+        .unwrap_or_else(|_| grafito_anim::captions::CaptionTrack::vacia());
+    Some((texto, pista))
 }
 
 /// Valida el pedido narrado del diálogo antes de spawnear (puro, sin I/O).
@@ -1788,9 +1842,9 @@ fn mapear_fallo_narrado(
 /// Núcleo bloqueante del MP4 con voz (llamar en hilo, jamás en el draw).
 ///
 /// Piper con texto del guion va por `spawn_mp4_narrado` (render, voz, mux,
-/// burn y sidecar en su hilo con join honesto). Hoy el texto es `None`
-/// honesto (el validar previo ya vetó Piper), así que esa rama queda como
-/// cableado futuro compilado.
+/// burn y sidecar en su hilo con join honesto). El texto y la pista llegan
+/// por parámetro desde el runtime (`ultimo_voiceover` del último guion
+/// exitoso); sin ellos el validar previo ya vetó Piper/captions.
 ///
 /// Importar rinde mudo a un intermedio vía `export_mp4_narrado_desde_set`,
 /// mezcla el wav elegido con `mux_audio_into` (offset 0, gain 1.0) y publica
@@ -1808,6 +1862,7 @@ fn export_mp4_narrado_en_hilo(
     audio_path: Option<String>,
     subtitulos: grafito_ui::assistant::CaptionsMode,
     texto_voz: Option<String>,
+    pista_voz: Option<grafito_anim::captions::CaptionTrack>,
     token: grafito_assistant::CancellationToken,
 ) -> Result<PathBuf, crate::anim_native::Mp4ExportError> {
     use crate::anim_native::Mp4ExportError;
@@ -1833,11 +1888,10 @@ fn export_mp4_narrado_en_hilo(
             offset_ms: 0,
             gain: 1.0,
         };
-        let pedido_sub =
-            pista_subtitulos_actual().map(|track| crate::anim_native::SubtitulosPedido {
-                track,
-                quemar: matches!(subtitulos, CaptionsMode::Quemado),
-            });
+        let pedido_sub = pista_voz.map(|track| crate::anim_native::SubtitulosPedido {
+            track,
+            quemar: matches!(subtitulos, CaptionsMode::Quemado),
+        });
         let hacerlo = crate::anim_native::spawn_mp4_narrado(
             frames,
             destino.clone(),
@@ -1901,7 +1955,7 @@ fn export_mp4_narrado_en_hilo(
         };
         return publicar_tmp_excl(&video, &destino);
     }
-    // Sin voz importada: solo subtítulos si algún día hay pista (hoy el
+    // Sin voz importada: solo subtítulos si hay pista persistida (el
     // validar previo ya vetó `SidecarSrt`/`Quemado` sin pista).
     if !matches!(subtitulos, CaptionsMode::Ninguno) {
         let _ = std::fs::remove_file(&intermedio);
@@ -1948,6 +2002,16 @@ pub(crate) struct AssistantRuntime {
     /// turnos, nueva al Limpiar conversación. Sólo se adjunta a `ProviderSettings`
     /// cuando el proveedor es Go; el resto trae `None` (sin header).
     pub(crate) go_session_id: Option<String>,
+    /// P2 — última narración persistida del guion: texto Piper + pista de
+    /// subtítulos con las duraciones reales de sus pasos. `Some` solo tras
+    /// un guion exitoso; Limpiar/cancel/fallo la borran (Piper y captions
+    /// fallan honesto sin ella). Sin I/O, solo memoria del turno.
+    pub(crate) ultimo_voiceover: Option<(String, grafito_anim::captions::CaptionTrack)>,
+    /// P2 — voz en vuelo del hilo del guion (canal lateral al `anim_job`:
+    /// ese tipo vive en `assistant_media.rs` y no se toca). El drain la
+    /// publica en `ultimo_voiceover` solo si el dueño sigue vivo.
+    pub(crate) anim_voiceover_rx:
+        Option<std::sync::mpsc::Receiver<(String, grafito_anim::captions::CaptionTrack)>>,
 }
 
 /// Compat pre-split: los 6 slots de media se leen/escriben como si fueran
@@ -2347,6 +2411,9 @@ impl AssistantRuntime {
             job.cancellation.cancel();
             hubo = true;
         }
+        // P2: se captura antes de soltar los slots (un cancel solo-remoto
+        // no borra la narración del guion que sigue en pantalla).
+        let tenia_anim = self.anim_job.is_some() || self.anim_ia_job.is_some();
         if let Some(job) = self.anim_job.as_ref() {
             job.cancellation.cancel();
         }
@@ -2364,6 +2431,13 @@ impl AssistantRuntime {
         // T1: el cancel limpia los dueños (sin job no hay drain que los tome).
         self.anim_owner = None;
         self.anim_ia_owner = None;
+        // P2: la voz en vuelo muere con el turno; la persistida solo cae si
+        // había media viva de animación (`tenia_anim` de arriba: un cancel
+        // solo-remoto no borra la narración del guion que sigue en pantalla).
+        self.anim_voiceover_rx = None;
+        if tenia_anim {
+            self.ultimo_voiceover = None;
+        }
         if let Some(job) = self.gif_export_job.take() {
             // R1-4: cancela el token (el export chequea entre frames) y el
             // reaper hace `join` ACOTADO (5 s) + borra el temporal: sin
@@ -3465,6 +3539,10 @@ impl GrafitoApp {
                         // Cancel real: el worker observó el token y el
                         // resultado es rancio — se descarta sin publicar
                         // (sin media rancia en el turno).
+                        // P2: el cancel borra la narración (la voz en vuelo
+                        // ya cayó en el shim; acá cae la persistida).
+                        self.assistant_runtime.anim_voiceover_rx = None;
+                        self.assistant_runtime.ultimo_voiceover = None;
                         self.notify("Generación cancelada.", ToastKind::Info);
                     } else if !es_dueno_vivo(&self.assistant.conversation, owner) {
                         // Stale (reemplazo o pregunta nueva en el medio):
@@ -3526,6 +3604,15 @@ impl GrafitoApp {
                         // El trim solo recorta pares viejos, pero el índice
                         // pudo moverse: re-chequeo antes del slot vivo.
                         if es_dueno_vivo(&self.assistant.conversation, owner) {
+                            // P2: publica la voz del guion si el hilo la
+                            // mandó (`None` si era single/playlist o guion
+                            // sin voz: la media nueva no se narra con la
+                            // voz vieja).
+                            self.assistant_runtime.ultimo_voiceover = self
+                                .assistant_runtime
+                                .anim_voiceover_rx
+                                .take()
+                                .and_then(|voz_rx| voz_rx.try_recv().ok());
                             self.assistant.set_media(Some(media), ctx);
                             self.notify("Animación lista.", ToastKind::Success);
                         } else {
@@ -3543,6 +3630,10 @@ impl GrafitoApp {
                     let owner = self.assistant_runtime.anim_owner.take();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
+                    // P2: el guion fallido no deja narración (la media se
+                    // limpia abajo, la voz cae con ella).
+                    self.assistant_runtime.anim_voiceover_rx = None;
+                    self.assistant_runtime.ultimo_voiceover = None;
                     if was_cancelled {
                         self.notify("Generación cancelada.", ToastKind::Info);
                     } else {
@@ -3562,6 +3653,10 @@ impl GrafitoApp {
                     let owner = self.assistant_runtime.anim_owner.take();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
+                    // P2: sin hilo no hay voz en camino; la persistida cae
+                    // con la media que se limpia abajo.
+                    self.assistant_runtime.anim_voiceover_rx = None;
+                    self.assistant_runtime.ultimo_voiceover = None;
                     if !was_cancelled {
                         anexar_error_a_dueno(
                             &mut self.assistant.conversation,
@@ -3647,6 +3742,10 @@ impl GrafitoApp {
                                 );
                             }
                             if es_dueno_vivo(&self.assistant.conversation, owner) {
+                                // P2: el worker IA no narra: su media limpia
+                                // cualquier voz persistida de un guion previo.
+                                self.assistant_runtime.anim_voiceover_rx = None;
+                                self.assistant_runtime.ultimo_voiceover = None;
                                 self.assistant.set_media(Some(render.media), ctx);
                                 if let Some(aviso) = render.aviso {
                                     self.notify(aviso, ToastKind::Info);
@@ -3674,6 +3773,9 @@ impl GrafitoApp {
                     if was_cancelled {
                         self.notify("Generación cancelada.", ToastKind::Info);
                     } else {
+                        // P2: sin media no hay narración que persistir.
+                        self.assistant_runtime.anim_voiceover_rx = None;
+                        self.assistant_runtime.ultimo_voiceover = None;
                         self.assistant.set_media(None, ctx);
                         let message = format!("No se pudo generar la animación: {error}");
                         self.notify(&message, ToastKind::Error);
@@ -3688,6 +3790,9 @@ impl GrafitoApp {
                     self.assistant_runtime.anim_ia_job = None;
                     self.assistant.anim_progress = false;
                     if !was_cancelled {
+                        // P2: sin hilo ni media no hay narración que persistir.
+                        self.assistant_runtime.anim_voiceover_rx = None;
+                        self.assistant_runtime.ultimo_voiceover = None;
                         self.assistant.set_media(None, ctx);
                         self.show_assistant_error(
                             "La generación terminó inesperadamente antes de responder.",
@@ -4426,6 +4531,10 @@ impl GrafitoApp {
             }
             AssistantUiAction::ClearConversation => {
                 self.assistant.clear_conversation();
+                // P2: conversación nueva = narración vieja borrada (Piper y
+                // captions vuelven al hint honesto hasta el próximo guion).
+                self.assistant_runtime.anim_voiceover_rx = None;
+                self.assistant_runtime.ultimo_voiceover = None;
                 // La conversación nueva abre sesión Go nueva (routing/caching
                 // frescos en el gateway); el próximo request Go la usa.
                 self.assistant_runtime.rotate_go_session();
@@ -5397,7 +5506,8 @@ impl GrafitoApp {
         self.assistant
             .set_export_dialog_latex(latex_available, dvisvgm_available);
         // Voz una sola vez al abrir (nunca en `Ui::`): piper del PATH +
-        // voiceover del guion actual (`false` honesto hoy, sin guion persistido).
+        // voiceover persistido del último guion exitoso (`None` honesto si
+        // no hay narración guardada).
         self.resolver_disponibilidad_voz_export();
         ctx.request_repaint();
     }
@@ -5427,7 +5537,7 @@ impl GrafitoApp {
     fn resolver_disponibilidad_voz_export(&mut self) {
         self.assistant
             .set_piper_available(crate::anim_native::voice::detect_piper_available());
-        let hay = hay_voiceover_en_media_actual(&self.assistant);
+        let hay = hay_voiceover_en_media_actual(&self.assistant_runtime);
         self.assistant.set_voiceover_disponible(hay);
     }
 
@@ -5646,8 +5756,8 @@ impl GrafitoApp {
                 } else {
                     if let Err(motivo) = validar_pedido_narrado(
                         &dialogo,
-                        texto_voiceover_actual(&self.assistant).is_some(),
-                        pista_subtitulos_actual().is_some(),
+                        texto_voiceover_actual(&self.assistant_runtime).is_some(),
+                        pista_subtitulos_actual(&self.assistant_runtime).is_some(),
                     ) {
                         self.assistant.export_dialog_mark_failed(motivo.clone());
                         self.assistant
@@ -5661,13 +5771,14 @@ impl GrafitoApp {
                     let voz = dialogo.voz_mode;
                     let audio = dialogo.audio_path().map(str::to_string);
                     let subtitulos = dialogo.captions_mode;
-                    let texto_voz = texto_voiceover_actual(&self.assistant);
+                    let texto_voz = texto_voiceover_actual(&self.assistant_runtime);
+                    let pista_voz = pista_subtitulos_actual(&self.assistant_runtime);
                     let token_hilo = cancel.clone();
                     let ruta_hilo = path.clone();
                     let handle = std::thread::spawn(move || {
                         export_mp4_narrado_en_hilo(
                             frames, ruta_hilo, fps, bitrate, calidad, voz, audio, subtitulos,
-                            texto_voz, token_hilo,
+                            texto_voz, pista_voz, token_hilo,
                         )
                     });
                     debug_assert!(self.assistant_runtime.mp4_export_job.is_none());
@@ -6290,6 +6401,9 @@ impl GrafitoApp {
         let cancellation = CancellationToken::default();
         let worker_cancel = cancellation.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        // P2: el worker IA no narra: suelta la voz en vuelo de un guion
+        // previo; el drain limpia la persistida al publicar su media.
+        self.assistant_runtime.anim_voiceover_rx = None;
         let pedido_hilo = pedido_original.clone();
         let plantilla_hilo = plantilla_fallback.clone();
         std::thread::spawn(move || {
@@ -6623,6 +6737,10 @@ impl GrafitoApp {
     /// `compilar_paso` por acto sobre la escena compartida,
     /// `ScenePlayer::try_play` por acto, raster a `ColorImage`) corre en el
     /// hilo: cero I/O en UI (el guion ni siquiera toca disco en el hilo).
+    /// P2: el hilo también computa la narración (`voiceover` unidos +
+    /// `CaptionTrack` con las duraciones reales) y la manda por el canal
+    /// lateral; el drain la persiste en `ultimo_voiceover` solo si el dueño
+    /// sigue vivo (Piper/captions la usan desde ahí).
     /// Presupuestos heredados del guion validado: actos 1..=5, pasos ≤8,
     /// frames ≤96, set ≤64 MiB, viewport único. Sin `unwrap`, sin pánicos.
     /// Con `historiar=false` reinyecta el slot vivo sin pegar media nueva
@@ -6674,6 +6792,11 @@ impl GrafitoApp {
         let cancellation = CancellationToken::default();
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        // P2: canal lateral de voz (el `AssistantAnimJob` vive en
+        // `assistant_media.rs` y no se toca): el hilo manda la narración y
+        // el drain la publica solo si el dueño sigue vivo.
+        let (voz_tx, voz_rx) = std::sync::mpsc::sync_channel(1);
+        self.assistant_runtime.anim_voiceover_rx = Some(voz_rx);
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let cancelado = || "La generación se canceló antes de completarse.".to_string();
@@ -6685,6 +6808,12 @@ impl GrafitoApp {
                     .map_err(|error| format!("guion_texto no parsea como GuionTexto: {error}"))?;
                 let guion =
                     Guion::try_new(crudo).map_err(|error| format!("guion inválido: {error}"))?;
+                // P2: narración con las duraciones reales del guion
+                // compilado (puro, sin I/O). Best-effort: si el turno ya no
+                // la espera, el `send` falla en silencio sin bloquear.
+                if let Some(voz) = narracion_y_pista_del_guion(&guion) {
+                    let _ = voz_tx.send(voz);
+                }
                 let concepto = guion.concepto().to_string();
                 let (ancho, alto) = guion.resolution().as_tuple();
                 let (w, h) = (ancho as usize, alto as usize);
@@ -6834,6 +6963,10 @@ impl GrafitoApp {
         let cancellation = CancellationToken::default();
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        // P2: la animación simple no narra: suelta la voz en vuelo de un
+        // guion previo (el drain publica `ultimo_voiceover = None` al
+        // completar, porque la media nueva no tiene narración).
+        self.assistant_runtime.anim_voiceover_rx = None;
         let repaint = ctx.clone();
         let template_owned = template.to_string();
         let concept_owned = concept.clone();
@@ -7159,6 +7292,9 @@ impl GrafitoApp {
         let cancellation = CancellationToken::default();
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        // P2: la playlist no narra (igual que la simple): suelta la voz en
+        // vuelo de un guion previo; el drain limpia la persistida.
+        self.assistant_runtime.anim_voiceover_rx = None;
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             // R2-V2: cap dura `max_steps=8` + `total_pixels` (OOM honesto).
@@ -7650,7 +7786,17 @@ impl GrafitoApp {
     fn cancela_turno_anim(&mut self) -> bool {
         // Shim fino R1: ver `AssistantJobsController::cancel_turno_anim`
         // (dueño B2-MED: resetea todos los formatos + limpia fallback_model).
-        self.with_assistant_jobs(AssistantJobsController::cancel_turno_anim)
+        let tenia_anim = self.assistant_runtime.anim_job.is_some()
+            || self.assistant_runtime.anim_ia_job.is_some();
+        let hubo = self.with_assistant_jobs(AssistantJobsController::cancel_turno_anim);
+        // P2: la voz en vuelo muere con el turno; la persistida solo cae si
+        // había media viva de animación (pregunta nueva con media quieta la
+        // conserva para Piper/captions).
+        self.assistant_runtime.anim_voiceover_rx = None;
+        if tenia_anim {
+            self.assistant_runtime.ultimo_voiceover = None;
+        }
+        hubo
     }
 
     /// Turno derivado del asistente (fuente: `AssistantTurnState::derive_from`
@@ -8167,6 +8313,169 @@ mod r2_guion_tests {
             "y".repeat(grafito_assistant::agent::GUION_TOOL_MAX_BYTES + 2048)
         );
         assert_eq!(extraer_guion_texto(&grande), None);
+    }
+}
+
+#[cfg(test)]
+mod p2_voiceover_tests {
+    use super::*;
+
+    fn guion_corto_validado() -> grafito_anim::guion::Guion {
+        let crudo =
+            grafito_anim::guion::short_script("derivada como pendiente").expect("corto válido");
+        assert!(crudo.validate_short_len());
+        grafito_anim::guion::Guion::try_new(crudo).expect("el corto valida")
+    }
+
+    fn guion_minimo_sin_voz() -> String {
+        serde_json::json!({
+            "concepto": "derivada",
+            "width": 320,
+            "height": 240,
+            "actos": [{
+                "titulo": "apertura",
+                "fondo": null,
+                "limpiar": false,
+                "pasos": [{
+                    "texto": "recta secante",
+                    "math_expr": "x^2",
+                    "whiteboard_hint": "ejes",
+                    "template_hint": "derivative-slope",
+                    "params": {},
+                    "efecto": "create",
+                    "frames": 8,
+                    "run_ms": 1000,
+                    "wait_after_ms": 200
+                }]
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn narracion_pura_une_voz_y_reparte_pista_con_duraciones_reales() {
+        let guion = guion_corto_validado();
+        let (texto, pista) = narracion_y_pista_del_guion(&guion).expect("el corto trae voz");
+        assert!(texto.contains("\n\n"), "pasos unidos con doble salto");
+        let palabras = texto.split_whitespace().count();
+        assert!(
+            (110..=130).contains(&palabras),
+            "rango short: {palabras} palabras"
+        );
+        assert!(
+            texto.chars().count() <= crate::anim_native::voice::VOICE_MAX_TEXT_CHARS,
+            "cota Piper"
+        );
+        assert_eq!(pista.len(), 6, "un segmento por paso con voz");
+        // Duraciones reales: la pista cubre run+wait de los 6 pasos.
+        let total: u64 = guion
+            .actos()
+            .iter()
+            .flat_map(|acto| acto.pasos.iter())
+            .map(|paso| paso.run_ms.saturating_add(paso.wait_after_ms))
+            .sum();
+        let ultimo_fin = pista
+            .segments
+            .last()
+            .map(|segmento| u64::from(segmento.end_ms))
+            .unwrap_or(0);
+        assert_eq!(ultimo_fin, total, "la pista cubre el guion entero");
+    }
+
+    #[test]
+    fn guion_sin_voz_no_persiste_nada() {
+        let crudo: grafito_anim::guion::GuionTexto =
+            serde_json::from_str(&guion_minimo_sin_voz()).expect("json");
+        let guion = grafito_anim::guion::Guion::try_new(crudo).expect("mínimo válido");
+        assert!(narracion_y_pista_del_guion(&guion).is_none());
+        let runtime = AssistantRuntime::default();
+        assert!(!hay_voiceover_en_media_actual(&runtime));
+        assert!(texto_voiceover_actual(&runtime).is_none());
+        assert!(pista_subtitulos_actual(&runtime).is_none());
+    }
+
+    #[test]
+    fn runtime_expone_voz_y_cancel_con_anim_viva_la_borra() {
+        let mut runtime = AssistantRuntime::default();
+        let guion = guion_corto_validado();
+        runtime.ultimo_voiceover = narracion_y_pista_del_guion(&guion);
+        assert!(hay_voiceover_en_media_actual(&runtime));
+        assert!(texto_voiceover_actual(&runtime).is_some());
+        assert!(pista_subtitulos_actual(&runtime).is_some());
+        // Sin jobs en vuelo el cancel es no-op y conserva la narración de
+        // la media quieta (una pregunta de texto no la borra).
+        assert!(!runtime.cancel_anim_job());
+        assert!(hay_voiceover_en_media_actual(&runtime));
+        // Con animación viva el cancel la borra junto al turno.
+        let (_tx, rx) = sync_channel::<Result<grafito_ui::assistant::AssistantMedia, String>>(1);
+        runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: CancellationToken::default(),
+            receiver: rx,
+            history: None,
+        });
+        assert!(runtime.cancel_anim_job());
+        assert!(runtime.anim_voiceover_rx.is_none());
+        assert!(runtime.ultimo_voiceover.is_none());
+        assert!(!hay_voiceover_en_media_actual(&runtime));
+    }
+
+    #[test]
+    fn hilo_guion_persiste_voz_y_dialogo_la_ofrece_a_piper() {
+        // Punta a punta: el hilo computa narración + pista y el drain las
+        // guarda; al abrir el diálogo Piper queda disponible con voz.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        // Dueño vivo: un turno asistente recién completado (`len-1`).
+        app.assistant
+            .complete_local_request("miramos la derivada como pendiente".to_string());
+        let crudo = grafito_anim::guion::short_script("derivada como pendiente").expect("corto");
+        let guion_texto = serde_json::to_string(&crudo).expect("json");
+        app.run_assistant_guion_with_history(&ctx, &guion_texto, true);
+        // Drena hasta que el hilo publique (nativo rápido, tope 30 s).
+        let inicio = std::time::Instant::now();
+        while app.assistant_runtime.anim_job.is_some() {
+            app.sync_assistant_for_frame(&ctx);
+            if inicio.elapsed() > std::time::Duration::from_secs(30) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            app.assistant_runtime.anim_job.is_none(),
+            "el hilo debe terminar"
+        );
+        assert!(app.assistant.media.is_some(), "hay media del guion");
+        let (texto, pista) = app
+            .assistant_runtime
+            .ultimo_voiceover
+            .clone()
+            .expect("voz persistida");
+        assert!(texto.contains("mir"), "{texto}");
+        assert_eq!(pista.len(), 6);
+        assert!(hay_voiceover_en_media_actual(&app.assistant_runtime));
+        // Al abrir el diálogo, la voz queda disponible (Piper narrable).
+        app.export_assistant_media(&ctx);
+        assert!(app.assistant.export_dialog_is_open());
+        let dialogo = app.assistant.export_dialog_snapshot();
+        assert!(
+            dialogo.voiceover_disponible,
+            "con narración persistida Piper no da hint"
+        );
+    }
+
+    #[test]
+    fn limpiar_conversacion_borra_la_narracion() {
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        let guion = guion_corto_validado();
+        app.assistant_runtime.ultimo_voiceover = narracion_y_pista_del_guion(&guion);
+        assert!(hay_voiceover_en_media_actual(&app.assistant_runtime));
+        app.handle_assistant_action(
+            &ctx,
+            grafito_ui::assistant::AssistantUiAction::ClearConversation,
+        );
+        assert!(app.assistant_runtime.ultimo_voiceover.is_none());
+        assert!(!hay_voiceover_en_media_actual(&app.assistant_runtime));
     }
 }
 

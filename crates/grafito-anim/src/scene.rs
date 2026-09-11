@@ -489,6 +489,11 @@ pub const MAX_GRAPH_EXPR_CHARS: usize = 2000;
 pub const MIN_FIGURE_SIZE: f64 = 1e-9;
 /// Radio/lado máximo de figuras (1e6, paridad con `Ortho::try_new`).
 pub const MAX_FIGURE_SIZE: f64 = 1e6;
+/// Cota máxima de las figuras P3 (`Rectangle`/`Ellipse`/`Arc`, unidades de
+/// mundo): 4096 (paridad con `Resolution` 64..=4096 y `MAX_MOBJECT_POINTS`;
+/// más estricta que el 1e6 legacy de `Circle`/`Square`, que se conserva por
+/// compat y porque el viewport fijo [-3,3]² ya recorta lo gigante).
+pub const MAX_P3_FIGURE_DIM: f64 = 4096.0;
 /// Divisiones máximas por lado de una retícula (`NumberPlane`/`VectorField`,
 /// paridad con `ArrowField` 64).
 pub const MAX_FIELD_DIVISIONS: usize = 64;
@@ -523,6 +528,24 @@ pub enum Mobject {
     Circle { cx: f64, cy: f64, r: f64 },
     /// Cuadrado centrado en mundo (`side` 1e-9..=1e6, centro finito).
     Square { cx: f64, cy: f64, side: f64 },
+    /// Rectángulo centrado en mundo (`w`/`h` 1e-9..=4096, centro finito).
+    /// El renderer dibuja 4 segmentos (sin relleno, como `Square`).
+    Rectangle { cx: f64, cy: f64, w: f64, h: f64 },
+    /// Elipse centrada en mundo (`rx`/`ry` 1e-9..=4096, centro finito).
+    /// El renderer la muestrea adaptativo 32..=128 según el radio mayor.
+    Ellipse { cx: f64, cy: f64, rx: f64, ry: f64 },
+    /// Arco circular en mundo, ÁNGULOS EN RADIANES (documentado: Manim usa
+    /// radianes en `Arc`; grados solo en la Piel si los pide).
+    /// (`r` 1e-9..=4096, centro finito, `end_rad > start_rad`, barrido
+    /// `0 < end_rad - start_rad <= 2π`; vuelta completa = `start` a
+    /// `start + 2π`, no más). El renderer submuestrea por ángulo.
+    Arc {
+        cx: f64,
+        cy: f64,
+        r: f64,
+        start_rad: f64,
+        end_rad: f64,
+    },
     /// Segmento en mundo (extremos finitos y distintos; si coinciden usá `Dot`).
     Line { from: [f64; 2], to: [f64; 2] },
     /// Flecha en mundo (igual que `Line` pero con punta; el renderer decide).
@@ -651,6 +674,82 @@ impl Mobject {
             }
             Self::Line { from, to } => valida_segmento(from, to, "Line"),
             Self::Arrow { from, to } => valida_segmento(from, to, "Arrow"),
+            Self::Rectangle { cx, cy, w, h } => {
+                if !cx.is_finite() || !cy.is_finite() {
+                    return Err(SceneError::MobjectInvalido {
+                        donde: "Rectangle",
+                        detalle: "centro no finito".to_string(),
+                    });
+                }
+                for (nombre, v) in [("w", *w), ("h", *h)] {
+                    if !v.is_finite() || !(MIN_FIGURE_SIZE..=MAX_P3_FIGURE_DIM).contains(&v) {
+                        return Err(SceneError::MobjectInvalido {
+                            donde: "Rectangle",
+                            detalle: format!(
+                                "{nombre} {v} fuera de {MIN_FIGURE_SIZE}..={MAX_P3_FIGURE_DIM}"
+                            ),
+                        });
+                    }
+                }
+                Ok(())
+            }
+            Self::Ellipse { cx, cy, rx, ry } => {
+                if !cx.is_finite() || !cy.is_finite() {
+                    return Err(SceneError::MobjectInvalido {
+                        donde: "Ellipse",
+                        detalle: "centro no finito".to_string(),
+                    });
+                }
+                for (nombre, v) in [("rx", *rx), ("ry", *ry)] {
+                    if !v.is_finite() || !(MIN_FIGURE_SIZE..=MAX_P3_FIGURE_DIM).contains(&v) {
+                        return Err(SceneError::MobjectInvalido {
+                            donde: "Ellipse",
+                            detalle: format!(
+                                "{nombre} {v} fuera de {MIN_FIGURE_SIZE}..={MAX_P3_FIGURE_DIM}"
+                            ),
+                        });
+                    }
+                }
+                Ok(())
+            }
+            Self::Arc {
+                cx,
+                cy,
+                r,
+                start_rad,
+                end_rad,
+            } => {
+                if !cx.is_finite() || !cy.is_finite() {
+                    return Err(SceneError::MobjectInvalido {
+                        donde: "Arc",
+                        detalle: "centro no finito".to_string(),
+                    });
+                }
+                if !r.is_finite() || !(MIN_FIGURE_SIZE..=MAX_P3_FIGURE_DIM).contains(r) {
+                    return Err(SceneError::MobjectInvalido {
+                        donde: "Arc",
+                        detalle: format!(
+                            "radio {r} fuera de {MIN_FIGURE_SIZE}..={MAX_P3_FIGURE_DIM}"
+                        ),
+                    });
+                }
+                if !start_rad.is_finite() || !end_rad.is_finite() {
+                    return Err(SceneError::MobjectInvalido {
+                        donde: "Arc",
+                        detalle: "ángulos no finitos (radianes)".to_string(),
+                    });
+                }
+                let barrido = *end_rad - *start_rad;
+                if !barrido.is_finite() || barrido <= 0.0 || barrido > std::f64::consts::TAU {
+                    return Err(SceneError::MobjectInvalido {
+                        donde: "Arc",
+                        detalle: format!(
+                            "barrido {barrido} rad fuera de (0..=2π]: pedí end_rad > start_rad con vuelta máxima"
+                        ),
+                    });
+                }
+                Ok(())
+            }
             Self::NumberPlane {
                 x_min,
                 x_max,
@@ -2409,6 +2508,152 @@ mod scene_f1_tests {
         grupo.validate().unwrap();
         let muchos = vec![Mobject::Dot { x: 0.0, y: 0.0 }; MAX_GROUP_CHILDREN + 1];
         assert!(Mobject::Group(muchos).validate().is_err());
+    }
+
+    #[test]
+    fn p3_rect_ellipse_arc_validan_finitos_positivos_y_cotas() {
+        // Válidos canónicos.
+        Mobject::Rectangle {
+            cx: 0.0,
+            cy: 0.0,
+            w: 4.0,
+            h: 2.0,
+        }
+        .validate()
+        .unwrap();
+        Mobject::Ellipse {
+            cx: 1.0,
+            cy: -1.0,
+            rx: 2.0,
+            ry: 1.0,
+        }
+        .validate()
+        .unwrap();
+        Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+            start_rad: 0.0,
+            end_rad: std::f64::consts::PI,
+        }
+        .validate()
+        .unwrap();
+        // Vuelta completa exacta (barrido = 2π) pasa.
+        Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+            start_rad: 0.5,
+            end_rad: 0.5 + std::f64::consts::TAU,
+        }
+        .validate()
+        .unwrap();
+        // Centros no finitos.
+        assert!(Mobject::Rectangle {
+            cx: f64::NAN,
+            cy: 0.0,
+            w: 1.0,
+            h: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(Mobject::Ellipse {
+            cx: 0.0,
+            cy: f64::INFINITY,
+            rx: 1.0,
+            ry: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+            start_rad: f64::NAN,
+            end_rad: 1.0
+        }
+        .validate()
+        .is_err());
+        // No positivos / cero.
+        assert!(Mobject::Rectangle {
+            cx: 0.0,
+            cy: 0.0,
+            w: 0.0,
+            h: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(Mobject::Ellipse {
+            cx: 0.0,
+            cy: 0.0,
+            rx: -2.0,
+            ry: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 0.0,
+            start_rad: 0.0,
+            end_rad: 1.0
+        }
+        .validate()
+        .is_err());
+        // Cota max 4096 (más allá falla aunque sea finita).
+        assert!(Mobject::Rectangle {
+            cx: 0.0,
+            cy: 0.0,
+            w: 4097.0,
+            h: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(Mobject::Ellipse {
+            cx: 0.0,
+            cy: 0.0,
+            rx: 1.0,
+            ry: 5000.0
+        }
+        .validate()
+        .is_err());
+        assert!(Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1e7,
+            start_rad: 0.0,
+            end_rad: 1.0
+        }
+        .validate()
+        .is_err());
+        // Arco: end <= start y barrido > 2π fallan honesto.
+        assert!(Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+            start_rad: 1.0,
+            end_rad: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+            start_rad: 2.0,
+            end_rad: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+            start_rad: 0.0,
+            end_rad: std::f64::consts::TAU + 0.1
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

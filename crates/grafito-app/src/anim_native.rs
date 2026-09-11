@@ -2841,6 +2841,137 @@ fn draw_square_world(
     true
 }
 
+/// Muestras adaptativas de la elipse según el radio mayor: 32 para la
+/// chica (`r<=1`), hasta 128 para la gigante (`r>=4`). Pura (testeable).
+fn muestras_elipse_para_radio(rx: f64, ry: f64) -> usize {
+    let mayor = rx.max(ry);
+    if !mayor.is_finite() || mayor <= 0.0 {
+        return 32;
+    }
+    ((mayor * 32.0).ceil() as usize).clamp(32, 128)
+}
+
+/// Muestras del arco proporcionales al barrido (radianes): 4 para el
+/// chico, 96 para la vuelta completa, tope 128. Pura (testeable).
+fn muestras_arco_para_barrido(barrido: f64) -> usize {
+    if !barrido.is_finite() || barrido <= 0.0 {
+        return 4;
+    }
+    ((barrido / std::f64::consts::TAU * 96.0).ceil() as usize).clamp(4, 128)
+}
+
+/// Rectángulo centrado en mundo: 4 segmentos con clip limpio tramo a tramo
+/// (`draw_seg_mundo`, sin saturar al borde). 1px `SQUARE_BLUE` como
+/// `Square` (mismo lenguaje visual que el resto de `draw_mobject`).
+/// `true` = pintó al menos un tramo. Puro sobre el buffer, sin E/S.
+#[allow(clippy::too_many_arguments)]
+fn draw_rect_world(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    cx: f64,
+    cy: f64,
+    rw: f64,
+    rh: f64,
+    color: [u8; 4],
+) -> bool {
+    if !(cx.is_finite()
+        && cy.is_finite()
+        && rw.is_finite()
+        && rh.is_finite()
+        && rw > 0.0
+        && rh > 0.0)
+        || w == 0
+        || h == 0
+    {
+        return false;
+    }
+    let (hw, hh) = (rw / 2.0, rh / 2.0);
+    let esq = [
+        [cx - hw, cy - hh],
+        [cx + hw, cy - hh],
+        [cx + hw, cy + hh],
+        [cx - hw, cy + hh],
+    ];
+    let mut pinto = false;
+    for k in 0..4 {
+        let (a, b) = (esq[k], esq[(k + 1) % 4]);
+        pinto |= draw_seg_mundo(buf, w, h, a[0], a[1], b[0], b[1], color, 1.0);
+    }
+    pinto
+}
+
+/// Elipse centrada en mundo: curva muestreada adaptativa (32..=128 según
+/// el radio mayor) con clip limpio tramo a tramo (sin saturar). 1px
+/// `CURVE_MAIN` como `Circle`. `true` = pintó. Pura, sin E/S.
+#[allow(clippy::too_many_arguments)]
+fn draw_ellipse_world(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+    color: [u8; 4],
+) -> bool {
+    if !(cx.is_finite()
+        && cy.is_finite()
+        && rx.is_finite()
+        && ry.is_finite()
+        && rx > 0.0
+        && ry > 0.0)
+        || w == 0
+        || h == 0
+    {
+        return false;
+    }
+    let n = muestras_elipse_para_radio(rx, ry);
+    let mut pinto = false;
+    let mut previo = (cx + rx, cy);
+    for k in 1..=n {
+        let a = k as f64 * std::f64::consts::TAU / n as f64;
+        let punto = (cx + rx * a.cos(), cy + ry * a.sin());
+        pinto |= draw_seg_mundo(buf, w, h, previo.0, previo.1, punto.0, punto.1, color, 1.0);
+        previo = punto;
+    }
+    pinto
+}
+
+/// Arco circular en mundo (radianes) con submuestreo por ángulo
+/// (4..=128 según el barrido) y clip limpio tramo a tramo (sin saturar).
+/// 1px `CURVE_MAIN` como `Circle`. `true` = pintó. Puro, sin E/S.
+#[allow(clippy::too_many_arguments)]
+fn draw_arc_world(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    cx: f64,
+    cy: f64,
+    r: f64,
+    start: f64,
+    end: f64,
+    color: [u8; 4],
+) -> bool {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite() && r > 0.0) || w == 0 || h == 0 {
+        return false;
+    }
+    let barrido = end - start;
+    if !barrido.is_finite() || barrido <= 0.0 {
+        return false;
+    }
+    let n = muestras_arco_para_barrido(barrido);
+    let mut pinto = false;
+    let mut previo = (cx + r * start.cos(), cy + r * start.sin());
+    for k in 1..=n {
+        let a = start + barrido * k as f64 / n as f64;
+        let punto = (cx + r * a.cos(), cy + r * a.sin());
+        pinto |= draw_seg_mundo(buf, w, h, previo.0, previo.1, punto.0, punto.1, color, 1.0);
+        previo = punto;
+    }
+    pinto
+}
+
 /// Flecha en mundo: línea + punta de dos alas a ±25° (largo 20% del tramo,
 /// clamp 0.05..0.40 para que se vea en miniaturas y no explote en zoom).
 /// El ángulo se mide en mundo (el aspecto del frame lo puede sesgar: solo
@@ -3069,6 +3200,22 @@ fn draw_mobject_con_profundidad(
         }
         M::Circle { cx, cy, r } => draw_circle_world(buf, w, h, *cx, *cy, *r, CURVE_MAIN),
         M::Square { cx, cy, side } => draw_square_world(buf, w, h, *cx, *cy, *side, SQUARE_BLUE),
+        M::Rectangle {
+            cx,
+            cy,
+            w: rw,
+            h: rh,
+        } => draw_rect_world(buf, w, h, *cx, *cy, *rw, *rh, SQUARE_BLUE),
+        M::Ellipse { cx, cy, rx, ry } => {
+            draw_ellipse_world(buf, w, h, *cx, *cy, *rx, *ry, CURVE_MAIN)
+        }
+        M::Arc {
+            cx,
+            cy,
+            r,
+            start_rad,
+            end_rad,
+        } => draw_arc_world(buf, w, h, *cx, *cy, *r, *start_rad, *end_rad, CURVE_MAIN),
         M::Line { from, to } => {
             draw_line(
                 buf,
@@ -3151,7 +3298,7 @@ fn draw_mobject_con_profundidad(
 // dibujan ejes 2D: el contexto es 3D, como en `render_orbit_frames`).
 //
 // - Solo las variantes geométricas se transforman (`Dot`/`Circle`/`Square`/
-//   `Line`/`Arrow`/`Polygon`/`Group`): el resto (`Axes`, `FunctionGraph`,
+//   `Rectangle`/`Ellipse`/`Arc`/`Line`/`Arrow`/`Polygon`/`Group`): el resto
 //   `ArrowField`, `Tex`, `NumberPlane`, `VectorField`) se dibuja tal cual
 //   (documentado, sin inventar geometría). Un `VMobject` entra vía
 //   `vmobject_como_polilinea` (aplanado Bézier honesto).
@@ -3198,6 +3345,45 @@ fn transformar_colocado(
                 cx: p[0],
                 cy: p[1],
                 side: side * escala.abs(),
+            }
+        }
+        M::Rectangle {
+            cx,
+            cy,
+            w: rw,
+            h: rh,
+        } => {
+            let p = colocado_punto([*cx, *cy], escala, centro);
+            M::Rectangle {
+                cx: p[0],
+                cy: p[1],
+                w: rw * escala.abs(),
+                h: rh * escala.abs(),
+            }
+        }
+        M::Ellipse { cx, cy, rx, ry } => {
+            let p = colocado_punto([*cx, *cy], escala, centro);
+            M::Ellipse {
+                cx: p[0],
+                cy: p[1],
+                rx: rx * escala.abs(),
+                ry: ry * escala.abs(),
+            }
+        }
+        M::Arc {
+            cx,
+            cy,
+            r,
+            start_rad,
+            end_rad,
+        } => {
+            let p = colocado_punto([*cx, *cy], escala, centro);
+            M::Arc {
+                cx: p[0],
+                cy: p[1],
+                r: r * escala.abs(),
+                start_rad: *start_rad,
+                end_rad: *end_rad,
             }
         }
         M::Line { from, to } => M::Line {
@@ -11589,6 +11775,159 @@ mod p1_video_tests {
         fill_background(&mut buf2, 64, 64);
         assert!(draw_mobject(&mut buf2, 64, 64, &tex));
         assert_ne!(buf2, antes);
+    }
+
+    #[test]
+    fn p3_rect_ellipse_arc_dibujan_e_invalidos_no_pintan() {
+        use grafito_anim::Mobject as M;
+        use std::f64::consts::PI;
+        // Muestreadores puros: cotas 32..=128 y 4..=128.
+        assert_eq!(super::muestras_elipse_para_radio(0.5, 0.5), 32);
+        assert_eq!(super::muestras_elipse_para_radio(1.0, 1.0), 32);
+        assert_eq!(super::muestras_elipse_para_radio(2.0, 1.0), 64);
+        assert_eq!(super::muestras_elipse_para_radio(100.0, 100.0), 128);
+        assert_eq!(super::muestras_elipse_para_radio(f64::NAN, 1.0), 32);
+        assert_eq!(super::muestras_arco_para_barrido(PI), 48);
+        assert_eq!(super::muestras_arco_para_barrido(std::f64::consts::TAU), 96);
+        assert_eq!(super::muestras_arco_para_barrido(0.1), 4);
+        assert_eq!(super::muestras_arco_para_barrido(-1.0), 4);
+        // Válidos: dibujan y cambian píxeles.
+        let p3 = [
+            M::Rectangle {
+                cx: 0.0,
+                cy: 0.0,
+                w: 4.0,
+                h: 2.0,
+            },
+            M::Ellipse {
+                cx: 0.0,
+                cy: 0.0,
+                rx: 2.0,
+                ry: 1.0,
+            },
+            M::Arc {
+                cx: 0.0,
+                cy: 0.0,
+                r: 1.5,
+                start_rad: 0.0,
+                end_rad: PI,
+            },
+        ];
+        for m in &p3 {
+            let mut buf = vec![0u8; 64 * 64 * 4];
+            fill_background(&mut buf, 64, 64);
+            let antes = buf.clone();
+            assert!(draw_mobject(&mut buf, 64, 64, m), "debe dibujar: {m:?}");
+            assert_ne!(buf, antes, "debe cambiar píxeles: {m:?}");
+        }
+        // Inválidos: false honesto sin pintar.
+        let malos = [
+            M::Rectangle {
+                cx: 0.0,
+                cy: 0.0,
+                w: 0.0,
+                h: 1.0,
+            },
+            M::Ellipse {
+                cx: 0.0,
+                cy: 0.0,
+                rx: 1.0,
+                ry: -2.0,
+            },
+            M::Arc {
+                cx: 0.0,
+                cy: 0.0,
+                r: 1.0,
+                start_rad: 1.0,
+                end_rad: 1.0,
+            },
+            M::Arc {
+                cx: f64::NAN,
+                cy: 0.0,
+                r: 1.0,
+                start_rad: 0.0,
+                end_rad: 1.0,
+            },
+        ];
+        for m in &malos {
+            let mut buf = vec![0u8; 64 * 64 * 4];
+            fill_background(&mut buf, 64, 64);
+            let antes = buf.clone();
+            assert!(!draw_mobject(&mut buf, 64, 64, m), "no debe dibujar: {m:?}");
+            assert_eq!(buf, antes);
+        }
+        // Escala del colocado también mueve las P3 (rect ×2 no pinta menos).
+        use grafito_anim::{Camera, Ortho, PlacedMobject};
+        let ortho = Camera::Ortho(Ortho::default_16_9());
+        let vacio = render_placed_objects(&[], 64, 64, ortho);
+        let rect = M::Rectangle {
+            cx: 0.0,
+            cy: 0.0,
+            w: 2.0,
+            h: 1.0,
+        };
+        let cuenta = |f: &egui::ColorImage| {
+            f.pixels
+                .iter()
+                .zip(vacio.pixels.iter())
+                .filter(|(a, b)| a != b)
+                .count()
+        };
+        let chico = render_placed_objects(
+            &[PlacedMobject::try_new(rect.clone(), 1.0, 1.0, [0.0, 0.0]).expect("válido")],
+            64,
+            64,
+            ortho,
+        );
+        let grande = render_placed_objects(
+            &[PlacedMobject::try_new(rect, 1.0, 2.0, [0.0, 0.0]).expect("válido")],
+            64,
+            64,
+            ortho,
+        );
+        assert!(
+            cuenta(&grande) >= cuenta(&chico),
+            "rect escala 2 no debe pintar menos que escala 1"
+        );
+    }
+
+    #[test]
+    fn write_mitad_linea_frontera_a_1px() {
+        use grafito_anim::{Mobject as M, RateFunc, WriteAnim};
+        // Línea conocida [-2,0]→[2,0] en 64×64: mundo [-3,3]² → 1px ≈ 0.094.
+        // A mitad (rate lineal) la frontera cae en mundo (0,0) = píxel (32,32).
+        let linea = M::Line {
+            from: [-2.0, 0.0],
+            to: [2.0, 0.0],
+        };
+        let w = WriteAnim::try_new(linea, 8, 1000, RateFunc::Linear).unwrap();
+        let colocado = w.placed_at(0.5).expect("write válido coloca");
+        assert!(matches!(colocado.mobject, M::Polygon { .. }));
+        let mut fondo = vec![0u8; 64 * 64 * 4];
+        fill_background(&mut fondo, 64, 64);
+        let mut buf = fondo.clone();
+        assert!(draw_mobject(&mut buf, 64, 64, &colocado.mobject));
+        // Difiere del fondo si algún canal RGB se mueve >12 (piso anti-halo AA).
+        let difiere = |imagen: &[u8], base: &[u8], x: usize, y: usize| -> bool {
+            let i = (y * 64 + x) * 4;
+            imagen[i..i + 3]
+                .iter()
+                .zip(base[i..i + 3].iter())
+                .map(|(a, b)| (*a as i16 - *b as i16).abs())
+                .sum::<i16>()
+                > 12
+        };
+        // Frontera a ±1px: pinta en 31 y 32, limpio desde 34 (33 = halo).
+        assert!(difiere(&buf, &fondo, 31, 32), "el trazo debe llegar a 31");
+        assert!(difiere(&buf, &fondo, 32, 32), "frontera en 32");
+        assert!(!difiere(&buf, &fondo, 34, 32), "nada revelado en 34");
+        // El extremo (mundo x=2 → px 53) sigue sin revelar a mitad...
+        assert!(!difiere(&buf, &fondo, 53, 32));
+        // ...pero sí con la figura completa.
+        let lleno = w.placed_at(1.0).expect("write válido coloca");
+        let mut buf2 = fondo.clone();
+        assert!(draw_mobject(&mut buf2, 64, 64, &lleno.mobject));
+        assert!(difiere(&buf2, &fondo, 53, 32), "completo debe llegar a 53");
     }
 
     #[test]

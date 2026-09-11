@@ -269,6 +269,7 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
         "suggest_next" => suggest_next_tool(call),
         "generate_animation" => generate_animation_tool(call),
         "generate_guion" => generate_guion_tool(call),
+        "generate_short_script" => generate_short_script_tool(call),
         unknown => ToolResult::text(
             &call.id,
             false,
@@ -1824,6 +1825,90 @@ fn generate_guion_tool(call: &ToolCall) -> ToolResult {
     ToolResult::text(&call.id, true, payload.to_string())
 }
 
+/// P2 — `generate_short_script(concepto)`: arma un guion corto validado.
+///
+/// Pura, sin I/O ni motor: usa `short_script` (4 beats: hook → intriga →
+/// clímax ×3 → payoff, 6 pasos, 48 frames, ≤60 s, 640×480, narración
+/// rioplatense 110-130 palabras con `voiceover` por paso) + `Guion::try_new`.
+/// Devuelve el corto validado como `concepto` canónico + `steps` para
+/// aprobar como cualquier guion: `short_script` es determinista, así que
+/// `short_script(concepto)` regenera el mismo `GuionTexto` byte-idéntico
+/// para emitirlo por `generate_guion`; el render corre en el hilo del guion
+/// tras aprobación explícita (el hilo persiste la narración para
+/// Piper/captions). El JSON completo no viaja en el resultado porque
+/// excede el presupuesto del tool-result (2048 chars); el `note` lo dice.
+/// `Err` honesto en español, sin pánicos.
+fn generate_short_script_tool(call: &ToolCall) -> ToolResult {
+    use grafito_pedagogy::guion_session::GuionASesion;
+    let Some(concepto) = string_arg(call, "concepto").or_else(|| string_arg(call, "concept"))
+    else {
+        return ToolResult::text(
+            &call.id,
+            false,
+            "generate_short_script requiere 'concepto' no vacío (máx 2000 chars)",
+        );
+    };
+    let crudo = match grafito_anim::guion::short_script(&concepto) {
+        Ok(guion) => guion,
+        Err(error) => {
+            return ToolResult::text(
+                &call.id,
+                false,
+                format!("short inválido para {concepto:?}: {error}"),
+            );
+        }
+    };
+    if !crudo.validate_short_len() {
+        return ToolResult::text(
+            &call.id,
+            false,
+            format!(
+                "el corto trae {} palabras de voz (válido 110..=130)",
+                crudo.total_voiceover_words()
+            ),
+        );
+    }
+    let guion = match grafito_anim::guion::Guion::try_new(crudo.clone()) {
+        Ok(guion) => guion,
+        Err(error) => {
+            return ToolResult::text(&call.id, false, format!("short inválido: {error}"));
+        }
+    };
+    let sesion = guion.a_sesion();
+    let (ancho, alto) = guion.resolution().as_tuple();
+    let steps: Vec<Value> = sesion
+        .steps
+        .iter()
+        .map(|paso| {
+            json!({
+                "id": paso.id,
+                "titulo": paso.title,
+                "verified": paso.verified,
+                "math_expr": paso.math_expr,
+                "manim_template": paso.manim_template,
+                "cue_ms": paso.cue_ms,
+                "frame_range": paso.frame_range,
+            })
+        })
+        .collect();
+    let payload = json!({
+        "tool": "generate_short_script",
+        "concepto": guion.concepto(),
+        "formato": "short 4 beats (hook, intriga, clímax ×3, payoff), ≤60 s, narración incluida",
+        "actos": guion.actos().len(),
+        "total_pasos": guion.total_pasos(),
+        "total_frames": guion.total_frames(),
+        "duracion_total_ms": guion.duracion_total_ms(),
+        "palabras_voz": crudo.total_voiceover_words(),
+        "resolution": [ancho, alto],
+        "steps": steps,
+        "short_determinista": true,
+        "remate": "check ausente honesto: el wire no trae probe/expected; el integrador suma with_final_check si corresponde",
+        "note": "short validado con voiceover por paso; short_script(concepto) regenera el mismo GuionTexto byte-idéntico para emitirlo por generate_guion (el JSON completo excede el presupuesto del tool-result y no viaja acá); el render corre en el hilo del guion tras aprobación explícita",
+    });
+    ToolResult::text(&call.id, true, payload.to_string())
+}
+
 /// Propone una animación paramétrica desde un pedido en lenguaje natural.
 ///
 /// Puro y honesto: delega en `infer_parametric_anim` (reglas sin inventos) y
@@ -2120,17 +2205,43 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
 /// fade, grow, indicate, tracker, wait (con alias en español: crear/traza,
 /// escribir/texto, aparecer, crecer, indicar/pulso, espera/pausa).
 /// `math_expr` inválida no tumba el paso: baja a `None` (el paso se conserva).
+/// Para shorts (≤60 s con narración): incluí `voiceover` por paso (texto
+/// plano, ≤40 palabras cada uno, 110-130 en total) o usá el atajo
+/// `generate_short_script(concepto)`, que ya trae la narración validada.
 pub fn generate_guion_tool_schema() -> ToolSchema {
     ToolSchema::new(
         "generate_guion",
-        "Valida un guion del director (JSON GuionTexto: 1..=5 actos, pasos 1..=3 por acto, frames 4..=16 y total ≤96, set ≤64 MiB, template_hint de las 11 canónicas [derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal], efecto de los 7 [create, write, fade, grow, indicate, tracker, wait]) y lo baja a sesión de enseñanza (1 acto = 1 paso, steps:[{titulo, verified}]); el render corre en la UI tras aprobación explícita.",
+        "Valida un guion del director (JSON GuionTexto: 1..=5 actos, pasos 1..=3 por acto, frames 4..=16 y total ≤96, set ≤64 MiB, template_hint de las 11 canónicas [derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal], efecto de los 7 [create, write, fade, grow, indicate, tracker, wait]) y lo baja a sesión de enseñanza (1 acto = 1 paso, steps:[{titulo, verified}]); el render corre en la UI tras aprobación explícita. Para shorts con narración incluí voiceover por paso (110-130 palabras totales) o usá el atajo generate_short_script.",
         json!({
             "type": "object",
             "properties": {
-                "guion_texto": {"type": "string", "description": "JSON de GuionTexto (máx 32768 bytes): {concepto (≤500 chars), width/height (64..=4096, únicos), actos[1..=5] de {titulo (1..=80), fondo ([r,g,b] opcional), limpiar (bool), pasos[1..=3] de {texto (1..=500), math_expr? (≤200, inválida→None), whiteboard_hint (≤200), template_hint (11 canónicas), params (≤16 finitos), efecto (7), frames (4..=16), run_ms (100..=60000; espera 1..=10000), wait_after_ms (0..=10000; espera exige 0)}}}"},
+                "guion_texto": {"type": "string", "description": "JSON de GuionTexto (máx 32768 bytes): {concepto (≤500 chars), width/height (64..=4096, únicos), actos[1..=5] de {titulo (1..=80), fondo ([r,g,b] opcional), limpiar (bool), pasos[1..=3] de {texto (1..=500), math_expr? (≤200, inválida→None), whiteboard_hint (≤200), template_hint (11 canónicas), params (≤16 finitos), efecto (7), frames (4..=16), run_ms (100..=60000; espera 1..=10000), wait_after_ms (0..=10000; espera exige 0), voiceover? (texto plano ≤40 palabras; para shorts 110-130 en total o usá generate_short_script)}}}"},
                 "guion": {"type": "string", "description": "Alias de guion_texto"}
             },
             "required": ["guion_texto"]
+        }),
+    )
+}
+
+/// Schema de `generate_short_script(concepto)`.
+///
+/// Atajo puro al guion corto: 4 beats (hook, intriga, clímax ×3, payoff),
+/// 6 pasos, 48 frames, ≤60 s, 640×480, con narración rioplatense incluida
+/// (`voiceover` por paso, 110-130 palabras totales). Devuelve el corto
+/// validado como `concepto` canónico + `steps` para aprobar como cualquier
+/// guion (`short_script` es determinista: regenera el mismo `GuionTexto`
+/// byte-idéntico para emitirlo por `generate_guion`).
+pub fn generate_short_script_tool_schema() -> ToolSchema {
+    ToolSchema::new(
+        "generate_short_script",
+        "Arma un guion corto validado para un concepto (4 beats: hook, intriga, clímax ×3, payoff; 6 pasos, 48 frames, ≤60 s, 640×480) con narración rioplatense incluida (voiceover por paso, 110-130 palabras totales) y lo baja a sesión de enseñanza (concepto canónico + steps:[{titulo, verified}] para aprobar como cualquier guion; short_script(concepto) regenera el mismo GuionTexto byte-idéntico para emitirlo por generate_guion); el render corre en la UI tras aprobación explícita.",
+        json!({
+            "type": "object",
+            "properties": {
+                "concepto": {"type": "string", "description": "Concepto a narrar en ≤60 s (no vacío, máx 2000 chars; ej. «derivada como pendiente»)"},
+                "concept": {"type": "string", "description": "Alias de concepto"}
+            },
+            "required": ["concepto"]
         }),
     )
 }
@@ -2145,6 +2256,7 @@ pub fn pedagogy_tool_schemas() -> Vec<ToolSchema> {
         suggest_next_tool_schema(),
         generate_animation_tool_schema(),
         generate_guion_tool_schema(),
+        generate_short_script_tool_schema(),
     ]
 }
 
@@ -5279,7 +5391,8 @@ mod tests {
         let nombres: Vec<&str> = esquemas.iter().map(|schema| schema.name.as_str()).collect();
         assert!(nombres.contains(&"run_command"));
         assert!(nombres.contains(&"solid_measure_3d"));
-        assert_eq!(esquemas.len(), 20);
+        assert!(nombres.contains(&"generate_short_script"));
+        assert_eq!(esquemas.len(), 21);
     }
 
     #[test]
@@ -5336,6 +5449,89 @@ mod tests {
         }
         assert!(texto.contains('5'));
         assert!(texto.contains("96"));
+    }
+
+    #[test]
+    fn generate_short_script_camino_feliz_con_guion_texto_validado() {
+        let call = ToolCall {
+            id: "short1".into(),
+            name: "generate_short_script".into(),
+            arguments: json!({"concepto": "derivada como pendiente"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("json");
+        assert_eq!(value["tool"], "generate_short_script");
+        assert_eq!(value["total_pasos"], 6);
+        assert_eq!(value["total_frames"], 48);
+        assert!(
+            value["duracion_total_ms"].as_u64().unwrap_or(u64::MAX) <= 60_000,
+            "short ≤60 s"
+        );
+        let palabras = value["palabras_voz"].as_u64().expect("palabras_voz") as usize;
+        assert!((110..=130).contains(&palabras), "{palabras}");
+        let steps = value["steps"].as_array().expect("steps");
+        assert_eq!(steps.len(), 4, "a_sesion baja 1 acto = 1 paso");
+        for paso in steps {
+            assert!(paso.get("titulo").and_then(Value::as_str).is_some());
+            assert!(paso.get("verified").and_then(Value::as_bool).is_some());
+        }
+        // El corto es determinista: `short_script(concepto canónico)`
+        // regenera el mismo GuionTexto validado (el modelo lo emite por
+        // `generate_guion` sin re-inventar nada).
+        let concepto = value["concepto"].as_str().expect("concepto");
+        let primero = grafito_anim::guion::short_script("derivada como pendiente").expect("short");
+        let segundo = grafito_anim::guion::short_script(concepto).expect("short canónico");
+        assert_eq!(
+            serde_json::to_string(&primero).expect("json"),
+            serde_json::to_string(&segundo).expect("json"),
+            "byte-idéntico desde el concepto canónico"
+        );
+        assert!(segundo.validate_short_len());
+        assert!(grafito_anim::guion::Guion::try_new(segundo).is_ok());
+    }
+
+    #[test]
+    fn generate_short_script_rechaza_sin_concepto() {
+        for (id, args) in [
+            ("short-sin", json!({})),
+            ("short-vacio", json!({"concepto": "   "})),
+        ] {
+            let call = ToolCall {
+                id: id.into(),
+                name: "generate_short_script".into(),
+                arguments: args,
+            };
+            let result = dispatch_safe_tool(&call);
+            assert!(!result.ok, "id={id} debía rechazar: {}", result.content);
+            assert!(result.content.contains("concepto"), "{}", result.content);
+        }
+    }
+
+    #[test]
+    fn generate_short_script_schema_es_tool_openai_valida() {
+        let schema = generate_short_script_tool_schema();
+        assert_eq!(schema.name, "generate_short_script");
+        assert!(schema.validate().is_ok());
+        let openai = schema.openai_tool().expect("openai_tool");
+        assert_eq!(openai["function"]["name"], "generate_short_script");
+        let required = schema.parameters["required"].as_array().expect("required");
+        assert!(required.iter().any(|r| r == "concepto"));
+        // La description documenta el atajo: 4 beats, narración incluida.
+        assert!(schema.description.contains("4 beats"));
+        assert!(schema.description.contains("110-130"));
+    }
+
+    #[test]
+    fn generate_guion_schema_documenta_voiceover_y_atajo_short() {
+        let schema = generate_guion_tool_schema();
+        let texto = format!("{} {}", schema.description, schema.parameters);
+        assert!(texto.contains("voiceover"), "documenta voz por paso");
+        assert!(texto.contains("110-130"), "documenta rango short");
+        assert!(
+            texto.contains("generate_short_script"),
+            "documenta el atajo"
+        );
     }
 
     #[test]
@@ -5835,7 +6031,7 @@ mod tests {
             assert_eq!(openai["type"], "function");
             assert_eq!(openai["function"]["name"], schema.name);
         }
-        assert_eq!(pedagogy_tool_schemas().len(), 7);
+        assert_eq!(pedagogy_tool_schemas().len(), 8);
         assert!(all_safe_tool_schemas().len() >= 10);
     }
 
@@ -5870,6 +6066,7 @@ mod tests {
             "suggest_next",
             "generate_animation",
             "generate_guion",
+            "generate_short_script",
         ] {
             let call = ToolCall {
                 id: "cov".into(),
@@ -5882,6 +6079,7 @@ mod tests {
                     "suggest_next" => json!({}),
                     "generate_animation" => json!({"concept": "derivada"}),
                     "generate_guion" => json!({"guion_texto": guion_texto_minimo()}),
+                    "generate_short_script" => json!({"concepto": "derivada como pendiente"}),
                     _ => json!({}),
                 },
             };
@@ -5907,8 +6105,8 @@ mod tests {
             assert_eq!(openai["function"]["name"], schema.name);
         }
         assert_eq!(math_tool_schemas().len(), 8);
-        // 3 base + 7 pedagógicas + 8 matemáticas + 2 harness-1.
-        assert_eq!(all_safe_tool_schemas().len(), 20);
+        // 3 base + 8 pedagógicas + 8 matemáticas + 2 harness-1.
+        assert_eq!(all_safe_tool_schemas().len(), 21);
     }
 
     fn math_call(name: &str, arguments: Value) -> ToolCall {

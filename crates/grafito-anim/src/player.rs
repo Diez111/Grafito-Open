@@ -20,9 +20,11 @@
 //!   cuando los items traen N distinto).
 //! - [`PlacedMobject::opaco`] y los `placed_at` devuelven `SceneResult`
 //!   (R6d): lo inválido jamás llega a pantalla como punto en el origen.
-//! - `Write` con SVG opaco NO finge trazo parcial: el SVG viaja entero y el
-//!   progreso se expresa por `opacity` (revelado honesto, documentado en
-//!   [`WriteAnim`]).
+//! - `Write` revela por trazo las polilíneas/VMobject (prefijo por longitud
+//!   de arco: `alpha=0` → traza vacía, `alpha=1` → figura completa,
+//!   monotónico con rates monótonos); con SVG opaco (`Tex`) NO finge trazo
+//!   parcial: el SVG viaja entero y el progreso se expresa por `opacity`
+//!   (fallback honesto, documentado en [`WriteAnim`]).
 //!
 //! Presupuestos intactos: frames por anim 1..=48, total del `play` ≤96
 //! (paridad con playlist; corto histórico), set 64 MiB (estimación honesta
@@ -209,7 +211,11 @@ impl PlayedFrame {
 pub fn centroide_de(m: &Mobject) -> [f64; 2] {
     match m {
         Mobject::Dot { x, y } => [*x, *y],
-        Mobject::Circle { cx, cy, .. } | Mobject::Square { cx, cy, .. } => [*cx, *cy],
+        Mobject::Circle { cx, cy, .. }
+        | Mobject::Square { cx, cy, .. }
+        | Mobject::Rectangle { cx, cy, .. }
+        | Mobject::Ellipse { cx, cy, .. }
+        | Mobject::Arc { cx, cy, .. } => [*cx, *cy],
         Mobject::Line { from, to } | Mobject::Arrow { from, to } => {
             [(from[0] + to[0]) / 2.0, (from[1] + to[1]) / 2.0]
         }
@@ -460,17 +466,142 @@ fn traza_prefijo(poly: &[[f64; 2]], s: f64, closed: bool) -> Vec<[f64; 2]> {
     out
 }
 
-/// `Write`: revelado honesto de texto ya tipografiado.
+/// `Write`: revelado por trazo para polilíneas + opacidad honesta si no hay trazo.
 ///
-/// El SVG viaja OPACO (sin parser de trazos en el cerebro): el progreso se
-/// expresa por `opacity` eased, jamás subdividiendo el path a ciegas. Si
-/// algún día hay parser, este es el punto de corte (documentado, no fingido).
+/// - Trazable (`Polygon` con ≥2 puntos, `Line`/`Arrow`, `Circle`/`Square`/
+///   `Rectangle`/`Ellipse`/`Arc` muestreados): el frame en `alpha` muestra el
+///   prefijo `eased·longitud` por arco-longitud (el mismo `traza_prefijo` de
+///   `Create`): `alpha=0` → traza vacía (cero puntos, colocado con opacidad
+///   0); `alpha=0.5` → mitad del trazo; `alpha=1` → figura completa opaca.
+///   Monotónico con rates monótonos (`Linear`/`Smooth`).
+/// - Sin trazo (`Tex`/SVG opaco, campos, `Dot` de un punto, `Group`, resto):
+///   el mobject viaja entero y el progreso se expresa por `opacity` eased
+///   (fallback documentado, jamás subdivisión ciega del path).
+///   Un `VMobject` entra por [`VMobject::como_mobject`] (aplanado a `Polygon`).
 #[derive(Debug, Clone)]
 pub struct WriteAnim {
     mobject: Mobject,
     frames: usize,
     run_ms: u64,
     rate: RateFunc,
+}
+
+/// Anillo muestreado con `segs` segmentos (sin duplicar el cierre: el
+/// `closed` de `traza_prefijo` ya envuelve). Puro, sin pánicos.
+fn anillo_muestreado(cx: f64, cy: f64, rx: f64, ry: f64, segs: usize) -> Vec<[f64; 2]> {
+    let n = segs.max(1);
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let a = 2.0 * std::f64::consts::PI * (k as f64) / (n as f64);
+        let (x, y) = (cx + rx * a.cos(), cy + ry * a.sin());
+        if x.is_finite() && y.is_finite() {
+            out.push([x, y]);
+        }
+    }
+    out
+}
+
+/// Arco muestreado proporcional al barrido (abierto, `end` incluido).
+/// 4..=64 segmentos (vuelta completa = 48). Puro, sin pánicos.
+fn arco_muestreado(cx: f64, cy: f64, r: f64, start: f64, end: f64) -> Vec<[f64; 2]> {
+    let barrido = end - start;
+    let n = if barrido.is_finite() && barrido > 0.0 {
+        ((barrido / std::f64::consts::TAU * 48.0).ceil() as usize).clamp(4, 64)
+    } else {
+        4
+    };
+    let mut out = Vec::with_capacity(n.saturating_add(1));
+    for k in 0..=n {
+        let a = start + barrido * (k as f64) / (n as f64);
+        let (x, y) = (cx + r * a.cos(), cy + r * a.sin());
+        if x.is_finite() && y.is_finite() {
+            out.push([x, y]);
+        }
+    }
+    out
+}
+
+/// Polilínea trazable de un mobject para `Write` (+ si es cerrada).
+/// `None` honesto = sin trazo (va por opacidad): `Tex`/SVG opaco, campos,
+/// `Dot`, `Polygon` de un punto, `Group` y resto sin geometría de puntos.
+/// `Polygon` con ≥3 puntos se toma cerrada (igual que el dibujo, que la
+/// cierra). Puro, sin pánicos.
+fn puntos_trazables(m: &Mobject) -> Option<(Vec<[f64; 2]>, bool)> {
+    match m {
+        Mobject::Polygon { pts } => {
+            if pts.len() >= 2 && pts.iter().all(|p| p[0].is_finite() && p[1].is_finite()) {
+                Some((pts.clone(), pts.len() >= 3))
+            } else {
+                None
+            }
+        }
+        Mobject::Line { from, to } | Mobject::Arrow { from, to } => Some((vec![*from, *to], false)),
+        Mobject::Circle { cx, cy, r } => Some((anillo_muestreado(*cx, *cy, *r, *r, 24), true)),
+        Mobject::Square { cx, cy, side } => {
+            let h = side / 2.0;
+            Some((
+                vec![
+                    [cx - h, cy - h],
+                    [cx + h, cy - h],
+                    [cx + h, cy + h],
+                    [cx - h, cy + h],
+                ],
+                true,
+            ))
+        }
+        Mobject::Rectangle { cx, cy, w, h } => {
+            let (hw, hh) = (w / 2.0, h / 2.0);
+            Some((
+                vec![
+                    [cx - hw, cy - hh],
+                    [cx + hw, cy - hh],
+                    [cx + hw, cy + hh],
+                    [cx - hw, cy + hh],
+                ],
+                true,
+            ))
+        }
+        Mobject::Ellipse { cx, cy, rx, ry } => {
+            Some((anillo_muestreado(*cx, *cy, *rx, *ry, 32), true))
+        }
+        Mobject::Arc {
+            cx,
+            cy,
+            r,
+            start_rad,
+            end_rad,
+        } => Some((arco_muestreado(*cx, *cy, *r, *start_rad, *end_rad), false)),
+        Mobject::Dot { .. }
+        | Mobject::Axes
+        | Mobject::FunctionGraph { .. }
+        | Mobject::ArrowField { .. }
+        | Mobject::Tex { .. }
+        | Mobject::NumberPlane { .. }
+        | Mobject::VectorField { .. }
+        | Mobject::Group(_) => None,
+    }
+}
+
+/// Longitud de arco de una polilínea (`closed` suma el cierre). Pura.
+fn longitud_arco(pts: &[[f64; 2]], closed: bool) -> f64 {
+    if pts.len() < 2 {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    let n = pts.len();
+    let segs = if closed { n } else { n.saturating_sub(1) };
+    for k in 0..segs {
+        let (a, b) = if closed {
+            (pts[k % n], pts[(k + 1) % n])
+        } else {
+            (pts[k], pts[k + 1])
+        };
+        let d = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+        if d.is_finite() && d > 0.0 {
+            total += d;
+        }
+    }
+    total
 }
 
 impl WriteAnim {
@@ -496,16 +627,85 @@ impl WriteAnim {
         self.frames
     }
 
-    /// Colocado en `alpha` (mismo SVG entero, alfa eased; R6d: `Err`
-    /// honesto si el colocado no valida).
+    /// ¿Revela por trazo (`true`) u opacidad (`false`)?
+    pub fn es_progresivo(&self) -> bool {
+        puntos_trazables(&self.mobject).is_some()
+    }
+
+    /// Prefijo trazado en `alpha` crudo 0..1 (easing aplicado).
+    /// Vacío si `alpha<=0` o si el mobject no tiene trazo (ver
+    /// [`WriteAnim::es_progresivo`]); completo si `alpha>=1`. Puro.
+    pub fn traza_en(&self, alpha: f64) -> Vec<[f64; 2]> {
+        let Some((poly, closed)) = puntos_trazables(&self.mobject) else {
+            return Vec::new();
+        };
+        let e = self.interpolate(alpha);
+        let s = if e.is_finite() {
+            e.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if s <= 0.0 {
+            return Vec::new();
+        }
+        traza_prefijo(&poly, s, closed)
+    }
+
+    /// Fracción de longitud revelada 0..1 (`0` si no hay trazo o degenera,
+    /// `1` con la figura completa). Monótona con rates monótonos. Pura.
+    pub fn fraccion_revelada(&self, alpha: f64) -> f64 {
+        let Some((poly, closed)) = puntos_trazables(&self.mobject) else {
+            return 0.0;
+        };
+        let total = longitud_arco(&poly, closed);
+        if !total.is_finite() || total <= 0.0 {
+            return 0.0;
+        }
+        let e = self.interpolate(alpha);
+        let s = if e.is_finite() {
+            e.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if s <= 0.0 {
+            return 0.0;
+        }
+        if s >= 1.0 {
+            return 1.0;
+        }
+        // El prefijo es abierto por construcción (`traza_prefijo` no duplica
+        // el cierre): se mide abierto aunque la figura sea cerrada.
+        let revelada = longitud_arco(&self.traza_en(alpha), false);
+        if !revelada.is_finite() {
+            return 0.0;
+        }
+        (revelada / total).clamp(0.0, 1.0)
+    }
+
+    /// Colocado en `alpha`: trazo parcial opaco si hay trazo (vacío →
+    /// mobject original con opacidad 0, nada visible); si no hay trazo, el
+    /// mobject entero con alfa eased (fallback `Tex`/opaco). El centro es el
+    /// del mobject completo (estable entre frames, sin temblor).
+    /// R6d: `Err` honesto si el colocado no valida.
     pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
+        let center = centroide_de(&self.mobject);
+        if puntos_trazables(&self.mobject).is_some() {
+            let traza = self.traza_en(alpha);
+            if traza.is_empty() {
+                return PlacedMobject::try_new(self.mobject.clone(), 0.0, 1.0, center);
+            }
+            if traza.len() == 1 {
+                let p = traza[0];
+                return PlacedMobject::try_new(Mobject::Dot { x: p[0], y: p[1] }, 1.0, 1.0, center);
+            }
+            return PlacedMobject::try_new(Mobject::Polygon { pts: traza }, 1.0, 1.0, center);
+        }
         let e = self.interpolate(alpha);
         let o = (if e.is_finite() {
             e.clamp(0.0, 1.0)
         } else {
             0.0
         }) as f32;
-        let center = centroide_de(&self.mobject);
         PlacedMobject::try_new(self.mobject.clone(), o, 1.0, center)
     }
 }
@@ -1177,6 +1377,27 @@ fn polilinea_de(m: &Mobject) -> Vec<[f64; 2]> {
                 [cx - h, cy + h],
             ]
         }
+        Mobject::Rectangle { cx, cy, w, h } => {
+            let (hw, hh) = (w / 2.0, h / 2.0);
+            vec![
+                [cx - hw, cy - hh],
+                [cx + hw, cy - hh],
+                [cx + hw, cy + hh],
+                [cx - hw, cy + hh],
+            ]
+        }
+        Mobject::Ellipse { cx, cy, rx, ry } => {
+            let mut out = anillo_muestreado(*cx, *cy, *rx, *ry, 24);
+            out.push([cx + rx, *cy]);
+            out
+        }
+        Mobject::Arc {
+            cx,
+            cy,
+            r,
+            start_rad,
+            end_rad,
+        } => arco_muestreado(*cx, *cy, *r, *start_rad, *end_rad),
         Mobject::Group(hijos) => {
             let mut out = Vec::new();
             for h in hijos {
@@ -1220,7 +1441,7 @@ pub enum PlayItem {
     Transform(crate::scene::TransformAnim),
     /// Traza progresiva.
     Create(CreateAnim),
-    /// Revelado honesto de texto/SVG opaco.
+    /// Revelado por trazo (u opacidad honesta si no hay trazo).
     Write(WriteAnim),
     /// Aparición / desaparición por alfa.
     Fade(FadeAnim),
@@ -1727,6 +1948,9 @@ mod player_tests {
         let tex = Mobject::tex_desde_texto("hola").unwrap();
         let w = WriteAnim::try_new(tex.clone(), 4, 1000, RateFunc::Smooth).unwrap();
         // El SVG viaja entero en todos los frames; solo cambia el alfa.
+        assert!(!w.es_progresivo());
+        assert!(w.traza_en(0.5).is_empty());
+        assert_eq!(w.fraccion_revelada(0.5), 0.0);
         assert_eq!(w.placed_at(0.0).expect("write válido").mobject, tex);
         assert_eq!(w.placed_at(1.0).expect("write válido").mobject, tex);
         assert!(
@@ -1734,6 +1958,83 @@ mod player_tests {
                 < w.placed_at(1.0).expect("write válido").opacity
         );
         assert_eq!(w.placed_at(1.0).expect("write válido").opacity, 1.0);
+    }
+
+    #[test]
+    fn write_revela_trazo_por_longitud_de_arco_monotono() {
+        // Línea conocida [0,0]→[10,0]: fracción exacta por tramo recto.
+        let linea = Mobject::Line {
+            from: [0.0, 0.0],
+            to: [10.0, 0.0],
+        };
+        let w = WriteAnim::try_new(linea, 8, 1000, RateFunc::Linear).unwrap();
+        assert!(w.es_progresivo());
+        // alpha=0 → cero puntos + colocado mudo (nada visible, válido).
+        assert!(w.traza_en(0.0).is_empty());
+        assert_eq!(w.fraccion_revelada(0.0), 0.0);
+        assert_eq!(w.placed_at(0.0).expect("write válido").opacity, 0.0);
+        // alpha=0.5 → mitad del trazo (longitud 5 de 10).
+        let mitad = w.traza_en(0.5);
+        assert!(mitad.len() >= 2);
+        let ultima = mitad[mitad.len() - 1];
+        assert!((ultima[0] - 5.0).abs() < 1e-9, "got {ultima:?}");
+        assert!(ultima[1].abs() < 1e-9);
+        assert!((w.fraccion_revelada(0.5) - 0.5).abs() < 1e-9);
+        // alpha=1 → completo opaco.
+        assert_eq!(w.fraccion_revelada(1.0), 1.0);
+        let p1 = w.placed_at(1.0).expect("write válido");
+        assert_eq!(p1.opacity, 1.0);
+        // Monotonía no-decreciente en la fracción (rate lineal).
+        let mut anterior = 0.0;
+        for k in 0..=20 {
+            let f = w.fraccion_revelada(f64::from(k) / 20.0);
+            assert!(f + 1e-12 >= anterior, "bajó en k={k}: {f} < {anterior}");
+            anterior = f;
+        }
+    }
+
+    #[test]
+    fn write_caja_conocida_mitad_del_perimetro() {
+        // Caja conocida: rect 4×2 centrado (perímetro 12, mitad = 6).
+        let caja = Mobject::Rectangle {
+            cx: 0.0,
+            cy: 0.0,
+            w: 4.0,
+            h: 2.0,
+        };
+        let w = WriteAnim::try_new(caja, 8, 1000, RateFunc::Linear).unwrap();
+        assert!(w.es_progresivo());
+        assert!((w.fraccion_revelada(0.5) - 0.5).abs() < 1e-9);
+        // El extremo a mitad cae en (2,1): 4 del lado + 2 del vertical.
+        let mitad = w.traza_en(0.5);
+        let ultima = mitad[mitad.len() - 1];
+        assert!((ultima[0] - 2.0).abs() < 1e-9, "got {ultima:?}");
+        assert!((ultima[1] - 1.0).abs() < 1e-9, "got {ultima:?}");
+        // VMobject por `como_mobject`: también revela por trazo.
+        let vm = VMobject::try_new(
+            vec![[0.0, 0.0], [4.0, 0.0]],
+            vec![[0.0, 0.0], [4.0, 0.0]],
+            vec![[0.0, 0.0], [4.0, 0.0]],
+        )
+        .unwrap();
+        let poli = vm.como_mobject();
+        let wv = WriteAnim::try_new(poli, 4, 500, RateFunc::Linear).unwrap();
+        assert!(wv.es_progresivo());
+        assert!((wv.fraccion_revelada(0.5) - 0.5).abs() < 1e-9);
+        assert_eq!(wv.fraccion_revelada(1.0), 1.0);
+        // Arco de medio círculo: mitad del barrido a 90°.
+        let arco = Mobject::Arc {
+            cx: 0.0,
+            cy: 0.0,
+            r: 2.0,
+            start_rad: 0.0,
+            end_rad: std::f64::consts::PI,
+        };
+        let wa = WriteAnim::try_new(arco, 4, 500, RateFunc::Linear).unwrap();
+        assert!((wa.fraccion_revelada(0.5) - 0.5).abs() < 1e-6);
+        let fin = wa.traza_en(0.5);
+        let u = fin[fin.len() - 1];
+        assert!(u[0].abs() < 1e-6 && (u[1] - 2.0).abs() < 1e-6, "got {u:?}");
     }
 
     #[test]
