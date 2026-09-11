@@ -4487,6 +4487,64 @@ pub(crate) fn sanitize_export_stem(raw: &str) -> String {
     }
 }
 
+// ── F4a: nombres estables para export de animación ──────────────────────
+// El destino final es estable (`grafito_{stem}_{w}x{h}_{n}.{ext}`, sin
+// pid/stamp: dos exports del mismo set dan el mismo nombre y el segundo
+// colisiona honesto vía `O_EXCL` del worker o `-k` de `export_path_unico`).
+// pid/stamp quedan SOLO en los hermanos temporales (`gif_tmp_sibling`,
+// `mp4_tmp_sibling`, ...), que exigen mismo-filesystem para el rename
+// atómico. Puro salvo `export_path_unico` (solo metadata de existencia,
+// sin crear nada: la publicación exclusiva la hace el worker).
+
+/// Nombre estable de export (`grafito_{stem}_{w}x{h}_{n}.{ext}`).
+///
+/// `stem` se sanea (minúsculas, alnum/`_`/`-`, máx 40, vacío → `animacion`);
+/// `ext` se sanea igual (vacía → `gif`). Puro, sin I/O.
+pub(crate) fn stable_anim_export_filename(
+    stem: &str,
+    width: usize,
+    height: usize,
+    frames: usize,
+    extension: &str,
+) -> String {
+    let limpio: String = stem
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '-')
+        .take(40)
+        .collect();
+    let stem = if limpio.is_empty() {
+        "animacion"
+    } else {
+        &limpio
+    };
+    let ext: String = extension
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .take(8)
+        .collect();
+    let ext = if ext.is_empty() { "gif" } else { &ext };
+    format!("grafito_{stem}_{width}x{height}_{frames}.{ext}")
+}
+
+/// Destino único sin pid/stamp: `base.ext`, y si existe `base-2.ext`…
+/// (hasta `-999`; agotado devuelve la base y el worker falla honesto por
+/// `O_EXCL`). Solo lee metadata de existencia, no crea nada.
+pub(crate) fn export_path_unico(dir: &Path, base: &str, extension: &str) -> PathBuf {
+    let directo = dir.join(format!("{base}.{extension}"));
+    if std::fs::symlink_metadata(&directo).is_err() {
+        return directo;
+    }
+    for k in 2..1000 {
+        let candidato = dir.join(format!("{base}-{k}.{extension}"));
+        if std::fs::symlink_metadata(&candidato).is_err() {
+            return candidato;
+        }
+    }
+    directo
+}
+
 /// Bytes PNG reales sin I/O (frente W4): reutiliza la escena + `render_png`
 /// de tiny-skia del export a archivo, sin motor nuevo ni framebuffer extra.
 ///
@@ -6356,6 +6414,39 @@ mod tests {
         assert_eq!(sanitize_export_stem("!!!"), "tabla");
         assert_eq!(sanitize_export_stem(""), "tabla");
         assert!(!sanitize_export_stem("áé").is_empty());
+    }
+
+    #[test]
+    fn r4_stable_anim_export_filename_estable_y_sin_pid() {
+        // F4a: mismo set → mismo nombre; sin pid/stamp (solo tmp-hermanos).
+        let a = stable_anim_export_filename("Derivada (nativa)", 470, 352, 48, "gif");
+        let b = stable_anim_export_filename("Derivada (nativa)", 470, 352, 48, "gif");
+        assert_eq!(a, b, "estable entre llamadas");
+        assert_eq!(a, "grafito_derivadanativa_470x352_48.gif", "fue: {a}");
+        assert!(!a.contains(&std::process::id().to_string()), "sin pid: {a}");
+        // Stem vacío/ext rara → fallbacks honestos.
+        assert_eq!(
+            stable_anim_export_filename("!!!", 64, 48, 3, "gif"),
+            "grafito_animacion_64x48_3.gif"
+        );
+        assert_eq!(
+            stable_anim_export_filename("t", 64, 48, 3, ""),
+            "grafito_t_64x48_3.gif"
+        );
+        // Único: sin colisión devuelve la base; con colisión `-2`.
+        let dir = std::env::temp_dir();
+        let unico = export_path_unico(&dir, "grafito_r4_sonda_inexistente_xyz", "gif");
+        assert_eq!(unico, dir.join("grafito_r4_sonda_inexistente_xyz.gif"));
+        let ocupado = dir.join("grafito_r4_sonda_ocupada_xyz.gif");
+        std::fs::write(&ocupado, b"sonda").expect("temporal del test");
+        let segundo = export_path_unico(&dir, "grafito_r4_sonda_ocupada_xyz", "gif");
+        assert_eq!(
+            segundo,
+            dir.join("grafito_r4_sonda_ocupada_xyz-2.gif"),
+            "fue: {}",
+            segundo.display()
+        );
+        std::fs::remove_file(&ocupado).expect("limpia su temporal");
     }
 
     #[test]

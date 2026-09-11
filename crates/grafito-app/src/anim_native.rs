@@ -87,6 +87,152 @@ pub const GIF_EXPORT_MAX_FRAMES: usize = 64;
 /// Lado máximo por frame (igual que `Resolution::try_new` 64..=4096).
 pub const GIF_EXPORT_MAX_DIM: usize = 4096;
 
+// ── F1canon: viewport canónico del chat 480×360 ─────────────────────────
+// Elección documentada: 480×360×48 RGBA = 33_177_600 B (31.6 MiB), que
+// entra holgado en `NATIVE_MAX_SET_BYTES` (64 MiB); el autofit GIF lo baja
+// ~4% a 470×352 (imperceptible) para el presupuesto de 8 M px del loader.
+// Workers nativos, replay y export usan este canónico (vía
+// `encajar_anim_a_chat`); SPEC/Guion conservan sus propios presupuestos.
+pub const CHAT_CANON_W: u32 = 480;
+pub const CHAT_CANON_H: u32 = 360;
+
+/// Encaja un pedido `(w, h)` al canónico del chat preservando aspecto.
+///
+/// Factor = min(480/w, 360/h, 1.0): nunca amplía, solo reduce; la salida
+/// es en dims pares (exigencia yuv420p/GIF) con mínimo 2. `(480, 360)` →
+/// idéntico. Puro, sin I/O.
+pub fn encajar_anim_a_chat(width: u32, height: u32) -> (u32, u32) {
+    let (w, h) = (u64::from(width.max(1)), u64::from(height.max(1)));
+    let factor = (f64::from(CHAT_CANON_W) / w as f64)
+        .min(f64::from(CHAT_CANON_H) / h as f64)
+        .min(1.0);
+    if !factor.is_finite() {
+        return (CHAT_CANON_W, CHAT_CANON_H);
+    }
+    let mut nw = ((w as f64 * factor).floor() as u32).clamp(2, CHAT_CANON_W);
+    let mut nh = ((h as f64 * factor).floor() as u32).clamp(2, CHAT_CANON_H);
+    nw &= !1;
+    nh &= !1;
+    (nw.max(2), nh.max(2))
+}
+
+// ── H1: autofit GIF con aviso visible ───────────────────────────────────
+// El default 480×360×48 suma 8_294_400 px > 8 M: autofitea mínimo a
+// 470×352 (factor 0.982) en vez de fallar. `gif_autofit_size` es puro;
+// `reescalar_frames_a_cancelable` es CPU puro (vecino más cercano, sin
+// I/O); el camino export (`confirm_export_assistant_media`) aplica el plan
+// y muestra `mensaje_autofit_gif` en toast (antes el aviso quedaba solo
+// en tests).
+
+/// Plan de downscale para entrar en 8 M px totales.
+///
+/// `None` si `w*h*n` ya entra; `Some((nw, nh))` en dims pares (mínimo 2)
+/// con el mismo aspecto si excede. `None` también con dims/n cero o
+/// desborde (el preflight lo rechaza honesto después). Puro, sin I/O.
+pub fn gif_autofit_size(width: usize, height: usize, frames: usize) -> Option<(usize, usize)> {
+    let total = width.checked_mul(height)?.checked_mul(frames)?;
+    if total <= GIF_EXPORT_MAX_TOTAL_PIXELS {
+        return None;
+    }
+    let factor = (GIF_EXPORT_MAX_TOTAL_PIXELS as f64 / total as f64).sqrt();
+    if !factor.is_finite() || factor <= 0.0 {
+        return None;
+    }
+    let mut nw = ((width as f64 * factor).floor() as usize).clamp(2, GIF_EXPORT_MAX_DIM);
+    let mut nh = ((height as f64 * factor).floor() as usize).clamp(2, GIF_EXPORT_MAX_DIM);
+    nw &= !1;
+    nh &= !1;
+    let (nw, nh) = (nw.max(2), nh.max(2));
+    // El floor+par puede pasarse por 1 px: re-chequeo honesto.
+    let encaja = nw
+        .checked_mul(nh)
+        .and_then(|v| v.checked_mul(frames.max(1)))
+        .is_some_and(|v| v <= GIF_EXPORT_MAX_TOTAL_PIXELS);
+    if encaja {
+        Some((nw, nh))
+    } else {
+        Some((nw.saturating_sub(2).max(2), nh.saturating_sub(2).max(2)))
+    }
+}
+
+/// Aviso visible del autofit (lo muestra el camino export en toast).
+pub fn mensaje_autofit_gif(width: usize, height: usize) -> String {
+    format!("Exportado a {width}×{height} para entrar en presupuesto")
+}
+
+/// Reescala el set a `(width, height)` por vecino más cercano.
+///
+/// CPU puro, sin I/O ni allocs gigantes (reserva exacta por frame).
+/// Chequea el token entre frames → `Cancelled` honesto sin parcial.
+/// `Err` también con set vacío, destino fuera de 1..=4096 u origen
+/// degenerado/inconsistente (sin panics).
+pub fn reescalar_frames_a_cancelable(
+    frames: &[egui::ColorImage],
+    width: usize,
+    height: usize,
+    token: &CancellationToken,
+) -> Result<Vec<egui::ColorImage>, GifExportError> {
+    if frames.is_empty() {
+        return Err(GifExportError::EmptyFrames);
+    }
+    if width == 0 || height == 0 || width > GIF_EXPORT_MAX_DIM || height > GIF_EXPORT_MAX_DIM {
+        return Err(GifExportError::DimensionOutOfRange { width, height });
+    }
+    let mut salida = Vec::new();
+    salida
+        .try_reserve_exact(frames.len())
+        .map_err(|_| GifExportError::Encode("sin memoria para el set reescalado".to_string()))?;
+    for (index, frame) in frames.iter().enumerate() {
+        if token.is_cancelled() {
+            return Err(GifExportError::Cancelled);
+        }
+        let [origen_w, origen_h] = frame.size;
+        let total_origen =
+            origen_w
+                .checked_mul(origen_h)
+                .ok_or(GifExportError::DimensionOutOfRange {
+                    width: origen_w,
+                    height: origen_h,
+                })?;
+        if origen_w == 0 || origen_h == 0 {
+            return Err(GifExportError::DimensionOutOfRange {
+                width: origen_w,
+                height: origen_h,
+            });
+        }
+        if frame.pixels.len() != total_origen {
+            return Err(GifExportError::PixelCountMismatch {
+                index,
+                expected: total_origen,
+                got: frame.pixels.len(),
+            });
+        }
+        let byte_len = width
+            .checked_mul(height)
+            .ok_or(GifExportError::DimensionOutOfRange { width, height })?;
+        let mut pixeles = Vec::with_capacity(byte_len);
+        for fila in 0..height {
+            let origen_y = fila.saturating_mul(origen_h) / height;
+            for columna in 0..width {
+                let origen_x = columna.saturating_mul(origen_w) / width;
+                let indice = origen_y.saturating_mul(origen_w).saturating_add(origen_x);
+                pixeles.push(
+                    frame
+                        .pixels
+                        .get(indice)
+                        .copied()
+                        .unwrap_or(egui::Color32::BLACK),
+                );
+            }
+        }
+        salida.push(egui::ColorImage {
+            size: [width, height],
+            pixels: pixeles,
+        });
+    }
+    Ok(salida)
+}
+
 /// Error tipado de la exportación a GIF (mensajes en español, sin panics).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GifExportError {
@@ -446,11 +592,12 @@ pub fn gif_delay_for_rate(base_delay_cs: u16, rate: f32) -> u16 {
     (delay.round() as u16).clamp(1, 100)
 }
 
-/// Preflight puro antes de spawnear la exportación (B5).
+/// Preflight puro antes de spawnear la exportación (B5 + H1).
 ///
-/// Verifica vacío, tope 64 frames, dimensiones 1..=4096 y píxeles totales
-/// ≤ 8 M (paridad con el loader; `checked_*` + saturación, sin panic ni
-/// overflow). No estima bytes: el tamaño final (cota 5 MB) lo verifica la app
+/// Verifica vacío, tope 64 frames, dimensiones 1..=4096 y píxeles POR
+/// FRAME ≤ 8 M (H1: solo un frame absurdo da `Err`; el total del set lo
+/// baja `gif_autofit_size` en el camino export, no el preflight).
+/// No estima bytes: el tamaño final (cota 5 MB) lo verifica la app
 /// tras el join, porque solo se conoce al codificar. Puro, sin E/S.
 pub fn check_gif_export_budget(frames: &[egui::ColorImage]) -> Result<(), GifExportError> {
     if frames.is_empty() {
@@ -459,7 +606,6 @@ pub fn check_gif_export_budget(frames: &[egui::ColorImage]) -> Result<(), GifExp
     if frames.len() > GIF_EXPORT_MAX_FRAMES {
         return Err(GifExportError::TooManyFrames { got: frames.len() });
     }
-    let mut total_pixels: usize = 0;
     for frame in frames {
         let (w, h) = (frame.size[0], frame.size[1]);
         if w == 0 || h == 0 || w > GIF_EXPORT_MAX_DIM || h > GIF_EXPORT_MAX_DIM {
@@ -474,9 +620,8 @@ pub fn check_gif_export_budget(frames: &[egui::ColorImage]) -> Result<(), GifExp
                 width: w,
                 height: h,
             })?;
-        total_pixels = total_pixels.saturating_add(pixel_count);
-        if total_pixels > GIF_EXPORT_MAX_TOTAL_PIXELS {
-            return Err(GifExportError::TooManyPixels { got: total_pixels });
+        if pixel_count > GIF_EXPORT_MAX_TOTAL_PIXELS {
+            return Err(GifExportError::TooManyPixels { got: pixel_count });
         }
     }
     Ok(())
@@ -484,7 +629,7 @@ pub fn check_gif_export_budget(frames: &[egui::ColorImage]) -> Result<(), GifExp
 
 // ── Export MP4 vía ffmpeg-sidecar (F1 Manim-en-Rust) ────────────────────────
 // Mismos budgets que el GIF (`GIF_EXPORT_MAX_FRAMES` 64, lado ≤4096, 8M px
-// totales): el preflight es `check_gif_export_budget` mapeado a
+// por frame; el total lo baja el autofit en el camino export): el preflight es `check_gif_export_budget` mapeado a
 // `Mp4ExportError::Budget`. Los frames se entuban como rawvideo RGBA al
 // stdin de `ffmpeg` (libx264, yuv420p, faststart) en un hilo worker con
 // `CancellationToken` — espejo de `spawn_gif_export_cancelable`: la UI
@@ -4498,6 +4643,105 @@ pub fn render_anim_for_concept_with_params(
     render_anim_with_progress(template, concept, width, height, params, &mut |_, _| {})
 }
 
+// ── F4a: caché LRU de sets animados (tope 64 MiB) ─────────────────────
+// Clave = template + hash de params + concepto + w×h + rótulo: el replay y
+// los re-renders del mismo pedido no pagan el render otra vez. Sin I/O
+// (solo RAM del worker), LRU por inserción con desalojo del más viejo.
+// Un set que solo ya excede el tope no se guarda (se renderiza directo).
+
+/// Tope de la caché de sets (paridad con `NATIVE_MAX_SET_BYTES`).
+pub const CACHE_SETS_ANIM_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Hash FNV-1a sobre entries ordenadas (`BTreeMap` ya ordena): estable
+/// entre runs para la misma tabla de params. Puro.
+fn params_hash_para_cache(params: &std::collections::BTreeMap<String, f64>) -> u64 {
+    let mut acumulado: u64 = 0xcbf29ce484222325;
+    for (clave, valor) in params {
+        for byte in clave.as_bytes() {
+            acumulado ^= u64::from(*byte);
+            acumulado = acumulado.wrapping_mul(0x100000001b3);
+        }
+        for byte in valor.to_bits().to_le_bytes() {
+            acumulado ^= u64::from(byte);
+            acumulado = acumulado.wrapping_mul(0x100000001b3);
+        }
+    }
+    acumulado
+}
+
+/// Clave de caché (template normalizado + params + concepto + viewport +
+/// rótulo). Pura.
+fn clave_cache_sets(
+    template: &str,
+    params: &std::collections::BTreeMap<String, f64>,
+    concept: &str,
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+) -> String {
+    format!(
+        "{}|{:016x}|{}|{width}x{height}|{}",
+        template.trim().to_lowercase(),
+        params_hash_para_cache(params),
+        concept.trim(),
+        u8::from(con_rotulo),
+    )
+}
+
+#[derive(Default)]
+struct CacheSetsAnim {
+    entradas: std::collections::HashMap<String, Vec<egui::ColorImage>>,
+    orden: std::collections::VecDeque<String>,
+    bytes: usize,
+}
+
+impl CacheSetsAnim {
+    fn bytes_de_set(set: &[egui::ColorImage]) -> usize {
+        set.iter()
+            .map(|frame| frame.pixels.len().saturating_mul(4))
+            .fold(0usize, |acc, v| acc.saturating_add(v))
+    }
+
+    /// Hit LRU (mueve al fondo = más reciente) con set clonado.
+    fn buscar(&mut self, clave: &str) -> Option<Vec<egui::ColorImage>> {
+        let posicion = self.orden.iter().position(|k| k == clave)?;
+        self.orden.remove(posicion);
+        self.orden.push_back(clave.to_string());
+        self.entradas.get(clave).cloned()
+    }
+
+    /// Guarda desalojando los más viejos hasta encajar; si el set solo ya
+    /// excede el tope, no guarda nada (render directo, sin mentir).
+    fn guardar(&mut self, clave: String, set: Vec<egui::ColorImage>) {
+        let set_bytes = Self::bytes_de_set(&set);
+        if set_bytes > CACHE_SETS_ANIM_MAX_BYTES {
+            return;
+        }
+        if let Some(viejo) = self.entradas.remove(&clave) {
+            self.bytes = self.bytes.saturating_sub(Self::bytes_de_set(&viejo));
+            self.orden.retain(|k| k != &clave);
+        }
+        while self.bytes.saturating_add(set_bytes) > CACHE_SETS_ANIM_MAX_BYTES {
+            let Some(vieja) = self.orden.pop_front() else {
+                break;
+            };
+            if let Some(sacado) = self.entradas.remove(&vieja) {
+                self.bytes = self.bytes.saturating_sub(Self::bytes_de_set(&sacado));
+            }
+        }
+        self.orden.push_back(clave.clone());
+        self.entradas.insert(clave, set);
+        self.bytes = self.bytes.saturating_add(set_bytes);
+    }
+}
+
+static CACHE_SETS_ANIM: std::sync::OnceLock<std::sync::Mutex<CacheSetsAnim>> =
+    std::sync::OnceLock::new();
+
+fn cache_sets_global() -> &'static std::sync::Mutex<CacheSetsAnim> {
+    CACHE_SETS_ANIM.get_or_init(|| std::sync::Mutex::new(CacheSetsAnim::default()))
+}
+
 /// Entrada canónica con PROGRESO REAL por frame (ANIM-REVIVE).
 ///
 /// Idéntica a `render_anim_for_concept_with_params`, pero `on_frame(done, total)`
@@ -4533,7 +4777,19 @@ pub fn render_anim_with_progress_con_rotulo(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    match resolve_native_template(template, concept) {
+    // F4a: hit de caché (progreso REAL igual: se re-emite 1..=n aunque los
+    // píxeles vengan clonados). El lock solo cubre map+clone, jamás el
+    // render (1-2 s bloquearían a otros workers).
+    let clave = clave_cache_sets(template, params, concept, width, height, con_rotulo);
+    if let Ok(mut cache) = cache_sets_global().lock() {
+        if let Some(set) = cache.buscar(&clave) {
+            for (indice, _) in set.iter().enumerate() {
+                on_frame(indice + 1, set.len());
+            }
+            return set;
+        }
+    }
+    let set = match resolve_native_template(template, concept) {
         "integral-area" => {
             render_integral_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
         }
@@ -4552,7 +4808,11 @@ pub fn render_anim_with_progress_con_rotulo(
         tmpl => render_anim_for_concept_legacy_with_progress(
             tmpl, concept, width, height, params, con_rotulo, on_frame,
         ),
+    };
+    if let Ok(mut cache) = cache_sets_global().lock() {
+        cache.guardar(clave, set.clone());
     }
+    set
 }
 
 /// Atajo standalone / export GIF: mismos 48 frames pero CON rótulo quemado
@@ -8443,14 +8703,21 @@ mod tests {
             check_gif_export_budget(&big),
             Err(GifExportError::DimensionOutOfRange { .. })
         ));
-        // Píxeles totales sobre 8 M con dimensiones válidas (9 × 1024² > 8 M).
-        let heavy: Vec<egui::ColorImage> = (0..9)
-            .map(|_| egui::ColorImage::new([1024, 1024], egui::Color32::BLACK))
-            .collect();
+        // H1: el preflight solo rechaza el frame absurdo individual
+        // (4096×2048 = 8.4 M > 8 M); el total del set lo baja el autofit,
+        // así que 9 × 1024² (1 M por frame) pasa el preflight.
+        let absurdo = vec![egui::ColorImage::new([4096, 2048], egui::Color32::BLACK)];
         assert!(matches!(
-            check_gif_export_budget(&heavy),
+            check_gif_export_budget(&absurdo),
             Err(GifExportError::TooManyPixels { .. })
         ));
+        let repartido: Vec<egui::ColorImage> = (0..9)
+            .map(|_| egui::ColorImage::new([1024, 1024], egui::Color32::BLACK))
+            .collect();
+        assert!(
+            check_gif_export_budget(&repartido).is_ok(),
+            "el total lo baja el autofit, no el preflight"
+        );
         // Mensaje en español, sin inglés crudo.
         let msg = format!("{}", GifExportError::TooManyPixels { got: 9_000_000 });
         assert!(msg.contains("píxeles"));
@@ -11470,6 +11737,218 @@ mod p2_tests {
         assert!(
             !raster_image_mobject_onto(&mut buf3, w, h, &vec![0u8; MAX_IMAGE_MOBJECT_BYTES + 1]),
             "exceso → false"
+        );
+    }
+}
+
+// ── R4: regresión de los 4 contratos (H1/T1-parcial/F4a/F1canon) ─────────
+// T1 vive en `manim_orchestrator` (owner) + `assistant` (drains/spawns);
+// acá se pinean H1 (autofit+aviso+rescale), F4a (caché LRU acotada) y
+// F1canon (viewport canónico + taylor-siempre-frames).
+#[cfg(test)]
+mod r4_contratos_tests {
+    use super::*;
+
+    fn frames_mini(n: usize, w: usize, h: usize) -> Vec<egui::ColorImage> {
+        (0..n)
+            .map(|k| {
+                egui::ColorImage::new([w, h], egui::Color32::from_rgb((k % 256) as u8, 10, 20))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn h1_autofit_none_si_entra_y_some_par_si_excede() {
+        // Chico entra: sin plan.
+        assert_eq!(gif_autofit_size(64, 48, 48), None);
+        // El default 480×360×48 (8_294_400 px) autofitea mínimo a dims
+        // pares que entran en 8 M.
+        let (nw, nh) = gif_autofit_size(CHAT_CANON_W as usize, CHAT_CANON_H as usize, 48)
+            .expect("el default debe autofitear");
+        assert_eq!((nw % 2, nh % 2), (0, 0), "dims pares");
+        assert!(
+            nw.checked_mul(nh)
+                .and_then(|v| v.checked_mul(48))
+                .is_some_and(|v| v <= GIF_EXPORT_MAX_TOTAL_PIXELS),
+            "470×352×48 debe entrar: {nw}×{nh}"
+        );
+        assert!(
+            nw >= 460 && nh >= 340,
+            "autofit mínimo, no recorte agresivo: {nw}×{nh}"
+        );
+        // Cero/desborde → None honesto (lo rechaza el preflight después).
+        assert_eq!(gif_autofit_size(0, 48, 48), None);
+        assert_eq!(gif_autofit_size(usize::MAX, usize::MAX, 48), None);
+    }
+
+    #[test]
+    fn h1_export_default_autofitea_con_aviso() {
+        // Regresión H1: el set default del chat sale con plan + aviso
+        // visible camino export (antes el aviso quedaba solo en tests).
+        let plan = gif_autofit_size(
+            CHAT_CANON_W as usize,
+            CHAT_CANON_H as usize,
+            NATIVE_ANIM_FRAME_COUNT,
+        )
+        .expect("default con plan");
+        let aviso = mensaje_autofit_gif(plan.0, plan.1);
+        assert!(aviso.contains('×'), "aviso con dims: {aviso}");
+        assert!(
+            aviso.contains("presupuesto"),
+            "aviso nombra el presupuesto: {aviso}"
+        );
+        assert_eq!(
+            aviso,
+            format!(
+                "Exportado a {}×{} para entrar en presupuesto",
+                plan.0, plan.1
+            )
+        );
+    }
+
+    #[test]
+    fn h1_reescalar_vecino_mas_cercano_y_cancelable() {
+        let token = CancellationToken::default();
+        let frames = frames_mini(3, 8, 8);
+        let chico = reescalar_frames_a_cancelable(&frames, 4, 4, &token).expect("reescala");
+        assert_eq!(chico.len(), 3);
+        for frame in &chico {
+            assert_eq!(frame.size, [4, 4]);
+            assert_eq!(frame.pixels.len(), 16);
+        }
+        // Cancelado → Cancelled sin parcial.
+        token.cancel();
+        assert_eq!(
+            reescalar_frames_a_cancelable(&frames, 4, 4, &token),
+            Err(GifExportError::Cancelled)
+        );
+        // Vacío / destino absurdo → Err honesto.
+        let fresco = CancellationToken::default();
+        assert_eq!(
+            reescalar_frames_a_cancelable(&[], 4, 4, &fresco),
+            Err(GifExportError::EmptyFrames)
+        );
+        assert!(matches!(
+            reescalar_frames_a_cancelable(&frames, 0, 4, &fresco),
+            Err(GifExportError::DimensionOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn f4a_cache_hit_devuelve_mismos_pixeles_y_emite_progreso() {
+        use std::collections::BTreeMap;
+        let params = BTreeMap::new();
+        let mut progreso_hit = 0usize;
+        let primero = render_anim_with_progress_con_rotulo(
+            "derivative-slope",
+            "r4-cache-pin",
+            64,
+            48,
+            &params,
+            false,
+            &mut |_, _| {},
+        );
+        assert!(!primero.is_empty());
+        let segundo = render_anim_with_progress_con_rotulo(
+            "derivative-slope",
+            "r4-cache-pin",
+            64,
+            48,
+            &params,
+            false,
+            &mut |done, total| {
+                assert_eq!(total, primero.len());
+                progreso_hit = done;
+            },
+        );
+        assert_eq!(primero.len(), segundo.len());
+        assert_eq!(primero[0].pixels, segundo[0].pixels, "hit idéntico");
+        assert_eq!(progreso_hit, primero.len(), "progreso real en hit");
+        // Rótulo distinto = clave distinta (no contamina).
+        let rotulado = render_anim_with_progress_con_rotulo(
+            "derivative-slope",
+            "r4-cache-pin",
+            64,
+            48,
+            &params,
+            true,
+            &mut |_, _| {},
+        );
+        assert_eq!(rotulado.len(), primero.len());
+    }
+
+    #[test]
+    fn f4a_cache_lru_acotada_y_set_gigante_no_se_guarda() {
+        // LRU pura sobre la struct (sin render pesado).
+        let mut cache = CacheSetsAnim::default();
+        // Set de ~12 KiB: llenar hasta pasar el tope desaloja al más viejo.
+        let chico = frames_mini(48, 8, 8);
+        let por_set = CacheSetsAnim::bytes_de_set(&chico);
+        assert!(por_set > 0 && por_set < CACHE_SETS_ANIM_MAX_BYTES);
+        let cuantos = CACHE_SETS_ANIM_MAX_BYTES / por_set + 3;
+        for k in 0..cuantos {
+            cache.guardar(format!("k{k}"), chico.clone());
+        }
+        assert!(
+            cache.bytes <= CACHE_SETS_ANIM_MAX_BYTES,
+            "tope respetado: {}",
+            cache.bytes
+        );
+        assert!(cache.buscar("k0").is_none(), "el más viejo se desalojó");
+        assert!(
+            cache.buscar(&format!("k{}", cuantos - 1)).is_some(),
+            "el más reciente sobrevive"
+        );
+        // Set gigante (> tope) no se guarda: buscar → None.
+        // (4096²×4 B = 64 MiB exactos: dos frames para exceder.)
+        let gigante = vec![egui::ColorImage::new([4096, 4096], egui::Color32::BLACK); 2];
+        assert!(CacheSetsAnim::bytes_de_set(&gigante) > CACHE_SETS_ANIM_MAX_BYTES);
+        cache.guardar("gigante".to_string(), gigante);
+        assert!(cache.buscar("gigante").is_none(), "lo gigante no se cachea");
+    }
+
+    #[test]
+    fn f1_canon_pineado_y_encaje_con_aspecto() {
+        assert_eq!((CHAT_CANON_W, CHAT_CANON_H), (480, 360));
+        // Canónico documentado: 31.6 MiB < 64 MiB.
+        assert_eq!(
+            estimate_frames_bytes(480, 360, NATIVE_ANIM_FRAME_COUNT),
+            Some(480 * 360 * 4 * 48)
+        );
+        const {
+            assert!(480 * 360 * 4 * 48 < NATIVE_MAX_SET_BYTES);
+        }
+        // Encaje: idéntico si entra, reduce con aspecto si excede, pares.
+        assert_eq!(encajar_anim_a_chat(480, 360), (480, 360));
+        assert_eq!(encajar_anim_a_chat(320, 200), (320, 200));
+        assert_eq!(encajar_anim_a_chat(720, 540), (480, 360));
+        let (w, h) = encajar_anim_a_chat(1000, 100);
+        assert_eq!((w % 2, h % 2), (0, 0));
+        assert!(w <= 480 && h <= 360, "{w}×{h}");
+        // Nulo/degenerado → mínimo honesto 2×2, sin panic.
+        assert_eq!(encajar_anim_a_chat(0, 0), (2, 2));
+    }
+
+    #[test]
+    fn f1_taylor_siempre_devuelve_frames_fallback_canonico() {
+        // El camino existe: expr que el motor no deriva → fallback canónico
+        // (48 frames honestos, jamás vacío que rompa el worker).
+        let spec = grafito_anim::parametric::TaylorSpec {
+            expr: "zzz_no_existe(x)".to_string(),
+            centro: 0.0,
+            orden: 5,
+        };
+        let frames = render_taylor_frames_for_spec_impl(
+            CHAT_CANON_W,
+            CHAT_CANON_H,
+            &spec,
+            false,
+            &mut |_, _| {},
+        );
+        assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT, "taylor→frames");
+        assert_eq!(
+            frames[0].size,
+            [CHAT_CANON_W as usize, CHAT_CANON_H as usize]
         );
     }
 }

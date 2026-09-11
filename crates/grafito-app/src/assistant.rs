@@ -1,8 +1,8 @@
 //! Integración de proveedores del asistente fuera del hilo de interfaz.
 
 use crate::manim_orchestrator::{
-    attach_media_to_last_assistant_turn, trim_conversation_dropping_pair_media,
-    turn_media_for_completed_job, AnimHistoryCoords,
+    anexar_error_a_dueno, attach_media_to_owner_turn, es_dueno_vivo,
+    trim_conversation_dropping_pair_media, turn_media_for_completed_job, AnimHistoryCoords,
 };
 use crate::{assistant_credentials, GrafitoApp};
 use grafito_assistant::{
@@ -1192,6 +1192,13 @@ pub(crate) struct AssistantRuntime {
     /// directo (`runtime.media.anim_job`) o vía `Deref` compat
     /// (`runtime.anim_job`), que conserva los call-sites pre-split.
     pub(crate) media: AssistantMediaController,
+    /// T1 — dueño del job `anim_job`: índice del turno asistente que lo
+    /// pidió (`len-1` al spawnear). El drain solo publica si sigue vivo
+    /// (dueño == último); si no, descarta el rancio sin contaminar.
+    pub(crate) anim_owner: Option<usize>,
+    /// T1 — dueño del job `anim_ia_job`: índice FUTURO del turno asistente
+    /// (`len` al spawnear, el `complete_local_request` del drain lo crea).
+    pub(crate) anim_ia_owner: Option<usize>,
     /// Export a PDF matemático en vuelo (diálogo, formato `Pdf`, exige LaTeX).
     /// Fuente = título de la card (hilo worker, `LatexMissing` honesto).
     pdf_export_job: Option<PdfExportJob>,
@@ -1617,6 +1624,9 @@ impl AssistantRuntime {
             self.anim_ia_job = None;
             hubo = true;
         }
+        // T1: el cancel limpia los dueños (sin job no hay drain que los tome).
+        self.anim_owner = None;
+        self.anim_ia_owner = None;
         if let Some(job) = self.gif_export_job.take() {
             // R1-4: cancela el token (el export chequea entre frames) y el
             // reaper hace `join` ACOTADO (5 s) + borra el temporal: sin
@@ -2709,6 +2719,9 @@ impl GrafitoApp {
                     // P0-app: las coords viajan en el job (el borrow muere
                     // acá, antes de tocar `assistant`).
                     let history = job.history.clone();
+                    // T1: el dueño se toma al resolver (Empty conserva
+                    // job + dueño para el próximo poll).
+                    let owner = self.assistant_runtime.anim_owner.take();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     if was_cancelled {
@@ -2716,18 +2729,23 @@ impl GrafitoApp {
                         // resultado es rancio — se descarta sin publicar
                         // (sin media rancia en el turno).
                         self.notify("Generación cancelada.", ToastKind::Info);
+                    } else if !es_dueno_vivo(&self.assistant.conversation, owner) {
+                        // Stale (reemplazo o pregunta nueva en el medio):
+                        // se descarta sin contaminar ni revivir el slot.
+                        self.notify("Se descartó una animación desactualizada.", ToastKind::Info);
                     } else {
                         // La animación vive DENTRO del turno del chat:
                         // `set_media` la instala para el reproductor del
                         // transcript (`ui/assistant.rs:915`, `draw_media_card`
                         // en el último turno). Sin ventana compañera.
                         // P0-app: además historía Thumb+Replay (W1) en el
-                        // turno asistente recién creado. Playlist/replay
-                        // traen `history=None`: solo slot vivo.
+                        // turno dueño. Playlist/replay traen `history=None`:
+                        // solo slot vivo.
                         if let Some(coords) = history {
                             if let Some(ref_media) = turn_media_for_completed_job(&media, &coords) {
-                                attach_media_to_last_assistant_turn(
+                                attach_media_to_owner_turn(
                                     &mut self.assistant.conversation,
+                                    owner,
                                     ref_media,
                                 );
                                 trim_conversation_dropping_pair_media(
@@ -2735,19 +2753,32 @@ impl GrafitoApp {
                                 );
                             }
                         }
-                        self.assistant.set_media(Some(media), ctx);
-                        self.notify("Animación lista.", ToastKind::Success);
+                        // El trim solo recorta pares viejos, pero el índice
+                        // pudo moverse: re-chequeo antes del slot vivo.
+                        if es_dueno_vivo(&self.assistant.conversation, owner) {
+                            self.assistant.set_media(Some(media), ctx);
+                            self.notify("Animación lista.", ToastKind::Success);
+                        } else {
+                            self.notify(
+                                "Se descartó una animación desactualizada.",
+                                ToastKind::Info,
+                            );
+                        }
                     }
                     ctx.request_repaint();
                 }
                 Ok(Err(error)) => {
                     let was_cancelled =
                         job.cancellation.is_cancelled() || error.to_lowercase().contains("cancel");
+                    let owner = self.assistant_runtime.anim_owner.take();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     if was_cancelled {
                         self.notify("Generación cancelada.", ToastKind::Info);
                     } else {
+                        // T1: el fallo queda anexado al turno dueño además
+                        // del banner global (no flota huérfano).
+                        anexar_error_a_dueno(&mut self.assistant.conversation, owner, &error);
                         self.assistant.set_media(None, ctx);
                         let message = format!("No se pudo generar la animación: {error}");
                         self.notify(&message, ToastKind::Error);
@@ -2758,9 +2789,15 @@ impl GrafitoApp {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     let was_cancelled = job.cancellation.is_cancelled();
+                    let owner = self.assistant_runtime.anim_owner.take();
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     if !was_cancelled {
+                        anexar_error_a_dueno(
+                            &mut self.assistant.conversation,
+                            owner,
+                            "la generación terminó inesperadamente antes de responder",
+                        );
                         self.assistant.set_media(None, ctx);
                         self.show_assistant_error(
                             "La generación terminó inesperadamente antes de responder.",
@@ -2777,6 +2814,8 @@ impl GrafitoApp {
             match job.receiver.try_recv() {
                 Ok(Ok(render)) => {
                     let was_cancelled = job.cancellation.is_cancelled();
+                    // T1: dueño futuro (el `complete` de abajo crea el turno).
+                    let owner = self.assistant_runtime.anim_ia_owner.take();
                     self.assistant_runtime.anim_ia_job = None;
                     self.assistant.anim_progress = false;
                     if was_cancelled {
@@ -2784,27 +2823,48 @@ impl GrafitoApp {
                     } else {
                         let humano = grafito_ui::assistant::humanize_prose_text(&render.prosa);
                         self.assistant.complete_local_request(humano);
-                        // P0-app: historía Thumb+Replay (W1) del SPEC
-                        // efectivamente renderizado, igual que el job
-                        // normal. Si las coords no validan, el turno queda
-                        // igual con el slot vivo, solo sin mini-card.
-                        let coords =
-                            AnimHistoryCoords::new(render.template.clone(), render.concept.clone());
-                        if let Some(ref_media) = coords
-                            .as_ref()
-                            .and_then(|c| turn_media_for_completed_job(&render.media, c))
-                        {
-                            attach_media_to_last_assistant_turn(
-                                &mut self.assistant.conversation,
-                                ref_media,
+                        // Si el complete movió el índice (trim) o hubo
+                        // reemplazo, el render es rancio: se descarta.
+                        if !es_dueno_vivo(&self.assistant.conversation, owner) {
+                            self.notify(
+                                "Se descartó una animación desactualizada.",
+                                ToastKind::Info,
                             );
-                            trim_conversation_dropping_pair_media(&mut self.assistant.conversation);
-                        }
-                        self.assistant.set_media(Some(render.media), ctx);
-                        if let Some(aviso) = render.aviso {
-                            self.notify(aviso, ToastKind::Info);
                         } else {
-                            self.notify("Animación lista.", ToastKind::Success);
+                            // P0-app: historía Thumb+Replay (W1) del SPEC
+                            // efectivamente renderizado, igual que el job
+                            // normal. Si las coords no validan, el turno queda
+                            // igual con el slot vivo, solo sin mini-card.
+                            let coords = AnimHistoryCoords::new(
+                                render.template.clone(),
+                                render.concept.clone(),
+                            );
+                            if let Some(ref_media) = coords
+                                .as_ref()
+                                .and_then(|c| turn_media_for_completed_job(&render.media, c))
+                            {
+                                attach_media_to_owner_turn(
+                                    &mut self.assistant.conversation,
+                                    owner,
+                                    ref_media,
+                                );
+                                trim_conversation_dropping_pair_media(
+                                    &mut self.assistant.conversation,
+                                );
+                            }
+                            if es_dueno_vivo(&self.assistant.conversation, owner) {
+                                self.assistant.set_media(Some(render.media), ctx);
+                                if let Some(aviso) = render.aviso {
+                                    self.notify(aviso, ToastKind::Info);
+                                } else {
+                                    self.notify("Animación lista.", ToastKind::Success);
+                                }
+                            } else {
+                                self.notify(
+                                    "Se descartó una animación desactualizada.",
+                                    ToastKind::Info,
+                                );
+                            }
                         }
                     }
                     ctx.request_repaint();
@@ -2812,6 +2872,9 @@ impl GrafitoApp {
                 Ok(Err(error)) => {
                     let was_cancelled =
                         job.cancellation.is_cancelled() || error.to_lowercase().contains("cancel");
+                    // Sin turno creado no hay dueño al que anexar: el fallo
+                    // va al banner global (igual que antes).
+                    self.assistant_runtime.anim_ia_owner.take();
                     self.assistant_runtime.anim_ia_job = None;
                     self.assistant.anim_progress = false;
                     if was_cancelled {
@@ -2827,6 +2890,7 @@ impl GrafitoApp {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     let was_cancelled = job.cancellation.is_cancelled();
+                    self.assistant_runtime.anim_ia_owner.take();
                     self.assistant_runtime.anim_ia_job = None;
                     self.assistant.anim_progress = false;
                     if !was_cancelled {
@@ -4545,7 +4609,7 @@ impl GrafitoApp {
             ctx.request_repaint();
             return;
         }
-        let frames = self
+        let mut frames = self
             .assistant
             .media
             .as_ref()
@@ -4581,7 +4645,34 @@ impl GrafitoApp {
         }
         // Preflight de budgets solo para raster/video (la vía LaTeX no
         // codifica frames: su presupuesto es el título + el motor).
+        // H1: antes del preflight se aplica el autofit (downscale a dims
+        // pares que entran en 8 M px): el default 480×360×48 autofitea
+        // mínimo y el aviso queda VISIBLE en toast (no solo en tests).
+        // CPU puro, sin I/O.
+        let mut aviso_autofit: Option<String> = None;
         if !es_latex {
+            let (w0, h0) = frames
+                .first()
+                .map(|frame| (frame.size[0], frame.size[1]))
+                .unwrap_or((0, 0));
+            if let Some((nw, nh)) = crate::anim_native::gif_autofit_size(w0, h0, frames.len()) {
+                let fresco = grafito_assistant::CancellationToken::default();
+                match crate::anim_native::reescalar_frames_a_cancelable(&frames, nw, nh, &fresco) {
+                    Ok(reducidos) => {
+                        frames = reducidos;
+                        aviso_autofit = Some(crate::anim_native::mensaje_autofit_gif(nw, nh));
+                    }
+                    Err(budget) => {
+                        let reason = budget.to_string();
+                        self.assistant.export_dialog_mark_failed(reason.clone());
+                        self.assistant
+                            .set_media_export(MediaExportState::Failed(reason.clone()));
+                        self.notify(format!("No se pudo exportar: {reason}"), ToastKind::Error);
+                        ctx.request_repaint();
+                        return;
+                    }
+                }
+            }
             if let Err(budget) = crate::anim_native::check_gif_export_budget(&frames) {
                 let reason = budget.to_string();
                 self.assistant.export_dialog_mark_failed(reason.clone());
@@ -4603,15 +4694,28 @@ impl GrafitoApp {
             ),
             _ => (100 / dialogo.fps.max(1)).clamp(1, 100) as u16,
         };
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0);
-        let pid = std::process::id();
+        // F4a: destino estable del título+viewport+frames (sin pid/stamp:
+        // esos quedan solo en los hermanos temporales del worker); `-k`
+        // si ya existe (el worker publica con `O_EXCL` igual).
+        let dir = std::env::temp_dir();
+        let (fw, fh) = frames
+            .first()
+            .map(|frame| (frame.size[0], frame.size[1]))
+            .unwrap_or((0, 0));
+        let ruta_estable = |ext: &str| -> PathBuf {
+            let nombre = crate::export::stable_anim_export_filename(
+                &titulo_fuente,
+                fw,
+                fh,
+                frame_count,
+                ext,
+            );
+            let base = nombre.trim_end_matches(&format!(".{ext}")).to_string();
+            crate::export::export_path_unico(&dir, &base, ext)
+        };
         match dialogo.format {
             MediaExportFormat::Gif => {
-                let path = std::env::temp_dir()
-                    .join(format!("grafito_animacion_{pid}_{stamp}_{frame_count}.gif"));
+                let path = ruta_estable("gif");
                 let cancel = grafito_assistant::CancellationToken::default();
                 let handle = crate::anim_native::spawn_gif_export_cancelable(
                     frames,
@@ -4627,8 +4731,8 @@ impl GrafitoApp {
                 });
             }
             MediaExportFormat::PngDir => {
-                let path = std::env::temp_dir()
-                    .join(format!("grafito_animacion_{pid}_{stamp}_{frame_count}_png"));
+                // Directorio (no archivo): ext `pngdir` para no fingir `.png`.
+                let path = ruta_estable("pngdir");
                 let cancel = grafito_assistant::CancellationToken::default();
                 let handle =
                     crate::anim_native::spawn_png_dir_export(frames, path.clone(), cancel.clone());
@@ -4640,8 +4744,7 @@ impl GrafitoApp {
                 });
             }
             MediaExportFormat::Mp4 => {
-                let path = std::env::temp_dir()
-                    .join(format!("grafito_animacion_{pid}_{stamp}_{frame_count}.mp4"));
+                let path = ruta_estable("mp4");
                 let cancel = grafito_assistant::CancellationToken::default();
                 // Calidad del diálogo → runner real (`-ql`/`-qm`/`-qh` →
                 // resolución + crf + bitrate en el worker).
@@ -4672,9 +4775,7 @@ impl GrafitoApp {
                 });
             }
             MediaExportFormat::Webm => {
-                let path = std::env::temp_dir().join(format!(
-                    "grafito_animacion_{pid}_{stamp}_{frame_count}.webm"
-                ));
+                let path = ruta_estable("webm");
                 let cancel = grafito_assistant::CancellationToken::default();
                 let calidad = match dialogo.quality {
                     grafito_ui::assistant::MediaExportQuality::Baja => {
@@ -4703,8 +4804,7 @@ impl GrafitoApp {
                 });
             }
             MediaExportFormat::Pdf => {
-                let path =
-                    std::env::temp_dir().join(format!("grafito_matematica_{pid}_{stamp}.pdf"));
+                let path = ruta_estable("pdf");
                 let cancel = grafito_assistant::CancellationToken::default();
                 let handle = spawn_math_pdf(titulo_fuente, path.clone(), cancel.clone());
                 self.assistant_runtime.pdf_export_job = Some(PdfExportJob {
@@ -4715,8 +4815,7 @@ impl GrafitoApp {
                 });
             }
             MediaExportFormat::Svg => {
-                let path =
-                    std::env::temp_dir().join(format!("grafito_matematica_{pid}_{stamp}.svg"));
+                let path = ruta_estable("svg");
                 let cancel = grafito_assistant::CancellationToken::default();
                 let handle = spawn_svg_export(titulo_fuente, path.clone(), cancel.clone());
                 self.assistant_runtime.svg_export_job = Some(SvgExportJob {
@@ -4729,6 +4828,10 @@ impl GrafitoApp {
         }
         self.assistant.export_dialog_mark_started();
         self.assistant.set_media_export(MediaExportState::Exporting);
+        // H1: el aviso del autofit queda visible (toast, no solo en tests).
+        if let Some(aviso) = aviso_autofit {
+            self.notify(aviso, ToastKind::Info);
+        }
         ctx.request_repaint();
     }
 
@@ -5308,6 +5411,8 @@ impl GrafitoApp {
             let _ = sender.send(resultado);
         });
         self.assistant.anim_progress = true;
+        // T1: dueño FUTURO (el drain lo crea con `complete_local_request`).
+        self.assistant_runtime.anim_ia_owner = Some(self.assistant.conversation.len());
         self.assistant_runtime.anim_ia_job = Some(AssistantAnimIaJob {
             cancellation,
             receiver,
@@ -5605,6 +5710,8 @@ impl GrafitoApp {
             repaint.request_repaint();
         });
         self.assistant.anim_progress = true;
+        // T1: el guion también drena por dueño (`len-1`, igual que el single).
+        self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
         self.assistant_runtime.anim_job = Some(AssistantAnimJob {
             cancellation,
             receiver,
@@ -5735,9 +5842,10 @@ impl GrafitoApp {
                             Err(error) => return Err(error.to_string()),
                         };
                         let mut saw_cancel = false;
+                        // F1canon: el worker taylor usa el canónico del chat.
                         let frames = crate::anim_native::render_taylor_frames_for_spec_impl(
-                            480,
-                            360,
+                            crate::anim_native::CHAT_CANON_W,
+                            crate::anim_native::CHAT_CANON_H,
                             &spec,
                             false,
                             &mut |_, _| {
@@ -5816,11 +5924,14 @@ impl GrafitoApp {
                         }
                     } else {
                         let mut saw_cancel = false;
+                        // F1canon: el worker nativo encaja al canónico del
+                        // chat (720×540 → 480×360, aspecto intacto).
+                        let (canon_w, canon_h) = crate::anim_native::encajar_anim_a_chat(720, 540);
                         let frames = crate::anim_native::render_anim_with_progress(
                             &template_owned,
                             &concept_owned,
-                            480,
-                            360,
+                            canon_w,
+                            canon_h,
                             &std::collections::BTreeMap::new(),
                             &mut |_, _| {
                                 if worker_cancellation.is_cancelled() {
@@ -5911,6 +6022,9 @@ impl GrafitoApp {
         } else {
             None
         };
+        // T1: tag del dueño (`len-1`: el turno asistente recién completado;
+        // `None` honesto en conversación vacía → el drain descarta).
+        self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
         self.assistant_runtime.anim_job = Some(AssistantAnimJob {
             cancellation,
             receiver,
@@ -6074,8 +6188,8 @@ impl GrafitoApp {
                     crate::anim_native::render_anim_with_progress(
                         &plantilla,
                         &concepto,
-                        480,
-                        360,
+                        crate::anim_native::CHAT_CANON_W,
+                        crate::anim_native::CHAT_CANON_H,
                         &params,
                         &mut mira_cancel,
                     )
@@ -6157,6 +6271,8 @@ impl GrafitoApp {
         self.assistant.anim_progress = true;
         // P0-app: la playlist multi-step no historía (no reinyectable
         // honesta por el camino single): solo slot vivo, sin mini-card.
+        // T1: igual drena por dueño (`len-1`).
+        self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
         self.assistant_runtime.anim_job = Some(AssistantAnimJob {
             cancellation,
             receiver,
@@ -8060,6 +8176,36 @@ mod tests {
     }
 
     #[test]
+    fn r4_cancel_limpia_duenos_y_drain_stale_descarta() {
+        // T1: el cancel limpia `anim_owner`/`anim_ia_owner` (sin job no hay
+        // drain que los tome); un dueño stale jamás publica.
+        let mut runtime = AssistantRuntime::default();
+        assert!(runtime.anim_owner.is_none());
+        assert!(runtime.anim_ia_owner.is_none());
+        runtime.anim_owner = Some(1);
+        runtime.anim_ia_owner = Some(2);
+        // Sin jobs es no-op pero igual limpia dueños (fail-closed).
+        assert!(!runtime.cancel_anim_job());
+        assert!(runtime.anim_owner.is_none(), "cancel limpia dueño anim");
+        assert!(runtime.anim_ia_owner.is_none(), "cancel limpia dueño ia");
+        // Dueño stale contra conversación nueva: nada vive.
+        let mut conversacion = vec![
+            ConversationTurn::user("pregunta A"),
+            ConversationTurn::assistant("respuesta A"),
+            ConversationTurn::user("pregunta B"),
+            ConversationTurn::assistant("respuesta B"),
+        ];
+        assert!(!crate::manim_orchestrator::es_dueno_vivo(
+            &conversacion,
+            Some(1)
+        ));
+        let antes: Vec<bool> = conversacion.iter().map(|t| t.media.is_some()).collect();
+        crate::manim_orchestrator::anexar_error_a_dueno(&mut conversacion, None, "x");
+        let despues: Vec<bool> = conversacion.iter().map(|t| t.media.is_some()).collect();
+        assert_eq!(antes, despues, "sin dueño no se toca nada");
+    }
+
+    #[test]
     fn anim_progress_closure_observes_token_between_frames() {
         // El render nativo no acepta token: el hilo lo chequea en el closure
         // de progreso. Este test pineado verifica el contrato sin render
@@ -8183,12 +8329,13 @@ mod tests {
         panel.begin_request("derivada con animación".to_string());
         panel.complete_local_request("la pendiente".to_string());
         // Lo que hace el drain tras `set_media`: pega + recorta.
-        assert!(
-            crate::manim_orchestrator::attach_media_to_last_assistant_turn(
-                &mut panel.conversation,
-                ref_media,
-            )
-        );
+        // T1: el drain publica por dueño (`len-1` al spawnear).
+        let dueno = panel.conversation.len().checked_sub(1);
+        assert!(crate::manim_orchestrator::attach_media_to_owner_turn(
+            &mut panel.conversation,
+            dueno,
+            ref_media,
+        ));
         crate::manim_orchestrator::trim_conversation_dropping_pair_media(&mut panel.conversation);
         panel.set_media(Some(media), &ctx);
         assert!(panel.media.is_some(), "slot vivo instalado");
@@ -9364,7 +9511,7 @@ mod tests {
         // Flujo diálogo: Exportar abre (`ffmpeg` detectado fuera del draw),
         // Confirmar spawnea el GIF en hilo y el poll publica `Done` (ruta
         // avisada por el aviso). Limpia su temporal.
-        // El prefijo `grafito_animacion_` solo lo crea este export.
+        // El nombre estable `grafito_prueba_8x8_3.gif` solo lo crea este export.
         let mut app = crate::app::dummy_grafito_app();
         let ctx = egui::Context::default();
         let frames = vec![egui::ColorImage::new([8, 8], egui::Color32::RED); 3];
@@ -9462,7 +9609,8 @@ mod tests {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
-                    name.starts_with("grafito_animacion_") && name.ends_with("_png")
+                    // F4a: nombre estable del título+viewport+frames.
+                    name.starts_with("grafito_prueba_8x8_2") && name.ends_with(".pngdir")
                 });
             if !is_ours {
                 continue;

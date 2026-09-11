@@ -22,8 +22,8 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use grafito_assistant_types::{
-    ConversationRole, ConversationTurn, TurnMediaRef, TURN_MEDIA_MAX_FRAMES,
-    TURN_MEDIA_THUMB_MAX_BYTES,
+    ConversationRole, ConversationTurn, TurnMediaRef, MAX_CONVERSATION_TURN_CHARS,
+    TURN_MEDIA_MAX_FRAMES, TURN_MEDIA_THUMB_MAX_BYTES,
 };
 use grafito_ui::assistant::AssistantMedia;
 
@@ -655,25 +655,74 @@ pub(crate) fn turn_media_for_completed_job(
     Some(hecha)
 }
 
-/// Pega la media al último turno si es del asistente (el recién creado).
+/// ¿El dueño sigue vivo (último turno y del asistente)?
 ///
-/// `false` honesto con conversación vacía o último turno del usuario: no
-/// toca nada. La media viaja dentro del turno, así que el trim la dropea
-/// con el par sin reindexado.
-pub(crate) fn attach_media_to_last_assistant_turn(
-    conversation: &mut [ConversationTurn],
-    media: TurnMediaRef,
-) -> bool {
-    let Some(indice) = conversation.len().checked_sub(1) else {
+/// El slot vivo solo vale si dueño == último: si el usuario ya pidió otra
+/// cosa (o hubo reemplazo), el job rancio se descarta sin contaminar.
+/// Puro, sin I/O.
+pub(crate) fn es_dueno_vivo(conversacion: &[ConversationTurn], dueno: Option<usize>) -> bool {
+    let Some(indice) = dueno else {
         return false;
     };
-    if !matches!(
-        conversation.get(indice).map(|turno| &turno.role),
-        Some(ConversationRole::Assistant)
-    ) {
+    let Some(ultimo) = conversacion.len().checked_sub(1) else {
+        return false;
+    };
+    indice == ultimo
+        && matches!(
+            conversacion.get(indice).map(|turno| &turno.role),
+            Some(ConversationRole::Assistant)
+        )
+}
+
+/// Pega la media SOLO al índice dueño si es turno asistente y último.
+///
+/// Stale (dueño != último, turno usuario, índice inválido) → `false`
+/// honesto sin tocar nada: el drain descarta el job rancio. La media viaja
+/// dentro del turno, así que el trim la dropea con el par sin reindexado.
+pub(crate) fn attach_media_to_owner_turn(
+    conversacion: &mut [ConversationTurn],
+    dueno: Option<usize>,
+    media: TurnMediaRef,
+) -> bool {
+    let Some(indice) = dueno else {
+        return false;
+    };
+    if !es_dueno_vivo(conversacion, Some(indice)) {
         return false;
     }
-    grafito_assistant_types::attach_turn_media(conversation, indice, media).is_ok()
+    grafito_assistant_types::attach_turn_media(conversacion, indice, media).is_ok()
+}
+
+/// Anexa el error del job al turno dueño (si sigue siendo del asistente).
+///
+/// El drain lo usa para que el fallo quede pegado al pedido que lo causó,
+/// no flotando global. Recorta a `MAX_CONVERSATION_TURN_CHARS`. `false`
+/// honesto sin dueño válido o turno no-asistente.
+pub(crate) fn anexar_error_a_dueno(
+    conversacion: &mut [ConversationTurn],
+    dueno: Option<usize>,
+    error: &str,
+) -> bool {
+    let Some(indice) = dueno else {
+        return false;
+    };
+    let limpio = error.trim();
+    if limpio.is_empty() {
+        return false;
+    }
+    let Some(turno) = conversacion.get_mut(indice) else {
+        return false;
+    };
+    if turno.role != ConversationRole::Assistant {
+        return false;
+    }
+    turno
+        .content
+        .push_str("\n\nNo se pudo generar la animación: ");
+    let resto = MAX_CONVERSATION_TURN_CHARS.saturating_sub(turno.content.len());
+    let recorte: String = limpio.chars().take(resto.min(500)).collect();
+    turno.content.push_str(&recorte);
+    true
 }
 
 /// Recorta app-side a `MAX_CONVERSATION_TURNS` dropeando el par completo.
@@ -930,29 +979,108 @@ mod tests {
     }
 
     #[test]
-    fn attach_solo_al_ultimo_turno_asistente() {
+    fn attach_solo_al_dueno_vivo_ultimo_asistente() {
         use grafito_assistant_types::ConversationTurn;
         let coords = coords_de_prueba();
         let hecha = turn_media_for_completed_job(&media_de_prueba("T", 2), &coords)
             .expect("historía válida");
+        // Vacía o dueño ausente: nada.
         let mut vacia: Vec<ConversationTurn> = Vec::new();
-        assert!(!attach_media_to_last_assistant_turn(
+        assert!(!attach_media_to_owner_turn(
             &mut vacia,
+            Some(0),
             hecha.clone()
         ));
+        assert!(!attach_media_to_owner_turn(&mut vacia, None, hecha.clone()));
+        // Último del usuario (dueño apunta al usuario): nada.
         let mut solo_usuario = vec![ConversationTurn::user("hola")];
-        assert!(!attach_media_to_last_assistant_turn(
+        assert!(!attach_media_to_owner_turn(
             &mut solo_usuario,
+            Some(0),
             hecha.clone()
         ));
         assert!(solo_usuario[0].media.is_none());
+        // Dueño válido == último asistente: pega.
         let mut par = vec![
             ConversationTurn::user("derivada"),
             ConversationTurn::assistant("la pendiente"),
         ];
-        assert!(attach_media_to_last_assistant_turn(&mut par, hecha));
+        assert!(attach_media_to_owner_turn(&mut par, Some(1), hecha.clone()));
         assert!(par[0].media.is_none(), "el usuario no lleva media");
-        assert!(par[1].media.is_some(), "el asistente recién creado sí");
+        assert!(par[1].media.is_some(), "el dueño sí");
+        // Dueño stale (apunta al primero, ya no es último): se descarta.
+        let mut otro = vec![
+            ConversationTurn::user("vieja"),
+            ConversationTurn::assistant("rancia"),
+            ConversationTurn::user("nueva"),
+            ConversationTurn::assistant("fresca"),
+        ];
+        assert!(!attach_media_to_owner_turn(
+            &mut otro,
+            Some(1),
+            hecha.clone()
+        ));
+        assert!(
+            otro.iter().all(|t| t.media.is_none()),
+            "stale no contamina ningún turno"
+        );
+        // Dueño fuera de rango: nada.
+        assert!(!attach_media_to_owner_turn(&mut otro, Some(99), hecha));
+    }
+
+    #[test]
+    fn drena_a_con_b_creado_sin_contaminacion() {
+        // Regresión T1: el job A se spawneó con dueño=1; antes de drenar, el
+        // usuario pidió B (turnos 2,3 nuevos). El drain de A debe descartar:
+        // ni slot del dueño viejo ni media en el turno nuevo.
+        use grafito_assistant_types::ConversationTurn;
+        let coords = coords_de_prueba();
+        let media_a =
+            turn_media_for_completed_job(&media_de_prueba("A", 2), &coords).expect("media A");
+        let mut conversacion = vec![
+            ConversationTurn::user("pregunta A"),
+            ConversationTurn::assistant("respuesta A"),
+        ];
+        let dueno_a = Some(1usize);
+        assert!(es_dueno_vivo(&conversacion, dueno_a));
+        // Llega B: dos turnos nuevos (el dueño de A queda stale).
+        conversacion.push(ConversationTurn::user("pregunta B"));
+        conversacion.push(ConversationTurn::assistant("respuesta B"));
+        assert!(!es_dueno_vivo(&conversacion, dueno_a), "A quedó stale");
+        assert!(!attach_media_to_owner_turn(
+            &mut conversacion,
+            dueno_a,
+            media_a
+        ));
+        assert!(
+            conversacion.iter().all(|t| t.media.is_none()),
+            "el drain rancio de A no pega en B ni revive A"
+        );
+        // El dueño nuevo sí vive.
+        assert!(es_dueno_vivo(&conversacion, Some(3)));
+    }
+
+    #[test]
+    fn error_se_anexa_solo_al_dueno_asistente() {
+        use grafito_assistant_types::ConversationTurn;
+        let mut par = vec![
+            ConversationTurn::user("derivada"),
+            ConversationTurn::assistant("la pendiente"),
+        ];
+        assert!(anexar_error_a_dueno(&mut par, Some(1), "motor caído"));
+        assert!(
+            par[1]
+                .content
+                .contains("No se pudo generar la animación: motor caído"),
+            "prosa: {}",
+            par[1].content
+        );
+        // Dueño usuario / ausente / vacío / fuera de rango: false.
+        assert!(!anexar_error_a_dueno(&mut par, Some(0), "x"));
+        assert!(!anexar_error_a_dueno(&mut par, None, "x"));
+        assert!(!anexar_error_a_dueno(&mut par, Some(1), "   "));
+        assert!(!anexar_error_a_dueno(&mut par, Some(9), "x"));
+        assert!(!par[0].content.contains("No se pudo"));
     }
 
     #[test]
