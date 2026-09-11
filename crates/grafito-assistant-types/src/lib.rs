@@ -664,20 +664,74 @@ impl TurnMediaRef {
     }
 }
 
+/// Rebasea un índice dueño (`anim_owner`/`anim_ia_owner`) tras dropear
+/// `drop_len` turnos desde `drop_start` (con `len_antes` turnos antes del drop).
+///
+/// - `None` → `None` (sin dueño, sin cambio).
+/// - Dueño fuera de rango (`>= len_antes`) → `None` honesto (ya rancio).
+/// - Dueño dentro del rango dropeado → `None` (su turno ya no existe).
+/// - Dueño posterior → desplazado (`owner - drop_len`).
+/// - Dueño anterior → intacto.
+///
+/// Puro, sin `unwrap`, saturante. Lo usa `trim_conversation_with_owners` para
+/// que el trim no deje dueños apuntando a otro pedido (el drain los descarta
+/// vía `es_dueno_vivo`, pero rebasear evita el falso stale del último turno).
+pub fn rebase_owner_index(
+    owner: Option<usize>,
+    drop_start: usize,
+    drop_len: usize,
+    len_antes: usize,
+) -> Option<usize> {
+    let indice = owner?;
+    if indice >= len_antes {
+        return None;
+    }
+    let fin_drop = drop_start.saturating_add(drop_len);
+    if indice >= drop_start && indice < fin_drop {
+        return None;
+    }
+    if indice >= fin_drop {
+        return Some(indice.saturating_sub(drop_len));
+    }
+    Some(indice)
+}
+
 /// Recorta el historial a los últimos [`MAX_CONVERSATION_TURNS`] turnos.
 ///
 /// Dropea el par completo usuario→asistente más viejo primero para no partir
 /// un intercambio. La media viaja dentro del turno, así que se recorta junto
 /// al par sin reindexado.
 pub fn trim_conversation(conversation: &mut Vec<ConversationTurn>) {
+    let mut sin_duenos: [Option<usize>; 0] = [];
+    trim_conversation_with_owners(conversation, &mut sin_duenos);
+}
+
+/// Recorta como [`trim_conversation`] y rebasea los índices dueños vivos.
+///
+/// `owners` son los slots `anim_owner`/`anim_ia_owner` del runtime (dueño:
+/// `assistant.rs`): cada drain los desplaza con [`rebase_owner_index`]; el
+/// dueño caído dentro del rango dropeado queda en `None` (rancio honesto,
+/// el drain lo descarta sin contaminar otro pedido). Puro, sin I/O.
+pub fn trim_conversation_with_owners(
+    conversation: &mut Vec<ConversationTurn>,
+    owners: &mut [Option<usize>],
+) {
     while conversation.len() > MAX_CONVERSATION_TURNS {
         if let Some(index) = conversation.windows(2).position(|pair| {
             matches!(pair[0].role, ConversationRole::User)
                 && matches!(pair[1].role, ConversationRole::Assistant)
         }) {
+            let len_antes = conversation.len();
             let _dropped: Vec<ConversationTurn> = conversation.drain(index..index + 2).collect();
+            for owner in owners.iter_mut() {
+                *owner = rebase_owner_index(*owner, index, 2, len_antes);
+            }
         } else {
+            let len_antes = conversation.len();
             let _dropped = conversation.remove(0);
+            for owner in owners.iter_mut() {
+                *owner = rebase_owner_index(*owner, 0, 1, len_antes);
+            }
         }
     }
 }
@@ -2034,6 +2088,37 @@ mod tests {
                 .frame_count,
             5
         );
+    }
+
+    #[test]
+    fn rebase_owner_index_mueve_solo_lo_posterior_al_drop() {
+        assert_eq!(rebase_owner_index(None, 0, 2, 8), None);
+        assert_eq!(rebase_owner_index(Some(5), 0, 2, 8), Some(3));
+        assert_eq!(rebase_owner_index(Some(0), 0, 2, 8), None);
+        assert_eq!(rebase_owner_index(Some(1), 0, 2, 8), None);
+        assert_eq!(rebase_owner_index(Some(4), 4, 2, 8), None);
+        assert_eq!(rebase_owner_index(Some(2), 4, 2, 8), Some(2));
+        assert_eq!(rebase_owner_index(Some(9), 0, 2, 8), None);
+        assert_eq!(rebase_owner_index(Some(3), 2, 0, 8), Some(3));
+    }
+
+    #[test]
+    fn trim_conversation_with_owners_rebasea_duenos_y_anula_al_dropeado() {
+        let mut conversacion2: Vec<ConversationTurn> = (0..MAX_CONVERSATION_TURNS + 2)
+            .map(|index| {
+                if index % 2 == 0 {
+                    ConversationTurn::user(format!("pregunta {index}"))
+                } else {
+                    ConversationTurn::assistant(format!("respuesta {index}"))
+                }
+            })
+            .collect();
+        let mut duenos = [Some(MAX_CONVERSATION_TURNS + 1), Some(3), Some(0)];
+        trim_conversation_with_owners(&mut conversacion2, &mut duenos);
+        assert_eq!(conversacion2.len(), MAX_CONVERSATION_TURNS);
+        assert_eq!(duenos[0], Some(MAX_CONVERSATION_TURNS - 1));
+        assert_eq!(duenos[1], Some(1));
+        assert_eq!(duenos[2], None);
     }
 
     #[test]

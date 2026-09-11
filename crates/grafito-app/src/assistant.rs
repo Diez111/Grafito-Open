@@ -4723,6 +4723,9 @@ impl GrafitoApp {
                     delay_cs,
                     cancel.clone(),
                 );
+                // F2-jobs: single-flight por formato (el diálogo gatea con
+                // `Exporting`); el guard chiva overwrite mudo del slot en debug.
+                debug_assert!(self.assistant_runtime.gif_export_job.is_none());
                 self.assistant_runtime.gif_export_job = Some(GifExportJob {
                     handle,
                     frame_count,
@@ -4736,6 +4739,7 @@ impl GrafitoApp {
                 let cancel = grafito_assistant::CancellationToken::default();
                 let handle =
                     crate::anim_native::spawn_png_dir_export(frames, path.clone(), cancel.clone());
+                debug_assert!(self.assistant_runtime.png_export_job.is_none());
                 self.assistant_runtime.png_export_job = Some(PngDirExportJob {
                     handle,
                     frame_count,
@@ -4767,6 +4771,7 @@ impl GrafitoApp {
                     dialogo.bitrate_kbps,
                     calidad,
                 );
+                debug_assert!(self.assistant_runtime.mp4_export_job.is_none());
                 self.assistant_runtime.mp4_export_job = Some(Mp4ExportJob {
                     handle,
                     frame_count,
@@ -4796,6 +4801,7 @@ impl GrafitoApp {
                     dialogo.bitrate_kbps,
                     calidad,
                 );
+                debug_assert!(self.assistant_runtime.webm_export_job.is_none());
                 self.assistant_runtime.webm_export_job = Some(WebmExportJob {
                     handle,
                     frame_count,
@@ -4807,6 +4813,7 @@ impl GrafitoApp {
                 let path = ruta_estable("pdf");
                 let cancel = grafito_assistant::CancellationToken::default();
                 let handle = spawn_math_pdf(titulo_fuente, path.clone(), cancel.clone());
+                debug_assert!(self.assistant_runtime.pdf_export_job.is_none());
                 self.assistant_runtime.pdf_export_job = Some(PdfExportJob {
                     handle,
                     frame_count,
@@ -4818,6 +4825,7 @@ impl GrafitoApp {
                 let path = ruta_estable("svg");
                 let cancel = grafito_assistant::CancellationToken::default();
                 let handle = spawn_svg_export(titulo_fuente, path.clone(), cancel.clone());
+                debug_assert!(self.assistant_runtime.svg_export_job.is_none());
                 self.assistant_runtime.svg_export_job = Some(SvgExportJob {
                     handle,
                     frame_count,
@@ -5413,6 +5421,8 @@ impl GrafitoApp {
         self.assistant.anim_progress = true;
         // T1: dueño FUTURO (el drain lo crea con `complete_local_request`).
         self.assistant_runtime.anim_ia_owner = Some(self.assistant.conversation.len());
+        // F2-jobs: `cancela_turno_anim` de arriba ya soltó el slot.
+        debug_assert!(self.assistant_runtime.anim_ia_job.is_none());
         self.assistant_runtime.anim_ia_job = Some(AssistantAnimIaJob {
             cancellation,
             receiver,
@@ -5712,6 +5722,8 @@ impl GrafitoApp {
         self.assistant.anim_progress = true;
         // T1: el guion también drena por dueño (`len-1`, igual que el single).
         self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
+        // F2-jobs: reemplazo siempre tras `cancela_turno_anim` (slot libre).
+        debug_assert!(self.assistant_runtime.anim_job.is_none());
         self.assistant_runtime.anim_job = Some(AssistantAnimJob {
             cancellation,
             receiver,
@@ -6025,6 +6037,8 @@ impl GrafitoApp {
         // T1: tag del dueño (`len-1`: el turno asistente recién completado;
         // `None` honesto en conversación vacía → el drain descarta).
         self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
+        // F2-jobs: reemplazo siempre tras `cancela_turno_anim` (slot libre).
+        debug_assert!(self.assistant_runtime.anim_job.is_none());
         self.assistant_runtime.anim_job = Some(AssistantAnimJob {
             cancellation,
             receiver,
@@ -6273,6 +6287,8 @@ impl GrafitoApp {
         // honesta por el camino single): solo slot vivo, sin mini-card.
         // T1: igual drena por dueño (`len-1`).
         self.assistant_runtime.anim_owner = self.assistant.conversation.len().checked_sub(1);
+        // F2-jobs: reemplazo siempre tras `cancela_turno_anim` (slot libre).
+        debug_assert!(self.assistant_runtime.anim_job.is_none());
         self.assistant_runtime.anim_job = Some(AssistantAnimJob {
             cancellation,
             receiver,
