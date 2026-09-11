@@ -993,8 +993,10 @@ pub const MEDIA_EXPORT_BITRATE_MAX_KBPS: u32 = 20_000;
 /// estado porque la Piel dibuja con `&Estado` (igual que playhead/velocidad).
 #[derive(Debug, Clone)]
 pub struct MediaExportDialog {
-    /// ¿Ventana visible?
-    pub open: bool,
+    /// ¿Ventana visible? Privado a propósito: el panel asistente es docked
+    /// permanente sin launcher (pin `ui_tests`); se lee vía
+    /// `export_dialog_is_open()`.
+    open: bool,
     /// Formato elegido en el selector.
     pub format: MediaExportFormat,
     /// Calidad elegida (aplica bitrate sugerido al cambiar).

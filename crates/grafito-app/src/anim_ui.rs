@@ -295,6 +295,28 @@ impl<T> RetentionQueue<T> {
 // dibuja una mini-card por turno no-last con ese thumb (1 `TextureHandle`
 // chico por turno) + botón [Ver de nuevo] → `AssistantUiAction::ReplayMedia`.
 // El slot vivo (`set_media`) sigue siendo el único reproductor full.
+//
+// Gate por dueño (P0, lado Piel en `live_slot_kind_for_last_turn`): el slot
+// vivo es global y no sabe a qué turno pertenece, así que el ÚLTIMO turno
+// solo lo usa si no tiene `media` propia; si ya tiene la suya, la Piel le
+// dibuja SU mini-card (mismo `ReplayMedia{turn_idx}`, resuelto acá abajo sin
+// importar que sea el último: `history_replay_request` no excluye al último
+// a propósito) y jamás el slot. El slot nunca contradice el `turn.media`
+// visible. Las mini-cards de turnos viejos (`is_history_mini_card`) quedan
+// intactas.
+//
+// LRU vs FIFO (P1-mini-card): el caché de thumbs de la Piel es LRU real por
+// `last_used` (con ≤6 turnos vivos << 96 casi nunca evicta, pero bajo presión
+// conserva el más usado, no el índice más chico). La `RetentionQueue` de este
+// módulo, en cambio, es FIFO a propósito: no es un caché sino una cola de
+// gracia (cada batch debe liberarse en orden tras `TEXTURE_GRACE_FRAMES`
+// ticks; reordenarla por uso rompería el invariante de liberación).
+//
+// Cancelled vs Failed (P1-export): cancelar no es error. La Piel distingue
+// `MediaExportState::Cancelled` (neutro, conserva el player) de `Failed`
+// (esconde toolbar/slider/export, solo error + [Reintentar]); el diálogo
+// marca neutro (`mark_cancelled`) en vez del viejo `mark_failed` con
+// "exportación cancelada".
 // Todo lo de acá es puro y headless-testeable: la app resuelve el pedido de
 // replay contra la conversación y reinyecta frames por el camino existente
 // (`set_media`), sin guardar `Vec<ColorImage>` completo por turno en memoria
@@ -397,6 +419,65 @@ pub fn history_thumb_fingerprint(media: &TurnMediaRef) -> u64 {
     }
     hash ^= u64::from(media.frame_count);
     hash.wrapping_mul(FNV_PRIME)
+}
+
+// ── M2 Piel: upscale card/overlay, letterbox del thumb e intents de chat ───
+// Helpers puros (sin egui, sin I/O) que la Piel espeja del otro lado del DAG
+// (`ui → app` prohíbe que `grafito-ui` importe de acá): el algoritmo se
+// duplica en `grafito-ui/src/assistant.rs` (`MAX_PREVIEW_UPSCALE`,
+// `history_thumb_uv_rect`) y ambas copias se pinean con los mismos vectores
+// en sus tests. El parseo de los intents lo hace otro frente (parser del
+// chat); acá solo vive el vocabulario visible + la política documentada.
+
+/// Cap de upscale del preview inline vs overlay libre (M2-1).
+///
+/// La card inline capea a 1.5× por nitidez: los frames nativos salen a ~480px
+/// y los paneles miden 300..520, así que el caso común escala ≤1.1× y el cap
+/// solo muerde texturas chicas (tests/thumbnails), donde más de 1.5× pixela
+/// feo aun con filtrado lineal. El overlay ("Ver grande") permite upscale
+/// libre: el usuario lo abrió a propósito y pide ver grande. Diferencia
+/// intencional con motivo, no bug: `Some(cap)` inline, `None` en overlay.
+/// Puro, sin I/O.
+pub fn preview_upscale_cap(in_overlay: bool) -> Option<f32> {
+    if in_overlay {
+        None
+    } else {
+        Some(grafito_ui::assistant::MAX_PREVIEW_UPSCALE)
+    }
+}
+
+/// Recorte UV centrado para el thumb histórico (M2-2).
+///
+/// El thumb serializado es RGBA 96×96 cuadrado por construcción: el caso real
+/// siempre da `(0,0,1,1)` y el rect cuadrado de la mini-card jamás deforma.
+/// Si la fuente algún día no fuera cuadrada, recorta el eje largo centrado
+/// (letterbox por recorte, jamás estiramiento). Devuelve
+/// `(min_u, min_v, max_u, max_v)` en 0..=1. Puro, sin `unwrap`.
+pub fn history_thumb_uv_crop(src_w: u32, src_h: u32) -> (f32, f32, f32, f32) {
+    let w = src_w.max(1) as f32;
+    let h = src_h.max(1) as f32;
+    if w == h {
+        return (0.0, 0.0, 1.0, 1.0);
+    }
+    if w > h {
+        let keep = (h / w).clamp(0.0, 1.0);
+        let margin = (1.0 - keep) / 2.0;
+        (margin, 0.0, 1.0 - margin, 1.0)
+    } else {
+        let keep = (w / h).clamp(0.0, 1.0);
+        let margin = (1.0 - keep) / 2.0;
+        (0.0, margin, 1.0, 1.0 - margin)
+    }
+}
+
+/// Ejemplos de intents de animación invocables por texto en el chat (M2-4).
+///
+/// El parseo lo hace otro frente (parser del chat → `AssistantUiAction` /
+/// setters de la Piel); esta lista es el vocabulario que la Piel muestra
+/// (`grafito-ui::assistant::MEDIA_CHAT_INTENTS_HINT`, paridad de texto) y que
+/// el parser acepta. Puro.
+pub fn media_chat_intent_examples() -> &'static [&'static str] {
+    &["exportar mp4 720p", "velocidad 2x", "órbita", "reintentar"]
 }
 
 // ── Diálogo Exportar profesional (Piel, `fn render(&Estado) -> Frame`) ─────
@@ -689,6 +770,23 @@ mod tests {
     }
 
     #[test]
+    fn replay_del_ultimo_turno_resuelve_para_el_gate_por_dueno() {
+        // Gate por dueño (P0, lado Piel): el último turno con media propia
+        // muestra SU mini-card con el mismo `ReplayMedia{turn_idx}`. Este
+        // resolver no excluye al último a propósito: si lo excluyera, el
+        // botón del último turno emitiría un pedido que jamás resuelve.
+        let media = muestra_historial("Integral");
+        let pedido = history_replay_request(3, 4, Some(&media))
+            .expect("el último con media resuelve replay");
+        assert_eq!(pedido.turn_idx, 3);
+        assert_eq!(pedido.title, "Integral");
+        assert!(
+            !is_history_mini_card(3, 4, true),
+            "el último no es mini-card de historial (usa slot o su propia card)"
+        );
+    }
+
+    #[test]
     fn fingerprint_determinista_y_sensible_a_campos() {
         let base = muestra_historial("Tangente");
         assert_eq!(
@@ -794,5 +892,41 @@ mod tests {
             HISTORY_THUMB_EXPECTED_RGBA_BYTES,
             "tope del tipo = RGBA 96×96"
         );
+    }
+
+    // ── M2 Piel: caps, letterbox e intents ──────────────────────────────
+    #[test]
+    fn upscale_card_capea_y_overlay_libre_con_motivo() {
+        // M2-1: la card inline capea a 1.5× (nitidez), el overlay es libre
+        // ("ver grande" a pedido). Diferencia intencional pineada.
+        assert_eq!(
+            preview_upscale_cap(false),
+            Some(grafito_ui::assistant::MAX_PREVIEW_UPSCALE)
+        );
+        assert_eq!(preview_upscale_cap(false), Some(1.5));
+        assert_eq!(preview_upscale_cap(true), None);
+    }
+
+    #[test]
+    fn thumb_uv_cuadrado_completo_y_no_cuadrado_recorta_centrado() {
+        // M2-2: 96×96 (el caso real) da UV completo: jamás deforma.
+        assert_eq!(history_thumb_uv_crop(96, 96), (0.0, 0.0, 1.0, 1.0));
+        // Apaisado: recorta U centrado, V intacta.
+        assert_eq!(history_thumb_uv_crop(192, 96), (0.25, 0.0, 0.75, 1.0));
+        // Retrato: recorta V centrada, U intacta.
+        assert_eq!(history_thumb_uv_crop(96, 192), (0.0, 0.25, 1.0, 0.75));
+        // Degenerado no panica: cae al cuadrado completo.
+        assert_eq!(history_thumb_uv_crop(0, 0), (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn intents_de_chat_cubren_los_4_ejemplos_visibles() {
+        // M2-4: vocabulario que la Piel muestra y el parser acepta.
+        let ejemplos = media_chat_intent_examples();
+        assert_eq!(ejemplos.len(), 4);
+        assert!(ejemplos.contains(&"exportar mp4 720p"));
+        assert!(ejemplos.contains(&"velocidad 2x"));
+        assert!(ejemplos.contains(&"órbita"));
+        assert!(ejemplos.contains(&"reintentar"));
     }
 }
