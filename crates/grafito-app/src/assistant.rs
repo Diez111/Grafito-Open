@@ -6,46 +6,52 @@ use crate::manim_orchestrator::{
 };
 use crate::{assistant_credentials, GrafitoApp};
 use grafito_assistant::{
-    harness, rate_limit_cooldown_remaining_secs, rate_limit_paused_message,
-    request_remote_models_with_api_key_on_worker, request_remote_streaming_with_api_key_on_worker,
-    validate_attachment, CancellationToken, ProviderSettings, RemoteCompletion,
-    SocraticGuardContext, RATE_LIMIT_DEFAULT_COOLDOWN_SECS,
+    harness, rate_limit_cooldown_remaining_secs, rate_limit_paused_message, CancellationToken,
+    ProviderSettings, SocraticGuardContext, RATE_LIMIT_DEFAULT_COOLDOWN_SECS,
 };
 use grafito_assistant_types::{
-    AssistantFocus, AssistantRepairFailure, AssistantRepairFailureKind, AssistantRepairFeedback,
-    AssistantRequest, AssistantResponse, AttachmentLimits, ConversationRole, ConversationTurn,
-    ImmutableDocumentContext, LocalAssistantStatus, ProposedPlan, ProviderCapabilities,
-    ProviderProfile, MAX_CONVERSATION_TURNS, MAX_CONVERSATION_TURN_CHARS,
-    REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES,
-    REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES, REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES,
-    REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
+    AssistantFocus, AssistantRepairFeedback, AssistantRequest, AssistantResponse, ConversationRole,
+    ConversationTurn, ImmutableDocumentContext, LocalAssistantStatus, ProposedPlan,
+    ProviderCapabilities, ProviderProfile, MAX_CONVERSATION_TURNS, MAX_CONVERSATION_TURN_CHARS,
 };
 use grafito_command::assistant_proposals::{
-    assistant_fenced_proposals, execute_assistant_command, execute_assistant_parameter,
     AssistantCommandInvocation, AssistantParameterAssignment, AssistantProposal,
-    AssistantProposalRejection, AssistantProposalRejectionKind,
 };
 use grafito_pedagogy::scaffold::{extract_concept, is_exploratory_request};
 use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm, Turn};
-use grafito_ui::assistant::{
-    AssistantCorrectionContext, AssistantPanelState, AssistantUiAction, VerifiedAssistantProposal,
-};
+use grafito_ui::assistant::{AssistantPanelState, AssistantUiAction};
 use grafito_ui::prosa::{append_canonical_integral_prose, prosa_integral_explicita};
 use grafito_ui::toast::ToastKind;
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
+use std::sync::mpsc::{sync_channel, TryRecvError};
 
-const MAX_REMOTE_PROPOSAL_PREFLIGHTS: usize = 4;
+// ── R1: split de god objects — fuentes canónicas en módulos hermanos ──
+// `assistant_preflight` (fns puras), `assistant_jobs` (jobs + TurnState),
+// `assistant_media` (slots de animación/export). Este módulo conserva los
+// shims `impl GrafitoApp`, `AssistantRuntime`, LaTeX y tests; los tipos
+// movidos se re-exportan para no cambiar paths (`super::X` sigue válido).
+pub(crate) use crate::assistant_jobs::{
+    AgentChannelMsg, AssistantAgentJob, AssistantImageJob, AssistantJobsContext,
+    AssistantJobsController, AssistantModelJob, AssistantProposalJob, AssistantRemoteJob,
+    AssistantRemoteLaunch, AssistantRemoteRoute, AssistantRepairRequest, AssistantTurnState,
+    BuildRemoteParams, FinishedModelJob, FinishedProposalJob, FinishedRemoteJob,
+};
+pub(crate) use crate::assistant_media::{
+    export_orbit_supported_for_title, join_gif_handle_bounded, AnimIaRender, AssistantAnimIaJob,
+    AssistantAnimJob, AssistantMediaController, GifExportJob, Mp4ExportJob, PngDirExportJob,
+    WebmExportJob, GIF_REAPER_TIMEOUT,
+};
+// R1: `pub use` es imposible acá — el split expone todo como `pub(crate)` y
+// el compilador rechaza re-exportar `pub` lo que no lo es (E0365). La vía
+// `pub(crate)` conserva los paths (`assistant::X`, `super::X` en tests).
+pub(crate) use crate::assistant_preflight::*;
+
 const MAX_ASSISTANT_PROPOSAL_CORRECTIONS: u8 = 2;
-const MAX_ASSISTANT_CORRECTION_SOURCE_BYTES: usize = 2_048;
 /// Modelo multimodal/visión (Xiaomi MiMo 2.5-VL); el razonamiento usa
 /// DeepSeek Flash por defecto (el más barato y suficiente).
 const OPENCODE_VISION_MODEL: &str = "mimo-2.5-vl";
 const OPENCODE_FUSION_MODEL: &str = "fusion";
-const ASSISTANT_CORRECTION_INSTRUCTION: &str = "\n\nUna propuesta gráfica anterior no superó la verificación local. Conservá la intención de la solicitud y regenerá una respuesta completa y autocontenida con un bloque grafito o un bloque grafito-scene de 2 a 8 comandos ejecutables. Si necesitás un parámetro escalar nuevo, incluí antes un único bloque grafito-param con una asignación finita. Usá exclusivamente la sintaxis exacta del catálogo; no inventes comandos ni emitas acciones de archivo, red, sistema o Script.";
 
 /// Guarda el perfil en background para no bloquear el UI thread (60fps).
 fn spawn_profile_save(profile: grafito_profile::StudentProfile, path: PathBuf) {
@@ -58,12 +64,6 @@ fn spawn_profile_save(profile: grafito_profile::StudentProfile, path: PathBuf) {
                 serde_json::to_string_pretty(&profile).unwrap_or_default(),
             );
         });
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AssistantRemoteRoute {
-    SelectedModel,
-    FusionFallback,
 }
 
 /// B7 — ¿El texto pide ejercitar? (botón «Andamiar» o pedido en el chat).
@@ -1135,7 +1135,7 @@ fn classify_local_assistant_response(response: AssistantResponse) -> LocalAssist
     }
 }
 
-fn apply_local_assistant_plan(
+pub(crate) fn apply_local_assistant_plan(
     document: &mut grafito_core::Document,
     plan: &ProposedPlan,
     undo_stack: &mut VecDeque<grafito_core::Document>,
@@ -1151,109 +1151,23 @@ fn apply_local_assistant_plan(
     Ok(result)
 }
 
-/// Statem del turno del asistente (F4: enum real, antes solo §4.3 en prosa).
-///
-/// Extracción sin lógica: hoy es documentación ejecutable del ciclo
-/// `Idle -> Composing -> Thinking -> AwaitingAuthorization -> Animating`
-/// con terminales `Failed | Cancelled`. `AssistantRuntime` (jobs en vuelo)
-/// aún no se cablea a este enum — ese wiring es P2 (dueño `app.rs`): aquí
-/// solo el tipo + transiciones tipadas + tests, cero cambio de comportamiento.
-/// Sin `Verifying`: el preflight corre síncrono dentro de `Thinking`.
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) enum AssistantTurnState {
-    #[default]
-    Idle,
-    Composing,
-    Thinking,
-    AwaitingAuthorization,
-    Animating {
-        job_id: String,
-    },
-    Failed {
-        reason: String,
-    },
-    Cancelled,
-}
-
-impl AssistantTurnState {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn state_name(&self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::Composing => "Composing",
-            Self::Thinking => "Thinking",
-            Self::AwaitingAuthorization => "AwaitingAuthorization",
-            Self::Animating { .. } => "Animating",
-            Self::Failed { .. } => "Failed",
-            Self::Cancelled => "Cancelled",
-        }
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn is_terminal(&self) -> bool {
-        matches!(self, Self::Failed { .. } | Self::Cancelled)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn transition_to(&mut self, next: Self) -> Result<(), String> {
-        let legal = matches!(
-            (&*self, &next),
-            (Self::Idle, Self::Composing)
-                | (Self::Composing, Self::Thinking)
-                | (Self::Thinking, Self::AwaitingAuthorization)
-                | (Self::Thinking, Self::Animating { .. })
-                | (Self::Thinking, Self::Failed { .. })
-                | (Self::AwaitingAuthorization, Self::Animating { .. })
-                | (Self::AwaitingAuthorization, Self::Thinking)
-                | (Self::AwaitingAuthorization, Self::Cancelled)
-                | (Self::Animating { .. }, Self::Failed { .. })
-                | (Self::Animating { .. }, Self::Cancelled)
-                | (Self::Animating { .. }, Self::Idle)
-                | (Self::Failed { .. }, Self::Idle)
-                | (Self::Cancelled, Self::Idle)
-                | (Self::Idle, Self::Idle)
-        );
-        if legal {
-            *self = next;
-            Ok(())
-        } else {
-            Err(format!(
-                "transición inválida {} -> {}",
-                self.state_name(),
-                next.state_name()
-            ))
-        }
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct AssistantRuntime {
-    next_request_id: u64,
+    pub(crate) next_request_id: u64,
     /// Modelo de fallback solo-sesión (p.ej. deepseek tras caída de spark).
     /// No se persiste: la preferencia del usuario queda intacta y el próximo
     /// pedido reintenta el modelo elegido (auto-recupera si el proveedor vuelve).
-    fallback_model: Option<String>,
-    remote_job: Option<AssistantRemoteJob>,
-    proposal_job: Option<AssistantProposalJob>,
-    model_job: Option<AssistantModelJob>,
-    model_refresh_queued: bool,
-    image_job: Option<AssistantImageJob>,
-    agent_job: Option<AssistantAgentJob>,
-    anim_job: Option<AssistantAnimJob>,
-    /// W-B: worker IA-primero (SPEC de la IA + render validado en un solo hilo).
-    /// Cero doble render: el Submit spawnea o `anim_job` (local) o este job
-    /// (IA-primero), nunca ambos (ambos se cancelan antes de spawnear).
-    anim_ia_job: Option<AssistantAnimIaJob>,
-    /// Export a GIF de la card en vuelo (B5): `JoinHandle` de
-    /// `spawn_gif_export` que `poll_gif_export_job` drena sin bloquear.
-    gif_export_job: Option<GifExportJob>,
-    /// Export a PNG-sequence en vuelo (diálogo, formato `PngDir`).
-    png_export_job: Option<PngDirExportJob>,
-    /// Export a MP4 en vuelo (diálogo, formato `Mp4`, exige ffmpeg).
-    mp4_export_job: Option<Mp4ExportJob>,
-    /// Export a WebM en vuelo (diálogo, formato `Webm`, exige ffmpeg).
-    webm_export_job: Option<WebmExportJob>,
+    pub(crate) fallback_model: Option<String>,
+    pub(crate) remote_job: Option<AssistantRemoteJob>,
+    pub(crate) proposal_job: Option<AssistantProposalJob>,
+    pub(crate) model_job: Option<AssistantModelJob>,
+    pub(crate) model_refresh_queued: bool,
+    pub(crate) image_job: Option<AssistantImageJob>,
+    pub(crate) agent_job: Option<AssistantAgentJob>,
+    /// Slots vivos de media del turno (dueño: `assistant_media`). Se accede
+    /// directo (`runtime.media.anim_job`) o vía `Deref` compat
+    /// (`runtime.anim_job`), que conserva los call-sites pre-split.
+    pub(crate) media: AssistantMediaController,
     /// Export a PDF matemático en vuelo (diálogo, formato `Pdf`, exige LaTeX).
     /// Fuente = título de la card (hilo worker, `LatexMissing` honesto).
     pdf_export_job: Option<PdfExportJob>,
@@ -1265,7 +1179,22 @@ pub(crate) struct AssistantRuntime {
     /// 2026-09-08): UUID v4 lazy en el primer request Go, estable entre
     /// turnos, nueva al Limpiar conversación. Sólo se adjunta a `ProviderSettings`
     /// cuando el proveedor es Go; el resto trae `None` (sin header).
-    go_session_id: Option<String>,
+    pub(crate) go_session_id: Option<String>,
+}
+
+/// Compat pre-split: los 6 slots de media se leen/escriben como si fueran
+/// campos directos (`runtime.anim_job`), delegando en `runtime.media`.
+impl std::ops::Deref for AssistantRuntime {
+    type Target = AssistantMediaController;
+    fn deref(&self) -> &Self::Target {
+        &self.media
+    }
+}
+
+impl std::ops::DerefMut for AssistantRuntime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.media
+    }
 }
 
 struct SessionApiKey {
@@ -1297,18 +1226,18 @@ impl Drop for SessionApiKey {
 impl AssistantRuntime {
     /// Modelo que deben traer los resultados en vuelo: el fallback si hay un
     /// reintento activo, si no el configurado por el usuario.
-    fn expected_model<'a>(&'a self, current: &'a str) -> &'a str {
+    pub(crate) fn expected_model<'a>(&'a self, current: &'a str) -> &'a str {
         self.fallback_model.as_deref().unwrap_or(current)
     }
 
-    fn key_for(&self, provider: ProviderProfile) -> Option<String> {
+    pub(crate) fn key_for(&self, provider: ProviderProfile) -> Option<String> {
         self.session_api_key
             .as_ref()
             .filter(|stored| stored.provider == provider)
             .map(|stored| stored.key.clone())
     }
 
-    fn remember_key(&mut self, provider: ProviderProfile, key: String) {
+    pub(crate) fn remember_key(&mut self, provider: ProviderProfile, key: String) {
         // Punto único de saneado: nunca queda en memoria una clave con
         // espacios/saltos pegados al copiar.
         self.session_api_key = Some(SessionApiKey {
@@ -1325,7 +1254,7 @@ impl AssistantRuntime {
     /// La crea en el primer request Go y la conserva entre turnos; el botón
     /// Limpiar la rota vía `rotate_go_session`. Pura memoria, sin I/O, sin
     /// `unwrap`: `Uuid::new_v4` no falla.
-    fn ensure_go_session(&mut self) -> String {
+    pub(crate) fn ensure_go_session(&mut self) -> String {
         if let Some(id) = self.go_session_id.clone() {
             if grafito_assistant::sanitize_go_session_id(&id).is_some() {
                 return id;
@@ -1343,11 +1272,11 @@ impl AssistantRuntime {
         self.go_session_id = Some(uuid::Uuid::new_v4().to_string());
     }
 
-    fn remote_request_slot_is_free(&self) -> bool {
+    pub(crate) fn remote_request_slot_is_free(&self) -> bool {
         self.remote_job.is_none() && self.proposal_job.is_none() && self.agent_job.is_none()
     }
 
-    fn cancel_stale_agent_job(
+    pub(crate) fn cancel_stale_agent_job(
         &mut self,
         current_provider: ProviderProfile,
         current_model: &str,
@@ -1363,7 +1292,7 @@ impl AssistantRuntime {
         false
     }
 
-    fn cancel_stale_remote_job(
+    pub(crate) fn cancel_stale_remote_job(
         &mut self,
         current_provider: ProviderProfile,
         current_model: &str,
@@ -1388,7 +1317,7 @@ impl AssistantRuntime {
         cancelled
     }
 
-    fn take_finished_remote_job(&mut self) -> Option<FinishedRemoteJob> {
+    pub(crate) fn take_finished_remote_job(&mut self) -> Option<FinishedRemoteJob> {
         let result = {
             let job = self.remote_job.as_ref()?;
             match job.receiver.try_recv() {
@@ -1528,7 +1457,7 @@ impl AssistantRuntime {
         panel.set_remote_stage(ui_stage, stage_elapsed_secs);
     }
 
-    fn take_finished_proposal_job(&mut self) -> Option<FinishedProposalJob> {
+    pub(crate) fn take_finished_proposal_job(&mut self) -> Option<FinishedProposalJob> {
         let result = {
             let job = self.proposal_job.as_ref()?;
             match job.receiver.try_recv() {
@@ -1558,7 +1487,7 @@ impl AssistantRuntime {
         })
     }
 
-    fn request_model_refresh(&mut self) -> bool {
+    pub(crate) fn request_model_refresh(&mut self) -> bool {
         if self.model_job.is_some() {
             self.model_refresh_queued = true;
             false
@@ -1567,7 +1496,7 @@ impl AssistantRuntime {
         }
     }
 
-    fn cancel_stale_model_job(&mut self, current_provider: ProviderProfile) -> bool {
+    pub(crate) fn cancel_stale_model_job(&mut self, current_provider: ProviderProfile) -> bool {
         let Some(job) = self.model_job.as_ref() else {
             return false;
         };
@@ -1578,7 +1507,7 @@ impl AssistantRuntime {
         true
     }
 
-    fn take_finished_model_job(&mut self) -> Option<FinishedModelJob> {
+    pub(crate) fn take_finished_model_job(&mut self) -> Option<FinishedModelJob> {
         let result = {
             let job = self.model_job.as_ref()?;
             match job.receiver.try_recv() {
@@ -1598,7 +1527,7 @@ impl AssistantRuntime {
         })
     }
 
-    fn take_queued_model_refresh_if_idle(&mut self) -> bool {
+    pub(crate) fn take_queued_model_refresh_if_idle(&mut self) -> bool {
         self.model_job.is_none() && std::mem::take(&mut self.model_refresh_queued)
     }
 
@@ -1608,6 +1537,7 @@ impl AssistantRuntime {
     /// turno (remote/proposal/agent/model señalados con slot hasta el
     /// drain, anim dropeados, export con reaper). Sin duplicar el contrato.
     /// Retorna `true` si había algún job en vuelo.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn cancel_all_assistant_jobs(&mut self) -> bool {
         self.cancel_anim_job()
     }
@@ -1630,6 +1560,7 @@ impl AssistantRuntime {
     ///   el llamante a `Idle` (ver `cancel_assistant_request` y runners).
     ///
     /// Retorna `true` si había algún job en vuelo.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cancel_anim_job(&mut self) -> bool {
         let mut hubo = false;
         if let Some(job) = self.remote_job.as_ref() {
@@ -1761,7 +1692,7 @@ impl AssistantRuntime {
 
     /// Señala cancel a los exports LaTeX en vuelo (ambos mundos: PDF + SVG).
     /// El poll drena el resultado honesto (jamás mudo). Retorna si había algo.
-    fn signal_latex_exports_cancel(&mut self) -> bool {
+    pub(crate) fn signal_latex_exports_cancel(&mut self) -> bool {
         let mut hubo = false;
         if let Some(job) = self.pdf_export_job.as_ref() {
             job.cancel.cancel();
@@ -1802,7 +1733,7 @@ impl AssistantRuntime {
 
     /// ¿Hay algún export de la card en vuelo (cualquier formato)?
     /// Puro sobre los slots, sin I/O.
-    fn any_export_in_flight(&self) -> bool {
+    pub(crate) fn any_export_in_flight(&self) -> bool {
         self.any_media_export_in_flight()
     }
 
@@ -1836,7 +1767,7 @@ pub(crate) fn anim_replace_message(was_animating: bool) -> Option<&'static str> 
 /// ocupado nada más empuja turnos, así que ese es el provisional creado por
 /// `drain_remote_stream_preview`. Si nunca hubo preview, no toca nada y la
 /// conversación queda como en el path no-streaming.
-fn pop_provisional_stream_turn(panel: &mut AssistantPanelState) {
+pub(crate) fn pop_provisional_stream_turn(panel: &mut AssistantPanelState) {
     if panel
         .conversation
         .last()
@@ -1854,7 +1785,7 @@ fn pop_provisional_stream_turn(panel: &mut AssistantPanelState) {
 /// lo publica: lo convierte a voz de Mili vía `repair_student_message`
 /// (sin `GUARD`/`attempts`/`estado`/`Re-preguntá`). Publicarlo crudo vía
 /// `complete_request` fue el bug P0.
-fn is_socratic_repair_error(error: &str) -> bool {
+pub(crate) fn is_socratic_repair_error(error: &str) -> bool {
     error.starts_with("GUARD TELLING")
 }
 
@@ -1904,7 +1835,7 @@ fn count_heuristic_answers(conversation: &[ConversationTurn]) -> u8 {
 /// - `history`: últimos 4 turnos como `Turn` pedagógicos (contenido capado a
 ///   200 chars; el engine vuelve a acotar al segmentar).
 ///   Puro y determinista: misma sesión → mismo guard.
-fn socratic_guard_context(
+pub(crate) fn socratic_guard_context(
     level_value: u32,
     working_topic: Option<&str>,
     question: &str,
@@ -1987,109 +1918,6 @@ pub(crate) fn remote_stage_for_job(
     }
 }
 
-struct AssistantRemoteJob {
-    id: u64,
-    /// Identidad seleccionada por el usuario, usada para descartar resultados obsoletos.
-    provider: ProviderProfile,
-    model: String,
-    route: AssistantRemoteRoute,
-    fusion_fallback_allowed: bool,
-    question: String,
-    correction_attempt: u8,
-    repair_target_turn: Option<usize>,
-    document_revision: u64,
-    document_digest: String,
-    focus: Option<AssistantFocus>,
-    cancellation: CancellationToken,
-    receiver: Receiver<Result<RemoteCompletion, String>>,
-    /// Deltas de streaming SSE (sólo protocolo Responses; el resto lo deja
-    /// desconectado y nunca hay preview). Acotado a 128 (best-effort).
-    stream_rx: Option<Receiver<String>>,
-    /// Texto acumulado del stream para la burbuja provisional.
-    stream_text: String,
-    /// Hay un turno provisional al final de `conversation` que debe limpiarse
-    /// al terminar/cancelar (ver `pop_provisional_stream_turn`).
-    preview_active: bool,
-    /// Instante de arranque del worker (para etapas con timestamp).
-    started_at: std::time::Instant,
-    /// Instante del primer delta SSE (para `Recibiendo` + aviso lento).
-    /// `None` = aún esperando primer token (p.ej. deepseek no-streaming).
-    first_delta_at: Option<std::time::Instant>,
-}
-
-struct AssistantProposalJob {
-    id: u64,
-    provider: ProviderProfile,
-    model: String,
-    route: AssistantRemoteRoute,
-    fusion_fallback_allowed: bool,
-    question: String,
-    correction_attempt: u8,
-    repair_target_turn: Option<usize>,
-    document_revision: u64,
-    document_digest: String,
-    focus: Option<AssistantFocus>,
-    text: String,
-    cancellation: CancellationToken,
-    receiver: Receiver<Result<RemoteProposalVerification, String>>,
-}
-
-struct AssistantRemoteLaunch {
-    settings: ProviderSettings,
-    request: AssistantRequest,
-    api_key: Option<String>,
-    provider: ProviderProfile,
-    model: String,
-    route: AssistantRemoteRoute,
-    fusion_fallback_allowed: bool,
-    question: String,
-    document_revision: u64,
-    document_digest: String,
-    focus: Option<AssistantFocus>,
-    correction_attempt: u8,
-    repair_target_turn: Option<usize>,
-    /// Guard socrático de sesión: el worker lo aplica sobre el completado
-    /// final (streaming y no-streaming). `None` lo desactiva.
-    socratic_guard: Option<SocraticGuardContext>,
-}
-
-struct AssistantRepairRequest {
-    feedback: AssistantRepairFeedback,
-    target_turn: usize,
-}
-
-struct AssistantProposalLaunch {
-    id: u64,
-    provider: ProviderProfile,
-    model: String,
-    route: AssistantRemoteRoute,
-    fusion_fallback_allowed: bool,
-    question: String,
-    correction_attempt: u8,
-    repair_target_turn: Option<usize>,
-    document_revision: u64,
-    document_digest: String,
-    focus: Option<AssistantFocus>,
-    text: String,
-}
-
-struct AssistantModelJob {
-    id: u64,
-    provider: ProviderProfile,
-    cancellation: CancellationToken,
-    receiver: Receiver<Result<Vec<String>, String>>,
-}
-
-struct AssistantImageJob {
-    receiver: Receiver<Result<grafito_assistant_types::ImageAttachment, String>>,
-}
-
-/// Mensaje del hilo del agente hacia la UI.
-enum AgentChannelMsg {
-    Event(grafito_agent::AgentEvent),
-    Done(Result<grafito_agent::loop_engine::AgentOutcome, String>),
-}
-
 /// Envía un mensaje del agente sin bloquear (R2-V1, puro).
 ///
 /// `try_send` + `CancellationToken`: si hay cancelación, no se envía;
@@ -2100,7 +1928,7 @@ enum AgentChannelMsg {
 ///
 /// Retorna `Some(true)` si se envió, `Some(false)` si se descartó por lleno
 /// (seguir drenando), `None` si hay que cortar (cancelado o desconectado).
-fn send_agent_msg_nonblocking(
+pub(crate) fn send_agent_msg_nonblocking(
     sender: &std::sync::mpsc::SyncSender<AgentChannelMsg>,
     msg: AgentChannelMsg,
     cancel: &grafito_agent::loop_engine::Cancellation,
@@ -2122,7 +1950,7 @@ fn send_agent_msg_nonblocking(
 /// `…` se recorta y se intenta igual; si no parsea, `None` honesto (sin
 /// inventar pregunta ni opciones). El `call_id` real no viaja en el evento,
 /// así que se deriva estable de la pregunta (longitud) sin inventar UUID.
-fn parse_agent_ask_user_pending(
+pub(crate) fn parse_agent_ask_user_pending(
     args_summary: &str,
 ) -> Option<grafito_ui::assistant::PendingClarification> {
     let cleaned = args_summary.trim().trim_end_matches('…').trim();
@@ -2146,94 +1974,6 @@ fn parse_agent_ask_user_pending(
         .unwrap_or_default();
     let call_id = format!("ask_user-{}", question.len());
     grafito_ui::assistant::PendingClarification::try_new(&call_id, question, options).ok()
-}
-
-/// Job que genera y carga una animación del motor externo.
-///
-/// AS4: con `cancellation` como `AssistantAgentJob` (cancel real: descartar
-/// señala el token, no solo dropea el receiver). El hilo la chequea entre
-/// frames en el closure de progreso (el render nativo no acepta token) y
-/// antes/después del transporte; el motor externo la recibe como closure
-/// `cancel` en `run_job` (aborto <200 ms).
-struct AssistantAnimJob {
-    cancellation: CancellationToken,
-    receiver: std::sync::mpsc::Receiver<Result<grafito_ui::assistant::AssistantMedia, String>>,
-    /// Coords W1 para historiar Thumb+Replay en el turno recién creado.
-    ///
-    /// `Some` solo en el single normal (plantilla+concepto efectivamente
-    /// renderizados): el drain pega `TurnMediaRef` al último turno
-    /// asistente además del slot vivo. `None` en playlist multi-step (no
-    /// reinyectable honesta por el camino single) y en replay (el turno ya
-    /// tiene su media; basta reinyectar el slot vivo).
-    history: Option<AnimHistoryCoords>,
-}
-
-/// W-B — render listo desde el worker IA-primero (media + prosa coherentes).
-///
-/// `media` y `prosa` vienen del MISMO spec validado (o IA o canónico de
-/// fallback, nunca mezclados). `aviso` es `Some` solo en fallback: UNA línea
-/// con plantilla y rango reales (`aviso_fallback_canonico`). `spec` es el
-/// efectivamente renderizado (para tests).
-pub(crate) struct AnimIaRender {
-    pub media: grafito_ui::assistant::AssistantMedia,
-    pub prosa: String,
-    pub aviso: Option<String>,
-    /// Coords efectivas del replay (plantilla+concepto renderizados, no el
-    /// pedido crudo): del SPEC de la IA (`spec.plantilla`/`spec.expr`) o de
-    /// la canónica de fallback. El drain las historía en el turno junto a
-    /// la media, igual que el job normal.
-    pub template: String,
-    pub concept: String,
-}
-
-/// W-B — job del worker IA-primero (SPEC de la IA + render en un solo hilo).
-/// Mismo contrato de cancel que `AssistantAnimJob`: el hilo chequea el token
-/// entre frames y descarta rancio.
-struct AssistantAnimIaJob {
-    cancellation: CancellationToken,
-    receiver: std::sync::mpsc::Receiver<Result<AnimIaRender, String>>,
-}
-
-/// Export a GIF de la card en vuelo (B5).
-///
-/// Guarda el `JoinHandle` de `spawn_gif_export` (hilo existente, reusable y
-/// probado) para drenarlo sin bloquear en `poll_gif_export_job`.
-/// `frame_count` es solo para el mensaje de éxito (cuántos fotogramas
-/// viajaron al GIF). `cancel` permite abortar el export (R1-4) y `path` es
-/// el destino temporal para borrarlo aunque el `join` dé timeout.
-struct GifExportJob {
-    handle: std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::GifExportError>>,
-    frame_count: usize,
-    cancel: grafito_assistant::CancellationToken,
-    path: std::path::PathBuf,
-}
-
-/// Export a PNG-sequence de la card en vuelo (mismo contrato que GIF).
-///
-/// Guarda el `JoinHandle` de `spawn_png_dir_export` para drenarlo sin
-/// bloquear. `path` es el directorio temporal (se borra en cancel).
-struct PngDirExportJob {
-    handle:
-        std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::PngDirExportError>>,
-    frame_count: usize,
-    cancel: grafito_assistant::CancellationToken,
-    path: std::path::PathBuf,
-}
-
-/// Export a MP4 de la card en vuelo (vía ffmpeg-sidecar).
-struct Mp4ExportJob {
-    handle: std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::Mp4ExportError>>,
-    frame_count: usize,
-    cancel: grafito_assistant::CancellationToken,
-    path: std::path::PathBuf,
-}
-/// Export a WebM de la card en vuelo (vía ffmpeg-sidecar).
-struct WebmExportJob {
-    handle:
-        std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::WebmExportError>>,
-    frame_count: usize,
-    cancel: grafito_assistant::CancellationToken,
-    path: std::path::PathBuf,
 }
 
 /// Motivo visible cuando PDF/SVG están deshabilitados sin LaTeX.
@@ -2290,6 +2030,9 @@ struct PdfExportJob {
     #[allow(dead_code)]
     frame_count: usize,
     cancel: grafito_assistant::CancellationToken,
+    // Ver `frame_count`: el lector prod vive en `cancel_anim_job`
+    // (pineado por tests); el poll LaTeX usa el `path` del join.
+    #[allow(dead_code)]
     path: std::path::PathBuf,
 }
 
@@ -2755,61 +2498,6 @@ pub(crate) fn spawn_svg_export(
     std::thread::spawn(move || export_math_to_svg_inner(&expresion, &path, &token, None, None))
 }
 
-/// ¿La plantilla del título soporta vista órbita? (puro, sin I/O).
-///
-/// Solo los títulos 3D habilitan la órbita del diálogo; el resto exporta la
-/// vista plana honesta (el selector muestra el motivo, jamás órbita fake).
-pub(crate) fn export_orbit_supported_for_title(title: &str) -> bool {
-    let norm = title.to_lowercase();
-    [
-        "orbita",
-        "órbita",
-        "3d",
-        "cubo",
-        "esfera",
-        "toro",
-        "cono",
-        "cilindro",
-        "piramide",
-        "pirámide",
-        "prisma",
-        "tetra",
-    ]
-    .iter()
-    .any(|pista| norm.contains(pista))
-}
-
-/// Cota del reaper GIF R1-4: el `join` en el path de cancel nunca bloquea
-/// más que esto (poll `is_finished` cada 50 ms).
-pub(crate) const GIF_REAPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// `join` acotado R1-4: espera hasta `timeout` (poll 50 ms) y devuelve
-/// `Some(resultado)` si el hilo terminó, `None` si dio timeout (hilo
-/// detached: al salir del scope el `JoinHandle` se suelta y el hilo sigue
-/// solo, con marca en el llamador). Puro sobre el handle, sin I/O.
-pub(crate) fn join_gif_handle_bounded(
-    handle: std::thread::JoinHandle<Result<std::path::PathBuf, crate::anim_native::GifExportError>>,
-    timeout: std::time::Duration,
-) -> Option<Result<std::path::PathBuf, crate::anim_native::GifExportError>> {
-    let inicio = std::time::Instant::now();
-    // Poll sin bloquear: el export corre en su hilo, acá solo miramos.
-    while !handle.is_finished() {
-        if inicio.elapsed() >= timeout {
-            // Timeout: se suelta el handle (detach) con marca del llamador;
-            // el hilo exportador sigue solo hasta terminar.
-            std::mem::forget(handle);
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    match handle.join() {
-        Ok(res) => Some(res),
-        Err(_) => Some(Err(crate::anim_native::GifExportError::Encode(
-            "la exportación terminó inesperadamente".to_string(),
-        ))),
-    }
-}
-
 /// Guard R1-5: marca `spec_terminado` en `Drop` (también si `complete`
 /// paniquea). Sin esto el puente forwarder quedaba en loop eterno y el
 /// `join` de abajo nunca llegaba: hilo huérfano por turno.
@@ -2846,62 +2534,6 @@ pub(crate) fn join_puente_bounded(
 
 /// Cota del puente R1-5: el `join` del forwarder nunca bloquea más que esto.
 pub(crate) const PUENTE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Job del modo agente (loop con herramientas).
-struct AssistantAgentJob {
-    provider: ProviderProfile,
-    model: String,
-    cancellation: grafito_agent::loop_engine::Cancellation,
-    receiver: Receiver<AgentChannelMsg>,
-    /// Canal lateral S2 (`ask_user` real vía evento): el forwarder de
-    /// background reenvía el pendiente como `PendingClarification` sin
-    /// bloquear (try_send acotado). La UI lo drena en `sync_assistant_for_frame`
-    /// (hilo UI, try_recv) y lo muestra como botones; nunca toca la zona guard.
-    clarification_receiver: Receiver<grafito_ui::assistant::PendingClarification>,
-}
-
-struct FinishedRemoteJob {
-    id: u64,
-    provider: ProviderProfile,
-    model: String,
-    route: AssistantRemoteRoute,
-    fusion_fallback_allowed: bool,
-    question: String,
-    correction_attempt: u8,
-    repair_target_turn: Option<usize>,
-    document_revision: u64,
-    document_digest: String,
-    focus: Option<AssistantFocus>,
-    cancelled: bool,
-    result: Result<RemoteCompletion, String>,
-    /// El job dejó una burbuja provisional que el poll debe limpiar antes de
-    /// procesar el resultado (éxito, error o cancelación).
-    stream_preview_active: bool,
-}
-
-struct FinishedProposalJob {
-    id: u64,
-    provider: ProviderProfile,
-    model: String,
-    route: AssistantRemoteRoute,
-    fusion_fallback_allowed: bool,
-    question: String,
-    correction_attempt: u8,
-    repair_target_turn: Option<usize>,
-    document_revision: u64,
-    document_digest: String,
-    focus: Option<AssistantFocus>,
-    text: String,
-    cancelled: bool,
-    result: Result<RemoteProposalVerification, String>,
-}
-
-struct FinishedModelJob {
-    id: u64,
-    provider: ProviderProfile,
-    cancelled: bool,
-    result: Result<Vec<String>, String>,
-}
 
 /// Empuja prosa al último turno del asistente (ApplyProposal, M1).
 ///
@@ -4183,19 +3815,6 @@ impl GrafitoApp {
         );
     }
 
-    fn fail_assistant_request(&mut self, error: impl Into<String>) {
-        let error = error.into();
-        let current_model = self.assistant.model.clone();
-        let visible_error = remote_error_message(&error, &current_model);
-        self.assistant.fail_request(visible_error.clone());
-        self.report_assistant_error(visible_error);
-    }
-
-    fn fail_assistant_repair_request(&mut self, error: impl Into<String>) {
-        self.assistant.restore_proposal_correction();
-        self.fail_assistant_request(error);
-    }
-
     fn report_assistant_error(&mut self, error: impl Into<String>) {
         self.show_assistant_error(error);
     }
@@ -4490,6 +4109,47 @@ impl GrafitoApp {
         self.assistant_runtime.image_job = Some(AssistantImageJob { receiver });
     }
 
+    /// Parte `&mut self` en el seam del slice 6 y delega en el controlador.
+    ///
+    /// El closure `notify` replica `GrafitoApp::notify` (toast + `ui_time`)
+    /// sin retener `&mut self` entero: los campos se parten por préstamo
+    /// disjunto. Nada acá guarda `&mut GrafitoApp` entero.
+    fn with_assistant_jobs<R>(&mut self, f: impl FnOnce(&mut AssistantJobsContext<'_>) -> R) -> R {
+        let Self {
+            assistant_runtime: runtime,
+            assistant: panel,
+            document,
+            undo_stack,
+            redo_stack,
+            profile,
+            plugin_registry,
+            selected_object,
+            camera,
+            current_view,
+            toasts,
+            ui_time,
+            ..
+        } = self;
+        let ui_time = *ui_time;
+        let mut notify = |message: String, kind: ToastKind| {
+            toasts.push(crate::app::wrap_toast_message(&message, 52), kind, ui_time);
+        };
+        let mut jobs = AssistantJobsContext {
+            runtime,
+            panel,
+            document,
+            undo_stack,
+            redo_stack,
+            profile,
+            plugin_registry: &*plugin_registry,
+            selected_object: *selected_object,
+            camera: *camera,
+            current_view: *current_view,
+            notify: &mut notify,
+        };
+        f(&mut jobs)
+    }
+
     fn build_remote_assistant_request(
         &self,
         question: String,
@@ -4499,137 +4159,21 @@ impl GrafitoApp {
         image_upload_consent: bool,
         repair: Option<AssistantRepairRequest>,
     ) -> Result<AssistantRequest, String> {
-        let (repair_feedback, history_before_turn) = match repair {
-            Some(AssistantRepairRequest {
-                feedback,
-                target_turn,
-            }) => (Some(feedback), Some(target_turn)),
-            None => (None, None),
-        };
-        let mut request = AssistantRequest::remote(question.clone(), document_context);
-        // Idioma del selector del panel (auto/es/en) → directiva en el system prompt.
-        request.language = self.assistant.avatar.language.clone();
-        request.focus = focus;
-        let plugin_instructions = self.plugin_instructions_budgeted();
-        let _plugin_instruction_bytes = if plugin_instructions.is_empty() {
-            0
-        } else {
-            plugin_instructions
-                .len()
-                .saturating_add(REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES)
-        };
-        // Memoria del tutor: el perfil del estudiante entra en el contexto de
-        // cada turno para que Mora adapte la pedagogía (ADR-0001).
-        let mut system = plugin_instructions;
-        if !system.is_empty() {
-            system.push_str("\n\n");
-        }
-        system.push_str(&format!(
-            "[Perfil del estudiante]\n{}",
-            self.profile.memory()
-        ));
-        request.system_instructions = system;
-        let focus_bytes = request
-            .focus
-            .as_ref()
-            .map(|focus| focus.summary.len())
-            .unwrap_or_default();
-        let context_bytes =
-            if request.context.objects.is_empty() && request.context.variables.is_empty() {
-                0
-            } else {
-                let mut len = REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES;
-                len += 30; // "Objetos visibles:\n" etc.
-                for (k, v) in &request.context.variables {
-                    len += k.len() + format!("{v}").len() + 4;
-                }
-                for obj in &request.context.objects {
-                    len += obj.label.len()
-                        + obj.kind.len()
-                        + obj.fingerprint.chars().take(120).collect::<String>().len()
-                        + 10;
-                }
-                len += 120; // instrucción Taylor
-                len
-            };
-        let repair_feedback_bytes = repair_feedback
-            .as_ref()
-            .map(|feedback| {
-                feedback
-                    .prompt_text()
-                    .len()
-                    .saturating_add(REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES)
-            })
-            .unwrap_or_default();
-        // Con 1M de presupuesto, el catálogo puede ser grande pero lo acotamos a 32k para no saturar
-        let system_bytes = request.system_instructions.len()
-            + if request.system_instructions.is_empty() {
-                0
-            } else {
-                REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES
-            };
-        let transcription_bytes = request.transcription.text.len()
-            + request
-                .attachments
-                .iter()
-                .map(|a| a.transcription.text.len())
-                .sum::<usize>();
-        // Presupuesto equitativo: garantiza catálogo útil incluso con historia larga
-        let raw_catalog = request
-            .budget
-            .max_input_chars
-            .saturating_sub(question.len())
-            .saturating_sub(focus_bytes)
-            .saturating_sub(
-                request
-                    .focus
-                    .as_ref()
-                    .map(|_| REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES)
-                    .unwrap_or_default(),
-            )
-            .saturating_sub(context_bytes)
-            .saturating_sub(REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES)
-            .saturating_sub(repair_feedback_bytes)
-            .saturating_sub(system_bytes)
-            .saturating_sub(transcription_bytes);
-        // Garantiza mínimo 1K para herramientas relevantes (evita catálogo vacío que deja al LLM ciego)
-        let catalog_budget = raw_catalog.clamp(1024, 32_000);
-        request.tool_catalog =
-            grafito_command::assistant_context::assistant_tool_catalog(&question, catalog_budget);
-        let catalog_overhead = if request.tool_catalog.is_empty() {
-            0
-        } else {
-            REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES
-        };
-        let history_budget = request
-            .budget
-            .max_input_chars
-            .saturating_sub(question.len())
-            .saturating_sub(focus_bytes)
-            .saturating_sub(
-                request
-                    .focus
-                    .as_ref()
-                    .map(|_| REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES)
-                    .unwrap_or_default(),
-            )
-            .saturating_sub(context_bytes)
-            .saturating_sub(request.tool_catalog.len())
-            .saturating_sub(catalog_overhead)
-            .saturating_sub(repair_feedback_bytes)
-            .saturating_sub(system_bytes)
-            .saturating_sub(transcription_bytes);
-        request.conversation = match history_before_turn {
-            Some(target_turn) => self
-                .assistant
-                .conversation_before_turn_within_budget(target_turn, history_budget),
-            None => self.assistant.conversation_within_budget(history_budget),
-        };
-        request.attachments = attachments;
-        request.image_upload_consent = image_upload_consent;
-        request.repair_feedback = repair_feedback;
-        request.validate(&AttachmentLimits::default())?;
-        Ok(request)
+        // Shim fino R1: la construcción vive en el controlador; acá solo se
+        // agrupan los 6 parámetros en `BuildRemoteParams` (tope de aridad).
+        AssistantJobsController::build_remote_request(
+            &self.assistant,
+            &self.profile,
+            self.plugin_instructions_budgeted(),
+            BuildRemoteParams {
+                question,
+                document_context,
+                focus,
+                attachments,
+                image_upload_consent,
+                repair,
+            },
+        )
     }
 
     fn start_remote_assistant_job(&mut self, ctx: &egui::Context, launch: AssistantRemoteLaunch) {
@@ -4637,222 +4181,8 @@ impl GrafitoApp {
         if self.exam_blocks("Internet") {
             return;
         }
-        let AssistantRemoteLaunch {
-            settings,
-            request,
-            api_key,
-            provider,
-            model,
-            route,
-            fusion_fallback_allowed,
-            question,
-            document_revision,
-            document_digest,
-            focus,
-            correction_attempt,
-            repair_target_turn,
-            socratic_guard,
-        } = launch;
-        self.assistant_runtime.next_request_id =
-            self.assistant_runtime.next_request_id.wrapping_add(1);
-        let id = self.assistant_runtime.next_request_id;
-        let cancellation = CancellationToken::default();
-        // Canal acotado de deltas SSE (128, best-effort): el worker de
-        // streaming lo alimenta y `poll_assistant_jobs` lo drena a la burbuja
-        // provisional. Protocolos no-streaming lo dejan desconectado.
-        let (delta_tx, stream_rx) = sync_channel::<String>(128);
-        let worker = request_remote_streaming_with_api_key_on_worker(
-            settings,
-            request,
-            api_key,
-            cancellation.clone(),
-            delta_tx,
-            socratic_guard,
-        );
-        let (sender, receiver) = sync_channel(1);
-        let repaint = ctx.clone();
-        let cancellation_for_thread = cancellation.clone();
-        std::thread::spawn(move || {
-            // Si hay cancelación pendiente, da una ventana breve para que el worker
-            // termine cooperativamente antes de bloquear el hilo forwarder (no UI).
-            if cancellation_for_thread.is_cancelled() {
-                for _ in 0..20 {
-                    if worker.is_finished() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-            let result = worker.join().unwrap_or_else(|_| {
-                Err("La consulta del asistente terminó inesperadamente.".into())
-            });
-            let _ = sender.send(result);
-            repaint.request_repaint();
-        });
-        self.assistant_runtime.remote_job = Some(AssistantRemoteJob {
-            id,
-            provider,
-            model,
-            route,
-            fusion_fallback_allowed,
-            question,
-            correction_attempt,
-            repair_target_turn,
-            document_revision,
-            document_digest,
-            focus,
-            cancellation,
-            receiver,
-            stream_rx: Some(stream_rx),
-            stream_text: String::new(),
-            preview_active: false,
-            started_at: std::time::Instant::now(),
-            first_delta_at: None,
-        });
-        // Etapa inicial visible de inmediato (sin esperar al primer poll):
-        // `Autorizada` con 0s, la Piel sólo renderiza el texto.
-        self.assistant
-            .set_remote_stage(grafito_ui::assistant::RemoteStage::Autorizada, 0);
-    }
-
-    /// Lanza el modo agente (loop con herramientas seguras) en un hilo y
-    /// enruta sus eventos de actividad + resultado hacia la UI.
-    fn start_agent_assistant_job(&mut self, ctx: &egui::Context, launch: AssistantRemoteLaunch) {
-        // D2 lockdown: en examen no sale nada a internet.
-        if self.exam_blocks("Internet") {
-            return;
-        }
-        let settings = launch.settings;
-        let request = launch.request;
-        let api_key = launch.api_key;
-        let provider = launch.provider;
-        let model = launch.model;
-        let question = launch.question;
-        self.assistant_runtime.next_request_id =
-            self.assistant_runtime.next_request_id.wrapping_add(1);
-        let _ = self.assistant_runtime.next_request_id;
-        let cancellation = grafito_agent::loop_engine::Cancellation::default();
-        let system = grafito_assistant::assistant_system_prompt(&request);
-        let prompt = grafito_assistant::assistant_remote_prompt(&request)
-            .unwrap_or_else(|_| question.clone());
-        let mut user_messages: Vec<serde_json::Value> = Vec::new();
-        for turn in &request.conversation {
-            let role = match turn.role {
-                grafito_assistant_types::ConversationRole::User => "user",
-                grafito_assistant_types::ConversationRole::Assistant => "assistant",
-            };
-            user_messages.push(serde_json::json!({"role": role, "content": turn.content}));
-        }
-        user_messages.push(serde_json::json!({"role": "user", "content": prompt}));
-        let tools = grafito_assistant::default_agent_tools();
-        let budget = grafito_agent::loop_engine::AgentBudget::default();
-        let goal = question
-            .chars()
-            .take(grafito_agent::ledger::MAX_LEDGER_GOAL_CHARS)
-            .collect::<String>();
-        let ledger = if grafito_agent::router::classify_band(&question)
-            == grafito_agent::router::TaskBand::LongRunning
-        {
-            Some(grafito_agent::ledger::JSpaceLedger::with_task(
-                goal,
-                "Analizar, verificar con tools y cerrar",
-            ))
-        } else {
-            None
-        };
-        let (outcome_handle, event_receiver) =
-            grafito_assistant::agent::request_agent_on_worker_with_ledger(
-                settings,
-                api_key,
-                system,
-                user_messages,
-                tools,
-                budget,
-                ledger,
-                cancellation.clone(),
-            );
-        let (sender, receiver) = std::sync::mpsc::sync_channel(128);
-        // S2: canal lateral de aclaraciones (cap 4, try_send sin bloquear).
-        let (clarification_sender, clarification_receiver) = std::sync::mpsc::sync_channel(4);
-        let repaint = ctx.clone();
-        let cancellation_forwarder = cancellation.clone();
-        std::thread::spawn(move || {
-            // Drena eventos con timeout para respetar cancelación y evitar bloqueo
-            // indefinido en `iter()` si el agente se cuelga.
-            loop {
-                if cancellation_forwarder.is_cancelled() {
-                    break;
-                }
-                match event_receiver.recv_timeout(std::time::Duration::from_millis(100)) {
-                    Ok(event) => {
-                        // S2 `ask_user` real vía evento: reenvía el pendiente al
-                        // canal lateral sin bloquear (try_send) para que la UI
-                        // lo muestre como botones. Nunca bloquea threads.
-                        if let grafito_agent::AgentEvent::ToolStarted { name, args_summary } =
-                            &event
-                        {
-                            if name == "ask_user" {
-                                if let Some(pending) = parse_agent_ask_user_pending(args_summary) {
-                                    let _ = clarification_sender.try_send(pending);
-                                }
-                            }
-                        }
-                        // R2-V1: `try_send` + `CancellationToken` (jamás `send` bloqueante).
-                        // Lleno → se descarta el evento (best-effort); desconectado/cancelado → corta.
-                        match send_agent_msg_nonblocking(
-                            &sender,
-                            AgentChannelMsg::Event(event),
-                            &cancellation_forwarder,
-                        ) {
-                            Some(_) => {}
-                            None => break,
-                        }
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            // Si hay cancelación, espera brevemente a que el worker termine
-            // cooperativamente antes de bloquear el hilo forwarder (no UI).
-            if cancellation_forwarder.is_cancelled() {
-                for _ in 0..20 {
-                    if outcome_handle.is_finished() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-            let outcome = outcome_handle
-                .join()
-                .unwrap_or_else(|_| Err("El agente terminó inesperadamente.".to_string()));
-            // R2-V1: `Done` con `try_send` + reintento acotado (jamás `send` bloqueante).
-            // Si el buffer sigue lleno tras 200 ms o hay cancelación/desconexión,
-            // se descarta para que el `join` sea <1s (la UI ve `Disconnected` honesto).
-            let mut pending = Some(AgentChannelMsg::Done(outcome));
-            for _ in 0..20 {
-                if cancellation_forwarder.is_cancelled() {
-                    break;
-                }
-                let Some(msg) = pending.take() else {
-                    break;
-                };
-                match sender.try_send(msg) {
-                    Ok(()) => break,
-                    Err(std::sync::mpsc::TrySendError::Full(returned)) => {
-                        pending = Some(returned);
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
-                }
-            }
-            repaint.request_repaint();
-        });
-        self.assistant_runtime.agent_job = Some(AssistantAgentJob {
-            provider,
-            model,
-            cancellation,
-            receiver,
-            clarification_receiver,
+        self.with_assistant_jobs(|jobs| {
+            AssistantJobsController::start_remote(jobs, ctx, launch);
         });
     }
 
@@ -5356,27 +4686,10 @@ impl GrafitoApp {
     /// ambos mundos: raster/video + LaTeX PDF/SVG); el poll drena el
     /// resultado honesto (jamás mudo). Fuera del draw.
     fn cancel_export_assistant_media(&mut self, ctx: &egui::Context) {
-        let mut hubo = false;
-        if let Some(job) = self.assistant_runtime.gif_export_job.as_ref() {
-            job.cancel.cancel();
-            hubo = true;
-        }
-        if let Some(job) = self.assistant_runtime.png_export_job.as_ref() {
-            job.cancel.cancel();
-            hubo = true;
-        }
-        if let Some(job) = self.assistant_runtime.mp4_export_job.as_ref() {
-            job.cancel.cancel();
-            hubo = true;
-        }
-        if let Some(job) = self.assistant_runtime.webm_export_job.as_ref() {
-            job.cancel.cancel();
-            hubo = true;
-        }
-        // Ambos mundos: la vía LaTeX también se señala (PDF + SVG).
-        if self.assistant_runtime.signal_latex_exports_cancel() {
-            hubo = true;
-        }
+        // Shim fino R1: el núcleo (señalar tokens sin soltar slots; el poll
+        // drena honesto) vive en el controller + puente LaTeX.
+        let hubo = self.assistant_runtime.signal_exports_cancel()
+            || self.assistant_runtime.signal_latex_exports_cancel();
         if !hubo {
             self.assistant
                 .export_dialog_mark_failed("no había exportación en curso");
@@ -5400,15 +4713,9 @@ impl GrafitoApp {
     /// Drena todos los jobs de export sin bloquear (ver `poll_gif_export_job`).
     fn poll_media_export_jobs(&mut self, ctx: &egui::Context) {
         use grafito_ui::assistant::MediaExportState;
-        if self
-            .assistant_runtime
-            .gif_export_job
-            .as_ref()
-            .is_some_and(|job| job.handle.is_finished())
-        {
-            let Some(job) = self.assistant_runtime.gif_export_job.take() else {
-                return;
-            };
+        // Shim fino R1: el gate `is_finished` + take vive en el
+        // controller (`take_ready_gif`); el `join` + aviso quedan acá.
+        if let Some(job) = self.assistant_runtime.take_ready_gif() {
             match job.handle.join() {
                 Ok(Ok(path)) => {
                     let too_big = std::fs::metadata(&path)
@@ -5458,15 +4765,9 @@ impl GrafitoApp {
             ctx.request_repaint();
             return;
         }
-        if self
-            .assistant_runtime
-            .png_export_job
-            .as_ref()
-            .is_some_and(|job| job.handle.is_finished())
-        {
-            let Some(job) = self.assistant_runtime.png_export_job.take() else {
-                return;
-            };
+        // Shim fino R1: el gate `is_finished` + take vive en el
+        // controller (`take_ready_png`); el `join` + aviso quedan acá.
+        if let Some(job) = self.assistant_runtime.take_ready_png() {
             match job.handle.join() {
                 Ok(Ok(path)) => {
                     self.assistant.export_dialog_mark_done();
@@ -5502,15 +4803,9 @@ impl GrafitoApp {
             ctx.request_repaint();
             return;
         }
-        if self
-            .assistant_runtime
-            .mp4_export_job
-            .as_ref()
-            .is_some_and(|job| job.handle.is_finished())
-        {
-            let Some(job) = self.assistant_runtime.mp4_export_job.take() else {
-                return;
-            };
+        // Shim fino R1: el gate `is_finished` + take vive en el
+        // controller (`take_ready_mp4`); el `join` + aviso quedan acá.
+        if let Some(job) = self.assistant_runtime.take_ready_mp4() {
             match job.handle.join() {
                 Ok(Ok(path)) => {
                     let too_big = std::fs::metadata(&path)
@@ -5560,15 +4855,9 @@ impl GrafitoApp {
             ctx.request_repaint();
             return;
         }
-        if self
-            .assistant_runtime
-            .webm_export_job
-            .as_ref()
-            .is_some_and(|job| job.handle.is_finished())
-        {
-            let Some(job) = self.assistant_runtime.webm_export_job.take() else {
-                return;
-            };
+        // Shim fino R1: el gate `is_finished` + take vive en el
+        // controller (`take_ready_webm`); el `join` + aviso quedan acá.
+        if let Some(job) = self.assistant_runtime.take_ready_webm() {
             match job.handle.join() {
                 Ok(Ok(path)) => {
                     let too_big = std::fs::metadata(&path)
@@ -6483,16 +5772,12 @@ impl GrafitoApp {
     /// se publica `Err` honesto en la card, jamás media parcial en silencio.
     ///
     /// R2-V2 (puro, testeable): valida `len <= PLAYLIST_MAX_STEPS` (8) con
-    /// `Err` acotado. El worker la llama antes de renderizar para que el
-    /// struct literal con 64 steps no acumule OOM.
+    /// `Err` acotado. Shim fino: la implementación vive en
+    /// `assistant_media` (dueño del presupuesto); el path
+    /// `GrafitoApp::playlist_len_budget_ok` se conserva para no cambiar
+    /// aserciones de tests.
     pub(crate) fn playlist_len_budget_ok(len: usize) -> Result<(), String> {
-        if len > grafito_anim::protocol::PLAYLIST_MAX_STEPS {
-            return Err(format!(
-                "la playlist trae {len} steps y excede el tope de {}: partila en dos",
-                grafito_anim::protocol::PLAYLIST_MAX_STEPS
-            ));
-        }
-        Ok(())
+        crate::assistant_media::playlist_len_budget_ok(len)
     }
 
     pub(crate) fn run_assistant_playlist_with(
@@ -6684,70 +5969,6 @@ impl GrafitoApp {
         // dentro); el único toast del flujo feliz es "Animación lista.".
     }
 
-    fn start_remote_proposal_verification(
-        &mut self,
-        ctx: &egui::Context,
-        launch: AssistantProposalLaunch,
-    ) {
-        // D2 lockdown: en examen no sale nada a internet.
-        if self.exam_blocks("Internet") {
-            return;
-        }
-        let AssistantProposalLaunch {
-            id,
-            provider,
-            model,
-            route,
-            fusion_fallback_allowed,
-            question,
-            correction_attempt,
-            repair_target_turn,
-            document_revision,
-            document_digest,
-            focus,
-            text,
-        } = launch;
-        let document = self.document.detached_clone_for_staging();
-        let camera = self.camera;
-        let response_text = text.clone();
-        let cancellation = CancellationToken::default();
-        let worker_cancellation = cancellation.clone();
-        let (sender, receiver) = sync_channel(1);
-        let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                inspect_remote_proposals_cancellable(
-                    &document,
-                    &text,
-                    camera,
-                    &worker_cancellation,
-                    correction_attempt > 0,
-                )
-            }))
-            .unwrap_or_else(|_| {
-                Err("La comprobación local de la propuesta falló inesperadamente.".into())
-            });
-            let _ = sender.send(result);
-            repaint.request_repaint();
-        });
-        self.assistant_runtime.proposal_job = Some(AssistantProposalJob {
-            id,
-            provider,
-            model,
-            route,
-            fusion_fallback_allowed,
-            question,
-            correction_attempt,
-            repair_target_turn,
-            document_revision,
-            document_digest,
-            focus,
-            text: response_text,
-            cancellation,
-            receiver,
-        });
-    }
-
     fn build_assistant_proposal_correction(
         &mut self,
         question: &str,
@@ -6886,19 +6107,15 @@ impl GrafitoApp {
     }
 
     /// Arranca la consulta remota tras un consentimiento explícito del cartel.
+    /// Arranca la consulta remota tras un consentimiento explícito del cartel.
     fn start_authorized_remote_assistant_request(&mut self, ctx: &egui::Context) {
-        if self.assistant.is_pending || !self.assistant_runtime.remote_request_slot_is_free() {
+        // D2 lockdown: el shim lo chequea antes de delegar (contrato slice 6).
+        if self.exam_blocks("Internet") {
             return;
         }
-        let Some(question) = self
-            .assistant
-            .pending_remote_authorization_question()
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        self.assistant.begin_authorized_remote_request();
-        self.start_remote_assistant_for(ctx, question, None);
+        self.with_assistant_jobs(|jobs| {
+            AssistantJobsController::start_authorized(jobs, ctx);
+        });
     }
 
     /// Guard socrático de la sesión actual para un lanzamiento remoto.
@@ -6954,148 +6171,33 @@ impl GrafitoApp {
         question: String,
         model_override: Option<&str>,
     ) {
-        // Freno 429: en pausa se avisa con cuenta regresiva sin tocar la red.
-        // Cubre chat simple, modo agente y el fallback sólo-sesión (que
-        // también pasa por acá): ningún reintento automático quema cuota.
-        if self.fail_fast_if_rate_limited() {
+        // D2 lockdown: el shim lo chequea antes de delegar (contrato slice 6).
+        // Matiz R1: en examen se frena acá (mismo toast) en vez de tras
+        // validar settings/red; la red jamás se toca en examen.
+        if self.exam_blocks("Internet") {
             return;
         }
-        if !self.assistant_runtime.remote_request_slot_is_free() {
-            return;
-        }
-        if !self.assistant.attachments.is_empty() {
-            if !self.assistant.vision_enabled {
-                self.show_assistant_error(
-                    "Confirmá que la configuración remota admite imágenes antes de enviarlas.",
-                );
-                return;
-            }
-            if self.assistant.full_permission {
-                self.assistant.image_upload_consent = true;
-            }
-            if !self.assistant.image_upload_consent {
-                self.show_assistant_error(
-                    "Autorizá el envío de las imágenes antes de realizar la consulta.",
-                );
-                return;
-            }
-        }
-        let effective_model = model_override
-            .unwrap_or(&self.assistant.model)
-            .trim()
-            .to_owned();
-        if effective_model.is_empty() {
-            self.show_assistant_error(
-                "Completá la configuración avanzada antes de consultar remotamente.",
-            );
-            return;
-        }
-        let settings = match self.assistant_provider_settings_for(&effective_model) {
-            Ok(settings) => settings,
-            Err(error) => {
-                self.show_assistant_error(error);
-                return;
-            }
-        };
-        let api_key = match self.assistant_api_key() {
-            Ok(key) => key,
-            Err(error) => {
-                self.show_assistant_error(error);
-                return;
-            }
-        };
-        let document_context = grafito_command::assistant_context::document_context(&self.document);
-        let focus = grafito_command::assistant_context::selected_function_focus(
-            &self.document,
-            self.selected_object,
-        );
-        let document_revision = document_context.revision;
-        let document_digest = document_context.digest.clone();
-        let request = match self.build_remote_assistant_request(
-            question.clone(),
-            document_context,
-            focus.clone(),
-            self.assistant.attachments.clone(),
-            self.assistant.image_upload_consent,
-            None,
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                // `build_remote_assistant_request` valida límites (inglés de
-                // crates externos) — se envuelve en español antes de mostrar.
-                self.show_assistant_error(remote_error_message(&error, &effective_model));
-                return;
-            }
-        };
-
-        // Fallback sólo-sesión: se recuerda para aceptar el resultado en vuelo
-        // sin tocar la preferencia guardada del usuario.
-        if model_override.is_some() {
-            self.assistant_runtime.fallback_model = Some(effective_model.clone());
-        } else {
-            self.assistant_runtime.fallback_model = None;
-        }
-        let launch = AssistantRemoteLaunch {
-            settings,
-            request,
-            api_key,
-            provider: self.assistant.provider,
-            model: effective_model,
-            route: AssistantRemoteRoute::SelectedModel,
-            fusion_fallback_allowed: self.assistant.allow_fusion_fallback,
-            question: question.clone(),
-            document_revision,
-            document_digest,
-            focus,
-            correction_attempt: 0,
-            repair_target_turn: None,
-            socratic_guard: self.session_socratic_guard(&question),
-        };
-        if self.assistant.agent_mode {
-            self.start_agent_assistant_job(ctx, launch);
-        } else {
-            self.start_remote_assistant_job(ctx, launch);
-        }
+        self.with_assistant_jobs(|jobs| {
+            AssistantJobsController::start_remote_for(jobs, ctx, question, model_override);
+        });
     }
 
     fn apply_proposed_assistant_plan(&mut self) {
-        let Some(plan) = self.assistant.proposed_plan().cloned() else {
+        // El controlador aplica documento + undo + panel + toast y devuelve
+        // los efectos de `app.rs`; el shim los completa con sus dueños
+        // (`record_step_from_diff` + `set_perspective` +
+        // `ensure_algebra_panel_visible`).
+        let effect = self.with_assistant_jobs(AssistantJobsController::apply_proposed);
+        if !effect.applied {
             return;
-        };
-        let before_labels = self.object_labels_snapshot();
-        match apply_local_assistant_plan(
-            &mut self.document,
-            &plan,
-            &mut self.undo_stack,
-            &mut self.redo_stack,
-        ) {
-            Ok(result) => {
-                self.record_step_from_diff("Propuesta local aplicada", &before_labels, true);
-                // Decide perspectiva según el contenido del plan: CreateGraph es 2D,
-                // otras operaciones matemáticas también deben quedar visibles en Álgebra.
-                let has_graph = plan.operations.iter().any(|operation| operation.is_graph());
-                if has_graph {
-                    if let Some(perspective) = assistant_graph_perspective(
-                        grafito_command::assistant_context::AssistantGraphView::TwoD,
-                        self.current_view,
-                    ) {
-                        self.set_perspective(perspective);
-                    }
-                }
-                self.ensure_algebra_panel_visible();
-                self.assistant.finish_proposed_plan_application(true);
-                self.notify(
-                    format!("Propuesta local aplicada: {}", result.changes.join(", ")),
-                    ToastKind::Success,
-                );
-            }
-            Err(error) => {
-                self.assistant.clear_proposed_plan();
-                self.show_assistant_error(format!(
-                    "La propuesta local cambió o dejó de ser válida: {error}"
-                ));
-            }
         }
+        if let Some((action, before_labels)) = effect.record_action {
+            self.record_step_from_diff(&action, &before_labels, true);
+        }
+        if let Some(perspective) = effect.wants_perspective {
+            self.set_perspective(perspective);
+        }
+        self.ensure_algebra_panel_visible();
     }
 
     fn request_assistant_proposal_correction(&mut self, ctx: &egui::Context) {
@@ -7161,58 +6263,10 @@ impl GrafitoApp {
     }
 
     fn start_model_request(&mut self, ctx: &egui::Context) {
-        // La lista de modelos también respeta la pausa (es un GET al mismo
-        // proveedor). Con cache fresco el worker ni sale a la red.
-        if self.fail_fast_if_rate_limited() {
-            return;
-        }
-        if !self.assistant_runtime.request_model_refresh() {
-            return;
-        }
-        let settings = match self.assistant_provider_settings() {
-            Ok(settings) => settings,
-            Err(error) => {
-                self.show_assistant_error(error);
-                return;
-            }
-        };
-        let api_key = match self.assistant_api_key() {
-            Ok(key) => key,
-            Err(error) => {
-                self.show_assistant_error(error);
-                return;
-            }
-        };
-        self.assistant_runtime.next_request_id =
-            self.assistant_runtime.next_request_id.wrapping_add(1);
-        let id = self.assistant_runtime.next_request_id;
-        let provider = self.assistant.provider;
-        let cancellation = CancellationToken::default();
-        let worker =
-            request_remote_models_with_api_key_on_worker(settings, api_key, cancellation.clone());
-        let (sender, receiver) = sync_channel(1);
-        let repaint = ctx.clone();
-        let cancellation_for_thread = cancellation.clone();
-        std::thread::spawn(move || {
-            if cancellation_for_thread.is_cancelled() {
-                for _ in 0..20 {
-                    if worker.is_finished() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-            let result = worker
-                .join()
-                .unwrap_or_else(|_| Err("La lista de modelos terminó inesperadamente.".into()));
-            let _ = sender.send(result);
-            repaint.request_repaint();
-        });
-        self.assistant_runtime.model_job = Some(AssistantModelJob {
-            id,
-            provider,
-            cancellation,
-            receiver,
+        // Shim fino R1: guards 429 + doble-spawn + spawn viven en el
+        // controlador (`start_model`).
+        self.with_assistant_jobs(|jobs| {
+            AssistantJobsController::start_model(jobs, ctx);
         });
     }
 
@@ -7223,14 +6277,8 @@ impl GrafitoApp {
         // Los workers con token se drenan en poll (take_finished_*); anim
         // señala su token y dropea el slot (worker acotado con chequeo entre
         // frames); el export suelto lo entierra el reaper y la card vuelve
-        // a `Idle` (ver `cancela_turno_anim`).
-        let had_anim = self.assistant_runtime.anim_job.is_some();
-        if self.cancela_turno_anim() {
-            if had_anim {
-                self.assistant.anim_progress = false;
-            }
-            self.begin_cancelling_remote_request();
-        }
+        // a `Idle` (ver `cancel_turno_anim`).
+        self.with_assistant_jobs(AssistantJobsController::cancel_remote);
     }
 
     /// Cancela el turno en vuelo + resetea la card de export si el cancel
@@ -7242,515 +6290,34 @@ impl GrafitoApp {
     /// se soltó: un `Done`/`Failed` previo no se toca. Sin I/O en el
     /// llamante. Retorna si había algún job en vuelo.
     fn cancela_turno_anim(&mut self) -> bool {
-        let habia_export = self.assistant_runtime.any_media_export_in_flight();
-        let hubo = self.assistant_runtime.cancel_all_assistant_jobs();
-        if habia_export && self.assistant_runtime.gif_export_job.is_none() {
-            self.assistant
-                .set_media_export(grafito_ui::assistant::MediaExportState::Idle);
-        }
-        hubo
+        // Shim fino R1: ver `AssistantJobsController::cancel_turno_anim`
+        // (dueño B2-MED: resetea todos los formatos + limpia fallback_model).
+        self.with_assistant_jobs(AssistantJobsController::cancel_turno_anim)
     }
 
-    fn begin_cancelling_remote_request(&mut self) {
-        self.assistant.begin_cancellation();
+    /// Turno derivado del asistente (fuente: `AssistantTurnState::derive_from`
+    /// sobre runtime + panel, sin estado almacenado que diverja). Requerido
+    /// por el harness del slice 6 (`assistant_jobs.rs`, test
+    /// `grafito_app_expone_el_turno_derivado`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn assistant_turn_state(&self) -> AssistantTurnState {
+        AssistantTurnState::derive_from(&self.assistant_runtime, &self.assistant)
     }
 
     fn cancel_stale_remote_request(&mut self) {
-        let expected = self
-            .assistant_runtime
-            .expected_model(&self.assistant.model)
-            .to_owned();
-        if self
-            .assistant_runtime
-            .cancel_stale_remote_job(self.assistant.provider, &expected)
-            || self
-                .assistant_runtime
-                .cancel_stale_agent_job(self.assistant.provider, &expected)
-        {
-            self.begin_cancelling_remote_request();
-        }
+        self.with_assistant_jobs(AssistantJobsController::cancel_stale_remote);
     }
 
     fn cancel_stale_model_request(&mut self) {
-        if self
-            .assistant_runtime
-            .cancel_stale_model_job(self.assistant.provider)
-        {}
-    }
-
-    /// Drena la actividad del modo agente y cierra el turno al terminar.
-    fn poll_assistant_agent(&mut self, ctx: &egui::Context) -> bool {
-        let Some(job) = self.assistant_runtime.agent_job.as_ref() else {
-            return false;
-        };
-        loop {
-            match job.receiver.try_recv() {
-                Ok(AgentChannelMsg::Event(event)) => match event {
-                    grafito_agent::AgentEvent::ToolStarted { name, .. } => {
-                        self.assistant
-                            .push_agent_activity(format!("usando {name}…"));
-                    }
-                    grafito_agent::AgentEvent::ToolFinished { name, ok } => {
-                        let marker = if ok { "✓" } else { "✗" };
-                        self.assistant
-                            .push_agent_activity(format!("{marker} {name}"));
-                    }
-                    grafito_agent::AgentEvent::Ledger { render } => {
-                        self.assistant.set_agent_ledger(Some(render));
-                    }
-                    grafito_agent::AgentEvent::Finalized { .. } => {}
-                },
-                Ok(AgentChannelMsg::Done(result)) => {
-                    if let Some(job) = self.assistant_runtime.agent_job.take() {
-                        let cancelled = job.cancellation.is_cancelled();
-                        if cancelled {
-                            self.fail_assistant_request(
-                                "La consulta agente se canceló antes de obtener una respuesta.",
-                            );
-                        } else {
-                            match result {
-                                Ok(outcome) => {
-                                    // Wiring B1 (loop Spark por Responses en paralelo):
-                                    // un `Done(Ok)` con Spark se acepta directo y NUNCA
-                                    // dispara el fallback a deepseek. El fallback sólo
-                                    // vive en la rama `Err` vía
-                                    // `should_fallback_agent_spark_to_deepseek`.
-                                    self.assistant.complete_request(outcome.final_text);
-                                }
-                                Err(error) => {
-                                    // Modo agente + Spark: las tools aún no viajan por Responses API.
-                                    // Fallback sólo-sesión a deepseek (chat-compatible), preferencia intacta.
-                                    // Si B1 ya cerró el loop por Responses, este error deja
-                                    // de ocurrir y el `Ok` de arriba gana sin fallback.
-                                    if should_fallback_agent_spark_to_deepseek(
-                                        &error,
-                                        job.provider,
-                                        &job.model,
-                                    ) {
-                                        eprintln!("grafito: session-fallback agent spark -> deepseek-v4-flash (preferencia intacta)");
-                                        self.notify(
-                                            "Modo agente con Spark aún no soporta herramientas; reintentando con DeepSeek Flash…",
-                                            ToastKind::Info,
-                                        );
-                                        let question = self.assistant.problem.trim().to_owned();
-                                        self.start_remote_assistant_for(
-                                            ctx,
-                                            question,
-                                            Some("deepseek-v4-flash"),
-                                        );
-                                    } else {
-                                        self.fail_assistant_request(error);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ctx.request_repaint();
-                    return true;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if let Some(_job) = self.assistant_runtime.agent_job.take() {
-                        self.fail_assistant_request(
-                            "El agente terminó inesperadamente antes de responder.",
-                        );
-                    }
-                    ctx.request_repaint();
-                    return true;
-                }
-            }
-        }
-        false
+        self.with_assistant_jobs(AssistantJobsController::cancel_stale_model);
     }
 
     fn poll_assistant_jobs(&mut self, ctx: &egui::Context) {
-        self.poll_assistant_agent(ctx);
-        // Drena deltas SSE a la burbuja provisional antes de cosechar el
-        // resultado final (el preview se limpia en cada rama terminal).
-        self.assistant_runtime
-            .drain_remote_stream_preview(&mut self.assistant, ctx);
-        if let Some(completion) = self.assistant_runtime.take_finished_remote_job() {
-            let FinishedRemoteJob {
-                id,
-                provider,
-                model,
-                route,
-                fusion_fallback_allowed,
-                question,
-                correction_attempt,
-                repair_target_turn,
-                document_revision,
-                document_digest,
-                focus,
-                cancelled,
-                result,
-                stream_preview_active,
-                ..
-            } = completion;
-            if stream_preview_active {
-                pop_provisional_stream_turn(&mut self.assistant);
-            }
-            if cancelled
-                || !accepts_remote_result(
-                    self.assistant.provider,
-                    self.assistant_runtime.expected_model(&self.assistant.model),
-                    provider,
-                    &model,
-                )
-            {
-                if correction_attempt > 0 {
-                    self.fail_assistant_repair_request(
-                        "La corrección se canceló antes de recibir una respuesta.",
-                    );
-                } else {
-                    self.fail_assistant_request(
-                        "La consulta se canceló antes de recibir una respuesta.",
-                    );
-                }
-            } else {
-                let current_context =
-                    grafito_command::assistant_context::document_context(&self.document);
-                let current_focus = grafito_command::assistant_context::selected_function_focus(
-                    &self.document,
-                    self.selected_object,
-                );
-                if !accepts_remote_context(
-                    &current_context,
-                    current_focus.as_ref(),
-                    document_revision,
-                    &document_digest,
-                    focus.as_ref(),
-                ) {
-                    self.fail_assistant_request(
-                        "La respuesta quedó obsoleta porque cambió el documento o el foco; no se aceptó ni se verificaron sus propuestas.",
-                    );
-                    self.assistant.invalidate_proposal_correction();
-                } else {
-                    match result {
-                        Ok(completion) => {
-                            if completion.truncated {
-                                self.notify(
-                                    "La respuesta alcanzó el límite de la consulta; pedí que continúe desde el último punto.",
-                                    ToastKind::Info,
-                                );
-                            }
-                            let text = completion.text;
-                            // Guard socrático post-respuesta: un pedido
-                            // exploratorio ("mostrame un ejemplo…") cuya
-                            // respuesta trae matemática ($..$, `=` numérico)
-                            // es telling igual y exige repair ANTES de
-                            // publicar (cierra el bypass demo, ver
-                            // `SocraticFsm::requires_repair_despite_exploratory`).
-                            // NO toca el guard pre-respuesta del worker.
-                            if SocraticFsm::requires_repair_despite_exploratory(
-                                &question,
-                                SocraticFsm::response_brings_math(&text),
-                            ) {
-                                if correction_attempt > 0 {
-                                    self.assistant.restore_proposal_correction();
-                                }
-                                eprintln!(
-                                    "grafito: socratic repair post-respuesta (no al transcript)"
-                                );
-                                let student = self
-                                    .session_socratic_guard(&question)
-                                    .map(|guard| {
-                                        guard.fsm.repair_student_message(&guard.scaffold)
-                                    })
-                                    .unwrap_or_else(|| {
-                                        "Antes de mostrarte la solución, ¿qué forma te imaginás? Contame qué probaste y lo vemos juntos.".to_owned()
-                                    });
-                                self.assistant.complete_request(student);
-                                self.notify(
-                                    "El tutor repregunta antes de mostrar la solución directa.",
-                                    ToastKind::Info,
-                                );
-                            } else {
-                                self.start_remote_proposal_verification(
-                                    ctx,
-                                    AssistantProposalLaunch {
-                                        id,
-                                        provider,
-                                        model,
-                                        route,
-                                        fusion_fallback_allowed,
-                                        question,
-                                        correction_attempt,
-                                        repair_target_turn,
-                                        document_revision,
-                                        document_digest,
-                                        focus,
-                                        text,
-                                    },
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            // Reparación socrática: el guard detectó telling
-                            // con attempts<2 en el worker (streaming o no).
-                            // El `error` es diagnóstico interno con jerga
-                            // (`GUARD TELLING...`, solo para detección y logs):
-                            // JAMÁS se publica crudo vía `complete_request`
-                            // (ese fue el bug P0). Se convierte a voz de Mili
-                            // vía `repair_student_message` (sin `GUARD`/
-                            // `attempts`/`estado`/`Re-preguntá`). No hay
-                            // fallback de modelo ni cartel de error aquí.
-                            if is_socratic_repair_error(&error) {
-                                if correction_attempt > 0 {
-                                    self.assistant.restore_proposal_correction();
-                                }
-                                // Jerga solo en logs/eventos internos.
-                                eprintln!(
-                                    "grafito: socratic repair interno (no al transcript): {error}"
-                                );
-                                // Convierte a voz de Mili; si no hay guard
-                                // (no debería pasar si hubo repair), fallback
-                                // humano sin jerga ni eco crudo.
-                                let student = self
-                                    .session_socratic_guard(&question)
-                                    .map(|guard| {
-                                        guard.fsm.repair_student_message(&guard.scaffold)
-                                    })
-                                    .unwrap_or_else(|| {
-                                        "Antes de mostrarte la solución, ¿qué forma te imaginás? Contame qué probaste y lo vemos juntos.".to_owned()
-                                    });
-                                self.assistant.complete_request(student);
-                                self.notify(
-                                    "El tutor repregunta antes de mostrar la solución directa.",
-                                    ToastKind::Info,
-                                );
-                            } else if should_fallback_remote_spark_to_deepseek(
-                                // OJO bucle: acá va el modelo INTENTADO (`model`
-                                // del job), no la preferencia. Con la preferencia
-                                // (siempre spark), el fallo del reintento en
-                                // deepseek re-disparaba el fallback al infinito.
-                                &error,
-                                provider,
-                                &model,
-                                correction_attempt,
-                            ) {
-                                if is_session_or_account_error(&error) {
-                                    eprintln!("grafito: session-fallback muse-spark 400-sesion [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
-                                    self.notify(
-                                        "Muse Spark rechazó la sesión Go (el header viaja solo; reintentá en un rato y si persiste verificá tu región o re-conectá tu clave Go). Sigo con DeepSeek Flash sin cambiar tu modelo.",
-                                        ToastKind::Info,
-                                    );
-                                } else {
-                                    eprintln!("grafito: session-fallback muse-spark [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
-                                    self.notify(
-                                        "Muse Spark no respondió, reintentando con DeepSeek Flash; tu modelo sigue siendo Muse Spark.",
-                                        ToastKind::Info,
-                                    );
-                                }
-                                // Reintentar la misma pregunta con el fallback, sin mostrar error
-                                self.start_remote_assistant_for(
-                                    ctx,
-                                    question.clone(),
-                                    Some("deepseek-v4-flash"),
-                                );
-                                return;
-                            } else if correction_attempt > 0 {
-                                self.fail_assistant_repair_request(error);
-                            } else {
-                                self.fail_assistant_request(error);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(completion) = self.assistant_runtime.take_finished_proposal_job() {
-            let FinishedProposalJob {
-                id: _request_id,
-                provider,
-                model,
-                route: _route,
-                fusion_fallback_allowed: _fusion_fallback_allowed,
-                question,
-                correction_attempt,
-                repair_target_turn,
-                document_revision,
-                document_digest,
-                focus,
-                text,
-                cancelled,
-                result,
-                ..
-            } = completion;
-            if cancelled
-                || !accepts_remote_result(
-                    self.assistant.provider,
-                    self.assistant_runtime.expected_model(&self.assistant.model),
-                    provider,
-                    &model,
-                )
-            {
-                if correction_attempt > 0 {
-                    self.fail_assistant_repair_request(
-                        "La corrección se canceló antes de terminar la comprobación local.",
-                    );
-                } else {
-                    self.fail_assistant_request(
-                        "La consulta se canceló antes de terminar la comprobación local.",
-                    );
-                }
-            } else {
-                let current_context =
-                    grafito_command::assistant_context::document_context(&self.document);
-                let current_focus = grafito_command::assistant_context::selected_function_focus(
-                    &self.document,
-                    self.selected_object,
-                );
-                if !accepts_remote_context(
-                    &current_context,
-                    current_focus.as_ref(),
-                    document_revision,
-                    &document_digest,
-                    focus.as_ref(),
-                ) {
-                    self.fail_assistant_request(
-                        "La respuesta quedó obsoleta porque cambió el documento o el foco; no se aceptó ni se verificaron sus propuestas.",
-                    );
-                    self.assistant.invalidate_proposal_correction();
-                } else {
-                    match result {
-                        Ok(proposal_check) => {
-                            let repair_feedback = proposal_check.repair_feedback.clone();
-                            let rejected_count = proposal_check
-                                .candidate_count
-                                .saturating_sub(proposal_check.verified.len());
-                            let can_offer_correction = can_offer_assistant_proposal_correction(
-                                correction_attempt,
-                                proposal_check.action_candidate_count,
-                                proposal_check.verified_action_count,
-                                repair_feedback.as_ref(),
-                            );
-                            self.assistant.set_proposal_preflight_results(
-                                proposal_check.verified,
-                                proposal_check.candidate_count,
-                                proposal_check.candidate_code_block_indices,
-                            );
-                            if correction_attempt > 0 {
-                                let Some(target_turn) = repair_target_turn else {
-                                    self.fail_assistant_request(
-                                        "La corrección perdió el turno que debía reemplazar.",
-                                    );
-                                    return;
-                                };
-                                if !self
-                                    .assistant
-                                    .complete_proposal_correction_at(target_turn, text.clone())
-                                {
-                                    self.fail_assistant_request(
-                                        "La corrección no pudo reemplazar su respuesta original.",
-                                    );
-                                    return;
-                                }
-                            } else {
-                                self.assistant.complete_request(text.clone());
-                            }
-                            if can_offer_correction {
-                                if let Some(feedback) = repair_feedback {
-                                    let target_turn = repair_target_turn.or_else(|| {
-                                        self.assistant.conversation.len().checked_sub(1)
-                                    });
-                                    self.assistant.offer_proposal_correction_for_turn(
-                                        question.clone(),
-                                        feedback,
-                                        target_turn,
-                                        correction_attempt,
-                                        AssistantCorrectionContext {
-                                            document_revision,
-                                            document_digest: document_digest.clone(),
-                                            focus: focus.clone(),
-                                        },
-                                    );
-                                }
-                            }
-                            if rejected_count > 0 {
-                                let error = if proposal_check.verified_action_count == 0 {
-                                    format!(
-                                        "No se obtuvo una propuesta verificable; se descartaron {rejected_count} propuesta(s) localmente."
-                                    )
-                                } else {
-                                    format!(
-                                        "Se descartaron {rejected_count} propuesta(s) que no superaron la comprobación local."
-                                    )
-                                };
-                                self.show_assistant_error(error);
-                            } else if correction_attempt > 0
-                                && proposal_check.verified_action_count == 0
-                            {
-                                self.show_assistant_error(
-                                    "No se obtuvo una propuesta verificable; no hay nada para aplicar.",
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            if correction_attempt > 0 {
-                                self.fail_assistant_repair_request(error);
-                            } else {
-                                self.fail_assistant_request(error);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(completion) = self.assistant_runtime.take_finished_model_job() {
-            let _request_id = completion.id;
-            let FinishedModelJob {
-                provider,
-                cancelled,
-                result,
-                ..
-            } = completion;
-            if accepts_model_result(self.assistant.provider, provider, cancelled) {
-                match result {
-                    Ok(models) => {
-                        self.assistant.set_available_models(models);
-                    }
-                    Err(error) => {
-                        // La lista de modelos viene del transporte (inglés
-                        // crudo posible) — se envuelve en español.
-                        let current_model = self.assistant.model.clone();
-                        self.show_assistant_error(remote_error_message(&error, &current_model));
-                    }
-                }
-            }
-        }
-        if self.assistant_runtime.take_queued_model_refresh_if_idle() {
-            self.start_model_request(ctx);
-        }
-
-        let image = self.assistant_runtime.image_job.as_ref().and_then(|job| {
-            match job.receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => Some(Err(
-                    "La importación de imagen terminó inesperadamente.".into(),
-                )),
-            }
+        // Shim fino R1: el drain completo (agent/stream/remote/proposal/
+        // model/image) vive en el controlador.
+        self.with_assistant_jobs(|jobs| {
+            AssistantJobsController::poll_assistant_jobs(jobs, ctx);
         });
-        if let Some(result) = image {
-            self.assistant_runtime.image_job = None;
-            self.assistant.is_importing_image = false;
-            match result {
-                Ok(attachment) => match self.assistant.add_attachment(attachment) {
-                    Ok(()) => {
-                        self.assistant.attachment_message =
-                            Some("Imagen lista para consultar.".into())
-                    }
-                    Err(error) => self.show_assistant_error(attachment_error_message(&error)),
-                },
-                Err(error) => {
-                    self.assistant.attachment_message = None;
-                    self.show_assistant_error(attachment_error_message(&error));
-                }
-            }
-        }
     }
 
     fn assistant_provider_settings(&mut self) -> Result<ProviderSettings, String> {
@@ -7810,14 +6377,11 @@ impl GrafitoApp {
     }
 
     /// Indica si el proveedor remoto configurado puede responder hoy.
+    /// Indica si el proveedor remoto configurado puede responder hoy.
+    ///
+    /// Shim fino R1: vive en el controlador (`remote_ready`).
     fn remote_provider_ready(&mut self) -> bool {
-        let Ok(settings) = self.assistant_provider_settings() else {
-            return false;
-        };
-        match settings.profile {
-            ProviderProfile::OllamaLocal => true,
-            _ => self.assistant_api_key().is_ok(),
-        }
+        self.with_assistant_jobs(AssistantJobsController::remote_ready)
     }
 
     fn assistant_api_key(&mut self) -> Result<Option<String>, String> {
@@ -7880,7 +6444,7 @@ fn is_agent_spark_responses_unsupported_error(error: &str) -> bool {
 /// Fallback agente sólo-sesión: Spark + Responses API no soportado → deepseek.
 /// Nunca dispara en `Ok` (sólo se llama en la rama `Err`) y nunca ante 429:
 /// la cuota en pausa no se quema probando con otro modelo.
-fn should_fallback_agent_spark_to_deepseek(
+pub(crate) fn should_fallback_agent_spark_to_deepseek(
     error: &str,
     provider: ProviderProfile,
     model: &str,
@@ -7901,7 +6465,7 @@ fn should_fallback_agent_spark_to_deepseek(
 /// Tipos cubiertos: `MissingSessionID|InvalidApiKey|ModelDisabled|AccountBlocked`.
 /// Puro, sin `unwrap`, sin I/O. No toca el wire (prohibido inventar `session_id`
 /// en bodies: la sesión viaja sólo como header `x-opencode-session`).
-fn is_session_or_account_error(error: &str) -> bool {
+pub(crate) fn is_session_or_account_error(error: &str) -> bool {
     error.contains("MissingSessionID")
         || error.contains("InvalidApiKey")
         || error.contains("ModelDisabled")
@@ -7918,7 +6482,7 @@ fn is_session_or_account_error(error: &str) -> bool {
 /// header: el servidor puede rechazar por región) también reintenta
 /// una vez con deepseek, con aviso honesto de una línea (ver rama en
 /// `poll_assistant_jobs`).
-fn should_fallback_remote_spark_to_deepseek(
+pub(crate) fn should_fallback_remote_spark_to_deepseek(
     error: &str,
     provider: ProviderProfile,
     current_model: &str,
@@ -7935,7 +6499,7 @@ fn should_fallback_remote_spark_to_deepseek(
 
 /// Sanea errores de adjuntos de crates externos (inglés crudo) a español.
 /// Los mensajes ya españoles de `grafito-ui` pasan intactos.
-fn attachment_error_message(error: &str) -> String {
+pub(crate) fn attachment_error_message(error: &str) -> String {
     if error.contains("assistant attachment") {
         "La imagen no es válida o supera los límites permitidos.".into()
     } else {
@@ -7958,7 +6522,7 @@ fn rate_limit_429_user_message(error: &str) -> String {
     rate_limit_paused_message(RATE_LIMIT_DEFAULT_COOLDOWN_SECS)
 }
 
-fn remote_error_message(error: &str, current_model: &str) -> String {
+pub(crate) fn remote_error_message(error: &str, current_model: &str) -> String {
     eprintln!(
         "grafito: remote_error raw={} model={}",
         error, current_model
@@ -8051,7 +6615,7 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     }
 }
 
-fn accepts_model_result(
+pub(crate) fn accepts_model_result(
     current_provider: ProviderProfile,
     result_provider: ProviderProfile,
     cancelled: bool,
@@ -8059,7 +6623,7 @@ fn accepts_model_result(
     !cancelled && current_provider == result_provider
 }
 
-fn accepts_remote_result(
+pub(crate) fn accepts_remote_result(
     current_provider: ProviderProfile,
     current_model: &str,
     result_provider: ProviderProfile,
@@ -8068,7 +6632,7 @@ fn accepts_remote_result(
     current_provider == result_provider && current_model == result_model
 }
 
-fn accepts_remote_context(
+pub(crate) fn accepts_remote_context(
     current_context: &ImmutableDocumentContext,
     current_focus: Option<&AssistantFocus>,
     result_revision: u64,
@@ -8280,1061 +6844,6 @@ mod gif_loader_tests {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
-}
-
-fn plugin_validation_context() -> grafito_plugins::ValidationContext<'static> {
-    grafito_plugins::ValidationContext {
-        resolvable_command_ids: &|id| grafito_command::command_registry::resolve(id).is_some(),
-        known_tools: &["evaluate_expr", "grafito_docs", "ask_user"],
-        known_scenes: &[
-            "derivative-slope",
-            "concept-flow",
-            "graph-trace",
-            "riemann",
-            "fourier_partial",
-            "pythagorean",
-            "tetrahedron_rotate",
-        ],
-    }
-}
-
-fn assistant_correction_prompt(question: &str) -> String {
-    let mut end = question.len().min(MAX_ASSISTANT_CORRECTION_SOURCE_BYTES);
-    while end > 0 && !question.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{}{}",
-        question[..end].trim(),
-        ASSISTANT_CORRECTION_INSTRUCTION
-    )
-}
-
-fn can_offer_assistant_proposal_correction(
-    correction_attempt: u8,
-    action_candidate_count: usize,
-    verified_action_count: usize,
-    repair_feedback: Option<&AssistantRepairFeedback>,
-) -> bool {
-    correction_attempt < MAX_ASSISTANT_PROPOSAL_CORRECTIONS
-        && verified_action_count == 0
-        && repair_feedback.is_some()
-        && (action_candidate_count > 0 || correction_attempt > 0)
-}
-
-fn can_use_fusion_fallback(
-    fallback_allowed: bool,
-    provider: ProviderProfile,
-    selected_model: &str,
-) -> bool {
-    fallback_allowed
-        && provider == ProviderProfile::OpenCodeGo
-        && selected_model == OPENCODE_VISION_MODEL
-}
-
-fn assistant_expected_syntax(command: &str) -> Vec<String> {
-    let mut syntaxes = grafito_command::assistant_context::assistant_executable_syntaxes(command);
-    if let Some(guidance) =
-        grafito_command::assistant_context::assistant_literal_argument_guidance(command)
-    {
-        syntaxes.push(guidance.into());
-    }
-    syntaxes
-}
-
-fn classify_assistant_preflight_error(error: &str) -> AssistantRepairFailureKind {
-    if error.contains("no creó un objeto") {
-        AssistantRepairFailureKind::NoNewObject
-    } else if error.contains("fuera de la vista gráfica esperada") {
-        AssistantRepairFailureKind::WrongRenderSpace
-    } else if error.contains("no produjo geometría visible")
-        || error.contains("no produjo una flor 3D visible")
-    {
-        AssistantRepairFailureKind::NotVisible
-    } else {
-        AssistantRepairFailureKind::CommandRejected
-    }
-}
-
-fn assistant_repair_failure_for_command(
-    command: &AssistantCommandInvocation,
-    error: &str,
-) -> AssistantRepairFailure {
-    AssistantRepairFailure {
-        command: command.canonical_name().into(),
-        kind: classify_assistant_preflight_error(error),
-        expected_syntax: assistant_expected_syntax(command.canonical_name()),
-    }
-}
-
-fn assistant_repair_failure_from_rejection(
-    rejection: &AssistantProposalRejection,
-) -> AssistantRepairFailure {
-    let expected_syntax =
-        if grafito_command::assistant_context::assistant_graph_capability(&rejection.command)
-            .is_some()
-        {
-            assistant_expected_syntax(&rejection.command)
-        } else {
-            Vec::new()
-        };
-    AssistantRepairFailure {
-        command: rejection.command.clone(),
-        kind: match rejection.kind {
-            AssistantProposalRejectionKind::InvalidSyntax => {
-                AssistantRepairFailureKind::InvalidSyntax
-            }
-            AssistantProposalRejectionKind::UnsupportedCommand => {
-                AssistantRepairFailureKind::UnsupportedCommand
-            }
-        },
-        expected_syntax,
-    }
-}
-
-fn assistant_repair_failure_for_scene(
-    _commands: &[AssistantCommandInvocation],
-    error: &str,
-) -> AssistantRepairFailure {
-    AssistantRepairFailure {
-        command: "Scene".into(),
-        kind: classify_assistant_preflight_error(error),
-        expected_syntax: Vec::new(),
-    }
-}
-
-struct AssistantGraphPreflight {
-    staged: grafito_core::Document,
-    outcome: grafito_command::commands::CommandOutcome,
-    view: grafito_command::assistant_context::AssistantGraphView,
-}
-
-struct AssistantScenePreflight {
-    staged: grafito_core::Document,
-    outcome: grafito_command::commands::CommandOutcome,
-    camera: grafito_geometry::Camera3D,
-    view: grafito_command::assistant_context::AssistantGraphView,
-}
-
-struct RemoteProposalVerification {
-    verified: Vec<VerifiedAssistantProposal>,
-    candidate_count: usize,
-    candidate_code_block_indices: Vec<usize>,
-    action_candidate_count: usize,
-    verified_action_count: usize,
-    repair_feedback: Option<AssistantRepairFeedback>,
-}
-
-#[cfg(test)]
-fn verified_remote_proposals(
-    document: &grafito_core::Document,
-    response: &str,
-    camera: grafito_geometry::Camera3D,
-) -> Vec<AssistantProposal> {
-    inspect_remote_proposals(document, response, camera)
-        .verified
-        .into_iter()
-        .map(|proposal| proposal.proposal)
-        .collect()
-}
-
-#[cfg(test)]
-fn inspect_remote_proposals(
-    document: &grafito_core::Document,
-    response: &str,
-    camera: grafito_geometry::Camera3D,
-) -> RemoteProposalVerification {
-    inspect_remote_proposals_cancellable(
-        document,
-        response,
-        camera,
-        &CancellationToken::default(),
-        false,
-    )
-    .expect("an uncancelled local proposal preflight must complete")
-}
-
-#[cfg(test)]
-fn inspect_remote_action_proposals(
-    document: &grafito_core::Document,
-    response: &str,
-    camera: grafito_geometry::Camera3D,
-) -> RemoteProposalVerification {
-    inspect_remote_proposals_cancellable(
-        document,
-        response,
-        camera,
-        &CancellationToken::default(),
-        true,
-    )
-    .expect("an uncancelled local proposal preflight must complete")
-}
-
-fn inspect_remote_proposals_cancellable(
-    document: &grafito_core::Document,
-    response: &str,
-    camera: grafito_geometry::Camera3D,
-    cancellation: &CancellationToken,
-    requires_action: bool,
-) -> Result<RemoteProposalVerification, String> {
-    let all_candidates = assistant_fenced_proposals(response);
-    let candidate_code_block_indices = all_candidates
-        .iter()
-        .map(|candidate| candidate.code_block_index)
-        .collect::<Vec<_>>();
-    let action_candidate_count = all_candidates
-        .iter()
-        .take(MAX_REMOTE_PROPOSAL_PREFLIGHTS)
-        .filter(|candidate| candidate.is_action_candidate())
-        .count();
-    let candidates = all_candidates
-        .into_iter()
-        .take(MAX_REMOTE_PROPOSAL_PREFLIGHTS)
-        .collect::<Vec<_>>();
-    let candidate_count = candidates.len();
-    let mut verified = Vec::new();
-    let mut repair_failures = Vec::new();
-    let mut parameter_context = document.detached_clone_for_staging();
-    let mut prerequisite_parameters = Vec::new();
-    for (candidate_index, candidate) in candidates.into_iter().enumerate() {
-        if cancellation.is_cancelled() {
-            return Err("La comprobación local de la propuesta se canceló.".into());
-        }
-        let Some(proposal) = candidate.proposal else {
-            if let Some(rejection) = candidate.rejection {
-                repair_failures.push(assistant_repair_failure_from_rejection(&rejection));
-            }
-            continue;
-        };
-        let prerequisite_parameters_for_proposal = match &proposal {
-            AssistantProposal::Parameter(_) => Vec::new(),
-            AssistantProposal::Command(_) | AssistantProposal::Scene(_) => {
-                prerequisite_parameters.clone()
-            }
-        };
-        let accepted = match &proposal {
-            AssistantProposal::Command(command) => {
-                match preflight_assistant_graph_command_with_camera(
-                    &parameter_context,
-                    command,
-                    camera,
-                ) {
-                    Ok(_) => true,
-                    Err(error) => {
-                        repair_failures.push(assistant_repair_failure_for_command(command, &error));
-                        false
-                    }
-                }
-            }
-            AssistantProposal::Scene(commands) => {
-                match preflight_assistant_scene(&parameter_context, commands, camera) {
-                    Ok(_) => true,
-                    Err(error) => {
-                        repair_failures.push(assistant_repair_failure_for_scene(commands, &error));
-                        false
-                    }
-                }
-            }
-            AssistantProposal::Parameter(assignment) => {
-                stage_assistant_parameter(&mut parameter_context, assignment).is_ok()
-            }
-        };
-        if cancellation.is_cancelled() {
-            return Err("La comprobación local de la propuesta se canceló.".into());
-        }
-        if accepted {
-            if let AssistantProposal::Parameter(assignment) = &proposal {
-                prerequisite_parameters.push(assignment.clone());
-            }
-            verified.push(VerifiedAssistantProposal {
-                candidate_index,
-                proposal,
-                prerequisite_parameters: prerequisite_parameters_for_proposal,
-            });
-        }
-    }
-    let verified_action_count = verified
-        .iter()
-        .filter(|proposal| {
-            matches!(
-                &proposal.proposal,
-                AssistantProposal::Command(_) | AssistantProposal::Scene(_)
-            )
-        })
-        .count();
-    if requires_action && action_candidate_count == 0 && verified_action_count == 0 {
-        repair_failures.push(AssistantRepairFailure {
-            command: "GraphProposal".into(),
-            kind: AssistantRepairFailureKind::InvalidSyntax,
-            expected_syntax: vec![
-                "Emit a grafito or grafito-scene block with executable catalog commands.".into(),
-            ],
-        });
-    }
-    Ok(RemoteProposalVerification {
-        verified,
-        candidate_count,
-        candidate_code_block_indices,
-        action_candidate_count,
-        verified_action_count,
-        repair_feedback: (!repair_failures.is_empty()).then_some(AssistantRepairFeedback {
-            failures: repair_failures,
-        }),
-    })
-}
-
-fn document_with_assistant_prerequisites(
-    document: &grafito_core::Document,
-    prerequisite_parameters: &[AssistantParameterAssignment],
-) -> Result<grafito_core::Document, String> {
-    let mut staged = document.detached_clone_for_staging();
-    for assignment in prerequisite_parameters {
-        stage_assistant_parameter(&mut staged, assignment)?;
-    }
-    Ok(staged)
-}
-
-fn preflight_assistant_scene_with_prerequisites(
-    document: &grafito_core::Document,
-    prerequisite_parameters: &[AssistantParameterAssignment],
-    commands: &[AssistantCommandInvocation],
-    camera: grafito_geometry::Camera3D,
-) -> Result<AssistantScenePreflight, String> {
-    let staged = document_with_assistant_prerequisites(document, prerequisite_parameters)?;
-    preflight_assistant_scene(&staged, commands, camera)
-}
-
-fn preflight_assistant_scene(
-    document: &grafito_core::Document,
-    commands: &[AssistantCommandInvocation],
-    camera: grafito_geometry::Camera3D,
-) -> Result<AssistantScenePreflight, String> {
-    let homogeneous = commands.first().is_some_and(|first| {
-        commands
-            .iter()
-            .all(|command| command.canonical_name() == first.canonical_name())
-    });
-
-    if homogeneous {
-        preflight_homogeneous_assistant_scene(document, commands, camera)
-    } else {
-        preflight_assistant_flower_scene(document, commands, camera)
-    }
-}
-
-fn preflight_homogeneous_assistant_scene(
-    document: &grafito_core::Document,
-    commands: &[AssistantCommandInvocation],
-    camera: grafito_geometry::Camera3D,
-) -> Result<AssistantScenePreflight, String> {
-    if !(2..=8).contains(&commands.len()) {
-        return Err("La escena requiere entre 2 y 8 componentes.".into());
-    }
-
-    let existing_ids = document
-        .objects_iter()
-        .map(|(id, _)| *id)
-        .collect::<std::collections::HashSet<_>>();
-    let mut staged = document.detached_clone_for_staging();
-    let mut capability: Option<grafito_command::assistant_context::AssistantGraphCapability> = None;
-
-    for command in commands {
-        let current_capability = grafito_command::assistant_context::assistant_graph_capability(
-            command.canonical_name(),
-        )
-        .ok_or_else(|| "La escena contiene un comando no permitido.".to_string())?;
-        if !assistant_command_is_safe(command) {
-            return Err("La escena contiene un comando con argumentos inválidos.".into());
-        }
-        if let Some(first_capability) = capability {
-            if current_capability.canonical != first_capability.canonical {
-                return Err("La escena general debe repetir un único tipo de comando.".into());
-            }
-        } else {
-            capability = Some(*current_capability);
-        }
-
-        let before_ids = staged
-            .objects_iter()
-            .map(|(id, _)| *id)
-            .collect::<std::collections::HashSet<_>>();
-        let outcome = execute_assistant_command(&mut staged, command);
-        if let grafito_command::commands::CommandOutcome::Error(error) = outcome {
-            return Err(error);
-        }
-        let created_ids = staged
-            .objects_iter()
-            .filter_map(|(id, _)| (!before_ids.contains(id)).then_some(*id))
-            .collect::<Vec<_>>();
-        if created_ids.is_empty() {
-            return Err("La escena contiene un comando que no creó un objeto gráfico.".into());
-        }
-        if created_ids.iter().any(|id| {
-            staged
-                .get_object(*id)
-                .is_none_or(|object| match current_capability.view {
-                    grafito_command::assistant_context::AssistantGraphView::TwoD => {
-                        object.render_space() != grafito_core::RenderSpace::D2
-                    }
-                    grafito_command::assistant_context::AssistantGraphView::ThreeD => {
-                        object.render_space() != grafito_core::RenderSpace::D3
-                    }
-                })
-        }) {
-            return Err("La escena creó un objeto fuera de la vista gráfica esperada.".into());
-        }
-    }
-
-    let Some(capability) = capability else {
-        return Err("La escena vacía no tiene capacidad.".into());
-    };
-    let mut inspection = staged.detached_clone_for_staging();
-    for id in existing_ids {
-        if let Some(object) = inspection.get_object_mut(id) {
-            object.set_visible(false);
-        }
-    }
-    let (camera, has_geometry) = match capability.proof {
-        grafito_command::assistant_context::AssistantGraphProof::StaticTwoD => {
-            let (vertices, indices) = grafito_render::Renderer::build_geometry_static(
-                &inspection,
-                inspection.view(),
-                false,
-                false,
-            );
-            (
-                camera,
-                static_geometry_intersects_view(&vertices, &indices, inspection.view()),
-            )
-        }
-        grafito_command::assistant_context::AssistantGraphProof::WorldMeshThreeD => {
-            let screen_size = inspection.view().screen_size;
-            let initial_mesh = grafito_render::Renderer::build_3d_world_mesh(
-                &inspection,
-                &camera,
-                screen_size.x,
-                screen_size.y,
-            );
-            if !initial_mesh.is_complete() || initial_mesh.validate().is_err() {
-                return Err("La escena produjo una geometría 3D inválida.".into());
-            }
-            let fitted_camera = fit_camera_to_world_mesh(&initial_mesh, camera)?;
-            let mesh = grafito_render::Renderer::build_3d_world_mesh(
-                &inspection,
-                &fitted_camera,
-                screen_size.x,
-                screen_size.y,
-            );
-            (
-                fitted_camera,
-                mesh.is_complete()
-                    && mesh.validate().is_ok()
-                    && world_mesh_intersects_view(
-                        &mesh,
-                        &fitted_camera,
-                        screen_size.x,
-                        screen_size.y,
-                    ),
-            )
-        }
-        grafito_command::assistant_context::AssistantGraphProof::CpuOverlayThreeD => (
-            camera,
-            cpu_overlay_intersects_view(&inspection, &camera, inspection.view().screen_size),
-        ),
-    };
-    if !has_geometry {
-        return Err("La escena no produjo geometría visible; no se aplicó al documento.".into());
-    }
-
-    Ok(AssistantScenePreflight {
-        staged,
-        outcome: grafito_command::commands::CommandOutcome::Message(format!(
-            "Escena verificada: {} componentes.",
-            commands.len()
-        )),
-        camera,
-        view: capability.view,
-    })
-}
-
-fn preflight_assistant_flower_scene(
-    document: &grafito_core::Document,
-    commands: &[AssistantCommandInvocation],
-    camera: grafito_geometry::Camera3D,
-) -> Result<AssistantScenePreflight, String> {
-    if !(6..=8).contains(&commands.len()) {
-        return Err("La escena de flor requiere entre 6 y 8 componentes.".into());
-    }
-
-    let mut stem_count = 0;
-    let mut center_count = 0;
-    let mut petal_count = 0;
-    for command in commands {
-        let capability = grafito_command::assistant_context::assistant_graph_capability(
-            command.canonical_name(),
-        )
-        .ok_or_else(|| "La escena contiene un comando no permitido.".to_string())?;
-        if capability.view != grafito_command::assistant_context::AssistantGraphView::ThreeD
-            || !assistant_command_is_safe(command)
-        {
-            return Err("La escena sólo admite componentes gráficos 3D verificables.".into());
-        }
-        match command.canonical_name() {
-            "Cylinder" | "Cone" | "Curve3D" => stem_count += 1,
-            "Sphere" => center_count += 1,
-            "Surface3D" => petal_count += 1,
-            _ => return Err("La escena de flor sólo admite tallo, centro y pétalos 3D.".into()),
-        }
-    }
-    if stem_count != 1 || center_count != 1 || petal_count < 4 {
-        return Err("La escena debe incluir un tallo, un centro y al menos cuatro pétalos.".into());
-    }
-
-    let existing_ids = document
-        .objects_iter()
-        .map(|(id, _)| *id)
-        .collect::<std::collections::HashSet<_>>();
-    let mut staged = document.detached_clone_for_staging();
-    let mut petal_index = 0;
-    for command in commands {
-        let before_ids = staged
-            .objects_iter()
-            .map(|(id, _)| *id)
-            .collect::<std::collections::HashSet<_>>();
-        let outcome = execute_assistant_command(&mut staged, command);
-        if let grafito_command::commands::CommandOutcome::Error(error) = outcome {
-            return Err(error);
-        }
-        let created_ids = staged
-            .objects_iter()
-            .filter_map(|(id, _)| (!before_ids.contains(id)).then_some(*id))
-            .collect::<Vec<_>>();
-        for id in created_ids {
-            if let Some(object) = staged.get_object_mut(id) {
-                style_flower_component(object, &mut petal_index);
-            }
-        }
-    }
-    if !flower_scene_components_are_connected(&staged, &existing_ids) {
-        return Err("La escena de flor debe formar una única figura conectada.".into());
-    }
-
-    let mut inspection = staged.detached_clone_for_staging();
-    for id in existing_ids {
-        if let Some(object) = inspection.get_object_mut(id) {
-            object.set_visible(false);
-        }
-    }
-    let initial_mesh = grafito_render::Renderer::build_3d_world_mesh(
-        &inspection,
-        &camera,
-        inspection.view().screen_size.x,
-        inspection.view().screen_size.y,
-    );
-    if !initial_mesh.is_complete() {
-        return Err("La escena produjo una geometría 3D incompleta.".into());
-    }
-    initial_mesh
-        .validate()
-        .map_err(|_| "La escena produjo una geometría 3D inválida.".to_string())?;
-    let fitted_camera = fit_camera_to_world_mesh(&initial_mesh, camera)?;
-    let mesh = grafito_render::Renderer::build_3d_world_mesh(
-        &inspection,
-        &fitted_camera,
-        inspection.view().screen_size.x,
-        inspection.view().screen_size.y,
-    );
-    if !mesh.is_complete()
-        || mesh.validate().is_err()
-        || !world_mesh_intersects_view(
-            &mesh,
-            &fitted_camera,
-            inspection.view().screen_size.x,
-            inspection.view().screen_size.y,
-        )
-    {
-        return Err("La escena no produjo una flor 3D visible.".into());
-    }
-
-    Ok(AssistantScenePreflight {
-        staged,
-        outcome: grafito_command::commands::CommandOutcome::Message(format!(
-            "Escena 3D verificada: {} componentes.",
-            commands.len()
-        )),
-        camera: fitted_camera,
-        view: grafito_command::assistant_context::AssistantGraphView::ThreeD,
-    })
-}
-
-fn flower_scene_components_are_connected(
-    document: &grafito_core::Document,
-    existing_ids: &std::collections::HashSet<grafito_core::ObjectId>,
-) -> bool {
-    let mut center = None;
-    let mut stem_connected = false;
-    let mut petals = Vec::new();
-
-    for (id, object) in document.objects_iter() {
-        if existing_ids.contains(id) {
-            continue;
-        }
-        match object {
-            grafito_core::GeoObject::Sphere3D(sphere) => {
-                center = Some((sphere.center, sphere.radius));
-            }
-            grafito_core::GeoObject::Surface3D(surface) => petals.push(surface),
-            _ => {}
-        }
-    }
-
-    let Some((center, radius)) = center.filter(|(_, radius)| radius.is_finite() && *radius > 0.0)
-    else {
-        return false;
-    };
-    let connection_radius = radius + 0.05;
-
-    for (id, object) in document.objects_iter() {
-        if existing_ids.contains(id) {
-            continue;
-        }
-        let connects_to_center = match object {
-            grafito_core::GeoObject::Cylinder3D(stem) => {
-                point_segment_distance(center, stem.base_center, stem.top_center)
-                    .is_some_and(|distance| distance <= radius + stem.radius.abs())
-            }
-            grafito_core::GeoObject::Cone3D(stem) => {
-                point_segment_distance(center, stem.base_center, stem.apex)
-                    .is_some_and(|distance| distance <= radius + stem.radius.abs())
-            }
-            grafito_core::GeoObject::ParametricCurve3D(stem) => {
-                grafito_core::parametric_sampling::evaluate_parametric_curve_3d(
-                    stem,
-                    128,
-                    &document.variables,
-                )
-                .into_iter()
-                .any(|(x, y, z)| {
-                    let point = grafito_geometry::Point3D::new(x, y, z);
-                    point.is_finite() && point.distance(&center) <= connection_radius
-                })
-            }
-            _ => false,
-        };
-        stem_connected |= connects_to_center;
-    }
-
-    stem_connected
-        && !petals.is_empty()
-        && petals.into_iter().all(|petal| {
-            grafito_core::parametric_sampling::evaluate_surface_3d(
-                petal,
-                petal.mesh_res.clamp(8, 32),
-                &document.variables,
-            )
-            .into_iter()
-            .flatten()
-            .any(|point| point.is_finite() && point.distance(&center) <= connection_radius)
-        })
-}
-
-fn point_segment_distance(
-    point: grafito_geometry::Point3D,
-    start: grafito_geometry::Point3D,
-    end: grafito_geometry::Point3D,
-) -> Option<f64> {
-    if !point.is_finite() || !start.is_finite() || !end.is_finite() {
-        return None;
-    }
-    let start = start.to_dvec3();
-    let segment = end.to_dvec3() - start;
-    let length_squared = segment.length_squared();
-    if !length_squared.is_finite() {
-        return None;
-    }
-    if length_squared <= 1.0e-24 {
-        return Some(point.to_dvec3().distance(start));
-    }
-    let parameter = ((point.to_dvec3() - start).dot(segment) / length_squared).clamp(0.0, 1.0);
-    let distance = point.to_dvec3().distance(start + parameter * segment);
-    distance.is_finite().then_some(distance)
-}
-
-fn style_flower_component(object: &mut grafito_core::GeoObject, petal_index: &mut usize) {
-    match object {
-        grafito_core::GeoObject::Cylinder3D(stem) => {
-            stem.label = "Tallo".into();
-            stem.color = grafito_geometry::Color::new(0.08, 0.45, 0.16, 1.0);
-            stem.fill_color = Some(grafito_geometry::Color::new(0.12, 0.62, 0.24, 1.0));
-        }
-        grafito_core::GeoObject::Cone3D(stem) => {
-            stem.label = "Tallo".into();
-            stem.color = grafito_geometry::Color::new(0.08, 0.45, 0.16, 1.0);
-            stem.fill_color = Some(grafito_geometry::Color::new(0.12, 0.62, 0.24, 1.0));
-        }
-        grafito_core::GeoObject::Sphere3D(center) => {
-            center.label = "Centro de la flor".into();
-            center.color = grafito_geometry::Color::new(0.75, 0.48, 0.02, 1.0);
-            center.fill_color = Some(grafito_geometry::Color::new(1.0, 0.76, 0.08, 1.0));
-        }
-        grafito_core::GeoObject::Surface3D(petal) => {
-            *petal_index += 1;
-            petal.label = format!("Pétalo {petal_index}");
-            petal.solid = true;
-            petal.color = grafito_geometry::Color::new(0.9, 0.12, 0.42, 1.0);
-            petal.width = 1.25;
-        }
-        _ => {}
-    }
-}
-
-fn fit_camera_to_world_mesh(
-    mesh: &grafito_render::WorldMesh,
-    mut camera: grafito_geometry::Camera3D,
-) -> Result<grafito_geometry::Camera3D, String> {
-    let points = mesh
-        .opaque_vertices
-        .iter()
-        .chain(&mesh.wire_vertices)
-        .map(|vertex| glam::Vec3::from_array(vertex.position))
-        .filter(|point| point.is_finite())
-        .collect::<Vec<_>>();
-    let Some(first) = points.first().copied() else {
-        return Err("La escena no tiene vértices finitos para encuadrar.".into());
-    };
-    let (min, max) = points
-        .into_iter()
-        .fold((first, first), |(min, max), point| {
-            (min.min(point), max.max(point))
-        });
-    let radius = ((max - min).length() * 0.5).max(0.5);
-    let half_fov = (camera.fov.to_radians() * 0.5).clamp(0.1, 1.4);
-    let half_horizontal = (half_fov.tan() * camera.aspect.max(0.25)).atan();
-    let limiting_half_angle = half_fov.min(half_horizontal).max(0.1);
-    let distance = (radius / limiting_half_angle.sin() * 1.35).max(2.0);
-    camera.target = (min + max) * 0.5;
-    camera.distance = distance;
-    camera.near = (distance - radius * 2.5).max(0.01);
-    camera.far = (distance + radius * 4.0 + 10.0).max(100.0);
-    Ok(camera)
-}
-
-/// Ejecuta una propuesta sobre un documento aislado y exige que los objetos
-/// nuevos emitan geometría propia, sin contar ejes, grilla ni objetos previos.
-#[cfg(test)]
-fn preflight_assistant_graph_command(
-    document: &grafito_core::Document,
-    command: &str,
-) -> Result<AssistantGraphPreflight, String> {
-    let command = grafito_command::assistant_proposals::parse_assistant_command(command)
-        .ok_or_else(|| "La propuesta no es un gráfico verificable por el asistente.".to_string())?;
-    preflight_assistant_graph_command_with_camera(
-        document,
-        &command,
-        grafito_geometry::Camera3D::new(4.0 / 3.0),
-    )
-}
-
-fn preflight_assistant_graph_command_with_camera(
-    document: &grafito_core::Document,
-    command: &AssistantCommandInvocation,
-    camera: grafito_geometry::Camera3D,
-) -> Result<AssistantGraphPreflight, String> {
-    let capability =
-        grafito_command::assistant_context::assistant_graph_capability(command.canonical_name())
-            .ok_or_else(|| {
-                "La propuesta no es un gráfico verificable por el asistente.".to_string()
-            })?;
-    if !assistant_command_is_safe(command) {
-        return Err(
-            "La propuesta usa valores literales que no cumplen el catálogo verificable.".into(),
-        );
-    }
-
-    let existing_ids = document
-        .objects_iter()
-        .map(|(id, _)| *id)
-        .collect::<std::collections::HashSet<_>>();
-    let mut staged = document.detached_clone_for_staging();
-    let outcome = execute_assistant_command(&mut staged, command);
-    if let grafito_command::commands::CommandOutcome::Error(error) = &outcome {
-        return Err(error.clone());
-    }
-
-    let created_ids = staged
-        .objects_iter()
-        .filter_map(|(id, _)| (!existing_ids.contains(id)).then_some(*id))
-        .collect::<Vec<_>>();
-    if created_ids.is_empty() {
-        return Err("La propuesta no creó un objeto gráfico nuevo.".into());
-    }
-
-    if created_ids.iter().any(|id| {
-        staged
-            .get_object(*id)
-            .is_none_or(|object| match capability.view {
-                grafito_command::assistant_context::AssistantGraphView::TwoD => {
-                    object.render_space() != grafito_core::RenderSpace::D2
-                }
-                grafito_command::assistant_context::AssistantGraphView::ThreeD => {
-                    object.render_space() != grafito_core::RenderSpace::D3
-                }
-            })
-    }) {
-        return Err("La propuesta creó un objeto fuera de la vista gráfica esperada.".into());
-    }
-
-    let mut inspection = staged.detached_clone_for_staging();
-    for id in existing_ids {
-        if let Some(object) = inspection.get_object_mut(id) {
-            object.set_visible(false);
-        }
-    }
-    let has_geometry = match capability.proof {
-        grafito_command::assistant_context::AssistantGraphProof::StaticTwoD => {
-            let (vertices, indices) = grafito_render::Renderer::build_geometry_static(
-                &inspection,
-                inspection.view(),
-                false,
-                false,
-            );
-            static_geometry_intersects_view(&vertices, &indices, inspection.view())
-        }
-        grafito_command::assistant_context::AssistantGraphProof::WorldMeshThreeD => {
-            let screen_size = inspection.view().screen_size;
-            let mesh = grafito_render::Renderer::build_3d_world_mesh(
-                &inspection,
-                &camera,
-                screen_size.x,
-                screen_size.y,
-            );
-            mesh.is_complete()
-                && mesh.validate().is_ok()
-                && world_mesh_intersects_view(&mesh, &camera, screen_size.x, screen_size.y)
-        }
-        grafito_command::assistant_context::AssistantGraphProof::CpuOverlayThreeD => {
-            cpu_overlay_intersects_view(&inspection, &camera, inspection.view().screen_size)
-        }
-    };
-    if !has_geometry {
-        return Err("La propuesta no produjo geometría visible; no se aplicó al documento.".into());
-    }
-
-    Ok(AssistantGraphPreflight {
-        staged,
-        outcome,
-        view: capability.view,
-    })
-}
-
-fn preflight_assistant_graph_command_with_prerequisites(
-    document: &grafito_core::Document,
-    prerequisite_parameters: &[AssistantParameterAssignment],
-    command: &AssistantCommandInvocation,
-    camera: grafito_geometry::Camera3D,
-) -> Result<AssistantGraphPreflight, String> {
-    let staged = document_with_assistant_prerequisites(document, prerequisite_parameters)?;
-    preflight_assistant_graph_command_with_camera(&staged, command, camera)
-}
-
-fn preflight_assistant_parameter(
-    document: &grafito_core::Document,
-    assignment: &AssistantParameterAssignment,
-) -> Result<(), String> {
-    let mut staged = document.detached_clone_for_staging();
-    stage_assistant_parameter(&mut staged, assignment)
-}
-
-fn stage_assistant_parameter(
-    document: &mut grafito_core::Document,
-    assignment: &AssistantParameterAssignment,
-) -> Result<(), String> {
-    if let grafito_command::commands::CommandOutcome::Error(error) =
-        execute_assistant_parameter(document, assignment)
-    {
-        return Err(error);
-    }
-    (document.get_variable(assignment.name()) == Some(assignment.value()))
-        .then_some(())
-        .ok_or_else(|| "La propuesta no actualizó el parámetro esperado.".into())
-}
-
-fn commit_assistant_graph_preflight(
-    document: &mut grafito_core::Document,
-    undo_stack: &mut VecDeque<grafito_core::Document>,
-    redo_stack: &mut VecDeque<grafito_core::ChangeSet>,
-    preflight: AssistantGraphPreflight,
-) -> grafito_command::commands::CommandOutcome {
-    let before = document.clone();
-    *document = preflight.staged;
-    crate::app::save_command_snapshot_if_mutated(
-        &preflight.outcome,
-        before,
-        document,
-        undo_stack,
-        redo_stack,
-    );
-    preflight.outcome
-}
-
-fn assistant_command_is_safe(command: &AssistantCommandInvocation) -> bool {
-    grafito_command::assistant_context::assistant_graph_capability(command.canonical_name())
-        .is_some()
-        && grafito_command::assistant_context::assistant_command_has_literal_safe_form(
-            command.canonical_name(),
-            command.arguments().len(),
-        )
-        && grafito_command::assistant_context::assistant_command_has_literal_safe_arguments(
-            command.canonical_name(),
-            command.arguments(),
-        )
-}
-
-fn assistant_graph_view(
-    command: &AssistantCommandInvocation,
-) -> Option<grafito_command::assistant_context::AssistantGraphView> {
-    grafito_command::assistant_context::assistant_graph_capability(command.canonical_name())
-        .map(|capability| capability.view)
-}
-
-#[cfg(test)]
-fn validate_assistant_command(candidate: &str) -> Option<String> {
-    grafito_command::assistant_proposals::parse_assistant_command(candidate)
-        .map(|command| command.canonical_text())
-}
-
-fn point_is_in_view(x: f32, y: f32, width: f32, height: f32) -> bool {
-    x.is_finite() && y.is_finite() && x >= 0.0 && x <= width && y >= 0.0 && y <= height
-}
-
-fn static_geometry_intersects_view(
-    vertices: &[grafito_render::Vertex],
-    indices: &[u32],
-    view: &grafito_geometry::ViewTransform,
-) -> bool {
-    !indices.is_empty()
-        && vertices.iter().any(|vertex| {
-            point_is_in_view(
-                vertex.position[0],
-                vertex.position[1],
-                view.screen_size.x,
-                view.screen_size.y,
-            )
-        })
-}
-
-fn world_mesh_intersects_view(
-    mesh: &grafito_render::WorldMesh,
-    camera: &grafito_geometry::Camera3D,
-    width: f32,
-    height: f32,
-) -> bool {
-    (!mesh.opaque_indices.is_empty() || !mesh.wire_indices.is_empty())
-        && mesh
-            .opaque_vertices
-            .iter()
-            .chain(&mesh.wire_vertices)
-            .any(|vertex| {
-                camera
-                    .project(
-                        &grafito_geometry::Point3D::new(
-                            vertex.position[0] as f64,
-                            vertex.position[1] as f64,
-                            vertex.position[2] as f64,
-                        ),
-                        width,
-                        height,
-                    )
-                    .is_some_and(|(x, y)| point_is_in_view(x, y, width, height))
-            })
-}
-
-fn cpu_overlay_intersects_view(
-    document: &grafito_core::Document,
-    camera: &grafito_geometry::Camera3D,
-    screen_size: glam::Vec2,
-) -> bool {
-    document.objects_iter().any(|(_, object)| match object {
-        grafito_core::GeoObject::Point3D(point) => camera
-            .project(&point.position, screen_size.x, screen_size.y)
-            .is_some_and(|(x, y)| point_is_in_view(x, y, screen_size.x, screen_size.y)),
-        grafito_core::GeoObject::HyperSurface4D(surface) => {
-            surface
-                .params
-                .first()
-                .is_some_and(|scale| scale.is_finite() && *scale > 0.0)
-                && camera
-                    .project(
-                        &grafito_geometry::Point3D::new(0.0, 0.0, 0.0),
-                        screen_size.x,
-                        screen_size.y,
-                    )
-                    .is_some_and(|(x, y)| point_is_in_view(x, y, screen_size.x, screen_size.y))
-        }
-        _ => false,
-    })
-}
-
-fn assistant_graph_perspective(
-    view: grafito_command::assistant_context::AssistantGraphView,
-    current_view: crate::ViewMode,
-) -> Option<crate::Perspective> {
-    match (view, current_view) {
-        (grafito_command::assistant_context::AssistantGraphView::TwoD, crate::ViewMode::D3) => {
-            Some(crate::Perspective::Geometry2D)
-        }
-        (grafito_command::assistant_context::AssistantGraphView::ThreeD, crate::ViewMode::D2) => {
-            Some(crate::Perspective::Geometry3D)
-        }
-        _ => None,
-    }
-}
-
-impl GrafitoApp {
-    /// Asegura que el panel de Álgebra quede visible después de un Apply exitoso.
-    fn ensure_algebra_panel_visible(&mut self) {
-        self.left_drawer_open = true;
-        self.compact_drawer_open = false;
-        self.sidebar_tab = crate::LeftPanelContent::Algebra.default_sidebar_tab();
-    }
-}
-
-fn load_assistant_attachment(
-    path: PathBuf,
-) -> Result<grafito_assistant_types::ImageAttachment, String> {
-    let limits = AttachmentLimits::default();
-    let file = File::open(path).map_err(|_| "No se pudo leer la imagen.".to_string())?;
-    let bytes = read_bounded_attachment(file, limits.max_bytes)?;
-    let format =
-        image::guess_format(&bytes).map_err(|_| "La imagen debe ser PNG o JPEG.".to_string())?;
-    let media_type = match format {
-        image::ImageFormat::Png => "image/png",
-        image::ImageFormat::Jpeg => "image/jpeg",
-        _ => return Err("La imagen debe ser PNG o JPEG.".into()),
-    };
-    let reader = image::ImageReader::with_format(Cursor::new(&bytes), format);
-    let (width, height) = reader
-        .into_dimensions()
-        .map_err(|_| "No se pudieron leer las dimensiones de la imagen.".to_string())?;
-    let attachment =
-        grafito_assistant_types::ImageAttachment::new(media_type, bytes, width, height);
-    validate_attachment(&attachment, &limits)?;
-    Ok(attachment)
-}
-
-fn read_bounded_attachment(reader: impl Read, max_bytes: usize) -> Result<Vec<u8>, String> {
-    let maximum = max_bytes
-        .checked_add(1)
-        .ok_or_else(|| "El límite de imagen no es válido.".to_string())?;
-    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
-    reader
-        .take(maximum as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "No se pudo leer la imagen.".to_string())?;
-    if bytes.len() > max_bytes {
-        return Err("La imagen supera el límite de tamaño permitido.".into());
-    }
-    Ok(bytes)
 }
 
 #[cfg(test)]

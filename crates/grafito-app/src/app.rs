@@ -10,6 +10,7 @@
 //! - GPU compute: `domain_coloring_compute` 500×500 = 250k cells en un único
 //!   dispatch wgpu (grafito-render). CPU submit << GPU time ⇒ GPU-bound.
 
+use crate::controllers::{AssistantController, DocumentController, ViewController};
 use crate::utils::{load_config, save_config, AppConfig, AppLocale, AutosaveDebouncer};
 use crate::{Perspective, ViewMode};
 use egui::Pos2;
@@ -923,7 +924,12 @@ fn document_bytes_approx(doc: &Document) -> usize {
 }
 
 /// Peso estimado de un `ChangeSet` de redo (`before+after`, `saturating_add`).
-/// Espejo de `DocumentController::redo_total_bytes` (controllers.rs).
+///
+/// R1: seam testeado (`tests.rs::redo_acotado_en_cantidad_y_bytes`); el dueño
+/// prod es `DocumentController::redo_total_bytes` (controllers.rs) y
+/// `GrafitoApp::undo` delega ahí. Se conserva la fn libre para no cambiar
+/// aserciones pineadas.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn redo_changeset_bytes(changes: &ChangeSet) -> usize {
     changes
         .before
@@ -935,6 +941,9 @@ pub(crate) fn redo_changeset_bytes(changes: &ChangeSet) -> usize {
 /// `pop_front` O(1) — espejo de `DocumentController::enforce_redo_budgets`
 /// (controllers.rs). Scan O(n≤50) solo en `undo()` (acción de usuario, no por
 /// frame). Guarda ≥1 entrada, igual que undo.
+///
+/// R1: ver `redo_changeset_bytes` (seam testeado, dueño prod el controller).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn enforce_redo_budgets(redo_stack: &mut VecDeque<ChangeSet>) {
     while redo_stack.len() > MAX_UNDO {
         if redo_stack.pop_front().is_none() {
@@ -2070,7 +2079,20 @@ impl GrafitoApp {
     }
 
     fn replace_document(&mut self, document: Document, path: Option<PathBuf>) {
+        // R1: el reemplazo + limpieza de historial vive en
+        // `DocumentController::replace_document`.
+        let mut doc_ctl = DocumentController::from_parts(
+            std::mem::replace(&mut self.document, Document::new()),
+            std::mem::take(&mut self.undo_stack),
+            std::mem::take(&mut self.redo_stack),
+            self.undo_total_bytes,
+        );
+        doc_ctl.replace_document(document);
+        let (document, undo_stack, redo_stack, undo_total_bytes) = doc_ctl.into_parts();
         self.document = document;
+        self.undo_stack = undo_stack;
+        self.redo_stack = redo_stack;
+        self.undo_total_bytes = undo_total_bytes;
         if let Some(path) = path {
             self.document_lifecycle
                 .establish_opened_document(path, &self.document);
@@ -2078,9 +2100,6 @@ impl GrafitoApp {
             self.document_lifecycle
                 .establish_new_document(&self.document);
         }
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.undo_total_bytes = 0;
         self.autosave.mark_saved();
         self.autosave_last_version = self.document.version;
         self.clear_document_bound_transient_state();
@@ -2124,8 +2143,13 @@ impl GrafitoApp {
         self.hover_cached_analysis = None;
         self.autocomplete = InputAutocomplete::default();
         self.assistant.focus = None;
-        self.assistant.verified_proposals.clear();
-        self.assistant.invalidate_proposal_correction();
+        // R1: el transitorio del panel vive en `AssistantController`.
+        let mut assistant_ctl = AssistantController {
+            state: std::mem::take(&mut self.assistant),
+            visible: self.assistant_visible,
+        };
+        assistant_ctl.clear_transient();
+        self.assistant = assistant_ctl.state;
         self.construction_log.clear();
         self.transient_render_state = TransientRenderState::default();
         self.reset_tool_input();
@@ -3150,12 +3174,19 @@ impl GrafitoApp {
 
     pub(crate) fn save_snapshot(&mut self, snapshot: Document) {
         self.sync_undo_total_bytes();
-        push_history_snapshot_with_counter(
-            &mut self.undo_stack,
-            &mut self.redo_stack,
-            snapshot,
-            Some(&mut self.undo_total_bytes),
+        // R1: el push + presupuestos viven en `DocumentController`.
+        let mut ctl = DocumentController::from_parts(
+            std::mem::replace(&mut self.document, Document::new()),
+            std::mem::take(&mut self.undo_stack),
+            std::mem::take(&mut self.redo_stack),
+            self.undo_total_bytes,
         );
+        ctl.push_snapshot(snapshot);
+        let (document, undo_stack, redo_stack, undo_total_bytes) = ctl.into_parts();
+        self.document = document;
+        self.undo_stack = undo_stack;
+        self.redo_stack = redo_stack;
+        self.undo_total_bytes = undo_total_bytes;
         self.mark_autosave_dirty();
     }
 
@@ -4110,48 +4141,58 @@ impl GrafitoApp {
     }
 
     pub(crate) fn undo(&mut self) {
-        if let Some(before) = self.undo_stack.pop_back() {
-            let before_bytes = before.estimated_bytes();
-            self.undo_total_bytes = self.undo_total_bytes.saturating_sub(before_bytes);
-            let changes = ChangeSet {
-                before,
-                after: self.document.clone(),
-            };
-            match changes.undo(&mut self.document) {
-                Ok(()) => {
-                    self.redo_stack.push_back(changes);
-                    // Cota de redo (auditoría: antes sin presupuesto) — espejo de
-                    // DocumentController::undo + enforce_redo_budgets (controllers.rs).
-                    enforce_redo_budgets(&mut self.redo_stack);
-                    self.selected_object = None;
-                }
-                Err(error) => {
-                    // Restore snapshot and counter on failure — mirrors DocumentController::undo (controllers.rs:142-147)
-                    let retry_bytes = changes.before.estimated_bytes();
-                    self.undo_total_bytes = self.undo_total_bytes.saturating_add(retry_bytes);
-                    self.undo_stack.push_back(changes.before);
-                    self.cas_result = format!("No se pudo deshacer: {error}");
-                }
+        // Stack vacío = no-op silencioso (igual que antes).
+        if self.undo_stack.is_empty() {
+            return;
+        }
+        // R1: transición + presupuestos en `DocumentController`; los efectos
+        // de app (`selected_object`, `cas_result`) quedan en el shim.
+        let mut ctl = DocumentController::from_parts(
+            std::mem::replace(&mut self.document, Document::new()),
+            std::mem::take(&mut self.undo_stack),
+            std::mem::take(&mut self.redo_stack),
+            self.undo_total_bytes,
+        );
+        let result = ctl.undo();
+        let (document, undo_stack, redo_stack, undo_total_bytes) = ctl.into_parts();
+        self.document = document;
+        self.undo_stack = undo_stack;
+        self.redo_stack = redo_stack;
+        self.undo_total_bytes = undo_total_bytes;
+        match result {
+            Ok(()) => {
+                self.selected_object = None;
+            }
+            Err(error) => {
+                self.cas_result = format!("No se pudo deshacer: {error}");
             }
         }
     }
 
     pub(crate) fn redo(&mut self) {
-        if let Some(changes) = self.redo_stack.pop_back() {
-            let before_redo = self.document.clone();
-            let before_bytes = before_redo.estimated_bytes();
-            match changes.redo(&mut self.document) {
-                Ok(()) => {
-                    self.undo_stack.push_back(before_redo);
-                    self.undo_total_bytes = self.undo_total_bytes.saturating_add(before_bytes);
-                    // Enforce budgets tras push_back — mirrors DocumentController::redo enforce_budgets (controllers.rs:163)
-                    enforce_undo_budgets(&mut self.undo_stack, &mut self.undo_total_bytes);
-                    self.selected_object = None;
-                }
-                Err(error) => {
-                    self.redo_stack.clear();
-                    self.cas_result = format!("No se pudo rehacer: {error}");
-                }
+        // Stack vacío = no-op silencioso (igual que antes).
+        if self.redo_stack.is_empty() {
+            return;
+        }
+        // R1: ver `undo` (el controller ya limpia redo si el restore falla).
+        let mut ctl = DocumentController::from_parts(
+            std::mem::replace(&mut self.document, Document::new()),
+            std::mem::take(&mut self.undo_stack),
+            std::mem::take(&mut self.redo_stack),
+            self.undo_total_bytes,
+        );
+        let result = ctl.redo();
+        let (document, undo_stack, redo_stack, undo_total_bytes) = ctl.into_parts();
+        self.document = document;
+        self.undo_stack = undo_stack;
+        self.redo_stack = redo_stack;
+        self.undo_total_bytes = undo_total_bytes;
+        match result {
+            Ok(()) => {
+                self.selected_object = None;
+            }
+            Err(error) => {
+                self.cas_result = format!("No se pudo rehacer: {error}");
             }
         }
     }
@@ -4743,7 +4784,11 @@ impl GrafitoApp {
     #[allow(dead_code)]
     #[inline]
     pub(crate) fn sync_current_view(&mut self) {
-        self.current_view = self.perspective.view_mode();
+        // R1: el invariante `current_view = perspective.view_mode()` vive en
+        // `ViewController::sync_view`; acá solo se copia el cache.
+        let mut vc = ViewController::with_perspective_and_camera(self.perspective, self.camera);
+        vc.sync_view();
+        self.current_view = vc.current_view;
         debug_assert_eq!(
             self.current_view,
             self.perspective.view_mode(),
@@ -4924,13 +4969,6 @@ impl GrafitoApp {
     /// Para chequear sin mutar y con `Err` honesto usar
     /// [`Self::try_set_perspective`].
     pub(crate) fn set_perspective(&mut self, p: Perspective) {
-        if self.exam_mode && self.perspective != p {
-            self.notify(
-                "Cambio de vista bloqueado en modo examen, che.",
-                grafito_ui::toast::ToastKind::Error,
-            );
-            return;
-        }
         if self.perspective == p {
             // Incluso si la perspectiva no cambia, el cache debe permanecer
             // consistente (defensa contra mutaciones externas accidentales).
@@ -4941,6 +4979,18 @@ impl GrafitoApp {
             );
             return;
         }
+        // R1: guard de examen + sync del cache en `ViewController` (dueño de
+        // perspective/view). El toast conserva el texto histórico.
+        let mut vc = ViewController::with_perspective_and_camera(self.perspective, self.camera);
+        if vc.try_set_perspective(p, self.exam_mode).is_err() {
+            self.notify(
+                "Cambio de vista bloqueado en modo examen, che.",
+                grafito_ui::toast::ToastKind::Error,
+            );
+            return;
+        }
+        self.perspective = vc.perspective;
+        self.current_view = vc.current_view;
         // Reset de estado transitorio: la perspectiva anterior puede tener
         // objetos seleccionados que no existen o no se renderizan en la nueva.
         self.selected_object = None;
@@ -5015,15 +5065,29 @@ impl GrafitoApp {
     /// Chequea ANTES de mutar: en `exam_mode` y otra perspectiva retorna `Err`
     /// honesto sin tocar documento/vista. Misma perspectiva = `Ok` (no-op).
     pub(crate) fn try_set_perspective(&mut self, p: Perspective) -> Result<(), String> {
-        if self.exam_mode && self.perspective != p {
+        // R1: el guard vive en `ViewController`; el toast conserva el texto
+        // histórico y el `Err` el mensaje del controller (pineado por tests).
+        let mut vc = ViewController::with_perspective_and_camera(self.perspective, self.camera);
+        if let Err(error) = vc.try_set_perspective(p, self.exam_mode) {
             self.notify(
                 "Cambio de vista bloqueado en modo examen, che.",
                 grafito_ui::toast::ToastKind::Error,
             );
-            return Err("Cambio de perspectiva bloqueado en modo examen".to_string());
+            return Err(error);
         }
         self.set_perspective(p);
         Ok(())
+    }
+
+    /// Asegura que el panel de álgebra quede visible (tab 0 + drawer abierto).
+    ///
+    /// R1: existía como call-site en 6 flujos del asistente
+    /// (`assistant.rs`) pero su definición se perdió en el incidente; se
+    /// repone acá (dueño `app.rs`: sidebar/drawers son estado de shell).
+    /// Tras preparar un comando, la entrada algebraica queda a la vista.
+    pub(crate) fn ensure_algebra_panel_visible(&mut self) {
+        self.sidebar_tab = 0;
+        self.left_drawer_open = true;
     }
 
     /// Grupos visibles ya filtrados por el nivel del perfil del estudiante (progressive disclosure).

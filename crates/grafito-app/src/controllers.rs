@@ -77,6 +77,36 @@ impl DocumentController {
         }
     }
 
+    /// Glue R1: arma el controller desde las piezas de `GrafitoApp` para
+    /// delegar transiciones (`undo`/`redo`/`push_snapshot`/`replace`) sin
+    /// duplicar estado. El wiring P2 (campo `DocumentController` en
+    /// `GrafitoApp`) eliminará este puente; hasta entonces el `move`
+    /// ida/vuelta por `into_parts` mantiene una sola implementación de
+    /// presupuestos.
+    pub fn from_parts(
+        document: Document,
+        undo_stack: VecDeque<Document>,
+        redo_stack: VecDeque<ChangeSet>,
+        undo_total_bytes: usize,
+    ) -> Self {
+        Self {
+            document,
+            undo_stack,
+            redo_stack,
+            undo_total_bytes,
+        }
+    }
+
+    /// Devuelve las piezas para restaurarlas en `GrafitoApp` tras delegar.
+    pub fn into_parts(self) -> (Document, VecDeque<Document>, VecDeque<ChangeSet>, usize) {
+        (
+            self.document,
+            self.undo_stack,
+            self.redo_stack,
+            self.undo_total_bytes,
+        )
+    }
+
     /// Referencia al documento activo.
     pub fn document(&self) -> &Document {
         &self.document
