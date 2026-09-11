@@ -1327,7 +1327,7 @@ fn export_frames_to_video_inner(
     let bin = ffmpeg_bin.unwrap_or_else(|| Path::new("ffmpeg"));
     let bitrate_kbps =
         bitrate_kbps.clamp(ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_BITRATE_MAX_KBPS);
-    let (crf, _preset) = quality.flags();
+    let (crf, preset) = quality.flags();
     let codecs = WEBM_VIDEO_CODECS;
     for (intento, codec) in codecs.iter().enumerate() {
         let ultimo_intento = intento + 1 == codecs.len();
@@ -1348,9 +1348,12 @@ fn export_frames_to_video_inner(
             .arg("-i")
             .arg("pipe:0");
         // yuv420p exige lados pares: el filtro es no-op si ya lo son.
-        // `-b:v` + `-crf` del diálogo (`-ql`/`-qm`/`-qh` → bitrate/crf).
+        // `-preset` igual que el MP4 (R6c, consistente con
+        // `VideoQuality::flags`) + `-b:v` + `-crf` del diálogo.
         cmd.arg("-c:v")
             .arg(codec)
+            .arg("-preset")
+            .arg(preset)
             .arg("-b:v")
             .arg(format!("{bitrate_kbps}k"))
             .arg("-crf")
@@ -2478,14 +2481,16 @@ pub fn native_dispatch_for(template: &str, concept: &str) -> NativeDispatch {
 //   El fondo es ÚNICO y fijo (`fill_background` + viñeta, sin tinte por
 //   concepto): los 6 vivos garantizan contraste sobre BG oscuro para vídeo
 //   didáctico.
-// - Lenguaje de color: amarilla 2px = objeto (`CURVE_MAIN` + `CURVE_ANCHO`),
-//   azul 2px = construcción (`TANGENT_BLUE`/`PAL_BLUE` + `CURVE_ANCHO`),
+// - Lenguaje de color: amarilla 3px = objeto (`CURVE_MAIN` + `CURVE_ANCHO`),
+//   azul 3px = construcción (`TANGENT_BLUE`/`PAL_BLUE` + `CURVE_ANCHO`),
 //   rojo = punto/resultado (`POINT_RED` radio 3, `GIBBS_RED` radio 3).
+//   Ejes a 1.5px (`AXIS_ANCHO`), ticks a 1px.
+// - Grilla alfa 38..51 (≈15-20% sobre BG, contraste 3:1 para gráficos).
 // REGLA: ningún color RGBA fuera de este bloque. Los renders solo usan estas
 // consts o `with_alpha(BASE, a)`. Ver test `palette_has_no_loose_hardcodes`.
 const BG: [u8; 4] = [14, 14, 20, 255];
 const BG_GRADIENT: [u8; 4] = [22, 22, 34, 255];
-const GRID_COLOR: [u8; 4] = [255, 255, 255, 14];
+const GRID_COLOR: [u8; 4] = [255, 255, 255, 44];
 const AXIS_COLOR: [u8; 4] = [200, 200, 200, 90];
 const TEXT_COLOR: [u8; 4] = [235, 235, 245, 255];
 // Trío canónico BG/FG/ACCENT (alias documentados para el gate de paleta).
@@ -2727,6 +2732,30 @@ pub(crate) fn resolve_native_size_budgeted(
     }
 }
 
+/// Aviso mostrable en la card cuando el pedido excede el presupuesto del set
+/// (R6c, `NATIVE_MAX_SET_BYTES` 64 MiB).
+///
+/// Los `render_*` clásicos devuelven `Vec` por firma histórica: ante exceso
+/// hacen clamp documentado vía `resolve_native_size_budgeted` en vez de
+/// `Err`. La card llama a esto con el pedido y, si da `Some`, muestra el
+/// texto junto a la vista previa. Puro, sin I/O.
+pub fn mensaje_overbudget_para(width: u32, height: u32) -> Option<String> {
+    match resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT) {
+        (
+            _,
+            Some(NativeSizeError::OverBudget {
+                requested,
+                clamped,
+                bytes,
+            }),
+        ) => Some(format!(
+            "vista previa reducida a {}×{} (pedido {}×{} ≈ {bytes} bytes, tope {NATIVE_MAX_SET_BYTES})",
+            clamped.0, clamped.1, requested.0, requested.1,
+        )),
+        _ => None,
+    }
+}
+
 fn checked_frame_byte_len(w: usize, h: usize) -> Result<usize, NativeSizeError> {
     w.checked_mul(h)
         .and_then(|v| v.checked_mul(4))
@@ -2888,7 +2917,8 @@ fn to_pixel(width: usize, height: usize, x: f64, y: f64) -> (usize, usize) {
 // contra el borde: `y=x²` se corta limpio en `y=3` en vez de dibujar un
 // plateau horizontal falso arriba.
 // Contraste AA sobre BG [14,14,20]: amarilla ≈11:1, azul ≈4.8:1,
-// roja ≈5:1 (todas ≥3:1 para gráficos); curvas a 2px (`CURVE_ANCHO`).
+// roja ≈5:1 (todas ≥3:1 para gráficos); curvas a 3px (`CURVE_ANCHO`),
+// ejes a 1.5px (`AXIS_ANCHO`), grilla a alfa 44 (≈17%, 3:1).
 /// Mínimo del viewport mundo en x (fijo, documentado, misma escala en 48).
 pub(crate) const VIEW_X_MIN: f64 = -3.0;
 /// Máximo del viewport mundo en x (fijo, documentado, misma escala en 48).
@@ -2901,8 +2931,15 @@ pub(crate) const VIEW_Y_MAX: f64 = 3.0;
 const VIEW_SPAN_X: f64 = VIEW_X_MAX - VIEW_X_MIN;
 /// Alto del viewport mundo (6.0, deriva de `VIEW_Y_*`).
 const VIEW_SPAN_Y: f64 = VIEW_Y_MAX - VIEW_Y_MIN;
-/// Grosor de curvas principales (parábola/tangente) en px.
-const CURVE_ANCHO: f32 = 2.0;
+/// Grosor de curvas principales (parábola/tangente) en px (R6c: 3px
+/// legibles a 480×360; los dorados de píxeles se actualizaron a propósito
+/// verificando la misma intención, jamás a ciegas).
+const CURVE_ANCHO: f32 = 3.0;
+/// Grosor de los ejes x/y en px (R6c: 1.5px; las marcas de tick siguen a 1px).
+const AXIS_ANCHO: f32 = 1.5;
+/// Margen mínimo de los slots "x"/"y" y del placeholder `universal` al borde
+/// del frame en px (R6c: ≥24px medido a 480×360).
+const SLOT_MARGEN: usize = 24;
 
 /// ¿El punto mundo está en vista (finito y dentro del viewport fijo)?
 /// Puro, sin pánicos.
@@ -2983,7 +3020,7 @@ fn sk_stroke_1px() -> tiny_skia::Stroke {
     sk_stroke(1.0)
 }
 
-/// Línea con grosor explícito (curvas principales a 2px para contraste AA).
+/// Línea con grosor explícito (curvas principales a 3px para contraste AA).
 /// Misma disciplina que `draw_line` (vista O(1), no-op honesto si no calza).
 fn draw_line_ancha(
     buf: &mut [u8],
@@ -3215,12 +3252,23 @@ fn sk_fallback_cell(
     draw_filled_rect(buf, w, h, x, y, cell_w, cell_h, color);
 }
 
-/// Escala de texto por alto del frame (cine visual): 3 en HD (h≥720),
-/// 2 en miniatura grande (h≥360), 1 abajo. Pura, sin pánicos.
+/// Escala de texto de TÍTULOS por alto del frame (R6c, cine visual): 3 en
+/// h≥360 (a 480×360 son glifos de ~30px ≈ 8-9%h), 1 abajo (legado compacto
+/// documentado para no romper previews diminutos: el texto cae en las mismas
+/// bandas que antes). Pura, sin pánicos.
 pub fn text_scale_for_h(h: usize) -> usize {
-    if h >= 720 {
+    if h >= 360 {
         3
-    } else if h >= 360 {
+    } else {
+        1
+    }
+}
+
+/// Escala de texto de TICKS por alto del frame (R6c): 2 en h≥360 (glifos de
+/// ~20px ≥ 16px y ≥4.5%h a 480×360; a escala 1 los 11px violan ambas cotas),
+/// 1 abajo (legado compacto, idéntico a antes). Pura, sin pánicos.
+pub fn tick_scale_for_h(h: usize) -> usize {
+    if h >= 360 {
         2
     } else {
         1
@@ -3420,9 +3468,15 @@ fn fill_background(buf: &mut [u8], w: usize, h: usize) {
 
 /// Grilla sutil ESTÁTICA (cada ~40px, punteada): el mismo fondo en los 48
 /// frames (sin parallax: la intersección grid↔relleno ya no baila y el test
-/// de sombra no necesita cota de fringe móvil). Pura, sin pánicos.
+/// de sombra no necesita cota de fringe móvil). Mezcla honesta por alfa
+/// (`GRID_COLOR[3]` 38..51 ≈ 15-20%, contraste 3:1): jamás promedio 50%.
+/// Pura, sin pánicos.
 fn draw_subtle_grid(buf: &mut [u8], w: usize, h: usize) {
     // grid cada ~40px, fija
+    let alfa = f32::from(GRID_COLOR[3]) / 255.0;
+    let mezcla = |fondo: u8, tinta: u8| -> u8 {
+        (f32::from(fondo) * (1.0 - alfa) + f32::from(tinta) * alfa) as u8
+    };
     let step = (w.min(h) / 10).max(18);
     for x in (0..w).step_by(step) {
         for y in 0..h {
@@ -3433,9 +3487,9 @@ fn draw_subtle_grid(buf: &mut [u8], w: usize, h: usize) {
             {
                 // linea vertical punteada sutil
                 if y % 3 == 0 && i + 2 < buf.len() {
-                    buf[i] = ((buf[i] as u16 + GRID_COLOR[0] as u16) / 2) as u8;
-                    buf[i + 1] = ((buf[i + 1] as u16 + GRID_COLOR[1] as u16) / 2) as u8;
-                    buf[i + 2] = ((buf[i + 2] as u16 + GRID_COLOR[2] as u16) / 2) as u8;
+                    buf[i] = mezcla(buf[i], GRID_COLOR[0]);
+                    buf[i + 1] = mezcla(buf[i + 1], GRID_COLOR[1]);
+                    buf[i + 2] = mezcla(buf[i + 2], GRID_COLOR[2]);
                 }
             }
         }
@@ -3449,14 +3503,33 @@ fn draw_subtle_grid(buf: &mut [u8], w: usize, h: usize) {
                     .and_then(|v| v.checked_mul(4))
                 {
                     if i + 2 < buf.len() {
-                        buf[i] = ((buf[i] as u16 + GRID_COLOR[0] as u16) / 2) as u8;
-                        buf[i + 1] = ((buf[i + 1] as u16 + GRID_COLOR[1] as u16) / 2) as u8;
-                        buf[i + 2] = ((buf[i + 2] as u16 + GRID_COLOR[2] as u16) / 2) as u8;
+                        buf[i] = mezcla(buf[i], GRID_COLOR[0]);
+                        buf[i + 1] = mezcla(buf[i + 1], GRID_COLOR[1]);
+                        buf[i + 2] = mezcla(buf[i + 2], GRID_COLOR[2]);
                     }
                 }
             }
         }
     }
+}
+
+/// Halo/scrim previo a un rótulo de tick: rectángulo `SCRIM` exactamente
+/// sobre su caja reservada (R6c). Se pinta ANTES del texto; como las cajas
+/// del registro `ocupadas` son disjuntas, los halos jamás se solapan. La
+/// caja mínima real (11px a escala 1) ya supera los 8px. Puro.
+fn pintar_halo_rotulo(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x: usize,
+    y: usize,
+    tw: usize,
+    th: usize,
+) {
+    if tw == 0 || th == 0 {
+        return;
+    }
+    draw_filled_rect(buf, w, h, x, y, tw, th, SCRIM);
 }
 
 fn ease_in_out(t: f64) -> f64 {
@@ -3549,27 +3622,33 @@ fn axis_tick_values(paso: f64) -> Vec<f64> {
 /// se solaparía). Rótulos con formato corto (1 decimal máximo, vía la Piel
 /// `short_tick_label`) + registro de cajas disjuntas: el que colisiona NO se
 /// dibuja (adiós "0000" amontonados y números verticales superpuestos).
-/// Cine visual: etiquetas a ≥8px del eje, "x"/"y" con margen 12px al borde,
-/// y el "0" del origen se omite si colisiona con otro rótulo.
-/// Los rótulos de ticks usan `draw_text_block` a escala 1 (las cajas de
-/// colisión asumen esa métrica): el test `ejes_pintan_texto_en_zona_de_ejes`
-/// los detecta como píxeles claros en las bandas de los ejes.
+/// Cine visual (R6c): etiquetas a ≥8px del eje, "x"/"y" con margen ≥24px al
+/// borde (`SLOT_MARGEN`), ejes a 1.5px (`AXIS_ANCHO`), y el "0" del origen
+/// se omite si colisiona con otro rótulo.
+/// Los rótulos de ticks usan `draw_text_block` a `tick_scale_for_h(h)` (2 en
+/// h≥360, 1 abajo como legado compacto) y las cajas de colisión asumen esa
+/// métrica escalada; cada rótulo lleva su halo/scrim previo
+/// (`pintar_halo_rotulo`, cajas disjuntas ⇒ sin solape, ≥8px). El test
+/// `ejes_pintan_texto_en_zona_de_ejes` los detecta como píxeles claros en
+/// las bandas de los ejes.
 fn draw_axes_with_labels(buf: &mut [u8], w: usize, h: usize) {
-    draw_line(
+    draw_line_ancha(
         buf,
         w,
         h,
         to_pixel(w, h, -3.0, 0.0),
         to_pixel(w, h, 3.0, 0.0),
         AXIS_COLOR,
+        AXIS_ANCHO,
     );
-    draw_line(
+    draw_line_ancha(
         buf,
         w,
         h,
         to_pixel(w, h, 0.0, -3.0),
         to_pixel(w, h, 0.0, 3.0),
         AXIS_COLOR,
+        AXIS_ANCHO,
     );
     if w < 48 || h < 48 {
         return;
@@ -3587,32 +3666,33 @@ fn draw_axes_with_labels(buf: &mut [u8], w: usize, h: usize) {
     let (cx, cy) = to_pixel(w, h, 0.0, 0.0);
     let skip_x = adaptive_label_skip(ticks.len(), w as f32, 48.0).max(1);
     let skip_y = adaptive_label_skip(ticks.len(), h as f32, 20.0).max(1);
+    // Métrica de caja a la escala real del tick (a escala 1 es idéntica a la
+    // histórica `TICK_CHAR_*` de la Piel).
+    let escala = tick_scale_for_h(h);
+    let cw = (TICK_CHAR_W_PX as usize).saturating_mul(escala).max(1);
+    let chh = (TICK_CHAR_H_PX as usize).saturating_mul(escala).max(1);
     // Registro de cajas ocupadas: se reservan PRIMERO los slots de "x",
     // "y" (nombre del eje tiene prioridad: el tick que colisione se omite,
     // su marca igual se dibuja). El "0" se chequea al final y se omite si
     // colisiona — bounding boxes disjuntos siempre.
-    let mut ocupadas: Vec<LabelCaja> = Vec::new();
     let caja_x = LabelCaja {
-        x: w.saturating_sub(12 + TICK_CHAR_W_PX as usize + 4),
+        x: w.saturating_sub(SLOT_MARGEN + cw + 4),
         y: (cy + 8).min(h.saturating_sub(9)),
-        w: TICK_CHAR_W_PX as usize + 4,
-        h: TICK_CHAR_H_PX as usize,
+        w: cw + 4,
+        h: chh,
     };
     let caja_y = LabelCaja {
         x: (cx + 8).min(w.saturating_sub(24)),
-        y: 12.min(h.saturating_sub(9)),
-        w: TICK_CHAR_W_PX as usize + 4,
-        h: TICK_CHAR_H_PX as usize,
+        y: SLOT_MARGEN.min(h.saturating_sub(9)),
+        w: cw + 4,
+        h: chh,
     };
+    let mut ocupadas: Vec<LabelCaja> = Vec::new();
     ocupadas.push(caja_x);
     ocupadas.push(caja_y);
     let caja_para = |tag: &str| -> (usize, usize) {
-        let tw = tag
-            .chars()
-            .count()
-            .saturating_mul(TICK_CHAR_W_PX as usize)
-            .saturating_add(4);
-        (tw, TICK_CHAR_H_PX as usize)
+        let tw = tag.chars().count().saturating_mul(cw).saturating_add(4);
+        (tw, chh)
     };
     for (i, v) in ticks.iter().enumerate() {
         let (px, _) = to_pixel(w, h, *v, 0.0);
@@ -3633,7 +3713,8 @@ fn draw_axes_with_labels(buf: &mut [u8], w: usize, h: usize) {
             let lejos_origen =
                 px.saturating_sub(cx).max(cx.saturating_sub(px)) >= tw.saturating_add(6);
             if lejos_origen && cabe_label_entre(lx, ly, tw, th, &ocupadas) {
-                draw_text_block(buf, w, h, lx, ly, &tag, TEXT_COLOR, 1);
+                pintar_halo_rotulo(buf, w, h, lx, ly, tw, th);
+                draw_text_block(buf, w, h, lx, ly, &tag, TEXT_COLOR, escala);
                 ocupadas.push(LabelCaja {
                     x: lx,
                     y: ly,
@@ -3660,7 +3741,8 @@ fn draw_axes_with_labels(buf: &mut [u8], w: usize, h: usize) {
             let lejos_origen =
                 py.saturating_sub(cy).max(cy.saturating_sub(py)) >= th.saturating_add(4);
             if lejos_origen && cabe_label_entre(lx, ly, tw, th, &ocupadas) {
-                draw_text_block(buf, w, h, lx, ly, &tag, TEXT_COLOR, 1);
+                pintar_halo_rotulo(buf, w, h, lx, ly, tw, th);
+                draw_text_block(buf, w, h, lx, ly, &tag, TEXT_COLOR, escala);
                 ocupadas.push(LabelCaja {
                     x: lx,
                     y: ly,
@@ -3672,20 +3754,23 @@ fn draw_axes_with_labels(buf: &mut [u8], w: usize, h: usize) {
     }
     // Origen una sola vez (se omite si colisiona con un tick o con los
     // slots reservados de "x"/"y") + rótulos de eje en sus slots
-    // reservados (margen 12px al borde, offset ≥8px del eje).
+    // reservados (margen 24px al borde, offset ≥8px del eje).
     let (ox, oy) = (cx.saturating_add(8), (cy + 8).min(h.saturating_sub(9)));
     let caja_cero = LabelCaja {
         x: ox,
         y: oy,
-        w: TICK_CHAR_W_PX as usize + 4,
-        h: TICK_CHAR_H_PX as usize,
+        w: cw + 4,
+        h: chh,
     };
     if cabe_label_entre(ox, oy, caja_cero.w, caja_cero.h, &ocupadas) {
-        draw_text_block(buf, w, h, ox, oy, "0", TEXT_COLOR, 1);
+        pintar_halo_rotulo(buf, w, h, ox, oy, caja_cero.w, caja_cero.h);
+        draw_text_block(buf, w, h, ox, oy, "0", TEXT_COLOR, escala);
         ocupadas.push(caja_cero);
     }
-    draw_text_block(buf, w, h, caja_x.x, caja_x.y, "x", TEXT_COLOR, 1);
-    draw_text_block(buf, w, h, caja_y.x, caja_y.y, "y", TEXT_COLOR, 1);
+    pintar_halo_rotulo(buf, w, h, caja_x.x, caja_x.y, caja_x.w, caja_x.h);
+    draw_text_block(buf, w, h, caja_x.x, caja_x.y, "x", TEXT_COLOR, escala);
+    pintar_halo_rotulo(buf, w, h, caja_y.x, caja_y.y, caja_y.w, caja_y.h);
+    draw_text_block(buf, w, h, caja_y.x, caja_y.y, "y", TEXT_COLOR, escala);
 }
 
 // ── Plantillas existentes ────────────────────────────────────────────────
@@ -3760,7 +3845,7 @@ fn render_derivative_frames_with_params_impl(
         }
         // titulo superior (solo standalone/export: el chat ya titula en el header)
         if con_rotulo {
-            draw_rotulo_con_scrim(&mut buf, w, h, w / 12, h / 12, "derivada  f'(x)");
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 12, h / 12, "derivada");
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -3815,7 +3900,7 @@ fn render_pitagoras_frames_impl(
             draw_line(&mut buf, w, h, mid, p1, SQUARE_GREEN);
         }
         if con_rotulo {
-            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "a^2 + b^2 = c^2");
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "pitagoras");
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -4485,7 +4570,7 @@ fn render_conformal_frames_impl(
             }
         }
         if con_rotulo {
-            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "conforme w=(z-c)/(1-cc*z)");
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "conforme w(z)");
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -4541,19 +4626,63 @@ fn render_universal_youtube_frames_impl(
         // titula en el header de la card).
         let echo: String = concept_norm.chars().take(32).collect();
         if con_rotulo {
-            let title_h = 30;
-            draw_filled_rect(&mut buf, w, h, 6, 6, w.saturating_sub(12), title_h, SCRIM);
-            draw_text_block(
-                &mut buf,
-                w,
-                h,
-                10,
-                10,
-                UNIVERSAL_PLACEHOLDER_LABEL,
-                TEXT_COLOR,
-                1,
-            );
-            draw_text_block(&mut buf, w, h, 10, 20, &echo, TEXT_COLOR, 1);
+            // R6c: a ≥480×360 rótulo y eco a margen ≥24px (`SLOT_MARGEN`);
+            // abajo legado compacto (posiciones históricas 6/10) para no
+            // romper el contrato chat/export de la banda media ni los
+            // previews diminutos. El rótulo de 26ch va a escala de tick (a
+            // escala de título invadiría el margen derecho); el eco (dato)
+            // queda a escala 1 debajo.
+            if w >= CHAT_CANON_W as usize && h >= CHAT_CANON_H as usize {
+                let tesc = tick_scale_for_h(h);
+                let mx = SLOT_MARGEN;
+                let my = SLOT_MARGEN;
+                let chars = UNIVERSAL_PLACEHOLDER_LABEL.chars().take(48).count();
+                let ancho = chars
+                    .saturating_mul(6 * tesc)
+                    .saturating_add(8)
+                    .min(w.saturating_sub(mx));
+                let alto = (12 * tesc + 8).min(h.saturating_sub(my));
+                if ancho > 0 && alto > 0 {
+                    draw_filled_rect(&mut buf, w, h, mx, my, ancho, alto, SCRIM);
+                }
+                draw_text_block(
+                    &mut buf,
+                    w,
+                    h,
+                    mx.saturating_add(4),
+                    my.saturating_add(4),
+                    UNIVERSAL_PLACEHOLDER_LABEL,
+                    TEXT_COLOR,
+                    tesc,
+                );
+                let ey = my.saturating_add(12 * tesc).saturating_add(12);
+                if ey < h {
+                    draw_text_block(
+                        &mut buf,
+                        w,
+                        h,
+                        mx.saturating_add(4),
+                        ey,
+                        &echo,
+                        TEXT_COLOR,
+                        1,
+                    );
+                }
+            } else {
+                let title_h = 30;
+                draw_filled_rect(&mut buf, w, h, 6, 6, w.saturating_sub(12), title_h, SCRIM);
+                draw_text_block(
+                    &mut buf,
+                    w,
+                    h,
+                    10,
+                    10,
+                    UNIVERSAL_PLACEHOLDER_LABEL,
+                    TEXT_COLOR,
+                    1,
+                );
+                draw_text_block(&mut buf, w, h, 10, 20, &echo, TEXT_COLOR, 1);
+            }
         }
         // Barra de progreso inferior: posición real del frame (cromo honesto).
         let bar_y = h.saturating_sub(6);
@@ -4836,8 +4965,9 @@ pub fn render_anim_for_export(
 }
 
 /// ¿Este locale quema rótulo en el frame? Solo ES: los títulos quemados son
-/// literales ES históricos (`"derivada f'(x)"`, `"a^2 + b^2 = c^2"`,
-/// `"y=x^2"`, `"taylor sin(x)"`, `"bifurcacion r"`, ...). En otro locale el
+/// literales ES cortos (R6c, ≤12ch salvo `"conforme w(z)"` con 13:
+/// `"derivada"`, `"pitagoras"`,
+/// `"y=x^2"`, `"taylor sin(x)"`, `"bifurcacion"`, ...). En otro locale el
 /// frame sale sin texto quemado (la card v3 ya titula localizado). Puro.
 pub fn con_rotulo_for_locale(locale: grafito_ui::i18n::Locale) -> bool {
     matches!(locale, grafito_ui::i18n::Locale::Es)
@@ -5226,14 +5356,14 @@ fn render_logistic_bifurcation_frames_impl(
             );
         }
         if con_rotulo {
-            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "bifurcacion r");
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "bifurcacion");
             draw_text_block(
                 &mut buf,
                 w,
                 h,
                 w / 14,
                 h / 12,
-                "bifurcacion r",
+                "bifurcacion",
                 PAL_FG,
                 text_scale_for_h(h),
             );
@@ -5432,14 +5562,14 @@ fn render_mobius_frames_impl(
         let pc = to_pixel(w, h, cr * 2.0, ci * 2.0);
         draw_filled_circle(&mut buf, w, h, pc.0, pc.1, 3, POINT_RED);
         if con_rotulo {
-            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "mobius  w(z)");
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "mobius w(z)");
             draw_text_block(
                 &mut buf,
                 w,
                 h,
                 w / 14,
                 h / 12,
-                "mobius  w(z)",
+                "mobius w(z)",
                 PAL_FG,
                 text_scale_for_h(h),
             );
@@ -7687,8 +7817,8 @@ mod tests {
     #[test]
     fn todos_los_parametricos_rotulan_eje_x() {
         // Integración: cada renderer paramétrico deja el rótulo "x" junto al
-        // extremo derecho del eje (caja con margen 12px al borde, filas
-        // cy+8..): zona donde ninguna curva didáctica del set pinta
+        // extremo derecho del eje (caja con margen 24px al borde —R6c—,
+        // filas cy+8..): zona donde ninguna curva didáctica del set pinta
         // (verificado por renderer).
         let hay_x = |f: &egui::ColorImage| {
             // Ventana derivada del propio frame (la vía paramétrica usa su
@@ -7697,7 +7827,9 @@ mod tests {
             let (_, cy) = super::to_pixel(fw, fh, 0.0, 0.0);
             let mut n = 0;
             for y in cy + 8..(cy + 19).min(fh) {
-                for x in fw.saturating_sub(26)..fw {
+                // R6c a propósito: el slot "x" se corrió a margen 24px
+                // (antes 12px + ventana de 26px); la ventana sigue la caja.
+                for x in fw.saturating_sub(40)..fw {
                     let p = &f.pixels[y * fw + x];
                     if p.r() > 200 && p.g() > 200 && p.b() > 200 {
                         n += 1;
@@ -8307,6 +8439,41 @@ mod tests {
             "libx264",
             "+faststart",
         ] {
+            assert!(argv.contains(aguja), "{aguja} en argv, fue: {argv}");
+        }
+        assert!(dest.exists(), "publicó el destino");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r6c_webm_pasa_preset_como_mp4() {
+        // Regla 8 (R6c): WebM pasa `-preset` igual que MP4
+        // (`VideoQuality::flags`), pineado con el mismo falso.
+        let base = std::env::temp_dir().join(format!(
+            "grafito-webm-preset-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let (falso, captura) = ffmpeg_falso_con_argv(&base, "webm-preset");
+        let dest = base.join("clip.webm");
+        let frames = synthetic_frames(2);
+        super::export_frames_to_webm_file_with_bin(
+            &frames,
+            &dest,
+            8,
+            &CancellationToken::default(),
+            &falso,
+            2000,
+            super::VideoQuality::Media,
+        )
+        .expect("el falso siempre sale 0");
+        let argv = std::fs::read_to_string(&captura).expect("argv capturado");
+        for aguja in ["-preset", "veryfast", "-crf", "23", "libvpx-vp9"] {
             assert!(argv.contains(aguja), "{aguja} en argv, fue: {argv}");
         }
         assert!(dest.exists(), "publicó el destino");
@@ -10451,10 +10618,12 @@ mod p1_video_tests {
 
     #[test]
     fn texto_escala_por_h_y_scrim_dimensiona() {
+        // R6c a propósito: título escala 3 en h≥360 (antes 2 hasta 719);
+        // abajo legado compacto 1 para previews diminutos.
         assert_eq!(text_scale_for_h(64), 1);
         assert_eq!(text_scale_for_h(359), 1);
-        assert_eq!(text_scale_for_h(360), 2);
-        assert_eq!(text_scale_for_h(719), 2);
+        assert_eq!(text_scale_for_h(360), 3);
+        assert_eq!(text_scale_for_h(719), 3);
         assert_eq!(text_scale_for_h(720), 3);
         assert_eq!(text_scale_for_h(4096), 3);
         // Scrim dimensiona al texto sin panics (incluso en 1px y vacío).
@@ -10465,6 +10634,296 @@ mod p1_video_tests {
         assert_ne!(buf, antes, "el scrim debe oscurecer la banda");
         draw_scrim_para_rotulo(&mut buf, 0, 0, 0, 0, "");
         draw_rotulo_con_scrim(&mut buf, 64, 64, 4, 5, "x");
+    }
+
+    // ── R6c (re-aplicado post-revert): legibilidad medible a 480×360 ──────
+    // Cada regla con su test que la pinnea (la 8 vive junto al test de argv
+    // MP4 en `mod tests`, misma instrumentación); presupuestos intactos
+    // (48 frames, 64/8M/5MB, 64MiB, Resolution 64..4096).
+
+    #[test]
+    fn r6c_ticks_escala_2_a_480x360() {
+        // Regla 1: ticks a escala ≥2 en h≥360 (11px viola ≥4.5%/16px).
+        assert_eq!(tick_scale_for_h(359), 1, "abajo legado compacto");
+        assert_eq!(tick_scale_for_h(360), 2);
+        assert_eq!(tick_scale_for_h(720), 2);
+        // Medible: en ejes aislados a 480×360 hay tinta clara bajo cy+19
+        // (a escala 1 el glifo termina en ly+11 = cy+19).
+        let (w, h) = (480usize, 360usize);
+        let mut buf = vec![0u8; w * h * 4];
+        super::fill_background(&mut buf, w, h);
+        super::draw_axes_with_labels(&mut buf, w, h);
+        let (_, cy) = super::to_pixel(w, h, 0.0, 0.0);
+        let mut claros = 0usize;
+        for y in cy + 19..(cy + 30).min(h) {
+            for x in 0..w {
+                if let Some(i) = y
+                    .checked_mul(w)
+                    .and_then(|v| v.checked_add(x))
+                    .and_then(|v| v.checked_mul(4))
+                {
+                    if i + 2 < buf.len() && buf[i] > 200 && buf[i + 1] > 200 && buf[i + 2] > 200 {
+                        claros += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            claros > 10,
+            "ticks a escala ≥2 (tinta bajo cy+19), fue: {claros}"
+        );
+    }
+
+    #[test]
+    fn r6c_titulo_escala_3_a_480x360() {
+        // Regla 2: título escala 3 en h≥360 (~30px ≈ 8-9%h).
+        assert_eq!(text_scale_for_h(359), 1, "abajo legado compacto");
+        assert_eq!(text_scale_for_h(360), 3);
+        // Medible: el scrim de "derivada" a 480×360 mide 12*3+8 = 44 filas
+        // (a escala 2 serían 32): la columna x (sin tinta: el texto arranca
+        // en x+4) sale oscurecida en y..y+44 e intacta en y+44.
+        let (w, h) = (480usize, 360usize);
+        let (x, y) = (w / 14, h / 12);
+        let mut buf = vec![0u8; w * h * 4];
+        super::fill_background(&mut buf, w, h);
+        let mut fondo = vec![0u8; w * h * 4];
+        super::fill_background(&mut fondo, w, h);
+        super::draw_rotulo_con_scrim(&mut buf, w, h, x, y, "derivada");
+        let mas_oscuro = |yy: usize| -> bool {
+            let i = yy * w + x;
+            (buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2])
+                < (fondo[i * 4], fondo[i * 4 + 1], fondo[i * 4 + 2])
+        };
+        for yy in y..y + 44 {
+            assert!(mas_oscuro(yy), "scrim escala 3 cubre la fila {yy}");
+        }
+        let i = (y + 44) * w + x;
+        assert_eq!(
+            (buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2]),
+            (fondo[i * 4], fondo[i * 4 + 1], fondo[i * 4 + 2]),
+            "tras 44 filas no hay scrim"
+        );
+    }
+
+    #[test]
+    fn r6c_slots_y_universal_a_margen_24() {
+        // Regla 3: slots "x"/"y" y placeholder universal a margen ≥24px.
+        // Medible: en ejes aislados a 480×360 no hay tinta clara en el marco
+        // exterior de 24px (las líneas de ejes son grises 200, no >200).
+        let (w, h) = (480usize, 360usize);
+        let mut buf = vec![0u8; w * h * 4];
+        super::fill_background(&mut buf, w, h);
+        super::draw_subtle_grid(&mut buf, w, h);
+        super::draw_axes_with_labels(&mut buf, w, h);
+        let en_marco =
+            |x: usize, y: usize| -> bool { x < 24 || x >= w - 24 || y < 24 || y >= h - 24 };
+        let mut claros = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                if !en_marco(x, y) {
+                    continue;
+                }
+                let i = (y * w + x) * 4;
+                if buf[i] > 200 && buf[i + 1] > 200 && buf[i + 2] > 200 {
+                    claros += 1;
+                }
+            }
+        }
+        assert_eq!(claros, 0, "marco 24px sin tinta de slots, fue: {claros}");
+        // Universal: rótulo + eco dentro del marco a 480×360.
+        let uni = super::render_universal_youtube_frames("prueba margen", 480, 360);
+        assert_eq!(uni.len(), super::NATIVE_ANIM_FRAME_COUNT);
+        let claros_uni = uni
+            .iter()
+            .map(|f| {
+                f.pixels
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, px)| {
+                        let (x, y) = (k % w, k / w);
+                        en_marco(x, y) && px.r() > 200 && px.g() > 200 && px.b() > 200
+                    })
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        assert_eq!(claros_uni, 0, "universal a margen ≥24px, fue: {claros_uni}");
+    }
+
+    #[test]
+    fn r6c_grilla_alfa_38_51() {
+        // Regla 4: grilla alfa 38..51 (≈15-20%, contraste 3:1).
+        let alfa = super::GRID_COLOR[3];
+        assert!(
+            (38..=51).contains(&alfa),
+            "alfa de grilla en 38..=51, fue: {alfa}"
+        );
+        // Medible: el píxel de grilla (3,0) —solo dosis horizontal, sin la
+        // doble dosis de las intersecciones— aclara el fondo entre 5 y 70
+        // por canal (mezcla por alfa, jamás promedio 50%).
+        let (w, h) = (480usize, 360usize);
+        let mut fondo = vec![0u8; w * h * 4];
+        super::fill_background(&mut fondo, w, h);
+        let mut buf = fondo.clone();
+        super::draw_subtle_grid(&mut buf, w, h);
+        let i = 3 * 4;
+        for k in 0..3 {
+            let delta = buf[i + k] as i16 - fondo[i + k] as i16;
+            assert!(
+                (5..=70).contains(&delta),
+                "canal {k} aclara {delta}, fuera de 5..=70"
+            );
+        }
+    }
+
+    #[test]
+    fn r6c_rotulos_12ch() {
+        // Regla 5: rótulos cortos (antes "derivada  f'(x)" 13ch,
+        // "a^2 + b^2 = c^2" 15ch, "conforme w=(z-c)/(1-cc*z)" 23ch).
+        for rot in [
+            "derivada",
+            "pitagoras",
+            "bifurcacion",
+            "gradiente f",
+            "mobius w(z)",
+            "y=x^2",
+        ] {
+            assert!(rot.chars().count() <= 12, "rótulo ≤12ch, fue: {rot}");
+        }
+        // "conforme w(z)" (13ch documentados) reemplaza al de 23ch.
+        assert_eq!("conforme w(z)".chars().count(), 13);
+        // Humo: los tres renderers rotulan 48 frames válidos a 480×360.
+        let vacio = std::collections::BTreeMap::new();
+        for (nombre, frames) in [
+            (
+                "derivative-slope",
+                super::render_derivative_frames_with_params(480, 360, &vacio),
+            ),
+            ("pitagoras", super::render_pitagoras_frames(480, 360)),
+            ("conformal-map", super::render_conformal_frames(480, 360)),
+        ] {
+            assert_eq!(frames.len(), super::NATIVE_ANIM_FRAME_COUNT, "{nombre}");
+            assert_eq!(frames[0].size, [480, 360], "{nombre}: tamaño");
+        }
+    }
+
+    #[test]
+    fn r6c_curva_3px_ejes_1_5px() {
+        // Regla 6: curva 3px, ejes 1.5px (dorados actualizados a propósito:
+        // `todos_los_parametricos_rotulan_eje_x` + `texto_escala_*` + docs).
+        assert_eq!(super::CURVE_ANCHO, 3.0);
+        assert_eq!(super::AXIS_ANCHO, 1.5);
+        // Medible: segmento mundo horizontal a 480×360 pinta ≥3 filas.
+        let (w, h) = (480usize, 360usize);
+        let mut fondo = vec![0u8; w * h * 4];
+        super::fill_background(&mut fondo, w, h);
+        let mut buf = fondo.clone();
+        assert!(super::draw_seg_mundo(
+            &mut buf,
+            w,
+            h,
+            -3.0,
+            0.0,
+            3.0,
+            0.0,
+            super::CURVE_MAIN,
+            super::CURVE_ANCHO,
+        ));
+        let (_, cy) = super::to_pixel(w, h, 0.0, 0.0);
+        for yy in [cy.saturating_sub(1), cy, cy + 1] {
+            let n = (0..w)
+                .filter(|&x| {
+                    let i = (yy * w + x) * 4;
+                    buf[i] != fondo[i] || buf[i + 1] != fondo[i + 1] || buf[i + 2] != fondo[i + 2]
+                })
+                .count();
+            assert!(n >= 10, "curva 3px cubre la fila {yy}, fue: {n}");
+        }
+        // Ejes: la fila central y sus vecinas difieren del fondo+grilla.
+        let mut ejes = fondo.clone();
+        super::draw_axes_with_labels(&mut ejes, w, h);
+        for yy in [cy.saturating_sub(1), cy, cy + 1] {
+            let n = (0..w)
+                .filter(|&x| {
+                    let i = (yy * w + x) * 4;
+                    ejes[i] != fondo[i]
+                        || ejes[i + 1] != fondo[i + 1]
+                        || ejes[i + 2] != fondo[i + 2]
+                })
+                .count();
+            assert!(n >= 100, "eje 1.5px cubre la fila {yy}, fue: {n}");
+        }
+    }
+
+    #[test]
+    fn r6c_halo_previo_a_cada_tick() {
+        // Regla 7: halo/scrim previo a cada tick (sin solape por cajas
+        // disjuntas, ≥8px).
+        // Helper directo: caja 8×8 se oscurece entera, fuera no se toca.
+        let (w, h) = (64usize, 64usize);
+        let mut buf = vec![0u8; w * h * 4];
+        super::fill_background(&mut buf, w, h);
+        let antes = buf.clone();
+        super::pintar_halo_rotulo(&mut buf, w, h, 10, 10, 8, 8);
+        for y in 10..18 {
+            for x in 10..18 {
+                let i = (y * w + x) * 4;
+                assert!(
+                    (buf[i], buf[i + 1], buf[i + 2]) < (antes[i], antes[i + 1], antes[i + 2]),
+                    "halo oscurece ({x},{y})"
+                );
+            }
+        }
+        for (x, y) in [(9, 10), (10, 9), (18, 10), (10, 18)] {
+            let i = (y * w + x) * 4;
+            assert_eq!(
+                (buf[i], buf[i + 1], buf[i + 2]),
+                (antes[i], antes[i + 1], antes[i + 2]),
+                "fuera de la caja no se toca ({x},{y})"
+            );
+        }
+        // Caja mínima real ≥8px a 480×360.
+        assert!(
+            super::tick_scale_for_h(360) * super::TICK_CHAR_H_PX as usize >= 8,
+            "halo ≥8px"
+        );
+        // Integración: en ejes a 480×360 hay halo (mínimo bajo el fondo
+        // solo) y tinta (máximo sobre el fondo solo).
+        let (w, h) = (480usize, 360usize);
+        let mut fondo = vec![0u8; w * h * 4];
+        super::fill_background(&mut fondo, w, h);
+        let mut ejes = fondo.clone();
+        super::draw_axes_with_labels(&mut ejes, w, h);
+        let minimo = |b: &[u8]| b.chunks_exact(4).map(|px| px[0]).min().unwrap_or(255);
+        let maximo = |b: &[u8]| {
+            b.chunks_exact(4)
+                .map(|px| px[0].max(px[1]).max(px[2]))
+                .max()
+                .unwrap_or(0)
+        };
+        assert!(
+            minimo(&ejes) < minimo(&fondo),
+            "halo previo oscurece bajo el fondo"
+        );
+        assert!(
+            maximo(&ejes) > maximo(&fondo),
+            "tinta del tick sobre el halo"
+        );
+    }
+
+    #[test]
+    fn r6c_overbudget_aviso_mostrable_en_card() {
+        // Regla 9: preview overbudget con mensaje para la card (`Option`:
+        // la firma `Vec` histórica impide `Err` y hace clamp documentado).
+        assert!(
+            super::mensaje_overbudget_para(480, 360).is_none(),
+            "el canon entra holgado"
+        );
+        let msg = super::mensaje_overbudget_para(4096, 4096).expect("4096²×48 excede 64MiB");
+        assert!(msg.contains("reducida"), "aviso mostrable, fue: {msg}");
+        // El render clásico sigue devolviendo el set (clamp, sin panic).
+        let frames = super::render_pitagoras_frames(4096, 4096);
+        assert_eq!(frames.len(), super::NATIVE_ANIM_FRAME_COUNT);
     }
 
     #[test]
@@ -10684,7 +11143,7 @@ fn render_conformal_frames_with_params_impl(
             }
         }
         if con_rotulo {
-            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "conforme w=(z-c)/(1-cc*z)");
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "conforme w(z)");
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -10749,7 +11208,7 @@ fn render_pitagoras_frames_with_params_impl(
             draw_line(&mut buf, w, h, mid, p1, SQUARE_GREEN);
         }
         if con_rotulo {
-            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "a^2 + b^2 = c^2");
+            draw_rotulo_con_scrim(&mut buf, w, h, w / 14, h / 12, "pitagoras");
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -10852,14 +11311,14 @@ fn render_logistic_bifurcation_frames_with_params_impl(
             );
         }
         if con_rotulo {
-            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "bifurcacion r");
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "bifurcacion");
             draw_text_block(
                 &mut buf,
                 w,
                 h,
                 w / 14,
                 h / 12,
-                "bifurcacion r",
+                "bifurcacion",
                 PAL_FG,
                 text_scale_for_h(h),
             );
@@ -11032,14 +11491,14 @@ fn render_mobius_frames_with_params_impl(
         let pc = to_pixel(w, h, cr * 2.0, ci * 2.0);
         draw_filled_circle(&mut buf, w, h, pc.0, pc.1, 3, POINT_RED);
         if con_rotulo {
-            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "mobius  w(z)");
+            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, "mobius w(z)");
             draw_text_block(
                 &mut buf,
                 w,
                 h,
                 w / 14,
                 h / 12,
-                "mobius  w(z)",
+                "mobius w(z)",
                 PAL_FG,
                 text_scale_for_h(h),
             );
