@@ -433,6 +433,23 @@ pub const MEDIA_TEXTURE_GRACE_FRAMES: u32 = 3;
 
 const _: () = assert!(MEDIA_TEXTURE_GRACE_FRAMES >= 2);
 
+/// Radio de la ventana viva de texturas alrededor del playhead (F4 perf
+/// visual): solo se suben a GPU los frames de `i-2` a `i+2`, o sea 5 vivas
+/// como máximo, en vez de los 48 de una vez.
+///
+/// Decisión medida: el atlas en tira única pedía una textura de `w` por
+/// `h*48`, que a 640×480 da 23040 px de alto sobre el límite típico de 8192,
+/// y el mosaico pedía UV en los 2 sitios de draw. La ventana lazy es más
+/// simple, usa ~6 MiB estables en vez de ~56 MiB y amortiza 1 subida por paso
+/// del playhead. Desliza bajo demanda desde el draw con `ensure_media_window`,
+/// la misma categoría de subida GPU que el thumb histórico. Lo que sale de la
+/// ventana se retira con la gracia de 3 intacta. El `frame.clone()` por subida
+/// pasa de ~44 MiB a ~3.7 MiB por set a 640×480.
+pub const MEDIA_TEXTURE_WINDOW: usize = 2;
+
+/// Texturas vivas máximas de la ventana (`2*2+1`): pinneado en test.
+pub const MEDIA_TEXTURE_WINDOW_MAX_VIVAS: usize = 2 * MEDIA_TEXTURE_WINDOW + 1;
+
 /// Set de texturas de una animación reemplazada, a la espera de gracia.
 #[derive(Clone)]
 struct RetiredMediaBatch {
@@ -460,11 +477,13 @@ pub const HISTORY_RETIRED_MAX_TEXTURES: usize = 96;
 /// Título de la tarjeta histórica (1-2 líneas, elide con `…`).
 const HISTORY_MINI_CARD_TITLE_MAX_CHARS: usize = 48;
 
-/// Entrada del caché de thumbs históricos: huella del `TurnMediaRef` + textura.
+/// Entrada del caché de thumbs históricos: huella del `TurnMediaRef` + textura
+/// + marca de uso para evicción LRU (ver `ensure_history_thumb`).
 #[derive(Clone)]
 struct HistoryThumbEntry {
     fingerprint: u64,
     texture: egui::TextureHandle,
+    last_used: u64,
 }
 
 /// Huella FNV-1a 64 del `TurnMediaRef` para validar el caché de thumbs.
@@ -492,6 +511,31 @@ pub(crate) fn history_thumb_fingerprint(media: &TurnMediaRef) -> u64 {
     hash.wrapping_mul(FNV_PRIME)
 }
 
+/// Rect UV del thumb histórico (M2-2): recorte centrado, jamás estiramiento.
+///
+/// El thumb es RGBA 96×96 cuadrado por construcción (`TurnMediaRef`), así que
+/// el caso real devuelve el UV completo y el rect cuadrado de la mini-card
+/// jamás deforma. Si la fuente no fuera cuadrada, recorta el eje largo
+/// centrado (letterbox por recorte). Paridad con
+/// `app::anim_ui::history_thumb_uv_crop` (la Piel no puede depender de la
+/// app, DAG `ui → app`); mismos vectores pineados en ambos tests. Puro.
+pub fn history_thumb_uv_rect(src_w: u32, src_h: u32) -> egui::Rect {
+    let w = src_w.max(1) as f32;
+    let h = src_h.max(1) as f32;
+    if w == h {
+        return egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    }
+    if w > h {
+        let keep = (h / w).clamp(0.0, 1.0);
+        let margin = (1.0 - keep) / 2.0;
+        egui::Rect::from_min_max(egui::pos2(margin, 0.0), egui::pos2(1.0 - margin, 1.0))
+    } else {
+        let keep = (w / h).clamp(0.0, 1.0);
+        let margin = (1.0 - keep) / 2.0;
+        egui::Rect::from_min_max(egui::pos2(0.0, margin), egui::pos2(1.0, 1.0 - margin))
+    }
+}
+
 /// ¿Este turno lleva tarjeta histórica? Solo turnos con media que no son
 /// el último: el último usa el slot vivo (`set_media`/`draw_media_card`).
 /// Puro (`&Estado`), sin I/O. La usa el dibujado y los tests de política.
@@ -504,6 +548,44 @@ pub(crate) fn turn_has_history_mini_card(
         && turn_count > 0
         && turn_idx < turn_count
         && turn_idx.saturating_add(1) != turn_count
+}
+
+/// Qué muestra el último turno del transcript (gate por dueño, P0).
+///
+/// El slot vivo (`set_media`/`anim_progress`) es global y no sabe a qué
+/// turno pertenece; sin gate, una tarjeta vieja queda bajo la prosa nueva.
+/// Regla: el último turno solo usa el slot vivo si NO tiene `media` propia.
+/// Si ya tiene `media` pegada (historia), muestra SU mini-card, jamás el
+/// slot. El slot nunca contradice el `turn.media` del turno visible.
+/// Puro (`&Estado`), sin I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveSlotKind {
+    /// Sin animación: ni progreso ni slot ni historia.
+    Hidden,
+    /// Job en curso del turno (sin media propia todavía).
+    Progress,
+    /// Slot vivo del turno (sin media propia todavía).
+    Slot,
+    /// El turno ya tiene media propia: su mini-card, no el slot.
+    History,
+}
+
+/// Clasifica qué dibuja el último turno a partir de su `media` propia y del
+/// slot global. Puro, sin I/O. La usa el dibujado y los tests de política.
+pub(crate) fn live_slot_kind_for_last_turn(
+    turn_has_media: bool,
+    anim_progress: bool,
+    slot_has_media: bool,
+) -> LiveSlotKind {
+    if turn_has_media {
+        LiveSlotKind::History
+    } else if anim_progress {
+        LiveSlotKind::Progress
+    } else if slot_has_media {
+        LiveSlotKind::Slot
+    } else {
+        LiveSlotKind::Hidden
+    }
 }
 
 /// Índices de turnos que llevan tarjeta histórica: con media y no finales.
@@ -529,7 +611,7 @@ pub(crate) fn history_mini_card_indices(conversation: &[ConversationTurn]) -> Ve
 /// es `ancho * h/w` clampeado a este tope para no mover el scroll.
 const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 
-/// Upscale máximo del preview inline (frente upscale libre).
+/// Upscale máximo del preview inline (M2-1: card capea, overlay libre).
 ///
 /// Decisión por nitidez (documentada): se capeó a 1.5× en vez de volver a
 /// `min(1.0)` porque los frames nativos salen a ~480px y los paneles miden
@@ -537,6 +619,13 @@ const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 /// en un layout que reserva todo el ancho. El cap solo muerde texturas
 /// chicas (tests/thumbnails), donde más de 1.5× pixela feo aun con filtrado
 /// lineal. "Ver grande" sigue disponible a tamaño real en el visor.
+///
+/// Política card vs overlay (diferencia intencional, no bug): la card inline
+/// usa este cap (`media_preview_size`); el overlay usa upscale libre
+/// (`media_overlay_preview_size`, "ver grande" a pedido del usuario).
+/// La política se pinnea en `app::anim_ui::preview_upscale_cap`
+/// (`Some` inline / `None` en overlay) y en el test
+/// `media_caps_card_vs_overlay_difieren_con_motivo`.
 pub const MAX_PREVIEW_UPSCALE: f32 = 1.5;
 
 /// Tooltips cortos de la toolbar única v3 (≤60 chars, sin cortes).
@@ -548,10 +637,24 @@ const MEDIA_TIP_PLAY: &str = "Retoma donde quedó (Espacio)";
 const MEDIA_TIP_STEP_BACK: &str = "Fotograma anterior (←)";
 const MEDIA_TIP_STEP_FWD: &str = "Fotograma siguiente (→)";
 
-/// Velocidad del reproductor de la card (B5).
+/// Ayuda visible de intents de animación invocables por texto (M2-3/M2-4).
 ///
-/// Por card (campo en el estado, sin global mutable): cada animación nueva
-/// arranca en `Normal` (ver `set_media`).
+/// Se dibuja en la card (`draw_media_card`); el parseo lo hace otro frente
+/// (parser del chat). Los 6 formatos más calidad, fps, bitrate, 720p y órbita
+/// hoy solo viven en el diálogo: este hint los hace descubribles por texto
+/// con ejemplos («exportar mp4 720p», «velocidad 2x», «órbita», «reintentar»)
+/// que el parser mapea a `ExportMedia`, `set_media_speed`, la vista `Orbita`
+/// del diálogo y `ExportMedia`/`ReplayMedia` respectivamente. Paridad de
+/// vocabulario con `app::anim_ui::media_chat_intent_examples` (DAG `ui → app`:
+/// duplicado pineado en tests de ambos lados).
+pub const MEDIA_CHAT_INTENTS_HINT: &str =
+    "Pedí en el chat: «exportar mp4 720p», «velocidad 2x», «órbita» o «reintentar»";
+
+/// Velocidad del reproductor de la card (B5, M2-5).
+///
+/// Preferencia por card que SOBREVIVE a `set_media` (pedir otra animación no
+/// pierde lo elegido); solo `clear_conversation` (Limpiar) la resetea.
+/// Sin global mutable: vive en el estado.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaPlaybackSpeed {
     /// Mitad de velocidad.
@@ -600,7 +703,8 @@ impl MediaPlaybackSpeed {
 ///
 /// Lo actualiza la app desde el hilo de export (`spawn_gif_export`); la UI
 /// solo lo renderiza. Progreso honesto: `Exporting` es indeterminado (el
-/// codificador no reporta %) y nunca inventa porcentaje.
+/// codificador no reporta %) y nunca inventa porcentaje. `Cancelled` es
+/// neutro (cancelar no es error): jamás comparte color ni texto con `Failed`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum MediaExportState {
     /// Sin exportación en curso ni resultado previo.
@@ -610,8 +714,22 @@ pub enum MediaExportState {
     Exporting,
     /// GIF escrito (la app avisa la ruta con un aviso).
     Done,
+    /// Export cancelada por el usuario: estado neutro, no error.
+    Cancelled,
     /// Falló con motivo en rioplatense (jamás mudo).
     Failed(String),
+}
+
+impl MediaExportState {
+    /// ¿Hay un fallo que esconde el player (`Failed`)?
+    pub const fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    /// ¿Se canceló (neutro, cancelar no es error)?
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
+    }
 }
 
 /// Formato de export del diálogo (espejo UI de
@@ -630,11 +748,22 @@ pub enum MediaExportFormat {
     Mp4,
     /// WebM VP9/AV1 vía ffmpeg-sidecar.
     Webm,
+    /// PDF matemático vía binario LaTeX (hilo worker, `LatexMissing` honesto).
+    Pdf,
+    /// SVG matemático vía LaTeX a DVI + `dvisvgm` (`SvgMissing` honesto).
+    Svg,
 }
 
 impl MediaExportFormat {
-    /// Los 4 del selector, en orden visible.
-    pub const ALL: [Self; 4] = [Self::Gif, Self::PngDir, Self::Mp4, Self::Webm];
+    /// Los 6 del selector, en orden visible.
+    pub const ALL: [Self; 6] = [
+        Self::Gif,
+        Self::PngDir,
+        Self::Mp4,
+        Self::Webm,
+        Self::Pdf,
+        Self::Svg,
+    ];
 
     /// Nombre visible del selector.
     pub const fn display_name(self) -> &'static str {
@@ -643,14 +772,59 @@ impl MediaExportFormat {
             Self::PngDir => "PNG-sequence",
             Self::Mp4 => "MP4",
             Self::Webm => "WebM",
+            Self::Pdf => "PDF",
+            Self::Svg => "SVG",
         }
     }
 
     /// ¿Necesita ffmpeg en el PATH?
     pub const fn needs_ffmpeg(self) -> bool {
         match self {
-            Self::Gif | Self::PngDir => false,
+            Self::Gif | Self::PngDir | Self::Pdf | Self::Svg => false,
             Self::Mp4 | Self::Webm => true,
+        }
+    }
+
+    /// ¿Necesita motor LaTeX en el PATH?
+    pub const fn needs_latex(self) -> bool {
+        match self {
+            Self::Pdf | Self::Svg => true,
+            Self::Gif | Self::PngDir | Self::Mp4 | Self::Webm => false,
+        }
+    }
+
+    /// ¿Necesita `dvisvgm` además de LaTeX?
+    pub const fn needs_dvisvgm(self) -> bool {
+        match self {
+            Self::Svg => true,
+            Self::Gif | Self::PngDir | Self::Mp4 | Self::Webm | Self::Pdf => false,
+        }
+    }
+
+    /// ¿Formato long-form (streaming por chunks)? MP4/WebM/PNG-dir sí;
+    /// GIF/PDF/SVG son cortos. Paridad con el wire (`ExportFormat::is_longform`).
+    pub const fn is_longform(self) -> bool {
+        match self {
+            Self::PngDir | Self::Mp4 | Self::Webm => true,
+            Self::Gif | Self::Pdf | Self::Svg => false,
+        }
+    }
+
+    /// Tope de frames del formato: GIF/PDF/SVG 64, long-form 1500. Puro.
+    pub const fn max_frames(self) -> usize {
+        if self.is_longform() {
+            MEDIA_EXPORT_MAX_FRAMES_LONGFORM
+        } else {
+            MEDIA_EXPORT_MAX_FRAMES
+        }
+    }
+
+    /// FPS por defecto del formato: long-form 30, resto 12. Puro.
+    pub const fn fps_default(self) -> u32 {
+        if self.is_longform() {
+            MEDIA_EXPORT_DEFAULT_VIDEO_FPS
+        } else {
+            MEDIA_EXPORT_DEFAULT_FPS
         }
     }
 }
@@ -687,6 +861,73 @@ impl MediaExportQuality {
     }
 }
 
+/// Tamaño del diálogo: de dónde salen las dimensiones del export.
+/// `Original` = tamaño del slot vivo; `Hd720p` = preset 1280×720
+/// (horizontal) o 720×1280 (vertical). Puro, sin I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaExportPreset {
+    /// Tamaño original del slot vivo (defecto, intacto).
+    #[default]
+    Original,
+    /// Preset 720p (1280×720 / 720×1280 según orientación).
+    Hd720p,
+}
+
+impl MediaExportPreset {
+    /// Las 2 del selector, en orden visible.
+    pub const DIALOG_ALL: [Self; 2] = [Self::Original, Self::Hd720p];
+
+    /// Nombre visible.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Original => "Original",
+            Self::Hd720p => "720p",
+        }
+    }
+
+    /// Tamaño del preset con la orientación dada. `Original` devuelve
+    /// `None` (el llamador usa el slot vivo); `Hd720p` devuelve el par
+    /// 1280×720 / 720×1280. Puro.
+    pub const fn size_for(self, orientation: MediaExportOrientation) -> Option<(u32, u32)> {
+        match self {
+            Self::Original => None,
+            Self::Hd720p => Some(orientation.size_720p()),
+        }
+    }
+}
+
+/// Orientación del preset 720p (solo aplica con `Hd720p`; con `Original`
+/// se ignora sin error). Pura, sin I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaExportOrientation {
+    /// 1280×720 (defecto).
+    #[default]
+    Horizontal,
+    /// 720×1280 (retrato, p. ej. móvil).
+    Vertical,
+}
+
+impl MediaExportOrientation {
+    /// Las 2 del selector, en orden visible.
+    pub const DIALOG_ALL: [Self; 2] = [Self::Horizontal, Self::Vertical];
+
+    /// Nombre visible.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Horizontal => "Horizontal",
+            Self::Vertical => "Vertical",
+        }
+    }
+
+    /// Par 720p de la orientación (pares, yuv420p). Puro.
+    pub const fn size_720p(self) -> (u32, u32) {
+        match self {
+            Self::Horizontal => (MEDIA_EXPORT_PRESET_W, MEDIA_EXPORT_PRESET_H),
+            Self::Vertical => (MEDIA_EXPORT_PRESET_H, MEDIA_EXPORT_PRESET_W),
+        }
+    }
+}
+
 /// Vista de la animación (selector del diálogo, si cabe sin romper).
 ///
 /// `Orbita` solo habilitada si la plantilla lo soporta (3D): si no,
@@ -714,6 +955,12 @@ impl MediaExportView {
 /// Motivo visible cuando MP4/WebM están deshabilitados sin ffmpeg.
 /// Paridad con `app::anim_native::FFMPEG_MISSING_HINT`.
 pub const MEDIA_EXPORT_FFMPEG_HINT: &str = "MP4/WebM requieren ffmpeg — se exporta GIF";
+/// Motivo visible cuando PDF/SVG están deshabilitados sin LaTeX.
+/// Paridad con `app::anim_native::LATEX_MISSING_HINT` (texto corto del diálogo).
+pub const MEDIA_EXPORT_LATEX_HINT: &str = "PDF/SVG requieren LaTeX — se usa vista nativa";
+/// Motivo visible cuando SVG está deshabilitado sin `dvisvgm`.
+/// Paridad con `app::anim_native::DVISVGM_MISSING_HINT` (texto corto del diálogo).
+pub const MEDIA_EXPORT_DVISVGM_HINT: &str = "SVG requiere dvisvgm — se exporta PDF o vista nativa";
 /// Nota Tex del diálogo: SVG real con fallback `ab_glyph`.
 pub const MEDIA_EXPORT_TEX_NOTE: &str =
     "Tex usa SVG real; si no hay formas, fallback ab_glyph (texto visible, jamás curva inventada).";
@@ -722,10 +969,19 @@ pub const MEDIA_EXPORT_ORBITA_SOLO_3D_HINT: &str =
     "la órbita solo vale en plantillas 3D — se exporta la vista plana";
 /// Tope de frames del diálogo (paridad GIF `GIF_EXPORT_MAX_FRAMES` 64).
 pub const MEDIA_EXPORT_MAX_FRAMES: usize = 64;
+/// Tope long-form del diálogo (MP4/WebM/PNG-dir: 50 s a 30 fps).
+/// Paridad con `VIDEO_LONGFORM_MAX_FRAMES` del wire.
+pub const MEDIA_EXPORT_MAX_FRAMES_LONGFORM: usize = 1500;
 /// FPS del diálogo (paridad `ANIM_EXPORT_FPS_MIN/MAX` 1..=60, default 12).
 pub const MEDIA_EXPORT_FPS_MIN: u32 = 1;
 pub const MEDIA_EXPORT_FPS_MAX: u32 = 60;
 pub const MEDIA_EXPORT_DEFAULT_FPS: u32 = 12;
+/// FPS por defecto del video long-form (MP4/WebM/PNG-dir): 30.
+/// El GIF sigue en 12 (`MEDIA_EXPORT_DEFAULT_FPS` intacto).
+pub const MEDIA_EXPORT_DEFAULT_VIDEO_FPS: u32 = 30;
+/// Preset 720p del diálogo (horizontal 1280×720, vertical 720×1280).
+pub const MEDIA_EXPORT_PRESET_W: u32 = 1280;
+pub const MEDIA_EXPORT_PRESET_H: u32 = 720;
 /// Bitrate del diálogo en kbps (paridad 100..=20000).
 pub const MEDIA_EXPORT_BITRATE_MIN_KBPS: u32 = 100;
 pub const MEDIA_EXPORT_BITRATE_MAX_KBPS: u32 = 20_000;
@@ -752,16 +1008,29 @@ pub struct MediaExportDialog {
     /// ¿Hay ffmpeg? Lo setea la app con `detect_ffmpeg_available()`
     /// fuera del draw, una vez al abrir.
     pub ffmpeg_available: bool,
+    /// ¿Hay motor LaTeX? Lo setea la app con `detect_latex_available()`
+    /// fuera del draw, una vez al abrir. PDF lo exige.
+    pub latex_available: bool,
+    /// ¿Hay `dvisvgm`? Lo setea la app con `detect_dvisvgm_available()`
+    /// fuera del draw, una vez al abrir. SVG lo exige además de LaTeX.
+    pub dvisvgm_available: bool,
     /// Progreso 0.0..=1.0 mientras exporta (`None` = indeterminado/spinner).
     pub progress: Option<f32>,
     /// Error honesto visible (`None` = sin error). Nada fake mudo.
     pub error: Option<String>,
+    /// Nota neutra de cancelación (`None` = no se canceló). Cancelar no es
+    /// error: jamás comparte color ni texto con `error`.
+    pub cancelled_note: Option<String>,
     /// ¿Hay export en curso? (la UI deshabilita Exportar y muestra progreso).
     pub exporting: bool,
     /// Vista elegida (Plana siempre, Órbita solo si `orbit_supported`).
     pub view: MediaExportView,
     /// ¿La plantilla soporta órbita? Lo setea la app al abrir.
     pub orbit_supported: bool,
+    /// Tamaño del export (Original = slot vivo; 720p = preset).
+    pub preset: MediaExportPreset,
+    /// Orientación del preset 720p (con Original se ignora).
+    pub orientation: MediaExportOrientation,
 }
 
 impl Default for MediaExportDialog {
@@ -771,7 +1040,7 @@ impl Default for MediaExportDialog {
 }
 
 impl MediaExportDialog {
-    /// Diálogo nuevo: cerrado, GIF + Media + 12fps, sin ffmpeg.
+    /// Diálogo nuevo: cerrado, GIF + Media + 12fps, sin ffmpeg ni LaTeX.
     /// Puro.
     pub fn new() -> Self {
         Self {
@@ -782,16 +1051,23 @@ impl MediaExportDialog {
             bitrate_kbps: MediaExportQuality::Media.suggested_bitrate_kbps(),
             frame_count: 0,
             ffmpeg_available: false,
+            latex_available: false,
+            dvisvgm_available: false,
             progress: None,
             error: None,
+            cancelled_note: None,
             exporting: false,
             view: MediaExportView::Plana,
             orbit_supported: false,
+            preset: MediaExportPreset::Original,
+            orientation: MediaExportOrientation::Horizontal,
         }
     }
 
     /// Abre el diálogo con lo detectado fuera del draw (ffmpeg una vez +
     /// soporte de órbita + frames del slot vivo). Puro.
+    /// LaTeX/dvisvgm quedan en `false`: la app los fija luego con
+    /// `set_latex_availability` (detección fuera del draw).
     pub fn open_with(&mut self, ffmpeg_available: bool, orbit_supported: bool, frame_count: usize) {
         self.open = true;
         self.ffmpeg_available = ffmpeg_available;
@@ -800,10 +1076,22 @@ impl MediaExportDialog {
         self.exporting = false;
         self.progress = None;
         self.error = None;
+        self.cancelled_note = None;
         if !orbit_supported {
             self.view = MediaExportView::Plana;
         }
-        if self.format.needs_ffmpeg() && !ffmpeg_available {
+        if !self.is_format_enabled(self.format) {
+            self.format = MediaExportFormat::Gif;
+        }
+    }
+
+    /// Fija la disponibilidad LaTeX/dvisvgm detectada fuera del draw.
+    /// Si el formato elegido queda deshabilitado, cae a GIF (honesto,
+    /// sin export mudo). Puro.
+    pub fn set_latex_availability(&mut self, latex_available: bool, dvisvgm_available: bool) {
+        self.latex_available = latex_available;
+        self.dvisvgm_available = dvisvgm_available;
+        if !self.is_format_enabled(self.format) {
             self.format = MediaExportFormat::Gif;
         }
     }
@@ -813,21 +1101,32 @@ impl MediaExportDialog {
         self.open = false;
         self.exporting = false;
         self.progress = None;
+        self.cancelled_note = None;
     }
 
-    /// ¿El formato está habilitado? MP4/WebM exigen ffmpeg.
+    /// ¿El formato está habilitado? MP4/WebM exigen ffmpeg;
+    /// PDF exige LaTeX; SVG exige LaTeX + dvisvgm.
     pub fn is_format_enabled(&self, format: MediaExportFormat) -> bool {
-        if format.needs_ffmpeg() {
-            self.ffmpeg_available
-        } else {
-            true
+        if format.needs_ffmpeg() && !self.ffmpeg_available {
+            return false;
         }
+        if format.needs_latex() && !self.latex_available {
+            return false;
+        }
+        if format.needs_dvisvgm() && !self.dvisvgm_available {
+            return false;
+        }
+        true
     }
 
     /// Motivo visible del formato deshabilitado (`None` = habilitado).
     pub fn format_disabled_reason(&self, format: MediaExportFormat) -> Option<&'static str> {
         if self.is_format_enabled(format) {
             None
+        } else if format.needs_dvisvgm() && self.latex_available && !self.dvisvgm_available {
+            Some(MEDIA_EXPORT_DVISVGM_HINT)
+        } else if format.needs_latex() && !self.latex_available {
+            Some(MEDIA_EXPORT_LATEX_HINT)
         } else {
             Some(MEDIA_EXPORT_FFMPEG_HINT)
         }
@@ -842,7 +1141,10 @@ impl MediaExportDialog {
     /// `Err` = motivo honesto para mostrar (jamás export fake mudo).
     pub fn validate_selection(&self) -> Result<(), String> {
         if !self.is_format_enabled(self.format) {
-            return Err(MEDIA_EXPORT_FFMPEG_HINT.to_string());
+            let motivo = self
+                .format_disabled_reason(self.format)
+                .unwrap_or(MEDIA_EXPORT_FFMPEG_HINT);
+            return Err(motivo.to_string());
         }
         if !(MEDIA_EXPORT_FPS_MIN..=MEDIA_EXPORT_FPS_MAX).contains(&self.fps) {
             return Err(format!(
@@ -858,11 +1160,9 @@ impl MediaExportDialog {
                 self.bitrate_kbps, MEDIA_EXPORT_BITRATE_MIN_KBPS, MEDIA_EXPORT_BITRATE_MAX_KBPS
             ));
         }
-        if self.frame_count == 0 || self.frame_count > MEDIA_EXPORT_MAX_FRAMES {
-            return Err(format!(
-                "frames {} fuera de 1..={}",
-                self.frame_count, MEDIA_EXPORT_MAX_FRAMES
-            ));
+        let tope = self.format.max_frames();
+        if self.frame_count == 0 || self.frame_count > tope {
+            return Err(self.aviso_limite());
         }
         if self.view == MediaExportView::Orbita && !self.orbit_supported {
             return Err(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT.to_string());
@@ -870,10 +1170,63 @@ impl MediaExportDialog {
         Ok(())
     }
 
+    /// Aviso honesto cuando el conteo excede el tope del formato, con la
+    /// alternativa sugerida (GIF>64 → mp4; long-form>1500 → partir).
+    /// Puro.
+    pub fn aviso_limite(&self) -> String {
+        let tope = self.format.max_frames();
+        if self.frame_count != 0 && self.frame_count <= tope {
+            return String::new();
+        }
+        if self.format.is_longform() {
+            format!(
+                "frames {} fuera de 1..={tope} (50 s a 30 fps): partí el video en dos",
+                self.frame_count
+            )
+        } else {
+            format!(
+                "frames {} fuera de 1..={tope} (todo en RAM): exportá a mp4 para long-form (hasta {MEDIA_EXPORT_MAX_FRAMES_LONGFORM}) o bajá los frames",
+                self.frame_count
+            )
+        }
+    }
+
+    /// Cambia el formato aplicando sus defaults (long-form → 30 fps si
+    /// venía del default GIF 12; GIF → 12 si venía del default video 30).
+    /// Los valores tocados a mano se respetan. Puro.
+    pub fn set_format_con_defaults(&mut self, format: MediaExportFormat) {
+        let anterior = self.format;
+        self.format = format;
+        if anterior == format {
+            return;
+        }
+        if format.is_longform() && self.fps == MEDIA_EXPORT_DEFAULT_FPS {
+            self.fps = MEDIA_EXPORT_DEFAULT_VIDEO_FPS;
+        } else if !format.is_longform() && self.fps == MEDIA_EXPORT_DEFAULT_VIDEO_FPS {
+            self.fps = MEDIA_EXPORT_DEFAULT_FPS;
+        }
+        self.error = None;
+        self.cancelled_note = None;
+    }
+
+    /// Tamaño efectivo del export: preset 720p con su orientación, o `None`
+    /// con Original (el llamador usa el slot vivo). Puro.
+    pub fn preset_size(&self) -> Option<(u32, u32)> {
+        self.preset.size_for(self.orientation)
+    }
+
+    /// Publica progreso real por chunk (0.0..=1.0, se clampa) sin tocar
+    /// error/cancelación. Puro: el worker long-form lo llama por chunk y
+    /// el draw muestra `ProgressBar`.
+    pub fn set_progress(&mut self, valor: f32) {
+        self.progress = Some(valor.clamp(0.0, 1.0));
+    }
+
     /// Marca inicio de export (limpia error, progreso indeterminado). Puro.
     pub fn mark_started(&mut self) {
         self.exporting = true;
         self.error = None;
+        self.cancelled_note = None;
         self.progress = None;
     }
 
@@ -881,7 +1234,16 @@ impl MediaExportDialog {
     pub fn mark_failed(&mut self, reason: impl Into<String>) {
         self.exporting = false;
         self.progress = None;
+        self.cancelled_note = None;
         self.error = Some(reason.into());
+    }
+
+    /// Marca cancelación neutra visible (cancelar no es error). Puro.
+    pub fn mark_cancelled(&mut self, note: impl Into<String>) {
+        self.exporting = false;
+        self.progress = None;
+        self.error = None;
+        self.cancelled_note = Some(note.into());
     }
 
     /// Marca éxito (cierra el spinner, sin error). Puro.
@@ -889,6 +1251,7 @@ impl MediaExportDialog {
         self.exporting = false;
         self.progress = Some(1.0);
         self.error = None;
+        self.cancelled_note = None;
     }
 }
 
@@ -1082,8 +1445,21 @@ pub struct AssistantPanelState {
     pub tutor_domain_samples: Vec<f32>,
     /// Última actividad legible («hoy», «ayer», «hace N días») de la próxima rama.
     pub tutor_last_activity: String,
-    /// Texturas de frames cargadas una sola vez al mostrar la animación.
-    media_textures: Vec<egui::TextureHandle>,
+    /// Texturas de frames de la VENTANA viva (`RefCell` porque la Piel dibuja
+    /// con `&Estado` y la ventana desliza en el draw).
+    ///
+    /// Solo los frames `[playhead-2, playhead+2]` (ver `MEDIA_TEXTURE_WINDOW`):
+    /// `set_media` sube `[0, +2]` y `ensure_media_window` completa/evicta bajo
+    /// demanda. En orden de frame desde `media_window_base`. Gracia y topes
+    /// intactos (`MEDIA_TEXTURE_GRACE_FRAMES`, `HISTORY_RETIRED_MAX_TEXTURES`).
+    media_textures: std::cell::RefCell<Vec<egui::TextureHandle>>,
+    /// Índice de frame de `media_textures[0]` (base de la ventana viva).
+    /// `Cell` porque la Piel dibuja con `&Estado`. Se reinicia en `set_media`.
+    media_window_base: std::cell::Cell<usize>,
+    /// Generación del set vivo: los nombres de textura llevan `gen` para no
+    /// colisionar entre sets (`assistant_media_{gen}_{i:03}`). Se reinicia en
+    /// `set_media` (wrapping, sin pánicos).
+    media_generation: std::cell::Cell<u64>,
     /// Sets viejos retirados con gracia diferida (fix `Queue::submit`).
     ///
     /// `set_media` mueve acá el set anterior en vez de dropearlo; cada
@@ -1095,8 +1471,15 @@ pub struct AssistantPanelState {
     /// Thumbs históricos: 1 `TextureHandle` chico (96px) por turno con media.
     /// `RefCell` porque la Piel dibuja con `&Estado`; la huella detecta
     /// reemplazos (`attach_media`) sin guardar `Vec<ColorImage>` por turno.
+    /// Evicción LRU real por `last_used` (ver `ensure_history_thumb`): con
+    /// ≤6 turnos vivos << 96 casi nunca muerde, pero bajo presión evicta el
+    /// menos usado, no el índice más chico.
     history_thumb_textures:
         std::cell::RefCell<std::collections::BTreeMap<usize, HistoryThumbEntry>>,
+    /// Reloj monótono de uso del caché histórico (LRU): cada
+    /// `ensure_history_thumb` (hit o inserción) lo avanza y lo sella en la
+    /// entrada. `Cell` porque la Piel dibuja con `&Estado`.
+    history_thumb_clock: std::cell::Cell<u64>,
     /// Instante del último tick de gracia: varios mini-cards + slot vivo en el
     /// mismo frame comparten UN tick (la gracia son frames dibujados, no cards).
     retire_tick_time_s: std::cell::Cell<Option<f64>>,
@@ -1139,7 +1522,9 @@ pub struct AssistantPanelState {
     /// Diálogo Exportar profesional (formato/audio/calidad/vista/Tex).
     /// `RefCell` porque la Piel dibuja con `&Estado`; la app lo abre con lo
     /// detectado fuera del draw (ffmpeg una vez + pista del pedido).
-    /// Se cierra en `set_media` (card nueva = diálogo fresco).
+    /// M2-5: `set_media` solo lo cierra y CONSERVA las prefs (formato,
+    /// calidad, bitrate, fps, preset, orientación); solo `clear_conversation`
+    /// (Limpiar) las resetea a los defaults.
     export_dialog: std::cell::RefCell<MediaExportDialog>,
     /// Confirmación del usuario de que el modelo elegido admite imágenes.
     pub vision_enabled: bool,
@@ -1235,9 +1620,12 @@ impl Default for AssistantPanelState {
             agent_activity: Vec::new(),
             agent_ledger: None,
             media: None,
-            media_textures: Vec::new(),
+            media_textures: std::cell::RefCell::new(Vec::new()),
+            media_window_base: std::cell::Cell::new(0),
+            media_generation: std::cell::Cell::new(0),
             retired_media_textures: std::cell::RefCell::new(Vec::new()),
             history_thumb_textures: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            history_thumb_clock: std::cell::Cell::new(0),
             retire_tick_time_s: std::cell::Cell::new(None),
             media_textures_ready: false,
             media_playhead_ms: std::cell::Cell::new(0),
@@ -1381,6 +1769,11 @@ impl AssistantPanelState {
         self.clear_proposed_plan();
         self.clear_pending_clarification();
         self.error = None;
+        // M2-5: Limpiar es el ÚNICO reset de las prefs de reproducción y
+        // export (`set_media` las conserva entre animaciones).
+        self.media_speed.set(MediaPlaybackSpeed::default());
+        self.media_export = MediaExportState::default();
+        *self.export_dialog.borrow_mut() = MediaExportDialog::new();
     }
 
     /// Conserva una consulta no resuelta localmente hasta que el usuario decida
@@ -1826,43 +2219,126 @@ impl AssistantPanelState {
     /// ticks de `draw_media_card`. Solo se dropean de inmediato los sets
     /// cuya gracia ya expiró.
     pub fn set_media(&mut self, media: Option<AssistantMedia>, ctx: &egui::Context) {
-        if !self.media_textures.is_empty() {
-            let old = std::mem::take(&mut self.media_textures);
+        if !self.media_textures.borrow().is_empty() {
+            let old = std::mem::take(&mut *self.media_textures.borrow_mut());
             self.retire_media_textures(old);
         }
         self.drop_expired_retired_media();
         self.media = media;
         self.media_textures_ready = false;
+        self.media_window_base.set(0);
+        self.media_generation
+            .set(self.media_generation.get().wrapping_add(1));
         // Card nueva = reproductor fresco (B5): playhead en 0, reloj sin
-        // armar, reproduciendo a velocidad base y sin resultado de export
-        // rancio de la animación anterior.
+        // armar, reproduciendo y sin resultado de export rancio de la
+        // animación anterior. M2-5: la velocidad y las prefs del diálogo
+        // (formato, calidad, bitrate, fps, preset, orientación) SOBREVIVEN:
+        // pedir otra animación no pierde lo elegido; solo Limpiar resetea
+        // (ver `clear_conversation`). El easing sí se reinicia: es contenido
+        // del wire de cada animación, no preferencia del usuario.
         self.media_playhead_ms.set(0);
         self.media_last_tick_s.set(None);
         self.media_paused.set(false);
-        self.media_speed.set(MediaPlaybackSpeed::default());
         self.media_easing_name = "linear".to_owned();
         self.media_last_shown.set(None);
         self.media_fullscreen.set(false);
         self.media_export = MediaExportState::default();
-        // Card nueva = diálogo fresco: no arrastra formato/error de la anterior.
+        // Card nueva = diálogo cerrado pero con prefs intactas (M2-5): `close`
+        // solo baja `open`/progreso/error; formato, calidad, bitrate, fps,
+        // preset y orientación sobreviven. Solo Limpiar resetea.
         self.export_dialog.borrow_mut().close();
         if let Some(media) = &self.media {
-            self.media_textures = media
-                .frames
+            // F4: ventana inicial `[0, +2]` (el playhead arranca en 0); el
+            // resto sube bajo demanda en `ensure_media_window`.
+            let gen = self.media_generation.get();
+            let fin = media.frames.len().min(MEDIA_TEXTURE_WINDOW + 1);
+            *self.media_textures.borrow_mut() = media.frames[..fin]
                 .iter()
                 .enumerate()
                 .map(|(index, frame)| {
                     ctx.load_texture(
-                        format!("assistant_media_frame_{:03}", index),
+                        format!("assistant_media_{gen}_{index:03}"),
                         frame.clone(),
                         egui::TextureOptions::LINEAR,
                     )
                 })
                 .collect();
+            self.media_window_base.set(0);
             self.media_textures_ready = true;
         } else {
-            self.media_textures.clear();
+            self.media_textures.borrow_mut().clear();
         }
+    }
+
+    /// Rango vivo `[lo, hi]` para el frame `index` (clamp al set). Puro.
+    fn media_window_range(&self, index: usize) -> Option<(usize, usize)> {
+        let len = self.media.as_ref().map_or(0, |m| m.frames.len());
+        if len == 0 {
+            return None;
+        }
+        let index = index.min(len - 1);
+        Some((
+            index.saturating_sub(MEDIA_TEXTURE_WINDOW),
+            (index + MEDIA_TEXTURE_WINDOW).min(len - 1),
+        ))
+    }
+
+    /// Garantiza la ventana viva alrededor de `index`: sube lo que falta y
+    /// retira (con gracia) lo que sale. Sin cambios si ya cubre. `&self`
+    /// porque corre en el draw (`fn render(&Estado)`); solo subida GPU, cero
+    /// I/O/spawn — igual que el thumb histórico.
+    pub(crate) fn ensure_media_window(&self, index: usize, ctx: &egui::Context) {
+        let Some(media) = &self.media else {
+            return;
+        };
+        let Some((lo, hi)) = self.media_window_range(index) else {
+            return;
+        };
+        let base = self.media_window_base.get();
+        {
+            let viva = self.media_textures.borrow();
+            if !viva.is_empty() && base <= lo && base.saturating_add(viva.len()) > hi {
+                return;
+            }
+        }
+        let gen = self.media_generation.get();
+        let mut nueva = Vec::with_capacity(hi - lo + 1);
+        let mut evictar = Vec::new();
+        {
+            let viva = self.media_textures.borrow();
+            for i in lo..=hi {
+                if i >= base && i < base.saturating_add(viva.len()) {
+                    nueva.push(viva[i - base].clone());
+                } else if let Some(frame) = media.frames.get(i) {
+                    nueva.push(ctx.load_texture(
+                        format!("assistant_media_{gen}_{i:03}"),
+                        frame.clone(),
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
+            for (k, handle) in viva.iter().enumerate() {
+                let frame_idx = base.saturating_add(k);
+                if frame_idx < lo || frame_idx > hi {
+                    evictar.push(handle.clone());
+                }
+            }
+        }
+        *self.media_textures.borrow_mut() = nueva;
+        self.media_window_base.set(lo);
+        if !evictar.is_empty() {
+            self.retire_media_textures(evictar);
+        }
+    }
+
+    /// Handle vivo del frame `index (`None` si está fuera de la ventana:
+    /// el draw muestra el placeholder hasta que `ensure_media_window` corre).
+    /// Puro (`&Estado`), sin I/O.
+    pub(crate) fn media_texture_for(&self, index: usize) -> Option<egui::TextureHandle> {
+        let base = self.media_window_base.get();
+        index
+            .checked_sub(base)
+            .and_then(|k| self.media_textures.borrow().get(k).cloned())
     }
 
     /// Retira un set viejo a la cola de gracia (no lo destruye).
@@ -1929,9 +2405,15 @@ impl AssistantPanelState {
             .sum()
     }
 
-    /// texturas de frames listas (para el dibujado del reproductor).
-    pub(crate) fn media_textures(&self) -> (&[egui::TextureHandle], bool) {
-        (&self.media_textures, self.media_textures_ready)
+    /// texturas de la ventana viva + flag lista (para el dibujado del
+    /// reproductor). Se devuelve clonada (handles baratos): el `RefCell` no
+    /// presta slices con vida de `&self`. El frame exacto se pide con
+    /// `media_texture_for`.
+    pub(crate) fn media_textures(&self) -> (Vec<egui::TextureHandle>, bool) {
+        (
+            self.media_textures.borrow().clone(),
+            self.media_textures_ready,
+        )
     }
 
     /// Avanza la gracia UNA vez por frame (idempotente por instante egui).
@@ -1953,6 +2435,9 @@ impl AssistantPanelState {
     /// retira la vieja con gracia y sube la nueva. `None` honesto si la media
     /// no valida o el thumb no trae los RGBA exactos de 96×96 (placeholder en
     /// la card, jamás pánico). Cero I/O/spawn: solo subida GPU como `set_media`.
+    /// Evicción LRU real: cada acceso sella `history_thumb_clock` en la
+    /// entrada y al llegar al tope se evicta la de menor `last_used` (no el
+    /// índice más chico: el turno 0 es el más visitado al scrollear arriba).
     fn ensure_history_thumb(
         &self,
         turn_idx: usize,
@@ -1965,6 +2450,8 @@ impl AssistantPanelState {
         if media.thumb.len() != TURN_MEDIA_THUMB_SIDE_PX * TURN_MEDIA_THUMB_SIDE_PX * 4 {
             return None;
         }
+        let tick = self.history_thumb_clock.get().wrapping_add(1);
+        self.history_thumb_clock.set(tick);
         let fingerprint = history_thumb_fingerprint(media);
         let cached = self
             .history_thumb_textures
@@ -1973,6 +2460,9 @@ impl AssistantPanelState {
             .map(|entry| (entry.fingerprint, entry.texture.clone()));
         if let Some((cached_fingerprint, texture)) = cached {
             if cached_fingerprint == fingerprint {
+                if let Some(entry) = self.history_thumb_textures.borrow_mut().get_mut(&turn_idx) {
+                    entry.last_used = tick;
+                }
                 return Some(texture);
             }
         }
@@ -1981,10 +2471,14 @@ impl AssistantPanelState {
             self.retire_media_textures(vec![old.texture]);
         }
         while cache.len() >= HISTORY_THUMB_MAX_TEXTURES {
-            let Some(oldest) = cache.keys().next().copied() else {
+            let Some(victim) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(idx, _)| *idx)
+            else {
                 break;
             };
-            if let Some(evicted) = cache.remove(&oldest) {
+            if let Some(evicted) = cache.remove(&victim) {
                 self.retire_media_textures(vec![evicted.texture]);
             }
         }
@@ -2002,6 +2496,7 @@ impl AssistantPanelState {
             HistoryThumbEntry {
                 fingerprint,
                 texture: texture.clone(),
+                last_used: tick,
             },
         );
         Some(texture)
@@ -2030,6 +2525,16 @@ impl AssistantPanelState {
     /// delay del GIF exportado). Puro, sin I/O.
     pub fn media_playback_rate(&self) -> f32 {
         self.media_speed.get().rate()
+    }
+
+    /// Fija la velocidad del reproductor (intent de chat «velocidad 2x», M2-4).
+    ///
+    /// La emite el parser del chat (otro frente); el menú de la card escribe
+    /// el mismo `Cell`. Puro estado UI (`&self` por interior mutável), sin
+    /// I/O ni spawn. Sobrevive a `set_media`; solo `clear_conversation`
+    /// (Limpiar) la resetea (M2-5).
+    pub fn set_media_speed(&self, speed: MediaPlaybackSpeed) {
+        self.media_speed.set(speed);
     }
 
     /// Estado de exportación para la app (hilo de export).
@@ -2086,6 +2591,11 @@ impl AssistantPanelState {
         self.export_dialog.borrow_mut().mark_failed(reason);
     }
 
+    /// Marca cancelación neutra visible en el diálogo (cancelar no es error).
+    pub fn export_dialog_mark_cancelled(&self, note: impl Into<String>) {
+        self.export_dialog.borrow_mut().mark_cancelled(note);
+    }
+
     /// Marca éxito del export en el diálogo.
     pub fn export_dialog_mark_done(&self) {
         self.export_dialog.borrow_mut().mark_done();
@@ -2094,6 +2604,14 @@ impl AssistantPanelState {
     /// Fija el formato del diálogo (tests + atajos de la app).
     pub fn export_dialog_set_format(&self, format: MediaExportFormat) {
         self.export_dialog.borrow_mut().format = format;
+    }
+
+    /// Fija LaTeX/dvisvgm detectados fuera del draw (la app, al abrir).
+    /// Puro.
+    pub fn set_export_dialog_latex(&self, latex_available: bool, dvisvgm_available: bool) {
+        self.export_dialog
+            .borrow_mut()
+            .set_latex_availability(latex_available, dvisvgm_available);
     }
 
     /// Fija el easing del scrub por nombre del wire (`EASING_NAMES`).
@@ -5746,8 +6264,17 @@ pub fn media_elided_title(title: &str, max_chars: usize) -> String {
     elide_chars(trimmed, max_chars)
 }
 
+/// ¿La card muestra el player (toolbar + deslizador + export)?
+///
+/// P0: en `Failed` el player se esconde y solo quedan error + [Reintentar].
+/// `Cancelled` es neutro (cancelar no es error) y conserva el player.
+/// Puro (`&Estado`), sin I/O. Lo usa `draw_media_card` y los tests.
+pub fn media_card_shows_player_controls(export: &MediaExportState) -> bool {
+    !export.is_failed()
+}
+
 /// Estado textual del header v3: `generando…` / `lista` / `error: motivo`
-/// (+ `exportando…` mientras el hilo de export vuela).
+/// / `cancelado` (+ `exportando…` mientras el hilo de export vuela).
 ///
 /// Puro (`&Estado -> String`): el color lo resuelve el render. El motivo de
 /// error se elide a `MEDIA_HEADER_ERROR_MAX_CHARS`; el detalle completo vive
@@ -5762,6 +6289,7 @@ pub fn media_header_status(generating: bool, export: &MediaExportState) -> Strin
                 format!("error: {why}")
             }
         }
+        MediaExportState::Cancelled => "cancelado".to_owned(),
         MediaExportState::Exporting => "exportando…".to_owned(),
         MediaExportState::Idle | MediaExportState::Done => {
             if generating {
@@ -5773,10 +6301,12 @@ pub fn media_header_status(generating: bool, export: &MediaExportState) -> Strin
     }
 }
 
-/// Tamaño del preview en el overlay (N2): llena `min(ancho, alto-disponible)`
-/// respetando aspecto. A diferencia de la card inline (cap 1.5× por nitidez),
-/// el overlay permite upscale libre: "ver grande" lo pide y el usuario lo
-/// abrió a propósito. Puro, sin `unwrap`.
+/// Tamaño del preview en el overlay (N2, M2-1): llena `min(ancho, alto-disponible)`
+/// respetando aspecto. A diferencia de la card inline (cap 1.5× por nitidez,
+/// ver `MAX_PREVIEW_UPSCALE`), el overlay permite upscale libre: "ver grande"
+/// lo pide el usuario a propósito. Diferencia intencional pineada en
+/// `app::anim_ui::preview_upscale_cap` y en el test
+/// `media_caps_card_vs_overlay_difieren_con_motivo`. Puro, sin `unwrap`.
 pub fn media_overlay_preview_size(
     frame_w: f32,
     frame_h: f32,
@@ -5934,7 +6464,13 @@ fn draw_history_mini_card(
                     ui.painter().image(
                         texture.id(),
                         rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        // M2-2: UV con recorte centrado (96×96 real = completo,
+                        // sin deformación posible; no-cuadrado recorta, jamás
+                        // estira). Ver `history_thumb_uv_rect`.
+                        history_thumb_uv_rect(
+                            TURN_MEDIA_THUMB_SIDE_PX as u32,
+                            TURN_MEDIA_THUMB_SIDE_PX as u32,
+                        ),
                         egui::Color32::WHITE,
                     );
                 } else {
@@ -6409,7 +6945,8 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     let generating = state.anim_progress;
     let status = media_header_status(generating, &state.media_export);
     let status_color = match &state.media_export {
-        MediaExportState::Failed(_) => theme.warning,
+        MediaExportState::Failed(_) => theme.danger,
+        MediaExportState::Cancelled => theme.text_secondary,
         MediaExportState::Exporting => theme.text_secondary,
         MediaExportState::Idle | MediaExportState::Done => {
             if generating {
@@ -6455,16 +6992,17 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     };
     // Handle clonado (barato): la pintura no retiene borrow del estado.
     // Tamaño de referencia = primer frame (estable entre fotogramas); la
-    // textura solo se re-selecciona si cambió el frame (las texturas se
-    // suben una sola vez en `set_media`, acá no hay I/O).
+    // textura solo se re-selecciona si cambió el frame. F4: la ventana viva
+    // desliza acá (subida GPU bajo demanda, cero I/O de disco/spawn).
     debug_assert!(index < frame_count, "índice de frame dentro de la media");
+    state.ensure_media_window(index, ui.ctx());
     let (first_w, first_h) = state
         .media_textures()
         .0
         .first()
         .map(|t| (t.size_vec2().x, t.size_vec2().y))
         .unwrap_or((1.0, 1.0));
-    let texture = state.media_textures().0.get(index).cloned();
+    let texture = state.media_texture_for(index);
     if state.media_last_shown.get() != Some(index) {
         state.media_last_shown.set(Some(index));
     }
@@ -6472,12 +7010,17 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     let speed_label = state.media_speed.get().label();
     let (counter_compact, counter_long) = media_counter_text(index, frame_count);
     let exporting = matches!(state.media_export, MediaExportState::Exporting);
+    let export_failed = !media_card_shows_player_controls(&state.media_export);
     let export_line: Option<(String, egui::Color32)> = match &state.media_export {
         MediaExportState::Idle => None,
         MediaExportState::Exporting => Some(("Exportando…".to_owned(), theme.text_secondary)),
         MediaExportState::Done => Some(("Se exportó la animación.".to_owned(), theme.success)),
+        MediaExportState::Cancelled => Some((
+            "Se canceló la exportación.".to_owned(),
+            theme.text_secondary,
+        )),
         MediaExportState::Failed(reason) => {
-            Some((format!("No se pudo exportar: {reason}"), theme.warning))
+            Some((format!("No se pudo exportar: {reason}"), theme.danger))
         }
     };
     egui::Frame::none()
@@ -6528,26 +7071,55 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 );
             }
             ui.add_space(SPACE_XS);
-            let toolbar_view = MediaToolbarView {
-                counter_compact: &counter_compact,
-                counter_long: &counter_long,
-                speed_label,
-                duration_ms,
-                frame_count,
-                exporting,
-                in_fullscreen: false,
-            };
-            if let Some(export_action) = draw_media_toolbar(ui, state, &toolbar_view).action {
-                action = Some(export_action);
-            }
-            if exporting {
+            // P0: en `Failed` el player se esconde (toolbar + deslizador +
+            // export): solo error honesto + [Reintentar]. Player y error a la
+            // vez confundían (¿qué se reproduce?) y el export roto invitaba a
+            // reintentar a ciegas sobre el mismo fallo.
+            if export_failed {
+                if let Some((text, color)) = &export_line {
+                    ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
+                    ui.add_space(SPACE_XS);
+                }
+                if ui
+                    .button(egui::RichText::new("Reintentar").size(TYPE_XS).strong())
+                    .on_hover_text("Vuelve a abrir el diálogo de exportar")
+                    .clicked()
+                {
+                    action = Some(AssistantUiAction::ExportMedia);
+                }
+            } else {
+                let toolbar_view = MediaToolbarView {
+                    counter_compact: &counter_compact,
+                    counter_long: &counter_long,
+                    speed_label,
+                    duration_ms,
+                    frame_count,
+                    exporting,
+                    in_fullscreen: false,
+                };
+                if let Some(export_action) = draw_media_toolbar(ui, state, &toolbar_view).action {
+                    action = Some(export_action);
+                }
+                if exporting {
+                    ui.add_space(SPACE_XS);
+                    let pulse = ((now_s * 2.4).sin() + 1.0) * 0.5;
+                    ui.add(
+                        egui::ProgressBar::new(0.2 + 0.55 * pulse as f32).desired_height(SPACE_XS),
+                    );
+                }
+                if let Some((text, color)) = &export_line {
+                    ui.add_space(SPACE_XS);
+                    ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
+                }
+                // M2-4: ayuda visible de intents por texto (el parseo lo hace
+                // otro frente). En `Failed` no se muestra: ahí solo quedan el
+                // error honesto + [Reintentar] (P0).
                 ui.add_space(SPACE_XS);
-                let pulse = ((now_s * 2.4).sin() + 1.0) * 0.5;
-                ui.add(egui::ProgressBar::new(0.2 + 0.55 * pulse as f32).desired_height(SPACE_XS));
-            }
-            if let Some((text, color)) = &export_line {
-                ui.add_space(SPACE_XS);
-                ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
+                ui.label(
+                    egui::RichText::new(MEDIA_CHAT_INTENTS_HINT)
+                        .color(theme.text_tertiary)
+                        .size(TYPE_2XS),
+                );
             }
         });
     // Overlay de pantalla completa: se conserva (ventana centrada + preview
@@ -6582,7 +7154,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 ui.set_min_width(ui.available_width());
                 draw_media_header(ui, &title, &status, status_color);
                 ui.add_space(SPACE_XS);
-                if let Some(texture) = state.media_textures().0.get(index).cloned() {
+                if let Some(texture) = state.media_texture_for(index) {
                     let size = texture.size_vec2();
                     // Reserva honesta para título + toolbar (todo tokens): lo
                     // que queda es para el preview, centrado.
@@ -6671,14 +7243,18 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
 /// `CloseExportDialog`). La app ejecuta el `spawn_*` del formato fuera del
 /// draw y publica progreso/error (jamás mudo).
 ///
-/// - Formatos: radio por formato con `add_enabled` + motivo cuando falta
-///   ffmpeg (`MEDIA_EXPORT_FFMPEG_HINT`).
+/// - Formatos: radio por formato con `add_enabled` + motivo inline cuando
+///   falta ffmpeg (`MEDIA_EXPORT_FFMPEG_HINT`) o LaTeX/dvisvgm
+///   (`MEDIA_EXPORT_LATEX_HINT` / `MEDIA_EXPORT_DVISVGM_HINT`): texto visible
+///   bajo el radio, no solo tooltip (el tooltip no se lee con teclado).
 /// - Calidad: 3 radios + `DragValue` de bitrate/fps acotados.
 /// - Vista: Plana 2D siempre; Órbita 3D solo si la plantilla lo soporta.
 /// - Nota Tex: SVG real con fallback `ab_glyph` (siempre visible).
-/// - Progreso (`ProgressBar`/spinner) + error honesto en rojo suave.
+/// - Progreso (`ProgressBar`/spinner) + error honesto en `theme.danger` +
+///   nota neutra de cancelación (cancelar no es error).
 /// - Botones [Exportar]/[Cancelar]/[Cerrar]: Exportar valida y devuelve
 ///   `ConfirmExport`; si no valida, setea el error visible y no devuelve nada.
+///   Cancelar marca neutro (`mark_cancelled`) y devuelve `CancelExport`.
 fn draw_media_export_dialog(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -6703,6 +7279,7 @@ fn draw_media_export_dialog(
                 .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG)),
         )
         .show(ui.ctx(), |ui| {
+            let theme = current_theme(ui.ctx());
             let mut dialog = state.export_dialog.borrow_mut();
             ui.label(
                 egui::RichText::new("Exportar animación")
@@ -6721,16 +7298,31 @@ fn draw_media_export_dialog(
                 if !habilitado {
                     if let Some(motivo) = dialog.format_disabled_reason(formato) {
                         radio = radio.on_hover_text(motivo);
+                        // P1: motivo inline además del tooltip (el tooltip no
+                        // se lee con teclado ni en táctil): texto chico bajo
+                        // el radio, jamás silencio.
+                        ui.label(
+                            egui::RichText::new(motivo)
+                                .size(TYPE_2XS)
+                                .color(theme.text_tertiary)
+                                .italics(),
+                        );
                     }
                 }
                 if radio.clicked() && habilitado {
-                    dialog.format = formato;
-                    dialog.error = None;
+                    dialog.set_format_con_defaults(formato);
                 }
             }
             if !dialog.ffmpeg_available {
                 ui.label(
                     egui::RichText::new(MEDIA_EXPORT_FFMPEG_HINT)
+                        .size(TYPE_XS)
+                        .italics(),
+                );
+            }
+            if !dialog.latex_available || !dialog.dvisvgm_available {
+                ui.label(
+                    egui::RichText::new(MEDIA_EXPORT_LATEX_HINT)
                         .size(TYPE_XS)
                         .italics(),
                 );
@@ -6747,6 +7339,7 @@ fn draw_media_export_dialog(
                         dialog.quality = calidad;
                         dialog.bitrate_kbps = calidad.suggested_bitrate_kbps();
                         dialog.error = None;
+                        dialog.cancelled_note = None;
                     }
                 }
             });
@@ -6759,6 +7352,7 @@ fn draw_media_export_dialog(
                 );
                 if respuesta.changed() {
                     dialog.error = None;
+                    dialog.cancelled_note = None;
                 }
                 ui.label(egui::RichText::new("FPS").size(TYPE_XS));
                 let respuesta_fps = ui.add(
@@ -6767,6 +7361,7 @@ fn draw_media_export_dialog(
                 );
                 if respuesta_fps.changed() {
                     dialog.error = None;
+                    dialog.cancelled_note = None;
                 }
             });
             ui.label(
@@ -6776,6 +7371,48 @@ fn draw_media_export_dialog(
                 ))
                 .size(TYPE_XS),
             );
+            ui.add_space(SPACE_XS);
+            // ── Tamaño: Original o preset 720p + orientación ──
+            ui.label(egui::RichText::new("Tamaño").size(TYPE_XS).strong());
+            ui.horizontal(|ui| {
+                for preset in MediaExportPreset::DIALOG_ALL {
+                    if ui
+                        .radio(dialog.preset == preset, preset.display_name())
+                        .clicked()
+                    {
+                        dialog.preset = preset;
+                        dialog.error = None;
+                        dialog.cancelled_note = None;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                for orientacion in MediaExportOrientation::DIALOG_ALL {
+                    if ui
+                        .radio(
+                            dialog.orientation == orientacion,
+                            orientacion.display_name(),
+                        )
+                        .clicked()
+                    {
+                        dialog.orientation = orientacion;
+                        dialog.error = None;
+                        dialog.cancelled_note = None;
+                    }
+                }
+            });
+            if let Some((pw, ph)) = dialog.preset_size() {
+                ui.label(egui::RichText::new(format!("preset {pw}×{ph}")).size(TYPE_XS));
+            }
+            // Tope honesto visible antes de exportar (con la alternativa).
+            if !dialog.aviso_limite().is_empty() {
+                ui.label(
+                    egui::RichText::new(dialog.aviso_limite())
+                        .size(TYPE_XS)
+                        .italics()
+                        .color(theme.text_secondary),
+                );
+            }
             ui.add_space(SPACE_XS);
             // ── Vista 2D/Órbita (si cabe sin romper) ──
             ui.label(egui::RichText::new("Vista").size(TYPE_XS).strong());
@@ -6790,6 +7427,7 @@ fn draw_media_export_dialog(
                 {
                     dialog.view = MediaExportView::Plana;
                     dialog.error = None;
+                    dialog.cancelled_note = None;
                 }
                 let mut radio_orbita = ui.add_enabled(
                     orbita_habilitada,
@@ -6804,6 +7442,7 @@ fn draw_media_export_dialog(
                 if radio_orbita.clicked() && orbita_habilitada {
                     dialog.view = MediaExportView::Orbita;
                     dialog.error = None;
+                    dialog.cancelled_note = None;
                 }
             });
             if !orbita_habilitada {
@@ -6832,10 +7471,17 @@ fn draw_media_export_dialog(
                 ui.add_space(SPACE_XS);
             }
             if let Some(error) = dialog.error.clone() {
+                ui.label(egui::RichText::new(error).size(TYPE_XS).color(theme.danger));
+                ui.add_space(SPACE_XS);
+            }
+            // Cancelación neutra: texto secundario, jamás `danger` (cancelar
+            // no es error).
+            if let Some(nota) = dialog.cancelled_note.clone() {
                 ui.label(
-                    egui::RichText::new(error)
+                    egui::RichText::new(nota)
                         .size(TYPE_XS)
-                        .color(egui::Color32::RED),
+                        .color(theme.text_secondary)
+                        .italics(),
                 );
                 ui.add_space(SPACE_XS);
             }
@@ -6858,7 +7504,7 @@ fn draw_media_export_dialog(
                 }
                 if dialog.exporting {
                     if ui.button("Cancelar").clicked() {
-                        dialog.mark_failed("exportación cancelada");
+                        dialog.mark_cancelled("se canceló la exportación");
                         pending = Some(AssistantUiAction::CancelExport);
                     }
                 } else if ui.button("Cerrar").clicked() {
@@ -6921,7 +7567,7 @@ fn draw_remote_authorization_card(
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(
-                        "Podés autorizar una consulta remota. El historial mostrará sólo “Consulta remota autorizada”.",
+                        "Podés autorizar una consulta remota. El historial mostrará sólo “Consulta remota autorizada...”.",
                     )
                     .color(theme.text_secondary)
                     .size(TYPE_XS),
@@ -8075,17 +8721,35 @@ fn draw_conversation_turn(
                 cache,
             );
             // Integración de animación dentro del mensaje: progreso o media del último turno.
-            // El slot vivo (`set_media`) sigue exclusivo del último turno.
+            // Gate por dueño (P0): el slot vivo es global y no sabe a qué
+            // turno pertenece. El último turno solo lo usa si no tiene media
+            // propia; si ya tiene `turn.media` (historia), muestra la suya y
+            // jamás el slot. El slot nunca contradice el turno visible.
             if is_last {
-                if state.anim_progress {
-                    ui.add_space(SPACE_SM);
-                    retain_first_assistant_action(
-                        &mut action,
-                        draw_animation_progress(ui, state, visuals),
-                    );
-                } else if state.media.is_some() {
-                    ui.add_space(SPACE_SM);
-                    retain_first_assistant_action(&mut action, draw_media_card(ui, state));
+                match live_slot_kind_for_last_turn(
+                    turn.media.is_some(),
+                    state.anim_progress,
+                    state.media.is_some(),
+                ) {
+                    LiveSlotKind::Progress => {
+                        ui.add_space(SPACE_SM);
+                        retain_first_assistant_action(
+                            &mut action,
+                            draw_animation_progress(ui, state, visuals),
+                        );
+                    }
+                    LiveSlotKind::Slot => {
+                        ui.add_space(SPACE_SM);
+                        retain_first_assistant_action(&mut action, draw_media_card(ui, state));
+                    }
+                    LiveSlotKind::History => {
+                        ui.add_space(SPACE_SM);
+                        retain_first_assistant_action(
+                            &mut action,
+                            draw_history_mini_card(ui, state, turn_index, turn),
+                        );
+                    }
+                    LiveSlotKind::Hidden => {}
                 }
             } else if turn_has_history_mini_card(turn_index, state.conversation.len(), turn) {
                 // P0-UI historial Thumb+Replay: mini-card 96px + [Ver de nuevo].
@@ -8100,8 +8764,12 @@ fn draw_conversation_turn(
             // texto) en vez de desaparecer sin explicación.
             let blocks_for_gate = cache.blocks(&turn.content);
             // Z3: el turno con animación (en curso o ya instalada) habilita
-            // el paso a paso si la explicación trae matemática.
-            let has_animation = state.anim_progress || state.media.is_some();
+            // el paso a paso si la explicación trae matemática. La media
+            // propia del turno cuenta (el slot global ya no manda solo: con
+            // gate por dueño el turno con historia habilita aunque el slot
+            // esté vacío).
+            let has_animation =
+                turn.media.is_some() || state.anim_progress || state.media.is_some();
             let stepwise_reason =
                 stepwise_disabled_reason(&blocks_for_gate, &turn.content, has_animation);
             ui.add_space(SPACE_SM);
@@ -9607,25 +10275,222 @@ impl MathLayout {
     }
 }
 
+// ── R3: LaTeX real offline vía `grafito-tex` ─────────────────────────────────
+// `draw_math` rasteriza con tex (STIX embebida, presupuestos 8KiB/1MiP/256
+// nodos) y cachea la textura por fórmula en el `ctx` (tope 32 con desalojo
+// total al llenar: las texturas se liberan al soltar sus handles). Cualquier
+// `Err` (sin fuente MATH, fuera de presupuesto, parse/layout) cae al subset
+// casero intacto + aviso en el tooltip. Jamás tofu: sin raster no hay `Ok`.
+// Sin I/O ni spawn en el draw: el raster corre una vez por fórmula distinta,
+// el resto de los frames reutiliza la textura viva.
+
+/// Tope de fórmulas tex rasterizadas en la caché del `ctx`.
+const TEX_FORMULA_CACHE_MAX: usize = 32;
+/// Cola del motivo de fallback en chars (UTF-8 seguro).
+const TEX_FALLBACK_AVISO_MAX_CHARS: usize = 120;
+
+/// Entrada de la caché de fórmulas tex (una por `source` distinto).
+#[derive(Clone)]
+enum TexFormulaEntrada {
+    /// Raster tex listo: textura viva + tamaño en px.
+    Tex {
+        textura: egui::TextureHandle,
+        px: [usize; 2],
+    },
+    /// tex no pudo: el draw usa el subset + este motivo en el tooltip.
+    Subset { motivo: String },
+}
+
+/// Caché viva en el `ctx` (`get_persisted`, una por contexto).
+#[derive(Clone, Default)]
+struct TexFormulaCache {
+    entradas: std::collections::HashMap<String, TexFormulaEntrada>,
+}
+
+impl TexFormulaCache {
+    /// Guarda con desalojo total al llegar al tope (política simple y
+    /// acotada: nunca más de `TEX_FORMULA_CACHE_MAX` texturas vivas).
+    fn insertar(&mut self, fuente: String, entrada: TexFormulaEntrada) {
+        if self.entradas.len() >= TEX_FORMULA_CACHE_MAX {
+            self.entradas.clear();
+        }
+        self.entradas.insert(fuente, entrada);
+    }
+}
+
+/// Cola en chars sin partir UTF-8 (espejo del `tail_chars` de `grafito-tex`).
+fn acortar_aviso(mensaje: &str) -> String {
+    let chars: Vec<char> = mensaje.chars().collect();
+    if chars.len() > TEX_FALLBACK_AVISO_MAX_CHARS {
+        chars[chars.len() - TEX_FALLBACK_AVISO_MAX_CHARS..]
+            .iter()
+            .collect()
+    } else {
+        mensaje.to_string()
+    }
+}
+
+/// Huella del `source` para nombrar la textura (FNV-1a 64, pura).
+fn huella_formula(source: &str) -> u64 {
+    let mut huella: u64 = 0xcbf29ce484222325;
+    for byte in source.bytes() {
+        huella ^= u64::from(byte);
+        huella = huella.wrapping_mul(0x1000_0000_01b3);
+    }
+    huella
+}
+
+/// Resultado del intento tex (una sola consulta a la caché por frame).
+enum TexFormulaResultado {
+    /// Textura viva + tamaño en px.
+    Tex {
+        textura: egui::TextureHandle,
+        px: [usize; 2],
+    },
+    /// Subset + motivo corto del fallback (`None` = paridad sin aviso).
+    Subset { motivo: Option<String> },
+}
+
+/// Id de la caché de fórmulas en el `ctx` (único en el crate).
+fn tex_cache_id() -> egui::Id {
+    egui::Id::new("grafito_tex_formulas")
+}
+
+/// Intenta el raster tex con caché por `ctx`. `Subset` = usar el casero.
+fn formula_tex(ui: &mut egui::Ui, source: &str) -> TexFormulaResultado {
+    if source.trim().is_empty() {
+        return TexFormulaResultado::Subset { motivo: None };
+    }
+    if source.len() > grafito_tex::TEX_INPUT_MAX_BYTES {
+        return TexFormulaResultado::Subset {
+            motivo: Some(format!(
+                "fórmula de {} bytes, máximo {}",
+                source.len(),
+                grafito_tex::TEX_INPUT_MAX_BYTES
+            )),
+        };
+    }
+    let ctx = ui.ctx().clone();
+    if let Some(entrada) = ctx.data_mut(|mapa| {
+        mapa.get_persisted::<TexFormulaCache>(tex_cache_id())
+            .and_then(|caché| caché.entradas.get(source).cloned())
+    }) {
+        return match entrada {
+            TexFormulaEntrada::Tex { textura, px } => TexFormulaResultado::Tex { textura, px },
+            TexFormulaEntrada::Subset { motivo } => TexFormulaResultado::Subset {
+                motivo: Some(motivo),
+            },
+        };
+    }
+    let entrada = rasterizar_formula_tex(&ctx, source);
+    let resultado = match &entrada {
+        TexFormulaEntrada::Tex { textura, px } => TexFormulaResultado::Tex {
+            textura: textura.clone(),
+            px: *px,
+        },
+        TexFormulaEntrada::Subset { motivo } => TexFormulaResultado::Subset {
+            motivo: Some(motivo.clone()),
+        },
+    };
+    ctx.data_mut(|mapa| {
+        let mut caché = mapa
+            .get_persisted::<TexFormulaCache>(tex_cache_id())
+            .unwrap_or_default();
+        caché.insertar(source.to_string(), entrada);
+        mapa.insert_persisted(tex_cache_id(), caché);
+    });
+    resultado
+}
+
+/// Rasteriza una fórmula con `grafito-tex` (una vez por `source` distinto).
+/// Todo `Err` → `Subset` con motivo (jamás tofu ni panic).
+fn rasterizar_formula_tex(ctx: &egui::Context, source: &str) -> TexFormulaEntrada {
+    if !grafito_tex::math_font_available() {
+        return TexFormulaEntrada::Subset {
+            motivo: "sin fuente matemática (tabla MATH)".to_string(),
+        };
+    }
+    let mapa = match grafito_tex::latex_to_rgba(source, grafito_tex::TEX_DEFAULT_FONT_PX) {
+        Ok(mapa) => mapa,
+        Err(error) => {
+            return TexFormulaEntrada::Subset {
+                motivo: acortar_aviso(&error.to_string()),
+            };
+        }
+    };
+    let (ancho, alto) = (mapa.width, mapa.height);
+    let esperado = ancho
+        .checked_mul(alto)
+        .and_then(|pixeles| pixeles.checked_mul(4));
+    if ancho == 0 || alto == 0 || esperado != Some(mapa.rgba.len()) {
+        return TexFormulaEntrada::Subset {
+            motivo: "dimensiones del raster inconsistentes".to_string(),
+        };
+    }
+    let imagen = egui::ColorImage::from_rgba_unmultiplied([ancho, alto], &mapa.rgba);
+    let textura = ctx.load_texture(
+        format!("grafito_tex_{:016x}", huella_formula(source)),
+        imagen,
+        egui::TextureOptions::LINEAR,
+    );
+    TexFormulaEntrada::Tex {
+        textura,
+        px: [ancho, alto],
+    }
+}
+
 /// Dibuja una expresión del subset `DisplayMath` (puro, sin I/O ni spawn).
+///
+/// R3: primero intenta el raster tex (`grafito-tex`, STIX embebida); si falla,
+/// usa el subset casero intacto + aviso del motivo en el tooltip.
 ///
 /// Reusable desde el overlay pedagógico: si el parse falla, muestra la
 /// fuente como texto con tooltip (jamás inventa glifos).
 pub fn draw_math(ui: &mut egui::Ui, source: &str) -> egui::Response {
     let theme = current_theme(ui.ctx());
-    let Some(expression) = MathParser::parse(source) else {
-        return ui
-            .add(
-                egui::Label::new(
-                    egui::RichText::new(source)
-                        .color(theme.text_primary)
-                        .size(TYPE_SM),
-                )
-                .wrap(),
+    match formula_tex(ui, source) {
+        TexFormulaResultado::Tex { textura, px } => {
+            let ppp = ui.ctx().pixels_per_point();
+            let ppp = if ppp.is_finite() && ppp > 0.0 {
+                ppp
+            } else {
+                1.0
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let tam = egui::vec2(px[0] as f32 / ppp, px[1] as f32 / ppp);
+            ui.add(
+                egui::Image::from_texture(&textura)
+                    .fit_to_exact_size(tam)
+                    .sense(egui::Sense::hover()),
             )
-            .on_hover_text(source);
-    };
-    let layout = layout_math(ui.painter(), &expression, TYPE_MD, theme.text_primary);
+            .on_hover_text(source)
+        }
+        TexFormulaResultado::Subset { motivo } => {
+            let aviso = motivo.map_or_else(
+                || source.to_string(),
+                |detalle| format!("{source}\n(vista simplificada: {detalle})"),
+            );
+            let Some(expression) = MathParser::parse(source) else {
+                return ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(source)
+                                .color(theme.text_primary)
+                                .size(TYPE_SM),
+                        )
+                        .wrap(),
+                    )
+                    .on_hover_text(aviso);
+            };
+            dibujar_subset_math(ui, &expression, aviso)
+        }
+    }
+}
+
+/// Subset casero intacto (extraído de `draw_math`): layout + pintado + hover.
+fn dibujar_subset_math(ui: &mut egui::Ui, expression: &MathExpr, aviso: String) -> egui::Response {
+    let theme = current_theme(ui.ctx());
+    let layout = layout_math(ui.painter(), expression, TYPE_MD, theme.text_primary);
     let (rect, response) = ui.allocate_exact_size(layout.size, egui::Sense::hover());
     let painter = ui.painter_at(rect);
     for glyph in layout.glyphs {
@@ -9637,7 +10502,7 @@ pub fn draw_math(ui: &mut egui::Ui, source: &str) -> egui::Response {
             egui::Stroke::new(1.0, theme.text_primary.gamma_multiply(0.8)),
         );
     }
-    response.on_hover_text(source)
+    response.on_hover_text(aviso)
 }
 
 fn layout_math(
@@ -11385,6 +12250,77 @@ mod tests {
     }
 
     #[test]
+    fn tex_presupuestos_cache_y_aviso_pineados() {
+        assert_eq!(TEX_FORMULA_CACHE_MAX, 32);
+        assert_eq!(TEX_FALLBACK_AVISO_MAX_CHARS, 120);
+        assert_eq!(acortar_aviso("abc"), "abc");
+        let larga = "ñ".repeat(200);
+        let corta = acortar_aviso(&larga);
+        assert_eq!(corta.chars().count(), 120);
+        assert_eq!(corta, "ñ".repeat(120));
+    }
+
+    #[test]
+    fn tex_cache_desaloja_al_tope() {
+        let mut caché = TexFormulaCache::default();
+        for i in 0..TEX_FORMULA_CACHE_MAX {
+            caché.insertar(
+                format!("f{i}"),
+                TexFormulaEntrada::Subset {
+                    motivo: "x".to_string(),
+                },
+            );
+        }
+        assert_eq!(caché.entradas.len(), TEX_FORMULA_CACHE_MAX);
+        caché.insertar(
+            "una_mas".to_string(),
+            TexFormulaEntrada::Subset {
+                motivo: "x".to_string(),
+            },
+        );
+        assert_eq!(caché.entradas.len(), 1);
+    }
+
+    #[test]
+    fn draw_math_tex_rasteriza_y_reutiliza_textura() {
+        let context = egui::Context::default();
+        let fuente = r"\frac{\alpha_i^2}{\sqrt{\beta}}";
+        let esperado = grafito_tex::latex_to_rgba(fuente, grafito_tex::TEX_DEFAULT_FONT_PX)
+            .expect("la fuente embebida rasteriza");
+        let mut tam_tex = egui::Vec2::ZERO;
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                tam_tex = draw_math(ui, fuente).rect.size();
+                // Segundo frame: sale de la caché (mismo tamaño, sin re-raster).
+                let tam_segundo = draw_math(ui, fuente).rect.size();
+                assert_eq!(tam_segundo, tam_tex);
+            });
+        });
+        // ppp headless = 1: el rect mide los px del raster.
+        assert_eq!(tam_tex.x, esperado.width as f32);
+        assert_eq!(tam_tex.y, esperado.height as f32);
+        let entradas = context.data_mut(|mapa| {
+            mapa.get_persisted::<TexFormulaCache>(tex_cache_id())
+                .map_or(0, |caché| caché.entradas.len())
+        });
+        assert_eq!(entradas, 1);
+    }
+
+    #[test]
+    fn draw_math_fuera_de_presupuesto_cae_al_subset() {
+        let context = egui::Context::default();
+        let fuente = "x+".repeat(grafito_tex::TEX_INPUT_MAX_BYTES);
+        let mut tam = egui::Vec2::ZERO;
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                tam = draw_math(ui, &fuente).rect.size();
+            });
+        });
+        // Subset casero: texto plano medido, jamás vacío ni tofu.
+        assert!(tam.x > 0.0 && tam.y > 0.0);
+    }
+
+    #[test]
     fn short_user_turn_does_not_consume_transcript_height() {
         let context = egui::Context::default();
         let mut transcript_height = 0.0;
@@ -11545,7 +12481,7 @@ mod tests {
         assert_eq!(state.media_easing_name, "cubic_in_out");
         state.set_media_easing_name("   ");
         assert_eq!(state.media_easing_name, "linear");
-        // Card nueva = reproductor fresco (igual que la velocidad).
+        // Card nueva = reproductor fresco (easing del wire, no pref: se reinicia).
         state.set_media_easing_name("cubic_in_out");
         state.set_media(None, &egui::Context::default());
         assert_eq!(state.media_easing_name, "linear");
@@ -11675,10 +12611,10 @@ mod tests {
 
     #[test]
     fn export_dialog_paridad_formatos_y_presupuestos() {
-        // Paridad con `app::anim_native`: 4 formatos, GIF/PNG sin ffmpeg,
-        // MP4/WebM con ffmpeg; presupuestos 64 frames / 1..=60fps /
-        // 100..=20000kbps + default 48 intactos.
-        assert_eq!(MediaExportFormat::ALL.len(), 4);
+        // Paridad con `app::anim_native`: 6 formatos, GIF/PNG sin ffmpeg,
+        // MP4/WebM con ffmpeg, PDF/SVG con LaTeX/dvisvgm; presupuestos
+        // 64 frames / 1..=60fps / 100..=20000kbps + default 48 intactos.
+        assert_eq!(MediaExportFormat::ALL.len(), 6);
         assert_eq!(MEDIA_EXPORT_MAX_FRAMES, 64);
         assert_eq!(MEDIA_EXPORT_DEFAULT_FPS, 12);
         assert_eq!(MEDIA_EXPORT_FPS_MIN, 1);
@@ -11688,9 +12624,13 @@ mod tests {
         assert_eq!(MediaExportQuality::Media.suggested_bitrate_kbps(), 2000);
         let state = AssistantPanelState::default();
         state.open_export_dialog(true, true, 48);
+        state.set_export_dialog_latex(true, true);
         let dialogo = state.export_dialog_snapshot();
         for formato in MediaExportFormat::ALL {
-            assert!(dialogo.is_format_enabled(formato), "{formato:?} con ffmpeg");
+            assert!(
+                dialogo.is_format_enabled(formato),
+                "{formato:?} con ffmpeg+latex"
+            );
             assert_eq!(dialogo.format_disabled_reason(formato), None);
         }
         assert!(dialogo.is_orbit_enabled());
@@ -11698,6 +12638,126 @@ mod tests {
         // Nota Tex siempre presente (SVG real + fallback ab_glyph).
         assert!(MEDIA_EXPORT_TEX_NOTE.contains("SVG"));
         assert!(MEDIA_EXPORT_TEX_NOTE.contains("ab_glyph"));
+    }
+
+    #[test]
+    fn export_dialog_pdf_svg_deshabilitados_sin_latex_con_motivo() {
+        // Sin LaTeX: PDF/SVG deshabilitados con motivo visible, jamás mudos.
+        // Con LaTeX pero sin dvisvgm: PDF sale, SVG sigue deshabilitado.
+        let state = AssistantPanelState::default();
+        state.open_export_dialog(true, true, 48);
+        let dialogo = state.export_dialog_snapshot();
+        assert!(!dialogo.is_format_enabled(MediaExportFormat::Pdf));
+        assert!(!dialogo.is_format_enabled(MediaExportFormat::Svg));
+        assert_eq!(
+            dialogo.format_disabled_reason(MediaExportFormat::Pdf),
+            Some(MEDIA_EXPORT_LATEX_HINT)
+        );
+        assert_eq!(
+            dialogo.format_disabled_reason(MediaExportFormat::Svg),
+            Some(MEDIA_EXPORT_LATEX_HINT)
+        );
+        assert!(MEDIA_EXPORT_LATEX_HINT.contains("LaTeX"));
+        assert!(MEDIA_EXPORT_LATEX_HINT.contains("vista nativa"));
+        state.export_dialog_set_format(MediaExportFormat::Pdf);
+        let err = state
+            .export_dialog_snapshot()
+            .validate_selection()
+            .expect_err("PDF sin LaTeX debe fallar");
+        assert!(err.contains("LaTeX"), "fue: {err}");
+        // Solo LaTeX: PDF habilitado, SVG pide dvisvgm.
+        state.set_export_dialog_latex(true, false);
+        let dialogo = state.export_dialog_snapshot();
+        assert!(dialogo.is_format_enabled(MediaExportFormat::Pdf));
+        assert!(!dialogo.is_format_enabled(MediaExportFormat::Svg));
+        assert_eq!(
+            dialogo.format_disabled_reason(MediaExportFormat::Svg),
+            Some(MEDIA_EXPORT_DVISVGM_HINT)
+        );
+        // Todo presente: los 6 habilitados.
+        state.set_export_dialog_latex(true, true);
+        let dialogo = state.export_dialog_snapshot();
+        for formato in MediaExportFormat::ALL {
+            assert!(dialogo.is_format_enabled(formato), "{formato:?}");
+        }
+    }
+
+    #[test]
+    fn export_dialog_preset_720p_orientacion_y_fps_longform() {
+        // P0 fase 2: preset 720p + orientación sin romper lo existente;
+        // fps default 30 en long-form, GIF sigue en 12.
+        assert_eq!(MEDIA_EXPORT_MAX_FRAMES, 64);
+        assert_eq!(MEDIA_EXPORT_MAX_FRAMES_LONGFORM, 1500);
+        assert_eq!(MEDIA_EXPORT_DEFAULT_FPS, 12);
+        assert_eq!(MEDIA_EXPORT_DEFAULT_VIDEO_FPS, 30);
+        assert_eq!(MediaExportFormat::Gif.fps_default(), 12);
+        assert_eq!(MediaExportFormat::Mp4.fps_default(), 30);
+        assert_eq!(MediaExportFormat::Webm.fps_default(), 30);
+        assert_eq!(MediaExportFormat::PngDir.fps_default(), 30);
+        assert!(MediaExportFormat::Mp4.is_longform());
+        assert!(MediaExportFormat::Webm.is_longform());
+        assert!(MediaExportFormat::PngDir.is_longform());
+        assert!(!MediaExportFormat::Gif.is_longform());
+        assert_eq!(MediaExportFormat::Gif.max_frames(), 64);
+        assert_eq!(MediaExportFormat::Mp4.max_frames(), 1500);
+        // Preset: Original intacto (None = slot vivo), 720p por orientación.
+        let mut dialogo = MediaExportDialog::new();
+        assert_eq!(dialogo.preset, MediaExportPreset::Original);
+        assert_eq!(dialogo.preset_size(), None);
+        dialogo.preset = MediaExportPreset::Hd720p;
+        dialogo.orientation = MediaExportOrientation::Horizontal;
+        assert_eq!(dialogo.preset_size(), Some((1280, 720)));
+        dialogo.orientation = MediaExportOrientation::Vertical;
+        assert_eq!(dialogo.preset_size(), Some((720, 1280)));
+        // Cambio de formato aplica defaults sin pisar valores manuales.
+        let mut dialogo = MediaExportDialog::new();
+        dialogo.set_format_con_defaults(MediaExportFormat::Mp4);
+        assert_eq!(dialogo.fps, 30);
+        dialogo.fps = 24;
+        dialogo.set_format_con_defaults(MediaExportFormat::Webm);
+        assert_eq!(dialogo.fps, 24, "manual se respeta");
+        dialogo.set_format_con_defaults(MediaExportFormat::Gif);
+        assert_eq!(dialogo.fps, 24, "manual se respeta al volver");
+        let mut dialogo = MediaExportDialog::new();
+        dialogo.set_format_con_defaults(MediaExportFormat::Mp4);
+        assert_eq!(dialogo.fps, 30);
+        dialogo.set_format_con_defaults(MediaExportFormat::Gif);
+        assert_eq!(dialogo.fps, 12);
+        // Progreso real por chunk: setter puro clampado.
+        let mut dialogo = MediaExportDialog::new();
+        dialogo.set_progress(0.5);
+        assert_eq!(dialogo.progress, Some(0.5));
+        dialogo.set_progress(9.0);
+        assert_eq!(dialogo.progress, Some(1.0));
+    }
+
+    #[test]
+    fn export_dialog_topes_por_formato_con_alternativa() {
+        // GIF>64 sugiere mp4; long-form>1500 sugiere partir. Sin romper el
+        // corto: 48 GIF y 1500 MP4 validan.
+        let state = AssistantPanelState::default();
+        state.open_export_dialog(true, false, 48);
+        assert!(state.export_dialog_snapshot().validate_selection().is_ok());
+        state.export_dialog.borrow_mut().frame_count = 65;
+        let err = state
+            .export_dialog_snapshot()
+            .validate_selection()
+            .expect_err("GIF 65 debe fallar");
+        assert!(err.contains("mp4"), "alternativa mp4: {err}");
+        // Long-form: 1500 sale, 1501 sugiere partir.
+        state.export_dialog_set_format(MediaExportFormat::Mp4);
+        state.export_dialog.borrow_mut().frame_count = 1500;
+        state.export_dialog.borrow_mut().fps = 30;
+        assert!(state.export_dialog_snapshot().validate_selection().is_ok());
+        state.export_dialog.borrow_mut().frame_count = 1501;
+        let err = state
+            .export_dialog_snapshot()
+            .validate_selection()
+            .expect_err("MP4 1501 debe fallar");
+        assert!(err.contains("partí"), "alternativa partir: {err}");
+        assert!(!state.export_dialog_snapshot().aviso_limite().is_empty());
+        state.export_dialog.borrow_mut().frame_count = 1500;
+        assert!(state.export_dialog_snapshot().aviso_limite().is_empty());
     }
 
     #[test]
@@ -11711,11 +12771,136 @@ mod tests {
             frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
         };
         state.set_media(Some(media), &context);
-        // Card nueva: playhead en 0, reproduciendo, velocidad base, export ocioso.
+        // Card nueva: playhead en 0, reproduciendo, export ocioso. La
+        // velocidad es pref (M2-5): acá sigue la default porque nunca se tocó.
         assert_eq!(*state.media_export_state(), MediaExportState::Idle);
         assert!(!state.media_paused.get());
         assert_eq!(state.media_playback_rate(), 1.0);
         assert_eq!(state.advance_media_playhead(1.0, 1, true), Some(0));
+    }
+
+    #[test]
+    fn prefs_velocidad_formato_calidad_sobreviven_a_set_media() {
+        // M2-5: pedir otra animación no pierde lo elegido.
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        state.set_media_speed(MediaPlaybackSpeed::Double);
+        state.export_dialog_set_format(MediaExportFormat::Mp4);
+        state.export_dialog.borrow_mut().quality = MediaExportQuality::Alta;
+        state.export_dialog.borrow_mut().bitrate_kbps =
+            MediaExportQuality::Alta.suggested_bitrate_kbps();
+        let media = AssistantMedia {
+            title: "derivada".into(),
+            frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
+        };
+        state.set_media(Some(media), &context);
+        // Prefs intactas…
+        assert_eq!(state.media_playback_rate(), 2.0);
+        assert_eq!(
+            state.export_dialog_snapshot().format,
+            MediaExportFormat::Mp4
+        );
+        assert_eq!(
+            state.export_dialog_snapshot().quality,
+            MediaExportQuality::Alta
+        );
+        assert_eq!(
+            state.export_dialog_snapshot().bitrate_kbps,
+            MediaExportQuality::Alta.suggested_bitrate_kbps()
+        );
+        // …pero el estado vivo de la card sí es fresco.
+        assert_eq!(*state.media_export_state(), MediaExportState::Idle);
+        assert!(!state.media_paused.get());
+        assert!(!state.export_dialog_is_open());
+    }
+
+    #[test]
+    fn limpiar_resetea_prefs_velocidad_formato_calidad() {
+        // M2-5: Limpiar es el único reset de prefs.
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        state.set_media_speed(MediaPlaybackSpeed::Half);
+        state.export_dialog_set_format(MediaExportFormat::Webm);
+        state.export_dialog.borrow_mut().quality = MediaExportQuality::Baja;
+        let media = AssistantMedia {
+            title: "integral".into(),
+            frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
+        };
+        state.set_media(Some(media), &context);
+        state.clear_conversation();
+        assert_eq!(state.media_playback_rate(), 1.0);
+        assert_eq!(
+            state.export_dialog_snapshot().format,
+            MediaExportFormat::Gif
+        );
+        assert_eq!(
+            state.export_dialog_snapshot().quality,
+            MediaExportQuality::Media
+        );
+        assert_eq!(*state.media_export_state(), MediaExportState::Idle);
+    }
+
+    #[test]
+    fn chat_intents_hint_muestra_los_4_ejemplos() {
+        // M2-4: el hint visible cubre los intents que el parser acepta
+        // (paridad con `app::anim_ui::media_chat_intent_examples`).
+        for ejemplo in ["exportar mp4 720p", "velocidad 2x", "órbita", "reintentar"] {
+            assert!(
+                MEDIA_CHAT_INTENTS_HINT.contains(ejemplo),
+                "el hint debe mostrar {ejemplo:?}: {MEDIA_CHAT_INTENTS_HINT}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_thumb_uv_rect_sin_deformar_con_paridad_app() {
+        // M2-2: 96×96 (el caso real) = UV completo; no-cuadrado recorta el
+        // eje largo centrado, jamás estira (paridad con
+        // `app::anim_ui::history_thumb_uv_crop`).
+        let cuadrado = history_thumb_uv_rect(96, 96);
+        assert_eq!(
+            (
+                cuadrado.min.x,
+                cuadrado.min.y,
+                cuadrado.max.x,
+                cuadrado.max.y
+            ),
+            (0.0, 0.0, 1.0, 1.0)
+        );
+        let apaisado = history_thumb_uv_rect(192, 96);
+        assert_eq!(
+            (
+                apaisado.min.x,
+                apaisado.min.y,
+                apaisado.max.x,
+                apaisado.max.y
+            ),
+            (0.25, 0.0, 0.75, 1.0)
+        );
+        let retrato = history_thumb_uv_rect(96, 192);
+        assert_eq!(
+            (retrato.min.x, retrato.min.y, retrato.max.x, retrato.max.y),
+            (0.0, 0.25, 1.0, 0.75)
+        );
+        // Degenerado no panica.
+        let cero = history_thumb_uv_rect(0, 0);
+        assert_eq!(
+            (cero.min.x, cero.min.y, cero.max.x, cero.max.y),
+            (0.0, 0.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn media_caps_card_vs_overlay_difieren_con_motivo() {
+        // M2-1: card capea a 1.5× (nitidez), overlay libre ("ver grande" a
+        // pedido). Diferencia intencional pineada (ver `MAX_PREVIEW_UPSCALE`).
+        assert_eq!(MAX_PREVIEW_UPSCALE, 1.5);
+        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (150.0, 75.0));
+        assert_eq!(
+            media_overlay_preview_size(100.0, 50.0, 340.0, 280.0),
+            (340.0, 170.0),
+            "el overlay no capea: llena el disponible"
+        );
     }
 
     #[test]
@@ -11850,6 +13035,161 @@ mod tests {
             ConversationTurn::assistant("r"),
         ];
         assert!(history_mini_card_indices(&sin_media).is_empty());
+    }
+
+    #[test]
+    fn live_slot_por_dueno_nunca_contradicte_turn_media() {
+        // P0 tarjeta vieja bajo prosa nueva: el último turno solo usa el
+        // slot vivo si no tiene media propia; con media propia muestra la
+        // suya (History), aunque haya progreso/slot globales en vuelo.
+        assert_eq!(
+            live_slot_kind_for_last_turn(false, false, false),
+            LiveSlotKind::Hidden
+        );
+        assert_eq!(
+            live_slot_kind_for_last_turn(false, true, false),
+            LiveSlotKind::Progress
+        );
+        assert_eq!(
+            live_slot_kind_for_last_turn(false, false, true),
+            LiveSlotKind::Slot
+        );
+        assert_eq!(
+            live_slot_kind_for_last_turn(false, true, true),
+            LiveSlotKind::Progress,
+            "progreso manda sobre slot quieto"
+        );
+        for (progreso, slot) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(
+                live_slot_kind_for_last_turn(true, progreso, slot),
+                LiveSlotKind::History,
+                "con media propia (progreso={progreso}, slot={slot}): su mini-card, jamás el slot"
+            );
+        }
+    }
+
+    #[test]
+    fn ultimo_turno_con_media_muestra_la_suya_y_viejos_intactos() {
+        // Dos animaciones: la vieja queda mini-card con replay y la nueva
+        // (último turno con media propia) NO usa el slot vivo.
+        let conv = vec![
+            ConversationTurn::user("q1"),
+            ConversationTurn::assistant("r1").with_media(muestra_historial("t1")),
+            ConversationTurn::user("q2"),
+            ConversationTurn::assistant("r2").with_media(muestra_historial("t2")),
+        ];
+        assert_eq!(history_mini_card_indices(&conv), vec![1]);
+        let ultimo = &conv[3];
+        assert_eq!(
+            live_slot_kind_for_last_turn(ultimo.media.is_some(), true, true),
+            LiveSlotKind::History,
+            "el último con media propia ignora progreso/slot globales"
+        );
+        assert!(turn_has_history_mini_card(1, conv.len(), &conv[1]));
+    }
+
+    #[test]
+    fn export_failed_esconde_player_y_cancelled_lo_conserva() {
+        // P0 player+error: solo `Failed` esconde toolbar/slider/export.
+        assert!(!media_card_shows_player_controls(
+            &MediaExportState::Failed("corte".into())
+        ));
+        assert!(MediaExportState::Failed("corte".into()).is_failed());
+        for estado in [
+            MediaExportState::Idle,
+            MediaExportState::Exporting,
+            MediaExportState::Done,
+            MediaExportState::Cancelled,
+        ] {
+            assert!(
+                media_card_shows_player_controls(&estado),
+                "player visible en {estado:?}"
+            );
+            assert!(!estado.is_failed());
+        }
+        assert!(MediaExportState::Cancelled.is_cancelled());
+        assert!(!MediaExportState::Failed("x".into()).is_cancelled());
+    }
+
+    #[test]
+    fn export_cancelled_neutro_distinto_de_failed() {
+        // P1: cancelar no es error — header neutro, sin prefijo `error:`.
+        assert_eq!(
+            media_header_status(false, &MediaExportState::Cancelled),
+            "cancelado"
+        );
+        assert!(
+            media_header_status(false, &MediaExportState::Failed("corte".into()))
+                .starts_with("error: ")
+        );
+        // Diálogo: cancelar setea nota neutra sin error ni spinner.
+        let mut dialogo = MediaExportDialog::new();
+        dialogo.mark_started();
+        dialogo.mark_cancelled("se canceló la exportación");
+        assert!(!dialogo.exporting);
+        assert!(dialogo.error.is_none());
+        assert_eq!(
+            dialogo.cancelled_note.as_deref(),
+            Some("se canceló la exportación")
+        );
+        // Nueva selección limpia la nota (no arrastra rancio).
+        dialogo.mark_started();
+        assert!(dialogo.cancelled_note.is_none());
+        dialogo.mark_cancelled("otra vez");
+        dialogo.close();
+        assert!(dialogo.cancelled_note.is_none());
+        dialogo.mark_failed("corte");
+        assert!(dialogo.cancelled_note.is_none());
+        assert!(dialogo.error.is_some());
+    }
+
+    #[test]
+    fn history_thumb_lru_evicta_menos_usado_no_indice_chico() {
+        // P0-mini-card: LRU real. Se llenan las 96, se toca el turno 0 (pasa
+        // a MRU) y al insertar la 97 la víctima es el turno 1, no el 0 (el
+        // viejo `keys().next()` hubiera evictado el 0, el más visitado al
+        // scrollear arriba).
+        let context = egui::Context::default();
+        let state = AssistantPanelState::default();
+        let mut ids = Vec::new();
+        for idx in 0..HISTORY_THUMB_MAX_TEXTURES {
+            let tex = state
+                .ensure_history_thumb(idx, &muestra_historial(&format!("t{idx}")), &context)
+                .expect("entra al caché");
+            ids.push((idx, tex.id()));
+        }
+        assert_eq!(
+            state.history_thumb_cached_count(),
+            HISTORY_THUMB_MAX_TEXTURES
+        );
+        let (idx0, id0) = ids[0];
+        let tocado = state
+            .ensure_history_thumb(idx0, &muestra_historial("t0"), &context)
+            .expect("hit del turno 0");
+        assert_eq!(tocado.id(), id0, "hit reutiliza la textura");
+        let _ = state
+            .ensure_history_thumb(
+                HISTORY_THUMB_MAX_TEXTURES,
+                &muestra_historial("nueva"),
+                &context,
+            )
+            .expect("evicta una para entrar");
+        assert_eq!(
+            state.history_thumb_cached_count(),
+            HISTORY_THUMB_MAX_TEXTURES
+        );
+        let sigue0 = state
+            .ensure_history_thumb(idx0, &muestra_historial("t0"), &context)
+            .expect("el turno 0 sigue");
+        assert_eq!(sigue0.id(), id0, "LRU conserva el más usado (turno 0)");
+        let re_subido1 = state
+            .ensure_history_thumb(1, &muestra_historial("t1"), &context)
+            .expect("el turno 1 se re-sube");
+        assert_ne!(
+            re_subido1.id(),
+            ids[1].1,
+            "la víctima LRU fue el turno 1 (menos usado)"
+        );
     }
 
     #[test]
@@ -13418,8 +14758,9 @@ mod tests {
 
     #[test]
     fn flicker_handles_estables_entre_frames() {
-        // H1: la textura se sube UNA vez en `set_media`; avanzar el playhead
-        // (un tick = un frame dibujado) jamás re-sube ni cambia handles.
+        // H1: avanzar el playhead sin deslizar la ventana jamás re-sube ni
+        // cambia handles (la ventana ±2 cubre los 3 frames enteros). El desliz
+        // bajo demanda (`ensure_media_window`) se pinnea en F4.
         let context = egui::Context::default();
         let mut state = AssistantPanelState::default();
         state.set_media(
@@ -13445,6 +14786,115 @@ mod tests {
         assert_eq!(ids_antes, ids_despues, "ni un handle cambia por frame");
         assert!(state.media_textures().1, "siguen listas");
         assert_eq!(state.retired_media_pending_textures(), 0, "nada retirado");
+    }
+
+    #[test]
+    fn f4_ventana_sube_3_y_desliza_con_gracia() {
+        // F4: set de 48 → `set_media` sube `[0, +2]` (no 48); `ensure`
+        // desliza la ventana ±2 y lo que sale va a gracia (gracia 3 + tope
+        // 96 intactos). VRAM estable ≈ 5 frames (~6 MiB a 640×480, no ~56).
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        let frames: Vec<egui::ColorImage> = (0..48)
+            .map(|i| egui::ColorImage::new([8, 6], egui::Color32::from_gray(i * 5)))
+            .collect();
+        state.set_media(
+            Some(AssistantMedia {
+                title: "larga".into(),
+                frames,
+            }),
+            &context,
+        );
+        assert_eq!(state.media_textures().0.len(), 3, "ventana inicial [0,2]");
+        assert_eq!(state.media_window_base.get(), 0);
+        assert!(state.media_textures().1);
+        assert!(state.media_texture_for(0).is_some());
+        assert!(state.media_texture_for(2).is_some());
+        assert!(
+            state.media_texture_for(3).is_none(),
+            "fuera de la ventana inicial"
+        );
+        // Salto al final: ventana [45,47], lo viejo a gracia.
+        state.ensure_media_window(47, &context);
+        assert_eq!(state.media_window_base.get(), 45);
+        assert_eq!(state.media_textures().0.len(), 3);
+        assert!(state.media_texture_for(47).is_some());
+        assert!(state.media_texture_for(44).is_none());
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            3,
+            "0,1,2 en gracia, no destruidos"
+        );
+        // Dentro de la ventana no hay re-subida: handles estables.
+        let ids_antes: Vec<_> = (45..=47)
+            .map(|i| state.media_texture_for(i).map(|t| t.id()))
+            .collect();
+        state.ensure_media_window(46, &context);
+        // Rango [44,47]: entra 44, nadie sale (45..47 siguen vivas).
+        assert_eq!(state.media_window_base.get(), 44);
+        assert_eq!(state.media_textures().0.len(), 4);
+        let ids_despues: Vec<_> = (45..=47)
+            .map(|i| state.media_texture_for(i).map(|t| t.id()))
+            .collect();
+        assert_eq!(ids_antes, ids_despues, "lo que sigue en ventana no cambia");
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            3,
+            "nada nuevo evictado"
+        );
+        // Topes.
+        assert!(
+            state.media_textures().0.len() <= MEDIA_TEXTURE_WINDOW_MAX_VIVAS,
+            "≤5 vivas"
+        );
+        assert_eq!(MEDIA_TEXTURE_WINDOW_MAX_VIVAS, 5);
+        assert_eq!(MEDIA_TEXTURE_WINDOW, 2, "radio ±2");
+        assert_eq!(MEDIA_TEXTURE_GRACE_FRAMES, 3, "gracia intacta");
+        assert_eq!(HISTORY_RETIRED_MAX_TEXTURES, 96, "tope intacto");
+        // La gracia expira y libera.
+        for _ in 0..MEDIA_TEXTURE_GRACE_FRAMES {
+            state.reap_retired_media_tick();
+        }
+        assert_eq!(state.retired_media_pending_textures(), 0);
+    }
+
+    #[test]
+    fn f4_ventana_sets_chicos_suben_enteros() {
+        // 6 frames: inicial [0,2]; `ensure(2)` cubre [0,4] sin evictar;
+        // `ensure(5)` desliza a [3,5] y 0,1,2 salen con gracia.
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        let frames: Vec<egui::ColorImage> = (0..6)
+            .map(|_| egui::ColorImage::new([4, 4], egui::Color32::WHITE))
+            .collect();
+        state.set_media(
+            Some(AssistantMedia {
+                title: "chico".into(),
+                frames,
+            }),
+            &context,
+        );
+        assert_eq!(state.media_textures().0.len(), 3, "ventana inicial [0,2]");
+        state.ensure_media_window(2, &context);
+        assert_eq!(state.media_window_base.get(), 0);
+        assert_eq!(state.media_textures().0.len(), 5, "rango [0,4] entero");
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            0,
+            "nada que evictar"
+        );
+        state.ensure_media_window(5, &context);
+        assert_eq!(state.media_window_base.get(), 3);
+        assert_eq!(state.media_textures().0.len(), 3);
+        assert_eq!(
+            state.retired_media_pending_textures(),
+            3,
+            "0,1,2 salen con gracia"
+        );
+        for i in 3..6 {
+            assert!(state.media_texture_for(i).is_some(), "frame {i} vivo");
+        }
+        assert!(state.media_texture_for(2).is_none(), "frame 2 evictado");
     }
 
     #[test]

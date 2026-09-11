@@ -1876,6 +1876,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "formulary"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "994e1a4a2c17552253a1ebac4433ddaff326a6d99f60982d2d3bb57b1092db5d"
+dependencies = [
+ "roxmltree",
+ "ttf-parser",
+]
+
+[[package]]
 name = "fst"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2487,6 +2497,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafito-tex"
+version = "1.0.0"
+dependencies = [
+ "formulary",
+ "pulldown-latex",
+ "tiny-skia",
+ "ttf-parser",
+]
+
+[[package]]
 name = "grafito-ui"
 version = "1.0.0"
 dependencies = [
@@ -2499,6 +2519,7 @@ dependencies = [
  "grafito-geometry",
  "grafito-pedagogy",
  "grafito-profile",
+ "grafito-tex",
  "log",
  "once_cell",
 ]
@@ -4406,6 +4427,15 @@ dependencies = [
  "log",
  "parking_lot",
  "puffin",
+]
+
+[[package]]
+name = "pulldown-latex"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1cf850381ae0dbb131f36e31d6090f55363d079ab3e518ad0323b9cb6a96d115"
+dependencies = [
+ "bumpalo",
 ]
 
 [[package]]

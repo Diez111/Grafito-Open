@@ -1,0 +1,27 @@
+[package]
+name = "grafito-tex"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "LaTeX real offline para Grafito (F3): pulldown-latex → formulary → SVG/tiny-skia con STIX Two Math embebida"
+
+[dependencies]
+# F3 Fase B (offline-first, MSRV 1.92 estricta, sin deps nativas/C):
+# - pulldown-latex =0.8.0: MSRV 1.74.1, MIT, puro Rust (bumpalo/heck/inventory).
+#   math-core (1.96) PROHIBIDO: no se usa ni directa ni transitivamente.
+# - formulary =0.2.0: MSRV 1.87, MIT/Apache; default-features=false para no
+#   traer rustybuzz (shaping); feature `svg` sin deps extras (solo activa el
+#   módulo svg, que outlinoa glifos vía ttf-parser). roxmltree 0.21 +
+#   ttf-parser 0.25 ya están en el lock (mismas versiones pineadas abajo).
+# - tiny-skia =0.11.4 + ttf-parser =0.25.1: raster propio display-list →
+#   píxeles (misma versión que grafito-app, ya en el lock).
+pulldown-latex = "=0.8.0"
+formulary = { version = "=0.2.0", default-features = false, features = ["svg"] }
+tiny-skia = "=0.11.4"
+ttf-parser = "=0.25.1"
+
+[lints]
+workspace = true

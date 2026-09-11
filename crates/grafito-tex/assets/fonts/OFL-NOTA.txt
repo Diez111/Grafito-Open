@@ -1,0 +1,10 @@
+STIX Two Math — fuente matemática embebida (F3 Fase B)
+=====================================================
+Archivo: STIXTwoMath-Regular.ttf (1 086 616 bytes)
+Origen: Google Fonts (https://fonts.gstatic.com/s/stixtwomath/v12/pONg1hwwL_6M9EkZySr_yteUi1o.ttf),
+  familia "STIX Two Math" servida por https://fonts.googleapis.com/css?family=STIX+Two+Math
+Licencia: SIL Open Font License 1.1 (OFL) — https://openfontlicense.org
+  (la OFL permite embebido; el TTF trae tabla MATH verificada)
+Descargada: 2026-09-10. Uso: `include_bytes!` en `src/lib.rs`
+  (`embedded_math_font_bytes`); `MathFont::probe` rechaza sin tabla MATH.
+Upstream: https://github.com/stipub/stixfonts

@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Pruebas de humo de release a nivel workspace para Grafito"
 
 [workspace]
-members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-pedagogy", "crates/grafito-plugins", "crates/grafito-profile", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex", "crates/grafito-ggb", "crates/grafito-classroom"]
+members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-pedagogy", "crates/grafito-plugins", "crates/grafito-profile", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex", "crates/grafito-ggb", "crates/grafito-classroom", "crates/grafito-tex"]
 resolver = "2"
 
 [workspace.package]
@@ -36,6 +36,9 @@ grafito-assistant = { path = "crates/grafito-assistant", default-features = fals
 grafito-assistant-types = { path = "crates/grafito-assistant-types" }
 grafito-whiteboard = { path = "crates/grafito-whiteboard" }
 grafito-classroom = { path = "crates/grafito-classroom" }
+# R3: LaTeX real offline (pipeline pulldown-latex→formulary→tiny-skia, STIX
+# embebida; llamadores: draw_math en grafito-ui con fallback al subset).
+grafito-tex = { path = "crates/grafito-tex" }
 
 # Window & GPU
 eframe = "0.29"
