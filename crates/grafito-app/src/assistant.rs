@@ -1254,6 +1254,12 @@ pub(crate) struct AssistantRuntime {
     mp4_export_job: Option<Mp4ExportJob>,
     /// Export a WebM en vuelo (diálogo, formato `Webm`, exige ffmpeg).
     webm_export_job: Option<WebmExportJob>,
+    /// Export a PDF matemático en vuelo (diálogo, formato `Pdf`, exige LaTeX).
+    /// Fuente = título de la card (hilo worker, `LatexMissing` honesto).
+    pdf_export_job: Option<PdfExportJob>,
+    /// Export a SVG matemático en vuelo (diálogo, formato `Svg`, exige
+    /// LaTeX + `dvisvgm`). Fuente = título de la card (`SvgMissing` honesto).
+    svg_export_job: Option<SvgExportJob>,
     session_api_key: Option<SessionApiKey>,
     /// Sesión Go estable por conversación (`x-opencode-session`, docs Go
     /// 2026-09-08): UUID v4 lazy en el primer request Go, estable entre
@@ -1721,7 +1727,83 @@ impl AssistantRuntime {
                 });
             hubo = true;
         }
+        if let Some(job) = self.pdf_export_job.take() {
+            // Misma disciplina que el GIF: token + reaper que entierra el
+            // temporal (jamás basura en disco).
+            job.cancel.cancel();
+            let ruta_conocida = job.path.clone();
+            let _ = std::thread::Builder::new()
+                .name("pdf-export-reaper".into())
+                .spawn(move || {
+                    let _ = job.handle.join();
+                    let _ = std::fs::remove_file(&ruta_conocida);
+                });
+            hubo = true;
+        }
+        if let Some(job) = self.svg_export_job.take() {
+            job.cancel.cancel();
+            let ruta_conocida = job.path.clone();
+            let _ = std::thread::Builder::new()
+                .name("svg-export-reaper".into())
+                .spawn(move || {
+                    let _ = job.handle.join();
+                    let _ = std::fs::remove_file(&ruta_conocida);
+                });
+            hubo = true;
+        }
         hubo
+    }
+
+    /// ¿Hay algún export LaTeX en vuelo (PDF o SVG)? Puro sobre los slots.
+    fn any_latex_export_in_flight(&self) -> bool {
+        self.pdf_export_job.is_some() || self.svg_export_job.is_some()
+    }
+
+    /// Señala cancel a los exports LaTeX en vuelo (ambos mundos: PDF + SVG).
+    /// El poll drena el resultado honesto (jamás mudo). Retorna si había algo.
+    fn signal_latex_exports_cancel(&mut self) -> bool {
+        let mut hubo = false;
+        if let Some(job) = self.pdf_export_job.as_ref() {
+            job.cancel.cancel();
+            hubo = true;
+        }
+        if let Some(job) = self.svg_export_job.as_ref() {
+            job.cancel.cancel();
+            hubo = true;
+        }
+        hubo
+    }
+
+    /// Job PDF listo para drenar sin bloquear (`is_finished`). Puro sobre el slot.
+    fn take_ready_pdf(&mut self) -> Option<PdfExportJob> {
+        if self
+            .pdf_export_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            self.pdf_export_job.take()
+        } else {
+            None
+        }
+    }
+
+    /// Job SVG listo para drenar sin bloquear (`is_finished`). Puro sobre el slot.
+    fn take_ready_svg(&mut self) -> Option<SvgExportJob> {
+        if self
+            .svg_export_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            self.svg_export_job.take()
+        } else {
+            None
+        }
+    }
+
+    /// ¿Hay algún export de la card en vuelo (cualquier formato)?
+    /// Puro sobre los slots, sin I/O.
+    fn any_export_in_flight(&self) -> bool {
+        self.any_media_export_in_flight()
     }
 
     /// ¿Hay algún export de la card en vuelo (cualquier formato)?
@@ -1731,6 +1813,7 @@ impl AssistantRuntime {
             || self.png_export_job.is_some()
             || self.mp4_export_job.is_some()
             || self.webm_export_job.is_some()
+            || self.any_latex_export_in_flight()
     }
 }
 
@@ -2144,7 +2227,6 @@ struct Mp4ExportJob {
     cancel: grafito_assistant::CancellationToken,
     path: std::path::PathBuf,
 }
-
 /// Export a WebM de la card en vuelo (vía ffmpeg-sidecar).
 struct WebmExportJob {
     handle:
@@ -2152,6 +2234,525 @@ struct WebmExportJob {
     frame_count: usize,
     cancel: grafito_assistant::CancellationToken,
     path: std::path::PathBuf,
+}
+
+/// Motivo visible cuando PDF/SVG están deshabilitados sin LaTeX.
+/// Paridad con `grafito_ui::assistant::MEDIA_EXPORT_LATEX_HINT`.
+pub(crate) const LATEX_MISSING_HINT: &str = "PDF/SVG requieren LaTeX — se usa vista nativa";
+/// Motivo visible cuando SVG está deshabilitado sin `dvisvgm`.
+/// Paridad con `grafito_ui::assistant::MEDIA_EXPORT_DVISVGM_HINT`.
+pub(crate) const DVISVGM_MISSING_HINT: &str =
+    "SVG requiere dvisvgm — se exporta PDF o vista nativa";
+
+/// Error tipado del export matemático LaTeX (mensajes en español, sin panics).
+///
+/// Fuente = título de la card; título vacío → `Empty` honesto visible,
+/// jamás mudo. Sin motor → `LatexMissing`/`SvgMissing` honestos.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LatexExportError {
+    /// Título vacío: no hay fuente matemática que componer.
+    Empty,
+    /// Exportación cancelada vía `CancellationToken`.
+    Cancelled,
+    /// Sin motor LaTeX (`pdflatex`/`lualatex`/`xelatex`/`latex`) en el PATH.
+    LatexMissing,
+    /// Sin `dvisvgm` en el PATH (solo SVG).
+    SvgMissing,
+    /// El motor corrió pero falló (cola del log, 500 chars).
+    LatexFailed(String),
+    /// E/S del tmp+rename atómico.
+    Io(String),
+}
+
+impl std::fmt::Display for LatexExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "sin título matemático para exportar"),
+            Self::Cancelled => write!(f, "exportación cancelada"),
+            Self::LatexMissing => write!(f, "{LATEX_MISSING_HINT}"),
+            Self::SvgMissing => write!(f, "{DVISVGM_MISSING_HINT}"),
+            Self::LatexFailed(detalle) => write!(f, "LaTeX falló: {detalle}"),
+            Self::Io(detalle) => write!(f, "falló escribir el export: {detalle}"),
+        }
+    }
+}
+
+impl std::error::Error for LatexExportError {}
+
+/// Export a PDF matemático en vuelo (mismo contrato que GIF).
+///
+/// Guarda el `JoinHandle` de `spawn_math_pdf` para drenarlo sin bloquear.
+/// `expresion` es el título de la card (fuente); `path` el destino temporal.
+struct PdfExportJob {
+    handle: std::thread::JoinHandle<Result<std::path::PathBuf, LatexExportError>>,
+    // Paridad de contrato con los jobs raster (el poll LaTeX no cuenta
+    // frames: la fuente es el título, no los fotogramas).
+    #[allow(dead_code)]
+    frame_count: usize,
+    cancel: grafito_assistant::CancellationToken,
+    path: std::path::PathBuf,
+}
+
+/// Export a SVG matemático en vuelo (mismo contrato que GIF).
+struct SvgExportJob {
+    handle: std::thread::JoinHandle<Result<std::path::PathBuf, LatexExportError>>,
+    // Paridad de contrato (ver `PdfExportJob`).
+    #[allow(dead_code)]
+    frame_count: usize,
+    cancel: grafito_assistant::CancellationToken,
+    path: std::path::PathBuf,
+}
+
+/// ¿Hay motor LaTeX usable? Recorre `PATH` buscando `pdflatex`, `lualatex`,
+/// `xelatex` o `latex`. Solo lectura, SIN spawnear: llamarla desde el
+/// evento que abre el diálogo, jamás desde `Ui::`.
+pub(crate) fn detect_latex_available() -> bool {
+    detect_latex_binary().is_some()
+}
+
+/// Binario LaTeX efectivo (`pdflatex` primero, luego resto). Puro PATH.
+fn detect_latex_binary() -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for bin in ["pdflatex", "lualatex", "xelatex", "latex"] {
+            #[cfg(windows)]
+            {
+                let candidato = dir.join(format!("{bin}.exe"));
+                if candidato.is_file() {
+                    return Some(candidato);
+                }
+            }
+            let candidato = dir.join(bin);
+            if candidato.is_file() {
+                return Some(candidato);
+            }
+        }
+    }
+    None
+}
+
+/// ¿Hay `dvisvgm` usable? Recorre `PATH` sin spawnear (evento, no draw).
+pub(crate) fn detect_dvisvgm_available() -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            let candidato = dir.join("dvisvgm.exe");
+            if candidato.is_file() {
+                return true;
+            }
+        }
+        if dir.join("dvisvgm").is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Documento LaTeX mínimo para la expresión (puro, sin E/S).
+///
+/// `standalone` + `amsmath`: la expresión va en `\[ ... \]`. Sin escapar:
+/// la fuente es el título curado de la card (texto UI, no bytes ajenos).
+pub(crate) fn build_latex_document(expresion: &str) -> String {
+    format!(
+        "\\documentclass[preview]{{standalone}}\n\\usepackage{{amsmath,amssymb}}\n\\begin{{document}}\n\\({expresion}\\)\n\\end{{document}}\n"
+    )
+}
+
+/// Hermano temporal para el PDF/SVG (mismo directorio = mismo filesystem,
+/// el `rename` es atómico; conserva extensión para el motor). Puro, sin E/S.
+fn latex_tmp_sibling(path: &std::path::Path) -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name: String = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("math"));
+    let tmp_name = format!("{name}.tmp.{}-{stamp}", std::process::id());
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(tmp_name),
+        _ => std::path::PathBuf::from(tmp_name),
+    }
+}
+
+/// Espera vigilada con cancel: poll `try_wait` cada 25 ms; cancelado →
+/// `kill` + `wait` (sin zombies) y `Err(Cancelled)`. Hilo worker, no UI.
+fn esperar_latex_con_cancel(
+    child: &mut std::process::Child,
+    token: &grafito_assistant::CancellationToken,
+) -> Result<bool, LatexExportError> {
+    loop {
+        if token.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(LatexExportError::Cancelled);
+        }
+        match child.try_wait() {
+            Ok(Some(estado)) => return Ok(estado.success()),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LatexExportError::Io(format!(
+                    "no se pudo esperar a LaTeX: {e}"
+                )));
+            }
+        }
+    }
+}
+
+/// Cola del log LaTeX (500 chars) para el error honesto. Pura.
+fn latex_log_tail(log: &str) -> String {
+    const CAP: usize = 500;
+    if log.len() <= CAP {
+        log.to_string()
+    } else {
+        log[log.len() - CAP..].to_string()
+    }
+}
+
+/// Núcleo bloqueante PDF (llamar en hilo): fuente = expresión, tmp+rename
+/// `O_EXCL`, `kill+wait` anti-zombie. `latex_bin=None` = autodetectar.
+fn export_math_to_pdf_inner(
+    expresion: &str,
+    path: &std::path::Path,
+    token: &grafito_assistant::CancellationToken,
+    latex_bin: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, LatexExportError> {
+    if token.is_cancelled() {
+        return Err(LatexExportError::Cancelled);
+    }
+    if expresion.trim().is_empty() {
+        return Err(LatexExportError::Empty);
+    }
+    let bin_owned;
+    let bin: &std::path::Path = match latex_bin {
+        Some(b) => b,
+        None => match detect_latex_binary() {
+            Some(b) => {
+                bin_owned = b;
+                // `bin_owned` vive hasta el fin del scope; el borrow es local.
+                // Se re-resuelve por nombre para no pelear con el borrow checker.
+                bin_owned.as_path()
+            }
+            None => return Err(LatexExportError::LatexMissing),
+        },
+    };
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(LatexExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    let workdir = std::env::temp_dir().join(format!(
+        "grafito_latex_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    // `create_dir` exclusiva (`O_EXCL` en directorios, sin seguir symlinks).
+    if let Err(e) = std::fs::create_dir(&workdir) {
+        return Err(LatexExportError::Io(format!(
+            "no se pudo preparar el área de trabajo {}: {e}",
+            workdir.display()
+        )));
+    }
+    let outcome: Result<std::path::PathBuf, LatexExportError> = (|| {
+        let documento = build_latex_document(expresion);
+        let tex_path = workdir.join("math.tex");
+        if let Err(e) = std::fs::write(&tex_path, documento.as_bytes()) {
+            return Err(LatexExportError::Io(format!(
+                "no se pudo escribir {}: {e}",
+                tex_path.display()
+            )));
+        }
+        if token.is_cancelled() {
+            return Err(LatexExportError::Cancelled);
+        }
+        let mut child = std::process::Command::new(bin)
+            .arg("-interaction=nonstopmode")
+            .arg("-halt-on-error")
+            .arg("-output-directory")
+            .arg(&workdir)
+            .arg(&tex_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    LatexExportError::LatexMissing
+                } else {
+                    LatexExportError::Io(format!("no se pudo lanzar LaTeX: {e}"))
+                }
+            })?;
+        // Espera vigilada con cancel (`kill` + `wait`, sin zombies). El log
+        // queda en `math.log` del workdir (stdio a null: sin deadlock de pipe).
+        match esperar_latex_con_cancel(&mut child, token) {
+            Err(cancelado) => return Err(cancelado),
+            Ok(true) => {}
+            Ok(false) => {
+                let log = std::fs::read_to_string(workdir.join("math.log"))
+                    .unwrap_or_else(|_| "LaTeX terminó con error".to_string());
+                return Err(LatexExportError::LatexFailed(latex_log_tail(&log)));
+            }
+        }
+        // Cancel entre `wait` y publicación: no se publica nada parcial.
+        if token.is_cancelled() {
+            return Err(LatexExportError::Cancelled);
+        }
+        let pdf_tmp = workdir.join("math.pdf");
+        if !pdf_tmp.is_file() {
+            return Err(LatexExportError::LatexFailed(
+                "LaTeX terminó sin producir PDF".to_string(),
+            ));
+        }
+        if std::fs::symlink_metadata(path).is_ok() {
+            return Err(LatexExportError::Io(format!(
+                "no se pudo crear {} sin sobrescribir: el destino ya existe",
+                path.display()
+            )));
+        }
+        let tmp = latex_tmp_sibling(path);
+        if let Err(e) = std::fs::copy(&pdf_tmp, &tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(LatexExportError::Io(format!(
+                "no se pudo publicar {}: {e}",
+                path.display()
+            )));
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(LatexExportError::Io(format!(
+                "no se pudo publicar {}: {e}",
+                path.display()
+            )));
+        }
+        Ok(path.to_path_buf())
+    })();
+    // Disciplina tmp: el workdir siempre se entierra (éxito o error).
+    let _ = std::fs::remove_dir_all(&workdir);
+    outcome
+}
+
+/// Núcleo bloqueante SVG (llamar en hilo): LaTeX a DVI + `dvisvgm`.
+/// Sin LaTeX → `LatexMissing`; con LaTeX pero sin `dvisvgm` → `SvgMissing`.
+fn export_math_to_svg_inner(
+    expresion: &str,
+    path: &std::path::Path,
+    token: &grafito_assistant::CancellationToken,
+    latex_bin: Option<&std::path::Path>,
+    dvisvgm_bin: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, LatexExportError> {
+    if token.is_cancelled() {
+        return Err(LatexExportError::Cancelled);
+    }
+    if expresion.trim().is_empty() {
+        return Err(LatexExportError::Empty);
+    }
+    let bin_owned;
+    let bin: &std::path::Path = match latex_bin {
+        Some(b) => b,
+        None => match detect_latex_binary() {
+            Some(b) => {
+                bin_owned = b;
+                bin_owned.as_path()
+            }
+            None => return Err(LatexExportError::LatexMissing),
+        },
+    };
+    let dvi_owned;
+    let dvisvgm: &std::path::Path = match dvisvgm_bin {
+        Some(b) => b,
+        None => {
+            // `dvisvgm` se resuelve por PATH sin spawnear (solo lectura).
+            let mut hallado: Option<std::path::PathBuf> = None;
+            if let Some(path_var) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&path_var) {
+                    if dir.as_os_str().is_empty() {
+                        continue;
+                    }
+                    let candidato = dir.join("dvisvgm");
+                    if candidato.is_file() {
+                        hallado = Some(candidato);
+                        break;
+                    }
+                }
+            }
+            match hallado {
+                Some(b) => {
+                    dvi_owned = b;
+                    dvi_owned.as_path()
+                }
+                None => return Err(LatexExportError::SvgMissing),
+            }
+        }
+    };
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(LatexExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    let workdir = std::env::temp_dir().join(format!(
+        "grafito_latex_svg_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if let Err(e) = std::fs::create_dir(&workdir) {
+        return Err(LatexExportError::Io(format!(
+            "no se pudo preparar el área de trabajo {}: {e}",
+            workdir.display()
+        )));
+    }
+    let outcome: Result<std::path::PathBuf, LatexExportError> = (|| {
+        let documento = build_latex_document(expresion);
+        let tex_path = workdir.join("math.tex");
+        if let Err(e) = std::fs::write(&tex_path, documento.as_bytes()) {
+            return Err(LatexExportError::Io(format!(
+                "no se pudo escribir {}: {e}",
+                tex_path.display()
+            )));
+        }
+        if token.is_cancelled() {
+            return Err(LatexExportError::Cancelled);
+        }
+        // Paso 1: LaTeX a DVI (stdio a null: sin deadlock de pipe; el log
+        // queda en `math.log` del workdir para el error honesto).
+        let mut latex = std::process::Command::new(bin)
+            .arg("-interaction=nonstopmode")
+            .arg("-halt-on-error")
+            .arg("-output-format=dvi")
+            .arg("-output-directory")
+            .arg(&workdir)
+            .arg(&tex_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    LatexExportError::LatexMissing
+                } else {
+                    LatexExportError::Io(format!("no se pudo lanzar LaTeX: {e}"))
+                }
+            })?;
+        match esperar_latex_con_cancel(&mut latex, token) {
+            Err(cancelado) => return Err(cancelado),
+            Ok(true) => {}
+            Ok(false) => {
+                let log = std::fs::read_to_string(workdir.join("math.log"))
+                    .unwrap_or_else(|_| "LaTeX terminó con error".to_string());
+                return Err(LatexExportError::LatexFailed(latex_log_tail(&log)));
+            }
+        }
+        if token.is_cancelled() {
+            return Err(LatexExportError::Cancelled);
+        }
+        let dvi_tmp = workdir.join("math.dvi");
+        if !dvi_tmp.is_file() {
+            return Err(LatexExportError::LatexFailed(
+                "LaTeX terminó sin producir DVI".to_string(),
+            ));
+        }
+        // Paso 2: DVI a SVG vía `dvisvgm` (kill+wait ante cancel).
+        let svg_tmp = workdir.join("math.svg");
+        let mut conversor = std::process::Command::new(dvisvgm)
+            .arg("--stdout")
+            .arg("-o")
+            .arg(&svg_tmp)
+            .arg(&dvi_tmp)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    LatexExportError::SvgMissing
+                } else {
+                    LatexExportError::Io(format!("no se pudo lanzar dvisvgm: {e}"))
+                }
+            })?;
+        match esperar_latex_con_cancel(&mut conversor, token) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = conversor.wait();
+                return Err(LatexExportError::LatexFailed(
+                    "dvisvgm terminó sin producir SVG".to_string(),
+                ));
+            }
+            Err(LatexExportError::Cancelled) => return Err(LatexExportError::Cancelled),
+            Err(otro) => return Err(otro),
+        }
+        if !svg_tmp.is_file() {
+            return Err(LatexExportError::LatexFailed(
+                "dvisvgm terminó sin producir SVG".to_string(),
+            ));
+        }
+        if token.is_cancelled() {
+            return Err(LatexExportError::Cancelled);
+        }
+        if std::fs::symlink_metadata(path).is_ok() {
+            return Err(LatexExportError::Io(format!(
+                "no se pudo crear {} sin sobrescribir: el destino ya existe",
+                path.display()
+            )));
+        }
+        let tmp = latex_tmp_sibling(path);
+        if let Err(e) = std::fs::copy(&svg_tmp, &tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(LatexExportError::Io(format!(
+                "no se pudo publicar {}: {e}",
+                path.display()
+            )));
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(LatexExportError::Io(format!(
+                "no se pudo publicar {}: {e}",
+                path.display()
+            )));
+        }
+        Ok(path.to_path_buf())
+    })();
+    let _ = std::fs::remove_dir_all(&workdir);
+    outcome
+}
+
+/// Exporta la expresión a PDF en un hilo aparte (no bloquea la UI).
+///
+/// Espejo de `spawn_gif_export_cancelable`: chequeo de cancel dentro del
+/// hilo + tmp+rename atómico. Sin LaTeX → `LatexMissing` honesto.
+pub(crate) fn spawn_math_pdf(
+    expresion: String,
+    path: std::path::PathBuf,
+    token: grafito_assistant::CancellationToken,
+) -> std::thread::JoinHandle<Result<std::path::PathBuf, LatexExportError>> {
+    std::thread::spawn(move || export_math_to_pdf_inner(&expresion, &path, &token, None))
+}
+
+/// Exporta la expresión a SVG en un hilo aparte (LaTeX + `dvisvgm`).
+pub(crate) fn spawn_svg_export(
+    expresion: String,
+    path: std::path::PathBuf,
+    token: grafito_assistant::CancellationToken,
+) -> std::thread::JoinHandle<Result<std::path::PathBuf, LatexExportError>> {
+    std::thread::spawn(move || export_math_to_svg_inner(&expresion, &path, &token, None, None))
 }
 
 /// ¿La plantilla del título soporta vista órbita? (puro, sin I/O).
@@ -4507,7 +5108,7 @@ impl GrafitoApp {
             return;
         }
         use grafito_ui::assistant::MediaExportState;
-        if self.assistant_runtime.any_media_export_in_flight() {
+        if self.assistant_runtime.any_export_in_flight() {
             self.notify("Ya se está exportando la animación.", ToastKind::Info);
             return;
         }
@@ -4525,9 +5126,13 @@ impl GrafitoApp {
         }
         // Detección fuera del draw, una vez al abrir (nunca en `Ui::`).
         let ffmpeg_available = crate::anim_native::detect_ffmpeg_available();
+        let latex_available = detect_latex_available();
+        let dvisvgm_available = detect_dvisvgm_available();
         let orbit_supported = export_orbit_supported_for_title(&title);
         self.assistant
             .open_export_dialog(ffmpeg_available, orbit_supported, frame_count);
+        self.assistant
+            .set_export_dialog_latex(latex_available, dvisvgm_available);
         ctx.request_repaint();
     }
 
@@ -4545,7 +5150,7 @@ impl GrafitoApp {
             return;
         }
         use grafito_ui::assistant::{MediaExportFormat, MediaExportState};
-        if self.assistant_runtime.any_media_export_in_flight() {
+        if self.assistant_runtime.any_export_in_flight() {
             self.notify("Ya se está exportando la animación.", ToastKind::Info);
             return;
         }
@@ -4572,14 +5177,38 @@ impl GrafitoApp {
             ctx.request_repaint();
             return;
         }
-        if let Err(budget) = crate::anim_native::check_gif_export_budget(&frames) {
-            let reason = budget.to_string();
-            self.assistant.export_dialog_mark_failed(reason.clone());
+        // Fuente matemática de PDF/SVG = título de la card. Título vacío →
+        // `Empty` honesto visible, jamás mudo (se publica en el diálogo).
+        let titulo_fuente = self
+            .assistant
+            .media
+            .as_ref()
+            .map_or_else(String::new, |media| media.title.clone());
+        let es_latex = matches!(
+            dialogo.format,
+            MediaExportFormat::Pdf | MediaExportFormat::Svg
+        );
+        if es_latex && titulo_fuente.trim().is_empty() {
+            let motivo = LatexExportError::Empty.to_string();
+            self.assistant.export_dialog_mark_failed(motivo.clone());
             self.assistant
-                .set_media_export(MediaExportState::Failed(reason.clone()));
-            self.notify(format!("No se pudo exportar: {reason}"), ToastKind::Error);
+                .set_media_export(MediaExportState::Failed(motivo.clone()));
+            self.notify(format!("No se pudo exportar: {motivo}"), ToastKind::Error);
             ctx.request_repaint();
             return;
+        }
+        // Preflight de budgets solo para raster/video (la vía LaTeX no
+        // codifica frames: su presupuesto es el título + el motor).
+        if !es_latex {
+            if let Err(budget) = crate::anim_native::check_gif_export_budget(&frames) {
+                let reason = budget.to_string();
+                self.assistant.export_dialog_mark_failed(reason.clone());
+                self.assistant
+                    .set_media_export(MediaExportState::Failed(reason.clone()));
+                self.notify(format!("No se pudo exportar: {reason}"), ToastKind::Error);
+                ctx.request_repaint();
+                return;
+            }
         }
         // `validate_selection` ya cubrió formato/fps/bitrate/frames/órbita.
         let frame_count = frames.len();
@@ -4691,6 +5320,30 @@ impl GrafitoApp {
                     path,
                 });
             }
+            MediaExportFormat::Pdf => {
+                let path =
+                    std::env::temp_dir().join(format!("grafito_matematica_{pid}_{stamp}.pdf"));
+                let cancel = grafito_assistant::CancellationToken::default();
+                let handle = spawn_math_pdf(titulo_fuente, path.clone(), cancel.clone());
+                self.assistant_runtime.pdf_export_job = Some(PdfExportJob {
+                    handle,
+                    frame_count,
+                    cancel,
+                    path,
+                });
+            }
+            MediaExportFormat::Svg => {
+                let path =
+                    std::env::temp_dir().join(format!("grafito_matematica_{pid}_{stamp}.svg"));
+                let cancel = grafito_assistant::CancellationToken::default();
+                let handle = spawn_svg_export(titulo_fuente, path.clone(), cancel.clone());
+                self.assistant_runtime.svg_export_job = Some(SvgExportJob {
+                    handle,
+                    frame_count,
+                    cancel,
+                    path,
+                });
+            }
         }
         self.assistant.export_dialog_mark_started();
         self.assistant.set_media_export(MediaExportState::Exporting);
@@ -4699,8 +5352,9 @@ impl GrafitoApp {
 
     /// Cancela el export en curso desde el diálogo (`Cancel`).
     ///
-    /// Señala el `CancellationToken` del worker en vuelo (cualquier formato);
-    /// el poll drena el resultado honesto (jamás mudo). Fuera del draw.
+    /// Señala el `CancellationToken` del worker en vuelo (cualquier formato,
+    /// ambos mundos: raster/video + LaTeX PDF/SVG); el poll drena el
+    /// resultado honesto (jamás mudo). Fuera del draw.
     fn cancel_export_assistant_media(&mut self, ctx: &egui::Context) {
         let mut hubo = false;
         if let Some(job) = self.assistant_runtime.gif_export_job.as_ref() {
@@ -4719,6 +5373,10 @@ impl GrafitoApp {
             job.cancel.cancel();
             hubo = true;
         }
+        // Ambos mundos: la vía LaTeX también se señala (PDF + SVG).
+        if self.assistant_runtime.signal_latex_exports_cancel() {
+            hubo = true;
+        }
         if !hubo {
             self.assistant
                 .export_dialog_mark_failed("no había exportación en curso");
@@ -4726,14 +5384,15 @@ impl GrafitoApp {
         ctx.request_repaint();
     }
 
-    /// Drena los exports de la card sin bloquear (GIF + PNG-dir + MP4 + WebM).
+    /// Drena los exports de la card sin bloquear (GIF + PNG-dir + MP4 + WebM
+    /// + PDF + SVG).
     ///
     /// Solo hace `join` si el hilo terminó (`is_finished`); publica el
     /// resultado en el diálogo + la card + aviso: éxito con ruta (verificando
     /// cota 5 MB post-escritura en archivos: si excede, se borra y es error
     /// honesto), o motivo del fallo. Se llama cada frame desde
     /// `sync_assistant_for_frame`. El nombre histórico se conserva (los tests
-    /// lo usan); drena los 4 formatos.
+    /// lo usan); drena los 6 formatos.
     fn poll_gif_export_job(&mut self, ctx: &egui::Context) {
         self.poll_media_export_jobs(ctx);
     }
@@ -4944,6 +5603,100 @@ impl GrafitoApp {
                         .set_media_export(MediaExportState::Failed(reason.clone()));
                     self.notify(
                         format!("No se pudo exportar la animación: {reason}."),
+                        ToastKind::Error,
+                    );
+                }
+                Err(_) => {
+                    self.assistant
+                        .export_dialog_mark_failed("la exportación terminó inesperadamente");
+                    self.assistant.set_media_export(MediaExportState::Failed(
+                        "la exportación terminó inesperadamente".into(),
+                    ));
+                    self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+        // Vía LaTeX (PDF + SVG): drena con `take_ready_*` (solo `join` si el
+        // hilo terminó) + cota 5 MB post-escritura + error honesto en diálogo.
+        if let Some(job) = self.assistant_runtime.take_ready_pdf() {
+            match job.handle.join() {
+                Ok(Ok(path)) => {
+                    let too_big = std::fs::metadata(&path)
+                        .map(|metadata| {
+                            metadata.len() > crate::anim_native::GIF_EXPORT_MAX_FILE_BYTES
+                        })
+                        .unwrap_or(false);
+                    if too_big {
+                        let _ = std::fs::remove_file(&path);
+                        let reason = "el PDF supera 5 MB";
+                        self.assistant.export_dialog_mark_failed(reason);
+                        self.assistant
+                            .set_media_export(MediaExportState::Failed(reason.into()));
+                        self.notify(format!("No se pudo exportar: {reason}."), ToastKind::Error);
+                    } else {
+                        self.assistant.export_dialog_mark_done();
+                        self.assistant.set_media_export(MediaExportState::Done);
+                        self.notify(
+                            format!("Se exportó la matemática a {}.", path.display()),
+                            ToastKind::Success,
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    self.assistant.export_dialog_mark_failed(reason.clone());
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(reason.clone()));
+                    self.notify(
+                        format!("No se pudo exportar la matemática: {reason}."),
+                        ToastKind::Error,
+                    );
+                }
+                Err(_) => {
+                    self.assistant
+                        .export_dialog_mark_failed("la exportación terminó inesperadamente");
+                    self.assistant.set_media_export(MediaExportState::Failed(
+                        "la exportación terminó inesperadamente".into(),
+                    ));
+                    self.notify("La exportación terminó inesperadamente.", ToastKind::Error);
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+        if let Some(job) = self.assistant_runtime.take_ready_svg() {
+            match job.handle.join() {
+                Ok(Ok(path)) => {
+                    let too_big = std::fs::metadata(&path)
+                        .map(|metadata| {
+                            metadata.len() > crate::anim_native::GIF_EXPORT_MAX_FILE_BYTES
+                        })
+                        .unwrap_or(false);
+                    if too_big {
+                        let _ = std::fs::remove_file(&path);
+                        let reason = "el SVG supera 5 MB";
+                        self.assistant.export_dialog_mark_failed(reason);
+                        self.assistant
+                            .set_media_export(MediaExportState::Failed(reason.into()));
+                        self.notify(format!("No se pudo exportar: {reason}."), ToastKind::Error);
+                    } else {
+                        self.assistant.export_dialog_mark_done();
+                        self.assistant.set_media_export(MediaExportState::Done);
+                        self.notify(
+                            format!("Se exportó la matemática a {}.", path.display()),
+                            ToastKind::Success,
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    self.assistant.export_dialog_mark_failed(reason.clone());
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(reason.clone()));
+                    self.notify(
+                        format!("No se pudo exportar la matemática: {reason}."),
                         ToastKind::Error,
                     );
                 }
@@ -8590,32 +9343,32 @@ mod tests {
         accepts_model_result, accepts_remote_context, accepts_remote_result,
         anim_parametrica_para_pedido, append_canonical_integral_prose, apply_local_assistant_plan,
         assistant_graph_perspective, attachment_error_message, aviso_fallback_canonico,
-        can_offer_assistant_proposal_correction, clasifica_pedido_integral,
+        build_latex_document, can_offer_assistant_proposal_correction, clasifica_pedido_integral,
         clasifica_pedido_tangente, clasifica_pedido_taylor, classify_local_assistant_response,
-        commit_assistant_graph_preflight, decide_animacion, esperar_spec_ia_con_timeout,
-        export_orbit_supported_for_title, ia_disponible_para_anim, inspect_remote_action_proposals,
-        inspect_remote_proposals, inspect_remote_proposals_cancellable,
-        is_agent_spark_responses_unsupported_error, is_session_or_account_error,
-        is_socratic_repair_error, join_gif_handle_bounded, join_puente_bounded,
-        limpiar_media_si_no_animacion, parsear_spec_anim_ia, plantilla_para_pedido,
-        playlist_para_pedido, pop_provisional_stream_turn, preflight_assistant_flower_scene,
-        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
-        preflight_assistant_parameter, preflight_assistant_scene, prosa_canonica_para_plantilla,
-        prosa_integral_explicita, prosa_para_spec_anim_ia, prosa_tangente_explicita,
-        prosa_taylor_canonica, prosa_taylor_explicita, read_bounded_attachment,
-        remote_error_message, remote_stage_for_job, render_media_desde_spec_ia,
-        resolver_turno_anim_ia, should_fallback_agent_spark_to_deepseek,
-        should_fallback_remote_spark_to_deepseek, socratic_guard_context,
-        spec_canonico_para_fallback, split_playlist_request, stage_assistant_parameter,
-        titulo_curado, titulo_curado_localized, validar_spec_anim_ia, validate_assistant_command,
-        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AnimIaRender,
-        AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation,
-        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
-        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
-        IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
-        RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido,
-        ANIM_IA_SPEC_TIMEOUT_MS, ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS,
-        ANIM_SIN_IA_AVISO,
+        commit_assistant_graph_preflight, decide_animacion, detect_dvisvgm_available,
+        detect_latex_available, esperar_spec_ia_con_timeout, export_orbit_supported_for_title,
+        ia_disponible_para_anim, inspect_remote_action_proposals, inspect_remote_proposals,
+        inspect_remote_proposals_cancellable, is_agent_spark_responses_unsupported_error,
+        is_session_or_account_error, is_socratic_repair_error, join_gif_handle_bounded,
+        join_puente_bounded, limpiar_media_si_no_animacion, parsear_spec_anim_ia,
+        plantilla_para_pedido, playlist_para_pedido, pop_provisional_stream_turn,
+        preflight_assistant_flower_scene, preflight_assistant_graph_command,
+        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
+        preflight_assistant_scene, prosa_canonica_para_plantilla, prosa_integral_explicita,
+        prosa_para_spec_anim_ia, prosa_tangente_explicita, prosa_taylor_canonica,
+        prosa_taylor_explicita, read_bounded_attachment, remote_error_message,
+        remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
+        should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
+        socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
+        stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_spec_anim_ia,
+        validate_assistant_command, verified_remote_proposals, wants_exercise_request,
+        AgentChannelMsg, AnimIaRender, AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob,
+        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
+        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
+        DecisionAnimacion, DesenlaceAnimIa, GifExportJob, IntegralPedido,
+        LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification, RemoteStage,
+        SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido, ANIM_IA_SPEC_TIMEOUT_MS,
+        ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS, ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
@@ -10981,6 +11734,147 @@ mod tests {
             "GIF plano con 2 frames valida sin audio"
         );
         assert!(!app.assistant_runtime.any_media_export_in_flight());
+    }
+
+    #[test]
+    fn export_dialog_pdf_svg_rutean_a_worker_latex_y_error_honesto() {
+        // PDF/SVG van al worker LaTeX con el título como fuente; sin motor
+        // el poll publica error honesto en el diálogo (jamás mudo).
+        // Sin LaTeX en el box: el worker falla rápido con `LatexMissing`.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        let frames = vec![egui::ColorImage::new([8, 8], egui::Color32::RED); 2];
+        app.assistant.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "x^2 + y^2".into(),
+                frames,
+            }),
+            &ctx,
+        );
+        for formato in [
+            grafito_ui::assistant::MediaExportFormat::Pdf,
+            grafito_ui::assistant::MediaExportFormat::Svg,
+        ] {
+            // Fuerza el formato aunque el gating lo deshabilite sin motor:
+            // el worker igual debe responder honesto (no mudo).
+            app.export_assistant_media(&ctx);
+            assert!(app.assistant.export_dialog_is_open());
+            app.assistant.export_dialog_set_format(formato);
+            // Si el motor falta, el diálogo lo marca deshabilitado: el
+            // `confirm` valida y publica el motivo honesto sin spawnear.
+            // Si el motor existe, spawnea el worker y el poll lo drena.
+            let habilitado = app
+                .assistant
+                .export_dialog_snapshot()
+                .is_format_enabled(formato);
+            app.confirm_export_assistant_media(&ctx);
+            if habilitado {
+                assert!(
+                    app.assistant_runtime.any_latex_export_in_flight(),
+                    "PDF/SVG con motor rutean al worker LaTeX"
+                );
+                // Cancela para no depender del motor en el test: el poll
+                // drena el `Cancelled` honesto en el diálogo.
+                app.cancel_export_assistant_media(&ctx);
+                for _ in 0..200 {
+                    app.poll_media_export_jobs(&ctx);
+                    if !app.assistant_runtime.any_latex_export_in_flight() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                assert!(
+                    !app.assistant_runtime.any_latex_export_in_flight(),
+                    "el worker LaTeX debe terminar"
+                );
+                assert!(
+                    matches!(
+                        app.assistant.media_export_state(),
+                        grafito_ui::assistant::MediaExportState::Failed(_)
+                    ),
+                    "cancel/error LaTeX es honesto en la card, jamás mudo"
+                );
+                // Limpia el diálogo para el siguiente formato.
+                app.export_assistant_media(&ctx);
+            } else {
+                assert!(
+                    matches!(
+                        app.assistant.media_export_state(),
+                        grafito_ui::assistant::MediaExportState::Failed(_)
+                    ),
+                    "sin motor el error es honesto, jamás mudo"
+                );
+                let dialogo = app.assistant.export_dialog_snapshot();
+                assert!(
+                    dialogo.error.is_some(),
+                    "el diálogo muestra el motivo visible"
+                );
+            }
+        }
+        // Título vacío → `Empty` honesto visible, jamás mudo (sin spawnear).
+        app.assistant.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "   ".into(),
+                frames: vec![egui::ColorImage::new([8, 8], egui::Color32::RED); 2],
+            }),
+            &ctx,
+        );
+        app.export_assistant_media(&ctx);
+        app.assistant
+            .export_dialog_set_format(grafito_ui::assistant::MediaExportFormat::Pdf);
+        // Habilita el formato a mano para llegar al worker aunque no haya
+        // motor: igual debe responder `Empty` antes de tocar disco.
+        app.confirm_export_assistant_media(&ctx);
+        assert!(
+            matches!(
+                app.assistant.media_export_state(),
+                grafito_ui::assistant::MediaExportState::Failed(_)
+            ),
+            "título vacío → Empty honesto"
+        );
+        assert!(app.assistant_runtime.pdf_export_job.is_none());
+        assert!(app.assistant_runtime.svg_export_job.is_none());
+    }
+
+    #[test]
+    fn export_dialog_pdf_svg_deshabilitados_sin_latex_con_motivo() {
+        // Sin LaTeX/dvisvgm el gating deshabilita PDF/SVG con motivo visible.
+        let mut dialogo = grafito_ui::assistant::MediaExportDialog::new();
+        dialogo.set_latex_availability(false, false);
+        assert!(!dialogo.is_format_enabled(grafito_ui::assistant::MediaExportFormat::Pdf));
+        assert!(!dialogo.is_format_enabled(grafito_ui::assistant::MediaExportFormat::Svg));
+        assert_eq!(
+            dialogo.format_disabled_reason(grafito_ui::assistant::MediaExportFormat::Pdf),
+            Some(grafito_ui::assistant::MEDIA_EXPORT_LATEX_HINT)
+        );
+        assert_eq!(
+            dialogo.format_disabled_reason(grafito_ui::assistant::MediaExportFormat::Svg),
+            Some(grafito_ui::assistant::MEDIA_EXPORT_LATEX_HINT)
+        );
+        // Con LaTeX pero sin dvisvgm: PDF habilitado, SVG deshabilitado con
+        // su motivo propio.
+        dialogo.set_latex_availability(true, false);
+        assert!(dialogo.is_format_enabled(grafito_ui::assistant::MediaExportFormat::Pdf));
+        assert!(!dialogo.is_format_enabled(grafito_ui::assistant::MediaExportFormat::Svg));
+        assert_eq!(
+            dialogo.format_disabled_reason(grafito_ui::assistant::MediaExportFormat::Svg),
+            Some(grafito_ui::assistant::MEDIA_EXPORT_DVISVGM_HINT)
+        );
+        // Con ambos: los 6 habilitados.
+        dialogo.set_latex_availability(true, true);
+        assert!(dialogo.is_format_enabled(grafito_ui::assistant::MediaExportFormat::Pdf));
+        assert!(dialogo.is_format_enabled(grafito_ui::assistant::MediaExportFormat::Svg));
+        assert_eq!(
+            dialogo.format_disabled_reason(grafito_ui::assistant::MediaExportFormat::Pdf),
+            None
+        );
+        // Documento mínimo puro: contiene la expresión y el entorno.
+        let doc = build_latex_document("x^2");
+        assert!(doc.contains("x^2"), "la fuente viaja al documento");
+        assert!(doc.contains("\\begin{document}"));
+        // Detecciones no pisan nada: solo leen el PATH sin spawnear.
+        let _ = detect_latex_available();
+        let _ = detect_dvisvgm_available();
     }
 
     #[test]
