@@ -1537,6 +1537,1027 @@ pub fn spawn_webm_export(
     })
 }
 
+// ── P0.2 long-form streaming (1500f por chunks, jamás `Vec` total) ──────────
+// Un set largo materializado no entra en RAM (1500f 720p ≈ 5.5 GiB): estos
+// writers reciben un productor `FnMut(j) -> Option<ColorImage>` y drenan a
+// disco por chunks de `max_chunk_frames(w, h, LONGFORM_CHUNK_MAX_BYTES)`
+// (contrato P0.1 de `grafito-anim`, usado sin redefinir: 720p→18,
+// 1080p→8, 640×480→54 con 64 MiB). En ningún momento vive el set entero en
+// memoria: como máximo un frame clonado (el 0, para fijar tamaño) más el
+// frame en vuelo.
+// Todo export corre en hilo worker (`CancellationToken` cooperativo,
+// tmp+rename atómico, `kill+wait` anti-zombie); la UI nunca hace E/S y lee
+// el progreso real por chunk vía `ProgresoChunks`.
+// Topes: 0 frames → `Err` honesto; >1500 → `Err` ("partí el video en dos").
+// GIF intacto: sigue por `export_frames_to_gif_file` (64 + autofit, corto).
+
+/// Progreso compartido con la UI (0.0..=1.0): el worker lo publica por
+/// chunk completado; el draw lo lee sin bloquear (`try_lock` honesto: si
+/// está ocupado, el frame actual muestra el valor anterior).
+pub type ProgresoChunks = std::sync::Arc<std::sync::Mutex<f32>>;
+
+/// Publica `hechos/total` (clamp 0.0..=1.0) en la barra compartida.
+/// `None` = sin observador (el export igual avanza). Puro (sin E/S).
+fn marcar_progreso(progreso: Option<&ProgresoChunks>, hechos: usize, total: usize) {
+    let Some(barra) = progreso else {
+        return;
+    };
+    let total = total.max(1) as f32;
+    let valor = (hechos as f32 / total).clamp(0.0, 1.0);
+    if let Ok(mut guarda) = barra.try_lock() {
+        *guarda = valor;
+    }
+}
+
+/// Mensaje de tope long-form (>1500): partir el pedido en dos videos.
+/// Comparte redacción con `validate_frames` del wire (sin duplicar lógica,
+// solo el texto que el diálogo muestra).
+fn longform_tope_msg(total: usize) -> String {
+    format!(
+        "{total} frames exceden el tope de {}: partí el video en dos",
+        grafito_anim::protocol::VIDEO_LONGFORM_MAX_FRAMES
+    )
+}
+
+/// Downscale de un frame al tamaño de la calidad (`-ql` 640 / `-qm` 1280 /
+/// `-qh` nativo sin upscale, vía `video_quality_export_size`). Si ya encaja,
+/// devuelve clon. CPU puro (llamar en hilo worker).
+/// El llamador ya validó `pixels.len() == ow*oh`: si el buffer igual no
+/// cuadra, devuelve el frame tal cual (el chequeo de tamaño del llamador lo
+/// rechaza honesto después, jamás píxeles inventados en silencio).
+fn downscale_un_frame(frame: &egui::ColorImage, nw: usize, nh: usize) -> egui::ColorImage {
+    let [bw, bh] = frame.size;
+    if (nw, nh) == (bw, bh) {
+        return frame.clone();
+    }
+    let bytes: Vec<u8> = frame.pixels.iter().flat_map(|p| p.to_array()).collect();
+    let (Some(bw32), Some(bh32), Some(nw32), Some(nh32)) = (
+        u32::try_from(bw).ok(),
+        u32::try_from(bh).ok(),
+        u32::try_from(nw).ok(),
+        u32::try_from(nh).ok(),
+    ) else {
+        return frame.clone();
+    };
+    let Some(img) = image::RgbaImage::from_raw(bw32, bh32, bytes) else {
+        return frame.clone();
+    };
+    let chica = image::imageops::resize(&img, nw32, nh32, image::imageops::FilterType::Triangle);
+    let pixeles: Vec<egui::Color32> = chica
+        .pixels()
+        .map(|p| egui::Color32::from_rgba_unmultiplied(p.0[0], p.0[1], p.0[2], p.0[3]))
+        .collect();
+    egui::ColorImage {
+        size: [nw, nh],
+        pixels: pixeles,
+    }
+}
+
+/// Re-muestrea con tope explícito (P0.2, puro): misma regla honesta que
+/// `remuestrear_frames_para_fps` (duración fija vía `Timeline::sample`),
+/// pero el anti-abuso es `tope` en vez de 512. El long-form llama con
+/// `VIDEO_LONGFORM_MAX_FRAMES` (1500); el corto conserva 512 vía
+/// `remuestrear_frames_para_fps` (intacto). Sin E/S.
+pub fn remuestrear_frames_con_tope(
+    frames: &[egui::ColorImage],
+    fps_origen: u32,
+    fps_destino: u32,
+    tope: usize,
+) -> Vec<egui::ColorImage> {
+    use grafito_anim::protocol::{Keyframe, Timeline};
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let origen = fps_origen.clamp(ANIM_FPS_MIN, ANIM_FPS_MAX) as u64;
+    let destino = fps_destino.clamp(ANIM_FPS_MIN, ANIM_FPS_MAX) as u64;
+    if origen == destino {
+        return frames.to_vec();
+    }
+    let n = frames.len() as u64;
+    let duracion_ms = n.saturating_mul(1000) / origen.max(1);
+    if duracion_ms == 0 {
+        return frames.to_vec();
+    }
+    let keys: Vec<Keyframe> = (0..n)
+        .map(|i| Keyframe {
+            t_ms: i.saturating_mul(1000) / origen,
+            value: i as f32,
+        })
+        .collect();
+    let timeline = Timeline {
+        duration_ms: duracion_ms.max(1),
+        keyframes: keys,
+    };
+    let total_dest = (duracion_ms.saturating_mul(destino) / 1000).max(1);
+    let total_dest = total_dest.min(tope.max(1) as u64) as usize;
+    (0..total_dest)
+        .map(|j| {
+            let t = (j as u64).saturating_mul(1000) / destino;
+            let idx = timeline.sample(t).round().clamp(0.0, (n - 1) as f32) as usize;
+            frames[idx.min(frames.len() - 1)].clone()
+        })
+        .collect()
+}
+
+/// Exporta a MP4 por chunks desde un productor (bloquea: llamar en hilo).
+///
+/// `productor(j)` entrega el frame `j` (`0..total_frames`, determinista: se
+/// lo puede llamar de nuevo si un codec WebM/MP4 falla y hay reintento —
+/// en MP4 hay un solo intento, pero la exigencia vale igual). Jamás se arma
+/// el `Vec` total: cada frame se entuba y se suelta.
+/// `fps` 1..=60 (se clampa), `bitrate_kbps` 100..=20000 (se clampa),
+/// `quality` aplica resolución real + crf + preset (`-ql`/`-qm`/`-qh`).
+/// Progreso real por chunk en `progreso`; cancelación entre chunks
+/// (`kill+wait`, sin zombie, sin tocar el destino); publicación atómica
+/// tmp+rename (`O_EXCL` honesto si el destino existe).
+#[allow(clippy::too_many_arguments)]
+pub fn export_mp4_streaming(
+    productor: &mut dyn FnMut(usize) -> Option<egui::ColorImage>,
+    total_frames: usize,
+    path: &Path,
+    fps: u32,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    token: &CancellationToken,
+    progreso: Option<&ProgresoChunks>,
+) -> Result<PathBuf, Mp4ExportError> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    if token.is_cancelled() {
+        return Err(Mp4ExportError::Cancelled);
+    }
+    if total_frames == 0 {
+        return Err(Mp4ExportError::Budget(GifExportError::EmptyFrames));
+    }
+    if total_frames > grafito_anim::protocol::VIDEO_LONGFORM_MAX_FRAMES {
+        return Err(Mp4ExportError::Io(longform_tope_msg(total_frames)));
+    }
+    let fps = fps.clamp(ANIM_EXPORT_FPS_MIN, ANIM_EXPORT_FPS_MAX);
+    let bitrate_kbps =
+        bitrate_kbps.clamp(ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_BITRATE_MAX_KBPS);
+    let primero = productor(0)
+        .ok_or_else(|| Mp4ExportError::Io("el productor no entregó el frame 0".to_string()))?;
+    let [ow, oh] = primero.size;
+    let (w, h) = video_quality_export_size(ow, oh, quality);
+    if w == 0 || h == 0 || w > GIF_EXPORT_MAX_DIM || h > GIF_EXPORT_MAX_DIM {
+        return Err(Mp4ExportError::Budget(
+            GifExportError::DimensionOutOfRange {
+                width: w,
+                height: h,
+            },
+        ));
+    }
+    if primero.pixels.len() != ow.saturating_mul(oh) {
+        return Err(Mp4ExportError::Budget(GifExportError::PixelCountMismatch {
+            index: 0,
+            expected: ow.saturating_mul(oh),
+            got: primero.pixels.len(),
+        }));
+    }
+    let pixel_count = w.checked_mul(h).ok_or(Mp4ExportError::Budget(
+        GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        },
+    ))?;
+    // Validación de chunk P0.1: por construcción cada chunk entra en 64 MiB.
+    let chunk = grafito_anim::protocol::max_chunk_frames(
+        w,
+        h,
+        grafito_anim::protocol::LONGFORM_CHUNK_MAX_BYTES,
+    )
+    .max(1);
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(Mp4ExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    let tmp = mp4_tmp_sibling(path);
+    let (crf, preset) = quality.flags();
+    let mut child = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg("rgba")
+        .arg("-s")
+        .arg(format!("{w}x{h}"))
+        .arg("-framerate")
+        .arg(fps.to_string())
+        .arg("-i")
+        .arg("pipe:0")
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg(preset)
+        .arg("-crf")
+        .arg(crf.to_string())
+        .arg("-b:v")
+        .arg(format!("{bitrate_kbps}k"))
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-vf")
+        .arg("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg("-f")
+        .arg("mp4")
+        .arg(&tmp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            mp4_drop_tmp(&tmp);
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Mp4ExportError::FfmpegMissing
+            } else {
+                Mp4ExportError::Io(format!("no se pudo lanzar ffmpeg: {e}"))
+            }
+        })?;
+    marcar_progreso(progreso, 0, total_frames);
+    // Un solo frame clonado vivo por vez (el 0); el resto se pide, entuba y
+    // suelta. Cancelado entre chunks → kill+wait + limpieza, sin destino.
+    let pipe_result = (|| -> Result<(), Mp4ExportError> {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Mp4ExportError::Io("ffmpeg no abrió su stdin".to_string()))?;
+        for j in 0..total_frames {
+            if token.is_cancelled() {
+                return Err(Mp4ExportError::Cancelled);
+            }
+            let crudo = if j == 0 {
+                primero.clone()
+            } else {
+                productor(j).ok_or_else(|| {
+                    Mp4ExportError::Io(format!("el productor no entregó el frame {j}"))
+                })?
+            };
+            if crudo.size != [ow, oh] {
+                return Err(Mp4ExportError::Budget(GifExportError::InconsistentSize {
+                    index: j,
+                    expected: [ow, oh],
+                    got: crudo.size,
+                }));
+            }
+            let chico = downscale_un_frame(&crudo, w, h);
+            if chico.size != [w, h] {
+                return Err(Mp4ExportError::Budget(GifExportError::PixelCountMismatch {
+                    index: j,
+                    expected: pixel_count,
+                    got: chico.pixels.len(),
+                }));
+            }
+            let rgba = frame_rgba_bytes(&chico, pixel_count, j).map_err(Mp4ExportError::Budget)?;
+            stdin
+                .write_all(&rgba)
+                .map_err(|e| Mp4ExportError::Io(format!("no se pudo entubar el frame {j}: {e}")))?;
+            if (j + 1) % chunk == 0 || j + 1 == total_frames {
+                marcar_progreso(progreso, j + 1, total_frames);
+            }
+        }
+        Ok(())
+    })();
+    if let Err(pipe_err) = pipe_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        mp4_drop_tmp(&tmp);
+        return Err(pipe_err);
+    }
+    match esperar_ffmpeg_con_cancel(&mut child, token) {
+        EsperaFfmpeg::Cancelado => {
+            mp4_drop_tmp(&tmp);
+            return Err(Mp4ExportError::Cancelled);
+        }
+        EsperaFfmpeg::FalloIo(detalle) => {
+            mp4_drop_tmp(&tmp);
+            return Err(Mp4ExportError::Io(detalle));
+        }
+        EsperaFfmpeg::Terminado(false, stderr) => {
+            mp4_drop_tmp(&tmp);
+            return Err(Mp4ExportError::FfmpegFailed(ffmpeg_stderr_tail(&stderr)));
+        }
+        EsperaFfmpeg::Terminado(true, _) => {}
+    }
+    if token.is_cancelled() {
+        mp4_drop_tmp(&tmp);
+        return Err(Mp4ExportError::Cancelled);
+    }
+    if std::fs::symlink_metadata(path).is_ok() {
+        mp4_drop_tmp(&tmp);
+        return Err(Mp4ExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        mp4_drop_tmp(&tmp);
+        return Err(Mp4ExportError::Io(format!(
+            "no se pudo publicar {}: {e}",
+            path.display()
+        )));
+    }
+    marcar_progreso(progreso, total_frames, total_frames);
+    Ok(path.to_path_buf())
+}
+
+/// Exporta a WebM por chunks desde un productor (bloquea: llamar en hilo).
+///
+/// Misma disciplina que `export_mp4_streaming` (chunks P0.1, progreso real,
+/// cancelación entre chunks, tmp+rename atómico) con los codecs WebM en
+// orden de intento (`libvpx-vp9`, fallback `libaom-av1`): si el primero
+/// falla por encoder desconocido se reintenta llamando al productor de
+/// nuevo (por eso debe ser determinista). Sin `ffmpeg` → `FfmpegMissing`.
+#[allow(clippy::too_many_arguments)]
+pub fn export_webm_streaming(
+    productor: &mut dyn FnMut(usize) -> Option<egui::ColorImage>,
+    total_frames: usize,
+    path: &Path,
+    fps: u32,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    token: &CancellationToken,
+    progreso: Option<&ProgresoChunks>,
+) -> Result<PathBuf, WebmExportError> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    if token.is_cancelled() {
+        return Err(WebmExportError::Cancelled);
+    }
+    if total_frames == 0 {
+        return Err(WebmExportError::Budget(GifExportError::EmptyFrames));
+    }
+    if total_frames > grafito_anim::protocol::VIDEO_LONGFORM_MAX_FRAMES {
+        return Err(WebmExportError::Io(longform_tope_msg(total_frames)));
+    }
+    let fps = fps.clamp(ANIM_EXPORT_FPS_MIN, ANIM_EXPORT_FPS_MAX);
+    let bitrate_kbps =
+        bitrate_kbps.clamp(ANIM_EXPORT_BITRATE_MIN_KBPS, ANIM_EXPORT_BITRATE_MAX_KBPS);
+    let primero = productor(0)
+        .ok_or_else(|| WebmExportError::Io("el productor no entregó el frame 0".to_string()))?;
+    let [ow, oh] = primero.size;
+    let (w, h) = video_quality_export_size(ow, oh, quality);
+    if w == 0 || h == 0 || w > GIF_EXPORT_MAX_DIM || h > GIF_EXPORT_MAX_DIM {
+        return Err(WebmExportError::Budget(
+            GifExportError::DimensionOutOfRange {
+                width: w,
+                height: h,
+            },
+        ));
+    }
+    if primero.pixels.len() != ow.saturating_mul(oh) {
+        return Err(WebmExportError::Budget(
+            GifExportError::PixelCountMismatch {
+                index: 0,
+                expected: ow.saturating_mul(oh),
+                got: primero.pixels.len(),
+            },
+        ));
+    }
+    let pixel_count = w.checked_mul(h).ok_or(WebmExportError::Budget(
+        GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        },
+    ))?;
+    let chunk = grafito_anim::protocol::max_chunk_frames(
+        w,
+        h,
+        grafito_anim::protocol::LONGFORM_CHUNK_MAX_BYTES,
+    )
+    .max(1);
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(WebmExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            path.display()
+        )));
+    }
+    let tmp = video_tmp_sibling(path, "webm");
+    let (crf, preset) = quality.flags();
+    marcar_progreso(progreso, 0, total_frames);
+    for (intento, codec) in WEBM_VIDEO_CODECS.iter().enumerate() {
+        let ultimo_intento = intento + 1 == WEBM_VIDEO_CODECS.len();
+        if token.is_cancelled() {
+            video_drop_tmp(&tmp);
+            return Err(WebmExportError::Cancelled);
+        }
+        let mut child = match Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("rgba")
+            .arg("-s")
+            .arg(format!("{w}x{h}"))
+            .arg("-framerate")
+            .arg(fps.to_string())
+            .arg("-i")
+            .arg("pipe:0")
+            .arg("-c:v")
+            .arg(codec)
+            .arg("-preset")
+            .arg(preset)
+            .arg("-b:v")
+            .arg(format!("{bitrate_kbps}k"))
+            .arg("-crf")
+            .arg(crf.to_string())
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-vf")
+            .arg("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+            .arg("-f")
+            .arg("webm")
+            .arg(&tmp)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                video_drop_tmp(&tmp);
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Err(WebmExportError::FfmpegMissing);
+                }
+                return Err(WebmExportError::Io(format!(
+                    "no se pudo lanzar ffmpeg: {e}"
+                )));
+            }
+        };
+        let pipe_result = (|| -> Result<(), WebmExportError> {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| WebmExportError::Io("ffmpeg no abrió su stdin".to_string()))?;
+            for j in 0..total_frames {
+                if token.is_cancelled() {
+                    return Err(WebmExportError::Cancelled);
+                }
+                let crudo = if j == 0 {
+                    primero.clone()
+                } else {
+                    productor(j).ok_or_else(|| {
+                        WebmExportError::Io(format!("el productor no entregó el frame {j}"))
+                    })?
+                };
+                if crudo.size != [ow, oh] {
+                    return Err(WebmExportError::Budget(GifExportError::InconsistentSize {
+                        index: j,
+                        expected: [ow, oh],
+                        got: crudo.size,
+                    }));
+                }
+                let chico = downscale_un_frame(&crudo, w, h);
+                if chico.size != [w, h] {
+                    return Err(WebmExportError::Budget(
+                        GifExportError::PixelCountMismatch {
+                            index: j,
+                            expected: pixel_count,
+                            got: chico.pixels.len(),
+                        },
+                    ));
+                }
+                let rgba =
+                    frame_rgba_bytes(&chico, pixel_count, j).map_err(WebmExportError::Budget)?;
+                stdin.write_all(&rgba).map_err(|e| {
+                    WebmExportError::Io(format!("no se pudo entubar el frame {j}: {e}"))
+                })?;
+                if (j + 1) % chunk == 0 || j + 1 == total_frames {
+                    marcar_progreso(progreso, j + 1, total_frames);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(pipe_err) = pipe_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            video_drop_tmp(&tmp);
+            return Err(pipe_err);
+        }
+        match esperar_ffmpeg_con_cancel(&mut child, token) {
+            EsperaFfmpeg::Cancelado => {
+                video_drop_tmp(&tmp);
+                return Err(WebmExportError::Cancelled);
+            }
+            EsperaFfmpeg::FalloIo(detalle) => {
+                video_drop_tmp(&tmp);
+                return Err(WebmExportError::Io(detalle));
+            }
+            EsperaFfmpeg::Terminado(true, _) => {
+                if token.is_cancelled() {
+                    video_drop_tmp(&tmp);
+                    return Err(WebmExportError::Cancelled);
+                }
+                if std::fs::symlink_metadata(path).is_ok() {
+                    video_drop_tmp(&tmp);
+                    return Err(WebmExportError::Io(format!(
+                        "no se pudo crear {} sin sobrescribir: el destino ya existe",
+                        path.display()
+                    )));
+                }
+                if let Err(e) = std::fs::rename(&tmp, path) {
+                    video_drop_tmp(&tmp);
+                    return Err(WebmExportError::Io(format!(
+                        "no se pudo publicar {}: {e}",
+                        path.display()
+                    )));
+                }
+                marcar_progreso(progreso, total_frames, total_frames);
+                return Ok(path.to_path_buf());
+            }
+            EsperaFfmpeg::Terminado(false, stderr) => {
+                let tail = ffmpeg_stderr_tail(&stderr);
+                video_drop_tmp(&tmp);
+                if !ultimo_intento && tail.contains("Unknown encoder") {
+                    continue;
+                }
+                return Err(WebmExportError::FfmpegFailed(tail));
+            }
+        }
+    }
+    Err(WebmExportError::FfmpegFailed(
+        "ffmpeg no aceptó ningún codec de vídeo".to_string(),
+    ))
+}
+
+/// Exporta la secuencia PNG por chunks desde un productor (bloquea: llamar
+/// en hilo). `frame_{j:04}.png` estables con índice global (no por chunk),
+/// vuelco a hermano tmp + `rename` atómico del directorio, `O_EXCL`
+/// honesto, progreso real por chunk y cancelación entre chunks sin dejar ni
+/// destino ni tmp huérfano. Sin `ffmpeg` (siempre disponible).
+pub fn export_png_dir_streaming(
+    productor: &mut dyn FnMut(usize) -> Option<egui::ColorImage>,
+    total_frames: usize,
+    dir: &Path,
+    token: &CancellationToken,
+    progreso: Option<&ProgresoChunks>,
+) -> Result<PathBuf, PngDirExportError> {
+    if token.is_cancelled() {
+        return Err(PngDirExportError::Cancelled);
+    }
+    if total_frames == 0 {
+        return Err(PngDirExportError::Budget(GifExportError::EmptyFrames));
+    }
+    if total_frames > grafito_anim::protocol::VIDEO_LONGFORM_MAX_FRAMES {
+        return Err(PngDirExportError::Io(longform_tope_msg(total_frames)));
+    }
+    let primero = productor(0)
+        .ok_or_else(|| PngDirExportError::Io("el productor no entregó el frame 0".to_string()))?;
+    let [w, h] = primero.size;
+    if w == 0 || h == 0 || w > GIF_EXPORT_MAX_DIM || h > GIF_EXPORT_MAX_DIM {
+        return Err(PngDirExportError::Budget(
+            GifExportError::DimensionOutOfRange {
+                width: w,
+                height: h,
+            },
+        ));
+    }
+    let pixel_count = w.checked_mul(h).ok_or(PngDirExportError::Budget(
+        GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        },
+    ))?;
+    if primero.pixels.len() != pixel_count {
+        return Err(PngDirExportError::Budget(
+            GifExportError::PixelCountMismatch {
+                index: 0,
+                expected: pixel_count,
+                got: primero.pixels.len(),
+            },
+        ));
+    }
+    let chunk = grafito_anim::protocol::max_chunk_frames(
+        w,
+        h,
+        grafito_anim::protocol::LONGFORM_CHUNK_MAX_BYTES,
+    )
+    .max(1);
+    if std::fs::symlink_metadata(dir).is_ok() {
+        return Err(PngDirExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            dir.display()
+        )));
+    }
+    let tmp = png_dir_tmp_sibling(dir);
+    if let Err(e) = std::fs::create_dir(&tmp) {
+        png_dir_drop_tmp(&tmp);
+        return Err(PngDirExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: {e}",
+            tmp.display()
+        )));
+    }
+    marcar_progreso(progreso, 0, total_frames);
+    for j in 0..total_frames {
+        if token.is_cancelled() {
+            png_dir_drop_tmp(&tmp);
+            return Err(PngDirExportError::Cancelled);
+        }
+        let frame = if j == 0 {
+            primero.clone()
+        } else {
+            productor(j).ok_or_else(|| {
+                PngDirExportError::Io(format!("el productor no entregó el frame {j}"))
+            })?
+        };
+        if frame.size != [w, h] {
+            png_dir_drop_tmp(&tmp);
+            return Err(PngDirExportError::Budget(
+                GifExportError::InconsistentSize {
+                    index: j,
+                    expected: [w, h],
+                    got: frame.size,
+                },
+            ));
+        }
+        if let Err(e) = write_png_frame(&tmp, &frame, pixel_count, j) {
+            png_dir_drop_tmp(&tmp);
+            return Err(e);
+        }
+        if (j + 1) % chunk == 0 || j + 1 == total_frames {
+            marcar_progreso(progreso, j + 1, total_frames);
+        }
+    }
+    if token.is_cancelled() {
+        png_dir_drop_tmp(&tmp);
+        return Err(PngDirExportError::Cancelled);
+    }
+    if std::fs::symlink_metadata(dir).is_ok() {
+        png_dir_drop_tmp(&tmp);
+        return Err(PngDirExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            dir.display()
+        )));
+    }
+    if let Err(e) = std::fs::rename(&tmp, dir) {
+        png_dir_drop_tmp(&tmp);
+        return Err(PngDirExportError::Io(format!(
+            "no se pudo publicar {}: {e}",
+            dir.display()
+        )));
+    }
+    marcar_progreso(progreso, total_frames, total_frames);
+    Ok(dir.to_path_buf())
+}
+
+/// Exporta un set materializado corto a MP4 con progreso (bloquea: llamar
+/// en hilo). Camino corto intacto (≤64 vía `check_gif_export_budget`
+/// dentro del núcleo): solo suma la barra compartida (0 al arrancar, 1.0
+/// al publicar). Para sets largos usar `export_mp4_streaming`.
+pub fn export_mp4_desde_set_con_progreso(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    progreso: Option<&ProgresoChunks>,
+) -> Result<PathBuf, Mp4ExportError> {
+    marcar_progreso(progreso, 0, frames.len().max(1));
+    let salida =
+        export_frames_to_mp4_file_cancelable(frames, path, delay_cs, token, bitrate_kbps, quality);
+    if salida.is_ok() {
+        marcar_progreso(progreso, frames.len().max(1), frames.len().max(1));
+    }
+    salida
+}
+
+/// Exporta un set materializado corto a WebM con progreso (bloquea: llamar
+/// en hilo). Camino corto intacto (≤64): solo suma la barra compartida.
+/// Para sets largos usar `export_webm_streaming`.
+pub fn export_webm_desde_set_con_progreso(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+    token: &CancellationToken,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    progreso: Option<&ProgresoChunks>,
+) -> Result<PathBuf, WebmExportError> {
+    marcar_progreso(progreso, 0, frames.len().max(1));
+    let salida =
+        export_frames_to_webm_file_cancelable(frames, path, delay_cs, token, bitrate_kbps, quality);
+    if salida.is_ok() {
+        marcar_progreso(progreso, frames.len().max(1), frames.len().max(1));
+    }
+    salida
+}
+
+/// Exporta un set materializado corto a PNG-dir con progreso (bloquea:
+/// llamar en hilo). Camino corto intacto (≤64): solo suma la barra
+/// compartida. Para sets largos usar `export_png_dir_streaming`.
+pub fn export_png_dir_desde_set_con_progreso(
+    frames: &[egui::ColorImage],
+    dir: &Path,
+    token: &CancellationToken,
+    progreso: Option<&ProgresoChunks>,
+) -> Result<PathBuf, PngDirExportError> {
+    marcar_progreso(progreso, 0, frames.len().max(1));
+    let salida = export_frames_to_png_dir_cancelable(frames, dir, token);
+    if salida.is_ok() {
+        marcar_progreso(progreso, frames.len().max(1), frames.len().max(1));
+    }
+    salida
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod p02_streaming_tests {
+    use super::{
+        export_mp4_desde_set_con_progreso, export_mp4_streaming,
+        export_png_dir_desde_set_con_progreso, export_png_dir_streaming,
+        export_webm_desde_set_con_progreso, export_webm_streaming, remuestrear_frames_con_tope,
+        ProgresoChunks, VideoQuality,
+    };
+    use grafito_assistant::CancellationToken;
+
+    /// Frame determinista `j` de `w×h` (gris que rota con `j`, alfa
+    /// opaco): el productor de los tests nunca devuelve `None` en rango.
+    fn frame_test(w: usize, h: usize, j: usize) -> egui::ColorImage {
+        let tono = (j % 256) as u8;
+        egui::ColorImage {
+            size: [w, h],
+            pixels: vec![
+                egui::Color32::from_rgba_unmultiplied(tono, 100, 200, 255);
+                w.saturating_mul(h)
+            ],
+        }
+    }
+
+    fn barra_nueva() -> ProgresoChunks {
+        ProgresoChunks::new(std::sync::Mutex::new(0.0))
+    }
+
+    fn progreso_actual(barra: &ProgresoChunks) -> f32 {
+        *barra.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hermano temporal único para los tests (nunca colisiona con el
+    /// destino real; se borra best-effort al final).
+    fn ruta_test(nombre: &str) -> std::path::PathBuf {
+        let sello = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "grafito-p02-{nombre}-{pid}-{sello}",
+            pid = std::process::id()
+        ))
+    }
+
+    #[test]
+    fn p02_chunks_pineados_contrato_p01() {
+        use grafito_anim::protocol::{
+            estimate_chunk_bytes, frames_for_duration, max_chunk_frames, LONGFORM_CHUNK_MAX_BYTES,
+            VIDEO_LONGFORM_MAX_FRAMES,
+        };
+        assert_eq!(VIDEO_LONGFORM_MAX_FRAMES, 1500);
+        assert_eq!(max_chunk_frames(1280, 720, LONGFORM_CHUNK_MAX_BYTES), 18);
+        assert_eq!(max_chunk_frames(1920, 1080, LONGFORM_CHUNK_MAX_BYTES), 8);
+        assert_eq!(max_chunk_frames(640, 480, LONGFORM_CHUNK_MAX_BYTES), 54);
+        let bytes_720p = estimate_chunk_bytes(1280, 720, 18).unwrap_or(usize::MAX);
+        assert!(
+            bytes_720p <= LONGFORM_CHUNK_MAX_BYTES,
+            "el chunk 720p entra en 64 MiB"
+        );
+        assert_eq!(frames_for_duration(50_000, 30), 1500);
+        assert_eq!(
+            frames_for_duration(50_000, 30) as usize,
+            VIDEO_LONGFORM_MAX_FRAMES
+        );
+    }
+
+    #[test]
+    fn p02_tope_sobre_pedido_sin_producir() {
+        let mut llamadas = 0usize;
+        let mut productor = |_: usize| -> Option<egui::ColorImage> {
+            llamadas += 1;
+            Some(frame_test(32, 24, 0))
+        };
+        let destino = ruta_test("tope-mp4.mp4");
+        let fallo = export_mp4_streaming(
+            &mut productor,
+            1501,
+            &destino,
+            30,
+            2000,
+            VideoQuality::Media,
+            &CancellationToken::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            fallo.to_string().contains("partí el video en dos"),
+            "mp4 >1500 honesto: {fallo}"
+        );
+        let destino = ruta_test("tope-webm.webm");
+        let fallo = export_webm_streaming(
+            &mut productor,
+            1501,
+            &destino,
+            30,
+            2000,
+            VideoQuality::Media,
+            &CancellationToken::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            fallo.to_string().contains("partí el video en dos"),
+            "webm >1500 honesto: {fallo}"
+        );
+        let destino = ruta_test("tope-png");
+        let fallo = export_png_dir_streaming(
+            &mut productor,
+            1501,
+            &destino,
+            &CancellationToken::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            fallo.to_string().contains("partí el video en dos"),
+            "png >1500 honesto: {fallo}"
+        );
+        assert_eq!(llamadas, 0, "el tope se valida antes de producir");
+        assert!(!destino.exists(), "sin parcial en disco");
+    }
+
+    #[test]
+    fn p02_png_streaming_redondo_con_progreso() {
+        let destino = ruta_test("png-ok");
+        let barra = barra_nueva();
+        let mut productor = |j: usize| -> Option<egui::ColorImage> { Some(frame_test(64, 48, j)) };
+        let salida = export_png_dir_streaming(
+            &mut productor,
+            8,
+            &destino,
+            &CancellationToken::default(),
+            Some(&barra),
+        )
+        .expect("png streaming 8f");
+        assert_eq!(salida, destino);
+        for j in 0..8 {
+            let frame = destino.join(format!("frame_{j:04}.png"));
+            assert!(frame.is_file(), "estable: {}", frame.display());
+        }
+        assert!(
+            (progreso_actual(&barra) - 1.0).abs() < f32::EPSILON,
+            "progreso real llega a 1.0"
+        );
+        let _ = std::fs::remove_dir_all(&destino);
+    }
+
+    #[test]
+    fn p02_png_streaming_cancelado_sin_parcial() {
+        let destino = ruta_test("png-cancel");
+        let token = CancellationToken::default();
+        token.cancel();
+        let mut productor = |j: usize| -> Option<egui::ColorImage> { Some(frame_test(32, 24, j)) };
+        let fallo =
+            export_png_dir_streaming(&mut productor, 8, &destino, &token, None).unwrap_err();
+        assert_eq!(
+            fallo,
+            super::PngDirExportError::Cancelled,
+            "cancelado honesto: {fallo}"
+        );
+        assert!(!destino.exists(), "cancelado no deja destino");
+    }
+
+    #[test]
+    fn p02_mp4_streaming_redondo_o_ffmpeg_honesto() {
+        let destino = ruta_test("mp4-ok.mp4");
+        let barra = barra_nueva();
+        let mut productor = |j: usize| -> Option<egui::ColorImage> { Some(frame_test(64, 48, j)) };
+        match export_mp4_streaming(
+            &mut productor,
+            8,
+            &destino,
+            12,
+            2000,
+            VideoQuality::Media,
+            &CancellationToken::default(),
+            Some(&barra),
+        ) {
+            Ok(salida) => {
+                assert_eq!(salida, destino);
+                assert!(destino.is_file(), "mp4 publicado");
+                assert!(
+                    (progreso_actual(&barra) - 1.0).abs() < f32::EPSILON,
+                    "progreso real llega a 1.0"
+                );
+                let _ = std::fs::remove_file(&destino);
+            }
+            Err(super::Mp4ExportError::FfmpegMissing) => {
+                assert!(!destino.exists(), "sin ffmpeg no queda parcial");
+            }
+            Err(otro) => panic!("mp4 streaming 8f falló deshonesto: {otro}"),
+        }
+    }
+
+    #[test]
+    fn p02_webm_streaming_redondo_o_ffmpeg_honesto() {
+        let destino = ruta_test("webm-ok.webm");
+        let mut productor = |j: usize| -> Option<egui::ColorImage> { Some(frame_test(64, 48, j)) };
+        match export_webm_streaming(
+            &mut productor,
+            8,
+            &destino,
+            12,
+            2000,
+            VideoQuality::Media,
+            &CancellationToken::default(),
+            None,
+        ) {
+            Ok(salida) => {
+                assert_eq!(salida, destino);
+                assert!(destino.is_file(), "webm publicado");
+                let _ = std::fs::remove_file(&destino);
+            }
+            Err(super::WebmExportError::FfmpegMissing) => {
+                assert!(!destino.exists(), "sin ffmpeg no queda parcial");
+            }
+            Err(otro) => panic!("webm streaming 8f falló deshonesto: {otro}"),
+        }
+    }
+
+    #[test]
+    fn p02_desde_set_corto_intacto_con_progreso() {
+        let set: Vec<egui::ColorImage> = (0..4).map(|j| frame_test(32, 24, j)).collect();
+        let destino = ruta_test("set-ok");
+        let barra = barra_nueva();
+        let salida = export_png_dir_desde_set_con_progreso(
+            &set,
+            &destino,
+            &CancellationToken::default(),
+            Some(&barra),
+        )
+        .expect("set corto intacto");
+        assert_eq!(salida, destino);
+        assert!(destino.join("frame_0003.png").is_file());
+        assert!(
+            (progreso_actual(&barra) - 1.0).abs() < f32::EPSILON,
+            "progreso del set llega a 1.0"
+        );
+        let _ = std::fs::remove_dir_all(&destino);
+
+        let destino = ruta_test("set-mp4.mp4");
+        let salida = export_mp4_desde_set_con_progreso(
+            &set,
+            &destino,
+            8,
+            &CancellationToken::default(),
+            2000,
+            VideoQuality::Media,
+            None,
+        );
+        match salida {
+            Ok(publicado) => {
+                assert_eq!(publicado, destino);
+                let _ = std::fs::remove_file(&destino);
+            }
+            Err(super::Mp4ExportError::FfmpegMissing) => {}
+            Err(otro) => panic!("mp4 desde set falló deshonesto: {otro}"),
+        }
+        let destino = ruta_test("set-webm.webm");
+        let salida = export_webm_desde_set_con_progreso(
+            &set,
+            &destino,
+            8,
+            &CancellationToken::default(),
+            2000,
+            VideoQuality::Media,
+            None,
+        );
+        match salida {
+            Ok(publicado) => {
+                assert_eq!(publicado, destino);
+                let _ = std::fs::remove_file(&destino);
+            }
+            Err(super::WebmExportError::FfmpegMissing) => {}
+            Err(otro) => panic!("webm desde set falló deshonesto: {otro}"),
+        }
+    }
+
+    #[test]
+    fn p02_remuestreo_con_tope_1500() {
+        let base: Vec<egui::ColorImage> = (0..48).map(|j| frame_test(16, 12, j)).collect();
+        // 48f @12fps = 4 s → @30fps = 120f con tope 1500.
+        let largo = remuestrear_frames_con_tope(
+            &base,
+            12,
+            30,
+            grafito_anim::protocol::VIDEO_LONGFORM_MAX_FRAMES,
+        );
+        assert_eq!(largo.len(), 120, "4 s a 30 fps = 120f");
+        let acotado = remuestrear_frames_con_tope(&base, 12, 30, 64);
+        assert_eq!(acotado.len(), 64, "el tope corto manda");
+        assert!(remuestrear_frames_con_tope(&[], 12, 30, 1500).is_empty());
+    }
+}
+
 // ── Tex real con tiny-skia (sin deps nuevas) ────────────────────────────────
 // `Mobject::Tex` trae SVG ya tipografiado (≤64 KiB, cota intacta vía
 // `crate::export::tex_svg_within_budget`). Se rasterizan las formas del
