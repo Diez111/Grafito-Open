@@ -4,6 +4,12 @@
 //! no disponible"): grilla + texto, jamás una curva que parezca respuesta.
 //! Todas las plantillas son deterministas.
 
+// P1-app: motor de voz + mux + captions (`voice.rs`). Submódulo declarado
+// acá (vía `#[path]`) para no tocar `lib.rs`: el wiring del diálogo lo hace
+// otro frente después, que lo moverá a `crate::voice` si lo necesita.
+#[path = "voice.rs"]
+pub mod voice;
+
 /// Frames por set nativo (48; el bench `benches/native_rgba.rs` lo pinnea).
 pub const NATIVE_ANIM_FRAME_COUNT: usize = 48;
 
@@ -1208,7 +1214,8 @@ fn video_drop_tmp(tmp: &Path) {
 }
 
 /// Cola del stderr (últimos 500 chars: el error real está al final).
-fn ffmpeg_stderr_tail(stderr: &[u8]) -> String {
+/// `pub(crate)` para el frente voz (`voice.rs`): misma disciplina kill+wait.
+pub(crate) fn ffmpeg_stderr_tail(stderr: &[u8]) -> String {
     String::from_utf8_lossy(stderr)
         .chars()
         .rev()
@@ -1226,13 +1233,14 @@ fn ffmpeg_stderr_tail(stderr: &[u8]) -> String {
 /// mientras el principal hace `try_wait` + token cada 5ms: cancelar en
 /// `wait` mata al hijo (sin zombies) y devuelve `Cancelled`. El llamador
 /// limpia el tmp hermano. Solo worker/hilo, jamás UI.
-enum EsperaFfmpeg {
+/// `pub(crate)` para el frente voz (`voice.rs`): misma disciplina kill+wait.
+pub(crate) enum EsperaFfmpeg {
     Terminado(bool, Vec<u8>),
     Cancelado,
     FalloIo(String),
 }
 
-fn esperar_ffmpeg_con_cancel(
+pub(crate) fn esperar_ffmpeg_con_cancel(
     child: &mut std::process::Child,
     token: &CancellationToken,
 ) -> EsperaFfmpeg {
@@ -1681,6 +1689,34 @@ pub fn export_mp4_streaming(
     token: &CancellationToken,
     progreso: Option<&ProgresoChunks>,
 ) -> Result<PathBuf, Mp4ExportError> {
+    export_mp4_streaming_with_bin(
+        productor,
+        total_frames,
+        path,
+        fps,
+        bitrate_kbps,
+        quality,
+        token,
+        progreso,
+        Path::new("ffmpeg"),
+    )
+}
+
+/// Idem con binario explícito (frente voz P1-app: el export narrado usa
+/// falsos herméticos en tests; prod pasa el `ffmpeg` del PATH).
+/// Misma disciplina (chunks P0.1, progreso real, cancelación, tmp+rename).
+#[allow(clippy::too_many_arguments)]
+pub fn export_mp4_streaming_with_bin(
+    productor: &mut dyn FnMut(usize) -> Option<egui::ColorImage>,
+    total_frames: usize,
+    path: &Path,
+    fps: u32,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    token: &CancellationToken,
+    progreso: Option<&ProgresoChunks>,
+    ffmpeg_bin: &Path,
+) -> Result<PathBuf, Mp4ExportError> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
     if token.is_cancelled() {
@@ -1735,7 +1771,7 @@ pub fn export_mp4_streaming(
     }
     let tmp = mp4_tmp_sibling(path);
     let (crf, preset) = quality.flags();
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(ffmpeg_bin)
         .arg("-y")
         .arg("-f")
         .arg("rawvideo")
@@ -1773,7 +1809,7 @@ pub fn export_mp4_streaming(
             if e.kind() == std::io::ErrorKind::NotFound {
                 Mp4ExportError::FfmpegMissing
             } else {
-                Mp4ExportError::Io(format!("no se pudo lanzar ffmpeg: {e}"))
+                Mp4ExportError::Io(format!("no se pudo lanzar {}: {e}", ffmpeg_bin.display()))
             }
         })?;
     marcar_progreso(progreso, 0, total_frames);
@@ -12954,6 +12990,670 @@ pub fn raster_image_mobject_onto(buf: &mut [u8], w: usize, h: usize, bytes: &[u8
         }
     }
     true
+}
+
+// ── P1-app: export narrado (render→mux→burn→sidecar) ───────────────────────
+// Combina los writers streaming (`export_mp4_streaming_with_bin`) con el
+// frente voz (`voice.rs`): render del set → voiceover piper → mux offset/gain
+// → quemado ASS → sidecar SRT. Todo en hilo worker (`spawn_mp4_narrado` +
+// `CancellationToken` cooperativo, tmp+rename `O_EXCL`, kill+wait anti-zombie
+// en cada etapa); la UI solo dispara y lee el `JoinHandle` + `ProgresoChunks`.
+// Solo MP4: el mux usa `-c:v copy` (H.264) y el burn re-encodea libx264.
+// Sin piper → `Voz(PiperMissing)`; sin ffmpeg → `Mux/Burn::FfmpegMissing`
+// honestos (el wiring muestra el video mudo + `.srt`). El wav es insumo
+// temporal (se borra tras el mux, jamás se publica).
+
+/// Pedido de voiceover: una sola pista de voz (contrato `AudioTrack`:
+/// `offset_ms` 0..=60000, `gain` 0.0..=2.0, validados en el mux).
+#[derive(Debug, Clone)]
+pub struct VoiceoverPedido {
+    /// Texto a narrar (1..=8192 chars, `VOICE_MAX_TEXT_CHARS`).
+    pub texto: String,
+    /// Voz `.onnx` en disco (`detect_piper_voice_path` la encuentra).
+    pub voz: PathBuf,
+    /// Desplazamiento en ms (0..=60000).
+    pub offset_ms: u32,
+    /// Ganancia lineal (0.0..=2.0, finita).
+    pub gain: f32,
+}
+
+/// Subtítulos del export: el `.srt` sidecar se escribe siempre; con
+/// `quemar = true` además se quema el ASS sobre el video (re-encode).
+#[derive(Debug, Clone)]
+pub struct SubtitulosPedido {
+    /// Pista validada (`to_srt`/`to_ass` con cota 256 KiB internas).
+    pub track: grafito_anim::captions::CaptionTrack,
+    /// ¿Quemar sobre el video (exige ffmpeg) o solo sidecar?
+    pub quemar: bool,
+}
+
+/// Bins externos (tests herméticos / distros sin PATH). Prod pasa `None`
+/// (= `piper`/`ffmpeg` del PATH real).
+#[derive(Debug, Clone)]
+pub struct VozBins {
+    /// Binario piper (tests: script falso).
+    pub piper: PathBuf,
+    /// Binario ffmpeg (tests: script falso).
+    pub ffmpeg: PathBuf,
+}
+
+/// Salida del export narrado: video final + sidecar si hubo subtítulos.
+#[derive(Debug, Clone)]
+pub struct VideoNarrado {
+    /// Video publicado (con voz quemada según el pedido).
+    pub video: PathBuf,
+    /// Sidecar `.srt` junto al video (`None` si no hubo subtítulos).
+    pub srt: Option<PathBuf>,
+}
+
+/// Error tipado del export narrado (cada etapa conserva su error honesto).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoNarradoError {
+    /// Falló el render del set (incluye `Cancelled` y `FfmpegMissing`).
+    Render(Mp4ExportError),
+    /// Falló el voiceover piper.
+    Voz(voice::VoiceError),
+    /// Falló el mux audio→video.
+    Mux(voice::MuxError),
+    /// Falló el quemado ASS.
+    Burn(voice::CaptionBurnError),
+    /// Falló el sidecar `.srt` / `.ass` intermedio.
+    Sidecar(voice::SidecarError),
+}
+
+impl std::fmt::Display for VideoNarradoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Render(inner) => write!(f, "{inner}"),
+            Self::Voz(inner) => write!(f, "{inner}"),
+            Self::Mux(inner) => write!(f, "{inner}"),
+            Self::Burn(inner) => write!(f, "{inner}"),
+            Self::Sidecar(inner) => write!(f, "{inner}"),
+        }
+    }
+}
+
+impl std::error::Error for VideoNarradoError {}
+
+/// Tmp intermedio del narrado (`<name>.narrado-<etapa>.<pid>-<nanos>.mp4`):
+/// nombres distintos por etapa para no colisionar entre sí. Puro, sin E/S.
+fn narrado_tmp(path: &Path, etapa: &str, extension: &str) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name: String = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("clip"));
+    let tmp_name = format!(
+        "{name}.narrado-{etapa}.{}-{stamp}.{extension}",
+        std::process::id()
+    );
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(tmp_name),
+        _ => PathBuf::from(tmp_name),
+    }
+}
+
+/// Borrado best-effort de intermedios (jamás deja parcial huérfano).
+fn narrado_limpiar(tmps: &[PathBuf]) {
+    for tmp in tmps {
+        let _ = std::fs::remove_file(tmp);
+    }
+}
+
+/// Publicación final tmp→destino con `O_EXCL` en ambos bordes (igual que
+/// los writers: pre-chequeo + re-chequeo pre-rename anti-TOCTOU).
+fn narrado_publicar(tmp: &Path, destino: &Path) -> Result<PathBuf, String> {
+    if std::fs::symlink_metadata(destino).is_ok() {
+        return Err(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            destino.display()
+        ));
+    }
+    if let Err(e) = std::fs::rename(tmp, destino) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(format!("no se pudo publicar {}: {e}", destino.display()));
+    }
+    Ok(destino.to_path_buf())
+}
+
+/// Núcleo bloqueante (llamar en hilo): render→mux→burn→sidecar con progreso
+/// por hitos (render 0..0.7, voz+mux 0.7..0.85, burn 0.85..0.95, sidecar 1.0).
+/// Sin post (ni voz ni quemado) el render va directo al destino con progreso
+/// fino real del streaming. Sin pánicos.
+#[allow(clippy::too_many_arguments)]
+pub fn export_mp4_narrado_streaming(
+    productor: &mut dyn FnMut(usize) -> Option<egui::ColorImage>,
+    total_frames: usize,
+    path: &Path,
+    fps: u32,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    voz: Option<VoiceoverPedido>,
+    subtitulos: Option<SubtitulosPedido>,
+    bins: Option<&VozBins>,
+    token: &CancellationToken,
+    progreso: Option<&ProgresoChunks>,
+) -> Result<VideoNarrado, VideoNarradoError> {
+    if token.is_cancelled() {
+        return Err(VideoNarradoError::Render(Mp4ExportError::Cancelled));
+    }
+    let ffmpeg_bin: &Path = bins
+        .map(|b| b.ffmpeg.as_path())
+        .unwrap_or(Path::new("ffmpeg"));
+    let quema = subtitulos.as_ref().is_some_and(|s| s.quemar);
+    // Camino rápido: sin voz ni quemado el render publica directo.
+    if voz.is_none() && !quema {
+        let video = export_mp4_streaming_with_bin(
+            productor,
+            total_frames,
+            path,
+            fps,
+            bitrate_kbps,
+            quality,
+            token,
+            progreso,
+            ffmpeg_bin,
+        )
+        .map_err(VideoNarradoError::Render)?;
+        let srt = match subtitulos {
+            Some(pedido) => Some(
+                voice::write_caption_sidecar(&pedido.track, path)
+                    .map_err(VideoNarradoError::Sidecar)?,
+            ),
+            None => None,
+        };
+        marcar_progreso(progreso, 1, 1);
+        return Ok(VideoNarrado { video, srt });
+    }
+    // Camino con post: render a intermedio, luego voz/mux/burn.
+    let interna: ProgresoChunks = std::sync::Arc::new(std::sync::Mutex::new(0.0));
+    let render_tmp = narrado_tmp(path, "render", "mp4");
+    let mut tmps = vec![render_tmp.clone()];
+    marcar_progreso(progreso, 0, 1);
+    if let Err(e) = export_mp4_streaming_with_bin(
+        productor,
+        total_frames,
+        &render_tmp,
+        fps,
+        bitrate_kbps,
+        quality,
+        token,
+        Some(&interna),
+        ffmpeg_bin,
+    ) {
+        narrado_limpiar(&tmps);
+        return Err(VideoNarradoError::Render(e));
+    }
+    marcar_progreso(progreso, 7, 10);
+    let mut actual = render_tmp.clone();
+    // Voz: piper en su hilo (join honesto) + mux offset/gain.
+    if let Some(pedido) = voz {
+        if token.is_cancelled() {
+            narrado_limpiar(&tmps);
+            return Err(VideoNarradoError::Voz(voice::VoiceError::Cancelled));
+        }
+        let piper_bin = bins
+            .map(|b| b.piper.clone())
+            .unwrap_or_else(|| PathBuf::from("piper"));
+        let wav_tmp = narrado_tmp(path, "voz", "wav");
+        tmps.push(wav_tmp.clone());
+        let handle = voice::spawn_voiceover_with_bin(
+            pedido.texto,
+            pedido.voz,
+            wav_tmp.clone(),
+            token.clone(),
+            piper_bin,
+        );
+        let wav = match handle.join() {
+            Ok(Ok(wav)) => wav,
+            Ok(Err(e)) => {
+                narrado_limpiar(&tmps);
+                return Err(VideoNarradoError::Voz(e));
+            }
+            Err(_) => {
+                narrado_limpiar(&tmps);
+                return Err(VideoNarradoError::Voz(voice::VoiceError::Failed(
+                    "el hilo de voz terminó de forma inesperada".to_string(),
+                )));
+            }
+        };
+        let mux_tmp = narrado_tmp(path, "mux", "mp4");
+        tmps.push(mux_tmp.clone());
+        let muxado = voice::mux_audio_cancelable_with_bin(
+            &actual,
+            &wav,
+            pedido.offset_ms,
+            pedido.gain,
+            &mux_tmp,
+            token,
+            ffmpeg_bin,
+        );
+        // El wav es insumo temporal: se borra siempre tras el mux.
+        let _ = std::fs::remove_file(&wav);
+        tmps.retain(|t| t != &wav_tmp);
+        match muxado {
+            Ok(muxado) => {
+                let _ = std::fs::remove_file(&actual);
+                tmps.retain(|t| t != &actual);
+                actual = muxado;
+            }
+            Err(e) => {
+                narrado_limpiar(&tmps);
+                return Err(VideoNarradoError::Mux(e));
+            }
+        }
+        marcar_progreso(progreso, 85, 100);
+    }
+    // Burn: ASS intermedio → re-encode → limpieza del ASS.
+    if let Some(pedido) = subtitulos.as_ref() {
+        if pedido.quemar {
+            if token.is_cancelled() {
+                narrado_limpiar(&tmps);
+                return Err(VideoNarradoError::Burn(voice::CaptionBurnError::Cancelled));
+            }
+            let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+            let dir_cow: PathBuf = dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            let ass = match voice::write_ass_temp(&pedido.track, &dir_cow) {
+                Ok(ass) => ass,
+                Err(e) => {
+                    narrado_limpiar(&tmps);
+                    return Err(VideoNarradoError::Sidecar(e));
+                }
+            };
+            let burn_tmp = narrado_tmp(path, "burn", "mp4");
+            tmps.push(burn_tmp.clone());
+            let quemado = voice::burn_captions_cancelable_with_bin(
+                &actual, &ass, &burn_tmp, token, ffmpeg_bin,
+            );
+            let _ = std::fs::remove_file(&ass);
+            match quemado {
+                Ok(quemado) => {
+                    let _ = std::fs::remove_file(&actual);
+                    tmps.retain(|t| t != &actual);
+                    actual = quemado;
+                }
+                Err(e) => {
+                    narrado_limpiar(&tmps);
+                    return Err(VideoNarradoError::Burn(e));
+                }
+            }
+            marcar_progreso(progreso, 95, 100);
+        }
+    }
+    if token.is_cancelled() {
+        narrado_limpiar(&tmps);
+        return Err(VideoNarradoError::Render(Mp4ExportError::Cancelled));
+    }
+    // Publicación final + sidecar (el sidecar va sobre el destino real).
+    let resto: Vec<PathBuf> = tmps.iter().filter(|t| *t != &actual).cloned().collect();
+    let video = match narrado_publicar(&actual, path) {
+        Ok(video) => video,
+        Err(detalle) => {
+            narrado_limpiar(&tmps);
+            return Err(VideoNarradoError::Render(Mp4ExportError::Io(detalle)));
+        }
+    };
+    narrado_limpiar(&resto);
+    let srt = match subtitulos {
+        Some(pedido) => Some(
+            voice::write_caption_sidecar(&pedido.track, path)
+                .map_err(VideoNarradoError::Sidecar)?,
+        ),
+        None => None,
+    };
+    marcar_progreso(progreso, 1, 1);
+    Ok(VideoNarrado { video, srt })
+}
+
+/// Idem desde un set materializado (corto, ≤64 frames): adapta el slice a
+/// productor y delega. Bloquea: llamar en hilo.
+#[allow(clippy::too_many_arguments)]
+pub fn export_mp4_narrado_desde_set(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    fps: u32,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    voz: Option<VoiceoverPedido>,
+    subtitulos: Option<SubtitulosPedido>,
+    bins: Option<&VozBins>,
+    token: &CancellationToken,
+    progreso: Option<&ProgresoChunks>,
+) -> Result<VideoNarrado, VideoNarradoError> {
+    let total = frames.len();
+    let mut productor = |j: usize| frames.get(j).cloned();
+    export_mp4_narrado_streaming(
+        &mut productor,
+        total,
+        path,
+        fps,
+        bitrate_kbps,
+        quality,
+        voz,
+        subtitulos,
+        bins,
+        token,
+        progreso,
+    )
+}
+
+/// Export narrado en un hilo aparte (no bloquea la UI). Espejo de
+/// `spawn_mp4_export`: el wiring lo dispara con el pedido del diálogo y al
+/// hacer `join` publica `media_path` / estado.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_mp4_narrado(
+    frames: Vec<egui::ColorImage>,
+    path: PathBuf,
+    fps: u32,
+    bitrate_kbps: u32,
+    quality: VideoQuality,
+    voz: Option<VoiceoverPedido>,
+    subtitulos: Option<SubtitulosPedido>,
+    bins: Option<VozBins>,
+    token: CancellationToken,
+    progreso: Option<ProgresoChunks>,
+) -> std::thread::JoinHandle<Result<VideoNarrado, VideoNarradoError>> {
+    std::thread::spawn(move || {
+        export_mp4_narrado_desde_set(
+            &frames,
+            &path,
+            fps,
+            bitrate_kbps,
+            quality,
+            voz,
+            subtitulos,
+            bins.as_ref(),
+            &token,
+            progreso.as_ref(),
+        )
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod p1_voz_tests {
+    use super::*;
+
+    fn frames_mini(n: usize) -> Vec<egui::ColorImage> {
+        vec![egui::ColorImage::new([16, 16], egui::Color32::RED); n]
+    }
+
+    fn dir_unico(prefijo: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "grafito-narrado-{prefijo}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// piper falso: respeta `--output_file X`, drena stdin, escribe wav.
+    #[cfg(unix)]
+    fn piper_falso(base: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = base.join("piper-falso");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nout=\"\"\nprev=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--output_file\" ]; then out=\"$a\"; fi\n  prev=\"$a\"\ndone\ncat > /dev/null\nprintf 'RIFFfalso-wav' > \"$out\"\nexit 0\n",
+        )
+        .unwrap();
+        let mut permisos = std::fs::metadata(&bin).unwrap().permissions();
+        permisos.set_mode(0o755);
+        std::fs::set_permissions(&bin, permisos).unwrap();
+        bin
+    }
+
+    /// ffmpeg falso en modo append: acumula argv de TODAS las etapas
+    /// (render+mux+burn) y `touch`ea el último argv como el real.
+    #[cfg(unix)]
+    fn ffmpeg_falso_append(base: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = base.join("ffmpeg-falso");
+        let captura = base.join("argv.txt");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> \"{}\"\ncat > /dev/null\nfor a in \"$@\"; do ultimo=\"$a\"; done\ntouch \"$ultimo\"\nexit 0\n",
+                captura.display()
+            ),
+        )
+        .unwrap();
+        let mut permisos = std::fs::metadata(&bin).unwrap().permissions();
+        permisos.set_mode(0o755);
+        std::fs::set_permissions(&bin, permisos).unwrap();
+        (bin, captura)
+    }
+
+    fn pista_hola() -> grafito_anim::captions::CaptionTrack {
+        grafito_anim::captions::CaptionTrack::try_new(vec![
+            grafito_anim::captions::CaptionSegment::frase("hola mundo".to_string(), 1000, 3500)
+                .unwrap(),
+        ])
+        .unwrap()
+    }
+
+    fn sin_tmps(base: &Path) {
+        let restos: Vec<_> = std::fs::read_dir(base)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name().to_string_lossy().contains(".tmp.")
+                    || e.file_name().to_string_lossy().contains(".narrado-")
+            })
+            .collect();
+        assert!(restos.is_empty(), "sin intermedios huérfanos: {restos:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn narrado_full_orden_render_mux_burn_sidecar() {
+        let base = dir_unico("full");
+        let piper = piper_falso(&base);
+        let (ffmpeg, captura) = ffmpeg_falso_append(&base);
+        let bins = VozBins { piper, ffmpeg };
+        let voz_onnx = base.join("voz.onnx");
+        std::fs::write(&voz_onnx, b"falsa").unwrap();
+        let dest = base.join("clip.mp4");
+        let voz = VoiceoverPedido {
+            texto: "hola mundo".to_string(),
+            voz: voz_onnx,
+            offset_ms: 500,
+            gain: 1.5,
+        };
+        let subtitulos = SubtitulosPedido {
+            track: pista_hola(),
+            quemar: true,
+        };
+        let salida = export_mp4_narrado_desde_set(
+            &frames_mini(2),
+            &dest,
+            12,
+            2000,
+            VideoQuality::Media,
+            Some(voz),
+            Some(subtitulos),
+            Some(&bins),
+            &CancellationToken::default(),
+            None,
+        )
+        .expect("los falsos siempre salen 0");
+        assert_eq!(salida.video, dest);
+        assert!(dest.exists(), "video final publicado");
+        // Sidecar junto al video con el texto.
+        let srt = salida.srt.expect("con subtítulos hay sidecar");
+        assert_eq!(srt, base.join("clip.srt"));
+        // El SRT parte en ≤2 renglones: ambas palabras, no la frase literal.
+        let srt_texto = std::fs::read_to_string(&srt).unwrap();
+        assert!(srt_texto.contains("hola"));
+        assert!(srt_texto.contains("mundo"));
+        // Las 3 etapas pasaron por ffmpeg: render (libx264) + mux
+        // (itsoffset/volume) + burn (ass=). Orden: el mux va después del
+        // primer libx264 y el burn después del mux.
+        let argv = std::fs::read_to_string(&captura).unwrap();
+        let lineas: Vec<&str> = argv.lines().collect();
+        assert_eq!(lineas.len(), 3, "render+mux+burn, fue:\n{argv}");
+        assert!(lineas[0].contains("libx264"), "render primero");
+        assert!(lineas[1].contains("-itsoffset") && lineas[1].contains("0.5"));
+        assert!(lineas[1].contains("volume=1.5"));
+        assert!(lineas[1].contains("-c:v copy"), "mux no re-encodea");
+        assert!(
+            lineas[2].contains("ass="),
+            "burn con ass=, fue: {}",
+            lineas[2]
+        );
+        assert!(lineas[2].contains("-c:a copy"), "burn copia el audio");
+        sin_tmps(&base);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn narrado_sin_voz_solo_sidecar_sin_burn() {
+        let base = dir_unico("sidecar");
+        let (ffmpeg, captura) = ffmpeg_falso_append(&base);
+        let bins = VozBins {
+            piper: base.join("piper-no"),
+            ffmpeg,
+        };
+        let dest = base.join("clip.mp4");
+        let subtitulos = SubtitulosPedido {
+            track: pista_hola(),
+            quemar: false,
+        };
+        let salida = export_mp4_narrado_desde_set(
+            &frames_mini(2),
+            &dest,
+            12,
+            2000,
+            VideoQuality::Media,
+            None,
+            Some(subtitulos),
+            Some(&bins),
+            &CancellationToken::default(),
+            None,
+        )
+        .expect("render falso + sidecar");
+        assert!(dest.exists());
+        assert!(salida.srt.unwrap().exists());
+        // Sin quemado: una sola llamada (el render), sin ass=.
+        let argv = std::fs::read_to_string(&captura).unwrap();
+        assert_eq!(argv.lines().count(), 1, "solo render, fue:\n{argv}");
+        assert!(!argv.contains("ass="));
+        sin_tmps(&base);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn narrado_sin_piper_falla_honesto_sin_video() {
+        // Bins a binarios inexistentes: hermético. El render falla primero
+        // (antes que la voz), sin publicar nada.
+        let base = dir_unico("missing");
+        let bins = VozBins {
+            piper: PathBuf::from("/definitivamente/no/existe/piper-falso"),
+            ffmpeg: PathBuf::from("/definitivamente/no/existe/ffmpeg-falso"),
+        };
+        let voz_onnx = base.join("voz.onnx");
+        std::fs::write(&voz_onnx, b"falsa").unwrap();
+        let dest = base.join("clip.mp4");
+        // Sin bins de render tampoco hay render: el render usa el ffmpeg
+        // inexistente → Render(FfmpegMissing) honesto antes que la voz.
+        let err = export_mp4_narrado_desde_set(
+            &frames_mini(2),
+            &dest,
+            12,
+            2000,
+            VideoQuality::Media,
+            Some(VoiceoverPedido {
+                texto: "hola".to_string(),
+                voz: voz_onnx,
+                offset_ms: 0,
+                gain: 1.0,
+            }),
+            None,
+            Some(&bins),
+            &CancellationToken::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VideoNarradoError::Render(Mp4ExportError::FfmpegMissing)
+            ),
+            "el render falla primero y honesto, fue: {err}"
+        );
+        assert!(!dest.exists());
+        sin_tmps(&base);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn narrado_cancelado_antes_no_toca_disco() {
+        let base = dir_unico("cancel");
+        let token = CancellationToken::default();
+        token.cancel();
+        let dest = base.join("clip.mp4");
+        let err = export_mp4_narrado_desde_set(
+            &frames_mini(2),
+            &dest,
+            12,
+            2000,
+            VideoQuality::Media,
+            None,
+            None,
+            None,
+            &token,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, VideoNarradoError::Render(Mp4ExportError::Cancelled));
+        assert!(!dest.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn narrado_spawn_no_bloquea_y_publica() {
+        let base = dir_unico("spawn");
+        let piper = piper_falso(&base);
+        let (ffmpeg, _captura) = ffmpeg_falso_append(&base);
+        let voz_onnx = base.join("voz.onnx");
+        std::fs::write(&voz_onnx, b"falsa").unwrap();
+        let dest = base.join("clip.mp4");
+        let handle = spawn_mp4_narrado(
+            frames_mini(2),
+            dest.clone(),
+            12,
+            2000,
+            VideoQuality::Media,
+            Some(VoiceoverPedido {
+                texto: "hola".to_string(),
+                voz: voz_onnx,
+                offset_ms: 0,
+                gain: 1.0,
+            }),
+            Some(SubtitulosPedido {
+                track: pista_hola(),
+                quemar: true,
+            }),
+            Some(VozBins { piper, ffmpeg }),
+            CancellationToken::default(),
+            None,
+        );
+        let salida = handle.join().expect("el hilo no debe panicar").unwrap();
+        assert_eq!(salida.video, dest);
+        assert!(dest.exists());
+        assert!(salida.srt.unwrap().exists());
+        sin_tmps(&base);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 #[cfg(test)]

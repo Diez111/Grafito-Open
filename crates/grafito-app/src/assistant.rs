@@ -1568,6 +1568,29 @@ pub(crate) fn apply_local_assistant_plan(
     undo_stack: &mut VecDeque<grafito_core::Document>,
     redo_stack: &mut VecDeque<grafito_core::ChangeSet>,
 ) -> Result<grafito_command::assistant_plan::PlanApplyResult, String> {
+    // P1-app-wiring — `RunCommand` se ejecuta vía el bridge validado.
+    //
+    // Plan de un solo `RunCommand`: `prepare_assistant_command` (allowlist +
+    // ejecución en clon + `validate_document`) y se aplica `documento_resultante`
+    // al documento real con push de undo (`save_command_snapshot_if_mutated`;
+    // el `DocumentController` real aún no está cableado — P2). Solo llega acá
+    // tras aprobación explícita (`ApplyProposedPlan`). El receipt viene del
+    // staging del harness sobre el documento previo (misma base y allowlist),
+    // así preview/apply no divergen.
+    if let [grafito_assistant_types::AssistantOperation::RunCommand { texto }] =
+        plan.operations.as_slice()
+    {
+        return apply_single_run_command_via_bridge(document, texto, plan, undo_stack, redo_stack);
+    }
+    // Planes mixtos: dry-run del bridge por cada `RunCommand` (ejecuta en clon
+    // sin mutar; el bridge valida al aplicar) + apply atómico del harness
+    // (preview/apply reales en `assistant_plan`) + un snapshot de undo.
+    for operation in &plan.operations {
+        if let grafito_assistant_types::AssistantOperation::RunCommand { texto } = operation {
+            grafito_command::assistant_bridge::prepare_assistant_command(texto, document)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     let before = document.clone();
     let result = harness::apply_plan(document, plan)?;
     let outcome =
@@ -1576,6 +1599,317 @@ pub(crate) fn apply_local_assistant_plan(
         &outcome, before, document, undo_stack, redo_stack,
     );
     Ok(result)
+}
+
+/// Aplica un plan de un solo `RunCommand` vía el bridge (ver
+/// `apply_local_assistant_plan`). Sin `unwrap`, sin pánico.
+fn apply_single_run_command_via_bridge(
+    document: &mut grafito_core::Document,
+    texto: &str,
+    plan: &ProposedPlan,
+    undo_stack: &mut VecDeque<grafito_core::Document>,
+    redo_stack: &mut VecDeque<grafito_core::ChangeSet>,
+) -> Result<grafito_command::assistant_plan::PlanApplyResult, String> {
+    // El staging valida base allowlist sin mutar; su preview/receipt son la
+    // evidencia del cambio que el bridge ejecuta abajo sobre el mismo documento.
+    let staged = grafito_command::assistant_plan::stage_plan(document, plan)?;
+    let cambios = staged.preview().changes.clone();
+    let receipt = staged.receipt().clone();
+    let preparado = grafito_command::assistant_bridge::prepare_assistant_command(texto, document)
+        .map_err(|error| error.to_string())?;
+    let antes = document.clone();
+    *document = preparado.documento_resultante;
+    let outcome = grafito_command::commands::CommandOutcome::Message(preparado.resumen);
+    crate::app::save_command_snapshot_if_mutated(&outcome, antes, document, undo_stack, redo_stack);
+    let contexto = grafito_command::assistant_context::document_context(document);
+    Ok(grafito_command::assistant_plan::PlanApplyResult {
+        changes: cambios,
+        revision: contexto.revision,
+        digest: contexto.digest,
+        receipt,
+    })
+}
+
+// ── P1-app-wiring: export narrado (voz + subtítulos, solo video) ───────────
+// La Piel (`MediaExportDialog`) solo guarda la selección; todo lo de acá corre
+// fuera del draw y el I/O vive en el hilo worker. Sin guion persistido el
+// voiceover es `false` honesto (ver `hay_voiceover_en_media_actual`): Piper y
+// los subtítulos fallan visible hasta que el runtime guarde el último guion.
+
+/// ¿El media actual trae guion con texto de narración? Hoy `false` honesto.
+///
+/// `TurnMediaRef` solo guarda título/plantilla/concepto+thumb
+/// (`assistant-types`, sin campo de guion ni voz), `AssistantMedia` es
+/// título+frames y `AnimHistoryCoords` plantilla+concepto: no hay texto de
+/// voz persistido en ningún lado del runtime. Sin texto no hay nada que
+/// narrar ni subtitular (ver `texto_voiceover_actual` / `pista_subtitulos_actual`).
+fn hay_voiceover_en_media_actual(_panel: &AssistantPanelState) -> bool {
+    false
+}
+
+/// Texto de narración del guion actual para Piper. `None` honesto hoy (ver
+/// `hay_voiceover_en_media_actual`): cuando el runtime persista el último
+/// guion, vuelve `Some` con los `voiceover` de sus pasos acotados a
+/// `VOICE_MAX_TEXT_CHARS`.
+fn texto_voiceover_actual(_panel: &AssistantPanelState) -> Option<String> {
+    None
+}
+
+/// Pista de subtítulos del guion actual. `None` honesto hoy: deriva de los
+/// `voiceover` vía `voiceover_segments`, y sin guion persistido no hay pista
+/// que escribir ni quemar.
+fn pista_subtitulos_actual() -> Option<grafito_anim::captions::CaptionTrack> {
+    None
+}
+
+/// Valida el pedido narrado del diálogo antes de spawnear (puro, sin I/O).
+///
+/// La existencia del wav y los bins se chequea en el worker (I/O solo en
+/// hilos); acá solo flags/strings con las constantes visibles existentes.
+/// `hay_texto_voz`/`hay_pista` los resuelve el llamante fuera del draw.
+/// `Ok` = se puede spawnear; `Err` = motivo honesto para diálogo+card+toast.
+fn validar_pedido_narrado(
+    dialogo: &grafito_ui::assistant::MediaExportDialog,
+    hay_texto_voz: bool,
+    hay_pista: bool,
+) -> Result<(), String> {
+    use grafito_ui::assistant::{
+        CaptionsMode, VozMode, MEDIA_EXPORT_AUDIO_EMPTY_HINT,
+        MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT, MEDIA_EXPORT_NO_VOICEOVER_HINT,
+        MEDIA_EXPORT_PIPER_MISSING_HINT,
+    };
+    match dialogo.voz_mode {
+        VozMode::Importar if dialogo.audio_path().is_none() => {
+            return Err(MEDIA_EXPORT_AUDIO_EMPTY_HINT.to_string());
+        }
+        VozMode::Piper if !dialogo.piper_available => {
+            return Err(MEDIA_EXPORT_PIPER_MISSING_HINT.to_string());
+        }
+        VozMode::Piper if !dialogo.voiceover_disponible || !hay_texto_voz => {
+            return Err(MEDIA_EXPORT_NO_VOICEOVER_HINT.to_string());
+        }
+        VozMode::Ninguna | VozMode::Importar | VozMode::Piper => {}
+    }
+    if !matches!(dialogo.captions_mode, CaptionsMode::Ninguno) && !hay_pista {
+        return Err(MEDIA_EXPORT_NO_VOICEOVER_HINT.to_string());
+    }
+    if matches!(dialogo.captions_mode, CaptionsMode::Quemado) && !dialogo.ffmpeg_available {
+        return Err(MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT.to_string());
+    }
+    Ok(())
+}
+
+/// Hermano temporal del MP4 narrado (`<name>.narrado-<etapa>.<pid>-<nanos>.mp4`).
+/// Puro, sin E/S (espejo del `narrado_tmp` de `anim_native`, inaccesible acá).
+fn hermano_tmp_mp4(destino: &std::path::Path, etapa: &str) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name: String = destino
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("clip"));
+    let tmp_name = format!("{name}.narrado-{etapa}.{}-{stamp}.mp4", std::process::id());
+    match destino.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(tmp_name),
+        _ => PathBuf::from(tmp_name),
+    }
+}
+
+/// Publicación tmp→destino con `O_EXCL` honesto en ambos bordes (pre-vuelco y
+/// pre-rename anti-TOCTOU, misma disciplina que el mux/sidecar). Sin pánicos.
+fn publicar_tmp_excl(
+    tmp: &std::path::Path,
+    destino: &std::path::Path,
+) -> Result<PathBuf, crate::anim_native::Mp4ExportError> {
+    use crate::anim_native::Mp4ExportError;
+    if std::fs::symlink_metadata(destino).is_ok() {
+        let _ = std::fs::remove_file(tmp);
+        return Err(Mp4ExportError::Io(format!(
+            "no se pudo crear {} sin sobrescribir: el destino ya existe",
+            destino.display()
+        )));
+    }
+    if let Err(error) = std::fs::rename(tmp, destino) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(Mp4ExportError::Io(format!(
+            "no se pudo publicar {}: {error}",
+            destino.display()
+        )));
+    }
+    Ok(destino.to_path_buf())
+}
+
+/// Mapea el fallo del pipeline narrado al error del slot MP4 (mensajes
+/// honestos originales, sin inventar nada). Sin pánicos.
+fn mapear_fallo_narrado(
+    fallo: crate::anim_native::VideoNarradoError,
+) -> crate::anim_native::Mp4ExportError {
+    use crate::anim_native::Mp4ExportError;
+    use crate::anim_native::VideoNarradoError;
+    match fallo {
+        VideoNarradoError::Render(inner) => inner,
+        VideoNarradoError::Voz(inner) => {
+            if matches!(inner, crate::anim_native::voice::VoiceError::Cancelled) {
+                Mp4ExportError::Cancelled
+            } else {
+                Mp4ExportError::Io(inner.to_string())
+            }
+        }
+        VideoNarradoError::Mux(inner) => {
+            if matches!(inner, crate::anim_native::voice::MuxError::Cancelled) {
+                Mp4ExportError::Cancelled
+            } else if matches!(inner, crate::anim_native::voice::MuxError::FfmpegMissing) {
+                Mp4ExportError::FfmpegMissing
+            } else {
+                Mp4ExportError::Io(inner.to_string())
+            }
+        }
+        VideoNarradoError::Burn(inner) => {
+            if matches!(
+                inner,
+                crate::anim_native::voice::CaptionBurnError::Cancelled
+            ) {
+                Mp4ExportError::Cancelled
+            } else if matches!(
+                inner,
+                crate::anim_native::voice::CaptionBurnError::FfmpegMissing
+            ) {
+                Mp4ExportError::FfmpegMissing
+            } else {
+                Mp4ExportError::Io(inner.to_string())
+            }
+        }
+        VideoNarradoError::Sidecar(inner) => Mp4ExportError::Io(inner.to_string()),
+    }
+}
+
+/// Núcleo bloqueante del MP4 con voz (llamar en hilo, jamás en el draw).
+///
+/// Piper con texto del guion va por `spawn_mp4_narrado` (render, voz, mux,
+/// burn y sidecar en su hilo con join honesto). Hoy el texto es `None`
+/// honesto (el validar previo ya vetó Piper), así que esa rama queda como
+/// cableado futuro compilado.
+///
+/// Importar rinde mudo a un intermedio vía `export_mp4_narrado_desde_set`,
+/// mezcla el wav elegido con `mux_audio_into` (offset 0, gain 1.0) y publica
+/// con `O_EXCL`. Los intermedios se limpian best-effort, jamás parcial huérfano.
+///
+/// Sin `unwrap`, sin pánico.
+#[allow(clippy::too_many_arguments)]
+fn export_mp4_narrado_en_hilo(
+    frames: Vec<egui::ColorImage>,
+    destino: PathBuf,
+    fps: u32,
+    bitrate_kbps: u32,
+    calidad: crate::anim_native::VideoQuality,
+    voz: grafito_ui::assistant::VozMode,
+    audio_path: Option<String>,
+    subtitulos: grafito_ui::assistant::CaptionsMode,
+    texto_voz: Option<String>,
+    token: grafito_assistant::CancellationToken,
+) -> Result<PathBuf, crate::anim_native::Mp4ExportError> {
+    use crate::anim_native::Mp4ExportError;
+    use grafito_ui::assistant::{CaptionsMode, VozMode, MEDIA_EXPORT_NO_VOICEOVER_HINT};
+    if token.is_cancelled() {
+        return Err(Mp4ExportError::Cancelled);
+    }
+    if matches!(voz, VozMode::Piper) {
+        let (texto, voz_path) = match (
+            texto_voz,
+            crate::anim_native::voice::detect_piper_voice_path(),
+        ) {
+            (Some(texto), Some(voz_path)) => (texto, voz_path),
+            _ => {
+                return Err(Mp4ExportError::Io(
+                    MEDIA_EXPORT_NO_VOICEOVER_HINT.to_string(),
+                ));
+            }
+        };
+        let pedido_voz = crate::anim_native::VoiceoverPedido {
+            texto,
+            voz: voz_path,
+            offset_ms: 0,
+            gain: 1.0,
+        };
+        let pedido_sub =
+            pista_subtitulos_actual().map(|track| crate::anim_native::SubtitulosPedido {
+                track,
+                quemar: matches!(subtitulos, CaptionsMode::Quemado),
+            });
+        let hacerlo = crate::anim_native::spawn_mp4_narrado(
+            frames,
+            destino.clone(),
+            fps,
+            bitrate_kbps,
+            calidad,
+            Some(pedido_voz),
+            pedido_sub,
+            None,
+            token,
+            None,
+        );
+        return match hacerlo.join() {
+            Ok(Ok(narrado)) => Ok(narrado.video),
+            Ok(Err(fallo)) => Err(mapear_fallo_narrado(fallo)),
+            Err(_) => Err(Mp4ExportError::Io(
+                "la exportación narrada terminó inesperadamente".into(),
+            )),
+        };
+    }
+    // Render mudo a intermedio (el mux/burn publican después, jamás parcial).
+    let intermedio = hermano_tmp_mp4(&destino, "mudo");
+    if let Err(fallo) = crate::anim_native::export_mp4_narrado_desde_set(
+        &frames,
+        &intermedio,
+        fps,
+        bitrate_kbps,
+        calidad,
+        None,
+        None,
+        None,
+        &token,
+        None,
+    ) {
+        let _ = std::fs::remove_file(&intermedio);
+        return Err(mapear_fallo_narrado(fallo));
+    }
+    if matches!(voz, VozMode::Importar) {
+        let ruta_audio = audio_path.unwrap_or_default();
+        let camada_mux = hermano_tmp_mp4(&destino, "mux");
+        let muxeado = crate::anim_native::voice::mux_audio_into(
+            &intermedio,
+            std::path::Path::new(&ruta_audio),
+            0,
+            1.0,
+            &camada_mux,
+        );
+        let _ = std::fs::remove_file(&intermedio);
+        let video = match muxeado {
+            Ok(video) => video,
+            Err(fallo) => {
+                let _ = std::fs::remove_file(&camada_mux);
+                return Err(match fallo {
+                    crate::anim_native::voice::MuxError::Cancelled => Mp4ExportError::Cancelled,
+                    crate::anim_native::voice::MuxError::FfmpegMissing => {
+                        Mp4ExportError::FfmpegMissing
+                    }
+                    resto => Mp4ExportError::Io(resto.to_string()),
+                });
+            }
+        };
+        return publicar_tmp_excl(&video, &destino);
+    }
+    // Sin voz importada: solo subtítulos si algún día hay pista (hoy el
+    // validar previo ya vetó `SidecarSrt`/`Quemado` sin pista).
+    if !matches!(subtitulos, CaptionsMode::Ninguno) {
+        let _ = std::fs::remove_file(&intermedio);
+        return Err(Mp4ExportError::Io(
+            MEDIA_EXPORT_NO_VOICEOVER_HINT.to_string(),
+        ));
+    }
+    publicar_tmp_excl(&intermedio, &destino)
 }
 
 #[derive(Default)]
@@ -4367,6 +4701,21 @@ impl GrafitoApp {
             AssistantUiAction::RequestExercise { topic } => {
                 self.iniciar_ejercicio(ctx, &topic);
             }
+            AssistantUiAction::PickExportAudio => self.elegir_audio_para_export(ctx),
+            AssistantUiAction::ClearExportAudio => {
+                self.assistant.export_dialog_clear_audio();
+                ctx.request_repaint();
+            }
+            AssistantUiAction::SetExportVozMode(modo) => {
+                self.assistant.export_dialog_set_voz_mode(modo);
+                self.resolver_disponibilidad_voz_export();
+                ctx.request_repaint();
+            }
+            AssistantUiAction::SetExportCaptions(modo) => {
+                self.assistant.export_dialog_set_captions(modo);
+                self.resolver_disponibilidad_voz_export();
+                ctx.request_repaint();
+            }
             AssistantUiAction::ReplayMedia { turn_idx } => {
                 self.replay_assistant_history_media(ctx, turn_idx);
             }
@@ -5010,8 +5359,9 @@ impl GrafitoApp {
     /// La UI solo emitió `ExportMedia`; acá se detecta fuera del draw y una
     /// sola vez al abrir: `ffmpeg_available` vía `detect_ffmpeg_available()`
     /// (lee el PATH, sin spawnear), órbita según plantilla y frames del slot
-    /// vivo. Backend sin audio (W3): el diálogo es de 3 args, sin pista.
-    /// El `Start` posterior spawnea el `spawn_*` del formato.
+    /// vivo, más voz (`detect_piper_available` + voiceover del guion actual,
+    /// hoy `false` honesto). El `Start` posterior spawnea el `spawn_*` del
+    /// formato (MP4 con voz si el diálogo la pide).
     /// Jamás mudo:
     /// - export en curso → aviso y no se duplica (ni se reabre);
     /// - sin animación o sin fotogramas → `Failed` en la card + aviso.
@@ -5046,14 +5396,49 @@ impl GrafitoApp {
             .open_export_dialog(ffmpeg_available, orbit_supported, frame_count);
         self.assistant
             .set_export_dialog_latex(latex_available, dvisvgm_available);
+        // Voz una sola vez al abrir (nunca en `Ui::`): piper del PATH +
+        // voiceover del guion actual (`false` honesto hoy, sin guion persistido).
+        self.resolver_disponibilidad_voz_export();
         ctx.request_repaint();
+    }
+
+    /// Abre el picker nativo de audio para el export de video (evento
+    /// `PickExportAudio`). Fuera del draw: `rfd::FileDialog` con filtros
+    /// wav/mp3/m4a/ogg (mismo patrón que `attach_assistant_image`); cancelar
+    /// no toca nada. Solo fija la ruta (`set_audio_path` recorta); el mux
+    /// real corre en el hilo del `ConfirmExport`. Sin I/O de lectura acá.
+    fn elegir_audio_para_export(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Audio", &["wav", "mp3", "m4a", "ogg"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.assistant
+            .export_dialog_set_audio_path(path.to_string_lossy().into_owned());
+        ctx.request_repaint();
+    }
+
+    /// Re-resuelve la disponibilidad de voz fuera del draw (al abrir el
+    /// diálogo y tras cambiar voz/captions): piper vía
+    /// `detect_piper_available()` (lee el PATH, sin spawnear) + voiceover
+    /// según el guion actual. `set_piper_available` degrada `Piper→Ninguna`
+    /// solo si el binario falta (honesto, como el fallback GIF sin ffmpeg).
+    fn resolver_disponibilidad_voz_export(&mut self) {
+        self.assistant
+            .set_piper_available(crate::anim_native::voice::detect_piper_available());
+        let hay = hay_voiceover_en_media_actual(&self.assistant);
+        self.assistant.set_voiceover_disponible(hay);
     }
 
     /// Confirma el export con la selección validada del diálogo (`Start`).
     ///
     /// Corre fuera del draw (evento `ConfirmExport`): valida la selección y
     /// spawnea el worker del formato en hilo aparte con `CancellationToken`,
-    /// tmp+rename `O_EXCL`, `kill+wait`. Backend sin audio (W3):
+    /// tmp+rename `O_EXCL`, `kill+wait`. MP4 con voz/captions va por
+    /// `export_mp4_narrado_en_hilo` (Importar = render + `mux_audio_into`,
+    /// Piper = `spawn_mp4_narrado` con el texto del guion, captions con pista);
+    /// WebM narrado falla honesto (el mux/burn es solo MP4).
     /// `validate_selection` cubre formato/fps/bitrate/frames/órbita y acá no
     /// se inventa nada. Presupuestos GIF 64/8M/5MB + default 48 intactos
     /// (preflight `check_gif_export_budget` dentro de cada worker).
@@ -5230,23 +5615,90 @@ impl GrafitoApp {
                         crate::anim_native::VideoQuality::Alta
                     }
                 };
-                let handle = crate::anim_native::spawn_mp4_export(
-                    frames,
-                    path.clone(),
-                    delay_cs,
-                    cancel.clone(),
-                    dialogo.bitrate_kbps,
-                    calidad,
-                );
-                debug_assert!(self.assistant_runtime.mp4_export_job.is_none());
-                self.assistant_runtime.mp4_export_job = Some(Mp4ExportJob {
-                    handle,
-                    frame_count,
-                    cancel,
-                    path,
-                });
+                // P1-app-wiring: voz/captions del diálogo solo en video. Mudo
+                // (`Ninguna`+`Ninguno`) → runner existente; narrado →
+                // `export_mp4_narrado_en_hilo` en hilo con `CancellationToken`
+                // (Importar = render + `mux_audio_into`; Piper =
+                // `spawn_mp4_narrado` con el texto del guion). Sin ffmpeg/piper
+                // ni voz → motivo honesto visible, jamás video fake.
+                let pide_narrado =
+                    !matches!(dialogo.voz_mode, grafito_ui::assistant::VozMode::Ninguna)
+                        || !matches!(
+                            dialogo.captions_mode,
+                            grafito_ui::assistant::CaptionsMode::Ninguno
+                        );
+                if !pide_narrado {
+                    let handle = crate::anim_native::spawn_mp4_export(
+                        frames,
+                        path.clone(),
+                        delay_cs,
+                        cancel.clone(),
+                        dialogo.bitrate_kbps,
+                        calidad,
+                    );
+                    debug_assert!(self.assistant_runtime.mp4_export_job.is_none());
+                    self.assistant_runtime.mp4_export_job = Some(Mp4ExportJob {
+                        handle,
+                        frame_count,
+                        cancel,
+                        path,
+                    });
+                } else {
+                    if let Err(motivo) = validar_pedido_narrado(
+                        &dialogo,
+                        texto_voiceover_actual(&self.assistant).is_some(),
+                        pista_subtitulos_actual().is_some(),
+                    ) {
+                        self.assistant.export_dialog_mark_failed(motivo.clone());
+                        self.assistant
+                            .set_media_export(MediaExportState::Failed(motivo.clone()));
+                        self.notify(format!("No se pudo exportar: {motivo}"), ToastKind::Error);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    let fps = dialogo.fps;
+                    let bitrate = dialogo.bitrate_kbps;
+                    let voz = dialogo.voz_mode;
+                    let audio = dialogo.audio_path().map(str::to_string);
+                    let subtitulos = dialogo.captions_mode;
+                    let texto_voz = texto_voiceover_actual(&self.assistant);
+                    let token_hilo = cancel.clone();
+                    let ruta_hilo = path.clone();
+                    let handle = std::thread::spawn(move || {
+                        export_mp4_narrado_en_hilo(
+                            frames, ruta_hilo, fps, bitrate, calidad, voz, audio, subtitulos,
+                            texto_voz, token_hilo,
+                        )
+                    });
+                    debug_assert!(self.assistant_runtime.mp4_export_job.is_none());
+                    self.assistant_runtime.mp4_export_job = Some(Mp4ExportJob {
+                        handle,
+                        frame_count,
+                        cancel,
+                        path,
+                    });
+                }
             }
             MediaExportFormat::Webm => {
+                // El mux/burn narrado es solo MP4 (`-c:v copy` H.264 + ASS vía
+                // libx264): WebM con voz/captions falla honesto y dirige a MP4.
+                // Mudo → runner existente intacto.
+                let pide_narrado =
+                    !matches!(dialogo.voz_mode, grafito_ui::assistant::VozMode::Ninguna)
+                        || !matches!(
+                            dialogo.captions_mode,
+                            grafito_ui::assistant::CaptionsMode::Ninguno
+                        );
+                if pide_narrado {
+                    let motivo =
+                        "la voz y los subtítulos solo aplican a MP4: exportá a MP4 o dejá voz Ninguna y subtítulos Ninguno";
+                    self.assistant.export_dialog_mark_failed(motivo);
+                    self.assistant
+                        .set_media_export(MediaExportState::Failed(motivo.into()));
+                    self.notify(format!("No se pudo exportar: {motivo}"), ToastKind::Error);
+                    ctx.request_repaint();
+                    return;
+                }
                 let path = ruta_estable("webm");
                 let cancel = grafito_assistant::CancellationToken::default();
                 let calidad = match dialogo.quality {
@@ -7843,16 +8295,16 @@ mod tests {
         remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
         should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
         socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
-        stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_spec_anim_ia,
-        validate_assistant_command, verificar_prosa_de_turno, verificar_prosa_vs_spec,
-        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AnimIaRender,
-        AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation,
-        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
-        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
-        IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
-        RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido,
-        ANIM_IA_SPEC_TIMEOUT_MS, ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS,
-        ANIM_SIN_IA_AVISO,
+        stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_pedido_narrado,
+        validar_spec_anim_ia, validate_assistant_command, verificar_prosa_de_turno,
+        verificar_prosa_vs_spec, verified_remote_proposals, wants_exercise_request,
+        AgentChannelMsg, AnimIaRender, AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob,
+        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
+        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
+        DecisionAnimacion, DesenlaceAnimIa, GifExportJob, IntegralPedido,
+        LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification, RemoteStage,
+        SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido, ANIM_IA_SPEC_TIMEOUT_MS,
+        ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS, ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
@@ -8004,6 +8456,96 @@ mod tests {
         );
         assert!(undo_stack.is_empty());
         assert!(redo_stack.is_empty());
+    }
+
+    #[test]
+    fn run_command_unitario_crea_objeto_via_bridge_con_receipt_y_undo() {
+        // A3: un plan `RunCommand` que crea objetos fallaba el receipt
+        // (`created <= create_graph`); con el techo `+ run_command_count`
+        // aplica vía bridge, valida receipt y registra un solo undo.
+        let mut document = Document::new();
+        let plan = ProposedPlan::new(
+            grafito_command::assistant_context::document_context(&document).basis(),
+            vec![AssistantOperation::RunCommand {
+                texto: "Point[(1, 2)]".into(),
+            }],
+        );
+        let mut undo_stack = VecDeque::new();
+        let mut redo_stack = VecDeque::new();
+
+        let result =
+            apply_local_assistant_plan(&mut document, &plan, &mut undo_stack, &mut redo_stack)
+                .expect("run_command válido aplica vía bridge");
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(document.object_count(), 1);
+        assert!(result.receipt.validate().is_ok());
+        assert_eq!(undo_stack.len(), 1);
+        assert!(redo_stack.is_empty());
+    }
+
+    #[test]
+    fn run_command_invalido_no_muta_ni_registra_undo() {
+        let mut document = Document::new();
+        let plan = ProposedPlan::new(
+            grafito_command::assistant_context::document_context(&document).basis(),
+            vec![AssistantOperation::RunCommand {
+                texto: "Inventado[X]".into(),
+            }],
+        );
+        let before = serde_json::to_value(&document).expect("document serializes");
+        let mut undo_stack = VecDeque::new();
+        let mut redo_stack = VecDeque::new();
+
+        assert!(
+            apply_local_assistant_plan(&mut document, &plan, &mut undo_stack, &mut redo_stack)
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(&document).expect("document serializes"),
+            before
+        );
+        assert!(undo_stack.is_empty());
+        assert!(redo_stack.is_empty());
+    }
+
+    #[test]
+    fn pedido_narrado_valida_honesto_por_modo() {
+        use grafito_ui::assistant::{
+            CaptionsMode, MediaExportDialog, VozMode, MEDIA_EXPORT_AUDIO_EMPTY_HINT,
+            MEDIA_EXPORT_NO_VOICEOVER_HINT, MEDIA_EXPORT_PIPER_MISSING_HINT,
+        };
+        // Mudo siempre pasa (el runner existente lo atiende).
+        let dialogo = MediaExportDialog::new();
+        assert!(validar_pedido_narrado(&dialogo, false, false).is_ok());
+        // Importar sin archivo pide archivo con el hint visible.
+        let mut dialogo = MediaExportDialog::new();
+        dialogo.set_voz_mode(VozMode::Importar);
+        assert_eq!(
+            validar_pedido_narrado(&dialogo, false, false).expect_err("sin audio"),
+            MEDIA_EXPORT_AUDIO_EMPTY_HINT
+        );
+        dialogo.set_audio_path("/tmp/voz.wav");
+        assert!(validar_pedido_narrado(&dialogo, false, false).is_ok());
+        // Piper sin binario → hint de instalación; con binario pero sin
+        // texto del guion → hint de narración (falso honesto hoy).
+        let mut dialogo = MediaExportDialog::new();
+        dialogo.set_voz_mode(VozMode::Piper);
+        assert_eq!(
+            validar_pedido_narrado(&dialogo, false, false).expect_err("sin piper"),
+            MEDIA_EXPORT_PIPER_MISSING_HINT
+        );
+        dialogo.set_piper_available(true);
+        assert_eq!(
+            validar_pedido_narrado(&dialogo, false, false).expect_err("sin texto"),
+            MEDIA_EXPORT_NO_VOICEOVER_HINT
+        );
+        // Subtítulos sin pista del guion → hint de narración, jamás srt fake.
+        let mut dialogo = MediaExportDialog::new();
+        dialogo.set_captions(CaptionsMode::SidecarSrt);
+        assert_eq!(
+            validar_pedido_narrado(&dialogo, false, false).expect_err("sin pista"),
+            MEDIA_EXPORT_NO_VOICEOVER_HINT
+        );
     }
 
     #[test]

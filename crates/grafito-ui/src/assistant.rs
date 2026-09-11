@@ -827,6 +827,15 @@ impl MediaExportFormat {
             MEDIA_EXPORT_DEFAULT_FPS
         }
     }
+
+    /// ¿Formato de video con pista de audio/subtítulos (MP4/WebM)?
+    /// GIF/PNG/PDF/SVG no aplican la sección de audio (P1-UI). Puro.
+    pub const fn is_video(self) -> bool {
+        match self {
+            Self::Mp4 | Self::Webm => true,
+            Self::Gif | Self::PngDir | Self::Pdf | Self::Svg => false,
+        }
+    }
 }
 
 /// Calidad del diálogo (espejo UI de `app::anim_native::VideoQuality`).
@@ -985,6 +994,70 @@ pub const MEDIA_EXPORT_PRESET_H: u32 = 720;
 /// Bitrate del diálogo en kbps (paridad 100..=20000).
 pub const MEDIA_EXPORT_BITRATE_MIN_KBPS: u32 = 100;
 pub const MEDIA_EXPORT_BITRATE_MAX_KBPS: u32 = 20_000;
+/// Motivo visible cuando la voz Piper está deshabilitada sin binario.
+pub const MEDIA_EXPORT_PIPER_MISSING_HINT: &str = "voz Piper no instalada";
+/// Nota visible cuando Piper está elegido pero el guion no trae narración.
+pub const MEDIA_EXPORT_NO_VOICEOVER_HINT: &str = "el guion actual no trae texto de narración";
+/// Nota visible de subtítulos quemados (el gating real lo pone la app).
+pub const MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT: &str = "requiere ffmpeg";
+/// Hint visible cuando Importar está elegido pero sin archivo.
+pub const MEDIA_EXPORT_AUDIO_EMPTY_HINT: &str = "elegí un archivo de audio…";
+
+/// Narración del export de video (P1-UI, solo MP4/WebM).
+///
+/// Puro, sin I/O: la app resuelve el picker/TTS fuera del draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VozMode {
+    /// Sin pista de audio (defecto).
+    #[default]
+    Ninguna,
+    /// Audio importado por el usuario (ruta vía `set_audio_path`).
+    Importar,
+    /// Voz sintética Piper (exige `piper_available`).
+    Piper,
+}
+
+impl VozMode {
+    /// Las 3 del selector, en orden visible.
+    pub const ALL: [Self; 3] = [Self::Ninguna, Self::Importar, Self::Piper];
+
+    /// Nombre visible del radio.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Ninguna => "Ninguna",
+            Self::Importar => "Importar audio",
+            Self::Piper => "Voz Piper",
+        }
+    }
+}
+
+/// Subtítulos del export de video (P1-UI, solo MP4/WebM).
+///
+/// Puro, sin I/O: la app hace el mux fuera del draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptionsMode {
+    /// Sin subtítulos (defecto).
+    #[default]
+    Ninguno,
+    /// SRT sidecar junto al video.
+    SidecarSrt,
+    /// Subtítulos quemados en el video (exige ffmpeg).
+    Quemado,
+}
+
+impl CaptionsMode {
+    /// Las 3 del selector, en orden visible.
+    pub const ALL: [Self; 3] = [Self::Ninguno, Self::SidecarSrt, Self::Quemado];
+
+    /// Nombre visible del radio.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Ninguno => "Ninguno",
+            Self::SidecarSrt => "SRT sidecar",
+            Self::Quemado => "Quemados",
+        }
+    }
+}
 
 /// Estado puro del diálogo Exportar (`fn render(&Estado) -> Frame`).
 ///
@@ -1033,6 +1106,22 @@ pub struct MediaExportDialog {
     pub preset: MediaExportPreset,
     /// Orientación del preset 720p (con Original se ignora).
     pub orientation: MediaExportOrientation,
+    /// Narración del video (solo MP4/WebM; en el resto no aplica).
+    /// Pref: sobrevive a `set_media`, solo `clear_conversation` resetea.
+    pub voz_mode: VozMode,
+    /// Ruta de audio importado (`None` = sin archivo). La app la fija
+    /// fuera del draw tras el picker nativo (`set_audio_path`).
+    /// Pref: sobrevive a `set_media`, solo `clear_conversation` resetea.
+    audio_path: Option<String>,
+    /// Subtítulos del video (solo MP4/WebM; en el resto no aplica).
+    /// Pref: sobrevive a `set_media`, solo `clear_conversation` resetea.
+    pub captions_mode: CaptionsMode,
+    /// ¿Hay voz Piper instalada? Lo setea la app con
+    /// `set_piper_available` fuera del draw, una vez al abrir.
+    pub piper_available: bool,
+    /// ¿El guion actual trae texto de narración? Lo setea la app con
+    /// `set_voiceover_disponible` fuera del draw.
+    pub voiceover_disponible: bool,
 }
 
 impl Default for MediaExportDialog {
@@ -1063,6 +1152,11 @@ impl MediaExportDialog {
             orbit_supported: false,
             preset: MediaExportPreset::Original,
             orientation: MediaExportOrientation::Horizontal,
+            voz_mode: VozMode::default(),
+            audio_path: None,
+            captions_mode: CaptionsMode::default(),
+            piper_available: false,
+            voiceover_disponible: false,
         }
     }
 
@@ -1085,6 +1179,15 @@ impl MediaExportDialog {
         if !self.is_format_enabled(self.format) {
             self.format = MediaExportFormat::Gif;
         }
+        // P1-UI prefs: sobreviven (voz/audio/subtítulos intactos); solo se
+        // degradan si quedaron imposibles (Piper sin binario, quemados sin
+        // ffmpeg), como el fallback GIF sin ffmpeg.
+        if !self.piper_available && self.voz_mode == VozMode::Piper {
+            self.voz_mode = VozMode::Ninguna;
+        }
+        if !self.ffmpeg_available && self.captions_mode == CaptionsMode::Quemado {
+            self.captions_mode = CaptionsMode::Ninguno;
+        }
     }
 
     /// Fija la disponibilidad LaTeX/dvisvgm detectada fuera del draw.
@@ -1096,6 +1199,90 @@ impl MediaExportDialog {
         if !self.is_format_enabled(self.format) {
             self.format = MediaExportFormat::Gif;
         }
+    }
+
+    /// Fija el modo de narración (P1-UI). Si Piper queda deshabilitado,
+    /// no se fuerza acá: el draw lo muestra deshabilitado con motivo y
+    /// `validate_selection` falla honesto. Puro.
+    pub fn set_voz_mode(&mut self, modo: VozMode) {
+        self.voz_mode = modo;
+        self.error = None;
+        self.cancelled_note = None;
+    }
+
+    /// Fija la ruta de audio importado (la app, tras el picker nativo).
+    /// Vacío/blanco → `None` honesto (sin archivo). Puro.
+    pub fn set_audio_path(&mut self, path: impl Into<String>) {
+        let ruta = path.into();
+        let recortada = ruta.trim();
+        self.audio_path = if recortada.is_empty() {
+            None
+        } else {
+            Some(recortada.to_owned())
+        };
+        self.error = None;
+        self.cancelled_note = None;
+    }
+
+    /// Quita el audio importado (`None`). Puro.
+    pub fn clear_audio(&mut self) {
+        self.audio_path = None;
+        self.error = None;
+        self.cancelled_note = None;
+    }
+
+    /// Ruta de audio importado (`None` = sin archivo). Puro.
+    pub fn audio_path(&self) -> Option<&str> {
+        self.audio_path.as_deref()
+    }
+
+    /// Fija el modo de subtítulos (P1-UI). Puro.
+    pub fn set_captions(&mut self, modo: CaptionsMode) {
+        self.captions_mode = modo;
+        self.error = None;
+        self.cancelled_note = None;
+    }
+
+    /// Fija si la voz Piper está instalada (detección fuera del draw).
+    /// Si deja de estar disponible y estaba elegida, cae a Ninguna
+    /// (honesto, como el fallback GIF sin ffmpeg). Puro.
+    pub fn set_piper_available(&mut self, disponible: bool) {
+        self.piper_available = disponible;
+        if !disponible && self.voz_mode == VozMode::Piper {
+            self.voz_mode = VozMode::Ninguna;
+        }
+    }
+
+    /// Fija si el guion actual trae texto de narración (detección fuera
+    /// del draw). Puro.
+    pub fn set_voiceover_disponible(&mut self, disponible: bool) {
+        self.voiceover_disponible = disponible;
+    }
+
+    /// ¿La sección Narración/Subtítulos aplica? Solo video MP4/WebM;
+    /// en GIF/PNG/PDF/SVG no aplica (P1-UI). Puro.
+    pub fn is_audio_section_visible(&self) -> bool {
+        self.format.is_video()
+    }
+
+    /// ¿La voz Piper está habilitada? Exige binario instalado. Puro.
+    pub fn is_piper_enabled(&self) -> bool {
+        self.piper_available
+    }
+
+    /// Motivo visible de Piper deshabilitado (`None` = habilitado). Puro.
+    pub fn piper_disabled_reason(&self) -> Option<&'static str> {
+        if self.piper_available {
+            None
+        } else {
+            Some(MEDIA_EXPORT_PIPER_MISSING_HINT)
+        }
+    }
+
+    /// ¿Los quemados están habilitados? Exigen ffmpeg (el gating real lo
+    /// pone la app al muxear; acá solo se deshabilita el radio). Puro.
+    pub fn is_burned_enabled(&self) -> bool {
+        self.ffmpeg_available
     }
 
     /// Cierra y deja de mostrar progreso/error viejos. Puro.
@@ -1168,6 +1355,16 @@ impl MediaExportDialog {
         }
         if self.view == MediaExportView::Orbita && !self.orbit_supported {
             return Err(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT.to_string());
+        }
+        // P1-UI: la sección de audio solo aplica en video; en el resto se
+        // ignora sin error (no aplica, no falla).
+        if self.is_audio_section_visible() {
+            if self.voz_mode == VozMode::Piper && !self.piper_available {
+                return Err(MEDIA_EXPORT_PIPER_MISSING_HINT.to_string());
+            }
+            if self.captions_mode == CaptionsMode::Quemado && !self.ffmpeg_available {
+                return Err(MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT.to_string());
+            }
         }
         Ok(())
     }
@@ -2616,6 +2813,52 @@ impl AssistantPanelState {
             .set_latex_availability(latex_available, dvisvgm_available);
     }
 
+    /// Fija el modo de narración del diálogo (P1-UI, la app tras
+    /// `SetExportVozMode`). Puro, sin I/O.
+    pub fn export_dialog_set_voz_mode(&self, modo: VozMode) {
+        self.export_dialog.borrow_mut().set_voz_mode(modo);
+    }
+
+    /// Fija la ruta de audio importado (la app, tras el picker nativo).
+    /// Puro, sin I/O.
+    pub fn export_dialog_set_audio_path(&self, path: impl Into<String>) {
+        self.export_dialog.borrow_mut().set_audio_path(path);
+    }
+
+    /// Quita el audio importado (la app tras `ClearExportAudio`). Puro.
+    pub fn export_dialog_clear_audio(&self) {
+        self.export_dialog.borrow_mut().clear_audio();
+    }
+
+    /// Fija el modo de subtítulos (P1-UI, la app tras `SetExportCaptions`).
+    /// Puro, sin I/O.
+    pub fn export_dialog_set_captions(&self, modo: CaptionsMode) {
+        self.export_dialog.borrow_mut().set_captions(modo);
+    }
+
+    /// Fija si Piper está instalado (detección fuera del draw, al abrir).
+    /// Puro, sin I/O.
+    pub fn set_export_dialog_piper(&self, disponible: bool) {
+        self.export_dialog
+            .borrow_mut()
+            .set_piper_available(disponible);
+    }
+
+    /// Alias exigido por el frente app (`set_piper_available`).
+    /// Puro, sin I/O.
+    pub fn set_piper_available(&self, disponible: bool) {
+        self.export_dialog
+            .borrow_mut()
+            .set_piper_available(disponible);
+    }
+
+    /// Fija si el guion trae narración (la app, fuera del draw). Puro.
+    pub fn set_voiceover_disponible(&self, disponible: bool) {
+        self.export_dialog
+            .borrow_mut()
+            .set_voiceover_disponible(disponible);
+    }
+
     /// Fija el easing del scrub por nombre del wire (`EASING_NAMES`).
     /// Vacío → `linear`; desconocido lo resuelve `easing::by_name` al
     /// samplear (también `linear`, honesto). Piel pura, sin I/O.
@@ -3753,6 +3996,27 @@ pub enum AssistantUiAction {
     CancelExport,
     /// Cerrar el diálogo sin exportar (descarta la selección).
     CloseExportDialog,
+    /// P1-UI: abrir el picker nativo de audio para el export de video.
+    ///
+    /// La emite [Elegir…] en la fila Narración/Importar; la app abre el
+    /// selector fuera del draw y fija la ruta con `set_audio_path`.
+    /// Sin I/O ni spawn en `Ui::`.
+    PickExportAudio,
+    /// P1-UI: quitar el audio importado del export de video.
+    ///
+    /// La emite [Quitar]; la Piel ya limpió `audio_path` y la app
+    /// descarta la pista pendiente. Sin I/O ni spawn en `Ui::`.
+    ClearExportAudio,
+    /// P1-UI: cambiar el modo de narración del export de video.
+    ///
+    /// La emiten los radios Ninguna/Importar/Piper; la Piel ya actualizó
+    /// `voz_mode` y la app re-resuelve la pista fuera del draw.
+    SetExportVozMode(VozMode),
+    /// P1-UI: cambiar el modo de subtítulos del export de video.
+    ///
+    /// La emiten los radios Ninguno/SRT/Quemados; la Piel ya actualizó
+    /// `captions_mode` y la app re-resuelve el mux fuera del draw.
+    SetExportCaptions(CaptionsMode),
     /// Reproducir de nuevo la animación de un turno del historial (P0-UI).
     ///
     /// La emite la tarjeta de un turno no final con `TurnMediaRef`; la app
@@ -7455,6 +7719,111 @@ fn draw_media_export_dialog(
                 );
             }
             ui.add_space(SPACE_XS);
+            // ── P1-UI: Narración + Subtítulos (solo video MP4/WebM) ──
+            // En GIF/PNG/PDF/SVG la sección no aplica: ni radios ni notas.
+            // Cero I/O/spawn: los radios mutan el estado puro y emiten la
+            // intención; [Elegir…]/[Quitar] emiten picker/clear y la app
+            // resuelve fuera del draw.
+            if dialog.is_audio_section_visible() {
+                ui.label(egui::RichText::new("Narración").size(TYPE_XS).strong());
+                ui.horizontal(|ui| {
+                    for modo in VozMode::ALL {
+                        let habilitado = modo != VozMode::Piper || dialog.is_piper_enabled();
+                        let radio = ui.add_enabled(
+                            habilitado,
+                            egui::RadioButton::new(dialog.voz_mode == modo, modo.display_name()),
+                        );
+                        if !habilitado {
+                            let _ = radio.on_hover_text(MEDIA_EXPORT_PIPER_MISSING_HINT);
+                        } else if radio.clicked() && dialog.voz_mode != modo {
+                            dialog.set_voz_mode(modo);
+                            if pending.is_none() {
+                                pending = Some(AssistantUiAction::SetExportVozMode(modo));
+                            }
+                        }
+                    }
+                });
+                if !dialog.is_piper_enabled() {
+                    ui.label(
+                        egui::RichText::new(MEDIA_EXPORT_PIPER_MISSING_HINT)
+                            .size(TYPE_2XS)
+                            .color(theme.text_tertiary)
+                            .italics(),
+                    );
+                }
+                if dialog.voz_mode == VozMode::Importar {
+                    match dialog.audio_path().map(str::to_owned) {
+                        Some(ruta) => {
+                            ui.label(
+                                egui::RichText::new(ruta)
+                                    .size(TYPE_XS)
+                                    .color(theme.text_secondary),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui.button("Elegir…").clicked() && pending.is_none() {
+                                    pending = Some(AssistantUiAction::PickExportAudio);
+                                }
+                                if ui.button("Quitar").clicked() {
+                                    dialog.clear_audio();
+                                    pending = Some(AssistantUiAction::ClearExportAudio);
+                                }
+                            });
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new(MEDIA_EXPORT_AUDIO_EMPTY_HINT)
+                                    .size(TYPE_XS)
+                                    .italics()
+                                    .color(theme.text_secondary),
+                            );
+                            if ui.button("Elegir…").clicked() && pending.is_none() {
+                                pending = Some(AssistantUiAction::PickExportAudio);
+                            }
+                        }
+                    }
+                }
+                if dialog.voz_mode == VozMode::Piper && !dialog.voiceover_disponible {
+                    ui.label(
+                        egui::RichText::new(MEDIA_EXPORT_NO_VOICEOVER_HINT)
+                            .size(TYPE_XS)
+                            .italics()
+                            .color(theme.text_secondary),
+                    );
+                }
+                ui.add_space(SPACE_XS);
+                ui.label(egui::RichText::new("Subtítulos").size(TYPE_XS).strong());
+                ui.horizontal(|ui| {
+                    for modo in CaptionsMode::ALL {
+                        let habilitado =
+                            modo != CaptionsMode::Quemado || dialog.is_burned_enabled();
+                        let radio = ui.add_enabled(
+                            habilitado,
+                            egui::RadioButton::new(
+                                dialog.captions_mode == modo,
+                                modo.display_name(),
+                            ),
+                        );
+                        if !habilitado {
+                            let _ = radio.on_hover_text(MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT);
+                        } else if radio.clicked() && dialog.captions_mode != modo {
+                            dialog.set_captions(modo);
+                            if pending.is_none() {
+                                pending = Some(AssistantUiAction::SetExportCaptions(modo));
+                            }
+                        }
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Quemados {}",
+                        MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT
+                    ))
+                    .size(TYPE_2XS)
+                    .color(theme.text_tertiary)
+                    .italics(),
+                );
+                ui.add_space(SPACE_XS);
+            }
             // ── Nota Tex (siempre visible) ──
             ui.label(
                 egui::RichText::new(MEDIA_EXPORT_TEX_NOTE)
@@ -12840,6 +13209,196 @@ mod tests {
             MediaExportQuality::Media
         );
         assert_eq!(*state.media_export_state(), MediaExportState::Idle);
+    }
+
+    #[test]
+    fn p1_export_narracion_subtitulos_defaults() {
+        // P1-UI: defaults sin narración ni subtítulos, sin Piper ni guion.
+        let dialogo = MediaExportDialog::new();
+        assert_eq!(dialogo.voz_mode, VozMode::Ninguna);
+        assert_eq!(dialogo.audio_path(), None);
+        assert_eq!(dialogo.captions_mode, CaptionsMode::Ninguno);
+        assert!(!dialogo.piper_available);
+        assert!(!dialogo.voiceover_disponible);
+        assert_eq!(VozMode::default(), VozMode::Ninguna);
+        assert_eq!(CaptionsMode::default(), CaptionsMode::Ninguno);
+        assert_eq!(VozMode::ALL.len(), 3);
+        assert_eq!(CaptionsMode::ALL.len(), 3);
+        // GIF no aplica audio.
+        assert!(!dialogo.is_audio_section_visible());
+    }
+
+    #[test]
+    fn p1_export_prefs_narracion_sobreviven_a_set_media() {
+        // P1-UI: voz/audio/subtítulos sobreviven a `set_media`;
+        // solo `clear_conversation` resetea (patrón M2-5).
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        state.export_dialog_set_format(MediaExportFormat::Mp4);
+        state.set_piper_available(true);
+        state.set_voiceover_disponible(true);
+        state.export_dialog_set_voz_mode(VozMode::Piper);
+        state.export_dialog_set_audio_path("/tmp/narra.wav");
+        state.export_dialog_set_captions(CaptionsMode::SidecarSrt);
+        let media = AssistantMedia {
+            title: "derivada".into(),
+            frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
+        };
+        state.set_media(Some(media), &context);
+        let dialogo = state.export_dialog_snapshot();
+        assert_eq!(dialogo.voz_mode, VozMode::Piper);
+        assert_eq!(dialogo.audio_path(), Some("/tmp/narra.wav"));
+        assert_eq!(dialogo.captions_mode, CaptionsMode::SidecarSrt);
+        assert!(dialogo.piper_available);
+        assert!(dialogo.voiceover_disponible);
+        // Limpiar sí resetea a defaults.
+        state.clear_conversation();
+        let limpio = state.export_dialog_snapshot();
+        assert_eq!(limpio.voz_mode, VozMode::Ninguna);
+        assert_eq!(limpio.audio_path(), None);
+        assert_eq!(limpio.captions_mode, CaptionsMode::Ninguno);
+        assert!(!limpio.piper_available);
+        assert!(!limpio.voiceover_disponible);
+    }
+
+    #[test]
+    fn p1_export_piper_gating_con_motivo() {
+        // P1-UI: sin Piper instalado el radio va deshabilitado con motivo
+        // visible inline, y validar falla honesto en video.
+        let mut dialogo = MediaExportDialog::new();
+        assert!(!dialogo.is_piper_enabled());
+        assert_eq!(
+            dialogo.piper_disabled_reason(),
+            Some(MEDIA_EXPORT_PIPER_MISSING_HINT)
+        );
+        assert!(MEDIA_EXPORT_PIPER_MISSING_HINT.contains("Piper"));
+        // En video con Piper elegido sin binario = error honesto.
+        dialogo.format = MediaExportFormat::Mp4;
+        dialogo.frame_count = 12;
+        dialogo.ffmpeg_available = true;
+        dialogo.voz_mode = VozMode::Piper;
+        let err = dialogo
+            .validate_selection()
+            .expect_err("Piper sin binario debe fallar");
+        assert!(err.contains("Piper"), "fue: {err}");
+        // Con binario habilita y valida.
+        dialogo.set_piper_available(true);
+        assert!(dialogo.is_piper_enabled());
+        assert_eq!(dialogo.piper_disabled_reason(), None);
+        assert!(dialogo.validate_selection().is_ok());
+        // Si se pierde el binario con Piper elegido, cae a Ninguna.
+        dialogo.set_piper_available(false);
+        assert_eq!(dialogo.voz_mode, VozMode::Ninguna);
+        // Quemados sin ffmpeg también fallan honesto en video.
+        dialogo.set_captions(CaptionsMode::Quemado);
+        dialogo.ffmpeg_available = false;
+        assert!(!dialogo.is_burned_enabled());
+        let err = dialogo
+            .validate_selection()
+            .expect_err("quemados sin ffmpeg deben fallar");
+        assert!(err.contains("ffmpeg"), "fue: {err}");
+    }
+
+    #[test]
+    fn p1_export_seccion_audio_solo_en_video() {
+        // P1-UI: la sección solo aplica en MP4/WebM; en GIF/PNG/PDF/SVG
+        // no aplica (invisible, sin error).
+        assert!(MediaExportFormat::Mp4.is_video());
+        assert!(MediaExportFormat::Webm.is_video());
+        for formato in [
+            MediaExportFormat::Gif,
+            MediaExportFormat::PngDir,
+            MediaExportFormat::Pdf,
+            MediaExportFormat::Svg,
+        ] {
+            assert!(!formato.is_video(), "{formato:?} no es video");
+            let mut dialogo = MediaExportDialog::new();
+            dialogo.format = formato;
+            assert!(
+                !dialogo.is_audio_section_visible(),
+                "{formato:?} esconde audio"
+            );
+            // En no-video la selección ignora voz/subtítulos sin fallar.
+            dialogo.frame_count = 12;
+            dialogo.voz_mode = VozMode::Piper;
+            dialogo.captions_mode = CaptionsMode::Quemado;
+            // GIF valida (los campos de audio se ignoran fuera de video).
+            if formato == MediaExportFormat::Gif {
+                assert!(dialogo.validate_selection().is_ok());
+            }
+        }
+        for formato in [MediaExportFormat::Mp4, MediaExportFormat::Webm] {
+            let mut dialogo = MediaExportDialog::new();
+            dialogo.format = formato;
+            assert!(
+                dialogo.is_audio_section_visible(),
+                "{formato:?} muestra audio"
+            );
+        }
+        // Blindaje draw: el bloque vive bajo el gate de video.
+        let source = include_str!("assistant.rs");
+        assert!(source.contains("is_audio_section_visible"));
+        assert!(source.contains("\"Narración\""));
+        assert!(source.contains("\"Subtítulos\""));
+        assert!(source.contains("MEDIA_EXPORT_PIPER_MISSING_HINT"));
+        assert!(source.contains("MEDIA_EXPORT_NO_VOICEOVER_HINT"));
+        assert!(source.contains("requiere ffmpeg"));
+    }
+
+    #[test]
+    fn p1_export_acciones_setters_y_estado() {
+        // P1-UI: interacción programática — setters + estado + variantes
+        // exactas que emite el draw para el wiring app.
+        let state = AssistantPanelState::default();
+        state.set_piper_available(true);
+        state.set_voiceover_disponible(false);
+        state.export_dialog_set_voz_mode(VozMode::Importar);
+        state.export_dialog_set_audio_path("  /tmp/voz.wav  ");
+        assert_eq!(
+            state.export_dialog_snapshot().audio_path(),
+            Some("/tmp/voz.wav"),
+            "recorta blanco"
+        );
+        state.export_dialog_set_captions(CaptionsMode::Quemado);
+        let dialogo = state.export_dialog_snapshot();
+        assert_eq!(dialogo.voz_mode, VozMode::Importar);
+        assert_eq!(dialogo.captions_mode, CaptionsMode::Quemado);
+        // clear vía setter.
+        state.export_dialog_clear_audio();
+        assert_eq!(state.export_dialog_snapshot().audio_path(), None);
+        state.export_dialog_set_audio_path("");
+        assert_eq!(state.export_dialog_snapshot().audio_path(), None);
+        // Variantes exactas del contrato app-side.
+        let a = AssistantUiAction::PickExportAudio;
+        let b = AssistantUiAction::ClearExportAudio;
+        let c = AssistantUiAction::SetExportVozMode(VozMode::Piper);
+        let d = AssistantUiAction::SetExportCaptions(CaptionsMode::SidecarSrt);
+        assert!(matches!(a, AssistantUiAction::PickExportAudio));
+        assert!(matches!(b, AssistantUiAction::ClearExportAudio));
+        assert!(matches!(
+            c,
+            AssistantUiAction::SetExportVozMode(VozMode::Piper)
+        ));
+        assert!(matches!(
+            d,
+            AssistantUiAction::SetExportCaptions(CaptionsMode::SidecarSrt)
+        ));
+        // El draw emite esas variantes (pin del source, sin I/O).
+        let source = include_str!("assistant.rs");
+        for pin in [
+            "PickExportAudio",
+            "ClearExportAudio",
+            "SetExportVozMode",
+            "SetExportCaptions",
+        ] {
+            assert!(source.contains(pin), "draw emite {pin}");
+        }
+        // Nota de guion sin narración con Piper elegido.
+        state.export_dialog_set_voz_mode(VozMode::Piper);
+        let dialogo = state.export_dialog_snapshot();
+        assert_eq!(dialogo.voz_mode, VozMode::Piper);
+        assert!(!dialogo.voiceover_disponible);
+        assert!(MEDIA_EXPORT_NO_VOICEOVER_HINT.contains("narración"));
     }
 
     #[test]

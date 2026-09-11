@@ -1100,6 +1100,15 @@ pub struct AssistantPlanReceiptDelta {
 }
 
 impl AssistantPlanReceiptDelta {
+    /// Valida conteos y coherencia sin necesitar el documento.
+    ///
+    /// P1-app-wiring: `created_object_count` admite hasta
+    /// `create_graph_count + run_command_count` porque `RunCommand` también
+    /// crea objetos vía el bridge validado al aplicar (allowlist + ejecución
+    /// en clon + `validate_document` en `prepare_assistant_command`); exigir
+    /// solo `create_graph_count` rechazaba planes `RunCommand` que crean
+    /// objetos (fail-closed falso). `changed_variable_count` sigue atado a
+    /// `set_variable_count` (`RunCommand` no promete variables).
     fn validate(&self) -> Result<(), String> {
         if self.operation_count == 0
             || usize::from(self.operation_count) > MAX_PROPOSED_PLAN_OPERATIONS
@@ -1108,7 +1117,10 @@ impl AssistantPlanReceiptDelta {
                 .saturating_add(self.create_graph_count)
                 .saturating_add(self.run_command_count)
                 != self.operation_count
-            || self.created_object_count > self.create_graph_count
+            || self.created_object_count
+                > self
+                    .create_graph_count
+                    .saturating_add(self.run_command_count)
             || self.changed_variable_count > self.set_variable_count
         {
             return Err("assistant receipt delta is invalid".into());
