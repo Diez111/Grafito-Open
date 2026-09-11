@@ -80,3 +80,10 @@
 - [ ] CI honesto: bench-regression real con critcmp (M, quitar || true), mutation gate 80% (M), fuzz anim_wire contra producción (M), fuzz smoke en PR (M), doc-tests ejecutables (S-M), GPU fail-closed local (S), coverage sin fallback ruidoso (S)
 - [ ] i18n resto: onboarding+cheat+toasts+menús (~280 claves, M), format_number cableado (M), resto 7335 strings por oleadas, fluent diferido (>500 claves)
 - [ ] Varios: whiteboard validación por hoja en validate_document (S), examen lockdown policy (decisión), pick 3D exacto resto, journal/ledger Plans.md F9 (S), CHANGELOG 1.2.35 (M), WORKSPACE Next (S), dropear 3 stashes (tras backup branch), .jspace sync
+
+## F11 — Sync C3 docs↔código 2026-09-11 — DONE (cerebro-audit, solo docs, sin código)
+- [x] F11.1 Tools reales: assistant 21 (3 base + 8 pedag + 8 math + 2 harness1, `assistant/src/agent.rs:2250-2259,2721-2766`) / agent hoja 9 (3+6, `agent/src/tools.rs:3060-3081`); §10 histórico (9) queda como snapshot v1.2.35 del crate hoja
+- [x] F11.2 Presupuestos C3 en §8/§13: AnimDuration 0.1..=60s (`protocol.rs:263`), Resolution 64..=4096, LONGFORM 1500 frames (GIF 64), chunks 64 MiB streaming, timeline 60 s, AudioTrack 0..=60000/0..=2.0, captions ≤256 KiB, voiceover ≤40/paso, short 110-130, run_command ≤2000, tex 8 KiB
+- [x] F11.3 Frente C3 en §14.1: Piper sidecar honesto (`voice.rs:39-56`), captions sidecar/quemadas (`:102-134`), short 4 beats (`guion.rs:933` + tool `:1828-1907`), Write por trazo (`player.rs:469,482`), Rectangle/Ellipse/Arc (`scene.rs:533-542`), run_command allowlist+undo (`agent.rs:2381-2432`), solid_measure_3d (`:2705-2720`), LaTeX offline (`grafito-tex` + `draw_math :10649-10820`), long-form streaming
+- [x] F11.4 Crates: 18 members en `Cargo.toml` (tex incluido) + root; 19 dirs en `crates/` (release-tests no listado) — §8/§13 actualizados
+- [x] F11.5 AGENTS.md: conteos sincerados (18 members/19 dirs, grupos 5/8/18, panel 300..520, tamaños app medidos hoy); `docs/production.md` no existe, nada que sync

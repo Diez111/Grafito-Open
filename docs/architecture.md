@@ -76,7 +76,7 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 
 - **AnimJobId**: newtype String try_new regex ^[A-Za-z0-9_-]{1,64}
 - **Resolution**: try_new 64..=4096, as_tuple()
-- **AnimDuration**: try_new 0.1..=30s, as_millis()
+- **AnimDuration**: try_new 0.1..=60s (P0.1 long-form; `protocol.rs:263`), as_millis()
 - **AnimParams**: validate template/concept/spec + params finite + duration/resolution
 - **ExportFormat**: Gif/PngSequence/Mp4
 - **WireMessage**: Hello{protocol_version, capabilities} | Progress | Result | Error{code,msg} | Pong ; versionado ANIM_PROTOCOL_VERSION=1
@@ -125,6 +125,17 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Anim | MAX_NODES | 200 | python |
 | Anim | line_cap | 64KB | engine.rs |
 | Anim | diagnostics cap | 64 lineas | engine.rs |
+| Anim | AnimDuration | 0.1..=60s (P0.1 long-form) | anim/src/protocol.rs:263 |
+| Anim | Resolution | 64..=4096 por lado | anim/src/protocol.rs (tests :3366-3371) |
+| Anim | VIDEO_LONGFORM_MAX_FRAMES | 1500 (Mp4/Webm; Gif/PngSequence cap 64) | anim/src/protocol.rs:341,345,438 |
+| Anim | PREVIEW_SHORT_MAX_FRAMES (GIF) | 64 | anim/src/protocol.rs:341 |
+| Anim | LONGFORM_CHUNK_MAX_BYTES | 64 MiB (streaming por chunks, sin Vec total) | anim/src/protocol.rs:349,364-389 |
+| Anim | MAX_TIMELINE_DURATION_MS | 60_000 (60 s) | anim/src/protocol.rs:931 |
+| Anim | AudioTrack offset_ms / gain | 0..=60000 / 0.0..=2.0 finita | anim/src/protocol.rs:468,470,503-543 |
+| Anim | CAPTION_MAX_OUTPUT_BYTES (SRT/ASS) | 256 KiB | anim/src/captions.rs:33 |
+| Anim | VOICEOVER_MAX_PALABRAS (por paso) | 40 | anim/src/guion.rs:64 |
+| Anim | SHORT_MIN/MAX_PALABRAS (short total) | 110 / 130 | anim/src/guion.rs:66,68 |
+| Anim | run_command texto | no vacío, ≤2000 chars, sin NUL, una línea | assistant-types/src/lib.rs:17 + assistant/src/agent.rs:2381-2399 |
 | Assistant | RequestBudget max_input_chars | 8192 | assistant-types/src/lib.rs:201 (+validate cap :214) |
 | Assistant | RequestBudget max_output_chars | 2048 | assistant-types/src/lib.rs:202 (+validate cap :217) |
 | Assistant | RequestBudget max_steps | 8 | assistant-types/src/lib.rs:203 (+validate cap :220) |
@@ -133,6 +144,9 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | AttachmentLimits max_total_bytes | 1 MiB | assistant-types/src/lib.rs:251 |
 | Assistant | AttachmentLimits max_pixels / max_total_pixels | 1 MiP / 2 MiP | assistant-types/src/lib.rs:249,252 |
 | Assistant | AttachmentLimits max_attachments | 2 | assistant-types/src/lib.rs:250 |
+| Assistant | tools seguras (`all_safe_tool_schemas`, assistant) | 21 (3 base + 8 pedag + 8 math + 2 harness1) | assistant/src/agent.rs:2250-2259,2721-2766 (math 8 verificado por conteo `ToolSchema::new`) |
+| Assistant | tools seguras (`all_safe_tool_schemas`, agent hoja) | 9 (3 base + 6 pedag, sin math/harness) | agent/src/tools.rs:3060-3081 |
+| Tex | TEX_INPUT_MAX_BYTES | 8 KiB | tex/src/lib.rs:37 |
 | Comandos | COMMANDS registrados | 338 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
 | Comandos | palette-visible | 293 (45 ocultos) + 15 acciones UI = 308 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible; 3D-A2: +Vista3D) |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
@@ -140,7 +154,7 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
 | Toolbar | Tool variantes | 87 | grafito-ui/src/lib.rs `pub enum Tool` (contado F5, 87 variantes; Parallel/Arc/Sector F9 ya incluidos) |
 | App | Perspectivas | 10 (Ctrl+Shift+1..9,0) | grafito-app/src/lib.rs:90-111 + app.rs:4236-4242 |
-| Workspace | crates | 18 | `crates/` (agent, anim, app, assistant, assistant-types, classroom, command, complex, core, geometry, ggb, pedagogy, plugins, profile, release-tests, render, ui, whiteboard) |
+| Workspace | crates | 18 members (tex incluido) + root; 19 dirs en `crates/` | `Cargo.toml` members (app, agent, anim, assistant, assistant-types, classroom, command, complex, core, geometry, ggb, pedagogy, plugins, profile, render, tex, ui, whiteboard) + `crates/grafito-release-tests/` no listado |
 | UI | BREAKPOINT_COMPACT | 1360 | tokens.rs:142 (is_compact_viewport :188-191) |
 | UI | PANEL_LEFT_DEFAULT | 260 (min 180, max 45% viewport via PANEL_LEFT_MAX_FRACTION) | tokens.rs + panels.rs/algebra.rs |
 | UI | PANEL_LEFT_MIN | 180 | tokens.rs |
@@ -245,6 +259,17 @@ Notas:
 | Ctrl+P/E lápiz/borrador, F8/F9 esfera/cubo | `crates/grafito-app/src/app.rs:4135-4144`, `:4268-4278` |
 | Onboarding 420px, 3 bullets, 3 botones | `crates/grafito-app/src/app.rs:4922-5033`, gating `:1763`, `utils.rs:46-48` |
 | Rail 60px, drawer 292..440, panel izq 180+45% | `crates/grafito-ui/src/tokens.rs:151-164,207-210`; `app/src/ui.rs:549-552,727-731`; `app/src/panels.rs:1201-1206,2125-2132` |
+| 21 tools assistant (3 base + 8 pedag + 8 math + 2 harness1) / 9 en agent hoja | `crates/grafito-assistant/src/agent.rs:2250-2259` (pedag 8), `:2721-2766` (harness1 2 + base 3), math 8 por conteo `ToolSchema::new`; `crates/grafito-agent/src/tools.rs:3060-3081` (3+6=9) |
+| AnimDuration 0.1..=60s, Resolution 64..=4096 | `crates/grafito-anim/src/protocol.rs:263`, tests `:3321-3371` |
+| Long-form 1500 frames (GIF 64), chunks 64 MiB streaming, timeline 60 s | `crates/grafito-anim/src/protocol.rs:341,345,349,364-389,438,931` |
+| AudioTrack offset 0..=60000, gain 0.0..=2.0 | `crates/grafito-anim/src/protocol.rs:468,470,503-543` |
+| Captions SRT/ASS ≤256 KiB; voiceover ≤40 palabras/paso; short 110-130 | `crates/grafito-anim/src/captions.rs:33`; `guion.rs:64,66,68` |
+| run_command ≤2000 chars + allowlist/undo (solo no destructivos) | `crates/grafito-assistant-types/src/lib.rs:17,988-997`; `assistant/src/agent.rs:2381-2432` |
+| solid_measure_3d + generate_short_script (4 beats) | `crates/grafito-assistant/src/agent.rs:1828-1907,2234-2237,2705-2720` |
+| Voiceover Piper sidecar honesto + captions sidecar/quemadas | `crates/grafito-app/src/voice.rs:39-56,102-134`; `grafito-ui/src/assistant.rs:997-998,1016-1017` |
+| Write por trazo + Rectangle/Ellipse/Arc | `crates/grafito-anim/src/player.rs:23,469,482`; `scene.rs:533-542` |
+| LaTeX offline SVG/raster (tex, STIX) + draw_math | `crates/grafito-tex/src/lib.rs:1,157,247,352`; `grafito-ui/src/assistant.rs:10649-10820` |
+| 18 members (tex) + root; 19 dirs en crates/ | `Cargo.toml` members + `ls crates/` (release-tests no listado) |
 
 ## 14. Paridad GeoGebra 2026 — frente F10-C (BUILD 2026-09-05, rama f10-plan-total)
 
@@ -267,3 +292,18 @@ Sin tocar geometría exacta, A11Y ni perf; sin `unwrap` (gates §9).
 | CSV RFC 4180 | `symbolic/csv.rs` (`to_csv` CRLF + `parse_csv` con `""`, cotas 20k filas/10M) | import/export CSV | S cerrado (wiring UI P2) |
 | Clipboard SVG/PNG | `app/src/export.rs` (SVG real punto/círculo/polígono/texto; PNG vía `clipboard_png_bytes` + `arboard` "Copiar PNG", headless honesto) | copiar SVG/PNG | S cerrado |
 | Gruntz / Risch / marching-tetra / Net / iroh / CRDT | `symbolic/exchange.rs` (`l_stub` siempre `Err` + diseño en mensaje) | CAS y P2P | L solo diseño + stub (F10.W5) |
+
+### 14.1 Frente C3 — voz, guion corto, trazo, LaTeX, run_command (sync 2026-09-11)
+
+Puro y acotado, sin tocar geometría exacta ni A11Y; sin `unwrap` (gates §9).
+
+| Pieza | Grafito hoy (archivo) | Nota |
+|---|---|---|
+| Voiceover Piper | `app/src/voice.rs` (sidecar `piper` en disco; sin binario → `PiperMissing` honesto, jamás silencio; UI `VozMode::Piper` + hint `assistant.rs:997-998`) | MP4 vía ffmpeg-sidecar o mudo honesto |
+| Captions | `anim/src/captions.rs` (SRT/ASS ≤256 KiB) + sidecar `.srt` / quemadas vía ffmpeg (`voice.rs:102-134`) | Sin ffmpeg queda el sidecar |
+| Short script | `anim/src/guion.rs:933` (`short_script`, 4 beats, 110-130 palabras) + tool `generate_short_script` (`assistant/src/agent.rs:1828-1907`) | Determinista byte-idéntico |
+| Write + figuras | `anim/src/player.rs` (`WriteAnim` por trazo) + `scene.rs:533-542` (`Rectangle`/`Ellipse`/`Arc`) | Fallback opacidad honesta sin trazo |
+| LaTeX offline | `grafito-tex` (pulldown-latex→formulary→SVG/tiny-skia, STIX embebida, 8 KiB) + `draw_math` (`ui/src/assistant.rs:10649-10820`) | Subset + aviso si falta fuente |
+| run_command | bridge puro ≤2000 chars (`assistant-types:988-997`, `agent.rs:2381-2399`); app valida allowlist y aplica con undo, solo no destructivos | Propuesta, nunca ejecuta solo |
+| solid_measure_3d | `assistant/src/agent.rs:2705-2720` sobre `symbolic::solids` exactos | Error honesto si no computable |
+| Long-form streaming | chunks 64 MiB (`protocol.rs:349,364-389`), 1500 frames, timeline 60 s | Sin `Vec` total en RAM |

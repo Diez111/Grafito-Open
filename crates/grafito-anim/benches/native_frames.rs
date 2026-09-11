@@ -66,10 +66,10 @@ fn bench_native_morph(c: &mut Criterion) {
         assert!(Resolution::try_new(63, 480).is_err());
         assert!(Resolution::try_new(4097, 480).is_err());
         assert!(AnimDuration::try_new(0.1).is_ok());
-        assert!(AnimDuration::try_new(30.0).is_ok());
+        assert!(AnimDuration::try_new(60.0).is_ok());
         assert!(AnimDuration::try_new(0.09).is_err());
-        assert!(AnimDuration::try_new(30.1).is_err());
-        println!("F5-presupuestos: frames=48 set=64MiB res=64..4096 dur=0.1..30s OK");
+        assert!(AnimDuration::try_new(60.1).is_err());
+        println!("F5-presupuestos: frames=48 set=64MiB res=64..4096 dur=0.1..60s OK");
     }
 
     c.bench_function("morph_chico_16x5", |b| {

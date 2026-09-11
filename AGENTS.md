@@ -14,8 +14,8 @@ grafito-ui        ─────────────> grafito-app (Piel)
 ```
 
 - **Cerebro puro** (sin egui/wgpu): `grafito-core`, `grafito-geometry`, `grafito-command`, `grafito-whiteboard`, `grafito-profile`, `grafito-pedagogy`, `grafito-plugins`
-- **Puente**: `grafito-anim` IPC JSON v1 stdio a Python/manim
-- **Piel**: `grafito-ui` (tokens, theme) + `grafito-app` (app.rs 4.8kL, assistant.rs 4.7kL)
+- **Puente**: `grafito-anim` nativo (11 plantillas, MP4 vía ffmpeg-sidecar, `FfmpegMissing` honesto; `engines/python` eliminado) + voz Piper sidecar / captions
+- **Piel**: `grafito-ui` (tokens, theme) + `grafito-app` (app.rs ~8.8kL, assistant.rs ~13kL, medido 2026-09-11 con `wc -l`)
 
 ## Principios
 
@@ -33,7 +33,7 @@ grafito-ui        ─────────────> grafito-app (Piel)
 | Expr | MAX_EXPR_LENGTH | 2000 |
 | Anim | line_cap | 64KB |
 | Undo | MAX_UNDO / MAX_UNDO_BYTES | 50 / 50 MiB VecDeque |
-| UI | ASSISTANT_PANEL | 340..460 width |
+| UI | ASSISTANT_PANEL | 300..520 width (default 400) |
 
 ## Gates locales
 
@@ -64,10 +64,10 @@ Locales (vía `skill` tool):
 - `skills-catalog` — router maestro 200+ (USAR PRIMERO)
 - `j-space` — workspace ledger Goal/Core/Verified/Open/Next, fast/full/loop gating
 - `rust-performance` — puffin, rayon tessellation, wgpu compute, lyon, spade, rstar
-- `rust-ui-ux` — tokens TYPE_XS..XXL, Scandinavian progressive disclosure (5/8/17 groups)
+- `rust-ui-ux` — tokens TYPE_XS..XXL, Scandinavian progressive disclosure (5/8/18 groups)
 - `token-optimizer` — LLMLingua-2, compaction, prompt-cache, small_model routing
 - `context-engineering` — opencode compaction, prune, reserved, instructions globs
-- `grafito-architecture` — 16 crates, presupuestos, deuda BTreeMap/Statem
+- `grafito-architecture` — 18 members (tex incluido, 19 dirs en `crates/`), presupuestos, deuda BTreeMap/Statem
 - `profiling` — puffin/criterion/wgpu-profiler, mide antes de optimizar
 
 ## Memoria híbrida (local-first + cloud team)
