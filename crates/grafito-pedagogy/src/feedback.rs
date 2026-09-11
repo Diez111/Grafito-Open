@@ -33,6 +33,31 @@ impl Misconception {
             Self::None => "ninguna",
         }
     }
+
+    /// Parsea una etiqueta libre al enum cerrado (R6e: el FSM jamás guarda
+    /// strings inventados por el LLM).
+    ///
+    /// Acepta variante inglesa (`Sign`), española (`signo`) y minúsculas;
+    /// `None`/`none`/`ninguna`/vacío → `None`. Todo lo demás → `None`
+    /// (sin `Concept` silencioso: el llamador distingue "sin dato" de
+    /// "error conceptual"). Pura, sin `unwrap`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_lowercase().as_str() {
+            "sign" | "signo" => Some(Self::Sign),
+            "distributive" | "distributiva" | "propiedad distributiva" => Some(Self::Distributive),
+            "chainrule" | "chain_rule" | "chain-rule" | "regla de la cadena" => {
+                Some(Self::ChainRule)
+            }
+            "fraction" | "fraccion" | "fracción" | "fracciones" => Some(Self::Fraction),
+            "domain" | "dominio" => Some(Self::Domain),
+            "notation" | "notacion" | "notación" => Some(Self::Notation),
+            "exponent" | "exponente" | "potencias y raíces" | "potencias" => Some(Self::Exponent),
+            "algebra" | "algebraica" | "manipulación algebraica" => Some(Self::Algebra),
+            "concept" | "conceptual" | "concepto" => Some(Self::Concept),
+            "none" | "ninguna" | "" => Some(Self::None),
+            _ => Option::None,
+        }
+    }
 }
 
 /// Veredicto de corrección: exacta, equivalente simbólica, parcial o incorrecta.
@@ -782,5 +807,34 @@ mod tests {
         assert!(!fb.correct);
         assert_eq!(fb.misconception, Misconception::Sign);
         assert_eq!(fb.verdict, Verdict::Incorrect);
+    }
+
+    #[test]
+    fn r6e_misconception_parse_enum_cerrado() {
+        // Es/en/variantes → canónico; desconocido/vacío →าศัย None honesto.
+        for (raw, expected) in [
+            ("sign", Some(Misconception::Sign)),
+            ("Signo", Some(Misconception::Sign)),
+            ("distributive", Some(Misconception::Distributive)),
+            ("propiedad distributiva", Some(Misconception::Distributive)),
+            ("chain_rule", Some(Misconception::ChainRule)),
+            ("regla de la cadena", Some(Misconception::ChainRule)),
+            ("fraction", Some(Misconception::Fraction)),
+            ("fracción", Some(Misconception::Fraction)),
+            ("domain", Some(Misconception::Domain)),
+            ("dominio", Some(Misconception::Domain)),
+            ("notation", Some(Misconception::Notation)),
+            ("notación", Some(Misconception::Notation)),
+            ("exponent", Some(Misconception::Exponent)),
+            ("algebra", Some(Misconception::Algebra)),
+            ("concept", Some(Misconception::Concept)),
+            ("none", Some(Misconception::None)),
+            ("ninguna", Some(Misconception::None)),
+            ("", Some(Misconception::None)),
+            ("typo-inventado", None),
+            ("signo-extraño", None),
+        ] {
+            assert_eq!(Misconception::parse(raw), expected, "raw={raw:?}");
+        }
     }
 }

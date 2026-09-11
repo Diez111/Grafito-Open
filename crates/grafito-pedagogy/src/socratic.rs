@@ -5,9 +5,11 @@
 //! - Éxito requiere al menos 1 intento (`attempts >= 1`).
 //! - Máximo 3 intentos, luego `Summarize` (`TooManyAttempts`).
 
+use crate::feedback::Misconception;
 use crate::level::PedagogicalLevel;
 use crate::scaffold::{is_exploratory_request, Scaffold, ScaffoldEngine, Turn};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 /// Estado del diálogo socrático.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,16 +41,24 @@ pub enum GuardError {
     AlreadyDone,
     #[error("se requiere al menos 1 intento para marcar éxito")]
     NotEnoughAttempts,
+    #[error("sin remate correcto: resolvé el check final antes de marcar éxito")]
+    CheckNotCorrect,
 }
 
 /// FSM socrático puro, sin I/O.
+///
+/// `history` es una cola acotada ([`MAX_HISTORY_ENTRIES`]): los pushes
+/// descartan lo más viejo (cap memoria, sin truncar en silencio el estado).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SocraticFsm {
     pub state: SocraticState,
     pub topic: String,
     pub attempts: u8,
-    pub history: Vec<String>,
+    pub history: VecDeque<String>,
 }
+
+/// Tope de entradas del historial del FSM (cola con descarte del más viejo).
+pub const MAX_HISTORY_ENTRIES: usize = 32;
 
 /// Reparación socrática tipada para uso interno (jamás se publica cruda al chat).
 ///
@@ -92,8 +102,16 @@ impl SocraticFsm {
             state: SocraticState::Review { lo_id: lo },
             topic: t,
             attempts: 0,
-            history: Vec::new(),
+            history: VecDeque::new(),
         }
+    }
+
+    /// Push acotado al historial: si está lleno descarta la entrada más vieja.
+    fn push_history(&mut self, entry: String) {
+        if self.history.len() >= MAX_HISTORY_ENTRIES {
+            self.history.pop_front();
+        }
+        self.history.push_back(entry);
     }
 
     /// ¿Se puede revelar la respuesta directa? (`attempts >= 2`)
@@ -142,37 +160,57 @@ impl SocraticFsm {
             attempts: self.attempts,
         };
         self.state = next.clone();
-        self.history
-            .push(format!("ask heuristic attempts={}", self.attempts));
+        self.push_history(format!("ask heuristic attempts={}", self.attempts));
         Ok(next)
     }
 
     /// Registra un intento del estudiante.
     ///
     /// - Incrementa `attempts` (cap 255).
-    /// - Guarda el `misconception` si existe.
-    /// - Si `misconception` presente y `attempts < 3` → `Rectify`.
+    /// - `misconception` se valida contra el enum cerrado
+    ///   ([`Misconception::parse`], es/en): solo una variante conocida produce
+    ///   `Rectify` (guarda el nombre canónico, jamás el string crudo del
+    ///   LLM); etiqueta desconocida/vacía se ignora con traza honesta.
     /// - Si `attempts >= 3` → `Summarize`.
-    /// - Si no, pasa a `AwaitStudent` o `HeuristicQ`.
+    /// - Si no, `Rectify` con misconception conocida o `HeuristicQ`.
     pub fn record_attempt(&mut self, misconception: Option<String>) {
         self.attempts = self.attempts.saturating_add(1);
-        if let Some(ref m) = misconception {
-            if !m.is_empty() {
-                self.history.push(format!("misconception: {m}"));
+        let parsed = misconception
+            .as_deref()
+            .and_then(Misconception::parse)
+            .filter(|m| !matches!(m, Misconception::None));
+
+        match &parsed {
+            Some(m) => self.push_history(format!("misconception: {m:?}")),
+            None => {
+                if misconception
+                    .as_deref()
+                    .is_some_and(|m| !m.trim().is_empty())
+                {
+                    let raw: String = misconception
+                        .as_deref()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(64)
+                        .collect();
+                    self.push_history(format!(
+                        "misconception desconocida {raw:?} (se ignora, sin Rectify)"
+                    ));
+                } else {
+                    self.push_history("intento sin misconception".to_string());
+                }
             }
-        } else {
-            self.history.push("intento sin misconception".to_string());
         }
 
         if self.attempts >= 3 {
             self.state = SocraticState::Summarize;
             return;
         }
-        if let Some(m) = misconception {
-            if !m.trim().is_empty() {
-                self.state = SocraticState::Rectify { misconception: m };
-                return;
-            }
+        if let Some(m) = parsed {
+            self.state = SocraticState::Rectify {
+                misconception: format!("{m:?}"),
+            };
+            return;
         }
         // Por defecto espera respuesta del estudiante con deadline heurístico
         // (ahora + 5 min) si no hay misconception.
@@ -182,44 +220,47 @@ impl SocraticFsm {
         };
     }
 
-    /// Marca éxito. Requiere `attempts >= 1`, caso contrario `TellingTooEarly`/`NotEnoughAttempts`.
-    /// En éxito transiciona a `Summarize`.
-    pub fn mark_success(&mut self) -> Result<SocraticState, GuardError> {
+    /// Marca éxito. Requiere `attempts >= 1` Y remate correcto (R6e:
+    /// `last_check_correct` es `step.assess_final(respuesta).correct`; sin
+    /// prueba de corrección no hay éxito). En éxito transiciona a `Summarize`.
+    pub fn mark_success(&mut self, last_check_correct: bool) -> Result<SocraticState, GuardError> {
         if matches!(self.state, SocraticState::Done) {
             return Err(GuardError::AlreadyDone);
         }
         if self.attempts < 1 {
             return Err(GuardError::NotEnoughAttempts);
         }
+        if !last_check_correct {
+            return Err(GuardError::CheckNotCorrect);
+        }
         self.state = SocraticState::Summarize;
-        self.history.push("éxito marcado".to_string());
+        self.push_history("éxito marcado".to_string());
         Ok(self.state.clone())
     }
 
     /// Alias para `mark_success` con nombre alternativo.
-    pub fn succeed(&mut self) -> Result<SocraticState, GuardError> {
-        self.mark_success()
+    pub fn succeed(&mut self, last_check_correct: bool) -> Result<SocraticState, GuardError> {
+        self.mark_success(last_check_correct)
     }
 
     /// Avanza a resumen.
     pub fn summarize(&mut self) -> SocraticState {
         self.state = SocraticState::Summarize;
-        self.history.push("summarize".to_string());
+        self.push_history("summarize".to_string());
         self.state.clone()
     }
 
     /// Finaliza el FSM.
     pub fn finish(&mut self) -> SocraticState {
         self.state = SocraticState::Done;
-        self.history.push("done".to_string());
+        self.push_history("done".to_string());
         self.state.clone()
     }
 
     /// Pone al FSM en espera de estudiante con deadline.
     pub fn await_student(&mut self, deadline_epoch: u64) {
         self.state = SocraticState::AwaitStudent { deadline_epoch };
-        self.history
-            .push(format!("await deadline {deadline_epoch}"));
+        self.push_history(format!("await deadline {deadline_epoch}"));
     }
 
     /// Transiciona a rectificación explícita.
@@ -227,7 +268,7 @@ impl SocraticFsm {
         self.state = SocraticState::Rectify {
             misconception: misconception.clone(),
         };
-        self.history.push(format!("rectify {misconception}"));
+        self.push_history(format!("rectify {misconception}"));
     }
 
     /// Revela con guía solo si `can_reveal_answer` es verdadero.
@@ -263,13 +304,15 @@ impl SocraticFsm {
     ///
     /// Lista acotada sin regex: frases explícitas de revelado (`solución es`,
     /// `respuesta es`, `resultado es`, `solución:`, `respuesta:`, `resultado:`,
-    /// `la solución`, `la respuesta`). A propósito NO incluye `x =`/`y =` sueltos:
+    /// `la solución`, `la respuesta`) MÁS marcadores verbales (R6e: decir el
+    /// valor en palabras también es revelar — `la derivada es dos`,
+    /// `el resultado son tres`). A propósito NO incluye `x =`/`y =` sueltos:
     /// cualquier ejemplo heurístico (`probá con x=1`) disparaba el guard y el
     /// primer turno siempre daba `attempts=0` punitivo. El telling real se
-    /// señala con framing explícito, no con una ecuación aislada.
+    /// señala con framing explícito o valor verbal, no con una ecuación aislada.
     pub fn contains_solution_marker(text: &str) -> bool {
         let lower = text.to_lowercase();
-        lower.contains("solución es")
+        if lower.contains("solución es")
             || lower.contains("solucion es")
             || lower.contains("respuesta es")
             || lower.contains("resultado es")
@@ -280,6 +323,57 @@ impl SocraticFsm {
             || lower.contains("la solución")
             || lower.contains("la solucion")
             || lower.contains("la respuesta")
+        {
+            return true;
+        }
+        Self::contains_verbal_answer(&lower)
+    }
+
+    /// ¿El texto afirma un valor en palabras (`es dos`, `son tres`)?
+    ///
+    /// R6e: `la derivada es dos` es telling aunque no haya dígitos. Cubre
+    /// cero..veinte, `treinta` y `cien` tras `es`/`son`/`vale(n)`/`da(n)` con
+    /// borde de palabra. Conservador: una pregunta (`¿qué es dos más dos?`)
+    /// también dispara — el guard prefiere repreguntar antes que revelar.
+    /// Puro, sin regex ni `unwrap`.
+    pub fn contains_verbal_answer(text: &str) -> bool {
+        const NUMBERS: &[&str] = &[
+            "cero",
+            "uno",
+            "dos",
+            "tres",
+            "cuatro",
+            "cinco",
+            "seis",
+            "siete",
+            "ocho",
+            "nueve",
+            "diez",
+            "once",
+            "doce",
+            "trece",
+            "catorce",
+            "quince",
+            "dieciseis",
+            "dieciséis",
+            "diecisiete",
+            "dieciocho",
+            "diecinueve",
+            "veinte",
+            "treinta",
+            "cien",
+            "ciento",
+        ];
+        const FRAMES: &[&str] = &["es", "son", "vale", "valen", "da", "dan"];
+        let lower = text.to_lowercase();
+        let words: Vec<&str> = lower
+            .split(|c: char| !c.is_alphabetic())
+            .filter(|w| !w.is_empty())
+            .collect();
+        words.windows(2).any(|w| {
+            FRAMES.contains(&w[0]) && NUMBERS.contains(&w[1])
+                || (w[0] == "menos" && NUMBERS.contains(&w[1]))
+        })
     }
 
     /// Heurística determinista: ¿el texto del LLM contiene un `=` numérico?
@@ -343,6 +437,21 @@ impl SocraticFsm {
     /// ```
     pub fn requires_repair_despite_exploratory(question: &str, response_brings_math: bool) -> bool {
         is_exploratory_request(question) && response_brings_math
+    }
+
+    /// ¿Exige repair en `Review` aunque aún no hubo pregunta? (R6e)
+    ///
+    /// En `Review` el `=` numérico suelto NO es telling (un ejemplo como
+    /// `x=1` no revela nada), pero una respuesta que YA trae matemática
+    /// decidida (`$..$`, framing explícito o valor verbal como
+    /// `la derivada es dos`) sí exige repair: el primer turno no puede
+    /// soltar la solución con la excusa de "aún no pregunté". Pura, para el
+    /// dueño del guard en app (OR con `is_telling`).
+    pub fn requires_repair_in_review(state: &SocraticState, response_text: &str) -> bool {
+        if !matches!(state, SocraticState::Review { .. }) {
+            return false;
+        }
+        response_text.contains('$') || Self::contains_solution_marker(response_text)
     }
 
     /// ¿La respuesta trae matemática (para `requires_repair_despite_exploratory`)?
@@ -566,11 +675,16 @@ mod tests {
     fn success_requires_at_least_one_attempt() {
         let mut fsm = SocraticFsm::new("pitágoras");
         assert_eq!(
-            fsm.mark_success().unwrap_err(),
+            fsm.mark_success(true).unwrap_err(),
             GuardError::NotEnoughAttempts
         );
         fsm.record_attempt(None);
-        assert!(fsm.mark_success().is_ok());
+        // Con intento pero sin remate correcto no hay éxito (R6e).
+        assert_eq!(
+            fsm.mark_success(false).unwrap_err(),
+            GuardError::CheckNotCorrect
+        );
+        assert!(fsm.mark_success(true).is_ok());
         assert!(matches!(fsm.state, SocraticState::Summarize));
     }
 
@@ -593,7 +707,7 @@ mod tests {
         let mut fsm = SocraticFsm::new("fracciones");
         fsm.record_attempt(Some("fracción".to_string()));
         assert!(
-            matches!(fsm.state, SocraticState::Rectify { misconception } if misconception == "fracción")
+            matches!(fsm.state, SocraticState::Rectify { misconception } if misconception == "Fraction")
         );
         assert_eq!(
             fsm.history
@@ -633,7 +747,7 @@ mod tests {
         let mut fsm = SocraticFsm::new("matrices");
         fsm.finish();
         assert_eq!(fsm.ask().unwrap_err(), GuardError::AlreadyDone);
-        assert_eq!(fsm.mark_success().unwrap_err(), GuardError::AlreadyDone);
+        assert_eq!(fsm.mark_success(true).unwrap_err(), GuardError::AlreadyDone);
     }
 
     #[test]
@@ -651,7 +765,7 @@ mod tests {
     fn succeed_alias_works() {
         let mut fsm = SocraticFsm::new("edo");
         fsm.record_attempt(None);
-        assert!(fsm.succeed().is_ok());
+        assert!(fsm.succeed(true).is_ok());
     }
 
     #[test]
@@ -677,18 +791,23 @@ mod tests {
         // 5. Intento con misconception → Rectify.
         fsm.record_attempt(Some("fracción".to_string()));
         assert!(
-            matches!(&fsm.state, SocraticState::Rectify { misconception } if misconception.as_str() == "fracción")
+            matches!(&fsm.state, SocraticState::Rectify { misconception } if misconception.as_str() == "Fraction")
         );
         assert_eq!(fsm.attempts, 1);
-        // 6. Éxito tras ≥1 intento → Summarize.
-        let s3 = fsm.mark_success().expect("éxito ok");
+        // 6. Éxito tras ≥1 intento + remate correcto → Summarize.
+        let s3 = fsm.mark_success(true).expect("éxito ok");
         assert_eq!(s3, SocraticState::Summarize);
         assert!(matches!(fsm.state, SocraticState::Summarize));
         // 7. Cierre → Done.
         fsm.finish();
         assert!(fsm.is_done());
         // Historial encadena todas las fases en orden.
-        let h = fsm.history.join("|");
+        let h = fsm
+            .history
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("|");
         assert!(h.contains("ask heuristic"));
         assert!(h.contains("await deadline"));
         assert!(h.contains("misconception"));
@@ -916,7 +1035,7 @@ mod tests {
         assert!(seg1.contains("Pregunta BKT actual"));
         assert!(seg1.contains("Pista scaffold"));
         assert!(seg1.contains("Historial FSM"));
-        assert!(seg1.contains("misconception: sign"));
+        assert!(seg1.contains("misconception: Sign"));
         assert!(seg1.chars().count() < 3000);
     }
 
@@ -931,5 +1050,126 @@ mod tests {
         assert_eq!(seg1, seg2);
         assert!(seg1.contains("taylor"));
         assert!(seg1.contains("VINCULANTE"));
+    }
+
+    #[test]
+    fn r6e_marcador_verbal_es_telling() {
+        // "la derivada es dos" dice el valor en palabras: es telling con
+        // attempts<2, incluso en Review (framing explícito de base).
+        assert!(SocraticFsm::contains_verbal_answer("la derivada es dos"));
+        assert!(SocraticFsm::contains_solution_marker("la derivada es dos"));
+        assert!(SocraticFsm::contains_solution_marker(
+            "el resultado son tres"
+        ));
+        let fresh = SocraticFsm::new("derivada");
+        assert!(fresh.is_telling("la derivada es dos"));
+        // Sin valor verbal no hay marcador.
+        assert!(!SocraticFsm::contains_verbal_answer(
+            "¿qué forma te imaginás? contame qué probaste"
+        ));
+        assert!(!SocraticFsm::contains_verbal_answer(
+            "la derivada es una pendiente"
+        ));
+        // Tras 2 intentos se puede revelar (umbral intacto).
+        let mut ok = SocraticFsm::new("derivada");
+        ok.record_attempt(None);
+        ok.record_attempt(None);
+        assert!(!ok.is_telling("la derivada es dos"));
+    }
+
+    #[test]
+    fn r6e_repair_en_review_con_math() {
+        let review = SocraticState::Review {
+            lo_id: "derivada".to_string(),
+        };
+        // Review + math decidida ($..$, framing, valor verbal) exige repair.
+        assert!(SocraticFsm::requires_repair_in_review(
+            &review,
+            "miralo: $x^2$"
+        ));
+        assert!(SocraticFsm::requires_repair_in_review(
+            &review,
+            "la derivada es dos, fijate"
+        ));
+        assert!(SocraticFsm::requires_repair_in_review(
+            &review,
+            "la solución es x = 4"
+        ));
+        // Review + ejemplo suelto o charla sin math: sin repair.
+        assert!(!SocraticFsm::requires_repair_in_review(
+            &review,
+            "intentá con x=1"
+        ));
+        assert!(!SocraticFsm::requires_repair_in_review(
+            &review,
+            "contame cómo lo pensaste"
+        ));
+        // Fuera de Review no aplica (lo cubre `is_telling`).
+        let asked = SocraticState::HeuristicQ { attempts: 0 };
+        assert!(!SocraticFsm::requires_repair_in_review(
+            &asked,
+            "miralo: $x^2$"
+        ));
+        assert!(!SocraticFsm::requires_repair_in_review(
+            &SocraticState::Done,
+            "la solución es x = 4"
+        ));
+    }
+
+    #[test]
+    fn r6e_misconception_contra_enum_cerrado() {
+        // Etiqueta conocida (es/en) → Rectify con nombre canónico.
+        let mut fsm = SocraticFsm::new("fracciones");
+        fsm.record_attempt(Some("fracción".to_string()));
+        assert!(
+            matches!(&fsm.state, SocraticState::Rectify { misconception } if misconception == "Fraction")
+        );
+        let mut fsm2 = SocraticFsm::new("derivada");
+        fsm2.record_attempt(Some("sign".to_string()));
+        assert!(
+            matches!(&fsm2.state, SocraticState::Rectify { misconception } if misconception == "Sign")
+        );
+        // Etiqueta inventada: sin Rectify, a HeuristicQ, con traza honesta.
+        let mut fsm3 = SocraticFsm::new("derivada");
+        fsm3.record_attempt(Some("typo-inventado".to_string()));
+        assert!(matches!(
+            fsm3.state,
+            SocraticState::HeuristicQ { attempts: 1 }
+        ));
+        assert!(
+            fsm3.history
+                .iter()
+                .any(|h| h.contains("desconocida") && h.contains("sin Rectify")),
+            "traza honesta del descarte"
+        );
+        // Vacía equivale a sin dato.
+        let mut fsm4 = SocraticFsm::new("derivada");
+        fsm4.record_attempt(Some("   ".to_string()));
+        assert!(matches!(
+            fsm4.state,
+            SocraticState::HeuristicQ { attempts: 1 }
+        ));
+    }
+
+    #[test]
+    fn r6e_history_es_vecdeque_cap_32() {
+        assert_eq!(super::MAX_HISTORY_ENTRIES, 32);
+        let mut fsm = SocraticFsm::new("derivada");
+        for _ in 0..40 {
+            fsm.ask().expect("ask");
+        }
+        assert_eq!(fsm.history.len(), super::MAX_HISTORY_ENTRIES);
+        assert!(
+            fsm.history.iter().all(|h| h.starts_with("ask heuristic")),
+            "lo viejo se descartó, lo nuevo queda"
+        );
+        // record_attempt también respeta el tope.
+        for _ in 0..40 {
+            fsm.record_attempt(None);
+            if matches!(fsm.state, SocraticState::Summarize) {
+                break;
+            }
+        }
+        assert!(fsm.history.len() <= super::MAX_HISTORY_ENTRIES);
     }
 }

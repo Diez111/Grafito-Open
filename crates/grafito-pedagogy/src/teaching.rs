@@ -163,8 +163,8 @@ pub struct TeachingStep {
     #[serde(default)]
     pub cue_ms: u64,
     /// Ventana de frames sugerida sobre el loop de animación (índices
-    /// absolutos; la UI la re-mapea con módulo al total real). `None` = loop
-    /// completo.
+    /// absolutos; debe vivir dentro del total real o `cue_frame_index`
+    /// devuelve `None`). `None` = loop completo.
     #[serde(default)]
     pub frame_range: Option<(u32, u32)>,
     /// Remate verificable del paso (`None` = paso expositivo).
@@ -274,7 +274,110 @@ pub fn verify_math_expr(expr: &str) -> bool {
     grafito_geometry::expr::prepare_function_ast(text, &vars, &[]).is_ok()
 }
 
-/// Sesión de enseñanza con pasos y pizarra asociada.
+/// ¿La prosa afirma un número-resultado que el CAS no cubre? (R6e)
+///
+/// Detecta afirmaciones explícitas de resultado en `explanation` y exige que
+/// cada número afirmado aparezca en `math_expr` o en `check_expected`:
+/// - keywords de resultado (`vale`, `valen`, `da`, `dan`, `dar`,
+///   `resultado(s)`, `igual(es)`, `equivale(n)`) + número,
+/// - `=` seguido de número (`f'(1)=2`, `x=-1.5`),
+/// - `≈` seguido de número.
+///
+/// Cobertura textual, no semántica: basta que el token numérico aparezca en
+/// la math o en el remate. Conservadora en el otro sentido: `h→0`, `paso 3`,
+/// preguntas (`¿cuánto vale c?`), fórmulas (`f(x)=x²`, `c² = a² + b²`) y
+/// `x=-b/a` NO son afirmaciones (el `=` no va seguido de dígito). Pura, sin
+/// regex ni `unwrap`.
+fn prose_claims_uncovered_numbers(
+    explanation: &str,
+    math_expr: Option<&str>,
+    check_expected: Option<&str>,
+) -> bool {
+    fn is_num_start(s: &str) -> bool {
+        let t = s.trim_start_matches([' ', '\t', ':', ',']);
+        let t = t.strip_prefix('-').unwrap_or(t);
+        t.starts_with(|c: char| c.is_ascii_digit())
+    }
+    fn take_number(s: &str) -> &str {
+        let t = s.trim_start_matches([' ', '\t', ':', ',']);
+        let t = t.strip_prefix('-').unwrap_or(t);
+        let mut end = 0usize;
+        for (i, c) in t.char_indices() {
+            if c.is_ascii_digit() || c == '.' || c == ',' || c == '/' {
+                end = i + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        &t[..end]
+    }
+    fn covered(number: &str, math_expr: Option<&str>, check_expected: Option<&str>) -> bool {
+        if number.is_empty() {
+            return true;
+        }
+        let norm = |s: &str| s.replace([' ', '\t'], "");
+        math_expr.is_some_and(|m| norm(m).contains(number))
+            || check_expected.is_some_and(|e| norm(e).contains(number))
+    }
+    // Ocurrencias de keyword con borde de palabra (sin substring: `da` en
+    // `verificada` no cuenta). Los keywords son ASCII puros, así que los
+    // offsets del `lower` valen para el original.
+    const KEYWORDS: &[&str] = &[
+        "vale",
+        "valen",
+        "da",
+        "dan",
+        "dar",
+        "resultado",
+        "resultados",
+        "igual",
+        "iguales",
+        "equivale",
+        "equivalen",
+    ];
+    let lower = explanation.to_lowercase();
+    let mut claimed: Vec<&str> = Vec::new();
+    let orig = explanation;
+    let low_bytes = lower.as_bytes();
+    for key in KEYWORDS {
+        let mut from = 0usize;
+        while from + key.len() <= low_bytes.len() {
+            let Some(rel) = lower[from..].find(key) else {
+                break;
+            };
+            let abs = from + rel;
+            let before_ok = abs == 0
+                || !lower[..abs]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphabetic());
+            let after = abs + key.len();
+            let after_ok = lower[after..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphabetic());
+            if before_ok && after_ok {
+                let tail = &orig[after.min(orig.len())..];
+                if is_num_start(tail) {
+                    claimed.push(take_number(tail));
+                }
+            }
+            from = abs + key.len().max(1);
+        }
+    }
+    // `=` / `≈` seguidos de número (fórmulas con rhs no numérico no cuentan).
+    for (idx, ch) in explanation.char_indices() {
+        if ch == '=' || ch == '≈' {
+            let tail = &explanation[idx + ch.len_utf8()..];
+            if is_num_start(tail) {
+                claimed.push(take_number(tail));
+            }
+        }
+    }
+    claimed
+        .iter()
+        .any(|n| !covered(n, math_expr, check_expected))
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeachingSession {
     pub topic: TeachingTopic,
@@ -284,16 +387,24 @@ pub struct TeachingSession {
 }
 
 impl TeachingSession {
-    /// Construye aplicando el CAS-gate: cada `math_expr` que no parsea se
-    /// descarta (`None`, `verified = false`); el que parsea queda marcado
-    /// `verified = true`. El paso se conserva siempre (la explicación en
-    /// prosa sigue valiendo).
+    /// Construye aplicando el CAS-gate + gate de prosa (R6e): cada `math_expr`
+    /// que no parsea se descarta (`None`, `verified = false`); la que parsea
+    /// se conserva pero solo queda `verified = true` si la prosa no afirma
+    /// números-resultado fuera de la math y del remate (el CAS avaló la
+    /// expresión, no la afirmación). El paso se conserva siempre.
     pub fn new(topic: TeachingTopic, steps: Vec<TeachingStep>) -> Self {
         let steps = steps
             .into_iter()
             .map(|mut step| {
                 match step.math_expr.as_deref() {
-                    Some(expr) if verify_math_expr(expr) => step.verified = true,
+                    Some(expr) if verify_math_expr(expr) => {
+                        let check_expected = step.check.as_ref().map(|c| c.expected.as_str());
+                        step.verified = !prose_claims_uncovered_numbers(
+                            &step.explanation,
+                            step.math_expr.as_deref(),
+                            check_expected,
+                        );
+                    }
                     Some(_) => {
                         step.math_expr = None;
                         step.verified = false;
@@ -510,10 +621,11 @@ impl TeachingSession {
 
     /// Índice de frame dentro de `step.frame_range` para `elapsed_ms`.
     ///
-    /// `fps` típico 12; `total_frames` es el largo real del loop (la ventana
-    /// sugerida se re-mapea con módulo si excede el total). `None` en
-    /// `frame_range` → loop completo (`elapsed*fps % total`). `total == 0` →
-    /// `None`. Puro, sin I/O ni `unwrap`.
+    /// `fps` típico 12; `total_frames` es el largo real del loop. `None` en
+    /// `frame_range` → loop completo (`elapsed*fps % total`). `total == 0`,
+    /// `fps` no finito/`<= 0` o ventana fuera del loop (`start >= total` o
+    /// `end > total`) → `None` honesto (R6e: jamás módulo silencioso sobre
+    /// una ventana que no existe). Puro, sin I/O ni `unwrap`.
     pub fn cue_frame_index(
         step: &TeachingStep,
         elapsed_ms: u64,
@@ -528,9 +640,11 @@ impl TeachingSession {
         match step.frame_range {
             None => Some((tick % total) as usize),
             Some((start, end)) => {
+                if end <= start || start as u64 >= total || end as u64 > total {
+                    return None;
+                }
                 let len = end.saturating_sub(start).max(1) as u64;
-                let start_mapped = (start as u64) % total;
-                Some(((start_mapped + tick % len) % total) as usize)
+                Some((start as u64 + tick % len) as usize)
             }
         }
     }
@@ -749,5 +863,85 @@ mod tests {
             Some("alg-matrices")
         );
         assert!(TeachingTopic::General("x".into()).lo_id().is_none());
+    }
+    #[test]
+    fn r6e_prosa_con_numeros_sin_gate_no_verifica_conservando_math() {
+        // Math válida pero la prosa afirma 8/3 que ni la math ni el remate
+        // cubren: se conserva la math y verified=false (el CAS avaló la
+        // expresión, no la afirmación).
+        let s = TeachingSession::new(
+            TeachingTopic::Integral,
+            vec![TeachingStep::new("t", "T", "el área bajo la curva vale 8/3").with_math("x^2")],
+        );
+        assert_eq!(s.steps[0].math_expr.as_deref(), Some("x^2"));
+        assert!(!s.steps[0].verified);
+        // Control: misma math sin afirmaciones en prosa → verificado.
+        let s2 = TeachingSession::new(
+            TeachingTopic::Integral,
+            vec![TeachingStep::new("t", "T", "mirá la curva en el canvas").with_math("x^2")],
+        );
+        assert!(s2.steps[0].verified);
+        // Remate que cubre el número afirmado → verificado.
+        let s3 = TeachingSession::new(
+            TeachingTopic::Integral,
+            vec![TeachingStep::new("t", "T", "el área vale 8/3")
+                .with_math("x^2")
+                .with_final_check("área bajo x² entre 0 y 2", "8/3")],
+        );
+        assert!(s3.steps[0].verified);
+        // Preguntas, fórmulas y notación de límite no son afirmaciones.
+        let s4 = TeachingSession::new(
+            TeachingTopic::Derivada,
+            vec![TeachingStep::new(
+                "t",
+                "T",
+                "¿cuánto vale c? mirá f(x)=x² en el paso 3 cuando h→0",
+            )
+            .with_math("x^2")],
+        );
+        assert!(s4.steps[0].verified, "pregunta/fórmula no es afirmación");
+        // `=` con rhs numérico no cubierto tampoco verifica.
+        let s5 = TeachingSession::new(
+            TeachingTopic::Ecuacion,
+            vec![TeachingStep::new("t", "T", "el cero está en x=-1.5").with_math("2*x+3")],
+        );
+        assert!(!s5.steps[0].verified);
+    }
+    #[test]
+    fn r6e_frame_range_fuera_de_ventana_da_none() {
+        // Ventana que excede el loop real: None honesto, sin módulo.
+        let fuera = TeachingStep::new("x", "X", "E").with_frames(40, 60);
+        assert_eq!(fuera.frame_range, Some((40, 60)));
+        assert_eq!(TeachingSession::cue_frame_index(&fuera, 0, 12.0, 48), None);
+        let inicio_fuera = TeachingStep::new("x", "X", "E").with_frames(50, 60);
+        assert_eq!(
+            TeachingSession::cue_frame_index(&inicio_fuera, 5000, 12.0, 48),
+            None
+        );
+        // En ventana sigue mapeando dentro.
+        let dentro = TeachingStep::new("x", "X", "E").with_frames(16, 32);
+        let idx = TeachingSession::cue_frame_index(&dentro, 2400, 12.0, 48).expect("idx");
+        assert!((16..32).contains(&idx), "idx={idx}");
+    }
+    #[test]
+    fn r6e_mark_success_exige_remate_correcto() {
+        // End-to-end: el éxito del FSM exige assess_final().correct.
+        let paso = TeachingStep::new("d4", "Verificá en x=1", "calculá y escribí")
+            .with_final_check("Si f(x)=x², ¿cuánto vale f'(1)?", "2");
+        let bien = paso.assess_final("2").expect("assess");
+        assert!(bien.correct);
+        let mal = paso.assess_final("5").expect("assess");
+        assert!(!mal.correct);
+        let mut fsm = crate::socratic::SocraticFsm::new("derivada");
+        fsm.record_attempt(None);
+        assert_eq!(
+            fsm.mark_success(mal.correct).unwrap_err(),
+            crate::socratic::GuardError::CheckNotCorrect
+        );
+        assert!(fsm.mark_success(bien.correct).is_ok());
+        assert!(matches!(
+            fsm.state,
+            crate::socratic::SocraticState::Summarize
+        ));
     }
 }

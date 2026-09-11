@@ -1585,7 +1585,16 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
     } else {
         concept_raw.clone()
     };
-    let template = grafito_anim::protocol::sanitize_template(&template_raw, &concept);
+    let template = match grafito_anim::protocol::sanitize_template(&template_raw, &concept) {
+        Ok(valid) => valid,
+        Err(error) => {
+            return ToolResult::text(
+                &call.id,
+                false,
+                format!("generate_animation: plantilla inválida: {error}"),
+            );
+        }
+    };
     let normalized_concept = grafito_anim::protocol::normalize_concept(&concept);
     let canvas = canvas_from_call(call);
     let resolution =
@@ -2072,17 +2081,17 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
                 "concept": {"type": "string", "description": "Concepto en lenguaje natural, ej. derivada como pendiente"},
                 "params": {"type": "object", "description": "Mapa opcional de parámetros numéricos finitos", "additionalProperties": {"type": "number"}},
                 "pedido": {"type": "string", "description": "Pedido libre para plan paramétrico, ej. barrido de f(x)=x^2+p·x con p en [-2,2] (tiene precedencia; el tamaño puede ir dentro, ej. en 320x240)"},
-                "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096 (solo vía template/concept)", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
-                "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640; solo vía template/concept)"},
-                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480; solo vía template/concept)"},
-                "quality": {"type": "string", "description": "Calidad opcional: baja, media (default), alta (bitrate 500/2000/8000 kbps; solo vía template/concept)"},
-                "view": {"type": "string", "description": "Vista opcional: plana (default) u orbita (órbita 3D; la UI la habilita solo en plantillas 3D)"},
-                "effect": {"type": "string", "description": "Efecto de creación opcional: create, write, fade, grow, indicate, none (default; none = morph histórico)"},
-                "format": {"type": "string", "description": "Formato de exportación opcional: gif (default), png, mp4, webm (mp4/webm requieren ffmpeg en la UI)"},
-                "duration_s": {"type": "number", "description": "Duración opcional en segundos 0.1..=30 (default 2.0; solo vía template/concept)"},
-                "fps": {"type": "integer", "description": "Fotogramas por segundo 1..=60 (default 12; solo vía template/concept)"},
+                "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096 (solo vía template/concept)", "items": {"type": "integer", "minimum": 64, "maximum": 4096}, "minItems": 2, "maxItems": 2},
+                "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640; solo vía template/concept)", "minimum": 64, "maximum": 4096},
+                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480; solo vía template/concept)", "minimum": 64, "maximum": 4096},
+                "quality": {"type": "string", "description": "Calidad opcional: baja, media (default), alta (bitrate 500/2000/8000 kbps; solo vía template/concept)", "enum": ["baja", "media", "alta"]},
+                "view": {"type": "string", "description": "Vista opcional: plana (default) u orbita (órbita 3D; la UI la habilita solo en plantillas 3D)", "enum": ["plana", "orbita"]},
+                "effect": {"type": "string", "description": "Efecto de creación opcional: create, write, fade, grow, indicate, none (default; none = morph histórico)", "enum": ["create", "write", "fade", "grow", "indicate", "none"]},
+                "format": {"type": "string", "description": "Formato de exportación opcional: gif (default), png, mp4, webm (mp4/webm requieren ffmpeg en la UI)", "enum": ["gif", "png", "mp4", "webm"]},
+                "duration_s": {"type": "number", "description": "Duración opcional en segundos 0.1..=30 (default 2.0; solo vía template/concept)", "minimum": 0.1, "maximum": 30.0},
+                "fps": {"type": "integer", "description": "Fotogramas por segundo 1..=60 (default 12; solo vía template/concept)", "minimum": 1, "maximum": 60},
                 "easing": {"type": "string", "description": "Easing opcional vía RateFunc::from_name, ej. smooth (default), linear, ease_in_out"},
-                "tracker": {"type": "object", "description": "Tracker opcional {start: number, end: number, map: opacity|scale|center_x|center_y} estilo ValueTracker", "properties": {"start": {"type": "number"}, "end": {"type": "number"}, "map": {"type": "string"}}, "required": ["start", "end"]}
+                "tracker": {"type": "object", "description": "Tracker opcional {start: number, end: number, map: opacity|scale|center_x|center_y} estilo ValueTracker", "properties": {"start": {"type": "number"}, "end": {"type": "number"}, "map": {"type": "string", "enum": ["opacity", "scale", "center_x", "center_y"]}}, "required": ["start", "end"]}
             },
             "required": []
         }),
@@ -4576,6 +4585,133 @@ mod tests {
             arguments: json!({"guion_texto": grande}),
         };
         assert!(reject_oversized_string_args(&call).is_none());
+    }
+
+    #[test]
+    fn r6e_schemas_enums_cerrados_y_minmax() {
+        // generate_animation: enums cerrados + cotas numéricas en el schema.
+        let schema = generate_animation_tool_schema();
+        let props = &schema.parameters["properties"];
+        assert_eq!(props["quality"]["enum"], json!(["baja", "media", "alta"]));
+        assert_eq!(props["view"]["enum"], json!(["plana", "orbita"]));
+        assert_eq!(
+            props["effect"]["enum"],
+            json!(["create", "write", "fade", "grow", "indicate", "none"])
+        );
+        assert_eq!(
+            props["format"]["enum"],
+            json!(["gif", "png", "mp4", "webm"])
+        );
+        assert_eq!(
+            props["tracker"]["properties"]["map"]["enum"],
+            json!(["opacity", "scale", "center_x", "center_y"])
+        );
+        assert_eq!(props["duration_s"]["minimum"], json!(0.1));
+        assert_eq!(props["duration_s"]["maximum"], json!(30.0));
+        assert_eq!(props["fps"]["minimum"], json!(1));
+        assert_eq!(props["fps"]["maximum"], json!(60));
+        assert_eq!(props["width"]["minimum"], json!(64));
+        assert_eq!(props["width"]["maximum"], json!(4096));
+        assert_eq!(props["height"]["minimum"], json!(64));
+        assert_eq!(props["height"]["maximum"], json!(4096));
+        // generate_guion: el arg es un JSON string, así que el enum cerrado
+        // (11 templates + 7 efectos) vive pineado en la description y el
+        // rechazo en `Guion::try_new` (ver test siguiente).
+        let guion = generate_guion_tool_schema();
+        for template in [
+            "derivative-slope",
+            "integral-area",
+            "taylor-series",
+            "conformal-map",
+            "pitagoras",
+            "euler",
+            "fourier",
+            "logistic-bifurcation",
+            "gradient-field",
+            "mobius-transform",
+            "universal",
+        ] {
+            assert!(
+                guion.description.contains(template),
+                "template {template} pineado en schema guion"
+            );
+        }
+        for efecto in [
+            "create", "write", "fade", "grow", "indicate", "tracker", "wait",
+        ] {
+            assert!(
+                guion.description.contains(efecto),
+                "efecto {efecto} pineado en schema guion"
+            );
+        }
+    }
+
+    #[test]
+    fn r6e_generate_animation_rechaza_fuera_de_enum() {
+        // Valor fuera del enum cerrado o typo de template → Err honesto.
+        for (id, args) in [
+            ("r6e-q", json!({"concept": "derivada", "quality": "ultra"})),
+            (
+                "r6e-v",
+                json!({"concept": "derivada", "view": "isometrica"}),
+            ),
+            (
+                "r6e-e",
+                json!({"concept": "derivada", "effect": "explotar"}),
+            ),
+            ("r6e-f", json!({"concept": "derivada", "format": "avi"})),
+            (
+                "r6e-t",
+                json!({"concept": "derivada", "template": "typo-xyz"}),
+            ),
+            ("r6e-d", json!({"concept": "derivada", "duration_s": 99.0})),
+            ("r6e-p", json!({"concept": "derivada", "fps": 999})),
+        ] {
+            let call = ToolCall {
+                id: id.into(),
+                name: "generate_animation".into(),
+                arguments: args,
+            };
+            let result = dispatch_safe_tool(&call);
+            assert!(!result.ok, "id={id} debía rechazar: {}", result.content);
+        }
+    }
+
+    #[test]
+    fn r6e_generate_guion_rechaza_template_hint_y_efecto_fuera_de_enum() {
+        // Parte del guion mínimo y muta un campo por vez.
+        fn con_paso(mut base: Value, key: &str, value: Value) -> String {
+            base["actos"][0]["pasos"][0][key] = value;
+            base.to_string()
+        }
+        let base: Value = serde_json::from_str(&guion_texto_minimo()).expect("json");
+        for (id, key, value) in [
+            ("r6e-th", "template_hint", json!("typo-xyz")),
+            ("r6e-ef", "efecto", json!("explotar")),
+            ("r6e-fr", "frames", json!(2)),
+            ("r6e-run", "run_ms", json!(1)),
+        ] {
+            let call = ToolCall {
+                id: id.into(),
+                name: "generate_guion".into(),
+                arguments: json!({"guion_texto": con_paso(base.clone(), key, value)}),
+            };
+            let result = dispatch_safe_tool(&call);
+            assert!(!result.ok, "id={id} debía rechazar: {}", result.content);
+        }
+        // El camino feliz sigue trayendo steps:[{titulo, verified}].
+        let call = ToolCall {
+            id: "r6e-ok".into(),
+            name: "generate_guion".into(),
+            arguments: json!({"guion_texto": guion_texto_minimo()}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("json");
+        for paso in value["steps"].as_array().expect("steps") {
+            assert!(paso.get("titulo").and_then(Value::as_str).is_some());
+            assert!(paso.get("verified").and_then(Value::as_bool).is_some());
+        }
     }
 
     #[test]

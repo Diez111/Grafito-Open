@@ -20,7 +20,14 @@ use std::fmt;
 pub const MAX_ARG_BYTES: usize = 2_000;
 /// Versión del protocolo de animación que `generate_animation` declara.
 pub const ANIM_PROTOCOL_VERSION: u32 = 1;
-/// Plantillas válidas del motor nativo (`anim_native` + protocolo).
+/// Plantillas válidas del motor nativo (R6e: espejo pineado de
+/// `grafito-anim::protocol::CANONICAL_TEMPLATES`, mismo orden).
+///
+/// `grafito-agent` es hoja sin dep a `grafito-anim` (ver encabezado): no
+/// puede delegar el símbolo, así que replica el contrato y lo pinea con
+/// `r6e_mirror_pineado_paridad_protocolo` (typo→`Err`, `""`/`auto` por
+/// concepto, fallback `universal` honesto). Si el protocolo suma una
+/// canónica, este espejo debe actualizarse a la par (el test lo exige).
 pub const KNOWN_TEMPLATES: &[&str] = &[
     "derivative-slope",
     "integral-area",
@@ -29,6 +36,10 @@ pub const KNOWN_TEMPLATES: &[&str] = &[
     "pitagoras",
     "euler",
     "fourier",
+    "logistic-bifurcation",
+    "gradient-field",
+    "mobius-transform",
+    "universal",
 ];
 const MIN_CANVAS: u64 = 64;
 const MAX_CANVAS: u64 = 4096;
@@ -1163,7 +1174,23 @@ fn normalize_concept(concept: &str) -> String {
     }
 }
 
+/// ¿`palabra` aparece como token completo en `minusculas`? (R6e: espejo de
+/// `grafito-anim::protocol::contiene_palabra`; evita que "tarea" dispare
+/// "area").
+fn contiene_palabra(minusculas: &str, palabra: &str) -> bool {
+    if palabra.is_empty() {
+        return false;
+    }
+    minusculas
+        .split(|ch: char| !ch.is_alphabetic())
+        .any(|tok| tok == palabra)
+}
+
 fn template_for_concept(concept: &str) -> &'static str {
+    // R6e: espejo pineado de `grafito-anim::protocol::template_for_concept`
+    // (contrato honesto: fallback `universal`, sin curva falsa; catch-alls
+    // con token explícito; `vector`/`probab`/`sin(` pelados NO dibujan).
+    // Ver `r6e_mirror_pineado_paridad_protocolo`.
     let c = concept.to_lowercase();
     if c.contains("pitágoras")
         || c.contains("pitagoras")
@@ -1172,11 +1199,7 @@ fn template_for_concept(concept: &str) -> &'static str {
     {
         return "pitagoras";
     }
-    if c.contains("integral")
-        || c.contains("área")
-        || (c.contains("area")
-            && (c.contains("bajo") || c.contains("curva") || c.contains("riemann")))
-    {
+    if c.contains("integral") || contiene_palabra(&c, "area") || contiene_palabra(&c, "área") {
         return "integral-area";
     }
     if c.contains("taylor")
@@ -1199,36 +1222,90 @@ fn template_for_concept(concept: &str) -> &'static str {
         || c.contains("pendiente")
         || c.contains("tangente")
         || c.contains("slope")
+        || (c.contains("límite") && c.contains("cociente"))
     {
         return "derivative-slope";
     }
-    if c.contains("vector") {
+    if c.contains("logist") || c.contains("bifurc") {
+        return "logistic-bifurcation";
+    }
+    if c.contains("gradiente") || c.contains("gradient") {
+        return "gradient-field";
+    }
+    if c.contains("mobius") || c.contains("möbius") || c.contains("moebius") {
+        return "mobius-transform";
+    }
+    // R6d: `vector` pelado no dibuja conforme solo: exige token explícito
+    // de conforme/complejo/fractal, si no `universal`.
+    if (c.contains("vector") || (c.contains("campo") && c.contains("vectorial")))
+        && (c.contains("conforme")
+            || c.contains("complej")
+            || c.contains("complex")
+            || c.contains("fractal"))
+    {
         return "conformal-map";
     }
-    if c.contains("euler") || c.contains("exponencial") || c.contains("exp(") {
+    if c.contains("euler")
+        || c.contains("número e")
+        || c.contains("numero e")
+        || c.contains("exp(")
+        || c.contains("exponencial")
+    {
         return "euler";
     }
-    if c.contains("fourier") || c.contains("armónico") || c.contains("armonico") {
+    if c.contains("fourier")
+        || c.contains("armónico")
+        || c.contains("armonico")
+        || c.contains("serie trigonométrica")
+        || c.contains("serie trigonometrica")
+    {
         return "fourier";
     }
-    if c.contains("probab") || c.contains("binom") || c.contains("distrib") || c.contains("estad") {
+    if (c.contains("probab") || c.contains("binom") || c.contains("distrib") || c.contains("estad"))
+        && (c.contains("integral")
+            || contiene_palabra(&c, "area")
+            || contiene_palabra(&c, "área")
+            || c.contains("densidad")
+            || c.contains("acumulada")
+            || c.contains("histograma"))
+    {
         return "integral-area";
     }
-    if c.contains("sin(") || c.contains("cos(") || c.contains("seno") || c.contains("coseno") {
+    if c.contains("sin(") || c.contains("cos(") {
+        if c.contains("taylor")
+            || c.contains("serie")
+            || c.contains("aproxima")
+            || c.contains("polinomio")
+        {
+            return "taylor-series";
+        }
+    } else if c.contains("seno") || c.contains("coseno") {
         return "taylor-series";
     }
-    "derivative-slope"
+    "universal"
 }
 
-fn sanitize_template(template: &str, concept: &str) -> String {
+fn sanitize_template(template: &str, concept: &str) -> Result<String, ToolError> {
+    // R6e: espejo pineado de `grafito-anim::protocol::sanitize_template`
+    // (mismo contrato honesto): alias histórico → `Ok`, canónica → `Ok`
+    // literal, `""`/`"auto"` → `Ok` por concepto, desconocido no vacío →
+    // `Err` (antes degradaba en silencio a otra plantilla).
     let t = template.trim().to_lowercase();
-    match t.as_str() {
-        "derivative-slope" | "integral-area" | "taylor-series" | "conformal-map" | "pitagoras"
-        | "euler" | "fourier" => t,
-        "pythagoras" => "pitagoras".to_string(),
-        // F4: "", "universal", "auto" y desconocidos caen por concepto (rama única, sin duplicar).
-        _ => template_for_concept(concept).to_string(),
+    if t == "pythagoras" {
+        return Ok("pitagoras".to_string());
     }
+    if KNOWN_TEMPLATES.contains(&t.as_str()) {
+        return Ok(t);
+    }
+    if t.is_empty() || t == "auto" {
+        return Ok(template_for_concept(concept).to_string());
+    }
+    Err(ToolError::CampoInvalido {
+        campo: "template",
+        motivo: format!(
+            "{template:?} no es una plantilla canónica (pedí auto o una de: {KNOWN_TEMPLATES:?})"
+        ),
+    })
 }
 
 /// Valida resolución 64..=4096 por lado (igual que `Resolution::try_new`).
@@ -2631,7 +2708,10 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
     } else {
         concept_raw.clone()
     };
-    let template = sanitize_template(&template_raw, &concept);
+    let template = match sanitize_template(&template_raw, &concept) {
+        Ok(valid) => valid,
+        Err(error) => return err_result(&call.id, error),
+    };
     if !is_known_template(&template) {
         return err_result(
             &call.id,
@@ -2943,6 +3023,11 @@ pub fn suggest_next_tool_schema() -> ToolSchema {
 }
 
 /// Schema de `generate_animation(template, concept, params, quality, view, effect, format, duration_s, fps, tracker)`.
+///
+/// Enums cerrados + cotas (R6e, paridad con `grafito-assistant`): quality
+/// baja/media/alta, view plana/orbita, effect create/write/fade/grow/
+/// indicate/none, format gif/png/mp4/webm, duration_s 0.1..=30, fps 1..=60,
+/// canvas 64..=4096, tracker.map opacity/scale/center_x/center_y.
 #[must_use]
 pub fn generate_animation_tool_schema() -> ToolSchema {
     ToolSchema::new(
@@ -2951,19 +3036,19 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
         json!({
             "type": "object",
             "properties": {
-                "template": {"type": "string", "description": "Plantilla opcional: derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, auto"},
+                "template": {"type": "string", "description": "Plantilla opcional: derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal, auto"},
                 "concept": {"type": "string", "description": "Concepto en lenguaje natural, ej. derivada como pendiente"},
                 "params": {"type": "object", "description": "Mapa opcional de parámetros numéricos finitos", "additionalProperties": {"type": "number"}},
-                "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
-                "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640)"},
-                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480)"},
-                "quality": {"type": "string", "description": "Calidad opcional: baja, media (default), alta (bitrate 500/2000/8000 kbps)"},
-                "view": {"type": "string", "description": "Vista opcional: plana (default) u orbita (órbita 3D; la UI la habilita solo en plantillas 3D)"},
-                "effect": {"type": "string", "description": "Efecto de creación opcional: create, write, fade, grow, indicate, none (default; none = morph histórico)"},
-                "format": {"type": "string", "description": "Formato de exportación opcional: gif (default), png, mp4, webm (mp4/webm requieren ffmpeg en la UI)"},
-                "duration_s": {"type": "number", "description": "Duración opcional en segundos 0.1..=30 (default 2.0)"},
-                "fps": {"type": "integer", "description": "Fotogramas por segundo 1..=60 (default 12)"},
-                "tracker": {"type": "object", "description": "Tracker opcional {start: number, end: number, map: opacity|scale|center_x|center_y} estilo ValueTracker", "properties": {"start": {"type": "number"}, "end": {"type": "number"}, "map": {"type": "string"}}, "required": ["start", "end"]}
+                "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096", "items": {"type": "integer", "minimum": 64, "maximum": 4096}, "minItems": 2, "maxItems": 2},
+                "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640)", "minimum": 64, "maximum": 4096},
+                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480)", "minimum": 64, "maximum": 4096},
+                "quality": {"type": "string", "description": "Calidad opcional: baja, media (default), alta (bitrate 500/2000/8000 kbps)", "enum": ["baja", "media", "alta"]},
+                "view": {"type": "string", "description": "Vista opcional: plana (default) u orbita (órbita 3D; la UI la habilita solo en plantillas 3D)", "enum": ["plana", "orbita"]},
+                "effect": {"type": "string", "description": "Efecto de creación opcional: create, write, fade, grow, indicate, none (default; none = morph histórico)", "enum": ["create", "write", "fade", "grow", "indicate", "none"]},
+                "format": {"type": "string", "description": "Formato de exportación opcional: gif (default), png, mp4, webm (mp4/webm requieren ffmpeg en la UI)", "enum": ["gif", "png", "mp4", "webm"]},
+                "duration_s": {"type": "number", "description": "Duración opcional en segundos 0.1..=30 (default 2.0)", "minimum": 0.1, "maximum": 30.0},
+                "fps": {"type": "integer", "description": "Fotogramas por segundo 1..=60 (default 12)", "minimum": 1, "maximum": 60},
+                "tracker": {"type": "object", "description": "Tracker opcional {start: number, end: number, map: opacity|scale|center_x|center_y} estilo ValueTracker", "properties": {"start": {"type": "number"}, "end": {"type": "number"}, "map": {"type": "string", "enum": ["opacity", "scale", "center_x", "center_y"]}}, "required": ["start", "end"]}
             },
             "required": []
         }),
@@ -3600,47 +3685,139 @@ mod tests {
     }
 
     #[test]
-    fn f4_sanitize_ramas_unificadas_y_tabla_pineada() {
-        // F4: "", "universal", "auto" y desconocidos delegan por concepto (rama única).
-        for tpl in ["", "universal", "auto", "unknown-xyz", "  "] {
+    fn r6e_schema_enums_cerrados_y_rechazo_fuera_de_enum() {
+        // Schema: enums cerrados + cotas numéricas (paridad con assistant).
+        let schema = generate_animation_tool_schema();
+        assert!(schema.validate().is_ok(), "schema válido");
+        let props = &schema.parameters["properties"];
+        assert_eq!(props["quality"]["enum"], json!(["baja", "media", "alta"]));
+        assert_eq!(props["view"]["enum"], json!(["plana", "orbita"]));
+        assert_eq!(
+            props["effect"]["enum"],
+            json!(["create", "write", "fade", "grow", "indicate", "none"])
+        );
+        assert_eq!(
+            props["format"]["enum"],
+            json!(["gif", "png", "mp4", "webm"])
+        );
+        assert_eq!(
+            props["tracker"]["properties"]["map"]["enum"],
+            json!(["opacity", "scale", "center_x", "center_y"])
+        );
+        assert_eq!(props["duration_s"]["minimum"], json!(0.1));
+        assert_eq!(props["duration_s"]["maximum"], json!(30.0));
+        assert_eq!(props["fps"]["minimum"], json!(1));
+        assert_eq!(props["fps"]["maximum"], json!(60));
+        // Dispatch: valor fuera de enum → Err tipado honesto.
+        for args in [
+            json!({"concept": "derivada", "quality": "ultra"}),
+            json!({"concept": "derivada", "view": "isometrica"}),
+            json!({"concept": "derivada", "effect": "explotar"}),
+            json!({"concept": "derivada", "format": "avi"}),
+            json!({"concept": "derivada", "template": "typo-xyz"}),
+            json!({"concept": "derivada", "duration_s": 99.0}),
+            json!({"concept": "derivada", "fps": 999}),
+        ] {
+            let r = safe_dispatch("generate_animation", args);
+            assert!(!r.ok, "debía rechazar: {}", r.content);
+            assert!(
+                r.content.contains("E_CAMPO_INVALIDO") || r.content.contains("E_PRESUPUESTO"),
+                "error tipado: {}",
+                r.content
+            );
+        }
+    }
+
+    #[test]
+    fn r6e_mirror_pineado_paridad_protocolo() {
+        // R6e: espejo pineado de `grafito-anim::protocol` (este crate es hoja
+        // sin esa dep: no delega el símbolo, replica el contrato). Misma
+        // honestidad: typo→Err, `""`/`auto` por concepto, fallback universal.
+        // Si el protocolo cambia, esta tabla debe cambiar a la par.
+        assert_eq!(
+            KNOWN_TEMPLATES,
+            &[
+                "derivative-slope",
+                "integral-area",
+                "taylor-series",
+                "conformal-map",
+                "pitagoras",
+                "euler",
+                "fourier",
+                "logistic-bifurcation",
+                "gradient-field",
+                "mobius-transform",
+                "universal",
+            ]
+        );
+        // `""`, `"auto"` y blancos → Ok por concepto.
+        for tpl in ["", "auto", "  "] {
             assert_eq!(
                 sanitize_template(tpl, "derivada pendiente"),
-                template_for_concept("derivada pendiente").to_string(),
+                Ok("derivative-slope".to_string()),
                 "tpl={tpl:?}"
             );
         }
-        // Canónicas pasan literales.
-        for known in [
-            "derivative-slope",
-            "integral-area",
-            "taylor-series",
-            "conformal-map",
-            "pitagoras",
-            "euler",
-            "fourier",
-        ] {
-            assert_eq!(sanitize_template(known, "cualquiera"), known);
+        // Canónicas (las 11) pasan literales; alias y case-insensitive también.
+        for known in KNOWN_TEMPLATES {
+            assert_eq!(
+                sanitize_template(known, "cualquiera"),
+                Ok((*known).to_string())
+            );
         }
-        assert_eq!(sanitize_template("pythagoras", "x"), "pitagoras");
-        // Tabla local pineada (paridad pre/post F4): 10 familias.
+        assert_eq!(
+            sanitize_template("pythagoras", "x"),
+            Ok("pitagoras".to_string())
+        );
+        assert_eq!(
+            sanitize_template("Derivative-Slope", "x"),
+            Ok("derivative-slope".to_string())
+        );
+        // Typo / desconocido no vacío → Err honesto (jamás fallback silencioso).
+        for typo in ["unknown-xyz", "typo-xyz", "universal2", "derivada"] {
+            assert!(
+                sanitize_template(typo, "derivada").is_err(),
+                "typo={typo:?}"
+            );
+        }
+        // Tabla pineada (paridad con el protocolo): 13 familias.
         for (concept, expected) in [
             ("teorema de pitágoras", "pitagoras"),
             ("integral área bajo curva", "integral-area"),
             ("serie de taylor", "taylor-series"),
             ("mapeo conforme complejo", "conformal-map"),
             ("derivada pendiente tangente", "derivative-slope"),
-            ("vector en el plano", "conformal-map"),
+            ("vector en el plano", "universal"),
+            ("vector conforme complejo", "conformal-map"),
             ("euler exponencial exp(x)", "euler"),
             ("serie de fourier", "fourier"),
-            ("probabilidad binomial", "integral-area"),
-            ("sin(x) coseno", "taylor-series"),
+            ("probabilidad binomial", "universal"),
+            ("probabilidad con histograma", "integral-area"),
+            ("sin(x) coseno", "universal"),
+            ("seno y coseno", "taylor-series"),
+            ("bifurcación logística", "logistic-bifurcation"),
+            ("campo gradiente", "gradient-field"),
+            ("transformada de mobius", "mobius-transform"),
+            ("tarea de matemática", "universal"),
         ] {
             assert_eq!(template_for_concept(concept), expected, "{concept}");
         }
-        // NOTA F4: la canónica `grafito-anim::protocol::template_for_concept`
-        // diverge a propósito (fallback `universal` honesto + `logistic-bifurcation`,
-        // `gradient-field`, `mobius-transform` + fix `contiene_palabra` para "tarea").
-        // El re-export real requiere dep `grafito-anim` en `grafito-agent/Cargo.toml`
-        // (hoy hoja sin esa dep, ver tools.rs:3-9) + cambio de conducta → BLOQUEADO.
+        // El dispatch honra el contrato: typo→!ok, auto→ok.
+        let typo = safe_dispatch(
+            "generate_animation",
+            json!({"concept": "derivada", "template": "typo-xyz"}),
+        );
+        assert!(!typo.ok, "typo debe fallar: {}", typo.content);
+        assert!(
+            typo.content.contains("E_CAMPO_INVALIDO"),
+            "{}",
+            typo.content
+        );
+        let auto = safe_dispatch(
+            "generate_animation",
+            json!({"concept": "vector en el plano"}),
+        );
+        assert!(auto.ok, "{}", auto.content);
+        assert!(auto.content.contains("universal"), "{}", auto.content);
     }
 }
