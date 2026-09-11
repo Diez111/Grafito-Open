@@ -7,6 +7,7 @@
 //! Incluye generador universal estilo canal de YouTube: cualquier texto produce
 //! una animación profesional en <2s con fallback garantizado.
 
+pub mod captions;
 pub mod engine;
 pub mod guion;
 pub mod parametric;
@@ -14,11 +15,27 @@ pub mod player;
 pub mod protocol;
 pub mod scene;
 
+pub use captions::{
+    cuenta_palabras, envuelve_dos_lineas, escapa_ass, escapa_srt, formatea_ass_ts, formatea_srt_ts,
+    normaliza_texto, voiceover_segments, CaptionError, CaptionSegment, CaptionTrack, ASS_FONTSIZE,
+    ASS_MARGIN_V, ASS_OUTLINE, CAPTION_MAX_CHARS, CAPTION_MAX_END_MS, CAPTION_MAX_OUTPUT_BYTES,
+    CAPTION_MAX_PALABRAS, CAPTION_MAX_SEGMENTS, SRT_MAX_LINEAS,
+};
 pub use engine::{
     playlist_desde_escena, run_job, AnimEngine, EngineConfig, JobEvent, CANCEL_GRACE,
     DEFAULT_IDLE_TIMEOUT_SECS, DEFAULT_JOB_TIMEOUT_SECS, DEFAULT_LINE_CAP_BYTES,
     MAX_IDLE_TIMEOUT_SECS, MAX_JOB_TIMEOUT_SECS, MAX_LINE_CAP_BYTES, MIN_IDLE_TIMEOUT_SECS,
     MIN_JOB_TIMEOUT_SECS, MIN_LINE_CAP_BYTES,
+};
+pub use guion::{
+    aplicar_frontera, compilar_paso, comprobar_viewport_unico, cuenta_palabras_voz,
+    math_expr_valida_para_cas, sanear_math_expr, sanear_voiceover, short_script, Acto, ActoTexto,
+    EfectoPaso, EscenaBase, Frontera, Guion, GuionError, GuionTexto, PasoGuion, PasoTexto,
+    ACTO_MAX_PASOS, CONCEPTO_MAX_CHARS, FONDO_POR_DEFECTO, GUION_MAX_ACTOS,
+    GUION_MAX_MEMORIA_BYTES, GUION_MIN_ACTOS, MATH_EXPR_MAX_CHARS, PARAMS_MAX_ENTRIES,
+    PARAMS_MAX_KEY_CHARS, PASO_MAX_FRAMES, PASO_MAX_RUN_MS, PASO_MIN_FRAMES, PASO_MIN_RUN_MS,
+    SHORT_MAX_PALABRAS, SHORT_MIN_PALABRAS, TITULO_MAX_CHARS, VOICEOVER_MAX_PALABRAS,
+    WHITEBOARD_MAX_CHARS,
 };
 pub use parametric::{
     infer_parametric_anim, parametric_hint, suaviza_bezier, taylor_orden_para_anim,
@@ -37,11 +54,12 @@ pub use protocol::{
     localize_worker_error, max_chunk_frames, normalize_concept, request_for_concept,
     sanitize_error_code, sanitize_template, taylor_anim_order, taylor_anim_order_from_params,
     template_for_concept, truncate_worker_message, AnimDuration, AnimJobId, AnimParams,
-    AnimRequest, AnimResult, AnimationGroup, ExportFormat, PlanRemuestreo, PngDir, RenderProgress,
-    Resolution, WireMessage, WorkerError, LONGFORM_CHUNK_MAX_BYTES, MAX_ERROR_CODE_LEN,
-    MAX_MEDIA_PATH_CHARS, MAX_TIMELINE_DURATION_MS, MAX_WORKER_MESSAGE_LEN,
-    PREVIEW_SHORT_MAX_FRAMES, TAYLOR_ANIM_ORDER_DEFAULT, TAYLOR_ANIM_ORDER_MAX,
-    TAYLOR_ANIM_ORDER_MIN, VIDEO_LONGFORM_MAX_FRAMES,
+    AnimRequest, AnimResult, AnimationGroup, AudioTrack, ExportFormat, PlanRemuestreo, PngDir,
+    RenderProgress, Resolution, WireMessage, WorkerError, LONGFORM_CHUNK_MAX_BYTES, MAX_AUDIO_GAIN,
+    MAX_AUDIO_OFFSET_MS, MAX_AUDIO_PATH_CHARS, MAX_ERROR_CODE_LEN, MAX_MEDIA_PATH_CHARS,
+    MAX_TIMELINE_DURATION_MS, MAX_WORKER_MESSAGE_LEN, PREVIEW_SHORT_MAX_FRAMES,
+    TAYLOR_ANIM_ORDER_DEFAULT, TAYLOR_ANIM_ORDER_MAX, TAYLOR_ANIM_ORDER_MIN,
+    VIDEO_LONGFORM_MAX_FRAMES,
 };
 pub use scene::{
     bezier_suaviza, frame_at_global, matching_shapes_frames, resample_arclen, sample_playlist,

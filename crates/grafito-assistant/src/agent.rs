@@ -258,6 +258,9 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
         "solve_system" => solve_system_tool(call),
         "interval_check" => interval_check_tool(call),
         "groebner_gate" => groebner_gate_tool(call),
+        // Harness-1 — puras, sin Document, sin I/O, sin red
+        "run_command" => run_command_tool(call),
+        "solid_measure_3d" => solid_measure_3d_tool(call),
         // Pedagogy tools (F3.2) — puras, sin Document, sin I/O
         "scaffold" => scaffold_tool(call),
         "generate_exercise" => generate_exercise_tool(call),
@@ -1281,7 +1284,7 @@ pub fn parse_anim_format(raw: Option<&str>) -> Result<grafito_anim::ExportFormat
     grafito_anim::ExportFormat::from_str(canonical).map_err(|e| e.to_string())
 }
 
-/// Extrae `duration_s` (default 2.0) validada contra `AnimDuration` 0.1..=30 s.
+/// Extrae `duration_s` (default 2.0) validada contra `AnimDuration` 0.1..=60 s.
 pub fn parse_anim_duration_s(arguments: &Value) -> Result<f64, String> {
     let secs = arguments
         .get("duration_s")
@@ -2069,7 +2072,7 @@ pub fn suggest_next_tool_schema() -> ToolSchema {
 ///
 /// `quality`/`view`/`effect`/`format`/`duration_s`/`fps`/`easing`/`tracker`
 /// solo aplican a la vía template/concept: se validan contra `AnimDuration`
-/// 0.1..=30 s y fps 1..=60 sin ejecutar el motor.
+/// 0.1..=60 s y fps 1..=60 sin ejecutar el motor.
 pub fn generate_animation_tool_schema() -> ToolSchema {
     ToolSchema::new(
         "generate_animation",
@@ -2088,9 +2091,9 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
                 "view": {"type": "string", "description": "Vista opcional: plana (default) u orbita (órbita 3D; la UI la habilita solo en plantillas 3D)", "enum": ["plana", "orbita"]},
                 "effect": {"type": "string", "description": "Efecto de creación opcional: create, write, fade, grow, indicate, none (default; none = morph histórico)", "enum": ["create", "write", "fade", "grow", "indicate", "none"]},
                 "format": {"type": "string", "description": "Formato de exportación opcional: gif (default), png, mp4, webm (mp4/webm requieren ffmpeg en la UI)", "enum": ["gif", "png", "mp4", "webm"]},
-                "duration_s": {"type": "number", "description": "Duración opcional en segundos 0.1..=30 (default 2.0; solo vía template/concept)", "minimum": 0.1, "maximum": 30.0},
+                "duration_s": {"type": "number", "description": "Duración opcional en segundos 0.1..=60 (default 2.0; paridad AnimDuration del núcleo; solo vía template/concept)", "minimum": 0.1, "maximum": 60.0},
                 "fps": {"type": "integer", "description": "Fotogramas por segundo 1..=60 (default 12; solo vía template/concept)", "minimum": 1, "maximum": 60},
-                "easing": {"type": "string", "description": "Easing opcional vía RateFunc::from_name, ej. smooth (default), linear, ease_in_out"},
+                "easing": {"type": "string", "description": "Easing opcional: las 18 rate-funcs canónicas del núcleo (smooth default)", "enum": ANIM_EASING_CANONICAL},
                 "tracker": {"type": "object", "description": "Tracker opcional {start: number, end: number, map: opacity|scale|center_x|center_y} estilo ValueTracker", "properties": {"start": {"type": "number"}, "end": {"type": "number"}, "map": {"type": "string", "enum": ["opacity", "scale", "center_x", "center_y"]}}, "required": ["start", "end"]}
             },
             "required": []
@@ -2261,6 +2264,352 @@ pub fn math_tool_schemas() -> Vec<ToolSchema> {
     ]
 }
 
+// ── Tools harness-1 (puras, sin Document, sin I/O, sin red) ─────────────────
+
+/// Hook de forma de `run_command`: no vacío, ≤2000 caracteres, sin NUL, una línea.
+///
+/// Devuelve el texto canónico (recortado) para el payload de plan. La app
+/// valida allowlist + aplica con undo tras aprobación explícita; acá jamás se
+/// ejecuta nada.
+pub fn validate_run_command_form(raw: &str) -> Result<String, String> {
+    let texto = raw.trim();
+    if texto.contains('\n') || texto.contains('\r') {
+        return Err("run_command: 'comando' debe ser una sola línea".into());
+    }
+    grafito_assistant_types::validate_run_command_texto(texto).map_err(|error| {
+        if error.contains("empty") {
+            "run_command requiere 'comando' no vacío".to_string()
+        } else if error.contains("2000") {
+            "run_command: 'comando' excede 2000 caracteres".to_string()
+        } else {
+            format!("run_command: {error}")
+        }
+    })?;
+    Ok(texto.to_owned())
+}
+
+/// `run_command(comando)` — propone un comando canónico sin ejecutarlo.
+///
+/// Pura: valida forma vía [`validate_run_command_form`] y devuelve
+/// `AssistantOperation::RunCommand` serializada en `plan_operation` para que
+/// el integrador la valide (allowlist) y la aplique con undo. Sólo comandos
+/// no destructivos, ej. `Punto[(1,2)]`, `Recta[A,B]`, `Midpoint[A,B]`.
+fn run_command_tool(call: &ToolCall) -> ToolResult {
+    let raw = call
+        .arguments
+        .get("comando")
+        .and_then(Value::as_str)
+        .or_else(|| call.arguments.get("texto").and_then(Value::as_str))
+        .unwrap_or("");
+    let texto = match validate_run_command_form(raw) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::text(&call.id, false, error),
+    };
+    let operacion = grafito_assistant_types::AssistantOperation::RunCommand {
+        texto: texto.clone(),
+    };
+    // Defensa en profundidad: el hook ya validó, pero al plan nunca viaja
+    // una op rota aunque cambie el hook.
+    if let Err(error) = operacion.validate() {
+        return ToolResult::text(&call.id, false, error);
+    }
+    let payload = json!({
+        "tool": "run_command",
+        "texto": texto,
+        "plan_operation": operacion,
+        "note": "propuesta pura; la app valida allowlist y aplica con undo tras aprobación explícita (solo comandos no destructivos)",
+    });
+    ToolResult::text(&call.id, true, payload.to_string())
+}
+
+/// Nombres canónicos de `solid_measure_3d` (los alias es/en se normalizan en
+/// [`solid_tipo_canonico`]).
+pub const SOLID_MEASURE_TIPOS: [&str; 9] = [
+    "esfera",
+    "cubo",
+    "cilindro",
+    "cono",
+    "toro",
+    "tetra",
+    "piramide",
+    "prisma",
+    "elipsoide",
+];
+
+/// Normaliza `tipo` (alias es/en, case-insensible) al canónico; `Err` honesto.
+fn solid_tipo_canonico(raw: &str) -> Result<&'static str, String> {
+    match raw.trim().to_lowercase().as_str() {
+        "esfera" | "sphere" | "esferica" | "esférica" => Ok("esfera"),
+        "cubo" | "cube" | "hexaedro" => Ok("cubo"),
+        "cilindro" | "cylinder" => Ok("cilindro"),
+        "cono" | "cone" => Ok("cono"),
+        "toro" | "torus" | "toroide" => Ok("toro"),
+        "tetra" | "tetraedro" | "tetrahedron" | "tetraedro_regular" => Ok("tetra"),
+        "piramide" | "pirámide" | "pyramid" | "piramide_cuadrada" => Ok("piramide"),
+        "prisma" | "prism" | "prisma_cuadrangular" => Ok("prisma"),
+        "elipsoide" | "ellipsoid" | "elipsoide_real" => Ok("elipsoide"),
+        _ => Err(format!(
+            "solid_measure_3d: tipo desconocido '{}' (válidos: {})",
+            raw.trim(),
+            SOLID_MEASURE_TIPOS.join(", ")
+        )),
+    }
+}
+
+/// Lee un parámetro numérico top-level o en `params`: finito y > 0.
+fn solid_param(arguments: &Value, clave: &str, alias: &[&str]) -> Result<f64, String> {
+    let buscar = |objeto: &serde_json::Map<String, Value>| -> Option<f64> {
+        if let Some(valor) = objeto.get(clave).and_then(Value::as_f64) {
+            return Some(valor);
+        }
+        alias
+            .iter()
+            .find_map(|nombre| objeto.get(*nombre).and_then(Value::as_f64))
+    };
+    let valor = arguments.as_object().and_then(buscar).or_else(|| {
+        arguments
+            .get("params")
+            .and_then(Value::as_object)
+            .and_then(buscar)
+    });
+    match valor {
+        Some(valor) if valor.is_finite() && valor > 0.0 => Ok(valor),
+        Some(_) => Err(format!(
+            "solid_measure_3d: '{clave}' debe ser finito y mayor que 0"
+        )),
+        None => {
+            let mut nombres = vec![clave.to_string()];
+            nombres.extend(alias.iter().map(|nombre| (*nombre).to_string()));
+            Err(format!(
+                "solid_measure_3d: falta parámetro '{}'",
+                nombres.join("' o '")
+            ))
+        }
+    }
+}
+
+/// Núcleo puro de `solid_measure_3d`: volumen/área + fórmula legible.
+///
+/// Usa las fórmulas exactas de `grafito_core::symbolic::solids` (vía sus
+/// funciones libres donde existen; pirámide/prisma/elipsoide replican la rama
+/// `GeoObject` exacta de ese módulo para no construir `ObjectId` impuro).
+/// `Err` honesto si el sólido no es computable con los parámetros dados.
+fn solid_measure_3d_inner(arguments: &Value) -> Result<Value, String> {
+    use grafito_core::symbolic::solids;
+    let tipo_raw = arguments.get("tipo").and_then(Value::as_str).unwrap_or("");
+    let tipo = solid_tipo_canonico(tipo_raw)?;
+    // (volumen, área o None honesto, fórmula V, fórmula A, estado, detalle)
+    let (volumen, area, formula_volumen, formula_area, estado): (
+        f64,
+        Option<f64>,
+        &'static str,
+        &'static str,
+        &'static str,
+    ) = match tipo {
+        "esfera" => {
+            let radio = solid_param(arguments, "radio", &["r"])?;
+            (
+                solids::sphere_volume(radio).map_err(|error| error.to_string())?,
+                Some(solids::sphere_area(radio).map_err(|error| error.to_string())?),
+                "V = 4/3·π·r³",
+                "A = 4·π·r²",
+                "exacto",
+            )
+        }
+        "cubo" => {
+            let arista = solid_param(arguments, "arista", &["a", "lado", "size"])?;
+            (
+                solids::cube_volume(arista).map_err(|error| error.to_string())?,
+                Some(solids::cube_area(arista).map_err(|error| error.to_string())?),
+                "V = a³",
+                "A = 6·a²",
+                "exacto",
+            )
+        }
+        "cilindro" => {
+            let radio = solid_param(arguments, "radio", &["r"])?;
+            let altura = solid_param(arguments, "altura", &["h"])?;
+            (
+                solids::cylinder_volume(radio, altura).map_err(|error| error.to_string())?,
+                Some(solids::cylinder_area(radio, altura).map_err(|error| error.to_string())?),
+                "V = π·r²·h",
+                "A = 2·π·r·(r+h)",
+                "exacto",
+            )
+        }
+        "cono" => {
+            let radio = solid_param(arguments, "radio", &["r"])?;
+            let altura = solid_param(arguments, "altura", &["h"])?;
+            (
+                solids::cone_volume(radio, altura).map_err(|error| error.to_string())?,
+                Some(solids::cone_area(radio, altura).map_err(|error| error.to_string())?),
+                "V = π·r²·h/3",
+                "A = π·r·(r+g), g = √(r²+h²)",
+                "exacto",
+            )
+        }
+        "toro" => {
+            let mayor = solid_param(arguments, "mayor", &["R", "radio_mayor"])?;
+            let menor = solid_param(arguments, "menor", &["r", "radio_menor"])?;
+            (
+                solids::torus_volume(mayor, menor).map_err(|error| error.to_string())?,
+                Some(solids::torus_area(mayor, menor).map_err(|error| error.to_string())?),
+                "V = 2·π²·R·r²",
+                "A = 4·π²·R·r",
+                "exacto",
+            )
+        }
+        "tetra" => {
+            let arista = solid_param(arguments, "arista", &["a", "lado"])?;
+            (
+                solids::tetrahedron_volume(arista).map_err(|error| error.to_string())?,
+                Some(solids::tetrahedron_area(arista).map_err(|error| error.to_string())?),
+                "V = a³/(6·√2)",
+                "A = √3·a²",
+                "exacto",
+            )
+        }
+        // Pirámide cuadrada regular: misma rama exacta que `solids.rs`
+        // (`base*base*h/3`, apotema `√(h²+(b/2)²)`).
+        "piramide" => {
+            let base = solid_param(arguments, "base", &["b", "lado"])?;
+            let altura = solid_param(arguments, "altura", &["h"])?;
+            let apotema = (altura * altura + (base / 2.0) * (base / 2.0)).sqrt();
+            if !apotema.is_finite() {
+                return Err("solid_measure_3d: apotema no finita".into());
+            }
+            (
+                base * base * altura / 3.0,
+                Some(base * base + 2.0 * base * apotema),
+                "V = b²·h/3",
+                "A = b²+2·b·ap, ap = √(h²+(b/2)²)",
+                "exacto",
+            )
+        }
+        // Prisma cuadrangular recto: `solids.rs` da `2·área_base +
+        // perímetro·extrusión` = `2·L²+4·L·h`.
+        "prisma" => {
+            let lado = solid_param(arguments, "lado", &["l", "base", "arista"])?;
+            let altura = solid_param(arguments, "altura", &["h"])?;
+            (
+                lado * lado * altura,
+                Some(2.0 * lado * lado + 4.0 * lado * altura),
+                "V = L²·h",
+                "A = 2·L²+4·L·h",
+                "exacto",
+            )
+        }
+        // Elipsoide real: volumen analítico `4/3·π·rx·ry·rz` (rama `Quadric3D`
+        // de `solids.rs`); el área no tiene forma cerrada: `None` honesto.
+        "elipsoide" => {
+            let rx = solid_param(arguments, "rx", &["a", "radio_x"])?;
+            let ry = solid_param(arguments, "ry", &["b", "radio_y"])?;
+            let rz = solid_param(arguments, "rz", &["c", "radio_z"])?;
+            let volumen = 4.0 / 3.0 * std::f64::consts::PI * rx * ry * rz;
+            if !volumen.is_finite() {
+                return Err("solid_measure_3d: volumen no finito".into());
+            }
+            (
+                volumen,
+                None,
+                "V = 4/3·π·rx·ry·rz",
+                "sin forma cerrada (área por integración numérica)",
+                "elipsoide real: volumen 4/3·π·rx·ry·rz (área por integración numérica)",
+            )
+        }
+        _ => {
+            return Err(format!(
+                "solid_measure_3d: tipo '{tipo}' sin fórmula exacta"
+            ))
+        }
+    };
+    if !volumen.is_finite() {
+        return Err("solid_measure_3d: volumen no finito".into());
+    }
+    if area.is_some_and(|valor| !valor.is_finite()) {
+        return Err("solid_measure_3d: área no finita".into());
+    }
+    Ok(json!({
+        "tool": "solid_measure_3d",
+        "tipo": tipo,
+        "volumen": volumen,
+        "area": area,
+        "formula_volumen": formula_volumen,
+        "formula_area": formula_area,
+        "status": estado,
+        "note": "medida exacta del núcleo (grafito_core::symbolic::solids); la app la dibuja tras aprobación explícita",
+    }))
+}
+
+/// `solid_measure_3d(tipo, params)` — volumen/área exactos sin documento.
+fn solid_measure_3d_tool(call: &ToolCall) -> ToolResult {
+    match solid_measure_3d_inner(&call.arguments) {
+        Ok(payload) => ToolResult::text(&call.id, true, payload.to_string()),
+        Err(error) => ToolResult::text(&call.id, false, error),
+    }
+}
+
+/// Las 18 rate-funcs canónicas del núcleo (`RateFunc::as_str` en
+/// `grafito-anim/src/scene.rs:182`; el `from_name` acepta además alias
+/// legacy/es que acá no se anuncian para mantener el enum cerrado).
+pub const ANIM_EASING_CANONICAL: [&str; 18] = [
+    "linear",
+    "smooth",
+    "ease_in_out",
+    "rush_in_out",
+    "there_and_back",
+    "wiggle",
+    "rush_into",
+    "rush_from",
+    "slow_into",
+    "double_smooth",
+    "squish",
+    "lingering",
+    "wiggle_k",
+    "there_and_back_with_pause",
+    "running_start",
+    "not_quite_there",
+    "exponential_decay",
+    "smootherstep",
+];
+
+/// Schema de `run_command(comando)`.
+pub fn run_command_tool_schema() -> ToolSchema {
+    ToolSchema::new(
+        "run_command",
+        "Propone ejecutar un comando canónico de Grafito en el documento (ej. `Punto[(1,2)]`, `Recta[A,B]`, `Midpoint[A,B]`; solo no destructivos). Puro: valida forma (no vacío, ≤2000 caracteres, sin NUL, una línea) y devuelve la operación RunCommand; la app valida allowlist y aplica con undo tras aprobación explícita.",
+        json!({
+            "type": "object",
+            "properties": {
+                "comando": {"type": "string", "description": "Comando canónico de Grafito en una línea, ej. Punto[(1,2)], Recta[A,B], Midpoint[A,B] (máx 2000 caracteres, sin NUL)"},
+                "texto": {"type": "string", "description": "Alias de comando"}
+            },
+            "required": ["comando"]
+        }),
+    )
+}
+
+/// Schema de `solid_measure_3d(tipo, params)`.
+pub fn solid_measure_3d_tool_schema() -> ToolSchema {
+    ToolSchema::new(
+        "solid_measure_3d",
+        "Calcula volumen y área exactos de un sólido 3D paramétrico con las fórmulas de grafito_core::symbolic::solids, sin documento: esfera (radio), cubo (arista), cilindro/cono (radio, altura), toro (mayor, menor), tetra (arista), pirámide cuadrada (base, altura), prisma cuadrangular (lado, altura), elipsoide (rx, ry, rz; solo volumen). Error honesto si no computable.",
+        json!({
+            "type": "object",
+            "properties": {
+                "tipo": {"type": "string", "description": "Sólido: esfera, cubo, cilindro, cono, toro, tetra, piramide, prisma, elipsoide", "enum": SOLID_MEASURE_TIPOS},
+                "params": {"type": "object", "description": "Parámetros numéricos finitos > 0 según el sólido (también se aceptan top-level)", "additionalProperties": {"type": "number"}}
+            },
+            "required": ["tipo"]
+        }),
+    )
+}
+
+/// Tools nuevas harness-1 para exponer al LLM vía OpenCode Go.
+pub fn harness1_tool_schemas() -> Vec<ToolSchema> {
+    vec![run_command_tool_schema(), solid_measure_3d_tool_schema()]
+}
+
 /// Conjunto completo seguro (base + pedagógicas) para el loop del agente.
 pub fn all_safe_tool_schemas() -> Vec<ToolSchema> {
     let mut schemas = vec![
@@ -2301,6 +2650,7 @@ pub fn all_safe_tool_schemas() -> Vec<ToolSchema> {
     ];
     schemas.extend(pedagogy_tool_schemas());
     schemas.extend(math_tool_schemas());
+    schemas.extend(harness1_tool_schemas());
     schemas
 }
 
@@ -4606,8 +4956,39 @@ mod tests {
             props["tracker"]["properties"]["map"]["enum"],
             json!(["opacity", "scale", "center_x", "center_y"])
         );
+        // Easing: las 18 rate-funcs canónicas del núcleo, ni una más ni una menos.
+        assert_eq!(props["easing"]["enum"], json!(ANIM_EASING_CANONICAL));
+        assert_eq!(
+            ANIM_EASING_CANONICAL,
+            [
+                "linear",
+                "smooth",
+                "ease_in_out",
+                "rush_in_out",
+                "there_and_back",
+                "wiggle",
+                "rush_into",
+                "rush_from",
+                "slow_into",
+                "double_smooth",
+                "squish",
+                "lingering",
+                "wiggle_k",
+                "there_and_back_with_pause",
+                "running_start",
+                "not_quite_there",
+                "exponential_decay",
+                "smootherstep",
+            ]
+        );
+        for nombre in ANIM_EASING_CANONICAL {
+            assert!(
+                grafito_anim::RateFunc::from_name(nombre).is_some(),
+                "easing {nombre} resuelve en el núcleo"
+            );
+        }
         assert_eq!(props["duration_s"]["minimum"], json!(0.1));
-        assert_eq!(props["duration_s"]["maximum"], json!(30.0));
+        assert_eq!(props["duration_s"]["maximum"], json!(60.0));
         assert_eq!(props["fps"]["minimum"], json!(1));
         assert_eq!(props["fps"]["maximum"], json!(60));
         assert_eq!(props["width"]["minimum"], json!(64));
@@ -4666,6 +5047,10 @@ mod tests {
             ),
             ("r6e-d", json!({"concept": "derivada", "duration_s": 99.0})),
             ("r6e-p", json!({"concept": "derivada", "fps": 999})),
+            (
+                "r6e-easing",
+                json!({"concept": "derivada", "easing": "ultra_suave"}),
+            ),
         ] {
             let call = ToolCall {
                 id: id.into(),
@@ -4675,6 +5060,226 @@ mod tests {
             let result = dispatch_safe_tool(&call);
             assert!(!result.ok, "id={id} debía rechazar: {}", result.content);
         }
+    }
+
+    #[test]
+    fn harness1_animacion_acepta_easing_canonico_y_duracion_longform() {
+        // Las 18 canónicas pasan el dispatch; 45 s (<60) ya es long-form válido.
+        for easing in ANIM_EASING_CANONICAL {
+            let call = ToolCall {
+                id: "h1-easing".into(),
+                name: "generate_animation".into(),
+                arguments: json!({"concept": "derivada", "easing": easing}),
+            };
+            let result = dispatch_safe_tool(&call);
+            assert!(result.ok, "easing={easing}: {}", result.content);
+            let value: Value = serde_json::from_str(&result.content).expect("json");
+            assert_eq!(value["easing"], easing);
+        }
+        let call = ToolCall {
+            id: "h1-duracion".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"concept": "derivada", "duration_s": 45.0}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("json");
+        assert_eq!(value["duration_s"].as_f64(), Some(45.0));
+    }
+
+    #[test]
+    fn harness1_run_command_valido_propone_op_e_invalido_falla_honesto() {
+        let call = ToolCall {
+            id: "h1-rc-ok".into(),
+            name: "run_command".into(),
+            arguments: json!({"comando": "Punto[(1,2)]"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("json");
+        assert_eq!(value["tool"], "run_command");
+        assert_eq!(value["texto"], "Punto[(1,2)]");
+        assert_eq!(value["plan_operation"]["operation"], "run_command");
+        assert_eq!(value["plan_operation"]["texto"], "Punto[(1,2)]");
+        // Roundtrip real al tipo del plan: lo que viaja se aplica tal cual.
+        let operacion: grafito_assistant_types::AssistantOperation =
+            serde_json::from_value(value["plan_operation"].clone()).expect("op válida");
+        assert!(operacion.validate().is_ok());
+
+        for (id, args) in [
+            ("h1-rc-vacio", json!({"comando": "   "})),
+            ("h1-rc-nul", json!({"comando": "Punto[(1,\u{0})]"})),
+            (
+                "h1-rc-multilinea",
+                json!({"comando": "Punto[(1,2)]\nBorrarTodo"}),
+            ),
+            ("h1-rc-largo", json!({"comando": "x".repeat(2001)})),
+            ("h1-rc-falta", json!({})),
+        ] {
+            let call = ToolCall {
+                id: id.into(),
+                name: "run_command".into(),
+                arguments: args,
+            };
+            let result = dispatch_safe_tool(&call);
+            assert!(!result.ok, "id={id} debía rechazar: {}", result.content);
+        }
+    }
+
+    #[test]
+    fn harness1_validate_run_command_form_recorta_y_acota() {
+        assert_eq!(
+            validate_run_command_form("  Recta[A,B]  ").expect("recorta"),
+            "Recta[A,B]"
+        );
+        assert!(validate_run_command_form("").is_err());
+        assert!(validate_run_command_form("a\nb").is_err());
+        assert!(validate_run_command_form("a\rb").is_err());
+        assert!(validate_run_command_form("a\u{0}b").is_err());
+        assert!(validate_run_command_form(&"x".repeat(2000)).is_ok());
+        assert!(validate_run_command_form(&"x".repeat(2001)).is_err());
+    }
+
+    #[test]
+    fn harness1_solid_measure_3d_exactos_y_error_honesto() {
+        let pi = std::f64::consts::PI;
+        for (tipo, args, volumen, area) in [
+            (
+                "esfera",
+                json!({"tipo": "esfera", "radio": 1.0}),
+                4.0 / 3.0 * pi,
+                Some(4.0 * pi),
+            ),
+            (
+                "cubo",
+                json!({"tipo": "cubo", "params": {"arista": 2.0}}),
+                8.0,
+                Some(24.0),
+            ),
+            (
+                "toro",
+                json!({"tipo": "toro", "mayor": 3.0, "menor": 1.0}),
+                6.0 * pi * pi,
+                Some(12.0 * pi * pi),
+            ),
+            (
+                "cilindro",
+                json!({"tipo": "cilindro", "radio": 1.0, "altura": 2.0}),
+                2.0 * pi,
+                Some(6.0 * pi),
+            ),
+            (
+                "cono",
+                json!({"tipo": "cono", "radio": 3.0, "altura": 4.0}),
+                12.0 * pi,
+                Some(pi * 3.0 * (3.0 + 5.0)),
+            ),
+            (
+                "tetra",
+                json!({"tipo": "tetra", "arista": 2.0}),
+                8.0 / (6.0 * std::f64::consts::SQRT_2),
+                Some(3.0_f64.sqrt() * 4.0),
+            ),
+            (
+                "piramide",
+                json!({"tipo": "piramide", "base": 2.0, "altura": 3.0}),
+                4.0,
+                Some(4.0 + 2.0 * 2.0 * 10.0_f64.sqrt()),
+            ),
+            (
+                "prisma",
+                json!({"tipo": "prisma", "lado": 2.0, "altura": 3.0}),
+                12.0,
+                Some(32.0),
+            ),
+        ] {
+            let call = ToolCall {
+                id: format!("h1-solid-{tipo}"),
+                name: "solid_measure_3d".into(),
+                arguments: args,
+            };
+            let result = dispatch_safe_tool(&call);
+            assert!(result.ok, "tipo={tipo}: {}", result.content);
+            let value: Value = serde_json::from_str(&result.content).expect("json");
+            let got_volumen = value["volumen"].as_f64().expect("volumen numérico");
+            assert!(
+                (got_volumen - volumen).abs() < 1e-9,
+                "tipo={tipo}: {got_volumen} vs {volumen}"
+            );
+            match area {
+                Some(esperada) => {
+                    let got_area = value["area"].as_f64().expect("área numérica");
+                    assert!(
+                        (got_area - esperada).abs() < 1e-9,
+                        "tipo={tipo}: {got_area} vs {esperada}"
+                    );
+                }
+                None => assert!(value["area"].is_null(), "tipo={tipo} sin área"),
+            }
+            assert_eq!(value["tipo"], tipo);
+            assert_eq!(value["status"], "exacto");
+        }
+        // Elipsoide: volumen analítico, área honesta nula.
+        let call = ToolCall {
+            id: "h1-solid-elipsoide".into(),
+            name: "solid_measure_3d".into(),
+            arguments: json!({"tipo": "elipsoide", "rx": 1.0, "ry": 2.0, "rz": 3.0}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("json");
+        let got = value["volumen"].as_f64().expect("volumen numérico");
+        assert!((got - 8.0 * pi).abs() < 1e-9);
+        assert!(value["area"].is_null());
+        assert!(value["status"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("elipsoide"));
+
+        // Alias + error honesto (tipo, falta, no positivo).
+        let alias = ToolCall {
+            id: "h1-solid-alias".into(),
+            name: "solid_measure_3d".into(),
+            arguments: json!({"tipo": "sphere", "r": 1.0}),
+        };
+        assert!(dispatch_safe_tool(&alias).ok);
+        for (id, args) in [
+            ("h1-solid-tipo", json!({"tipo": "k botella de klein"})),
+            ("h1-solid-falta", json!({"tipo": "esfera"})),
+            ("h1-solid-cero", json!({"tipo": "cubo", "arista": 0.0})),
+            (
+                "h1-solid-neg",
+                json!({"tipo": "cono", "radio": 1.0, "altura": -2.0}),
+            ),
+        ] {
+            let call = ToolCall {
+                id: id.into(),
+                name: "solid_measure_3d".into(),
+                arguments: args,
+            };
+            let result = dispatch_safe_tool(&call);
+            assert!(
+                !result.ok,
+                "id={id} debía fallar honesto: {}",
+                result.content
+            );
+        }
+    }
+
+    #[test]
+    fn harness1_schemas_validos_y_conjunto_completo() {
+        for schema in harness1_tool_schemas() {
+            assert!(schema.validate().is_ok(), "schema {} invalid", schema.name);
+            let openai = schema.openai_tool().expect("openai_tool");
+            assert_eq!(openai["type"], "function");
+            assert_eq!(openai["function"]["name"], schema.name);
+        }
+        assert_eq!(harness1_tool_schemas().len(), 2);
+        let esquemas = all_safe_tool_schemas();
+        let nombres: Vec<&str> = esquemas.iter().map(|schema| schema.name.as_str()).collect();
+        assert!(nombres.contains(&"run_command"));
+        assert!(nombres.contains(&"solid_measure_3d"));
+        assert_eq!(esquemas.len(), 20);
     }
 
     #[test]
@@ -4974,7 +5579,7 @@ mod tests {
             json!({"concept": "derivada", "fps": 0}),
             json!({"concept": "derivada", "fps": 61}),
             json!({"concept": "derivada", "duration_s": 0.05}),
-            json!({"concept": "derivada", "duration_s": 31.0}),
+            json!({"concept": "derivada", "duration_s": 61.0}),
             json!({"concept": "derivada", "effect": "explotar"}),
             json!({"concept": "derivada", "view": "holograma"}),
             json!({"concept": "derivada", "quality": "ultra"}),
@@ -5302,8 +5907,8 @@ mod tests {
             assert_eq!(openai["function"]["name"], schema.name);
         }
         assert_eq!(math_tool_schemas().len(), 8);
-        // 3 base + 7 pedagógicas + 8 matemáticas.
-        assert_eq!(all_safe_tool_schemas().len(), 18);
+        // 3 base + 7 pedagógicas + 8 matemáticas + 2 harness-1.
+        assert_eq!(all_safe_tool_schemas().len(), 20);
     }
 
     fn math_call(name: &str, arguments: Value) -> ToolCall {

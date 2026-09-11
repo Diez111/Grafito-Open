@@ -60,6 +60,12 @@ pub const WHITEBOARD_MAX_CHARS: usize = 200;
 pub const PARAMS_MAX_ENTRIES: usize = 16;
 /// Clave de `params`: `<= 64` chars.
 pub const PARAMS_MAX_KEY_CHARS: usize = 64;
+/// `voiceover`: narración del paso, `<= 40` palabras (forma local).
+pub const VOICEOVER_MAX_PALABRAS: usize = 40;
+/// Guion corto: mínimo de palabras de voz total (informativo, no `Err`).
+pub const SHORT_MIN_PALABRAS: usize = 110;
+/// Guion corto: máximo de palabras de voz total (informativo, no `Err`).
+pub const SHORT_MAX_PALABRAS: usize = 130;
 /// `run_ms` de paso animado (paridad `AnimDuration` 0.1..=60 s, P0 long-form).
 pub const PASO_MIN_RUN_MS: u64 = 100;
 /// `run_ms` de paso animado (paridad `AnimDuration` 0.1..=60 s, P0 long-form).
@@ -249,6 +255,39 @@ pub fn sanear_math_expr(raw: Option<String>) -> Option<String> {
     })
 }
 
+/// Sanea `voiceover` del LLM: `None`/vacío → `None` (hueco silencioso
+/// legítimo); con más de [`VOICEOVER_MAX_PALABRAS`] palabras o con
+/// controles → `Err` en español. Colapsa blancos (determinista).
+pub fn sanear_voiceover(raw: Option<String>) -> Result<Option<String>, GuionError> {
+    let Some(s) = raw else {
+        return Ok(None);
+    };
+    let t = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.is_empty() {
+        return Ok(None);
+    }
+    if t.chars().any(|c| c.is_control()) {
+        return Err(invalido(
+            "voiceover",
+            "la narración trae caracteres de control: usá texto plano".to_string(),
+        ));
+    }
+    let n = t.split_whitespace().count();
+    if n > VOICEOVER_MAX_PALABRAS {
+        return Err(invalido(
+            "voiceover",
+            format!("{n} palabras (válido 0..={VOICEOVER_MAX_PALABRAS}): acortá la narración"),
+        ));
+    }
+    Ok(Some(t))
+}
+
+/// Cuenta palabras separadas por blancos (misma cuenta que el reparto de
+/// [`crate::captions::voiceover_segments`]). Pura.
+pub fn cuenta_palabras_voz(texto: &str) -> usize {
+    texto.split_whitespace().count()
+}
+
 /// Sanea `template_hint` a canónico; fuera de la allowlist es `Err`.
 fn sanear_template(hint: &str) -> Result<String, GuionError> {
     let t = hint.trim().to_lowercase();
@@ -314,6 +353,10 @@ pub struct PasoTexto {
     pub run_ms: u64,
     /// Silencio posterior (`0..=10000`; la espera sola exige `0`).
     pub wait_after_ms: u64,
+    /// Voz en off del paso (`None`/vacía = hueco silencioso legítimo;
+    /// `<= 40` palabras validadas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voiceover: Option<String>,
 }
 
 /// Acto tal cual lo emite el LLM.
@@ -342,6 +385,25 @@ pub struct GuionTexto {
     pub actos: Vec<ActoTexto>,
 }
 
+impl GuionTexto {
+    /// Palabras totales de voz (`voiceover` de cada paso, informativa).
+    /// Pura.
+    pub fn total_voiceover_words(&self) -> usize {
+        self.actos
+            .iter()
+            .flat_map(|a| a.pasos.iter())
+            .filter_map(|p| p.voiceover.as_deref())
+            .map(cuenta_palabras_voz)
+            .sum()
+    }
+
+    /// ¿El total de voz cae en el rango del guion corto
+    /// (`110..=130`)? Informativa: nunca es `Err`, solo `bool`. Pura.
+    pub fn validate_short_len(&self) -> bool {
+        (SHORT_MIN_PALABRAS..=SHORT_MAX_PALABRAS).contains(&self.total_voiceover_words())
+    }
+}
+
 /// Paso validado (salida de la validación, entrada de [`compilar_paso`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasoGuion {
@@ -363,6 +425,9 @@ pub struct PasoGuion {
     pub run_ms: u64,
     /// Silencio posterior en ms.
     pub wait_after_ms: u64,
+    /// Voz en off saneada (`None` = hueco silencioso legítimo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voiceover: Option<String>,
 }
 
 impl PasoGuion {
@@ -437,6 +502,7 @@ impl PasoGuion {
                 ),
             ));
         }
+        let voiceover = sanear_voiceover(raw.voiceover)?;
         Ok(Self {
             texto,
             math_expr: sanear_math_expr(raw.math_expr),
@@ -447,6 +513,7 @@ impl PasoGuion {
             frames: raw.frames,
             run_ms: raw.run_ms,
             wait_after_ms: raw.wait_after_ms,
+            voiceover,
         })
     }
 
@@ -691,9 +758,26 @@ impl Guion {
     pub fn duracion_total_ms(&self) -> u64 {
         self.actos
             .iter()
-            .flat_map(|a| &a.pasos)
+            .flat_map(|a| a.pasos.iter())
             .map(|p| p.run_ms.saturating_add(p.wait_after_ms))
             .fold(0, |acc, d| acc.saturating_add(d))
+    }
+
+    /// Palabras totales de voz (`voiceover` de cada paso, informativa).
+    /// Pura.
+    pub fn total_voiceover_words(&self) -> usize {
+        self.actos
+            .iter()
+            .flat_map(|a| a.pasos.iter())
+            .filter_map(|p| p.voiceover.as_deref())
+            .map(cuenta_palabras_voz)
+            .sum()
+    }
+
+    /// ¿El total de voz cae en el rango del guion corto
+    /// (`110..=130`)? Informativa: nunca es `Err`, solo `bool`. Pura.
+    pub fn validate_short_len(&self) -> bool {
+        (SHORT_MIN_PALABRAS..=SHORT_MAX_PALABRAS).contains(&self.total_voiceover_words())
     }
 
     /// Baja todo el guion a items del player (puro, en orden de actos).
@@ -782,6 +866,7 @@ impl Guion {
                     export: ExportFormat::Gif,
                     canvas: (ancho, alto),
                     duration_ms: paso.run_ms,
+                    audio: None,
                 };
                 steps.push(
                     PlaylistStep::anim(request, paso.run_ms, paso.wait_after_ms)
@@ -831,6 +916,132 @@ impl Guion {
             ),
         }
     }
+}
+
+/// Arma un guion corto de 4 beats para `concepto` (P1-core voiceover).
+///
+/// Beats: hook 0-3 s (1 paso de 2500 ms) → intriga (1 paso) → clímax
+/// (3 micro-pasos) → payoff+loop (1 paso). Textos en español rioplatense
+/// con voz en off de 111 palabras totales (rango corto 110-130); la
+/// plantilla es la de [`crate::protocol::template_for_concept`] acotada a
+/// `taylor-series`/`integral-area`/`derivative-slope`/`conformal-map`/
+/// `pitagoras` (otro resultado → fallback `universal` honesto).
+///
+/// Presupuestos intactos: 4 actos (`<= 5`), 6 pasos (`<= 8`), 48 frames
+/// (`<= 96`), 640×480×4×48 ≈ 56 MiB (`<= 64 MiB`), 25.7 s (`0.1..=60 s`).
+/// Pura, sin I/O, sin pánicos.
+pub fn short_script(concepto: &str) -> Result<GuionTexto, GuionError> {
+    let norm = crate::protocol::normalize_concept(concepto);
+    let resuelta = crate::protocol::template_for_concept(&norm);
+    let template = match resuelta {
+        "taylor-series" | "integral-area" | "derivative-slope" | "conformal-map" | "pitagoras" => {
+            resuelta.to_string()
+        }
+        _ => "universal".to_string(),
+    };
+    // (título acto | texto | voiceover | efecto | frames | run_ms). El
+    // `wait_after` es 200 ms fijo y la plantilla la resuelta de arriba.
+    let beats: &[(&str, &str, &str, &str, usize, u64)] = &[
+        (
+            "Hook",
+            "Hook: mirá el truco de cerca",
+            "Che, mirá esto con atención: parece magia, pero tiene un truco cortito que ya mismo vas a ver.",
+            "write",
+            8,
+            2500,
+        ),
+        (
+            "Intriga",
+            "Intriga: el patrón que se repite",
+            "Fijate bien: hay un patrón que se repite siempre igual. Bancame un toque que te lo muestro paso a paso.",
+            "fade",
+            8,
+            5000,
+        ),
+        (
+            "Clímax",
+            "Clímax 1: el punto de partida",
+            "Primero mirá bien el punto de partida: todo arranca quieto, ordenado, sin ningún misterio a la vista.",
+            "create",
+            8,
+            4000,
+        ),
+        (
+            "Clímax",
+            "Clímax 2: movemos una sola cosa",
+            "Ahora prestá atención al cambio: movemos una sola cosa y todo lo demás se acomoda solito detrás.",
+            "tracker",
+            8,
+            4000,
+        ),
+        (
+            "Clímax",
+            "Clímax 3: un mismo gesto",
+            "¿Ves? Esa es la idea entera: un mismo gesto explica cada caso, del más fácil al más retorcido.",
+            "indicate",
+            8,
+            4000,
+        ),
+        (
+            "Payoff",
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si lo entendiste una vez, ya lo tenés para siempre. Miralo de nuevo y comprobalo vos.",
+            "grow",
+            8,
+            5000,
+        ),
+    ];
+    let mut actos: Vec<ActoTexto> = Vec::with_capacity(4);
+    let mut indice = 0usize;
+    // Reparto de los 6 pasos en 4 actos: 1 + 1 + 3 + 1.
+    for (titulo, cantidad) in [
+        ("Hook", 1usize),
+        ("Intriga", 1),
+        ("Clímax", 3),
+        ("Payoff", 1),
+    ] {
+        let mut pasos = Vec::with_capacity(cantidad);
+        for _ in 0..cantidad {
+            let (_, texto, voiceover, efecto, frames, run_ms) = beats[indice];
+            pasos.push(PasoTexto {
+                texto: texto.to_string(),
+                math_expr: None,
+                whiteboard_hint: "ejes y curva".to_string(),
+                template_hint: template.clone(),
+                params: BTreeMap::new(),
+                efecto: efecto.to_string(),
+                frames,
+                run_ms,
+                wait_after_ms: 200,
+                voiceover: Some(voiceover.to_string()),
+            });
+            indice += 1;
+        }
+        actos.push(ActoTexto {
+            titulo: titulo.to_string(),
+            fondo: None,
+            limpiar: false,
+            pasos,
+        });
+    }
+    let guion = GuionTexto {
+        concepto: norm,
+        width: 640,
+        height: 480,
+        actos,
+    };
+    // Chequeo interno barato (sin `Guion::try_new` completo para no
+    // duplicar su costo): la voz debe caer en el rango corto.
+    if !guion.validate_short_len() {
+        return Err(invalido(
+            "voiceover",
+            format!(
+                "el corto trae {} palabras (válido {SHORT_MIN_PALABRAS}..={SHORT_MAX_PALABRAS})",
+                guion.total_voiceover_words()
+            ),
+        ));
+    }
+    Ok(guion)
 }
 
 /// Aplica la frontera del acto a la escena viva (puro, sin I/O):
@@ -982,6 +1193,7 @@ mod tests {
             frames,
             run_ms: 1000,
             wait_after_ms: 200,
+            voiceover: None,
         }
     }
 
@@ -1218,5 +1430,132 @@ mod tests {
         assert_eq!(lista.len(), 2);
         assert!(lista.steps[1].is_wait());
         assert_eq!(lista.validate_frame_counts(&[8, 0]).expect("frames"), 8);
+    }
+
+    #[test]
+    fn voiceover_40_pasa_y_41_falla() {
+        // 40 palabras ok, 41 es `Err`; vacío/None = silencio legítimo.
+        let voz40 = (0..40)
+            .map(|i| format!("palabra{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut p = paso_texto("create", 4);
+        p.voiceover = Some(voz40);
+        assert!(PasoGuion::try_new(p)
+            .expect("40 palabras")
+            .voiceover
+            .is_some());
+        let voz41 = (0..41)
+            .map(|i| format!("palabra{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut p = paso_texto("create", 4);
+        p.voiceover = Some(voz41);
+        assert!(PasoGuion::try_new(p).is_err());
+        let mut p = paso_texto("create", 4);
+        p.voiceover = Some("   ".to_string());
+        assert_eq!(PasoGuion::try_new(p).expect("vacío").voiceover, None);
+        let p = paso_texto("create", 4);
+        assert_eq!(PasoGuion::try_new(p).expect("none").voiceover, None);
+        // Wire viejo sin `voiceover` deserializa a `None` (serde default).
+        let sin_voz: PasoTexto = serde_json::from_str(
+            r#"{"texto":"t","math_expr":null,"whiteboard_hint":"","template_hint":"derivative-slope","params":{},"efecto":"create","frames":4,"run_ms":1000,"wait_after_ms":200}"#,
+        )
+        .unwrap();
+        assert!(sin_voz.voiceover.is_none());
+    }
+
+    #[test]
+    fn short_script_cuatro_beats_presupuestos_y_rango() {
+        for concepto in [
+            "serie de taylor del seno",
+            "integral del área bajo la curva",
+            "derivada como pendiente",
+            "mapeo conforme complejo",
+            "teorema de pitágoras",
+            "tarea sin matemática",
+        ] {
+            let crudo = short_script(concepto).expect("corto válido");
+            // 4 actos / 6 pasos / 48 frames / 640×480 / 25.7 s.
+            assert_eq!(crudo.actos.len(), 4, "{concepto}");
+            let pasos: usize = crudo.actos.iter().map(|a| a.pasos.len()).sum();
+            assert_eq!(pasos, 6, "{concepto}");
+            assert_eq!(
+                crudo.actos[0].titulo, "Hook",
+                "el primer beat es el hook: {concepto}"
+            );
+            assert_eq!(crudo.actos[3].titulo, "Payoff", "{concepto}");
+            // Rango corto informativo en crudo y validado.
+            assert!(crudo.validate_short_len(), "{concepto}");
+            let g = Guion::try_new(crudo).expect("el corto valida entero");
+            assert_eq!(g.total_pasos(), 6);
+            assert_eq!(g.total_frames(), 48);
+            assert_eq!(g.duracion_total_ms(), 25_700);
+            assert!(g.validate_short_len());
+            assert!((SHORT_MIN_PALABRAS..=SHORT_MAX_PALABRAS).contains(&g.total_voiceover_words()));
+            // Plantilla coherente al concepto (5 + fallback universal).
+            let primera = g.actos[0].pasos[0].template.clone();
+            assert!(
+                [
+                    "taylor-series",
+                    "integral-area",
+                    "derivative-slope",
+                    "conformal-map",
+                    "pitagoras",
+                    "universal",
+                ]
+                .contains(&primera.as_str()),
+                "template {primera} fuera del set corto: {concepto}"
+            );
+            assert!(g
+                .actos
+                .iter()
+                .flat_map(|a| a.pasos.iter())
+                .all(|p| p.template == primera));
+        }
+        // Coherencia puntual: taylor e integral resuelven a la suya.
+        let taylor = short_script("serie de taylor del seno").unwrap();
+        assert_eq!(taylor.actos[0].pasos[0].template_hint, "taylor-series");
+        let integral = short_script("integral del área").unwrap();
+        assert_eq!(integral.actos[0].pasos[0].template_hint, "integral-area");
+        let libre = short_script("tarea sin matemática").unwrap();
+        assert_eq!(libre.actos[0].pasos[0].template_hint, "universal");
+    }
+
+    #[test]
+    fn voiceover_segments_reparte_proporcional_y_salta_silencios() {
+        use crate::captions::voiceover_segments;
+        let crudo = short_script("derivada como pendiente").unwrap();
+        let g = Guion::try_new(crudo).expect("corto válido");
+        let pasos: Vec<PasoGuion> = g
+            .actos
+            .iter()
+            .flat_map(|a| a.pasos.iter().cloned())
+            .collect();
+        let durs: Vec<u32> = pasos.iter().map(|p| p.run_ms as u32).collect();
+        let pista = voiceover_segments(&pasos, &durs).expect("pista de voz");
+        assert_eq!(pista.len(), 6);
+        pista.validate().expect("pista válida");
+        // Ventanas acumuladas en orden sin solapar.
+        assert_eq!(pista.segments[0].start_ms, 0);
+        assert_eq!(pista.segments[0].end_ms, 2500);
+        assert_eq!(pista.segments[1].start_ms, 2500);
+        // Karaoke por palabra suma la ventana entera.
+        for seg in &pista.segments {
+            let total: u32 = seg.palabras.iter().map(|(_, i, f)| f - i).sum();
+            assert_eq!(total, seg.end_ms - seg.start_ms);
+        }
+        // Paso sin voz = hueco silencioso legítimo (se salta, el cursor avanza).
+        let mut pasos_mudos = pasos.clone();
+        pasos_mudos[1].voiceover = None;
+        let pista = voiceover_segments(&pasos_mudos, &durs).expect("pista con hueco");
+        assert_eq!(pista.len(), 5);
+        assert_eq!(pista.segments[1].start_ms, durs[0] + durs[1]);
+        // Ventanas desparejas = `Err`.
+        assert!(voiceover_segments(&pasos, &durs[..3]).is_err());
+        // SRT/ASS de la voz del corto no fallan.
+        let pista = voiceover_segments(&pasos, &durs).expect("pista");
+        assert!(!pista.to_srt().unwrap().is_empty());
+        assert!(pista.to_ass().unwrap().contains("{\\k"));
     }
 }

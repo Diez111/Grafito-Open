@@ -1147,6 +1147,7 @@ done
             export: ExportFormat::PngSequence,
             canvas: (640, 480),
             duration_ms: 2000,
+            audio: None,
         }
     }
 
@@ -2002,6 +2003,7 @@ mod escena_f1_tests {
             export: ExportFormat::Gif,
             canvas: (640, 480),
             duration_ms: 2000,
+            audio: None,
         }
     }
 
@@ -2043,6 +2045,7 @@ mod playlist_fifo_f2b_tests {
             export: ExportFormat::Gif,
             canvas: (640, 480),
             duration_ms: 2000,
+            audio: None,
         }
     }
 

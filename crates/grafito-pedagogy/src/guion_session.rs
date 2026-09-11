@@ -142,6 +142,7 @@ mod tests {
             frames: 8,
             run_ms: 1000,
             wait_after_ms: 200,
+            voiceover: None,
         }
     }
 

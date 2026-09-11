@@ -256,6 +256,16 @@ fn validate_operation(document: &Document, operation: &AssistantOperation) -> Re
             validate_graph_expression(document, expression)?;
             Ok(())
         }
+        AssistantOperation::RunCommand { texto } => {
+            grafito_assistant_types::validate_run_command_texto(texto)?;
+            if texto.contains(['\n', '\r']) {
+                return Err("assistant run_command texto must be a single line".into());
+            }
+            crate::assistant_bridge::assistant_may_execute(texto)
+                .map(|_| ())
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
     }
 }
 
@@ -274,6 +284,15 @@ fn apply_operation(document: &mut Document, operation: AssistantOperation) -> Re
             document.try_add_object(GeoObject::Function(graph))?;
             Ok(())
         }
+        AssistantOperation::RunCommand { texto } => {
+            let mut input = crate::assistant_bridge::canonical_command_texto(&texto)
+                .map_err(|error| error.to_string())?;
+            match crate::commands::process_input(document, &mut input) {
+                crate::commands::CommandOutcome::Ok
+                | crate::commands::CommandOutcome::Message(_) => Ok(()),
+                crate::commands::CommandOutcome::Error(mensaje) => Err(mensaje),
+            }
+        }
     }
 }
 
@@ -286,6 +305,7 @@ fn describe_operation(operation: &AssistantOperation) -> String {
             domain_max,
             ..
         } => format!("Create graph y = {expression} for x in [{domain_min}, {domain_max}]"),
+        AssistantOperation::RunCommand { texto } => format!("Run command {}", texto.trim()),
     }
 }
 
@@ -375,6 +395,12 @@ fn receipt_delta(
             .filter(|operation| matches!(operation, AssistantOperation::CreateGraph { .. }))
             .count(),
     )?;
+    let run_command_count = receipt_count(
+        plan.operations
+            .iter()
+            .filter(|operation| matches!(operation, AssistantOperation::RunCommand { .. }))
+            .count(),
+    )?;
     let created_object_count = receipt_count(
         after
             .object_count()
@@ -396,6 +422,7 @@ fn receipt_delta(
         operation_count,
         set_variable_count,
         create_graph_count,
+        run_command_count,
         created_object_count,
         changed_variable_count,
     })

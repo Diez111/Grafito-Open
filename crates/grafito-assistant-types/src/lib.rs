@@ -13,6 +13,8 @@ pub const ASSISTANT_SCHEMA_VERSION: u32 = 1;
 
 /// Máximo de operaciones tipadas que puede incluir una propuesta del asistente.
 pub const MAX_PROPOSED_PLAN_OPERATIONS: usize = 8;
+/// Máximo de caracteres de un comando Grafito canónico en `RunCommand`.
+pub const MAX_RUN_COMMAND_CHARS: usize = 2000;
 /// Version de los receipts locales de staging de propuestas.
 pub const ASSISTANT_PLAN_RECEIPT_SCHEMA_VERSION: u32 = 1;
 /// Version de la politica local usada para generar un receipt.
@@ -933,12 +935,33 @@ pub enum AssistantOperation {
         /// Límite superior del dominio visible.
         domain_max: f64,
     },
+    /// Ejecuta un comando canónico de Grafito en el documento.
+    ///
+    /// La app valida el texto contra su allowlist y lo aplica con undo tras
+    /// aprobación explícita; acá sólo viaja la forma ya saneada (no vacío,
+    /// ≤2000 caracteres, sin NUL, una línea).
+    RunCommand {
+        /// Comando Grafito canónico, ej. `Punto[(1,2)]`.
+        texto: String,
+    },
 }
 
 impl AssistantOperation {
     /// Indica si la operación es la creación de un gráfico simple.
     pub const fn is_graph(&self) -> bool {
         matches!(self, Self::CreateGraph { .. })
+    }
+
+    /// Valida la forma de la operación sin necesitar el documento.
+    ///
+    /// `SetVariable`/`CreateGraph` se validan en el integrador (allowlist +
+    /// dominio); `RunCommand` sí se valida acá porque viaja como texto libre:
+    /// no vacío, [`MAX_RUN_COMMAND_CHARS`] caracteres como tope y sin NUL.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Self::RunCommand { texto } = self {
+            validate_run_command_texto(texto)?;
+        }
+        Ok(())
     }
 
     fn add_display_characters(&self, total: &mut usize) -> Result<(), String> {
@@ -952,8 +975,27 @@ impl AssistantOperation {
                 add_display_characters(total, expression)?;
                 add_display_characters(total, variable)
             }
+            Self::RunCommand { texto } => add_display_characters(total, texto),
         }
     }
+}
+
+/// Valida el texto de `RunCommand`: no vacío, ≤2000 caracteres, sin NUL.
+///
+/// Puro, sin documento ni I/O. La app suma allowlist + undo; el chequeo de
+/// una sola línea vive en el hook del agente (`validate_run_command_form` en
+/// `grafito-assistant`), no acá.
+pub fn validate_run_command_texto(texto: &str) -> Result<(), String> {
+    if texto.trim().is_empty() {
+        return Err("assistant run_command texto is empty".into());
+    }
+    if texto.chars().count() > MAX_RUN_COMMAND_CHARS {
+        return Err("assistant run_command texto exceeds 2000 characters".into());
+    }
+    if texto.contains('\0') {
+        return Err("assistant run_command texto contains NUL".into());
+    }
+    Ok(())
 }
 
 /// Propuesta que nunca se ejecuta sin validación por el integrador de comandos.
@@ -1048,6 +1090,9 @@ pub struct AssistantPlanReceiptDelta {
     pub set_variable_count: u8,
     /// Cantidad de operaciones `CreateGraph` solicitadas.
     pub create_graph_count: u8,
+    /// Cantidad de operaciones `RunCommand` solicitadas.
+    #[serde(default)]
+    pub run_command_count: u8,
     /// Objetos creados realmente durante el staging.
     pub created_object_count: u8,
     /// Variables cuyo valor final cambio realmente durante el staging.
@@ -1061,6 +1106,7 @@ impl AssistantPlanReceiptDelta {
             || self
                 .set_variable_count
                 .saturating_add(self.create_graph_count)
+                .saturating_add(self.run_command_count)
                 != self.operation_count
             || self.created_object_count > self.create_graph_count
             || self.changed_variable_count > self.set_variable_count
@@ -1902,6 +1948,7 @@ mod tests {
                 operation_count: 2,
                 set_variable_count: 1,
                 create_graph_count: 1,
+                run_command_count: 0,
                 created_object_count: 1,
                 changed_variable_count: 1,
             },
@@ -2161,5 +2208,99 @@ mod tests {
             TURN_MEDIA_MAX_FRAMES + 1,
         ));
         assert!(request.validate(&AttachmentLimits::default()).is_err());
+    }
+
+    #[test]
+    fn run_command_acepta_texto_valido_y_rechaza_formas_rotas() {
+        let valido = AssistantOperation::RunCommand {
+            texto: "Punto[(1,2)]".into(),
+        };
+        assert!(valido.validate().is_ok());
+        assert!(!valido.is_graph());
+
+        for roto in [
+            AssistantOperation::RunCommand {
+                texto: String::new(),
+            },
+            AssistantOperation::RunCommand {
+                texto: "   ".into(),
+            },
+            AssistantOperation::RunCommand {
+                texto: "x".repeat(MAX_RUN_COMMAND_CHARS + 1),
+            },
+            AssistantOperation::RunCommand {
+                texto: "Punto[(1,\0)]".into(),
+            },
+        ] {
+            assert!(roto.validate().is_err());
+        }
+        // El borde exacto (2000 caracteres) sigue válido.
+        assert!(AssistantOperation::RunCommand {
+            texto: "x".repeat(MAX_RUN_COMMAND_CHARS),
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn run_command_serializa_con_tag_canonico_y_presupuesto_de_salida() {
+        let operacion = AssistantOperation::RunCommand {
+            texto: "Recta[A,B]".into(),
+        };
+        let valor = serde_json::to_value(&operacion).expect("run_command serializes");
+        assert_eq!(valor["operation"], "run_command");
+        assert_eq!(valor["texto"], "Recta[A,B]");
+        let vuelta: AssistantOperation =
+            serde_json::from_value(valor).expect("run_command deserializes");
+        assert_eq!(vuelta, operacion);
+
+        // El texto cuenta en el presupuesto de salida como el resto de ops.
+        let budget = RequestBudget {
+            max_output_chars: 8,
+            ..RequestBudget::default()
+        };
+        let basis = ImmutableDocumentContext::empty(0).basis();
+        let mut response = AssistantResponse::message(LocalAssistantStatus::Solved, "x");
+        response.plan = Some(ProposedPlan {
+            schema_version: ASSISTANT_SCHEMA_VERSION,
+            basis,
+            summary: String::new(),
+            operations: vec![AssistantOperation::RunCommand {
+                texto: "x".repeat(8),
+            }],
+        });
+        assert!(response.validate(&budget).is_err());
+    }
+
+    #[test]
+    fn receipt_delta_cuenta_run_command_como_operacion_allowlisted() {
+        let bueno = AssistantPlanReceiptDelta {
+            operation_count: 3,
+            set_variable_count: 1,
+            create_graph_count: 1,
+            run_command_count: 1,
+            created_object_count: 1,
+            changed_variable_count: 1,
+        };
+        assert!(bueno.validate().is_ok());
+
+        let desbalanceado = AssistantPlanReceiptDelta {
+            run_command_count: 0,
+            ..bueno.clone()
+        };
+        assert!(desbalanceado.validate().is_err());
+
+        // Compat: receipts viejos sin el campo siguen parseando (default 0).
+        let legacy = serde_json::json!({
+            "operation_count": 2,
+            "set_variable_count": 1,
+            "create_graph_count": 1,
+            "created_object_count": 1,
+            "changed_variable_count": 1,
+        });
+        let parsed: AssistantPlanReceiptDelta =
+            serde_json::from_value(legacy).expect("legacy delta parses");
+        assert_eq!(parsed.run_command_count, 0);
+        assert!(parsed.validate().is_ok());
     }
 }

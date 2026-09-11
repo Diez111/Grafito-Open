@@ -331,6 +331,7 @@ impl AnimParams {
             export: self.export,
             canvas: self.resolution.as_tuple(),
             duration_ms: self.duration.as_millis(),
+            audio: None,
         }
     }
 }
@@ -455,6 +456,105 @@ impl std::str::FromStr for ExportFormat {
     }
 }
 
+// ── Voiceover mínimo P1-core (solo narración) ────────────────────────────
+// El sistema viejo de audio se borró en P0-a a propósito: NO reintroducir
+// volumen UI, offsets arbitrarios ni mux genérico. Este `AudioTrack` es el
+// mínimo aprobado: una sola pista de voz con offset y ganancia acotados.
+// Cerebro puro: sin egui, sin wgpu, sin I/O salvo `validate_en` de lectura.
+
+/// Largo máximo del `path` de voz en chars (anti-OOM de wire).
+pub const MAX_AUDIO_PATH_CHARS: usize = 512;
+/// Offset máximo de la voz en ms (paridad con el timeline de 60 s).
+pub const MAX_AUDIO_OFFSET_MS: u32 = 60_000;
+/// Ganancia máxima de la voz (0.0 silencio .. 2.0 doble).
+pub const MAX_AUDIO_GAIN: f32 = 2.0;
+
+fn default_audio_gain() -> f32 {
+    1.0
+}
+
+/// Pista de voz en off mínima: SOLO narración (sin loops ni volumen
+/// complejo ni mux genérico: esos campos no existen a propósito).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioTrack {
+    /// Ruta del audio de voz (relativa al workdir o absoluta contenida).
+    pub path: String,
+    /// Desplazamiento en ms (`0..=60000`).
+    #[serde(default)]
+    pub offset_ms: u32,
+    /// Ganancia lineal (`0.0..=2.0`, finita; default 1.0).
+    #[serde(default = "default_audio_gain")]
+    pub gain: f32,
+}
+
+impl AudioTrack {
+    /// Constructor validado (sintáctico, sin I/O).
+    pub fn try_new(path: String, offset_ms: u32, gain: f32) -> Result<Self, ProtocolError> {
+        let track = Self {
+            path,
+            offset_ms,
+            gain,
+        };
+        track.validate()?;
+        Ok(track)
+    }
+
+    /// Validación sintáctica: path no vacío (≤512 chars, sin NUL, sin
+    /// `..`), offset `0..=60000`, gain finita `0.0..=2.0`. Sin I/O.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.path.is_empty() {
+            return Err(ProtocolError::InvalidField {
+                field: "audio.path",
+                reason: "ruta vacía".into(),
+            });
+        }
+        if self.path.contains('\0') {
+            return Err(ProtocolError::InvalidField {
+                field: "audio.path",
+                reason: "ruta con byte NUL".into(),
+            });
+        }
+        if self.path.chars().count() > MAX_AUDIO_PATH_CHARS {
+            return Err(ProtocolError::InvalidField {
+                field: "audio.path",
+                reason: format!("excede {MAX_AUDIO_PATH_CHARS} chars"),
+            });
+        }
+        if self.path.contains("..") {
+            return Err(ProtocolError::InvalidField {
+                field: "audio.path",
+                reason: "la ruta no puede contener `..`: usá ruta contenida".into(),
+            });
+        }
+        if self.offset_ms > MAX_AUDIO_OFFSET_MS {
+            return Err(ProtocolError::InvalidField {
+                field: "audio.offset_ms",
+                reason: format!("{} fuera de 0..={MAX_AUDIO_OFFSET_MS}", self.offset_ms),
+            });
+        }
+        if !self.gain.is_finite() || !(0.0..=MAX_AUDIO_GAIN).contains(&self.gain) {
+            return Err(ProtocolError::InvalidField {
+                field: "audio.gain",
+                reason: format!("{} fuera de 0.0..={MAX_AUDIO_GAIN}", self.gain),
+            });
+        }
+        Ok(())
+    }
+
+    /// Además de [`AudioTrack::validate`], exige contención del `path`
+    /// dentro de `base` (solo lectura, nunca crea directorios).
+    pub fn validate_en(&self, base: &std::path::Path) -> Result<(), ProtocolError> {
+        self.validate()?;
+        if !ruta_contenida_en(base, &self.path) {
+            return Err(ProtocolError::InvalidField {
+                field: "audio.path",
+                reason: "fuera del área de trabajo: usá ruta relativa contenida".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Pedido de una animación: o un concepto en lenguaje natural o un spec JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnimRequest {
@@ -476,9 +576,11 @@ pub struct AnimRequest {
     /// Duración en ms (propagada desde AnimParams::duration). Default 2000 si falta (compat v1).
     #[serde(default = "default_duration_ms")]
     pub duration_ms: u64,
-    // NOTA: el audio se borró del núcleo (inventario P0-a). El wire viejo
-    // con campo `audio` sigue deserializando: serde ignora campos
-    // desconocidos por defecto y el pedido queda mudo (honesto).
+    /// Pista de voz en off mínima (P1-core voiceover, solo narración).
+    /// `None` = mudo (histórico intacto). El wire viejo con `audio`
+    /// desconocido ya no se ignora: deserializa acá y se valida.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioTrack>,
 }
 
 fn default_duration_ms() -> u64 {
@@ -558,16 +660,23 @@ impl AnimRequest {
                 reason: format!("{} fuera de 100..=60000", self.duration_ms),
             });
         }
+        if let Some(track) = &self.audio {
+            track.validate()?;
+        }
         Ok(())
     }
 
     /// Validación con contención de rutas contra `base` (directorio de
-    /// trabajo del render): hoy equivale a [`AnimRequest::validate`] (el
-    /// audio se borró del núcleo; la contención de PNG-sequence vive en
-    /// [`PngDir::validate_en`]). Se conserva la firma para compat.
+    /// trabajo del render): [`AnimRequest::validate`] + contención del
+    /// `audio.path` si hay pista (solo lectura, nunca crea directorios;
+    /// la contención de PNG-sequence vive en [`PngDir::validate_en`]).
     /// Puro salvo `canonicalize` de lectura (nunca crea directorios).
-    pub fn validate_en(&self, _base: &std::path::Path) -> Result<(), ProtocolError> {
-        self.validate()
+    pub fn validate_en(&self, base: &std::path::Path) -> Result<(), ProtocolError> {
+        self.validate()?;
+        if let Some(track) = &self.audio {
+            track.validate_en(base)?;
+        }
+        Ok(())
     }
 
     /// Tope de frames del pedido según su formato (P0.1, puro): corto
@@ -1392,6 +1501,7 @@ pub fn request_for_concept(concept: &str, template_hint: &str) -> ProtocolResult
         export: ExportFormat::Gif,
         canvas: (640, 480),
         duration_ms: 2000,
+        audio: None,
     };
     req.validate()?;
     Ok(req)
@@ -1682,17 +1792,58 @@ mod universal_tests {
     }
 
     #[test]
-    fn audio_borrado_del_nucleo_wire_viejo_queda_mudo() {
-        // P0-a: `AudioTrack` ya no existe en el crate (ni campo `audio`).
-        // El wire viejo con `audio` sigue deserializando: serde ignora el
-        // campo desconocido y el pedido queda mudo (honesto, sin pista).
-        let con_audio_viejo: AnimRequest = serde_json::from_str(
-            r#"{"template":"derivative-slope","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000,"audio":{"path":"a.mp3","offset_ms":100,"gain":1.5}}"#,
+    fn audio_minimo_voiceover_valida_camino_feliz() {
+        // P1-core voiceover mínimo (solo narración): el wire con `audio`
+        // deserializa a `Some` y valida; sin `audio` queda `None` (mudo
+        // histórico) y el wire nuevo sin pista no emite la clave.
+        let con_audio: AnimRequest = serde_json::from_str(
+            r#"{"template":"derivative-slope","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000,"audio":{"path":"voz/off.mp3","offset_ms":100,"gain":1.5}}"#,
         )
         .unwrap();
-        assert!(con_audio_viejo.validate().is_ok());
-        let v: serde_json::Value = serde_json::to_value(&con_audio_viejo).unwrap();
-        assert!(v.get("audio").is_none(), "el wire nuevo no emite audio");
+        assert!(con_audio.validate().is_ok());
+        let pista = con_audio.audio.as_ref().unwrap();
+        assert_eq!(pista.path, "voz/off.mp3");
+        assert_eq!(pista.offset_ms, 100);
+        assert!((pista.gain - 1.5).abs() < 1e-6);
+        let v: serde_json::Value = serde_json::to_value(&con_audio).unwrap();
+        assert!(v.get("audio").is_some(), "con pista sí se emite audio");
+        let muda = request_for_concept("derivada", "").expect("pedido válido");
+        assert!(muda.audio.is_none());
+        let v: serde_json::Value = serde_json::to_value(&muda).unwrap();
+        assert!(v.get("audio").is_none(), "sin pista no se emite audio");
+    }
+
+    #[test]
+    fn audio_minimo_rechaza_bordes() {
+        // Path: vacío, NUL, >512, `..`. Offset >60000. Gain NaN/inf/>2/<0.
+        assert!(AudioTrack::try_new(String::new(), 0, 1.0).is_err());
+        assert!(AudioTrack::try_new("a\0b.mp3".to_string(), 0, 1.0).is_err());
+        assert!(AudioTrack::try_new("a".repeat(513), 0, 1.0).is_err());
+        assert!(AudioTrack::try_new("a".repeat(512), 0, 1.0).is_ok());
+        assert!(AudioTrack::try_new("../afuera.mp3".to_string(), 0, 1.0).is_err());
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 60_001, 1.0).is_err());
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 60_000, 1.0).is_ok());
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 0, f32::NAN).is_err());
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 0, f32::INFINITY).is_err());
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 0, 2.5).is_err());
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 0, -0.5).is_err());
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 0, 0.0).is_ok());
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 0, 2.0).is_ok());
+        // El pedido incluye la pista en su `validate`.
+        let mut req = request_for_concept("derivada", "").expect("pedido válido");
+        req.audio = Some(AudioTrack {
+            path: "../afuera.mp3".to_string(),
+            offset_ms: 0,
+            gain: 1.0,
+        });
+        assert!(req.validate().is_err());
+        // Contención: relativa contenida ok, `..` err (sin crear nada).
+        let base = std::env::temp_dir();
+        assert!(AudioTrack::try_new("voz/a.mp3".to_string(), 0, 1.0)
+            .unwrap()
+            .validate_en(&base)
+            .is_ok());
+        assert!(AudioTrack::try_new("../afuera.mp3".to_string(), 0, 1.0).is_err());
     }
 
     #[test]
@@ -1713,15 +1864,18 @@ mod universal_tests {
 
     #[test]
     fn anim_request_sin_audio_valida_igual() {
-        // P0-a: ya no hay campo `audio`; el pedido sin audio valida igual y
-        // el wire mínimo sigue deserializando con defaults (duration 2000).
+        // P1-core: sin pista el pedido queda mudo (histórico) y valida
+        // igual; el wire mínimo sigue deserializando con defaults
+        // (duration 2000, audio None).
         let req = request_for_concept("derivada", "").expect("pedido válido");
         assert!(req.validate().is_ok());
+        assert!(req.audio.is_none());
         let minimo: AnimRequest = serde_json::from_str(
             r#"{"template":"derivative-slope","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000}"#,
         )
         .unwrap();
         assert!(minimo.validate().is_ok());
+        assert!(minimo.audio.is_none());
         assert_eq!(minimo.duration_ms, 2000);
     }
 
@@ -1849,6 +2003,7 @@ mod universal_tests {
                 export: ExportFormat::PngSequence,
                 canvas,
                 duration_ms: 2000,
+                audio: None,
             };
             assert!(req.validate().is_err(), "canvas {canvas:?} debe rechazarse");
         }
@@ -1883,6 +2038,7 @@ mod universal_tests {
             export: ExportFormat::PngSequence,
             canvas: (640, 480),
             duration_ms: 2000,
+            audio: None,
         };
         assert!(ok.validate().is_ok());
         // Duración fuera de 0.1..=60 s se rechaza (P0.1 long-form: 60000
@@ -2858,6 +3014,7 @@ mod playlist_f2b_tests {
             export: ExportFormat::Gif,
             canvas: (640, 480),
             duration_ms: 2000,
+            audio: None,
         }
     }
 
@@ -3155,6 +3312,7 @@ mod p01_longform_tests {
             export: formato,
             canvas: (640, 480),
             duration_ms,
+            audio: None,
         }
     }
 

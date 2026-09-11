@@ -2679,6 +2679,7 @@ mod scene_f1_tests {
             export: ExportFormat::Gif,
             canvas: (640, 480),
             duration_ms: 2000,
+            audio: None,
         };
         let lista = Playlist::try_new(vec![
             PlaylistStep::anim(pedido("derivative-slope"), 2000, 0).unwrap(),

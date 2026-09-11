@@ -22,6 +22,7 @@
 //! assert!(doc.objects_iter().any(|(_, obj)| obj.label() == "A"));
 //! ```
 
+pub mod assistant_bridge;
 pub mod assistant_context;
 pub mod assistant_plan;
 pub mod assistant_proposals;
