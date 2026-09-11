@@ -1365,6 +1365,81 @@ fn extract_viewport(lower: &str) -> Option<Resolution> {
     None
 }
 
+/// Primer par `WxH`/`canvas [w, h]` mencionado en crudo (aunque sea
+/// inválido para `Resolution`). `None` si el pedido no menciona tamaño.
+/// Espejo de [`extract_viewport`] pero sin filtrar por validez: sirve para
+/// distinguir "mención inválida" (`Err` con números) de "sin mención"
+/// (defecto). Puro, sin pánicos.
+fn mencion_viewport(lower: &str) -> Option<(u32, u32)> {
+    if let Some(pos) = lower.find("canvas") {
+        let rest = lower.get(pos + "canvas".len()..).unwrap_or("");
+        if let (Some(a), Some(b)) = (rest.find('['), rest.find(']')) {
+            if a < b {
+                let inside = rest.get(a + 1..b).unwrap_or("");
+                let parts: Vec<&str> = inside.split(',').collect();
+                if parts.len() == 2 {
+                    if let (Ok(w), Ok(h)) = (
+                        parts[0].trim().parse::<u32>(),
+                        parts[1].trim().parse::<u32>(),
+                    ) {
+                        return Some((w, h));
+                    }
+                }
+            }
+        }
+    }
+    // `640x480` (con `x` o `×`): primer candidato parseable, válido o no.
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            let sep_x = bytes.get(j) == Some(&b'x');
+            let sep_mul = lower.get(j..j + 1) == Some("×");
+            if sep_x || sep_mul {
+                let sep_len = if sep_mul { "×".len() } else { 1 };
+                let mut k = j + sep_len;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                let mut m = k;
+                while m < bytes.len() && bytes[m].is_ascii_digit() {
+                    m += 1;
+                }
+                if m > k {
+                    if let (Ok(w), Ok(h)) = (
+                        lower.get(i..j).unwrap_or("").parse::<u32>(),
+                        lower.get(k..m).unwrap_or("").parse::<u32>(),
+                    ) {
+                        return Some((w, h));
+                    }
+                }
+                i = m.max(j + 1);
+                continue;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Viewport del pedido (R6d): mención explícita inválida → `Err` con los
+/// números (`ViewportInvalido`, jamás default silencioso); sin mención →
+/// 640×480 (`Resolution::default`). Puro, sin pánicos.
+pub fn viewport_o_defecto(lower: &str) -> ParametricResult<Resolution> {
+    match mencion_viewport(lower) {
+        None => Ok(Resolution::default()),
+        Some((w, h)) => {
+            Resolution::try_new(w, h).map_err(|_| ParametricError::ViewportInvalido { w, h })
+        }
+    }
+}
+
 /// Pista en español para la vista previa (solo nombres humanos del mapa de
 /// controles: deslizador, reproducir, pausar, tangente, área, recta, punto,
 /// función — jamás identificadores literales).
@@ -1704,9 +1779,14 @@ fn area_anim(
         param_raw.to_string()
     };
     let param = ParamName::try_new(&param_nombre)?;
-    let n = extract_frames(pedido_lower)?.unwrap_or(PARAMETRIC_MAX_FRAMES);
+    // R6d: sin mención defaultean 24 frames (`PARAMETRIC_DEFAULT_FRAMES`:
+    // 48×640×480×4 ≈ 59 MiB roza el tope de 64 MiB, así que el default es
+    // la mitad documentada, no el tope).
+    let n = extract_frames(pedido_lower)?.unwrap_or(PARAMETRIC_DEFAULT_FRAMES);
     let frames = FrameCount::try_new(n)?;
-    let viewport = extract_viewport(pedido_lower).unwrap_or_default();
+    // R6d: mención explícita inválida → `Err` con números; sin mención →
+    // 640×480 (jamás default silencioso ante tamaño pedido).
+    let viewport = viewport_o_defecto(pedido_lower)?;
     ParametricAnim::try_new(
         ParametricKind::Area,
         expr,
@@ -1870,9 +1950,11 @@ fn tangent_anim(
         param_raw.to_string()
     };
     let param = ParamName::try_new(&param_nombre)?;
-    let n = extract_frames(pedido_lower)?.unwrap_or(PARAMETRIC_MAX_FRAMES);
+    // R6d: espejo de `area_anim` — default 24 frames + viewport explícito
+    // inválido → `Err` con números.
+    let n = extract_frames(pedido_lower)?.unwrap_or(PARAMETRIC_DEFAULT_FRAMES);
     let frames = FrameCount::try_new(n)?;
-    let viewport = extract_viewport(pedido_lower).unwrap_or_default();
+    let viewport = viewport_o_defecto(pedido_lower)?;
     ParametricAnim::try_new(
         ParametricKind::Tangent,
         expr,
@@ -2395,7 +2477,9 @@ mod tests {
             assert_eq!(anim.expr_a, INTEGRAL_CANONICAL_EXPR);
             assert_eq!(anim.param.as_str(), INTEGRAL_CANONICAL_PARAM);
             assert_eq!((anim.p0, anim.p1), (0.0, 2.0));
-            assert_eq!(anim.frame_count(), PARAMETRIC_MAX_FRAMES);
+            // R6d: sin mención defaultean 24 frames (no el tope 48: el set
+            // 48×640×480×4 ≈ 59 MiB roza los 64 MiB) y 640×480.
+            assert_eq!(anim.frame_count(), PARAMETRIC_DEFAULT_FRAMES);
         }
         // La prosa declara la canónica en rioplatense.
         assert!(INTEGRAL_CANONICAL_PROSA.contains("x²"));
@@ -3433,5 +3517,46 @@ mod vivo_m4 {
                 anim.eval_frame_con_vivo(i, 2.0, None)
             );
         }
+    }
+
+    #[test]
+    fn area_y_tangente_defaultean_24_frames_y_640x480() {
+        // R6d: sin mención → 24 frames (48 roza 64 MiB) y 640×480.
+        let area = infer_area_anim("haceme una animacion de una integral (nativa)").unwrap();
+        assert_eq!(area.anim().frame_count(), PARAMETRIC_DEFAULT_FRAMES);
+        assert_eq!(area.anim().viewport.as_tuple(), (640, 480));
+        let tang = infer_tangent_anim("hace una animacion de una derivada (paramétrica)").unwrap();
+        assert_eq!(tang.anim().frame_count(), PARAMETRIC_DEFAULT_FRAMES);
+        assert_eq!(tang.anim().viewport.as_tuple(), (640, 480));
+        // Mención válida se respeta.
+        let grande =
+            infer_area_anim("animacion de la integral de f(x)=x^2 de 0 a 2 en 800x600").unwrap();
+        assert_eq!(grande.anim().viewport.as_tuple(), (800, 600));
+    }
+
+    #[test]
+    fn viewport_mencionado_invalido_falla_con_numeros() {
+        // R6d: mención explícita inválida → `Err` con números (jamás
+        // default silencioso).
+        assert_eq!(
+            viewport_o_defecto("integral en 10x10"),
+            Err(ParametricError::ViewportInvalido { w: 10, h: 10 })
+        );
+        assert_eq!(
+            viewport_o_defecto("canvas [0, 480]"),
+            Err(ParametricError::ViewportInvalido { w: 0, h: 480 })
+        );
+        assert_eq!(
+            viewport_o_defecto("integral en 5000x500"),
+            Err(ParametricError::ViewportInvalido { w: 5000, h: 500 })
+        );
+        // Sin mención → defecto.
+        assert_eq!(
+            viewport_o_defecto("integral de f(x)=x^2"),
+            Ok(Resolution::default())
+        );
+        // Propaga por las dos vías de inferencia.
+        assert!(infer_area_anim("animacion de la integral en 10x10").is_err());
+        assert!(infer_tangent_anim("derivada pelada en canvas [0, 480]").is_err());
     }
 }

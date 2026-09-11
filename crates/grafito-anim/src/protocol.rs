@@ -432,6 +432,22 @@ impl AnimRequest {
                 reason: "caracteres inválidos".into(),
             });
         }
+        // Allowlist R6d: el template no vacío debe ser canónico (o el alias
+        // histórico `pythagoras`). `""` con concepto/spec ok (se resuelve por
+        // concepto vía `sanitize_template`); `"auto"` y desconocidos son
+        // `Err` (antes se degradaban en silencio a otra plantilla).
+        if !self.template.is_empty() {
+            let t = self.template.trim().to_lowercase();
+            if t != "pythagoras" && !CANONICAL_TEMPLATES.contains(&t.as_str()) {
+                return Err(ProtocolError::InvalidField {
+                    field: "template",
+                    reason: format!(
+                        "{:?} no está en la lista canónica: elegí una de {CANONICAL_TEMPLATES:?}",
+                        self.template
+                    ),
+                });
+            }
+        }
         for (k, v) in &self.params {
             if !v.is_finite() {
                 return Err(ProtocolError::InvalidField {
@@ -455,8 +471,10 @@ impl AnimRequest {
                 "{w}x{h} > 4096 (máximo soportado)"
             )));
         }
-        // Valida duration_ms propagada (0.1..30s → 100..30000ms).
-        if self.duration_ms != 0 && (self.duration_ms < 100 || self.duration_ms > 30000) {
+        // Valida duration_ms propagada (0.1..30s → 100..30000ms), sin
+        // excepción del 0 (R6d: el 0 antes pasaba y el motor lo defaulteaba
+        // en silencio a 2000; hoy es `Err` honesto).
+        if self.duration_ms < 100 || self.duration_ms > 30000 {
             return Err(ProtocolError::InvalidField {
                 field: "duration_ms",
                 reason: format!("{} fuera de 100..=30000", self.duration_ms),
@@ -1123,7 +1141,16 @@ pub fn template_for_concept(concept: &str) -> &'static str {
         return "mobius-transform";
     }
     if c.contains("vector") || (c.contains("campo") && c.contains("vectorial")) {
-        return "conformal-map";
+        // R6d: `vector` pelado no dibuja conforme solo (antes cualquier
+        // mención caía a `conformal-map` fingiendo respuesta): exige token
+        // explícito de conforme/complejo/fractal, si no `universal`.
+        if c.contains("conforme")
+            || c.contains("complej")
+            || c.contains("complex")
+            || c.contains("fractal")
+        {
+            return "conformal-map";
+        }
     }
     if c.contains("euler")
         || c.contains("número e")
@@ -1141,10 +1168,31 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     {
         return "fourier";
     }
-    if c.contains("probab") || c.contains("binom") || c.contains("distrib") || c.contains("estad") {
+    // R6d: catch-alls con token explícito. `probab/binom/distrib/estad`
+    // sin mención a integral/área/densidad/acumulada/histograma NO dibuja
+    // curva integral (antes "probabilidad binomial" fingía área).
+    if (c.contains("probab") || c.contains("binom") || c.contains("distrib") || c.contains("estad"))
+        && (c.contains("integral")
+            || contiene_palabra(&c, "area")
+            || contiene_palabra(&c, "área")
+            || c.contains("densidad")
+            || c.contains("acumulada")
+            || c.contains("histograma"))
+    {
         return "integral-area";
     }
-    if c.contains("sin(") || c.contains("cos(") || c.contains("seno") || c.contains("coseno") {
+    // R6d: `sin(`/`cos(` sin token de taylor/serie/aproxima/polinomio NO
+    // dibuja serie (antes "sin(x)" pelado fingía Taylor). `seno`/`coseno`
+    // en palabras sí son mención trigonométrica explícita y van a Taylor.
+    if c.contains("sin(") || c.contains("cos(") {
+        if c.contains("taylor")
+            || c.contains("serie")
+            || c.contains("aproxima")
+            || c.contains("polinomio")
+        {
+            return "taylor-series";
+        }
+    } else if c.contains("seno") || c.contains("coseno") {
         return "taylor-series";
     }
     // Fallback honesto T2: pedido desconocido → `universal` (placeholder
@@ -1179,32 +1227,44 @@ pub const CANONICAL_TEMPLATES: &[&str] = &[
     "universal",
 ];
 
-/// Sanitiza un template libre a uno conocido; si es desconocido, elige por concepto.
-pub fn sanitize_template(template: &str, concept: &str) -> String {
+/// Sanitiza un template libre a uno conocido (R6d: devuelve `Result`).
+///
+/// - Alias histórico `pythagoras` → `Ok("pitagoras")`.
+/// - Canónica → `Ok` literal (el dispatcher nativo la atiende).
+/// - `""` / `"auto"` → `Ok` por concepto (`template_for_concept`).
+/// - Desconocido no vacío → `Err` honesto (antes se degradaba en silencio
+///   a otra plantilla, fingiendo respuesta).
+pub fn sanitize_template(template: &str, concept: &str) -> ProtocolResult<String> {
     let t = template.trim().to_lowercase();
     // Alias histórico: pasa a su canónica.
     if t == "pythagoras" {
-        return "pitagoras".to_string();
+        return Ok("pitagoras".to_string());
     }
     // Canónicas v3 con renderer nativo propio (sync con anim_native):
     // pasan literales para que el dispatcher nativo las atienda en vez
     // de degradarlas por concepto. "universal" también pasa literal: el
     // nativo lo renderiza (placeholder neutro honesto).
     if CANONICAL_TEMPLATES.contains(&t.as_str()) {
-        return t;
+        return Ok(t);
     }
     if t.is_empty() || t == "auto" {
-        return template_for_concept(concept).to_string();
+        return Ok(template_for_concept(concept).to_string());
     }
-    template_for_concept(concept).to_string()
+    Err(ProtocolError::InvalidField {
+        field: "template",
+        reason: format!(
+            "{template:?} no está en la lista canónica: elegí una de {CANONICAL_TEMPLATES:?}"
+        ),
+    })
 }
 
-/// Construye un AnimRequest universal a partir de cualquier texto libre.
-/// Garantiza validacion y valores por defecto profesionales.
-pub fn request_for_concept(concept: &str, template_hint: &str) -> AnimRequest {
+/// Construye un AnimRequest a partir de cualquier texto libre (R6d:
+/// devuelve `Result`: template desconocido o pedido inválido es `Err`,
+/// jamás defaults silenciosos).
+pub fn request_for_concept(concept: &str, template_hint: &str) -> ProtocolResult<AnimRequest> {
     let concept_norm = normalize_concept(concept);
-    let template = sanitize_template(template_hint, &concept_norm);
-    AnimRequest {
+    let template = sanitize_template(template_hint, &concept_norm)?;
+    let req = AnimRequest {
         template,
         concept: concept_norm,
         params: std::collections::BTreeMap::new(),
@@ -1212,7 +1272,9 @@ pub fn request_for_concept(concept: &str, template_hint: &str) -> AnimRequest {
         export: ExportFormat::Gif,
         canvas: (640, 480),
         duration_ms: 2000,
-    }
+    };
+    req.validate()?;
+    Ok(req)
 }
 
 #[cfg(test)]
@@ -1238,7 +1300,14 @@ mod universal_tests {
             ("hola mundo sin matemática", "universal"),
             ("", "universal"),
             ("   ", "universal"),
-            ("probabilidad binomial", "integral-area"),
+            // R6d: catch-all con token explícito — sin mención a
+            // integral/área/densidad/acumulada/histograma es `universal`.
+            ("probabilidad binomial", "universal"),
+            ("probabilidad con histograma de densidad", "integral-area"),
+            ("vector campo F(x,y)", "universal"),
+            ("vector conforme complejo", "conformal-map"),
+            ("graficá sin(x)", "universal"),
+            ("serie de taylor de sin(x)", "taylor-series"),
             ("fractal mandelbrot", "conformal-map"),
         ];
         for (concept, expected) in cases {
@@ -1279,11 +1348,11 @@ mod universal_tests {
     }
     #[test]
     fn request_for_concept_validates() {
-        let req = request_for_concept("derivada", "");
+        let req = request_for_concept("derivada", "").expect("pedido válido");
         assert!(req.validate().is_ok());
-        let req2 = request_for_concept("", "unknown-template");
-        assert!(req2.validate().is_ok());
-        let req3 = request_for_concept(&"a".repeat(1000), "auto");
+        // Template desconocido no vacío → `Err` (R6d, sin degradado).
+        assert!(request_for_concept("", "unknown-template").is_err());
+        let req3 = request_for_concept(&"a".repeat(1000), "auto").expect("auto resuelve");
         assert!(req3.validate().is_ok());
         assert!(req3.concept.len() <= 500);
     }
@@ -1313,18 +1382,19 @@ mod universal_tests {
     #[test]
     fn sanitize_template_fallback() {
         assert_eq!(
-            sanitize_template("derivative-slope", "hola"),
+            sanitize_template("derivative-slope", "hola").expect("canónica"),
             "derivative-slope"
         );
-        assert_eq!(sanitize_template("pythagoras", "hola"), "pitagoras");
         assert_eq!(
-            sanitize_template("", "integral de riemann"),
+            sanitize_template("pythagoras", "hola").expect("alias"),
+            "pitagoras"
+        );
+        assert_eq!(
+            sanitize_template("auto", "integral de riemann").expect("auto resuelve"),
             "integral-area"
         );
-        assert_eq!(
-            sanitize_template("unknown", "taylor serie"),
-            "taylor-series"
-        );
+        // R6d: desconocido no vacío es `Err` (antes degradaba a concepto).
+        assert!(sanitize_template("unknown", "taylor serie").is_err());
     }
 
     // ── v3: params vivos + timeline + sync plantillas + webm ────────────
@@ -1439,7 +1509,11 @@ mod universal_tests {
             "mobius-transform",
             "universal",
         ] {
-            assert_eq!(sanitize_template(t, "cualquier concepto"), t, "{t}");
+            assert_eq!(
+                sanitize_template(t, "cualquier concepto").expect("canónica"),
+                t,
+                "{t}"
+            );
         }
         assert_eq!(
             template_for_concept("bifurcación logística r=3.5"),
@@ -1456,7 +1530,7 @@ mod universal_tests {
         // Comportamiento histórico intacto para el resto.
         assert_eq!(template_for_concept("hola mundo"), "universal");
         assert_eq!(
-            sanitize_template("auto", "integral de riemann"),
+            sanitize_template("auto", "integral de riemann").expect("auto resuelve"),
             "integral-area"
         );
     }
@@ -1493,7 +1567,7 @@ mod universal_tests {
         // El wire viejo con `audio` sigue deserializando: serde ignora el
         // campo desconocido y el pedido queda mudo (honesto, sin pista).
         let con_audio_viejo: AnimRequest = serde_json::from_str(
-            r#"{"template":"t","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000,"audio":{"path":"a.mp3","offset_ms":100,"gain":1.5}}"#,
+            r#"{"template":"derivative-slope","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000,"audio":{"path":"a.mp3","offset_ms":100,"gain":1.5}}"#,
         )
         .unwrap();
         assert!(con_audio_viejo.validate().is_ok());
@@ -1521,10 +1595,10 @@ mod universal_tests {
     fn anim_request_sin_audio_valida_igual() {
         // P0-a: ya no hay campo `audio`; el pedido sin audio valida igual y
         // el wire mínimo sigue deserializando con defaults (duration 2000).
-        let req = request_for_concept("derivada", "");
+        let req = request_for_concept("derivada", "").expect("pedido válido");
         assert!(req.validate().is_ok());
         let minimo: AnimRequest = serde_json::from_str(
-            r#"{"template":"t","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000}"#,
+            r#"{"template":"derivative-slope","concept":"c","params":{},"spec":null,"export":"gif","canvas":[640,480],"duration_ms":2000}"#,
         )
         .unwrap();
         assert!(minimo.validate().is_ok());
@@ -1537,23 +1611,33 @@ mod universal_tests {
         // se pinean iguales por test en grafito-app (mismo orden).
         assert_eq!(CANONICAL_TEMPLATES.len(), 11);
         for t in CANONICAL_TEMPLATES {
-            assert_eq!(sanitize_template(t, "cualquier concepto"), *t, "{t}");
+            assert_eq!(
+                sanitize_template(t, "cualquier concepto").expect("canónica"),
+                *t,
+                "{t}"
+            );
         }
         // Alias y auto intactos tras el refactor a `contains`.
-        assert_eq!(sanitize_template("pythagoras", "hola"), "pitagoras");
-        assert_eq!(sanitize_template("  EULER  ", "hola"), "euler");
         assert_eq!(
-            sanitize_template("", "integral de riemann"),
+            sanitize_template("pythagoras", "hola").expect("alias"),
+            "pitagoras"
+        );
+        assert_eq!(
+            sanitize_template("  EULER  ", "hola").expect("canónica"),
+            "euler"
+        );
+        assert_eq!(
+            sanitize_template("", "integral de riemann").expect("vacío resuelve"),
             "integral-area"
         );
         assert_eq!(
-            sanitize_template("auto", "integral de riemann"),
+            sanitize_template("auto", "integral de riemann").expect("auto resuelve"),
             "integral-area"
         );
-        assert_eq!(
-            sanitize_template("limit-epsilon", "derivada"),
-            "derivative-slope"
-        );
+        // R6d: `limit-epsilon` no tiene renderer propio y ya no degrada en
+        // silencio a otra plantilla: es `Err` (el concepto resuelve por
+        // `template_for_concept` solo con `""`/`"auto"`).
+        assert!(sanitize_template("limit-epsilon", "derivada").is_err());
     }
 
     #[test]
@@ -1577,7 +1661,11 @@ mod universal_tests {
             "gradient-field",
             "mobius-transform",
         ] {
-            assert_eq!(sanitize_template(t, "cualquier concepto"), t, "{t}");
+            assert_eq!(
+                sanitize_template(t, "cualquier concepto").expect("canónica"),
+                t,
+                "{t}"
+            );
         }
         // Wire v1: cada mensaje documentado en el head del módulo parsea.
         let hello = serde_json::json!({
@@ -1649,15 +1737,21 @@ mod universal_tests {
         assert!(AnimJobId::try_new(String::new()).is_err());
         assert!(AnimJobId::try_new("job-1".to_string()).is_ok());
         // Alias histórico pythagoras → pitagoras.
-        assert_eq!(sanitize_template("pythagoras", "hola"), "pitagoras");
-        // Template desconocido: ruteo por concepto, jamás plantilla con
-        // renderer falso para un pedido que no la menciona.
         assert_eq!(
-            sanitize_template("no-existe-xyz", "integral de riemann"),
+            sanitize_template("pythagoras", "hola").expect("alias"),
+            "pitagoras"
+        );
+        // Template desconocido: `Err` honesto (R6d, jamás plantilla con
+        // renderer falso para un pedido que no la menciona).
+        assert!(sanitize_template("no-existe-xyz", "integral de riemann").is_err());
+        assert!(sanitize_template("no-existe-xyz", "tarea sin matemática").is_err());
+        // `""` con concepto sí resuelve por concepto.
+        assert_eq!(
+            sanitize_template("", "integral de riemann").expect("vacío resuelve"),
             "integral-area"
         );
         assert_eq!(
-            sanitize_template("no-existe-xyz", "tarea sin matemática"),
+            sanitize_template("", "tarea sin matemática").expect("vacío resuelve"),
             "universal"
         );
         // Pedido legítimo pasa con canvas y duración de presupuesto.
@@ -1675,6 +1769,24 @@ mod universal_tests {
         let mut mala = ok.clone();
         mala.duration_ms = 90_000;
         assert!(mala.validate().is_err());
+        // R6d: el 0 ya no pasa (antes defaulteaba en silencio a 2000).
+        mala.duration_ms = 0;
+        assert!(mala.validate().is_err());
+        mala.duration_ms = 99;
+        assert!(mala.validate().is_err());
+        // R6d: allowlist de template — desconocido y `auto` son `Err`,
+        // alias `pythagoras` y `""` con concepto pasan.
+        let mut raro = ok.clone();
+        raro.template = "no-existe-xyz".to_string();
+        assert!(raro.validate().is_err());
+        raro.template = "auto".to_string();
+        assert!(raro.validate().is_err());
+        raro.template = "pythagoras".to_string();
+        assert!(raro.validate().is_ok());
+        raro.template = String::new();
+        assert!(raro.validate().is_ok());
+        raro.concept = String::new();
+        assert!(raro.validate().is_err());
     }
 }
 
@@ -2492,8 +2604,10 @@ pub fn build_animations_with_timings(
     Playlist::try_new(steps)
 }
 
-/// `Succession` con defaults honestos: cada request corre su `duration_ms`
-/// (0 = compat → 2000 ms) y sin espera posterior.
+/// `Succession` validada (R6d): cada request se valida (`validate`, que
+/// exige template canónico y `duration_ms` 100..=30000) y corre su
+/// `duration_ms` sin espera posterior. Nada se defaultea en silencio
+/// (el 0 antes pasaba a 2000 ms sin error).
 pub fn build_succession(requests: Vec<AnimRequest>) -> Result<Playlist, ProtocolError> {
     if requests.is_empty() {
         return Err(ProtocolError::InvalidField {
@@ -2512,11 +2626,13 @@ pub fn build_succession(requests: Vec<AnimRequest>) -> Result<Playlist, Protocol
     }
     let mut steps = Vec::with_capacity(requests.len());
     for request in requests {
-        let run_ms = if request.duration_ms == 0 {
-            2000
-        } else {
-            request.duration_ms
-        };
+        request
+            .validate()
+            .map_err(|e| ProtocolError::InvalidField {
+                field: "playlist.request",
+                reason: e.to_string(),
+            })?;
+        let run_ms = request.duration_ms;
         steps.push(PlaylistStep::anim(request, run_ms, 0)?);
     }
     Playlist::try_new(steps)
@@ -2642,6 +2758,25 @@ mod playlist_f2b_tests {
         )])
         .is_err());
         assert!(build_succession(vec![]).is_err());
+    }
+
+    #[test]
+    fn succession_valida_en_vez_de_defaultear() {
+        // R6d: duration 0 o template desconocido es `Err` (antes el 0
+        // pasaba a 2000 ms en silencio).
+        let mut cero = pedido("derivative-slope", "derivada");
+        cero.duration_ms = 0;
+        assert!(build_succession(vec![cero]).is_err());
+        let mut raro = pedido("derivative-slope", "derivada");
+        raro.template = "no-existe-xyz".to_string();
+        assert!(build_succession(vec![raro]).is_err());
+        // Cada request válido corre su `duration_ms` (sin espera posterior).
+        let lista = build_succession(vec![
+            pedido("derivative-slope", "derivada"),
+            pedido("integral-area", "integral"),
+        ])
+        .unwrap();
+        assert_eq!(lista.total_duration_ms(), 4000);
     }
 
     #[test]

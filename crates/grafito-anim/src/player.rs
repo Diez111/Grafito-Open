@@ -12,9 +12,14 @@
 //!   `center` con alfa `opacity`.
 //! - [`PlayedFrame`] = `{ objects: Vec<PlacedMobject> }` en orden de dibujo
 //!   (0 = fondo). Sin píxeles, sin texturas.
-//! - [`ScenePlayer::play`] es total: clampa presupuestos en vez de fallar
-//!   (frames por item 1..=48, total ≤96, capas ≤32). [`ScenePlayer::try_play`]
-//!   es la versión estricta que devuelve `Err` honesto si algo excede.
+//! - [`ScenePlayer::play`] es total: clampa presupuestos y SALTA el colocado
+//!   inválido en vez de fallar (frames por item 1..=48, total ≤96, capas
+//!   ≤32). [`ScenePlayer::try_play`] es la versión estricta que devuelve
+//!   `Err` honesto si algo excede o algún colocado es inválido (además
+//!   valida el plan de remuestreo vía `AnimationGroup::plan_remuestreo`
+//!   cuando los items traen N distinto).
+//! - [`PlacedMobject::opaco`] y los `placed_at` devuelven `SceneResult`
+//!   (R6d): lo inválido jamás llega a pantalla como punto en el origen.
 //! - `Write` con SVG opaco NO finge trazo parcial: el SVG viaja entero y el
 //!   progreso se expresa por `opacity` (revelado honesto, documentado en
 //!   [`WriteAnim`]).
@@ -168,16 +173,12 @@ impl PlacedMobject {
     }
 
     /// Colocado opaco sin transformar (centro = centroide honesto).
-    pub fn opaco(mobject: Mobject) -> Self {
+    ///
+    /// R6d: devuelve `SceneResult` — el mobject inválido es `Err` honesto
+    /// (antes caía a un `Dot` en el origen, fingiendo contenido).
+    pub fn opaco(mobject: Mobject) -> SceneResult<Self> {
         let center = centroide_de(&mobject);
-        // `try_new` solo falla con mobject inválido; acá el llamador ya
-        // validó (escena) o el test lo pinnea: fallback total sin panic.
-        Self::try_new(mobject, 1.0, 1.0, center).unwrap_or(Self {
-            mobject: Mobject::Dot { x: 0.0, y: 0.0 },
-            opacity: 1.0,
-            scale: 1.0,
-            center: [0.0, 0.0],
-        })
+        Self::try_new(mobject, 1.0, 1.0, center)
     }
 }
 
@@ -348,8 +349,9 @@ impl CreateAnim {
         traza_prefijo(&self.poly, s, self.closed)
     }
 
-    /// Colocado en `alpha` (polígono parcial opaco).
-    pub fn placed_at(&self, alpha: f64) -> PlacedMobject {
+    /// Colocado en `alpha` (polígono parcial opaco; R6d: `Err` honesto si
+    /// la traza queda vacía, jamás punto en el origen).
+    pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
         let traza = self.traza_en(alpha);
         let center = centroide_de(&Mobject::Polygon {
             pts: self.poly.clone(),
@@ -359,14 +361,14 @@ impl CreateAnim {
         } else if let Some(p) = traza.first().or(self.poly.first()) {
             Mobject::Dot { x: p[0], y: p[1] }
         } else {
-            Mobject::Dot { x: 0.0, y: 0.0 }
+            // Inalcanzable con constructor validado (polilínea no vacía);
+            // `Err` honesto en vez del viejo `Dot` en el origen.
+            return Err(SceneError::MobjectInvalido {
+                donde: "Create",
+                detalle: "traza vacía sin polilínea: no hay qué colocar".to_string(),
+            });
         };
-        PlacedMobject::try_new(m, 1.0, 1.0, center).unwrap_or(PlacedMobject {
-            mobject: Mobject::Dot { x: 0.0, y: 0.0 },
-            opacity: 1.0,
-            scale: 1.0,
-            center: [0.0, 0.0],
-        })
+        PlacedMobject::try_new(m, 1.0, 1.0, center)
     }
 }
 
@@ -487,8 +489,9 @@ impl WriteAnim {
         self.frames
     }
 
-    /// Colocado en `alpha` (mismo SVG entero, alfa eased).
-    pub fn placed_at(&self, alpha: f64) -> PlacedMobject {
+    /// Colocado en `alpha` (mismo SVG entero, alfa eased; R6d: `Err`
+    /// honesto si el colocado no valida).
+    pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
         let e = self.interpolate(alpha);
         let o = (if e.is_finite() {
             e.clamp(0.0, 1.0)
@@ -496,12 +499,7 @@ impl WriteAnim {
             0.0
         }) as f32;
         let center = centroide_de(&self.mobject);
-        PlacedMobject::try_new(self.mobject.clone(), o, 1.0, center).unwrap_or(PlacedMobject {
-            mobject: self.mobject.clone(),
-            opacity: o,
-            scale: 1.0,
-            center: [0.0, 0.0],
-        })
+        PlacedMobject::try_new(self.mobject.clone(), o, 1.0, center)
     }
 }
 
@@ -554,8 +552,9 @@ impl FadeAnim {
         self.frames
     }
 
-    /// Colocado en `alpha` (alfa eased o su complemento).
-    pub fn placed_at(&self, alpha: f64) -> PlacedMobject {
+    /// Colocado en `alpha` (alfa eased o su complemento; R6d: `Err`
+    /// honesto si el colocado no valida).
+    pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
         let e = self.interpolate(alpha);
         let s = if e.is_finite() {
             e.clamp(0.0, 1.0)
@@ -564,12 +563,7 @@ impl FadeAnim {
         };
         let o = (if self.fade_in { s } else { 1.0 - s }) as f32;
         let center = centroide_de(&self.mobject);
-        PlacedMobject::try_new(self.mobject.clone(), o, 1.0, center).unwrap_or(PlacedMobject {
-            mobject: self.mobject.clone(),
-            opacity: o,
-            scale: 1.0,
-            center: [0.0, 0.0],
-        })
+        PlacedMobject::try_new(self.mobject.clone(), o, 1.0, center)
     }
 }
 
@@ -615,8 +609,9 @@ impl GrowFromCenterAnim {
     }
 
     /// Colocado en `alpha` (escala eased, mínimo honesto 1e-6 para no
-    /// colapsar a escala 0 inválida en el primer frame).
-    pub fn placed_at(&self, alpha: f64) -> PlacedMobject {
+    /// colapsar a escala 0 inválida en el primer frame; R6d: `Err`
+    /// honesto si el colocado no valida).
+    pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
         let e = self.interpolate(alpha);
         let s = if e.is_finite() {
             e.clamp(0.0, 1.0)
@@ -625,12 +620,7 @@ impl GrowFromCenterAnim {
         };
         let scale = (s.max(1e-6)) as f32;
         let center = centroide_de(&self.mobject);
-        PlacedMobject::try_new(self.mobject.clone(), 1.0, scale, center).unwrap_or(PlacedMobject {
-            mobject: self.mobject.clone(),
-            opacity: 1.0,
-            scale,
-            center: [0.0, 0.0],
-        })
+        PlacedMobject::try_new(self.mobject.clone(), 1.0, scale, center)
     }
 }
 
@@ -675,8 +665,9 @@ impl IndicateAnim {
         self.frames
     }
 
-    /// Colocado en `alpha` (1 en los extremos, 1.2 en el medio eased).
-    pub fn placed_at(&self, alpha: f64) -> PlacedMobject {
+    /// Colocado en `alpha` (1 en los extremos, 1.2 en el medio eased;
+    /// R6d: `Err` honesto si el colocado no valida).
+    pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
         let e = self.interpolate(alpha);
         let s = if e.is_finite() {
             e.clamp(0.0, 1.0)
@@ -690,12 +681,7 @@ impl IndicateAnim {
             1.0
         };
         let center = centroide_de(&self.mobject);
-        PlacedMobject::try_new(self.mobject.clone(), 1.0, scale, center).unwrap_or(PlacedMobject {
-            mobject: self.mobject.clone(),
-            opacity: 1.0,
-            scale,
-            center: [0.0, 0.0],
-        })
+        PlacedMobject::try_new(self.mobject.clone(), 1.0, scale, center)
     }
 }
 
@@ -829,7 +815,9 @@ impl UpdateFromTracker {
 
     /// Colocado en `alpha`: normaliza el valor al rango y mapea.
     /// Rango degenerado (`start==end`) → usa el piso del mapa (honesto).
-    pub fn placed_at(&self, alpha: f64) -> PlacedMobject {
+    /// R6d: devuelve `SceneResult` (el inválido es `Err`, jamás colocado
+    /// sin validar).
+    pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
         let v = self.valor_en(alpha);
         let s = if self.start == self.end {
             0.0
@@ -870,14 +858,7 @@ impl UpdateFromTracker {
                 (1.0, 1.0, [base[0], y])
             }
         };
-        PlacedMobject::try_new(self.mobject.clone(), opacity, scale, center).unwrap_or(
-            PlacedMobject {
-                mobject: self.mobject.clone(),
-                opacity: 1.0,
-                scale: 1.0,
-                center: base,
-            },
-        )
+        PlacedMobject::try_new(self.mobject.clone(), opacity, scale, center)
     }
 }
 
@@ -1090,8 +1071,9 @@ impl TransformMatchingShapes {
         self.frames
     }
 
-    /// Colocados en `alpha` crudo 0..1 (easing aplicado).
-    pub fn frame_at(&self, alpha: f64) -> Vec<PlacedMobject> {
+    /// Colocados en `alpha` crudo 0..1 (easing aplicado; R6d: `Err`
+    /// honesto si algún colocado no valida — jamás punto en el origen).
+    pub fn frame_at(&self, alpha: f64) -> SceneResult<Vec<PlacedMobject>> {
         let e = self.interpolate(alpha);
         let s = if e.is_finite() {
             e.clamp(0.0, 1.0)
@@ -1108,7 +1090,7 @@ impl TransformMatchingShapes {
                 } else {
                     self.to[i].clone()
                 };
-                PlacedMobject::opaco(m)
+                PlacedMobject::opaco(m)?
             } else {
                 match par_remuestreado(&a, &b, self.samples, self.closed) {
                     Ok((ra, rb)) => {
@@ -1118,10 +1100,9 @@ impl TransformMatchingShapes {
                             .map(|(pa, pb)| self.path.interpola(*pa, *pb, s))
                             .collect();
                         let center = punto_medio(&ra, &rb, s);
-                        PlacedMobject::try_new(Mobject::Polygon { pts }, 1.0, 1.0, center)
-                            .unwrap_or(PlacedMobject::opaco(self.to[i].clone()))
+                        PlacedMobject::try_new(Mobject::Polygon { pts }, 1.0, 1.0, center)?
                     }
-                    Err(_) => PlacedMobject::opaco(self.to[i].clone()),
+                    Err(_) => PlacedMobject::opaco(self.to[i].clone())?,
                 }
             };
             out.push(colocado);
@@ -1151,7 +1132,7 @@ impl TransformMatchingShapes {
                 out.push(p);
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -1292,7 +1273,8 @@ impl PlayItem {
 
 /// Player puro escena→frames colocados.
 ///
-/// `play` es total (clampa presupuestos); `try_play` es estricta.
+/// `play` es total (clampa presupuestos y salta el colocado inválido);
+/// `try_play` es estricta (falla honesto + valida remuestreo con N distinto).
 /// Ambas aplican `begin`/`interpolate`/`finish` por anim, componen
 /// fondo (capas de la escena) + animado, y dejan la escena en su estado
 /// final (las capas pasan a valer el último frame animado cuando el item
@@ -1300,14 +1282,19 @@ impl PlayItem {
 pub struct ScenePlayer;
 
 impl ScenePlayer {
-    /// Reproduce (total): clampa frames por item a 1..=48 y el total a 96.
+    /// Reproduce (total): clampa frames por item a 1..=48 y el total a 96,
+    /// y SALTA el colocado inválido (jamás punto en el origen).
     /// Nunca falla; si no hay items devuelve vacío.
     pub fn play(scene: &mut Scene, items: Vec<PlayItem>) -> Vec<PlayedFrame> {
-        Self::play_clamp(scene, items, true)
+        // En modo total el inválido se salta, así que el `Err` es
+        // inalcanzable; se mapea a vacío por tipo (sin `unwrap`).
+        Self::play_clamp(scene, items, true).unwrap_or_default()
     }
 
     /// Reproduce estricto: `Err` honesto si algún item excede frames, si el
-    /// total excede 96 o si el set estimado supera 64 MiB.
+    /// total excede 96, si el set estimado supera 64 MiB o si algún colocado
+    /// (fondo o animado) es inválido. Con N distinto entre items valida el
+    /// plan de remuestreo al máximo (espejo de `Guion::items_para`).
     pub fn try_play(scene: &mut Scene, items: Vec<PlayItem>) -> SceneResult<Vec<PlayedFrame>> {
         if items.is_empty() {
             return Err(SceneError::EscenaInvalida {
@@ -1342,16 +1329,36 @@ impl ScenePlayer {
                 });
             }
         }
-        Ok(Self::play_clamp(scene, items, false))
+        // R6d: N distinto → valida el plan de remuestreo al máximo (vecino
+        // más cercano) en vez de componer a ciegas. El player compone en
+        // secuencia (no simultáneo) y no conoce viewports: el plan se valida
+        // sobre conteos con viewport unitario; el viewport real se valida
+        // donde sí se conoce (`AnimationGroup::plan_remuestreo` en el
+        // protocolo y `Guion::items_para`/`a_playlist`).
+        let conteos: Vec<usize> = items.iter().map(PlayItem::frames).collect();
+        if conteos.len() >= 2 && conteos.windows(2).any(|w| w[0] != w[1]) {
+            let indices: Vec<usize> = (0..conteos.len()).collect();
+            let grupo = crate::protocol::AnimationGroup::try_new(indices, 0.0).map_err(|e| {
+                SceneError::PresupuestoExcedido {
+                    detalle: format!("remuestreo imposible: {e}"),
+                }
+            })?;
+            let tamanos = vec![(1usize, 1usize); conteos.len()];
+            grupo.plan_remuestreo(&conteos, &tamanos).map_err(|e| {
+                SceneError::PresupuestoExcedido {
+                    detalle: format!("remuestreo imposible: {e}"),
+                }
+            })?;
+        }
+        Self::play_clamp(scene, items, false)
     }
 
-    fn play_clamp(scene: &mut Scene, items: Vec<PlayItem>, clamp: bool) -> Vec<PlayedFrame> {
-        let mut fondo: Vec<PlacedMobject> = scene
-            .layers
-            .iter()
-            .cloned()
-            .map(PlacedMobject::opaco)
-            .collect();
+    fn play_clamp(
+        scene: &mut Scene,
+        items: Vec<PlayItem>,
+        clamp: bool,
+    ) -> SceneResult<Vec<PlayedFrame>> {
+        let mut fondo = fondo_desde(scene, clamp)?;
         if fondo.len() > crate::scene::MAX_SCENE_LAYERS {
             fondo.truncate(crate::scene::MAX_SCENE_LAYERS);
         }
@@ -1369,33 +1376,44 @@ impl ScenePlayer {
                             break;
                         }
                         let alpha = alpha_en(fi, n);
-                        let fila = anim.frame_at(alpha).unwrap_or_else(|_| Vec::new());
+                        let fila = match anim.frame_at(alpha) {
+                            Ok(fila) => fila,
+                            Err(e) => {
+                                if clamp {
+                                    Vec::new()
+                                } else {
+                                    return Err(e);
+                                }
+                            }
+                        };
                         let center = centroide_pts(&fila);
                         let mut frame = fondo.clone();
                         if !fila.is_empty() {
-                            if let Ok(p) = PlacedMobject::try_new(
+                            let colocado = PlacedMobject::try_new(
                                 Mobject::Polygon { pts: fila.clone() },
                                 1.0,
                                 1.0,
                                 center,
-                            ) {
-                                frame.push(p);
-                            }
+                            );
+                            empuja_colocado(&mut frame, colocado, clamp)?;
                         }
                         out.push(PlayedFrame { objects: frame });
                     }
                     anim.finish();
-                    if let Ok(fila) = anim.frame_at(1.0) {
-                        if !fila.is_empty() {
-                            scene.layers.push(Mobject::Polygon { pts: fila });
-                            acota_capas(scene);
-                            fondo = scene
-                                .layers
-                                .iter()
-                                .cloned()
-                                .map(PlacedMobject::opaco)
-                                .collect();
+                    let fila = match anim.frame_at(1.0) {
+                        Ok(fila) => fila,
+                        Err(e) => {
+                            if clamp {
+                                Vec::new()
+                            } else {
+                                return Err(e);
+                            }
                         }
+                    };
+                    if !fila.is_empty() {
+                        scene.layers.push(Mobject::Polygon { pts: fila });
+                        acota_capas(scene);
+                        fondo = fondo_desde(scene, clamp)?;
                     }
                 }
                 PlayItem::Create(mut anim) => {
@@ -1405,9 +1423,9 @@ impl ScenePlayer {
                         if out.len() >= PLAYER_MAX_TOTAL_FRAMES {
                             break;
                         }
-                        let p = anim.placed_at(alpha_en(fi, n));
+                        let colocado = anim.placed_at(alpha_en(fi, n));
                         let mut frame = fondo.clone();
-                        frame.push(p);
+                        empuja_colocado(&mut frame, colocado, clamp)?;
                         out.push(PlayedFrame { objects: frame });
                     }
                     anim.finish();
@@ -1418,12 +1436,7 @@ impl ScenePlayer {
                         scene.layers.push(Mobject::Dot { x: p[0], y: p[1] });
                     }
                     acota_capas(scene);
-                    fondo = scene
-                        .layers
-                        .iter()
-                        .cloned()
-                        .map(PlacedMobject::opaco)
-                        .collect();
+                    fondo = fondo_desde(scene, clamp)?;
                 }
                 PlayItem::Write(mut anim) => {
                     let n = anim.frames().clamp(1, PLAYER_MAX_FRAMES);
@@ -1433,7 +1446,8 @@ impl ScenePlayer {
                             break;
                         }
                         let mut frame = fondo.clone();
-                        frame.push(anim.placed_at(alpha_en(fi, n)));
+                        let colocado = anim.placed_at(alpha_en(fi, n));
+                        empuja_colocado(&mut frame, colocado, clamp)?;
                         out.push(PlayedFrame { objects: frame });
                     }
                     anim.finish();
@@ -1446,7 +1460,8 @@ impl ScenePlayer {
                             break;
                         }
                         let mut frame = fondo.clone();
-                        frame.push(anim.placed_at(alpha_en(fi, n)));
+                        let colocado = anim.placed_at(alpha_en(fi, n));
+                        empuja_colocado(&mut frame, colocado, clamp)?;
                         out.push(PlayedFrame { objects: frame });
                     }
                     anim.finish();
@@ -1459,7 +1474,8 @@ impl ScenePlayer {
                             break;
                         }
                         let mut frame = fondo.clone();
-                        frame.push(anim.placed_at(alpha_en(fi, n)));
+                        let colocado = anim.placed_at(alpha_en(fi, n));
+                        empuja_colocado(&mut frame, colocado, clamp)?;
                         out.push(PlayedFrame { objects: frame });
                     }
                     anim.finish();
@@ -1472,7 +1488,8 @@ impl ScenePlayer {
                             break;
                         }
                         let mut frame = fondo.clone();
-                        frame.push(anim.placed_at(alpha_en(fi, n)));
+                        let colocado = anim.placed_at(alpha_en(fi, n));
+                        empuja_colocado(&mut frame, colocado, clamp)?;
                         out.push(PlayedFrame { objects: frame });
                     }
                     anim.finish();
@@ -1485,7 +1502,8 @@ impl ScenePlayer {
                             break;
                         }
                         let mut frame = fondo.clone();
-                        frame.push(anim.placed_at(alpha_en(fi, n)));
+                        let colocado = anim.placed_at(alpha_en(fi, n));
+                        empuja_colocado(&mut frame, colocado, clamp)?;
                         out.push(PlayedFrame { objects: frame });
                     }
                     anim.finish();
@@ -1498,7 +1516,14 @@ impl ScenePlayer {
                             break;
                         }
                         let mut frame = fondo.clone();
-                        frame.extend(anim.frame_at(alpha_en(fi, n)));
+                        match anim.frame_at(alpha_en(fi, n)) {
+                            Ok(colocados) => frame.extend(colocados),
+                            Err(e) => {
+                                if !clamp {
+                                    return Err(e);
+                                }
+                            }
+                        }
                         out.push(PlayedFrame { objects: frame });
                     }
                     anim.finish();
@@ -1519,9 +1544,47 @@ impl ScenePlayer {
                     }
                 }
             }
-            let _ = clamp;
         }
-        out
+        Ok(out)
+    }
+}
+
+/// Fondo colocado desde las capas (R6d): en modo total salta la capa
+/// inválida; en estricto es `Err` honesto. Puro, sin pánicos.
+fn fondo_desde(scene: &Scene, clamp: bool) -> SceneResult<Vec<PlacedMobject>> {
+    let mut fondo = Vec::with_capacity(scene.layers.len());
+    for m in &scene.layers {
+        match PlacedMobject::opaco(m.clone()) {
+            Ok(p) => fondo.push(p),
+            Err(e) => {
+                if !clamp {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(fondo)
+}
+
+/// Empuja un colocado al frame (R6d): en modo total salta el inválido;
+/// en estricto es `Err` honesto. Puro, sin pánicos.
+fn empuja_colocado(
+    frame: &mut Vec<PlacedMobject>,
+    colocado: SceneResult<PlacedMobject>,
+    clamp: bool,
+) -> SceneResult<()> {
+    match colocado {
+        Ok(p) => {
+            frame.push(p);
+            Ok(())
+        }
+        Err(e) => {
+            if clamp {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
     }
 }
 
@@ -1596,8 +1659,8 @@ mod player_tests {
         .unwrap();
         assert!((u.valor_en(0.0) - 0.0).abs() < 1e-12);
         assert!((u.valor_en(1.0) - 10.0).abs() < 1e-12);
-        let p0 = u.placed_at(0.0);
-        let p1 = u.placed_at(1.0);
+        let p0 = u.placed_at(0.0).expect("tracker válido coloca");
+        let p1 = u.placed_at(1.0).expect("tracker válido coloca");
         assert_eq!(p0.center, [-4.0, 0.0]);
         assert_eq!(p1.center, [4.0, 0.0]);
         // Opacidad mapea al rango pedido.
@@ -1611,8 +1674,8 @@ mod player_tests {
             TrackerMap::Opacity { lo: 0.0, hi: 1.0 },
         )
         .unwrap();
-        assert_eq!(uo.placed_at(0.0).opacity, 0.0);
-        assert_eq!(uo.placed_at(1.0).opacity, 1.0);
+        assert_eq!(uo.placed_at(0.0).expect("tracker válido").opacity, 0.0);
+        assert_eq!(uo.placed_at(1.0).expect("tracker válido").opacity, 1.0);
         assert!(UpdateFromTracker::try_new(
             Mobject::Dot { x: 0.0, y: 0.0 },
             f64::NAN,
@@ -1635,7 +1698,7 @@ mod player_tests {
         assert_eq!(t1.len(), 3);
         let t05 = c.traza_en(0.5);
         assert!(t05.len() >= 2);
-        let p = c.placed_at(1.0);
+        let p = c.placed_at(1.0).expect("create válido coloca");
         assert_eq!(p.opacity, 1.0);
         assert!(CreateAnim::try_new(vec![], 5, 1000, RateFunc::Linear, false).is_err());
     }
@@ -1645,28 +1708,31 @@ mod player_tests {
         let tex = Mobject::tex_desde_texto("hola").unwrap();
         let w = WriteAnim::try_new(tex.clone(), 4, 1000, RateFunc::Smooth).unwrap();
         // El SVG viaja entero en todos los frames; solo cambia el alfa.
-        assert_eq!(w.placed_at(0.0).mobject, tex);
-        assert_eq!(w.placed_at(1.0).mobject, tex);
-        assert!(w.placed_at(0.0).opacity < w.placed_at(1.0).opacity);
-        assert_eq!(w.placed_at(1.0).opacity, 1.0);
+        assert_eq!(w.placed_at(0.0).expect("write válido").mobject, tex);
+        assert_eq!(w.placed_at(1.0).expect("write válido").mobject, tex);
+        assert!(
+            w.placed_at(0.0).expect("write válido").opacity
+                < w.placed_at(1.0).expect("write válido").opacity
+        );
+        assert_eq!(w.placed_at(1.0).expect("write válido").opacity, 1.0);
     }
 
     #[test]
     fn fade_grow_indicate_extremos() {
         let m = Mobject::Dot { x: 1.0, y: 2.0 };
         let fi = FadeAnim::try_new(m.clone(), true, 4, 500, RateFunc::Linear).unwrap();
-        assert_eq!(fi.placed_at(0.0).opacity, 0.0);
-        assert_eq!(fi.placed_at(1.0).opacity, 1.0);
+        assert_eq!(fi.placed_at(0.0).expect("fade válido").opacity, 0.0);
+        assert_eq!(fi.placed_at(1.0).expect("fade válido").opacity, 1.0);
         let fo = FadeAnim::try_new(m.clone(), false, 4, 500, RateFunc::Linear).unwrap();
-        assert_eq!(fo.placed_at(0.0).opacity, 1.0);
-        assert_eq!(fo.placed_at(1.0).opacity, 0.0);
+        assert_eq!(fo.placed_at(0.0).expect("fade válido").opacity, 1.0);
+        assert_eq!(fo.placed_at(1.0).expect("fade válido").opacity, 0.0);
         let g = GrowFromCenterAnim::try_new(m.clone(), 4, 500, RateFunc::Linear).unwrap();
-        assert!(g.placed_at(0.0).scale <= 1e-5);
-        assert_eq!(g.placed_at(1.0).scale, 1.0);
+        assert!(g.placed_at(0.0).expect("grow válido").scale <= 1e-5);
+        assert_eq!(g.placed_at(1.0).expect("grow válido").scale, 1.0);
         let ind = IndicateAnim::try_new(m, 5, 500, RateFunc::Linear).unwrap();
-        assert_eq!(ind.placed_at(0.0).scale, 1.0);
-        assert!((ind.placed_at(0.5).scale - 1.2).abs() < 1e-6);
-        assert_eq!(ind.placed_at(1.0).scale, 1.0);
+        assert_eq!(ind.placed_at(0.0).expect("indicate válido").scale, 1.0);
+        assert!((ind.placed_at(0.5).expect("indicate válido").scale - 1.2).abs() < 1e-6);
+        assert_eq!(ind.placed_at(1.0).expect("indicate válido").scale, 1.0);
     }
 
     #[test]
@@ -1713,6 +1779,62 @@ mod player_tests {
     }
 
     #[test]
+    fn opaco_invalido_es_err_y_play_total_lo_salta() {
+        // R6d: lo inválido jamás llega a pantalla como punto en el origen.
+        let malo = Mobject::Circle {
+            cx: 0.0,
+            cy: 0.0,
+            r: 0.0,
+        };
+        assert!(PlacedMobject::opaco(malo.clone()).is_err());
+        // Escena con capa inválida (literal, sin `try_new`): `play` total
+        // salta la capa y compone solo el animado; `try_play` falla honesto.
+        let mut escena = Scene {
+            camera: Ortho::default_16_9(),
+            layers: vec![malo],
+            bg: [10, 12, 16],
+        };
+        let item = || {
+            PlayItem::Create(
+                CreateAnim::try_new(
+                    vec![[0.0, 0.0], [2.0, 0.0]],
+                    4,
+                    1000,
+                    RateFunc::Linear,
+                    false,
+                )
+                .unwrap(),
+            )
+        };
+        let frames = ScenePlayer::play(&mut escena, vec![item()]);
+        assert_eq!(frames.len(), 4);
+        assert!(frames.iter().all(|f| f.len() == 1), "solo el animado");
+        let mut escena2 = Scene {
+            camera: Ortho::default_16_9(),
+            layers: vec![Mobject::Circle {
+                cx: 0.0,
+                cy: 0.0,
+                r: 0.0,
+            }],
+            bg: [10, 12, 16],
+        };
+        assert!(ScenePlayer::try_play(&mut escena2, vec![item()]).is_err());
+    }
+
+    #[test]
+    fn try_play_valida_remuestreo_con_n_distinto() {
+        // R6d: espejo de `Guion::items_para` — N distinto (8 vs 12) valida
+        // el plan al máximo y reproduce; N inválido sigue fallando.
+        let mut escena = escena1();
+        let items = vec![
+            PlayItem::Wait(WaitAnim::try_new(8).unwrap()),
+            PlayItem::Wait(WaitAnim::try_new(12).unwrap()),
+        ];
+        let frames = ScenePlayer::try_play(&mut escena, items).expect("N distinto válido");
+        assert_eq!(frames.len(), 20);
+    }
+
+    #[test]
     fn vmobject_alinea_y_transform_matching_empareja() {
         let v = VMobject::try_new(
             vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
@@ -1740,9 +1862,9 @@ mod player_tests {
             PathFunc::Straight,
         )
         .unwrap();
-        let f0 = m.frame_at(0.0);
+        let f0 = m.frame_at(0.0).expect("matching válido");
         assert_eq!(f0.len(), 2);
-        let f1 = m.frame_at(1.0);
+        let f1 = m.frame_at(1.0).expect("matching válido");
         assert_eq!(f1.len(), 2);
         // Transform con Arc mete panza perpendicular al viaje: la forma sube
         // 2 en Y y el arco la aparta en X (panza `sin(π/2)·0.25·2 = 0.5`).
