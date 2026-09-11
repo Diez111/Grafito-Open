@@ -181,6 +181,39 @@ pub fn solid_volume(object: &GeoObject) -> Option<f64> {
             let base: Vec<[f64; 3]> = o.base_vertices.iter().map(|p| [p.x, p.y, p.z]).collect();
             prism_volume_from(&base, [o.direction.x, o.direction.y, o.direction.z])
         }
+        // Cuádrica real con forma cerrada: elipsoide (incluye esfera)
+        // 4/3·π·rx·ry·rz vía `classify_quadric`. El resto sigue `None`
+        // honesto (ver `solid_measure_status`).
+        GeoObject::Quadric3D(quadric) => {
+            let coeffs = [
+                quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g,
+                quadric.h, quadric.i, quadric.j,
+            ];
+            match grafito_geometry::quadrics::classify_quadric(coeffs) {
+                Ok(shape)
+                    if matches!(
+                        shape.kind,
+                        grafito_geometry::quadrics::QuadricKind::Sphere
+                            | grafito_geometry::quadrics::QuadricKind::Ellipsoid
+                    ) =>
+                {
+                    let [rx, ry, rz] = shape.params;
+                    if rx.is_finite()
+                        && ry.is_finite()
+                        && rz.is_finite()
+                        && rx > 0.0
+                        && ry > 0.0
+                        && rz > 0.0
+                    {
+                        let volume = 4.0 / 3.0 * std::f64::consts::PI * rx * ry * rz;
+                        volume.is_finite().then_some(volume)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -579,12 +612,38 @@ mod tests {
 
     #[test]
     fn quadric_has_honest_status() {
-        // Esfera como cuádrica: clasificación real con volumen analítico.
+        // Esfera como cuádrica: clasificación real con volumen analítico
+        // 4/3·π·1·1·1 (el área sigue por integración: el resumen global
+        // continúa `None` honesto salvo el texto de estado).
         let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
             1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         ]));
-        assert_eq!(solid_volume(&quadric), None);
+        let volume = solid_volume(&quadric).expect("esfera cuádrica");
+        assert!(
+            (volume - 4.0 / 3.0 * std::f64::consts::PI).abs() < 1e-9,
+            "esfera unitaria 4/3·π: {volume}"
+        );
         assert!(solid_measure_status(&quadric).contains("elipsoide real"));
+        // Elipsoide x²/4+y²/9+z²/16=1: rx=2, ry=3, rz=4 → 4/3·π·24 = 32π.
+        let elipsoide = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            0.25,
+            1.0 / 9.0,
+            0.0625,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+        ]));
+        let volume = solid_volume(&elipsoide).expect("elipsoide cuádrico");
+        assert!(
+            (volume - 32.0 * std::f64::consts::PI).abs() < 1e-9,
+            "elipsoide 2×3×4 = 32π: {volume}"
+        );
+        assert!(solid_measure_status(&elipsoide).contains("elipsoide real"));
+        assert_eq!(solid_area(&elipsoide), None);
         // Hiperboloide: superficie real pero sin volumen cerrado.
         let hiperboloide = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
             1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,

@@ -16709,8 +16709,10 @@ fn run_analysis_command(
 /// `?` honesto en vez de inventarse. Sin `unwrap`, sin matemática nueva.
 /// Vista 3D pedida (dueño command/): valida el nombre contra
 /// `grafito_core::symbolic::OrthoView` (cerebro) más la perspectiva orbital.
-/// Solo consulta: no toca el documento (respeta DAG command⇏app — la app
-/// aplica la vista vía su selector en canvas, wiring P2).
+/// Error honesto SIEMPRE: el comando no aplica vistas (respeta DAG
+/// command⇏app — sin variante nueva de outcome, sin importar app); la app
+/// aplica la vista vía su selector en canvas (wiring P2). El `Message` mudo
+/// anterior mentía éxito sin cambiar nada.
 fn run_vista3d_command(input_text: &mut String, raw: &str) -> CommandOutcome {
     let ortho = match raw.trim().to_ascii_lowercase().as_str() {
         "perspectiva" | "perspective" | "orbital" => None,
@@ -16724,9 +16726,9 @@ fn run_vista3d_command(input_text: &mut String, raw: &str) -> CommandOutcome {
         }
     };
     let name = ortho.map_or("perspectiva", grafito_core::symbolic::OrthoView::name);
-    input_text.clear();
-    CommandOutcome::Message(format!(
-        "Vista3D: {name} (vista solicitada; el canvas 3D la aplica vía su selector)"
+    let _ = input_text;
+    CommandOutcome::Error(format!(
+        "Vista3D: {name} (el comando no aplica vistas: elegí la vista con el selector del canvas 3D)"
     ))
 }
 
@@ -22459,7 +22461,8 @@ mod tests {
 
     #[test]
     fn vista3d_valida_vistas_sin_mutar_documento() {
-        // Vista3D[perspectiva|alzado|planta|perfil]: solo consulta, cero objetos.
+        // Vista3D[perspectiva|alzado|planta|perfil]: error honesto que obliga
+        // al selector del canvas (respeta DAG command⇏app); cero objetos.
         let mut doc = Document::new();
         for (raw, esperado) in [
             ("perspectiva", "perspectiva"),
@@ -22471,10 +22474,14 @@ mod tests {
         ] {
             let mut input = format!("Vista3D[{raw}]");
             match process_input(&mut doc, &mut input) {
-                CommandOutcome::Message(m) => {
+                CommandOutcome::Error(m) => {
                     assert!(m.contains(esperado), "{raw} → {esperado}, fue: {m}");
+                    assert!(
+                        m.contains("selector del canvas"),
+                        "{raw} obliga al selector: {m}"
+                    );
                 }
-                other => panic!("Vista3D[{raw}] debe responder Message: {other:?}"),
+                other => panic!("Vista3D[{raw}] debe responder Error honesto: {other:?}"),
             }
         }
         assert_eq!(

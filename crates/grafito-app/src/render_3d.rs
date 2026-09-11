@@ -2,9 +2,10 @@ use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use glam::{DVec3, Vec3};
 use grafito_core::{
     ChangeSet, Cone3DObj, Cube3DObj, Cylinder3DObj, Document, GeoObject, ImplicitSurface3DObj,
-    Line3DObj, MoebiusStripObj, ObjectId, ParametricCurve3DObj, Plane3DObj, Platonic3DObj,
-    Point3DObj, PointStyle, Prism3DObj, Pyramid3DObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
-    Segment3DObj, Sphere3DObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField3DObj,
+    InfiniteCone3DObj, InfiniteCylinder3DObj, Line3DObj, MoebiusStripObj, ObjectId,
+    ParametricCurve3DObj, Plane3DObj, Platonic3DObj, Point3DObj, PointStyle, Prism3DObj,
+    Pyramid3DObj, RegularPolychoron4DObj, RegularPolytopeNDObj, Segment3DObj, Sphere3DObj,
+    Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField3DObj,
 };
 use grafito_geometry::{
     curve_3d_segment_is_continuous, ray_mesh_hit, Aabb3D, Camera3D, Point3D, PolyhedronNet, Ray3D,
@@ -615,6 +616,162 @@ pub(crate) fn fallback_object_bounds_with_typed_four_d_phase(
     }
 }
 
+/// Eje unitario de un objeto infinito como el dibujo (`direction − origen`).
+/// `None` si algún punto no es finito o el eje degenera (longitud ~0).
+fn infinite_object_axis(origin: Point3D, direction: Point3D) -> Option<DVec3> {
+    if !origin.is_finite() || !direction.is_finite() {
+        return None;
+    }
+    let axis = direction.to_dvec3() - origin.to_dvec3();
+    if !axis.is_finite() || axis.length_squared() <= 1.0e-24 {
+        return None;
+    }
+    let unit = axis.normalize();
+    unit.is_finite().then_some(unit)
+}
+
+/// Raíces ordenadas de `a·t²+b·t+c=0` (lineal si `a ~ 0`). Vacío si no hay
+/// raíces reales o la aritmética no es finita. Sin alloc: máximo 2.
+fn quadratic_roots(a: f64, b: f64, c: f64) -> [Option<f64>; 2] {
+    if !a.is_finite() || !b.is_finite() || !c.is_finite() {
+        return [None, None];
+    }
+    if a.abs() <= 1.0e-12 {
+        if b.abs() <= 1.0e-12 {
+            return [None, None];
+        }
+        let root = -c / b;
+        return [root.is_finite().then_some(root), None];
+    }
+    let disc = b * b - 4.0 * a * c;
+    if !disc.is_finite() || disc < 0.0 {
+        return [None, None];
+    }
+    let sqrt_disc = disc.sqrt();
+    let (first, second) = ((-b - sqrt_disc) / (2.0 * a), (-b + sqrt_disc) / (2.0 * a));
+    if !first.is_finite() || !second.is_finite() {
+        return [None, None];
+    }
+    if first <= second {
+        [Some(first), Some(second)]
+    } else {
+        [Some(second), Some(first)]
+    }
+}
+
+/// Primera raíz visible cuya coordenada axial cae en el clip ±`CLIP`.
+/// El clip se mide sobre el eje desde `apex_or_base`, igual que el dibujo.
+fn first_root_in_clip(
+    ray: &Ray3D,
+    roots: [Option<f64>; 2],
+    axial_at: impl Fn(f64) -> Option<f64>,
+) -> Option<f64> {
+    for root in roots.into_iter().flatten() {
+        if root < ray.min_distance || root > ray.max_distance {
+            continue;
+        }
+        let axial = axial_at(root)?;
+        if axial.is_finite() && axial.abs() <= INFINITE_OBJECT_VIEWPORT_CLIP {
+            return Some(root);
+        }
+    }
+    None
+}
+
+/// Intersección rayo-cono infinito (doble manto, como el dibujo que traza
+/// ambas ramas): `(x·u)² − cos²α·(x·x) = 0` con `x = w + t·d`.
+/// `None` si el eje/ángulo degenera, el rayo falla el manto o todo cruce
+/// cae fuera del clip ±50.
+fn infinite_cone_ray_hit(cone: &InfiniteCone3DObj, ray: &Ray3D) -> Option<f64> {
+    if !cone.apex.is_finite() || !cone.direction.is_finite() {
+        return None;
+    }
+    let axis = infinite_object_axis(cone.apex, cone.direction)?;
+    let half = cone.half_angle_rad;
+    if !half.is_finite() || half <= 0.0 || half >= std::f64::consts::FRAC_PI_2 {
+        return None;
+    }
+    let cos2 = half.cos().powi(2);
+    if !cos2.is_finite() || cos2 <= 0.0 || cos2 >= 1.0 {
+        return None;
+    }
+    let origin = ray.origin.to_dvec3();
+    let dir = ray.direction.to_dvec3();
+    if !origin.is_finite() || !dir.is_finite() {
+        return None;
+    }
+    let apex = cone.apex.to_dvec3();
+    let dir2 = dir.length_squared();
+    let w = origin - apex;
+    let dv = dir.dot(axis);
+    let wv = w.dot(axis);
+    let wd = w.dot(dir);
+    let ww = w.dot(w);
+    if !dir2.is_finite()
+        || !dv.is_finite()
+        || !wv.is_finite()
+        || !wd.is_finite()
+        || !ww.is_finite()
+        || dir2 <= 1.0e-24
+    {
+        return None;
+    }
+    let roots = quadratic_roots(
+        dv * dv - cos2 * dir2,
+        2.0 * (wv * dv - cos2 * wd),
+        wv * wv - cos2 * ww,
+    );
+    first_root_in_clip(ray, roots, |t| {
+        let hit = origin + dir * t;
+        hit.is_finite().then(|| (hit - apex).dot(axis))
+    })
+}
+
+/// Intersección rayo-cilindro infinito de radio `r` sobre el eje por
+/// `base_point`. `None` si el eje/radio degenera, el rayo falla el manto o
+/// todo cruce cae fuera del clip ±50. El rayo paralelo al eje nunca cruza
+/// el manto (`None` honesto, incluso desde adentro).
+fn infinite_cylinder_ray_hit(cylinder: &InfiniteCylinder3DObj, ray: &Ray3D) -> Option<f64> {
+    if !cylinder.base_point.is_finite() || !cylinder.direction.is_finite() {
+        return None;
+    }
+    let radius = cylinder.radius;
+    if !radius.is_finite() || radius <= 0.0 {
+        return None;
+    }
+    let axis = infinite_object_axis(cylinder.base_point, cylinder.direction)?;
+    let origin = ray.origin.to_dvec3();
+    let dir = ray.direction.to_dvec3();
+    if !origin.is_finite() || !dir.is_finite() {
+        return None;
+    }
+    let base = cylinder.base_point.to_dvec3();
+    let dir2 = dir.length_squared();
+    let w = origin - base;
+    let dv = dir.dot(axis);
+    let wv = w.dot(axis);
+    let wd = w.dot(dir);
+    let ww = w.dot(w);
+    if !dir2.is_finite()
+        || !dv.is_finite()
+        || !wv.is_finite()
+        || !wd.is_finite()
+        || !ww.is_finite()
+        || dir2 <= 1.0e-24
+    {
+        return None;
+    }
+    let roots = quadratic_roots(
+        dir2 - dv * dv,
+        2.0 * (wd - wv * dv),
+        ww - wv * wv - radius * radius,
+    );
+    first_root_in_clip(ray, roots, |t| {
+        let hit = origin + dir * t;
+        hit.is_finite().then(|| (hit - base).dot(axis))
+    })
+}
+
 fn object_ray_hit(
     object: &GeoObject,
     variables: &std::collections::BTreeMap<String, f64>,
@@ -662,14 +819,32 @@ fn object_ray_hit(
         GeoObject::Sphere3D(sphere) => ray
             .intersect_sphere(sphere.center, sphere.radius)
             .map(PickHit::exact),
-        GeoObject::InfiniteCone3D(c) => center_extent_bounds(c.apex, INFINITE_OBJECT_VIEWPORT_CLIP)
-            .and_then(|bounds| ray.intersect_aabb(bounds))
-            .map(PickHit::exact),
-        GeoObject::InfiniteCylinder3D(c) => {
-            center_extent_bounds(c.base_point, INFINITE_OBJECT_VIEWPORT_CLIP)
-                .and_then(|bounds| ray.intersect_aabb(bounds))
+        GeoObject::InfiniteCone3D(c) => {
+            infinite_cone_ray_hit(c, ray)
                 .map(PickHit::exact)
+                .or_else(|| {
+                    coarse_object_hit(
+                        object,
+                        variables,
+                        camera,
+                        ray,
+                        canvas_height,
+                        typed_four_d_phase,
+                    )
+                })
         }
+        GeoObject::InfiniteCylinder3D(c) => infinite_cylinder_ray_hit(c, ray)
+            .map(PickHit::exact)
+            .or_else(|| {
+                coarse_object_hit(
+                    object,
+                    variables,
+                    camera,
+                    ray,
+                    canvas_height,
+                    typed_four_d_phase,
+                )
+            }),
         GeoObject::Plane3D(plane) => plane_ray_hit_distance(plane, ray).map(PickHit::exact),
         // G-B: picking exacto contra malla con tolerancia GB_GEOM_EPS; si la
         // malla no aplica o el rayo la falla, cae al grueso conservador.
@@ -1352,7 +1527,11 @@ impl GrafitoApp {
             }
             Tool::MoebiusStrip => {
                 self.insert_object_from_tool(
-                    GeoObject::MoebiusStrip(MoebiusStripObj::new(c, 2.0, 0.5)),
+                    GeoObject::MoebiusStrip(MoebiusStripObj::new(
+                        c,
+                        approx_scale * 1.5,
+                        approx_scale * 0.4,
+                    )),
                     "MoebiusStrip",
                     time,
                 );
@@ -2442,9 +2621,7 @@ impl GrafitoApp {
                         let a_proj = projector.project_point(&base[i]);
 
                         // Calculate face normal using cross product
-                        let v1 = base[j].to_vec3() - base[i].to_vec3();
-                        let v2 = py.apex.to_vec3() - base[i].to_vec3();
-                        let face_normal = v1.cross(v2).normalize();
+                        let face_normal = face_normal(base[i], base[j], py.apex).unwrap_or(Vec3::Y);
 
                         if let (Some(a), Some(ap)) = (a_proj, apex_proj) {
                             let lit_color =
@@ -2472,8 +2649,14 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::Cone3D(cone) => {
-                    // Base circle (normal: -Y)
-                    let base_normal = Vec3::new(0.0, -1.0, 0.0);
+                    // Base circle (normal: −eje real; legacy −Y solo si degenera).
+                    let cone_axis =
+                        (cone.apex.to_vec3() - cone.base_center.to_vec3()).normalize_or_zero();
+                    let base_normal = if cone_axis.length_squared() > 1.0e-12 {
+                        -cone_axis
+                    } else {
+                        Vec3::new(0.0, -1.0, 0.0)
+                    };
                     let base_pts_3d: Vec<Vec3> = Camera3D::circle_points(
                         cone.base_center.to_vec3(),
                         Vec3::X,
@@ -2508,10 +2691,16 @@ impl GrafitoApp {
                             let bp_3d = *bp_3d;
                             if let Some(bp) = projector.project_point(&Point3D::from_vec3(bp_3d)) {
                                 // Calculate lateral surface normal at this point
-                                let radial = (bp_3d - cone.base_center.to_vec3()).normalize();
-                                let axial =
-                                    (cone.apex.to_vec3() - cone.base_center.to_vec3()).normalize();
-                                let lateral_normal = (radial + axial * 0.5).normalize();
+                                let radial =
+                                    (bp_3d - cone.base_center.to_vec3()).normalize_or_zero();
+                                let axial = (cone.apex.to_vec3() - cone.base_center.to_vec3())
+                                    .normalize_or_zero();
+                                let lateral = radial + axial * 0.5;
+                                let lateral_normal = if lateral.length_squared() > 1.0e-12 {
+                                    lateral.normalize_or_zero()
+                                } else {
+                                    base_normal
+                                };
 
                                 let lit_color = light.shade_with_view(
                                     cone.color,
@@ -2545,10 +2734,19 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::Cylinder3D(cyl) => {
-                    // Top and bottom circles with their normals
+                    // Top and bottom circles with their normals (±eje real;
+                    // legacy ±Y solo si el eje degenera).
+                    let cyl_axis =
+                        (cyl.top_center.to_vec3() - cyl.base_center.to_vec3()).normalize_or_zero();
+                    let axis_valid = cyl_axis.length_squared() > 1.0e-12;
+                    let (bottom_normal, top_normal) = if axis_valid {
+                        (-cyl_axis, cyl_axis)
+                    } else {
+                        (Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 1.0, 0.0))
+                    };
                     let circles = [
-                        (cyl.base_center, Vec3::new(0.0, -1.0, 0.0)), // Bottom (normal: -Y)
-                        (cyl.top_center, Vec3::new(0.0, 1.0, 0.0)),   // Top (normal: +Y)
+                        (cyl.base_center, bottom_normal), // Bottom
+                        (cyl.top_center, top_normal),     // Top
                     ];
 
                     for &(center, normal) in &circles {
@@ -2595,8 +2793,19 @@ impl GrafitoApp {
                             let rx = angle.cos() * cyl.radius as f32;
                             let rz = angle.sin() * cyl.radius as f32;
 
-                            // Radial normal pointing outward
-                            let radial_normal = Vec3::new(angle.cos(), 0.0, angle.sin());
+                            // Radial normal pointing outward (sin componente axial:
+                            // idéntica a la legacy con eje Y, correcta con oblicuo).
+                            let radial_raw = Vec3::new(angle.cos(), 0.0, angle.sin());
+                            let radial_normal = if axis_valid {
+                                let projected = radial_raw - cyl_axis * radial_raw.dot(cyl_axis);
+                                if projected.length_squared() > 1.0e-12 {
+                                    projected.normalize_or_zero()
+                                } else {
+                                    radial_raw
+                                }
+                            } else {
+                                radial_raw
+                            };
 
                             let ca = projector.project_point(&Point3D::new(
                                 cyl.base_center.x + rx as f64,
@@ -5784,6 +5993,152 @@ mod gb_pick_tests {
         .expect("moebius");
         assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
         assert!((hit.distance - 5.0).abs() < 1e-9, "{}", hit.distance);
+    }
+
+    #[test]
+    fn infinite_cone_cylinder_analytic_hit_clip_and_degenerate() {
+        // Cono: ápice origen, eje +Y (direction − apex, como el dibujo),
+        // semiángulo 45° (tan = 1).
+        let cone_inner = InfiniteCone3DObj::new(
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(0.0, 1.0, 0.0),
+            std::f64::consts::FRAC_PI_4,
+        );
+        let cone = GeoObject::InfiniteCone3D(cone_inner.clone());
+        // Hit: rayo por (10,5,0) hacia −X toca el manto en t=5 (axial 5).
+        let hit = gb_hit(
+            &cone,
+            &gb_ray(Point3D::new(10.0, 5.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("cono");
+        assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
+        assert!((hit.distance - 5.0).abs() < 1e-9, "{}", hit.distance);
+        // Miss: sin raíces reales (25 = ½(125+(5+t)²) imposible).
+        assert_eq!(
+            infinite_cone_ray_hit(
+                &cone_inner,
+                &gb_ray(Point3D::new(10.0, 5.0, 5.0), Point3D::new(0.0, 0.0, 1.0)),
+            ),
+            None
+        );
+        // Clip ±50: a altura axial 60 el cruce existe pero se recorta.
+        assert_eq!(
+            infinite_cone_ray_hit(
+                &cone_inner,
+                &gb_ray(Point3D::new(10.0, 60.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+            ),
+            None
+        );
+        assert_eq!(INFINITE_OBJECT_VIEWPORT_CLIP, 50.0);
+        // Degenerados: eje nulo o ángulo inválido → None analítico.
+        let no_axis = InfiniteCone3DObj::new(
+            Point3D::new(1.0, 1.0, 1.0),
+            Point3D::new(1.0, 1.0, 1.0),
+            std::f64::consts::FRAC_PI_4,
+        );
+        assert_eq!(
+            infinite_cone_ray_hit(
+                &no_axis,
+                &gb_ray(Point3D::new(10.0, 1.0, 1.0), Point3D::new(-1.0, 0.0, 0.0)),
+            ),
+            None
+        );
+        for bad_angle in [0.0, f64::NAN, std::f64::consts::FRAC_PI_2] {
+            let bad = InfiniteCone3DObj::new(
+                Point3D::new(0.0, 0.0, 0.0),
+                Point3D::new(0.0, 1.0, 0.0),
+                bad_angle,
+            );
+            assert_eq!(
+                infinite_cone_ray_hit(
+                    &bad,
+                    &gb_ray(Point3D::new(10.0, 5.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+                ),
+                None,
+                "ángulo {bad_angle}"
+            );
+        }
+        // Eje degenerado a nivel objeto: cae al grueso histórico (sin pánico).
+        let flat_cone = GeoObject::InfiniteCone3D(no_axis);
+        let hit = gb_hit(
+            &flat_cone,
+            &gb_ray(Point3D::new(10.0, 1.0, 1.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("grueso conservador");
+        assert_eq!(hit.confidence, PickConfidence::CoarseBounds);
+        // Miss total: ni manto ni caja ±50 → None.
+        assert!(gb_hit(
+            &cone,
+            &gb_ray(Point3D::new(200.0, 200.0, 0.0), Point3D::new(0.0, 0.0, 1.0)),
+        )
+        .is_none());
+
+        // Cilindro: base origen, eje +Y, r=1.
+        let cyl_inner = InfiniteCylinder3DObj::new(
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(0.0, 1.0, 0.0),
+            1.0,
+        );
+        let cylinder = GeoObject::InfiniteCylinder3D(cyl_inner.clone());
+        let hit = gb_hit(
+            &cylinder,
+            &gb_ray(Point3D::new(10.0, 0.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("cilindro");
+        assert_eq!(hit.confidence, PickConfidence::ExactGeometry);
+        assert!((hit.distance - 9.0).abs() < 1e-9, "{}", hit.distance);
+        // Miss: rayo paralelo al eje fuera del manto (nunca lo cruza).
+        assert_eq!(
+            infinite_cylinder_ray_hit(
+                &cyl_inner,
+                &gb_ray(Point3D::new(2.0, 0.0, 0.0), Point3D::new(0.0, 1.0, 0.0)),
+            ),
+            None
+        );
+        // Clip ±50: cruce a altura axial 60 → None.
+        assert_eq!(
+            infinite_cylinder_ray_hit(
+                &cyl_inner,
+                &gb_ray(Point3D::new(10.0, 60.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+            ),
+            None
+        );
+        // Degenerados: eje nulo o radio inválido → None analítico.
+        let no_axis = InfiniteCylinder3DObj::new(
+            Point3D::new(1.0, 1.0, 1.0),
+            Point3D::new(1.0, 1.0, 1.0),
+            1.0,
+        );
+        assert_eq!(
+            infinite_cylinder_ray_hit(
+                &no_axis,
+                &gb_ray(Point3D::new(10.0, 1.0, 1.0), Point3D::new(-1.0, 0.0, 0.0)),
+            ),
+            None
+        );
+        for bad_radius in [0.0, -1.0, f64::NAN] {
+            let bad = InfiniteCylinder3DObj::new(
+                Point3D::new(0.0, 0.0, 0.0),
+                Point3D::new(0.0, 1.0, 0.0),
+                bad_radius,
+            );
+            assert_eq!(
+                infinite_cylinder_ray_hit(
+                    &bad,
+                    &gb_ray(Point3D::new(10.0, 0.0, 0.0), Point3D::new(-1.0, 0.0, 0.0)),
+                ),
+                None,
+                "radio {bad_radius}"
+            );
+        }
+        // Eje degenerado a nivel objeto: grueso histórico.
+        let flat_cyl = GeoObject::InfiniteCylinder3D(no_axis);
+        let hit = gb_hit(
+            &flat_cyl,
+            &gb_ray(Point3D::new(10.0, 1.0, 1.0), Point3D::new(-1.0, 0.0, 0.0)),
+        )
+        .expect("grueso conservador");
+        assert_eq!(hit.confidence, PickConfidence::CoarseBounds);
     }
 
     #[test]
