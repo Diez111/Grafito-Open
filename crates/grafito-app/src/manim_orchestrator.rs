@@ -727,12 +727,23 @@ pub(crate) fn anexar_error_a_dueno(
 
 /// Recorta app-side a `MAX_CONVERSATION_TURNS` dropeando el par completo.
 ///
-/// El thumb viaja dentro del turno (`ConversationTurn.media`), así que se
-/// recorta junto al par sin reindexado ni caché propio acá (el de la Piel
-/// se retira con gracia en su `trim_conversation`). Defensivo tras cada
-/// `attach`: con `len <= 6` es no-op.
-pub(crate) fn trim_conversation_dropping_pair_media(conversation: &mut Vec<ConversationTurn>) {
-    grafito_assistant_types::trim_conversation(conversation);
+/// R6a: adopción `trim-with-owners` — el thumb viaja dentro del turno
+/// (`ConversationTurn.media`), así que se recorta junto al par sin
+/// reindexado ni caché propio acá (el de la Piel se retira con gracia en
+/// su `trim_conversation`). `owners` son los slots vivos del runtime
+/// (`&mut [&mut anim_owner, &mut anim_ia_owner]` donde existan): se
+/// rebasean con la primitiva `trim_conversation_with_owners` (el dueño
+/// caído en el rango dropeado queda en `None`, rancio honesto que el
+/// drain descarta). Defensivo tras cada `attach`: con `len <= 6` es no-op.
+pub(crate) fn trim_conversation_dropping_pair_media(
+    conversation: &mut Vec<ConversationTurn>,
+    owners: &mut [&mut Option<usize>],
+) {
+    let mut vivos: Vec<Option<usize>> = owners.iter().map(|slot| **slot).collect();
+    grafito_assistant_types::trim_conversation_with_owners(conversation, &mut vivos);
+    for (slot, vivo) in owners.iter_mut().zip(vivos) {
+        **slot = vivo;
+    }
 }
 
 #[cfg(test)]
@@ -1101,7 +1112,12 @@ mod tests {
         let ultimo = conversacion.len() - 1;
         grafito_assistant_types::attach_turn_media(&mut conversacion, ultimo, nueva)
             .expect("attach nuevo");
-        trim_conversation_dropping_pair_media(&mut conversacion);
+        let mut sin_uno: Option<usize> = None;
+        let mut sin_otro: Option<usize> = None;
+        trim_conversation_dropping_pair_media(
+            &mut conversacion,
+            &mut [&mut sin_uno, &mut sin_otro],
+        );
         assert_eq!(conversacion.len(), MAX_CONVERSATION_TURNS);
         // El par más viejo (con su thumb) salió; la media nueva sigue viva.
         assert!(
@@ -1116,6 +1132,34 @@ mod tests {
                 .and_then(|t| t.media.clone())
                 .is_some_and(|m| m.title == "Nueva"),
             "el thumb nuevo sobrevive"
+        );
+    }
+
+    #[test]
+    fn trim_con_duenos_rebasea_vivos_y_anula_al_dropeado() {
+        use grafito_assistant_types::MAX_CONVERSATION_TURNS;
+        // R6a: adopción trim-with-owners — los slots vivos se rebasean,
+        // el caído en el rango dropeado queda en `None` honesto.
+        let mut conversacion: Vec<ConversationTurn> = Vec::new();
+        for i in 0..MAX_CONVERSATION_TURNS + 2 {
+            conversacion.push(ConversationTurn::user(format!("q{i}")));
+            conversacion.push(ConversationTurn::assistant(format!("r{i}")));
+        }
+        let len_antes = conversacion.len();
+        // Dueño en el par más viejo (índices 0-1, cae en el drop) y dueño
+        // vivo al final.
+        let mut caido: Option<usize> = Some(1);
+        let mut vivo: Option<usize> = Some(len_antes - 1);
+        trim_conversation_dropping_pair_media(&mut conversacion, &mut [&mut caido, &mut vivo]);
+        assert_eq!(conversacion.len(), MAX_CONVERSATION_TURNS);
+        assert!(
+            caido.is_none(),
+            "el dueño dropeado se anula, no apunta basura"
+        );
+        assert_eq!(
+            vivo,
+            Some(conversacion.len() - 1),
+            "el vivo sigue al último turno"
         );
     }
 }

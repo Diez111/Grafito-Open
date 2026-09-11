@@ -274,6 +274,10 @@ pub(crate) const ANIM_SIN_IA_AVISO: &str = "sin conexión: te muestro x², pedim
 
 /// W-B — SPEC validado venido de la IA (función, rango, kind/plantilla).
 /// El motor solo renderiza esto tras validar con `infer_*`; jamás basura.
+///
+/// R6a: `centro`/`orden` son el SPEC taylor (parseados y clampeados en
+/// `parsear_spec_anim_ia`: centro finito, orden 1..=10). En integral y
+/// tangente viajan con el default canónico y se ignoran.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SpecAnimIa {
     pub expr: String,
@@ -281,6 +285,8 @@ pub(crate) struct SpecAnimIa {
     pub p1: f64,
     pub plantilla: String,
     pub param: String,
+    pub centro: f64,
+    pub orden: usize,
 }
 
 /// W-B — ¿Hay IA disponible para proponer el SPEC? (puro, sin I/O).
@@ -299,15 +305,17 @@ pub(crate) fn ia_disponible_para_anim(
 
 /// W-B — prompt acotado para pedir SPEC a la IA (puro, sin I/O).
 ///
-/// Pide UNA sola línea JSON con expr/p0/p1/plantilla (`integral-area` o
-/// `derivative-slope` según el pedido; el ejemplo integral no debe sesgar
-/// la tangente); el parseo es estricto y la validación posterior usa
-/// `infer_*` (si la IA inventa, se descarta con `Err` honesto). Capado por
-/// chars para no pasar el budget.
+/// Pide UNA sola línea JSON con expr/p0/p1/plantilla + centro/orden si es
+/// taylor. Trae ejemplo CONTRASTIVO taylor (plantilla/centro/orden) junto al
+/// integral, y cierra con anti-copia: "la plantilla debe matchear la
+/// intención, jamás copies el ejemplo" (el bug era prosa Taylor sobre
+/// frames integral por copiar el ejemplo integral). El parseo es estricto
+/// y la validación posterior usa `infer_*` (si la IA inventa, se descarta
+/// con `Err` honesto). Capado por chars para no pasar el budget.
 pub(crate) fn prompt_spec_anim_ia(pedido: &str) -> String {
     let recortado: String = pedido.chars().take(500).collect();
     format!(
-        "Devolvé SOLO una línea JSON para animar en Grafito: {{\"expr\": \"f(x)\", \"p0\": 0, \"p1\": 2, \"plantilla\": \"integral-area\"}} (si el pedido es de tangente/derivada, usá \"plantilla\": \"derivative-slope\"). Pedido: {recortado}"
+        "Devolvé SOLO una línea JSON para animar en Grafito: integral {{\"expr\": \"x^2\", \"p0\": 0, \"p1\": 2, \"plantilla\": \"integral-area\"}} o taylor {{\"expr\": \"sin(x)\", \"plantilla\": \"taylor-series\", \"centro\": 0, \"orden\": 3}}. La plantilla debe matchear la intención del pedido, jamás copies el ejemplo. Pedido: {recortado}"
     )
 }
 
@@ -352,7 +360,19 @@ pub(crate) fn resolver_turno_anim_ia(ia_disponible: bool, salida: PedidoSpecIa) 
     match salida {
         PedidoSpecIa::Exito(spec) => {
             let prosa = prosa_para_spec_anim_ia(&spec);
-            DesenlaceAnimIa::RenderIa { spec, prosa }
+            // R6a: puerta final en el resolver — la prosa del MISMO spec
+            // debe citar plantilla+función+orden/rango; veto → error
+            // honesto, jamás prosa mentirosa con frames reales.
+            let es_taylor = spec.plantilla.trim().to_lowercase() == "taylor-series";
+            let (orden, rango) = if es_taylor {
+                (Some(spec.orden), None)
+            } else {
+                (None, Some((spec.p0, spec.p1)))
+            };
+            match verificar_prosa_vs_spec(&prosa, &spec.plantilla, &spec.expr, orden, rango) {
+                Ok(()) => DesenlaceAnimIa::RenderIa { spec, prosa },
+                Err(veto) => DesenlaceAnimIa::ErrorHonesto(veto),
+            }
         }
         PedidoSpecIa::Timeout | PedidoSpecIa::Transporte(_) => DesenlaceAnimIa::FallbackCanonico {
             aviso: ANIM_SIN_IA_AVISO,
@@ -361,19 +381,43 @@ pub(crate) fn resolver_turno_anim_ia(ia_disponible: bool, salida: PedidoSpecIa) 
     }
 }
 
-/// W-B — prosa del turno desde el SPEC validado (MUST nombrar función y rango).
+/// W-B — prosa del turno desde el SPEC validado (MUST nombrar lo pedido).
 ///
-/// Usa los valores venidos de la IA, no re-infiere (para que un spec con
-/// f=x³ se vea en prosa aunque el pedido original no la trajera).
+/// R6a: prosa POR PLANTILLA, jamás genérica que mezcle:
+/// - `taylor-series` → nombra centro + orden (`taylor_prosa`), SIN rango
+///   (la serie vive en x=centro, el rango integral mentiría: ese fue el bug
+///   de la captura — prosa Taylor sobre frames integral).
+/// - `integral-area`/`derivative-slope` → su keyword (integral/tangente)
+///   + función y rango.
+///
 /// Rioplatense + frase de referencia de la media. Pura, sin I/O.
 pub(crate) fn prosa_para_spec_anim_ia(spec: &SpecAnimIa) -> String {
-    format!(
-        "te muestro con f(x)={} en [{},{}].\n\n{}",
-        spec.expr,
-        spec.p0,
-        spec.p1,
-        crate::anim_ui::animation_reference_sentence(),
-    )
+    let referencia = crate::anim_ui::animation_reference_sentence();
+    match spec.plantilla.trim().to_lowercase().as_str() {
+        "taylor-series" => {
+            let taylor = grafito_anim::parametric::TaylorSpec {
+                expr: spec.expr.clone(),
+                centro: spec.centro,
+                orden: spec.orden,
+            };
+            format!(
+                "{}.\n\n{referencia}",
+                grafito_anim::parametric::taylor_prosa(&taylor, false)
+            )
+        }
+        "derivative-slope" => {
+            format!(
+                "te muestro la tangente con f(x)={} en [{},{}].\n\n{referencia}",
+                spec.expr, spec.p0, spec.p1,
+            )
+        }
+        _ => {
+            format!(
+                "te muestro la integral con f(x)={} en [{},{}].\n\n{referencia}",
+                spec.expr, spec.p0, spec.p1,
+            )
+        }
+    }
 }
 
 /// M1 — prosa canónica declarada según plantilla (punto único local).
@@ -412,6 +456,283 @@ pub(crate) fn aviso_fallback_canonico(spec: &SpecAnimIa) -> String {
         "sin conexión: te muestro {} en [{},{}] ({}), pedime otra",
         spec.expr, spec.p0, spec.p1, kind
     )
+}
+
+/// R6a — keyword rioplatense de la plantilla real (puro, sin I/O).
+///
+/// Punto único para que prosa, aviso y verificación nombren lo mismo:
+/// `integral-area`→"la integral", `derivative-slope`→"la tangente",
+/// `taylor-series`→"Taylor", resto→"la animación".
+pub(crate) fn keyword_plantilla_anim(plantilla: &str) -> &'static str {
+    match plantilla.trim().to_lowercase().as_str() {
+        "integral-area" => "la integral",
+        "derivative-slope" => "la tangente",
+        "taylor-series" => "Taylor",
+        _ => "la animación",
+    }
+}
+
+/// R6a — punto único de prosa+aviso canónicos para un pedido (puro, sin I/O).
+///
+/// Timeout/Transporte y early-returns sin-settings/sin-key pasan por acá:
+/// prosa y aviso describen la MISMA canónica efectivamente renderizada
+/// (`spec_canonico_para_fallback`: solo integral/tangente reales). Sin
+/// canónica para la plantilla (taylor/resto) → prosa canónica por
+/// plantilla + aviso genérico `ANIM_SIN_IA_AVISO` (el worker resuelve el
+/// render por su pipeline dedicado, nunca integral muda).
+pub(crate) fn prosa_y_aviso_canonicos_para_pedido(
+    plantilla: &str,
+    pedido: &str,
+) -> (String, String) {
+    match spec_canonico_para_fallback(plantilla) {
+        Some(canonico) => {
+            let prosa = if canonico.plantilla == "taylor-series" {
+                prosa_taylor_canonica(pedido)
+            } else {
+                prosa_canonica_para_plantilla(&canonico.plantilla)
+            };
+            let aviso = aviso_fallback_canonico(&canonico);
+            (prosa, aviso)
+        }
+        None => (
+            prosa_canonica_para_plantilla(plantilla),
+            ANIM_SIN_IA_AVISO.to_string(),
+        ),
+    }
+}
+
+/// R6a — prosa+aviso offline con la f REAL del pedido (puro, sin I/O).
+///
+/// Offline-explícito jamás miente con canónica: si el pedido infiere
+/// función real (área/tangente/taylor por sus `infer_*`), la prosa es la
+/// explícita que nombra f (+rango o +centro/orden) y el aviso declara lo
+/// mismo; si no infiere (canónica o inválida), cae al punto único
+/// canónico declarado. La usa el early-return sin-settings/sin-key.
+pub(crate) fn prosa_y_aviso_offline_para_pedido(plantilla: &str, pedido: &str) -> (String, String) {
+    let normalizada = plantilla.trim().to_lowercase();
+    if normalizada == "taylor-series" {
+        if let Ok(resuelto) = grafito_anim::parametric::infer_taylor_anim(pedido) {
+            let spec = resuelto.spec();
+            let prosa = if resuelto.es_canonica() {
+                prosa_taylor_canonica(pedido)
+            } else {
+                prosa_taylor_explicita(&spec.expr, pedido)
+            };
+            let aviso = format!(
+                "sin conexión: te muestro Taylor de {} en x={}, orden {}; pedime otra",
+                spec.expr, spec.centro, spec.orden
+            );
+            return (prosa, aviso);
+        }
+    } else if normalizada == "derivative-slope" {
+        if let Ok(resuelto) = grafito_anim::parametric::infer_tangent_anim(pedido) {
+            let anim = resuelto.anim();
+            let prosa = prosa_tangente_explicita(&anim.expr_a, pedido);
+            let aviso = format!(
+                "sin conexión: te muestro {} en [{},{}] (tangente), pedime otra",
+                anim.expr_a, anim.p0, anim.p1
+            );
+            return (prosa, aviso);
+        }
+    } else if normalizada == "integral-area" {
+        if let Ok(resuelto) = grafito_anim::parametric::infer_area_anim(pedido) {
+            let anim = resuelto.anim();
+            let prosa = prosa_integral_explicita(&anim.expr_a, pedido);
+            let aviso = format!(
+                "sin conexión: te muestro {} en [{},{}] (integral), pedime otra",
+                anim.expr_a, anim.p0, anim.p1
+            );
+            return (prosa, aviso);
+        }
+    }
+    prosa_y_aviso_canonicos_para_pedido(plantilla, pedido)
+}
+
+/// R6a — prosa genérica que DECLARA plantilla+concepto (pura, sin I/O).
+///
+/// Las ramas genéricas (single genérico, guion, playlist) completaban la
+/// frase de referencia sola: genérico sin claims = veto en la puerta
+/// final. Ahora declaran keyword de la plantilla + concepto recortado
+/// (120 chars) + referencia. Pasa `verificar_prosa_vs_spec`.
+pub(crate) fn prosa_turno_generica(plantilla: &str, concepto: &str) -> String {
+    let recorte: String = concepto.chars().take(120).collect();
+    format!(
+        "te muestro {} con {}.\n\n{}",
+        keyword_plantilla_anim(plantilla),
+        recorte.trim(),
+        crate::anim_ui::animation_reference_sentence(),
+    )
+}
+
+/// R6a — prosa del turno guion: declara primer template + concepto (pura).
+///
+/// Parse acotado igual que el worker (`GuionTexto` → `Guion`); si no
+/// parsea, declara "la animación" con el texto recortado (el hilo dará el
+/// error honesto). Pasa `verificar_prosa_vs_spec` a nivel presencia.
+pub(crate) fn prosa_turno_para_guion(guion_texto: &str) -> String {
+    use grafito_anim::guion::{Guion, GuionTexto};
+    let coords = serde_json::from_str::<GuionTexto>(guion_texto)
+        .ok()
+        .and_then(|crudo| Guion::try_new(crudo).ok())
+        .map(|guion| {
+            let plantilla = guion
+                .actos()
+                .first()
+                .and_then(|acto| acto.pasos.first())
+                .map(|paso| paso.template.clone())
+                .unwrap_or_else(|| "universal".to_string());
+            (plantilla, guion.concepto().to_string())
+        });
+    match coords {
+        Some((plantilla, concepto)) => prosa_turno_generica(&plantilla, &concepto),
+        None => prosa_turno_generica("universal", guion_texto),
+    }
+}
+
+/// R6a — prosa del turno playlist: declara primer template + lados (pura).
+///
+/// Une los conceptos de los steps animados ("a y después b"); sin steps
+/// animados declara la cantidad de pasos. Pasa la puerta a nivel
+/// presencia (el drain de playlist no verifica: `history=None`).
+pub(crate) fn prosa_turno_para_playlist(playlist: &grafito_anim::protocol::Playlist) -> String {
+    let animados: Vec<&grafito_anim::protocol::AnimRequest> = playlist
+        .steps
+        .iter()
+        .filter_map(|s| s.request.as_ref())
+        .collect();
+    match animados.first() {
+        Some(primero) => {
+            let lados: Vec<&str> = animados
+                .iter()
+                .map(|r| {
+                    let c = r.concept.trim();
+                    if c.is_empty() {
+                        r.template.as_str()
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            prosa_turno_generica(&primero.template, &lados.join(" y después "))
+        }
+        None => prosa_turno_generica(
+            "universal",
+            &format!("playlist de {} pasos", playlist.steps.len()),
+        ),
+    }
+}
+///
+/// El log lleva `{template, func_hash}` sin PII: la función se hashea,
+/// jamás se imprime.
+pub(crate) fn fnv1a64(texto: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in texto.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// R6a — normaliza texto para comparar prosa vs spec (puro, sin I/O).
+///
+/// Minúsculas, sin espacios, `**`→`^`, `²`→`^2`, `³`→`^3`: "x^3" del SPEC
+/// matchea "x³" de la prosa y viceversa.
+pub(crate) fn normalizar_prosa_para_spec(texto: &str) -> String {
+    texto
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .replace("**", "^")
+        .replace('²', "^2")
+        .replace('³', "^3")
+}
+
+/// R6a — puerta final prosa-vs-spec: `Ok` o veto (pura, sin I/O).
+///
+/// La prosa que acompaña frames DEBE citar lo EFECTIVAMENTE renderizado:
+/// - keyword de `template_real` (`la integral`/`la tangente`/`taylor`…),
+/// - función normalizada (`normalizar_prosa_para_spec`),
+/// - taylor: `orden {n}` exacto si `orden` es `Some`, o cualquier "orden"
+///   si es `None`; resto: rango `[p0,p1]` exacto si `rango` es `Some`, o
+///   sin chequeo de rango si es `None` (drain genérico).
+///
+/// Genérico sin claims = VETO (`Err` sin PII, solo la plantilla). Ante
+/// veto loguea `prose_vs_spec_refuted{template,func_hash FNV}` (sin PII).
+pub(crate) fn verificar_prosa_vs_spec(
+    prosa: &str,
+    template_real: &str,
+    func_real: &str,
+    orden: Option<usize>,
+    rango: Option<(f64, f64)>,
+) -> Result<(), String> {
+    let norma = normalizar_prosa_para_spec(prosa);
+    let keyword = match template_real.trim().to_lowercase().as_str() {
+        "integral-area" => "integral",
+        "derivative-slope" => "tangente",
+        "taylor-series" => "taylor",
+        _ => "animación",
+    };
+    let es_taylor = template_real.trim().to_lowercase() == "taylor-series";
+    let func_norma = normalizar_prosa_para_spec(func_real);
+    // Ante concepto largo la prosa lo recorta: se verifica con el prefijo
+    // (60 chars normalizados) para no vetar declaraciones honestas.
+    let func_citada = if func_norma.chars().count() > 60 {
+        let prefijo: String = func_norma.chars().take(60).collect();
+        norma.contains(&prefijo)
+    } else {
+        func_norma.is_empty() || norma.contains(&func_norma)
+    };
+    let cita_orden_rango = if es_taylor {
+        match orden {
+            Some(n) => norma.contains(&format!("orden{n}")),
+            None => norma.contains("orden"),
+        }
+    } else {
+        match rango {
+            Some((p0, p1)) => norma.contains(&format!("[{p0},{p1}]")),
+            // Sin rango conocido (drain genérico): la prosa ya declara
+            // plantilla+concepto; solo keyword+func deciden (el bare
+            // reference sin claims sigue vetado por keyword+func).
+            None => true,
+        }
+    };
+    if norma.contains(keyword) && func_citada && cita_orden_rango {
+        Ok(())
+    } else {
+        log::warn!(
+            "prose_vs_spec_refuted{{template={},func_hash={:016x}}}",
+            template_real.trim().to_lowercase(),
+            fnv1a64(&func_norma),
+        );
+        Err(format!(
+            "la prosa no cita lo renderizado ({}): pedí de nuevo.",
+            keyword_plantilla_anim(template_real)
+        ))
+    }
+}
+
+/// R6a — verifica la prosa del turno dueño en el drain (puro, sin I/O).
+///
+/// Lee el contenido del turno `owner` y lo pasa por
+/// `verificar_prosa_vs_spec` (el veto ya loguea
+/// `prose_vs_spec_refuted`). Turno ausente o rol no-asistente = veto
+/// honesto (el drain completa prosa genérica que declara en su lugar).
+/// Replay excluido: el llamante solo la invoca con `history` real.
+pub(crate) fn verificar_prosa_de_turno(
+    conversacion: &[ConversationTurn],
+    owner: Option<usize>,
+    template_real: &str,
+    func_real: &str,
+    orden: Option<usize>,
+    rango: Option<(f64, f64)>,
+) -> Result<(), String> {
+    let indice = owner.ok_or_else(|| "sin turno dueño para verificar la prosa.".to_string())?;
+    let turno = conversacion
+        .get(indice)
+        .filter(|turno| turno.role == ConversationRole::Assistant)
+        .ok_or_else(|| "el turno dueño ya no existe para verificar la prosa.".to_string())?;
+    verificar_prosa_vs_spec(&turno.content, template_real, func_real, orden, rango)
 }
 /// M1 — prosa rioplatense para tangente explícita: nombra función y rango.
 ///
@@ -573,6 +894,40 @@ pub(crate) fn validar_spec_anim_ia(spec: &SpecAnimIa) -> Result<(), String> {
             }
             Err(error) => Err(format!("el SPEC de la IA no valida: {error}")),
         }
+    } else if plantilla == "taylor-series" {
+        // R6a: rama taylor por `infer_taylor_anim` con centro/orden: el
+        // centro debe ser finito y el orden 1..=10 (lo que el motor deriva;
+        // fuera de eso el renderer dedicado no promete nada honesto).
+        if !spec.centro.is_finite() {
+            return Err("el SPEC de la IA trae un centro inválido: pedí de nuevo.".into());
+        }
+        if !(1..=10).contains(&spec.orden) {
+            return Err(format!(
+                "el SPEC de la IA trae orden {} fuera de 1..=10: pedí de nuevo.",
+                spec.orden
+            ));
+        }
+        let sintetico = format!(
+            "taylor de f(x)={} en x={} orden {} con animación",
+            spec.expr, spec.centro, spec.orden
+        );
+        match grafito_anim::parametric::infer_taylor_anim(&sintetico) {
+            Ok(resuelto) => {
+                let got = resuelto.spec();
+                if got.expr.trim() == spec.expr.trim()
+                    && (got.centro - spec.centro).abs() < 1e-9
+                    && got.orden == spec.orden
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "el SPEC de la IA ({:?}) no valida como taylor explícita: pedí de nuevo.",
+                        spec.expr
+                    ))
+                }
+            }
+            Err(error) => Err(format!("el SPEC de la IA no valida: {error}")),
+        }
     } else {
         let sintetico = format!(
             "barrido de f(x)={} con {} en [{},{}] con animación",
@@ -587,10 +942,17 @@ pub(crate) fn validar_spec_anim_ia(spec: &SpecAnimIa) -> Result<(), String> {
 /// W-B — parsea el JSON del SPEC venido de la IA y lo valida con `infer_*`.
 ///
 /// Acepta `{"expr_a"|"expr", "range":[p0,p1] o "p0"/"p1",
-/// "plantilla"|"template"|"kind", "param"}`. Extrae el primer objeto `{…}`
-/// del texto (la IA a veces agrega prosa alrededor), valida topes
-/// (expr ≤2000 chars, rango finito con p0<p1, param ASCII) y re-valida con
-/// `validar_spec_anim_ia` (puertas `infer_*`). Sin `unwrap`, sin I/O.
+/// "plantilla"|"template"|"kind", "param", "centro", "orden"}`. Extrae el
+/// primer objeto `{…}` del texto (la IA a veces agrega prosa alrededor),
+/// valida topes (expr ≤2000 chars, rango finito con p0<p1, param ASCII) y
+/// re-valida con `validar_spec_anim_ia` (puertas `infer_*`). Sin `unwrap`,
+/// sin I/O.
+///
+/// R6a: plantilla ausente = `Invalido` (Err honesto): `kind` vale como
+/// alias, pero SIN default que mezcle (el default heredaba la plantilla
+/// del pedido y la prosa Taylor terminaba sobre frames integral).
+/// `centro`/`orden` se parsean y clampean (centro finito o canónico,
+/// orden 1..=10 o canónico) para la rama `taylor-series`.
 pub(crate) fn parsear_spec_anim_ia(
     texto_ia: &str,
     pedido_original: &str,
@@ -655,11 +1017,16 @@ pub(crate) fn parsear_spec_anim_ia(
     let plantilla = valor
         .get("plantilla")
         .or_else(|| valor.get("template"))
+        .or_else(|| valor.get("kind"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|texto| !texto.is_empty())
         .map(|texto| texto.to_lowercase())
-        .unwrap_or_else(|| plantilla_para_pedido(pedido_original).to_string());
+        .ok_or_else(|| {
+            format!(
+                "el SPEC de la IA vino sin plantilla para {pedido_original:?}: pedí integral, tangente o taylor explícita."
+            )
+        })?;
     let param = valor
         .get("param")
         .and_then(serde_json::Value::as_str)
@@ -667,12 +1034,31 @@ pub(crate) fn parsear_spec_anim_ia(
         .filter(|texto| !texto.is_empty())
         .unwrap_or("p")
         .to_string();
+    // R6a: centro/orden taylor parseados y clampeados (finito / 1..=10;
+    // ante basura van al canónico y `validar_spec_anim_ia` decide).
+    let centro = valor
+        .get("centro")
+        .or_else(|| valor.get("x0"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|c| c.is_finite())
+        .unwrap_or(grafito_anim::parametric::TAYLOR_CANONICAL_CENTER);
+    let orden = valor
+        .get("orden")
+        .or_else(|| valor.get("order"))
+        .or_else(|| valor.get("terms"))
+        .or_else(|| valor.get("grado"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| (1..=10).contains(n))
+        .unwrap_or(grafito_anim::parametric::TAYLOR_CANONICAL_ORDER);
     let spec = SpecAnimIa {
         expr: expr.to_string(),
         p0,
         p1,
         plantilla,
         param,
+        centro,
+        orden,
     };
     validar_spec_anim_ia(&spec)?;
     Ok(spec)
@@ -737,39 +1123,56 @@ pub(crate) fn anim_desde_spec_ia(
 
 /// W-B — SPEC canónico para fallback local (sin IA, timeout o 400-429).
 ///
-/// Espeja `parametric_for_template`: integral `x^2 [0,2]`, tangente
-/// `x^2 [-1.5,1.5]`; resto → integral honesta (jamás vacío).
-/// Pura, sin I/O. La prosa que lo declara vive en
+/// R6a CRÍTICO (bug probado con captura: prosa Taylor + frames integral):
+/// el fallback canónico/integral NUNCA sustituye la plantilla pedida.
+/// Espeja `parametric_for_template` SOLO para lo real: integral
+/// `x^2 [0,2]`, tangente `x^2 [-1.5,1.5]`; el resto (taylor incluida) →
+/// `None` honesto y el llamante usa su pipeline dedicado o error honesto,
+/// jamás integral muda. Pura, sin I/O. La prosa que lo declara vive en
 /// `INTEGRAL_CANONICAL_PROSA` / `TANGENT_CANONICAL_PROSA`.
-pub(crate) fn spec_canonico_para_fallback(plantilla: &str) -> SpecAnimIa {
+pub(crate) fn spec_canonico_para_fallback(plantilla: &str) -> Option<SpecAnimIa> {
     match plantilla.trim().to_lowercase().as_str() {
-        "derivative-slope" => SpecAnimIa {
-            expr: grafito_anim::parametric::TANGENT_CANONICAL_EXPR.to_string(),
-            p0: grafito_anim::parametric::TANGENT_CANONICAL_P0,
-            p1: grafito_anim::parametric::TANGENT_CANONICAL_P1,
-            plantilla: "derivative-slope".to_string(),
-            param: grafito_anim::parametric::TANGENT_CANONICAL_PARAM.to_string(),
-        },
-        _ => SpecAnimIa {
+        "integral-area" => Some(SpecAnimIa {
             expr: grafito_anim::parametric::INTEGRAL_CANONICAL_EXPR.to_string(),
             p0: grafito_anim::parametric::INTEGRAL_CANONICAL_P0,
             p1: grafito_anim::parametric::INTEGRAL_CANONICAL_P1,
             plantilla: "integral-area".to_string(),
             param: "p".to_string(),
-        },
+            centro: grafito_anim::parametric::TAYLOR_CANONICAL_CENTER,
+            orden: grafito_anim::parametric::TAYLOR_CANONICAL_ORDER,
+        }),
+        "derivative-slope" => Some(SpecAnimIa {
+            expr: grafito_anim::parametric::TANGENT_CANONICAL_EXPR.to_string(),
+            p0: grafito_anim::parametric::TANGENT_CANONICAL_P0,
+            p1: grafito_anim::parametric::TANGENT_CANONICAL_P1,
+            plantilla: "derivative-slope".to_string(),
+            param: grafito_anim::parametric::TANGENT_CANONICAL_PARAM.to_string(),
+            centro: grafito_anim::parametric::TAYLOR_CANONICAL_CENTER,
+            orden: grafito_anim::parametric::TAYLOR_CANONICAL_ORDER,
+        }),
+        _ => None,
     }
 }
 
 /// W-B — renderiza la media desde un SPEC ya validado (un solo render).
 ///
-/// Construye el `ParametricAnim` con `anim_desde_spec_ia` y renderiza con
-/// progreso cancelable (mismo presupuesto que la canónica: 48 frames).
-/// Título curado por el punto único (nombra la función del SPEC).
+/// R6a: RECHAZA `taylor-series` con `Err` honesto (obliga al renderer
+/// taylor dedicado: la vía paramétrica genérica dibujaría la traza de f,
+/// no f vs su serie — ese fue el bug de la captura). Construye el
+/// `ParametricAnim` con `anim_desde_spec_ia` y renderiza con progreso
+/// cancelable (mismo presupuesto que la canónica: 48 frames). Título
+/// curado por el punto único (nombra la función del SPEC).
 /// Hilo background, sin tocar UI. Sin `unwrap`. Pura salvo el render.
 pub(crate) fn render_media_desde_spec_ia(
     spec: &SpecAnimIa,
     cancel: &CancellationToken,
 ) -> Result<grafito_ui::assistant::AssistantMedia, String> {
+    if spec.plantilla.trim().to_lowercase() == "taylor-series" {
+        return Err(
+            "el SPEC taylor va por el renderer taylor dedicado, no por la vía paramétrica."
+                .to_string(),
+        );
+    }
     let anim = anim_desde_spec_ia(spec)?;
     let mut saw_cancel = false;
     let frames = crate::anim_native::render_parametric_frames_with_progress(&anim, &mut |_, _| {
@@ -2742,6 +3145,35 @@ impl GrafitoApp {
                         // turno dueño. Playlist/replay traen `history=None`:
                         // solo slot vivo.
                         if let Some(coords) = history {
+                            // R6a: puerta final en el drain single/guion
+                            // (replay excluido: trae `history=None`). La prosa
+                            // del turno dueño debe declarar plantilla y
+                            // concepto; veto → se anexa la declaración
+                            // honesta (el veto ya logueó el metric) y la
+                            // media real se publica igual.
+                            if verificar_prosa_de_turno(
+                                &self.assistant.conversation,
+                                owner,
+                                &coords.template,
+                                &coords.concept,
+                                None,
+                                None,
+                            )
+                            .is_err()
+                            {
+                                if let Some(indice) = owner {
+                                    if let Some(turno) = self.assistant.conversation.get_mut(indice)
+                                    {
+                                        if turno.role == ConversationRole::Assistant {
+                                            turno.content.push_str("\n\n");
+                                            turno.content.push_str(&prosa_turno_generica(
+                                                &coords.template,
+                                                &coords.concept,
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                             if let Some(ref_media) = turn_media_for_completed_job(&media, &coords) {
                                 attach_media_to_owner_turn(
                                     &mut self.assistant.conversation,
@@ -2750,6 +3182,10 @@ impl GrafitoApp {
                                 );
                                 trim_conversation_dropping_pair_media(
                                     &mut self.assistant.conversation,
+                                    &mut [
+                                        &mut self.assistant_runtime.anim_owner,
+                                        &mut self.assistant_runtime.anim_ia_owner,
+                                    ],
                                 );
                             }
                         }
@@ -2821,7 +3257,25 @@ impl GrafitoApp {
                     if was_cancelled {
                         self.notify("Generación cancelada.", ToastKind::Info);
                     } else {
-                        let humano = grafito_ui::assistant::humanize_prose_text(&render.prosa);
+                        // R6a: puerta final en el drain — la prosa se verifica
+                        // ANTES de publicarla (el worker ya verificó exacto;
+                        // acá nivel presencia); veto → prosa genérica que
+                        // declara plantilla+concepto (la media es real, solo
+                        // la prosa divergió; el veto ya logueó el metric).
+                        let prosa_final = if verificar_prosa_vs_spec(
+                            &render.prosa,
+                            &render.template,
+                            &render.concept,
+                            None,
+                            None,
+                        )
+                        .is_ok()
+                        {
+                            render.prosa
+                        } else {
+                            prosa_turno_generica(&render.template, &render.concept)
+                        };
+                        let humano = grafito_ui::assistant::humanize_prose_text(&prosa_final);
                         self.assistant.complete_local_request(humano);
                         // Si el complete movió el índice (trim) o hubo
                         // reemplazo, el render es rancio: se descarta.
@@ -2848,8 +3302,14 @@ impl GrafitoApp {
                                     owner,
                                     ref_media,
                                 );
+                                // R6a: el trim rebasea los dueños vivos (el
+                                // otro slot puede seguir en vuelo).
                                 trim_conversation_dropping_pair_media(
                                     &mut self.assistant.conversation,
+                                    &mut [
+                                        &mut self.assistant_runtime.anim_owner,
+                                        &mut self.assistant_runtime.anim_ia_owner,
+                                    ],
                                 );
                             }
                             if es_dueno_vivo(&self.assistant.conversation, owner) {
@@ -3177,7 +3637,10 @@ impl GrafitoApp {
                     let pregunta = problem_clone.clone();
                     self.assistant.begin_request(pregunta);
                     self.assistant.problem.clear();
-                    let prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                    // R6a: la rama genérica declara plantilla+concepto del
+                    // guion (primer template canónico + concepto), jamás el
+                    // bare reference sin claims (la puerta final lo vetaría).
+                    let prosa = prosa_turno_para_guion(&guion_texto);
                     let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                     self.assistant.complete_local_request(humano);
                     self.assistant.set_media(None, ctx);
@@ -3245,7 +3708,9 @@ impl GrafitoApp {
                         let question = problem_clone.clone();
                         self.assistant.begin_request(question);
                         self.assistant.problem.clear();
-                        let prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                        // R6a: la playlist declara primer template + pasos
+                        // (jamás bare reference sin claims).
+                        let prosa = prosa_turno_para_playlist(&playlist);
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                         self.assistant.complete_local_request(humano);
                         self.assistant.set_media(None, ctx);
@@ -3380,7 +3845,9 @@ impl GrafitoApp {
                         let question = problem_clone.clone();
                         self.assistant.begin_request(question);
                         self.assistant.problem.clear();
-                        let prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                        // R6a: el genérico declara plantilla+concepto (el
+                        // bare reference sin claims lo veta la puerta final).
+                        let prosa = prosa_turno_generica(plantilla, concepto);
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                         self.assistant.complete_local_request(humano);
                         self.assistant.set_media(None, ctx);
@@ -5342,7 +5809,11 @@ impl GrafitoApp {
         let settings = match self.assistant_provider_settings() {
             Ok(settings) => settings,
             Err(_) => {
-                let prosa = prosa_canonica_para_plantilla(&plantilla_fallback);
+                // R6a: offline-explícito por el punto único (f real del
+                // pedido si infiere, canónica declarada si no; jamás
+                // canónica mentirosa sobre explícita).
+                let (prosa, _) =
+                    prosa_y_aviso_offline_para_pedido(&plantilla_fallback, &pedido_original);
                 let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                 self.assistant.complete_local_request(humano);
                 self.run_assistant_animation_with(ctx, &plantilla_fallback, &pedido_original);
@@ -5353,11 +5824,12 @@ impl GrafitoApp {
         let api_key = match self.assistant_api_key() {
             Ok(key) => key,
             Err(_) => {
-                let prosa = prosa_canonica_para_plantilla(&plantilla_fallback);
+                // R6a: punto único offline (prosa+aviso del MISMO pedido).
+                let (prosa, aviso) =
+                    prosa_y_aviso_offline_para_pedido(&plantilla_fallback, &pedido_original);
                 let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
                 self.assistant.complete_local_request(humano);
-                let canonico = spec_canonico_para_fallback(&plantilla_fallback);
-                self.notify(aviso_fallback_canonico(&canonico), ToastKind::Info);
+                self.notify(aviso, ToastKind::Info);
                 self.run_assistant_animation_with(ctx, &plantilla_fallback, &pedido_original);
                 ctx.request_repaint();
                 return;
@@ -5380,33 +5852,138 @@ impl GrafitoApp {
             let desenlace = resolver_turno_anim_ia(true, salida);
             let resultado = match desenlace {
                 DesenlaceAnimIa::RenderIa { spec, prosa } => {
-                    match render_media_desde_spec_ia(&spec, &worker_cancel) {
-                        Ok(media) => Ok(AnimIaRender {
-                            media,
-                            prosa,
-                            aviso: None,
-                            template: spec.plantilla.clone(),
-                            concept: spec.expr.clone(),
-                        }),
-                        Err(error) => Err(error),
+                    // R6a: puerta final en el worker IA (single) — re-verifica
+                    // la prosa contra el spec antes de publicar; veto → Err
+                    // honesto sin media mentirosa.
+                    let es_taylor = spec.plantilla.trim().to_lowercase() == "taylor-series";
+                    let (orden, rango) = if es_taylor {
+                        (Some(spec.orden), None)
+                    } else {
+                        (None, Some((spec.p0, spec.p1)))
+                    };
+                    if let Err(veto) =
+                        verificar_prosa_vs_spec(&prosa, &spec.plantilla, &spec.expr, orden, rango)
+                    {
+                        Err(veto)
+                    } else {
+                        match render_media_desde_spec_ia(&spec, &worker_cancel) {
+                            Ok(media) => Ok(AnimIaRender {
+                                media,
+                                prosa,
+                                aviso: None,
+                                template: spec.plantilla.clone(),
+                                concept: spec.expr.clone(),
+                            }),
+                            Err(error) => Err(error),
+                        }
                     }
                 }
                 DesenlaceAnimIa::FallbackCanonico { aviso: _ } => {
-                    // M1: el aviso genérico del resolver se especializa acá
-                    // con la canónica EFECTIVAMENTE renderizada (plantilla y
-                    // rango reales, no promesa del pedido).
-                    let canonico = spec_canonico_para_fallback(&plantilla_hilo);
-                    let prosa = prosa_canonica_para_plantilla(&plantilla_hilo);
-                    let aviso = aviso_fallback_canonico(&canonico);
-                    match render_media_desde_spec_ia(&canonico, &worker_cancel) {
-                        Ok(media) => Ok(AnimIaRender {
-                            media,
-                            prosa,
-                            aviso: Some(aviso),
-                            template: canonico.plantilla.clone(),
-                            concept: canonico.expr.clone(),
-                        }),
-                        Err(error) => Err(error),
+                    // R6a CRÍTICO: el fallback NUNCA sustituye la plantilla
+                    // pedida (bug de la captura: prosa Taylor + frames
+                    // integral). taylor → renderer taylor DEDICADO con lo
+                    // inferido del pedido real; integral/tangente → su
+                    // canónica declarada; resto → pipeline clásico local.
+                    // Prosa+aviso describen lo EFECTIVAMENTE renderizado.
+                    let normalizada = plantilla_hilo.trim().to_lowercase();
+                    if normalizada == "taylor-series" {
+                        match grafito_anim::parametric::infer_taylor_anim(&pedido_hilo) {
+                            Ok(resuelto) => {
+                                let spec = resuelto.spec().clone();
+                                let mut saw_cancel = false;
+                                let frames = crate::anim_native::render_taylor_frames_for_spec_impl(
+                                    crate::anim_native::CHAT_CANON_W,
+                                    crate::anim_native::CHAT_CANON_H,
+                                    &spec,
+                                    false,
+                                    &mut |_, _| {
+                                        if worker_cancel.is_cancelled() {
+                                            saw_cancel = true;
+                                        }
+                                    },
+                                );
+                                if worker_cancel.is_cancelled() || saw_cancel {
+                                    Err("La generación se canceló antes de completarse."
+                                        .to_string())
+                                } else if frames.is_empty() {
+                                    Err(crate::anim_native::error_sin_fotogramas("el motor nativo"))
+                                } else {
+                                    let prosa = if resuelto.es_canonica() {
+                                        prosa_taylor_canonica(&pedido_hilo)
+                                    } else {
+                                        prosa_taylor_explicita(&spec.expr, &pedido_hilo)
+                                    };
+                                    let aviso = format!(
+                                        "sin conexión: te muestro Taylor de {} en x={}, orden {}; pedime otra",
+                                        spec.expr, spec.centro, spec.orden
+                                    );
+                                    let title = titulo_curado(&plantilla_hilo, &spec.expr, None);
+                                    Ok(AnimIaRender {
+                                        media: grafito_ui::assistant::AssistantMedia {
+                                            title,
+                                            frames,
+                                        },
+                                        prosa,
+                                        aviso: Some(aviso),
+                                        template: "taylor-series".to_string(),
+                                        concept: spec.expr.clone(),
+                                    })
+                                }
+                            }
+                            Err(error) => Err(error.to_string()),
+                        }
+                    } else if let Some(canonico) = spec_canonico_para_fallback(&plantilla_hilo) {
+                        // M1 + R6a: el aviso genérico del resolver se
+                        // especializa por el PUNTO ÚNICO con la canónica
+                        // EFECTIVAMENTE renderizada (plantilla y rango
+                        // reales, no promesa del pedido).
+                        let (prosa, aviso) =
+                            prosa_y_aviso_canonicos_para_pedido(&plantilla_hilo, &pedido_hilo);
+                        match render_media_desde_spec_ia(&canonico, &worker_cancel) {
+                            Ok(media) => Ok(AnimIaRender {
+                                media,
+                                prosa,
+                                aviso: Some(aviso),
+                                template: canonico.plantilla.clone(),
+                                concept: canonico.expr.clone(),
+                            }),
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        // Resto sin canónica honesta: pipeline clásico local
+                        // en el hilo (jamás integral muda).
+                        let mut saw_cancel = false;
+                        let (canon_w, canon_h) = crate::anim_native::encajar_anim_a_chat(720, 540);
+                        let frames = crate::anim_native::render_anim_with_progress(
+                            &plantilla_hilo,
+                            &pedido_hilo,
+                            canon_w,
+                            canon_h,
+                            &std::collections::BTreeMap::new(),
+                            &mut |_, _| {
+                                if worker_cancel.is_cancelled() {
+                                    saw_cancel = true;
+                                }
+                            },
+                        );
+                        if worker_cancel.is_cancelled() || saw_cancel {
+                            Err("La generación se canceló antes de completarse.".to_string())
+                        } else if frames.is_empty() {
+                            Err(crate::anim_native::error_sin_fotogramas("el motor nativo"))
+                        } else {
+                            let prosa = prosa_turno_generica(&plantilla_hilo, &pedido_hilo);
+                            let title = format!(
+                                "{} (nativa)",
+                                titulo_curado(&plantilla_hilo, &pedido_hilo, None)
+                            );
+                            Ok(AnimIaRender {
+                                media: grafito_ui::assistant::AssistantMedia { title, frames },
+                                prosa,
+                                aviso: Some(ANIM_SIN_IA_AVISO.to_string()),
+                                template: plantilla_hilo.clone(),
+                                concept: pedido_hilo.clone(),
+                            })
+                        }
                     }
                 }
                 DesenlaceAnimIa::ErrorHonesto(detalle) => Err(detalle),
@@ -7250,28 +7827,32 @@ mod tests {
         clasifica_pedido_tangente, clasifica_pedido_taylor, classify_local_assistant_response,
         commit_assistant_graph_preflight, decide_animacion, detect_dvisvgm_available,
         detect_latex_available, esperar_spec_ia_con_timeout, export_orbit_supported_for_title,
-        ia_disponible_para_anim, inspect_remote_action_proposals, inspect_remote_proposals,
-        inspect_remote_proposals_cancellable, is_agent_spark_responses_unsupported_error,
-        is_session_or_account_error, is_socratic_repair_error, join_gif_handle_bounded,
-        join_puente_bounded, limpiar_media_si_no_animacion, parsear_spec_anim_ia,
+        fnv1a64, ia_disponible_para_anim, inspect_remote_action_proposals,
+        inspect_remote_proposals, inspect_remote_proposals_cancellable,
+        is_agent_spark_responses_unsupported_error, is_session_or_account_error,
+        is_socratic_repair_error, join_gif_handle_bounded, join_puente_bounded,
+        keyword_plantilla_anim, limpiar_media_si_no_animacion, parsear_spec_anim_ia,
         plantilla_para_pedido, playlist_para_pedido, pop_provisional_stream_turn,
         preflight_assistant_flower_scene, preflight_assistant_graph_command,
         preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
-        preflight_assistant_scene, prosa_canonica_para_plantilla, prosa_integral_explicita,
-        prosa_para_spec_anim_ia, prosa_tangente_explicita, prosa_taylor_canonica,
-        prosa_taylor_explicita, read_bounded_attachment, remote_error_message,
+        preflight_assistant_scene, prompt_spec_anim_ia, prosa_canonica_para_plantilla,
+        prosa_integral_explicita, prosa_para_spec_anim_ia, prosa_tangente_explicita,
+        prosa_taylor_canonica, prosa_taylor_explicita, prosa_turno_generica,
+        prosa_turno_para_guion, prosa_turno_para_playlist, prosa_y_aviso_canonicos_para_pedido,
+        prosa_y_aviso_offline_para_pedido, read_bounded_attachment, remote_error_message,
         remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
         should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
         socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
         stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_spec_anim_ia,
-        validate_assistant_command, verified_remote_proposals, wants_exercise_request,
-        AgentChannelMsg, AnimIaRender, AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob,
-        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
-        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
-        DecisionAnimacion, DesenlaceAnimIa, GifExportJob, IntegralPedido,
-        LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification, RemoteStage,
-        SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido, ANIM_IA_SPEC_TIMEOUT_MS,
-        ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS, ANIM_SIN_IA_AVISO,
+        validate_assistant_command, verificar_prosa_de_turno, verificar_prosa_vs_spec,
+        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AnimIaRender,
+        AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation,
+        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
+        IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
+        RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido,
+        ANIM_IA_SPEC_TIMEOUT_MS, ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS,
+        ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
@@ -8352,7 +8933,10 @@ mod tests {
             dueno,
             ref_media,
         ));
-        crate::manim_orchestrator::trim_conversation_dropping_pair_media(&mut panel.conversation);
+        crate::manim_orchestrator::trim_conversation_dropping_pair_media(
+            &mut panel.conversation,
+            &mut [&mut None, &mut None],
+        );
         panel.set_media(Some(media), &ctx);
         assert!(panel.media.is_some(), "slot vivo instalado");
         let ultimo = panel.conversation.last().expect("turno asistente");
@@ -8595,6 +9179,8 @@ mod tests {
             p1: 2.0,
             plantilla: "integral-area".to_string(),
             param: "p".to_string(),
+            centro: grafito_anim::parametric::TAYLOR_CANONICAL_CENTER,
+            orden: grafito_anim::parametric::TAYLOR_CANONICAL_ORDER,
         };
         match resolver_turno_anim_ia(false, PedidoSpecIa::Exito(spec_ignorado)) {
             DesenlaceAnimIa::FallbackCanonico { aviso } => {
@@ -8607,13 +9193,17 @@ mod tests {
             otro => panic!("sin IA debe ser fallback, fue {otro:?}"),
         }
         // La canónica de fallback es x² [0,2] y valida con las puertas.
-        let canonica = spec_canonico_para_fallback("integral-area");
+        // R6a: solo integral/tangente reales tienen canónica; el resto es
+        // `None` honesto (jamás integral muda sobre taylor).
+        let canonica = spec_canonico_para_fallback("integral-area").expect("integral canónica");
         assert_eq!(canonica.expr, "x^2");
         assert_eq!((canonica.p0, canonica.p1), (0.0, 2.0));
         assert!(validar_spec_anim_ia(&canonica).is_ok());
-        let tangente = spec_canonico_para_fallback("derivative-slope");
+        let tangente = spec_canonico_para_fallback("derivative-slope").expect("tangente canónica");
         assert_eq!(tangente.expr, "x^2");
         assert!(validar_spec_anim_ia(&tangente).is_ok());
+        assert!(spec_canonico_para_fallback("taylor-series").is_none());
+        assert!(spec_canonico_para_fallback("universal").is_none());
     }
 
     #[test]
@@ -8656,7 +9246,7 @@ mod tests {
             "título nombra x³: {}",
             media_ia.title
         );
-        let canonica = spec_canonico_para_fallback("integral-area");
+        let canonica = spec_canonico_para_fallback("integral-area").expect("integral canónica");
         let media_canonica =
             render_media_desde_spec_ia(&canonica, &cancel).expect("render canónico");
         assert_ne!(
@@ -8739,6 +9329,8 @@ mod tests {
                 p1: anim.p1,
                 plantilla: "derivative-slope".to_string(),
                 param: anim.param.as_str().to_string(),
+                centro: grafito_anim::parametric::TAYLOR_CANONICAL_CENTER,
+                orden: grafito_anim::parametric::TAYLOR_CANONICAL_ORDER,
             },
             &cancel,
         )
@@ -8748,7 +9340,7 @@ mod tests {
             "título nombra x³: {}",
             media.title
         );
-        let canonica = spec_canonico_para_fallback("derivative-slope");
+        let canonica = spec_canonico_para_fallback("derivative-slope").expect("tangente canónica");
         let media_canonica = render_media_desde_spec_ia(&canonica, &cancel).expect("canónica");
         assert_ne!(
             media.frames[0].pixels, media_canonica.frames[0].pixels,
@@ -8897,14 +9489,14 @@ mod tests {
     #[test]
     fn m1_aviso_fallback_declara_plantilla_y_rango_reales() {
         // Defecto 3: el aviso declara lo EFECTIVAMENTE renderizado.
-        let integral = spec_canonico_para_fallback("integral-area");
+        let integral = spec_canonico_para_fallback("integral-area").expect("integral canónica");
         let aviso = aviso_fallback_canonico(&integral);
         assert!(!aviso.contains('\n'), "UNA línea: {aviso}");
         assert!(aviso.contains("x^2"), "{aviso}");
         assert!(aviso.contains("[0,2]"), "{aviso}");
         assert!(aviso.contains("integral"), "{aviso}");
         assert!(aviso.contains("pedime otra"), "{aviso}");
-        let tangente = spec_canonico_para_fallback("derivative-slope");
+        let tangente = spec_canonico_para_fallback("derivative-slope").expect("tangente canónica");
         let aviso_t = aviso_fallback_canonico(&tangente);
         assert!(!aviso_t.contains('\n'), "UNA línea: {aviso_t}");
         assert!(aviso_t.contains("x^2"), "{aviso_t}");
@@ -8923,6 +9515,312 @@ mod tests {
         let integral = prosa_canonica_para_plantilla("integral-area");
         assert!(!integral.contains("tangente"), "{integral}");
         assert!(integral.contains("x²"), "{integral}");
+    }
+
+    // ── R6a: reconstrucción anti-cruce Taylor/integral ───────────────────
+    #[test]
+    fn r6a_prompt_spec_contrasta_taylor_y_prohibe_copiar() {
+        // El SPEC trae ejemplo CONTRASTIVO taylor (plantilla/centro/orden)
+        // junto al integral + anti-copia ("jamás copies el ejemplo"): el
+        // bug era prosa Taylor sobre frames integral por copiar el ejemplo.
+        let prompt = prompt_spec_anim_ia("taylor de sin(x) con animación");
+        assert!(prompt.contains("taylor-series"), "{prompt}");
+        assert!(prompt.contains("centro"), "{prompt}");
+        assert!(prompt.contains("orden"), "{prompt}");
+        assert!(prompt.contains("integral-area"), "{prompt}");
+        assert!(prompt.contains("matchear la intención"), "{prompt}");
+        assert!(prompt.contains("jamás copies el ejemplo"), "{prompt}");
+    }
+
+    #[test]
+    fn r6a_taylor_parsea_centro_orden_y_valida_rama_propia() {
+        // `SpecAnimIa` con centro/orden parseados y clampeados; la rama
+        // `taylor-series` valida por `infer_taylor_anim` (finito, 1..=10).
+        let texto = r#"{"expr": "sin(x)", "p0": 0, "p1": 2, "plantilla": "taylor-series", "centro": 1, "orden": 5}"#;
+        let spec = parsear_spec_anim_ia(texto, "taylor de sin(x) en x=1 orden 5 con animación")
+            .expect("taylor válida");
+        assert_eq!(spec.plantilla, "taylor-series");
+        assert!((spec.centro - 1.0).abs() < 1e-9, "centro: {}", spec.centro);
+        assert_eq!(spec.orden, 5);
+        assert!(validar_spec_anim_ia(&spec).is_ok());
+        // Orden fuera de 1..=10 se clampean al canónico y validan igual.
+        let texto_clamp =
+            r#"{"expr": "sin(x)", "p0": 0, "p1": 2, "plantilla": "taylor-series", "orden": 99}"#;
+        let clamp = parsear_spec_anim_ia(texto_clamp, "taylor de sin(x) con animación")
+            .expect("clamp honesto");
+        assert_eq!(
+            clamp.orden,
+            grafito_anim::parametric::TAYLOR_CANONICAL_ORDER
+        );
+        // Orden manual fuera de rango no valida jamás.
+        let mut mala = clamp.clone();
+        mala.orden = 11;
+        assert!(validar_spec_anim_ia(&mala).is_err());
+        mala.orden = 0;
+        assert!(validar_spec_anim_ia(&mala).is_err());
+    }
+
+    #[test]
+    fn r6a_prosa_por_plantilla_nombra_lo_suyo_sin_cruzar() {
+        // Taylor nombra centro+orden SIN rango; integral/tangente su keyword.
+        let taylor = SpecAnimIa {
+            expr: "sin(x)".to_string(),
+            p0: 0.0,
+            p1: 2.0,
+            plantilla: "taylor-series".to_string(),
+            param: "p".to_string(),
+            centro: 1.0,
+            orden: 5,
+        };
+        let prosa_t = prosa_para_spec_anim_ia(&taylor);
+        assert!(prosa_t.contains("Taylor"), "{prosa_t}");
+        assert!(prosa_t.contains("x=1"), "{prosa_t}");
+        assert!(prosa_t.contains("orden 5"), "{prosa_t}");
+        assert!(!prosa_t.contains("[0,2]"), "taylor sin rango: {prosa_t}");
+        let integral = SpecAnimIa {
+            expr: "x^3".to_string(),
+            p0: 0.0,
+            p1: 2.0,
+            plantilla: "integral-area".to_string(),
+            param: "p".to_string(),
+            centro: 0.0,
+            orden: 3,
+        };
+        let prosa_i = prosa_para_spec_anim_ia(&integral);
+        assert!(prosa_i.contains("integral"), "{prosa_i}");
+        assert!(prosa_i.contains("x^3"), "{prosa_i}");
+        assert!(prosa_i.contains("[0,2]"), "{prosa_i}");
+        let tangente = SpecAnimIa {
+            plantilla: "derivative-slope".to_string(),
+            p0: -2.0,
+            p1: 2.0,
+            ..integral.clone()
+        };
+        let prosa_d = prosa_para_spec_anim_ia(&tangente);
+        assert!(prosa_d.contains("tangente"), "{prosa_d}");
+        assert!(prosa_d.contains("[-2,2]"), "{prosa_d}");
+    }
+
+    #[test]
+    fn r6a_parseo_sin_plantilla_es_invalido_y_kind_vale_como_alias() {
+        // Plantilla ausente = Invalido (sin default que mezcle pedidos).
+        let sin_plantilla = r#"{"expr": "x^3", "p0": 0, "p1": 2}"#;
+        let err = parsear_spec_anim_ia(sin_plantilla, "taylor de x^3 con animación")
+            .expect_err("sin plantilla debe fallar");
+        assert!(err.contains("plantilla"), "{err}");
+        // `kind` vale como alias de plantilla.
+        let con_kind = r#"{"expr": "x^3", "p0": -2, "p1": 2, "kind": "derivative-slope"}"#;
+        let spec =
+            parsear_spec_anim_ia(con_kind, "derivada x^3 con animación").expect("kind alias");
+        assert_eq!(spec.plantilla, "derivative-slope");
+    }
+
+    #[test]
+    fn r6a_punto_unico_offline_explicito_no_miente() {
+        // Offline-explícito usa la f REAL del pedido, jamás canónica muda.
+        let (prosa_i, aviso_i) =
+            prosa_y_aviso_offline_para_pedido("integral-area", "integral de x^3 de 0 a 2");
+        assert!(prosa_i.contains("x^3"), "{prosa_i}");
+        assert!(aviso_i.contains("x^3"), "{aviso_i}");
+        assert!(aviso_i.contains("integral"), "{aviso_i}");
+        assert!(!aviso_i.contains('\n'), "UNA línea: {aviso_i}");
+        let (prosa_t, aviso_t) = prosa_y_aviso_offline_para_pedido(
+            "taylor-series",
+            "taylor de f(x)=x^3 en x=1 orden 5 con animación",
+        );
+        assert!(prosa_t.contains("x^3"), "{prosa_t}");
+        assert!(prosa_t.contains("orden 5"), "{prosa_t}");
+        assert!(aviso_t.contains("Taylor"), "{aviso_t}");
+        assert!(aviso_t.contains("orden 5"), "{aviso_t}");
+        // Sin función inferible: canónica DECLARADA por el punto único.
+        let (prosa_c, aviso_c) =
+            prosa_y_aviso_canonicos_para_pedido("integral-area", "integral con animación");
+        assert!(prosa_c.contains("x²"), "{prosa_c}");
+        assert!(prosa_c.contains("pedime otra"), "{prosa_c}");
+        assert!(aviso_c.contains("x^2"), "{aviso_c}");
+        // El punto único jamás inventa canónica para taylor.
+        let (prosa_n, _) = prosa_y_aviso_canonicos_para_pedido("taylor-series", "taylor");
+        assert!(prosa_n.contains("Taylor"), "{prosa_n}");
+    }
+
+    #[test]
+    fn r6a_fallback_sin_catchall_y_render_rechaza_taylor() {
+        // CRÍTICO: sin catch-all `_ → integral`; resto None/Err honesto.
+        assert!(spec_canonico_para_fallback("taylor-series").is_none());
+        assert!(spec_canonico_para_fallback("universal").is_none());
+        assert!(spec_canonico_para_fallback("pitagoras").is_none());
+        assert!(spec_canonico_para_fallback("integral-area").is_some());
+        assert!(spec_canonico_para_fallback("derivative-slope").is_some());
+        // La vía paramétrica genérica rechaza taylor (obliga al dedicado).
+        let cancel = CancellationToken::default();
+        let taylor = SpecAnimIa {
+            expr: "sin(x)".to_string(),
+            p0: 0.0,
+            p1: 2.0,
+            plantilla: "taylor-series".to_string(),
+            param: "p".to_string(),
+            centro: 0.0,
+            orden: 3,
+        };
+        match render_media_desde_spec_ia(&taylor, &cancel) {
+            Err(err) => assert!(err.contains("dedicado"), "{err}"),
+            Ok(_) => panic!("taylor debe ir al renderer dedicado"),
+        }
+    }
+
+    #[test]
+    fn r6a_puerta_final_ok_y_veta_generico_sin_claims() {
+        // Taylor OK: keyword + f normalizada + orden exacto.
+        assert!(verificar_prosa_vs_spec(
+            "te muestro Taylor de f(x)=sin(x) en x=1, orden 5. La animación está lista.",
+            "taylor-series",
+            "sin(x)",
+            Some(5),
+            None,
+        )
+        .is_ok());
+        // Integral OK con ³ normalizado a ^3.
+        assert!(verificar_prosa_vs_spec(
+            "te muestro la integral con f(x)=x³ en [0,2]. Deslizador listo.",
+            "integral-area",
+            "x^3",
+            None,
+            Some((0.0, 2.0)),
+        )
+        .is_ok());
+        // Genérico sin claims = VETO (aunque nombre el deslizador).
+        assert!(verificar_prosa_vs_spec(
+            "La animación está lista abajo: mové el deslizador.",
+            "integral-area",
+            "x^3",
+            None,
+            Some((0.0, 2.0)),
+        )
+        .is_err());
+        // Prosa cruzada (taylor sobre integral) = VETO.
+        assert!(verificar_prosa_vs_spec(
+            "te muestro Taylor de f(x)=sin(x) en x=0, orden 3.",
+            "integral-area",
+            "x^2",
+            None,
+            Some((0.0, 2.0)),
+        )
+        .is_err());
+        // `verificar_prosa_de_turno` lee el turno dueño; ausente = veto.
+        let conversacion = vec![
+            ConversationTurn::user("taylor de sin(x)"),
+            ConversationTurn::assistant("te muestro Taylor de f(x)=sin(x) en x=0, orden 3."),
+        ];
+        assert!(verificar_prosa_de_turno(
+            &conversacion,
+            Some(1),
+            "taylor-series",
+            "sin(x)",
+            Some(3),
+            None,
+        )
+        .is_ok());
+        assert!(verificar_prosa_de_turno(
+            &conversacion,
+            None,
+            "taylor-series",
+            "sin(x)",
+            Some(3),
+            None
+        )
+        .is_err());
+        assert!(verificar_prosa_de_turno(
+            &conversacion,
+            Some(0),
+            "taylor-series",
+            "sin(x)",
+            Some(3),
+            None
+        )
+        .is_err());
+        // FNV estable y sin colisiones triviales (log sin PII).
+        assert_eq!(fnv1a64("x^3"), fnv1a64("x^3"));
+        assert_ne!(fnv1a64("x^3"), fnv1a64("x^2"));
+    }
+
+    #[test]
+    fn r6a_golden_pide_x_da_plantilla() {
+        // Golden set: 15 pedidos → plantilla, sin default que mezcle.
+        let casos: [(&str, &str); 15] = [
+            (
+                "calculá la integral de x^2 de 0 a 2 con animación",
+                "integral-area",
+            ),
+            ("mostrame el área bajo x^2 con animación", "integral-area"),
+            ("hace una animacion de una integrela", "integral-area"),
+            ("integral definida de sin(x) con animación", "integral-area"),
+            ("quiero ver la integral con animación", "integral-area"),
+            ("derivada de x^3 con animación", "derivative-slope"),
+            (
+                "recta tangente a x^2 en x=1 con animación",
+                "derivative-slope",
+            ),
+            (
+                "mostrame la pendiente de x^2 con animación",
+                "derivative-slope",
+            ),
+            ("derivadaa de x^2 con animación", "derivative-slope"),
+            ("tangente móvil con animación", "derivative-slope"),
+            (
+                "taylor de sin(x) en x=0 orden 3 con animación",
+                "taylor-series",
+            ),
+            ("serie de taylor de e^x con animación", "taylor-series"),
+            ("polinomio de taylor orden 5 con animación", "taylor-series"),
+            (
+                "aproximación de taylor en x=1 con animación",
+                "taylor-series",
+            ),
+            ("pedí un ejemplo de animación de taylor", "taylor-series"),
+        ];
+        for (pedido, plantilla) in casos {
+            assert_eq!(plantilla_para_pedido(pedido), plantilla, "pedido: {pedido}");
+        }
+    }
+
+    #[test]
+    fn r6a_ramas_genericas_declaran_plantilla_y_concepto() {
+        // Single genérico, guion y playlist declaran (pasan la puerta a
+        // nivel presencia); el bare reference se veta.
+        let generica = prosa_turno_generica("universal", "pitágoras con animación");
+        assert!(generica.contains("animación"), "{generica}");
+        assert!(generica.contains("pitágoras"), "{generica}");
+        assert!(verificar_prosa_vs_spec(
+            &generica,
+            "universal",
+            "pitágoras con animación",
+            None,
+            None
+        )
+        .is_ok());
+        assert!(verificar_prosa_vs_spec(
+            crate::anim_ui::animation_reference_sentence(),
+            "universal",
+            "pitágoras con animación",
+            None,
+            None,
+        )
+        .is_err());
+        // Guion real declara su primer template + concepto.
+        let guion = r#"{"concepto": "derivada de x^2", "width": 640, "height": 480, "actos": [{"titulo": "A1", "limpiar": false, "pasos": [{"texto": "curva", "whiteboard_hint": "", "template_hint": "derivative-slope", "params": {}, "efecto": "create", "frames": 8, "run_ms": 1000, "wait_after_ms": 0}]}]}"#;
+        let prosa_g = prosa_turno_para_guion(guion);
+        assert!(prosa_g.contains("tangente"), "{prosa_g}");
+        assert!(prosa_g.contains("derivada de x^2"), "{prosa_g}");
+        // Playlist declara primer template + lados.
+        let playlist =
+            playlist_para_pedido("derivada de x^2 y después integral de x^2 con animación")
+                .expect("playlist válida");
+        let prosa_p = prosa_turno_para_playlist(&playlist);
+        assert!(prosa_p.contains("tangente"), "{prosa_p}");
+        // Keywords por plantilla, punto único.
+        assert_eq!(keyword_plantilla_anim("integral-area"), "la integral");
+        assert_eq!(keyword_plantilla_anim("derivative-slope"), "la tangente");
+        assert_eq!(keyword_plantilla_anim("taylor-series"), "Taylor");
     }
 
     #[test]
