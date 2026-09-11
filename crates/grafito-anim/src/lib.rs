@@ -8,6 +8,7 @@
 //! una animación profesional en <2s con fallback garantizado.
 
 pub mod engine;
+pub mod guion;
 pub mod parametric;
 pub mod player;
 pub mod protocol;

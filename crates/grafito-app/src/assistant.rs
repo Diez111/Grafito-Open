@@ -1013,6 +1013,30 @@ pub(crate) enum DecisionAnimacion {
     },
 }
 
+// R2 — ¿el texto trae un payload `generate_guion`? (puro, testeable).
+// Detecta dos formas: el JSON de `GuionTexto` tal cual, o un objeto con
+// campo `guion_texto` (el envelope del tool-call del agente). Tope
+// `GUION_TOOL_MAX_BYTES + 1024` (el envelope suma poco); más largo → `None`
+// honesto. No valida el guion (eso lo hace `Guion::try_new` en el hilo);
+// solo reconoce la forma para rutear al hilo del guion en submit/aprobación.
+pub(crate) fn extraer_guion_texto(texto: &str) -> Option<String> {
+    let recorte = texto.trim();
+    if recorte.is_empty() || recorte.len() > grafito_assistant::agent::GUION_TOOL_MAX_BYTES + 1024 {
+        return None;
+    }
+    if serde_json::from_str::<grafito_anim::guion::GuionTexto>(recorte).is_ok() {
+        return Some(recorte.to_string());
+    }
+    let valor: serde_json::Value = serde_json::from_str(recorte).ok()?;
+    let interno = valor.get("guion_texto")?.as_str()?;
+    let interno = interno.trim();
+    if interno.is_empty() || interno.len() > grafito_assistant::agent::GUION_TOOL_MAX_BYTES {
+        return None;
+    }
+    serde_json::from_str::<grafito_anim::guion::GuionTexto>(interno).ok()?;
+    Some(interno.to_string())
+}
+
 /// Punto único de decisión para animación (puro, sin I/O ni spawn).
 ///
 /// Orden: gatillo → concepto → integral (canónica/explícita/inválida) →
@@ -3081,6 +3105,22 @@ impl GrafitoApp {
                 }
                 let problem_clone = self.assistant.problem.clone();
                 let lower = problem_clone.to_lowercase();
+                // R2: payload `generate_guion` explícito (JSON del director
+                // o envelope con `guion_texto`, típico pegado del tool-call
+                // del agente) → hilo del guion con historial Thumb+Replay.
+                // La animación simple queda intacta: sin payload sigue abajo.
+                if let Some(guion_texto) = extraer_guion_texto(&problem_clone) {
+                    let pregunta = problem_clone.clone();
+                    self.assistant.begin_request(pregunta);
+                    self.assistant.problem.clear();
+                    let prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                    let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                    self.assistant.complete_local_request(humano);
+                    self.assistant.set_media(None, ctx);
+                    self.run_assistant_guion_with_history(ctx, &guion_texto, true);
+                    ctx.request_repaint();
+                    return;
+                }
                 // Punto único de decisión honesto (`decide_animacion`): media
                 // sí/no + prosa coherente en un solo lugar. Antes había doble
                 // carril (hilo local + remoto Spark preguntón) que mostraba Y
@@ -3429,56 +3469,68 @@ impl GrafitoApp {
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
                             .unwrap_or("");
-                        // M1 defecto 8: punto único de plantilla, igual que
-                        // Submit vía `plantilla_para_pedido`. Vacío → se
-                        // resuelve del concepto (vacío total → default
-                        // histórico `derivative-slope`); integral/tangente
-                        // mencionadas coercionan aunque el LLM haya propuesto
-                        // `universal`.
-                        let plantilla_efectiva: String = match template_crudo {
-                            None if concept.is_empty() => "derivative-slope".to_string(),
-                            None => plantilla_para_pedido(concept).to_string(),
-                            Some(crudo)
-                                if grafito_anim::parametric::pedido_menciona_area(concept) =>
-                            {
-                                "integral-area".to_string()
-                            }
-                            Some(crudo)
-                                if crudo == "universal"
-                                    && grafito_anim::parametric::pedido_menciona_tangente(
-                                        concept,
-                                    ) =>
-                            {
-                                "derivative-slope".to_string()
-                            }
-                            Some(crudo) => crudo.to_string(),
-                        };
-                        // M1 defecto 8: pasa por SPEC+validación igual que el
-                        // resto. Con IA disponible va IA-primero (la IA
-                        // propone el SPEC, el motor solo renderiza lo
-                        // validado); sin IA cae al local validado de abajo.
-                        let es_animable = plantilla_efectiva.trim() == "integral-area"
-                            || (plantilla_efectiva.trim() == "derivative-slope"
-                                && grafito_anim::parametric::pedido_menciona_tangente(concept));
-                        let rate_limited = rate_limit_cooldown_remaining_secs().is_some();
-                        if es_animable
-                            && ia_disponible_para_anim(
-                                self.assistant.agent_mode,
-                                self.remote_provider_ready(),
-                                rate_limited,
-                                self.exam_mode,
-                            )
-                        {
-                            self.run_assistant_animation_ia_primero(
-                                ctx,
-                                concept.to_string(),
-                                plantilla_efectiva.clone(),
-                            );
-                            // El worker IA-primero publica prosa+media del
-                            // MISMO spec (o fallback declarado): nada más que
-                            // hacer en este turno.
+                        // R2: la propuesta aprobada trae un payload
+                        // `generate_guion` (el LLM pegó el JSON del director
+                        // como concepto) → hilo del guion; la animación
+                        // simple queda intacta para el resto.
+                        if let Some(guion_texto) = extraer_guion_texto(concept) {
+                            self.run_assistant_guion_with_history(ctx, &guion_texto, true);
                         } else {
-                            self.animacion_apply_local_validada(ctx, &plantilla_efectiva, concept);
+                            // M1 defecto 8: punto único de plantilla, igual que
+                            // Submit vía `plantilla_para_pedido`. Vacío → se
+                            // resuelve del concepto (vacío total → default
+                            // histórico `derivative-slope`); integral/tangente
+                            // mencionadas coercionan aunque el LLM haya propuesto
+                            // `universal`.
+                            let plantilla_efectiva: String = match template_crudo {
+                                None if concept.is_empty() => "derivative-slope".to_string(),
+                                None => plantilla_para_pedido(concept).to_string(),
+                                Some(crudo)
+                                    if grafito_anim::parametric::pedido_menciona_area(concept) =>
+                                {
+                                    "integral-area".to_string()
+                                }
+                                Some(crudo)
+                                    if crudo == "universal"
+                                        && grafito_anim::parametric::pedido_menciona_tangente(
+                                            concept,
+                                        ) =>
+                                {
+                                    "derivative-slope".to_string()
+                                }
+                                Some(crudo) => crudo.to_string(),
+                            };
+                            // M1 defecto 8: pasa por SPEC+validación igual que el
+                            // resto. Con IA disponible va IA-primero (la IA
+                            // propone el SPEC, el motor solo renderiza lo
+                            // validado); sin IA cae al local validado de abajo.
+                            let es_animable = plantilla_efectiva.trim() == "integral-area"
+                                || (plantilla_efectiva.trim() == "derivative-slope"
+                                    && grafito_anim::parametric::pedido_menciona_tangente(concept));
+                            let rate_limited = rate_limit_cooldown_remaining_secs().is_some();
+                            if es_animable
+                                && ia_disponible_para_anim(
+                                    self.assistant.agent_mode,
+                                    self.remote_provider_ready(),
+                                    rate_limited,
+                                    self.exam_mode,
+                                )
+                            {
+                                self.run_assistant_animation_ia_primero(
+                                    ctx,
+                                    concept.to_string(),
+                                    plantilla_efectiva.clone(),
+                                );
+                                // El worker IA-primero publica prosa+media del
+                                // MISMO spec (o fallback declarado): nada más que
+                                // hacer en este turno.
+                            } else {
+                                self.animacion_apply_local_validada(
+                                    ctx,
+                                    &plantilla_efectiva,
+                                    concept,
+                                );
+                            }
                         }
                     } else {
                         self.run_assistant_animation(ctx);
@@ -5415,6 +5467,151 @@ impl GrafitoApp {
         self.run_assistant_animation_with_history(ctx, template, concept, true);
     }
 
+    /// R2 — hilo del guion: reproduce un `GuionTexto` con el `ScenePlayer`.
+    ///
+    /// Camino single con o sin historiar (igual que la animación simple):
+    /// submit y aprobación llaman con `historiar=true`; las coords guardan
+    /// el primer template canónico del guion, así el replay del historial
+    /// cae al worker de animación simple con ese template. Solo arranca por
+    /// acción explícita del usuario (submit/aprobación); examen bloquea
+    /// igual que la animación simple.
+    /// Todo lo pesado (parse, `Guion::try_new`, `aplicar_frontera` +
+    /// `compilar_paso` por acto sobre la escena compartida,
+    /// `ScenePlayer::try_play` por acto, raster a `ColorImage`) corre en el
+    /// hilo: cero I/O en UI (el guion ni siquiera toca disco en el hilo).
+    /// Presupuestos heredados del guion validado: actos 1..=5, pasos ≤8,
+    /// frames ≤96, set ≤64 MiB, viewport único. Sin `unwrap`, sin pánicos.
+    /// Con `historiar=false` reinyecta el slot vivo sin pegar media nueva
+    /// (paridad con el replay de la animación simple).
+    fn run_assistant_guion_with_history(
+        &mut self,
+        ctx: &egui::Context,
+        guion_texto: &str,
+        historiar: bool,
+    ) {
+        use grafito_anim::guion::{aplicar_frontera, compilar_paso, Guion, GuionTexto};
+        use grafito_anim::player::ScenePlayer;
+        // Examen: ni siquiera el guion corre (igual que la animación).
+        if self.exam_blocks("Asistente") {
+            return;
+        }
+        // Reemplazo explícito avisado, igual que el single (el hilo viejo
+        // descarta por token; acá no hay media previa que preservar porque
+        // el drain publica al completar).
+        if self.cancela_turno_anim() {
+            self.assistant.anim_progress = false;
+            if let Some(message) = anim_replace_message(true) {
+                self.notify(message, ToastKind::Info);
+            }
+        }
+        let _ = ctx;
+        let texto = guion_texto.to_string();
+        // Coords W1 para historiar Thumb+Replay en el drain (igual que el
+        // single): primer template canónico del guion + concepto. Parse
+        // acotado en UI (≤33 KiB, sin I/O); el hilo re-valida (doble puerta,
+        // como el SPEC). `None` honesto si no parsea: el turno queda igual
+        // con el slot vivo, solo sin mini-card.
+        let history = if historiar {
+            serde_json::from_str::<GuionTexto>(&texto)
+                .ok()
+                .and_then(|crudo| Guion::try_new(crudo).ok())
+                .and_then(|guion| {
+                    let plantilla = guion
+                        .actos()
+                        .first()
+                        .and_then(|acto| acto.pasos.first())
+                        .map(|paso| paso.template.clone())
+                        .unwrap_or_else(|| "universal".to_string());
+                    AnimHistoryCoords::new(plantilla, guion.concepto().to_string())
+                })
+        } else {
+            None
+        };
+        let cancellation = CancellationToken::default();
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let cancelado = || "La generación se canceló antes de completarse.".to_string();
+            let resultado: Result<grafito_ui::assistant::AssistantMedia, String> = (|| {
+                if worker_cancellation.is_cancelled() {
+                    return Err(cancelado());
+                }
+                let crudo: GuionTexto = serde_json::from_str(&texto)
+                    .map_err(|error| format!("guion_texto no parsea como GuionTexto: {error}"))?;
+                let guion =
+                    Guion::try_new(crudo).map_err(|error| format!("guion inválido: {error}"))?;
+                let concepto = guion.concepto().to_string();
+                let (ancho, alto) = guion.resolution().as_tuple();
+                let (w, h) = (ancho as usize, alto as usize);
+                // Escena compartida: cada acto aplica su frontera
+                // (`Conservar` sigue dibujando, `Limpiar` restaura su base)
+                // y sus pasos bajan con `compilar_paso` contra la escena
+                // viva; `try_play` estricto por acto (presupuesto del
+                // guion ya acota el total: ≤96 frames, set ≤64 MiB).
+                let mut escena = guion.escena().clone();
+                let mut imagenes = Vec::new();
+                for acto in guion.actos() {
+                    if worker_cancellation.is_cancelled() {
+                        return Err(cancelado());
+                    }
+                    aplicar_frontera(&mut escena, acto)
+                        .map_err(|error| format!("frontera del acto «{}»: {error}", acto.titulo))?;
+                    let mut items = Vec::with_capacity(acto.pasos.len());
+                    for paso in &acto.pasos {
+                        items.push(compilar_paso(paso, &escena).map_err(|error| {
+                            format!(
+                                "paso «{}»: {error}",
+                                paso.texto.chars().take(60).collect::<String>()
+                            )
+                        })?);
+                    }
+                    let jugados = ScenePlayer::try_play(&mut escena, items)
+                        .map_err(|error| format!("player del acto «{}»: {error}", acto.titulo))?;
+                    let camara = grafito_anim::Camera::Ortho(escena.camera);
+                    for cuadro in &jugados {
+                        if worker_cancellation.is_cancelled() {
+                            return Err(cancelado());
+                        }
+                        imagenes.push(crate::anim_native::render_placed_objects(
+                            &cuadro.objects,
+                            w,
+                            h,
+                            camara,
+                        ));
+                    }
+                }
+                if imagenes.is_empty() {
+                    return Err("el guion no produjo fotogramas: revisá actos y pasos.".to_string());
+                }
+                let plantilla = guion
+                    .actos()
+                    .first()
+                    .and_then(|acto| acto.pasos.first())
+                    .map(|paso| paso.template.clone())
+                    .unwrap_or_else(|| "universal".to_string());
+                let titulo = titulo_curado(&plantilla, &concepto, None);
+                Ok(grafito_ui::assistant::AssistantMedia {
+                    title: titulo,
+                    frames: imagenes,
+                })
+            })();
+            let resultado = if worker_cancellation.is_cancelled() {
+                Err(cancelado())
+            } else {
+                resultado
+            };
+            let _ = sender.send(resultado);
+            repaint.request_repaint();
+        });
+        self.assistant.anim_progress = true;
+        self.assistant_runtime.anim_job = Some(AssistantAnimJob {
+            cancellation,
+            receiver,
+            history,
+        });
+    }
+
     /// Single con o sin historiar (P0-app): el replay del historial reusca
     /// este mismo worker cancelable con `historiar=false` (reinyecta el
     /// slot vivo sin pegar media nueva: el turno ya tiene la suya).
@@ -6744,6 +6941,71 @@ mod domain_sparkline_tests {
         assert!(!samples.is_empty());
         assert!(samples.len() <= 14, "muestras acotadas");
         assert!(samples.iter().all(|value| (0.0..=1.0).contains(value)));
+    }
+}
+
+#[cfg(test)]
+mod r2_guion_tests {
+    use super::extraer_guion_texto;
+
+    fn guion_minimo() -> String {
+        serde_json::json!({
+            "concepto": "derivada",
+            "width": 320,
+            "height": 240,
+            "actos": [{
+                "titulo": "apertura",
+                "fondo": null,
+                "limpiar": false,
+                "pasos": [{
+                    "texto": "recta secante",
+                    "math_expr": "x^2",
+                    "whiteboard_hint": "ejes",
+                    "template_hint": "derivative-slope",
+                    "params": {},
+                    "efecto": "create",
+                    "frames": 8,
+                    "run_ms": 1000,
+                    "wait_after_ms": 200
+                }]
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn detecta_guion_texto_pelado() {
+        let texto = guion_minimo();
+        assert_eq!(extraer_guion_texto(&texto), Some(texto));
+    }
+
+    #[test]
+    fn detecta_envelope_con_guion_texto() {
+        let envelope = serde_json::json!({"tool": "generate_guion", "guion_texto": guion_minimo()})
+            .to_string();
+        let extraido = extraer_guion_texto(&envelope).expect("envelope");
+        assert_eq!(extraido, guion_minimo());
+    }
+
+    #[test]
+    fn rechaza_prosa_y_json_sin_forma() {
+        assert_eq!(extraer_guion_texto(""), None);
+        assert_eq!(extraer_guion_texto("animá la derivada"), None);
+        assert_eq!(extraer_guion_texto("{\"a\": 1}"), None);
+        assert_eq!(extraer_guion_texto("{\"guion_texto\": \"no-json\"}"), None);
+        // Seis actos tienen forma pero no validan: el helper solo mira
+        // forma GuionTexto (campos), no presupuestos — el hilo valida.
+        // Acá un JSON con actos que no es GuionTexto válido por campo.
+        assert_eq!(extraer_guion_texto("{\"guion_texto\": \"\"}"), None);
+    }
+
+    #[test]
+    fn rechaza_sobretamano() {
+        let grande = format!(
+            "{{\"guion_texto\": \"{}\"}}",
+            "y".repeat(grafito_assistant::agent::GUION_TOOL_MAX_BYTES + 2048)
+        );
+        assert_eq!(extraer_guion_texto(&grande), None);
     }
 }
 

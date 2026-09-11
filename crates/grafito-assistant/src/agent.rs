@@ -203,11 +203,11 @@ pub fn request_agent_on_worker_with_ledger(
 /// ejecuta código; sólo evalúan matemática y consultan conocimiento local.
 pub struct SafeGrafitoDispatcher;
 
-/// Despachador pedagógico puro (6 tools F3.2).
+/// Despachador pedagógico puro (7 tools F3.2 + R2).
 ///
 /// Expone sólo las herramientas pedagógicas; es útil para tests aislados o
 /// para orquestación pedagógica sin las tools base (evaluate_expr, etc.).
-/// `SafeGrafitoDispatcher` ya incluye estas 6 más las base, por compatibilidad.
+/// `SafeGrafitoDispatcher` ya incluye estas 7 más las base, por compatibilidad.
 pub struct PedagogyDispatcher;
 
 impl ToolDispatcher for SafeGrafitoDispatcher {
@@ -265,6 +265,7 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
         "get_curriculum" => get_curriculum_tool(call),
         "suggest_next" => suggest_next_tool(call),
         "generate_animation" => generate_animation_tool(call),
+        "generate_guion" => generate_guion_tool(call),
         unknown => ToolResult::text(
             &call.id,
             false,
@@ -300,30 +301,45 @@ fn string_arg(call: &ToolCall, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Tope del JSON `guion_texto` de `generate_guion` (R2): un guion de 5 actos
+/// × 3 pasos supera los 2000 bytes del genérico; 32 KiB cubre el peor caso
+/// honesto (15 pasos × ~2 KiB) sin abrir DoS.
+pub const GUION_TOOL_MAX_BYTES: usize = 32 * 1024;
+
 /// Rechaza cualquier argumento de cadena >2000 bytes antes de despachar la tool.
 ///
 /// Mitiga DoS por payload excesivo sin necesidad de parsear el contenido.
+/// Excepción: `generate_guion{guion_texto|guion}` usa `GUION_TOOL_MAX_BYTES`
+/// (el JSON del guion supera 2000 bytes por construcción).
 fn reject_oversized_string_args(call: &ToolCall) -> Option<ToolResult> {
     // Recorre recursivamente todos los strings en arguments (incluye objetos anidados)
-    fn check_value(call_id: &str, key: &str, value: &Value) -> Option<ToolResult> {
+    // R2: tope propio para el JSON del guion (el resto de args sigue en 2000).
+    let guion_cap = |key: &str| {
+        if call.name == "generate_guion" && (key == "guion_texto" || key == "guion") {
+            GUION_TOOL_MAX_BYTES
+        } else {
+            2_000
+        }
+    };
+    fn check_value(call_id: &str, key: &str, value: &Value, cap: usize) -> Option<ToolResult> {
         if let Some(text) = value.as_str() {
-            if text.len() > 2_000 {
+            if text.len() > cap {
                 return Some(ToolResult::text(
                     call_id,
                     false,
-                    format!("argument '{key}' exceeds 2000 byte limit"),
+                    format!("argument '{key}' exceeds {cap} byte limit"),
                 ));
             }
         } else if let Some(map) = value.as_object() {
             for (nested_key, nested_value) in map {
-                if let Some(rejected) = check_value(call_id, nested_key, nested_value) {
+                if let Some(rejected) = check_value(call_id, nested_key, nested_value, cap) {
                     return Some(rejected);
                 }
             }
         } else if let Some(array) = value.as_array() {
             for element in array {
                 if let Some(text) = element.as_str() {
-                    if text.len() > 2_000 {
+                    if text.len() > cap {
                         return Some(ToolResult::text(
                             call_id,
                             false,
@@ -337,7 +353,7 @@ fn reject_oversized_string_args(call: &ToolCall) -> Option<ToolResult> {
     }
     if let Some(map) = call.arguments.as_object() {
         for (key, value) in map {
-            if let Some(rejected) = check_value(&call.id, key, value) {
+            if let Some(rejected) = check_value(&call.id, key, value, guion_cap(key)) {
                 return Some(rejected);
             }
         }
@@ -1711,6 +1727,91 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
     ToolResult::text(&call.id, true, payload.to_string())
 }
 
+/// R2 — `generate_guion(guion_texto)`: valida un guion del director y lo baja a sesión.
+///
+/// Pura, sin I/O ni motor: parsea `guion_texto` (JSON de `GuionTexto`, tope
+/// `GUION_TOOL_MAX_BYTES`) y valida vía `Guion::try_new` (actos 1..=5, pasos
+/// 1..=3 por acto, aplanados ≤8, frames 4..=16 por paso y ≤96 total, set
+/// ≤64 MiB, viewport único, `template_hint` solo canónicas, `math_expr`
+/// inválida → `None` sin tumbar el paso). Baja a `TeachingSession` vía
+/// `GuionASesion` (1 acto = 1 paso, `manim_template "guion:k/n"`,
+/// `frame_range` particionado, `check: None` honesto — el wire no trae
+/// `probe`/`expected`).
+/// El payload trae `steps:[{id, titulo, verified, ...}]` para aprobación
+/// explícita en la UI; el render vive en el hilo del guion (`grafito-app`),
+/// jamás acá. `Err` honesto en español, sin pánicos.
+fn generate_guion_tool(call: &ToolCall) -> ToolResult {
+    use grafito_pedagogy::guion_session::GuionASesion;
+    let Some(raw) = call
+        .arguments
+        .get("guion_texto")
+        .and_then(Value::as_str)
+        .or_else(|| call.arguments.get("guion").and_then(Value::as_str))
+    else {
+        return ToolResult::text(
+            &call.id,
+            false,
+            "generate_guion requiere 'guion_texto' (JSON de GuionTexto: concepto, width, height, actos 1..=5 con pasos 1..=3)",
+        );
+    };
+    if raw.len() > GUION_TOOL_MAX_BYTES {
+        return ToolResult::text(
+            &call.id,
+            false,
+            format!(
+                "guion_texto de {} bytes excede {GUION_TOOL_MAX_BYTES}: partí el guion en dos",
+                raw.len()
+            ),
+        );
+    }
+    let texto: grafito_anim::guion::GuionTexto = match serde_json::from_str(raw) {
+        Ok(texto) => texto,
+        Err(error) => {
+            return ToolResult::text(
+                &call.id,
+                false,
+                format!("guion_texto no parsea como GuionTexto: {error}"),
+            );
+        }
+    };
+    let guion = match grafito_anim::guion::Guion::try_new(texto) {
+        Ok(guion) => guion,
+        Err(error) => {
+            return ToolResult::text(&call.id, false, format!("guion inválido: {error}"));
+        }
+    };
+    let sesion = guion.a_sesion();
+    let (ancho, alto) = guion.resolution().as_tuple();
+    let steps: Vec<Value> = sesion
+        .steps
+        .iter()
+        .map(|paso| {
+            json!({
+                "id": paso.id,
+                "titulo": paso.title,
+                "verified": paso.verified,
+                "math_expr": paso.math_expr,
+                "manim_template": paso.manim_template,
+                "cue_ms": paso.cue_ms,
+                "frame_range": paso.frame_range,
+            })
+        })
+        .collect();
+    let payload = json!({
+        "tool": "generate_guion",
+        "concepto": guion.concepto(),
+        "actos": guion.actos().len(),
+        "total_pasos": guion.total_pasos(),
+        "total_frames": guion.total_frames(),
+        "duracion_total_ms": guion.duracion_total_ms(),
+        "resolution": [ancho, alto],
+        "steps": steps,
+        "remate": "check ausente honesto: el wire no trae probe/expected; el integrador suma with_final_check si corresponde",
+        "note": "guion validado; el render corre en el hilo del guion tras aprobación explícita",
+    });
+    ToolResult::text(&call.id, true, payload.to_string())
+}
+
 /// Propone una animación paramétrica desde un pedido en lenguaje natural.
 ///
 /// Puro y honesto: delega en `infer_parametric_anim` (reglas sin inventos) y
@@ -1988,6 +2089,40 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
     )
 }
 
+/// Schema de `generate_guion(guion_texto)`.
+///
+/// `guion_texto` es el JSON de `GuionTexto` (string, máx `GUION_TOOL_MAX_BYTES`
+/// = 32768 bytes): `{concepto, width, height, actos}` con cada acto
+/// `{titulo, fondo?, limpiar, pasos}` y cada paso `{texto, math_expr?,
+/// whiteboard_hint, template_hint, params, efecto, frames, run_ms, wait_after_ms}`.
+/// Presupuestos (los valida `Guion::try_new`, acá van documentados): actos
+/// 1..=5, pasos 1..=3 por acto (aplanados ≤8), frames 4..=16 por paso (total
+/// ≤96), set `w*h*4*total` ≤64 MiB, viewport único 64..=4096, concepto
+/// ≤500 chars, `run_ms` 100..=60000 (la espera sola 1..=10000 con
+/// `wait_after_ms` 0), `wait_after_ms` 0..=10000, `params` ≤16 entradas
+/// finitas.
+/// `template_hint` solo las 11 canónicas: derivative-slope, integral-area,
+/// taylor-series, conformal-map, pitagoras, euler, fourier,
+/// logistic-bifurcation, gradient-field, mobius-transform, universal (alias
+/// histórico pythagoras→pitagoras). `efecto` solo los 7: create, write,
+/// fade, grow, indicate, tracker, wait (con alias en español: crear/traza,
+/// escribir/texto, aparecer, crecer, indicar/pulso, espera/pausa).
+/// `math_expr` inválida no tumba el paso: baja a `None` (el paso se conserva).
+pub fn generate_guion_tool_schema() -> ToolSchema {
+    ToolSchema::new(
+        "generate_guion",
+        "Valida un guion del director (JSON GuionTexto: 1..=5 actos, pasos 1..=3 por acto, frames 4..=16 y total ≤96, set ≤64 MiB, template_hint de las 11 canónicas [derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal], efecto de los 7 [create, write, fade, grow, indicate, tracker, wait]) y lo baja a sesión de enseñanza (1 acto = 1 paso, steps:[{titulo, verified}]); el render corre en la UI tras aprobación explícita.",
+        json!({
+            "type": "object",
+            "properties": {
+                "guion_texto": {"type": "string", "description": "JSON de GuionTexto (máx 32768 bytes): {concepto (≤500 chars), width/height (64..=4096, únicos), actos[1..=5] de {titulo (1..=80), fondo ([r,g,b] opcional), limpiar (bool), pasos[1..=3] de {texto (1..=500), math_expr? (≤200, inválida→None), whiteboard_hint (≤200), template_hint (11 canónicas), params (≤16 finitos), efecto (7), frames (4..=16), run_ms (100..=60000; espera 1..=10000), wait_after_ms (0..=10000; espera exige 0)}}}"},
+                "guion": {"type": "string", "description": "Alias de guion_texto"}
+            },
+            "required": ["guion_texto"]
+        }),
+    )
+}
+
 /// Todas las tools pedagógicas F3.2 para exponer al LLM vía OpenCode Go.
 pub fn pedagogy_tool_schemas() -> Vec<ToolSchema> {
     vec![
@@ -1997,6 +2132,7 @@ pub fn pedagogy_tool_schemas() -> Vec<ToolSchema> {
         get_curriculum_tool_schema(),
         suggest_next_tool_schema(),
         generate_animation_tool_schema(),
+        generate_guion_tool_schema(),
     ]
 }
 
@@ -4314,6 +4450,153 @@ mod tests {
         assert_eq!(value["template"], "integral-area");
     }
 
+    /// Guion mínimo válido para los tests R2 (1 acto × 1 paso, 8 frames).
+    fn guion_texto_minimo() -> String {
+        serde_json::json!({
+            "concepto": "derivada",
+            "width": 320,
+            "height": 240,
+            "actos": [{
+                "titulo": "apertura",
+                "fondo": null,
+                "limpiar": false,
+                "pasos": [{
+                    "texto": "recta secante",
+                    "math_expr": "x^2",
+                    "whiteboard_hint": "ejes",
+                    "template_hint": "derivative-slope",
+                    "params": {},
+                    "efecto": "create",
+                    "frames": 8,
+                    "run_ms": 1000,
+                    "wait_after_ms": 200
+                }]
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn generate_guion_tool_camino_feliz_con_steps() {
+        let call = ToolCall {
+            id: "guion1".into(),
+            name: "generate_guion".into(),
+            arguments: json!({"guion_texto": guion_texto_minimo()}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("json");
+        assert_eq!(value["tool"], "generate_guion");
+        assert_eq!(value["concepto"], "derivada");
+        assert_eq!(value["actos"], 1);
+        assert_eq!(value["total_pasos"], 1);
+        assert_eq!(value["total_frames"], 8);
+        let steps = value["steps"].as_array().expect("steps");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["titulo"], "apertura");
+        assert_eq!(steps[0]["verified"], true);
+        assert_eq!(steps[0]["manim_template"], "guion:1/1");
+    }
+
+    #[test]
+    fn generate_guion_tool_rechaza_sin_arg() {
+        let call = ToolCall {
+            id: "guion2".into(),
+            name: "generate_guion".into(),
+            arguments: json!({}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(!result.ok);
+        assert!(result.content.contains("guion_texto"));
+    }
+
+    #[test]
+    fn generate_guion_tool_rechaza_json_roto_y_guion_invalido() {
+        let roto = ToolCall {
+            id: "guion3".into(),
+            name: "generate_guion".into(),
+            arguments: json!({"guion_texto": "{no es json"}),
+        };
+        let result = dispatch_safe_tool(&roto);
+        assert!(!result.ok);
+        // Seis actos exceden GUION_MAX_ACTOS = 5.
+        let base: Value = serde_json::from_str(&guion_texto_minimo()).expect("json");
+        let acto = base["actos"][0].clone();
+        let seis = vec![
+            acto.clone(),
+            acto.clone(),
+            acto.clone(),
+            acto.clone(),
+            acto.clone(),
+            acto.clone(),
+        ];
+        let invalido = serde_json::json!({
+            "concepto": "derivada",
+            "width": 320,
+            "height": 240,
+            "actos": seis,
+        })
+        .to_string();
+        let call = ToolCall {
+            id: "guion4".into(),
+            name: "generate_guion".into(),
+            arguments: json!({"guion_texto": invalido}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(!result.ok, "{}", result.content);
+        assert!(result.content.contains("actos"));
+    }
+
+    #[test]
+    fn generate_guion_tool_acepta_mas_de_2000_bytes() {
+        // R2: el JSON del guion supera el tope genérico de 2000 bytes;
+        // el tope propio (32 KiB) lo deja pasar y el genérico sigue
+        // rechazando otros args largos.
+        let largo = "x".repeat(3000);
+        let call = ToolCall {
+            id: "guion5".into(),
+            name: "generate_guion".into(),
+            arguments: json!({"guion_texto": guion_texto_minimo(), "extra": largo}),
+        };
+        let rechazado = reject_oversized_string_args(&call);
+        assert!(rechazado.is_some(), "el arg extra largo sigue rechazado");
+        let solo_guion = ToolCall {
+            id: "guion6".into(),
+            name: "generate_guion".into(),
+            arguments: json!({"guion_texto": guion_texto_minimo()}),
+        };
+        assert!(reject_oversized_string_args(&solo_guion).is_none());
+        // Y un texto de ~5 KiB pasa el gate de tamaño del guion.
+        let base = guion_texto_minimo();
+        let grande = format!("[{}]", [base.as_str(); 16].join(","));
+        assert!(grande.len() > 2_000, "len={}", grande.len());
+        let call = ToolCall {
+            id: "guion7".into(),
+            name: "generate_guion".into(),
+            arguments: json!({"guion_texto": grande}),
+        };
+        assert!(reject_oversized_string_args(&call).is_none());
+    }
+
+    #[test]
+    fn generate_guion_schema_exige_guion_texto() {
+        let schema = generate_guion_tool_schema();
+        assert_eq!(schema.name, "generate_guion");
+        let required = schema.parameters["required"].as_array().expect("required");
+        assert!(required.iter().any(|r| r == "guion_texto"));
+        assert!(schema.parameters["properties"]["guion_texto"].is_object());
+        // El contrato interno va documentado: 11 canónicas, 7 efectos, presupuestos.
+        let texto = format!("{} {}", schema.description, schema.parameters);
+        for canonica in ["derivative-slope", "pitagoras", "universal"] {
+            assert!(texto.contains(canonica), "falta {canonica}");
+        }
+        for efecto in ["create", "tracker", "wait"] {
+            assert!(texto.contains(efecto), "falta {efecto}");
+        }
+        assert!(texto.contains('5'));
+        assert!(texto.contains("96"));
+    }
+
     #[test]
     fn generate_animation_rejects_empty_both() {
         let call = ToolCall {
@@ -4811,8 +5094,8 @@ mod tests {
             assert_eq!(openai["type"], "function");
             assert_eq!(openai["function"]["name"], schema.name);
         }
-        assert_eq!(pedagogy_tool_schemas().len(), 6);
-        assert!(all_safe_tool_schemas().len() >= 9);
+        assert_eq!(pedagogy_tool_schemas().len(), 7);
+        assert!(all_safe_tool_schemas().len() >= 10);
     }
 
     #[test]
@@ -4845,6 +5128,7 @@ mod tests {
             "get_curriculum",
             "suggest_next",
             "generate_animation",
+            "generate_guion",
         ] {
             let call = ToolCall {
                 id: "cov".into(),
@@ -4856,6 +5140,7 @@ mod tests {
                     "get_curriculum" => json!({"query": "derivada"}),
                     "suggest_next" => json!({}),
                     "generate_animation" => json!({"concept": "derivada"}),
+                    "generate_guion" => json!({"guion_texto": guion_texto_minimo()}),
                     _ => json!({}),
                 },
             };
@@ -4881,8 +5166,8 @@ mod tests {
             assert_eq!(openai["function"]["name"], schema.name);
         }
         assert_eq!(math_tool_schemas().len(), 8);
-        // 3 base + 6 pedagógicas + 8 matemáticas.
-        assert_eq!(all_safe_tool_schemas().len(), 17);
+        // 3 base + 7 pedagógicas + 8 matemáticas.
+        assert_eq!(all_safe_tool_schemas().len(), 18);
     }
 
     fn math_call(name: &str, arguments: Value) -> ToolCall {

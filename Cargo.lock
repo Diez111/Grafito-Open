@@ -2436,6 +2436,7 @@ dependencies = [
 name = "grafito-pedagogy"
 version = "1.0.0"
 dependencies = [
+ "grafito-anim",
  "grafito-geometry",
  "serde",
  "serde_json",

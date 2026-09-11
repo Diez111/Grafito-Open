@@ -1954,6 +1954,39 @@ impl TeachingUiState {
             }
         }
         self.whiteboard.doc = doc;
+        // R2: el último paso revelado puede ser de guion (`guion:k/n`:
+        // 1 acto = 1 paso con `frame_range` particionado del total). Se
+        // extraen datos propios ANTES de mutar (el borrow de `session`
+        // muere acá): sin eso el orchestrator no se puede tocar.
+        let guion_revelado: Option<(String, String, bool)> =
+            session.revealed_steps(elapsed_ms).last().and_then(|paso| {
+                let tmpl = paso.manim_template.clone()?;
+                if !tmpl.trim().starts_with("guion:") {
+                    return None;
+                }
+                let valido = paso_guion_valido(Some(&tmpl), session.steps.len());
+                Some((tmpl, paso.title.clone(), valido))
+            });
+        let Some((tmpl, titulo, valido)) = guion_revelado else {
+            return;
+        };
+        if !valido {
+            // Fallback honesto a paso expositivo: la pizarra ya hidrató
+            // arriba; sin animación (cancela el orchestrator y limpia
+            // frames, jamás basura en pantalla).
+            self.orchestrator.cancel();
+            self.anim_frames = None;
+            self.clear_anim_textures_only(None);
+        } else if self.orchestrator.template != tmpl {
+            // Reparto por acto: cada acto relanza el orchestrator con su
+            // template; al completar, `tick` renderiza el loop nativo y el
+            // draw lo ventana por `frame_range` vía `cue_frame_index` (con
+            // módulo al total real, según contrato de `TeachingStep`).
+            self.orchestrator.cancel();
+            let _ = self.orchestrator.start(titulo, tmpl);
+            self.anim_frames = None;
+            self.clear_anim_textures_only(None);
+        }
     }
     /// Progreso 0..=1 del morph burbuja (ANIM_MICRO 180ms ease-out).
     pub fn morph_progress(&self) -> f32 {
@@ -1963,6 +1996,28 @@ impl TeachingUiState {
         let elapsed_ms = Instant::now().duration_since(opened).as_secs_f32() * 1000.0;
         (elapsed_ms / grafito_ui::tokens::ANIM_MICRO).clamp(0.0, 1.0)
     }
+}
+
+// R2 — parsea `manim_template` forma `guion:k/n` → `(k, n)`.
+// `None` si no es guion o está mal formado (`k` 1-based, `1 <= k <= n`).
+// Puro, sin I/O — testeable headless.
+pub(crate) fn parse_guion_template(tmpl: &str) -> Option<(u32, u32)> {
+    let resto = tmpl.trim().strip_prefix("guion:")?;
+    let (k_crudo, n_crudo) = resto.split_once('/')?;
+    let k: u32 = k_crudo.trim().parse().ok()?;
+    let n: u32 = n_crudo.trim().parse().ok()?;
+    if k == 0 || n == 0 || k > n {
+        return None;
+    }
+    Some((k, n))
+}
+
+// R2 — ¿el paso guion es válido contra la sesión? `n` debe igualar la
+// cantidad de pasos (el adaptador `GuionASesion` emite `guion:k/n` con
+// `n` = actos = pasos). Puro, sin I/O.
+pub(crate) fn paso_guion_valido(manim_template: Option<&str>, pasos_sesion: usize) -> bool {
+    parse_guion_template(manim_template.unwrap_or_default())
+        .is_some_and(|(_, n)| n as usize == pasos_sesion)
 }
 
 /// R1-8: ¿el overlay debe cerrarse por entrada? `Esc` cierra siempre;
@@ -2509,6 +2564,80 @@ pub fn draw_teaching_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r2_guion_template_parsea_k_n_y_rechaza_malos() {
+        assert_eq!(parse_guion_template("guion:1/3"), Some((1, 3)));
+        assert_eq!(parse_guion_template("  guion:2/2 "), Some((2, 2)));
+        assert_eq!(parse_guion_template("derivative-slope"), None);
+        assert_eq!(parse_guion_template("guion:0/3"), None);
+        assert_eq!(parse_guion_template("guion:4/3"), None);
+        assert_eq!(parse_guion_template("guion:1/0"), None);
+        assert_eq!(parse_guion_template("guion:x/3"), None);
+        assert_eq!(parse_guion_template("guion:1"), None);
+        assert_eq!(parse_guion_template("guion:"), None);
+        assert_eq!(parse_guion_template(""), None);
+    }
+
+    #[test]
+    fn r2_paso_guion_valida_n_contra_sesion() {
+        // `n` debe igualar los pasos de la sesión (a_sesion: n = actos).
+        assert!(paso_guion_valido(Some("guion:1/3"), 3));
+        assert!(paso_guion_valido(Some("guion:3/3"), 3));
+        assert!(!paso_guion_valido(Some("guion:1/3"), 2));
+        assert!(!paso_guion_valido(Some("guion:4/3"), 3));
+        assert!(!paso_guion_valido(Some("derivative-slope"), 3));
+        assert!(!paso_guion_valido(None, 3));
+    }
+
+    #[test]
+    fn r2_poll_cues_guion_valido_relanza_orquestador() {
+        use grafito_pedagogy::{TeachingStep, TeachingTopic};
+        // Sesión de 1 paso con template de guion válido (`n` = pasos).
+        let paso = TeachingStep::new("g1", "apertura", "recta secante")
+            .with_manim("guion:1/1")
+            .with_cue(0);
+        let ahora = Instant::now();
+        let mut ui = TeachingUiState {
+            session: Some(TeachingSession::new(
+                TeachingTopic::from_text("derivada"),
+                vec![paso],
+            )),
+            session_started_at: Some(ahora),
+            last_revealed: 0,
+            ..Default::default()
+        };
+        assert_ne!(ui.orchestrator.template, "guion:1/1");
+        ui.poll_cues(ahora);
+        assert_eq!(ui.last_revealed, 1);
+        assert_eq!(ui.orchestrator.template, "guion:1/1");
+    }
+
+    #[test]
+    fn r2_poll_cues_guion_invalido_cae_a_expositivo() {
+        use grafito_pedagogy::{TeachingStep, TeachingTopic};
+        // `guion:2/1` no valida (k > n): fallback a paso expositivo —
+        // pizarra hidratada, sin animación, sin pánico.
+        let paso = TeachingStep::new("g1", "apertura", "recta secante")
+            .with_whiteboard("Dibuja la curva x² y una secante entre dos puntos")
+            .with_manim("guion:2/1")
+            .with_cue(0);
+        let ahora = Instant::now();
+        let mut ui = TeachingUiState {
+            session: Some(TeachingSession::new(
+                TeachingTopic::from_text("derivada"),
+                vec![paso],
+            )),
+            session_started_at: Some(ahora),
+            last_revealed: 0,
+            ..Default::default()
+        };
+        ui.poll_cues(ahora);
+        assert_eq!(ui.last_revealed, 1);
+        assert!(!ui.whiteboard.doc.is_empty(), "la pizarra igual hidrata");
+        assert!(ui.anim_frames.is_none(), "sin frames ante guion roto");
+        assert!(!ui.orchestrator.is_busy(), "orchestrator cancelado");
+    }
 
     #[test]
     fn r1_overlay_esc_y_clic_fuera_cierran() {
