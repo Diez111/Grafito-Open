@@ -21,8 +21,11 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use grafito_assistant_types::{
-    ConversationRole, ConversationTurn, TurnMediaRef, MAX_CONVERSATION_TURN_CHARS,
+    ConversationRole, ConversationTurn, TurnFrameSet, TurnMediaRef, HISTORY_FULL_FRAMES_MAX,
+    MAX_CONVERSATION_TURN_CHARS, TURN_FRAME_SET_MAX_BYTES, TURN_FRAME_SET_MAX_DIM,
     TURN_MEDIA_MAX_FRAMES, TURN_MEDIA_THUMB_MAX_BYTES,
 };
 use grafito_ui::assistant::AssistantMedia;
@@ -600,9 +603,10 @@ impl AnimHistoryCoords {
 
 /// Baja el primer frame a RGBA 96×96 por vecino más cercano.
 ///
-/// Puro y acotado (36 KiB fijos): jamás guarda el `Vec<ColorImage>` por
-/// turno (48 frames a 480px ~30 MiB = OOM). `None` honesto sin frames o
-/// con píxeles inconsistentes.
+/// Puro y acotado (36 KiB fijos). `None` honesto sin frames o
+/// con píxeles inconsistentes. Los frames completos viajan aparte como
+/// `Arc<TurnFrameSet>` (ver `shared_frames_from_media`, cap
+/// `HISTORY_FULL_FRAMES_MAX`); el thumb solo es la mini-card.
 pub(crate) fn thumb_rgba_96_from_media(media: &AssistantMedia) -> Option<Vec<u8>> {
     let first = media.frames.first()?;
     let [ancho, alto] = first.size;
@@ -627,11 +631,120 @@ pub(crate) fn thumb_rgba_96_from_media(media: &AssistantMedia) -> Option<Vec<u8>
     Some(salida)
 }
 
+/// Frames RGBA planos compartidos desde una media recién renderizada.
+///
+/// Puro, sin I/O: exige tamaño uniforme en todos los frames, dims
+/// 1..=`TURN_FRAME_SET_MAX_DIM` y total ≤`TURN_FRAME_SET_MAX_BYTES`.
+/// `None` honesto si no hay frames, exceden 64 o son inconsistentes (el
+/// turno queda thumb-only y el replay re-renderiza por el camino existente).
+/// El `Arc` hace barato el pegado en los drains (clone sin copiar bytes).
+pub(crate) fn shared_frames_from_media(media: &AssistantMedia) -> Option<Arc<TurnFrameSet>> {
+    if media.frames.is_empty() || media.frames.len() > usize::from(TURN_MEDIA_MAX_FRAMES) {
+        return None;
+    }
+    let first = media.frames.first()?;
+    let [ancho, alto] = first.size;
+    if ancho == 0
+        || alto == 0
+        || ancho > TURN_FRAME_SET_MAX_DIM as usize
+        || alto > TURN_FRAME_SET_MAX_DIM as usize
+    {
+        return None;
+    }
+    let total = ancho.checked_mul(alto)?;
+    if first.pixels.len() != total {
+        return None;
+    }
+    let por_frame = total.checked_mul(4)?;
+    let total_bytes = por_frame.checked_mul(media.frames.len())?;
+    if total_bytes > TURN_FRAME_SET_MAX_BYTES {
+        return None;
+    }
+    let mut frames_rgba = Vec::with_capacity(media.frames.len());
+    for frame in &media.frames {
+        if frame.size != [ancho, alto] || frame.pixels.len() != total {
+            return None;
+        }
+        let mut plano = Vec::with_capacity(por_frame);
+        for pixel in &frame.pixels {
+            plano.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
+        }
+        frames_rgba.push(plano);
+    }
+    let set = TurnFrameSet {
+        width: ancho as u32,
+        height: alto as u32,
+        frames_rgba,
+    };
+    set.validate().ok()?;
+    Some(Arc::new(set))
+}
+
+/// Reconstruye una media reproducible desde frames compartidos guardados.
+///
+/// Puro, sin I/O: convierte cada RGBA plano a `ColorImage` del mismo
+/// tamaño. `None` honesto si el set no valida (el llamante re-renderiza
+/// por el camino existente). La usa el replay del turno con frames: reutiliza
+/// el player sin re-render.
+pub(crate) fn assistant_media_from_shared(
+    title: &str,
+    shared: &TurnFrameSet,
+) -> Option<AssistantMedia> {
+    shared.validate().ok()?;
+    let ancho = usize::try_from(shared.width).ok()?;
+    let alto = usize::try_from(shared.height).ok()?;
+    let total = ancho.checked_mul(alto)?;
+    let mut frames = Vec::with_capacity(shared.frames_rgba.len());
+    for plano in &shared.frames_rgba {
+        if plano.len() != total.checked_mul(4)? {
+            return None;
+        }
+        let mut pixels = Vec::with_capacity(total);
+        for rgba in plano.chunks_exact(4) {
+            pixels.push(egui::Color32::from_rgba_unmultiplied(
+                rgba[0], rgba[1], rgba[2], rgba[3],
+            ));
+        }
+        frames.push(egui::ColorImage {
+            size: [ancho, alto],
+            pixels,
+        });
+    }
+    if title.trim().is_empty() {
+        return None;
+    }
+    Some(AssistantMedia {
+        title: title.to_string(),
+        frames,
+    })
+}
+
+/// Media reutilizable del turno sin re-render, si conserva frames.
+///
+/// Puro, sin I/O: `Some` solo si el turno tiene media válida con
+/// `frames` compartidos (el replay la reinyecta al slot vivo sin spawnear
+/// hilo); `None` si fue evictada o nunca se guardó (re-renderizar como hoy).
+pub(crate) fn reusable_media_from_turn(turno: &ConversationTurn) -> Option<AssistantMedia> {
+    let media = turno.media.as_ref()?;
+    let shared = media.frames.as_ref()?;
+    assistant_media_from_shared(&media.title, shared)
+}
+
+/// Aplica el cap de frames completos (últimos `HISTORY_FULL_FRAMES_MAX`
+/// turnos con media). Puro, sin I/O: llamar tras cada attach en los drains.
+/// El más viejo suelta frames y conserva thumb+meta.
+pub(crate) fn enforce_turn_frames_cap(conversation: &mut [ConversationTurn]) {
+    grafito_assistant_types::retain_full_frames_for_last_n(conversation, HISTORY_FULL_FRAMES_MAX);
+}
+
 /// Construye el `TurnMediaRef` de un job recién completado.
 ///
 /// `None` honesto si no hay frames, si exceden `TURN_MEDIA_MAX_FRAMES`
 /// (64), si el thumb no es RGBA 96×96 exacto o si algún campo no valida:
-/// el job completa igual con el slot vivo, solo sin mini-card.
+/// el job completa igual con el slot vivo, solo sin mini-card. Los frames
+/// completos se pegan como `Arc` compartido (clone barato en el drain);
+/// si no caben o son inconsistentes, el turno queda thumb-only (mini-card +
+/// replay con re-render) sin invalidar el historial.
 pub(crate) fn turn_media_for_completed_job(
     media: &AssistantMedia,
     coords: &AnimHistoryCoords,
@@ -644,13 +757,16 @@ pub(crate) fn turn_media_for_completed_job(
         return None;
     }
     let frame_count = u8::try_from(media.frames.len()).ok()?;
-    let hecha = TurnMediaRef::new(
+    let mut hecha = TurnMediaRef::new(
         media.title.clone(),
         coords.template.clone(),
         coords.concept.clone(),
         thumb,
         frame_count,
     );
+    if let Some(shared) = shared_frames_from_media(media) {
+        hecha.set_frames(shared);
+    }
     hecha.validate().ok()?;
     Some(hecha)
 }
@@ -744,6 +860,9 @@ pub(crate) fn trim_conversation_dropping_pair_media(
     for (slot, vivo) in owners.iter_mut().zip(vivos) {
         **slot = vivo;
     }
+    // El trim dropea el par con todo (thumb+frames+meta viajan en el turno);
+    // tras recortar se re-aplica el cap por si el historial encogió raro.
+    enforce_turn_frames_cap(conversation);
 }
 
 #[cfg(test)]
@@ -1161,5 +1280,101 @@ mod tests {
             Some(conversacion.len() - 1),
             "el vivo sigue al último turno"
         );
+    }
+
+    #[test]
+    fn frames_compartidos_roundtrip_sin_rerender() {
+        use grafito_assistant_types::ConversationTurn;
+        let coords = coords_de_prueba();
+        // Dos animaciones conservan frames: el player reutiliza sin re-render.
+        let hecha_a =
+            turn_media_for_completed_job(&media_de_prueba("A", 2), &coords).expect("media A");
+        let hecha_b =
+            turn_media_for_completed_job(&media_de_prueba("B", 3), &coords).expect("media B");
+        assert!(hecha_a.has_full_frames(), "A guarda frames");
+        assert!(hecha_b.has_full_frames(), "B guarda frames");
+        // El attach exige dueño == último: se construye incremental.
+        let mut conversacion = vec![
+            ConversationTurn::user("qA"),
+            ConversationTurn::assistant("rA"),
+        ];
+        assert!(attach_media_to_owner_turn(
+            &mut conversacion,
+            Some(1),
+            hecha_a
+        ));
+        conversacion.push(ConversationTurn::user("qB"));
+        conversacion.push(ConversationTurn::assistant("rB"));
+        assert!(attach_media_to_owner_turn(
+            &mut conversacion,
+            Some(3),
+            hecha_b
+        ));
+        enforce_turn_frames_cap(&mut conversacion);
+        let rea = reusable_media_from_turn(&conversacion[1]).expect("A reutilizable");
+        let reb = reusable_media_from_turn(&conversacion[3]).expect("B reutilizable");
+        assert_eq!(rea.frames.len(), 2, "A sin re-render");
+        assert_eq!(reb.frames.len(), 3, "B sin re-render");
+        assert_eq!(rea.title, "A");
+        // El Arc es barato: ambas medias comparten bytes sin copiar.
+        let pa = conversacion[1].media.as_ref().expect("media A");
+        let qa = conversacion[1].media.clone().expect("media A clonada");
+        assert!(std::sync::Arc::ptr_eq(
+            pa.frames.as_ref().expect("frames A"),
+            qa.frames.as_ref().expect("frames A clon"),
+        ));
+    }
+
+    #[test]
+    fn cuarta_animacion_evicta_la_primera_thumb_sobrevive() {
+        use grafito_assistant_types::{ConversationTurn, HISTORY_FULL_FRAMES_MAX};
+        assert_eq!(HISTORY_FULL_FRAMES_MAX, 3);
+        let coords = coords_de_prueba();
+        // El attach exige dueño == último: se construye incremental sin trim
+        // (8 turnos a propósito: el cap de frames evicta sin dropear el par).
+        let mut conversacion = vec![
+            ConversationTurn::user("q1"),
+            ConversationTurn::assistant("r1"),
+        ];
+        let hecha1 = turn_media_for_completed_job(&media_de_prueba("U1", 2), &coords)
+            .expect("media con frames");
+        assert!(attach_media_to_owner_turn(
+            &mut conversacion,
+            Some(1),
+            hecha1
+        ));
+        for (nombre, make_idx) in [("U2", 3), ("U3", 5), ("U4", 7)] {
+            let n = conversacion.len();
+            conversacion.push(ConversationTurn::user(format!("q{n}")));
+            conversacion.push(ConversationTurn::assistant(format!("r{n}")));
+            let hecha = turn_media_for_completed_job(&media_de_prueba(nombre, 2), &coords)
+                .expect("media con frames");
+            assert!(hecha.has_full_frames());
+            assert!(attach_media_to_owner_turn(
+                &mut conversacion,
+                Some(make_idx),
+                hecha
+            ));
+            enforce_turn_frames_cap(&mut conversacion);
+        }
+        // La 1ª soltó frames pero conserva thumb+meta (mini-card viva).
+        let primera = conversacion[1].media.as_ref().expect("U1 sigue");
+        assert_eq!(primera.title, "U1");
+        assert!(!primera.has_full_frames(), "U1 evictada");
+        assert!(!primera.thumb.is_empty(), "U1 conserva thumb");
+        assert!(
+            reusable_media_from_turn(&conversacion[1]).is_none(),
+            "U1 re-renderiza"
+        );
+        for idx in [3, 5, 7] {
+            assert!(
+                conversacion[idx]
+                    .media
+                    .as_ref()
+                    .is_some_and(|m| m.has_full_frames()),
+                "turno {idx} conserva frames",
+            );
+            assert!(reusable_media_from_turn(&conversacion[idx]).is_some());
+        }
     }
 }

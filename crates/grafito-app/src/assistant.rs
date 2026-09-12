@@ -548,18 +548,21 @@ pub(crate) fn prosa_y_aviso_offline_para_pedido(plantilla: &str, pedido: &str) -
     prosa_y_aviso_canonicos_para_pedido(plantilla, pedido)
 }
 
-/// R6a — prosa genérica que DECLARA plantilla+concepto (pura, sin I/O).
+/// R6a — prosa genérica que DECLARA plantilla+título canónico (pura, sin I/O).
 ///
 /// Las ramas genéricas (single genérico, guion, playlist) completaban la
 /// frase de referencia sola: genérico sin claims = veto en la puerta
-/// final. Ahora declaran keyword de la plantilla + concepto recortado
-/// (120 chars) + referencia. Pasa `verificar_prosa_vs_spec`.
+/// final. Declaran keyword de la plantilla + TITULO CANONICO
+/// (`titulo_curado`, jamás el texto crudo del pedido) + referencia. Pasa
+/// `verificar_prosa_vs_spec` (acepta el canónico como cita de función).
+/// Un pedido deforme tipo "hace una animacion explicando pitagoras" sale
+/// como "Teorema de Pitágoras", sin eco del crudo.
 pub(crate) fn prosa_turno_generica(plantilla: &str, concepto: &str) -> String {
-    let recorte: String = concepto.chars().take(120).collect();
+    let titulo = titulo_curado(plantilla, concepto, None);
     format!(
         "te muestro {} con {}.\n\n{}",
         keyword_plantilla_anim(plantilla),
-        recorte.trim(),
+        titulo,
         crate::anim_ui::animation_reference_sentence(),
     )
 }
@@ -567,8 +570,8 @@ pub(crate) fn prosa_turno_generica(plantilla: &str, concepto: &str) -> String {
 /// R6a — prosa del turno guion: declara primer template + concepto (pura).
 ///
 /// Parse acotado igual que el worker (`GuionTexto` → `Guion`); si no
-/// parsea, declara "la animación" con el texto recortado (el hilo dará el
-/// error honesto). Pasa `verificar_prosa_vs_spec` a nivel presencia.
+/// parsea, declara el título por defecto (jamás el JSON crudo: el hilo dará
+/// el error honesto). Pasa `verificar_prosa_vs_spec` a nivel presencia.
 pub(crate) fn prosa_turno_para_guion(guion_texto: &str) -> String {
     use grafito_anim::guion::{Guion, GuionTexto};
     let coords = serde_json::from_str::<GuionTexto>(guion_texto)
@@ -585,7 +588,7 @@ pub(crate) fn prosa_turno_para_guion(guion_texto: &str) -> String {
         });
     match coords {
         Some((plantilla, concepto)) => prosa_turno_generica(&plantilla, &concepto),
-        None => prosa_turno_generica("universal", guion_texto),
+        None => prosa_turno_generica("universal", ""),
     }
 }
 
@@ -652,7 +655,10 @@ pub(crate) fn normalizar_prosa_para_spec(texto: &str) -> String {
 ///
 /// La prosa que acompaña frames DEBE citar lo EFECTIVAMENTE renderizado:
 /// - keyword de `template_real` (`la integral`/`la tangente`/`taylor`…),
-/// - función normalizada (`normalizar_prosa_para_spec`),
+/// - función normalizada (`normalizar_prosa_para_spec`) O título canónico
+///   (`titulo_curado`: la prosa genérica jamás echa el crudo del pedido,
+///   cita el canónico — p. ej. "hace una animacion explicando pitagoras"
+///   sale como "Teorema de Pitágoras"),
 /// - taylor: `orden {n}` exacto si `orden` es `Some`, o cualquier "orden"
 ///   si es `None`; resto: rango `[p0,p1]` exacto si `rango` es `Some`, o
 ///   sin chequeo de rango si es `None` (drain genérico).
@@ -675,14 +681,19 @@ pub(crate) fn verificar_prosa_vs_spec(
     };
     let es_taylor = template_real.trim().to_lowercase() == "taylor-series";
     let func_norma = normalizar_prosa_para_spec(func_real);
+    // Título canónico como cita alternativa: la prosa genérica usa
+    // `titulo_curado` (jamás el crudo), así que el crudo deforme no necesita
+    // aparecer para pasar la puerta.
+    let titulo_norma = normalizar_prosa_para_spec(&titulo_curado(template_real, func_real, None));
     // Ante concepto largo la prosa lo recorta: se verifica con el prefijo
     // (60 chars normalizados) para no vetar declaraciones honestas.
-    let func_citada = if func_norma.chars().count() > 60 {
+    let cita_crudo = if func_norma.chars().count() > 60 {
         let prefijo: String = func_norma.chars().take(60).collect();
         norma.contains(&prefijo)
     } else {
         func_norma.is_empty() || norma.contains(&func_norma)
     };
+    let func_citada = cita_crudo || (!titulo_norma.is_empty() && norma.contains(&titulo_norma));
     let cita_orden_rango = if es_taylor {
         match orden {
             Some(n) => norma.contains(&format!("orden{n}")),
@@ -3635,6 +3646,13 @@ impl GrafitoApp {
                                     owner,
                                     ref_media,
                                 );
+                                // Frames por turno: el `Arc` se clonó barato en
+                                // el attach (dueño intacto); se aplica el cap
+                                // de 3 (el más viejo suelta frames, conserva
+                                // thumb+meta) antes del trim por par.
+                                crate::manim_orchestrator::enforce_turn_frames_cap(
+                                    &mut self.assistant.conversation,
+                                );
                                 trim_conversation_dropping_pair_media(
                                     &mut self.assistant.conversation,
                                     &mut [
@@ -3798,6 +3816,11 @@ impl GrafitoApp {
                                     &mut self.assistant.conversation,
                                     owner,
                                     ref_media,
+                                );
+                                // Frames por turno (`Arc` barato, dueño
+                                // intacto) + cap de 3 antes del trim.
+                                crate::manim_orchestrator::enforce_turn_frames_cap(
+                                    &mut self.assistant.conversation,
                                 );
                                 // R6a: el trim rebasea los dueños vivos (el
                                 // otro slot puede seguir en vuelo).
@@ -7293,11 +7316,18 @@ impl GrafitoApp {
     /// mini-card de un turno no-final. Acá se resuelve contra la
     /// conversación con `anim_ui::history_replay_request` (`None` honesto
     /// con aviso si el turno salió por trim, no valida o el thumb no es
-    /// RGBA 96×96) y se reinyecta por el camino single existente con
-    /// `historiar=false`: mismo worker cancelable (`CancellationToken`,
-    /// `render_anim_with_progress` en hilo), slot vivo vía `set_media`,
-    /// sin pegar media nueva (el turno ya tiene la suya) y sin crear
-    /// turno. Presupuestos intactos (MAX_TURNS 6, GIF 64/8M/5MB).
+    /// RGBA 96×96).
+    ///
+    /// Si el turno conserva frames completos (`TurnMediaRef.frames`), se
+    /// reutilizan SIN re-render: se reconstruye la media y se reinyecta al
+    /// slot vivo con dueño = el turno viejo (pausada si hace falta: la
+    /// animación anterior queda tal cual, no colapsa a mini-card). Sin
+    /// frames (evictado por el cap de 3 o thumb-only histórico), se
+    /// re-renderiza por el camino single existente con `historiar=false`:
+    /// mismo worker cancelable (`CancellationToken`,
+    /// `render_anim_with_progress` en hilo), sin pegar media nueva (el turno
+    /// ya tiene la suya) y sin crear turno. Presupuestos intactos (turnos 6,
+    /// thumb 96px, GIF 64).
     fn replay_assistant_history_media(&mut self, ctx: &egui::Context, turn_idx: usize) {
         // Examen: ni siquiera el replay local corre (igual que el single).
         if self.exam_blocks("Asistente") {
@@ -7309,6 +7339,20 @@ impl GrafitoApp {
             .conversation
             .get(turn_idx)
             .and_then(|turno| turno.media.clone());
+        // Frames por turno: reutilización sin re-render ni hilo.
+        if let Some(turno) = self.assistant.conversation.get(turn_idx) {
+            if let Some(reusada) = crate::manim_orchestrator::reusable_media_from_turn(turno) {
+                self.assistant_runtime.anim_voiceover_rx = None;
+                self.assistant_runtime.ultimo_voiceover = None;
+                self.assistant.set_media(Some(reusada), ctx);
+                // `set_media` resetea el dueño a `None`: se setea DESPUÉS para
+                // que el player viva en el turno viejo (dueño intacto).
+                self.assistant.set_media_owner_turn(Some(turn_idx));
+                self.notify("Animación lista.", ToastKind::Success);
+                ctx.request_repaint();
+                return;
+            }
+        }
         let Some(pedido) = crate::anim_ui::history_replay_request(turn_idx, len, media.as_ref())
         else {
             self.notify(
@@ -9942,12 +9986,42 @@ mod tests {
             app.assistant.conversation[1].media.is_some(),
             "la última tiene su mini-card"
         );
-        // Replay de la vieja: reinjecta por el camino single y el drain
-        // setea dueño=0 (el player va a ESE turno, no a la última).
+        // Replay de la vieja CON frames: reutiliza SIN re-render (sincrónico,
+        // sin worker) y setea dueño=0 (el player va a ESE turno, no a la última).
+        app.replay_assistant_history_media(&ctx, 0);
+        assert!(
+            app.assistant_runtime.anim_job.is_none(),
+            "con frames no se spawnea worker"
+        );
+        assert!(
+            app.assistant_runtime.anim_replay_owner.is_none(),
+            "sin worker no hay marcador"
+        );
+        assert!(app.assistant.media.is_some(), "slot reinyectado");
+        assert_eq!(
+            app.assistant.media_owner_turn(),
+            Some(0),
+            "tras el replay el player vive en el turno viejo"
+        );
+        assert!(
+            app.assistant.conversation[0].media.is_some(),
+            "la vieja sigue con mini-card"
+        );
+        assert!(
+            app.assistant.conversation[1].media.is_some(),
+            "la última sigue con mini-card"
+        );
+        // Replay SIN frames (evictado por el cap): re-renderiza por el camino
+        // single con worker + marcador, como antes.
+        app.assistant.conversation[0]
+            .media
+            .as_mut()
+            .expect("mini-card vieja")
+            .clear_frames();
         app.replay_assistant_history_media(&ctx, 0);
         assert!(
             app.assistant_runtime.anim_job.is_some(),
-            "el replay spawnea worker"
+            "sin frames el replay spawnea worker"
         );
         assert_eq!(app.assistant_runtime.anim_replay_owner, Some(0));
         drenar(&mut app, &ctx);
@@ -10801,10 +10875,14 @@ mod tests {
     #[test]
     fn r6a_ramas_genericas_declaran_plantilla_y_concepto() {
         // Single genérico, guion y playlist declaran (pasan la puerta a
-        // nivel presencia); el bare reference se veta.
+        // nivel presencia); el bare reference se veta. La prosa usa el
+        // TÍTULO CANÓNICO, jamás el crudo del pedido.
         let generica = prosa_turno_generica("universal", "pitágoras con animación");
         assert!(generica.contains("animación"), "{generica}");
-        assert!(generica.contains("pitágoras"), "{generica}");
+        assert!(
+            generica.contains("Pitágoras") || generica.contains("PITÁGORAS"),
+            "{generica}"
+        );
         assert!(verificar_prosa_vs_spec(
             &generica,
             "universal",
@@ -10821,11 +10899,18 @@ mod tests {
             None,
         )
         .is_err());
-        // Guion real declara su primer template + concepto.
+        // Guion real declara su primer template + título canónico.
         let guion = r#"{"concepto": "derivada de x^2", "width": 640, "height": 480, "actos": [{"titulo": "A1", "limpiar": false, "pasos": [{"texto": "curva", "whiteboard_hint": "", "template_hint": "derivative-slope", "params": {}, "efecto": "create", "frames": 8, "run_ms": 1000, "wait_after_ms": 0}]}]}"#;
         let prosa_g = prosa_turno_para_guion(guion);
         assert!(prosa_g.contains("tangente"), "{prosa_g}");
-        assert!(prosa_g.contains("derivada de x^2"), "{prosa_g}");
+        assert!(
+            prosa_g.contains("Derivada como pendiente"),
+            "título canónico, no eco: {prosa_g}"
+        );
+        // Guion que no parsea: jamás echa el JSON crudo.
+        let prosa_rota = prosa_turno_para_guion("{no es json");
+        assert!(!prosa_rota.contains("{no es json"), "{prosa_rota}");
+        assert!(prosa_rota.contains("Animación"), "{prosa_rota}");
         // Playlist declara primer template + lados.
         let playlist =
             playlist_para_pedido("derivada de x^2 y después integral de x^2 con animación")
@@ -10836,6 +10921,36 @@ mod tests {
         assert_eq!(keyword_plantilla_anim("integral-area"), "la integral");
         assert_eq!(keyword_plantilla_anim("derivative-slope"), "la tangente");
         assert_eq!(keyword_plantilla_anim("taylor-series"), "Taylor");
+    }
+
+    #[test]
+    fn prosa_generica_usa_titulo_canonico_sin_eco_crudo() {
+        // Captura del chat: el pedido deforme "hace una animacion explicando
+        // pitagoras" se repetía crudo en la prosa ("te muestro la animación
+        // con hace una animacion..."). Ahora sale el título canónico.
+        let pedido = "hace una animacion explicando pitagoras";
+        for plantilla in ["pitagoras", "universal"] {
+            let prosa = prosa_turno_generica(plantilla, pedido);
+            assert!(
+                !prosa.contains("hace una animacion"),
+                "eco crudo en prosa ({plantilla}): {prosa}"
+            );
+            assert!(
+                prosa.contains("Pitágoras"),
+                "falta título canónico ({plantilla}): {prosa}"
+            );
+            assert!(
+                verificar_prosa_vs_spec(&prosa, plantilla, pedido, None, None).is_ok(),
+                "la canónica pasa la puerta ({plantilla}): {prosa}"
+            );
+        }
+        // Taylor deforme también cura sin eco.
+        let taylor = prosa_turno_generica(
+            "taylor-series",
+            "hace una animacion explicando taylor de sin(x)",
+        );
+        assert!(!taylor.contains("hace una animacion"), "{taylor}");
+        assert!(taylor.contains("Taylor"), "{taylor}");
     }
 
     #[test]

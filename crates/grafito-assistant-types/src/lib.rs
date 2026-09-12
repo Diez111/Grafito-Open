@@ -601,12 +601,91 @@ pub const MAX_TURN_MEDIA_FIELD_CHARS: usize = 4_096;
 pub const TURN_MEDIA_MIN_FRAMES: u8 = 1;
 /// Máximo de frames que un replay puede declarar.
 pub const TURN_MEDIA_MAX_FRAMES: u8 = 64;
+/// Turnos con media que conservan frames completos en memoria.
+///
+/// Los últimos 3 turnos con media guardan sus frames RGBA compartidos
+/// (`TurnMediaRef.frames: Option<Arc<TurnFrameSet>>`); al exceder, el más
+/// viejo suelta frames y conserva thumb+meta (mini-card + replay re-renderiza
+/// por el camino existente). El trim por par dropea todo junto (la media
+/// viaja dentro del turno). Puro presupuesto en memoria, sin I/O.
+pub const HISTORY_FULL_FRAMES_MAX: usize = 3;
+/// Lado máximo de un frame guardado en memoria (paridad chat 480×360).
+pub const TURN_FRAME_SET_MAX_DIM: u32 = 1024;
+/// Tope total de bytes RGBA de un set de frames guardado (64 MiB).
+pub const TURN_FRAME_SET_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Frames RGBA planos compartidos de un turno, sin egui ni wgpu.
+///
+/// Representación: `frames_rgba[k]` son `width*height*4` bytes RGBA del
+/// frame k (fila por fila, como `egui::ColorImage` aplanado). La conversión
+/// desde/hacia `ColorImage` vive en la app (`manim_orchestrator`:
+/// `shared_frames_from_media` / `assistant_media_from_shared`); acá solo
+/// dims + bytes + validación pura. In-memory only (`#[serde(skip)]` en
+/// `TurnMediaRef.frames`): tras serializar se pierde y el replay re-renderiza.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFrameSet {
+    /// Ancho en píxeles (>0, ≤`TURN_FRAME_SET_MAX_DIM`).
+    pub width: u32,
+    /// Alto en píxeles (>0, ≤`TURN_FRAME_SET_MAX_DIM`).
+    pub height: u32,
+    /// Un `Vec<u8>` RGBA por frame (1..=64, cada uno `w*h*4` bytes).
+    pub frames_rgba: Vec<Vec<u8>>,
+}
+
+impl TurnFrameSet {
+    /// Valida dims, conteo y largo exacto de cada frame + tope total.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.width == 0
+            || self.height == 0
+            || self.width > TURN_FRAME_SET_MAX_DIM
+            || self.height > TURN_FRAME_SET_MAX_DIM
+        {
+            return Err("assistant turn frames dimensions are outside the allowed range".into());
+        }
+        if self.frames_rgba.is_empty()
+            || self.frames_rgba.len() > usize::from(TURN_MEDIA_MAX_FRAMES)
+        {
+            return Err("assistant turn frames count is outside the allowed range".into());
+        }
+        let por_frame = (self.width as usize)
+            .checked_mul(self.height as usize)
+            .and_then(|pixeles| pixeles.checked_mul(4))
+            .ok_or_else(|| "assistant turn frames size overflow".to_string())?;
+        let mut total = 0_usize;
+        for frame in &self.frames_rgba {
+            if frame.len() != por_frame {
+                return Err("assistant turn frames pixel length mismatch".into());
+            }
+            total = total
+                .checked_add(frame.len())
+                .ok_or_else(|| "assistant turn frames size overflow".to_string())?;
+        }
+        if total > TURN_FRAME_SET_MAX_BYTES {
+            return Err("assistant turn frames exceed the allowed size".into());
+        }
+        Ok(())
+    }
+
+    /// Cantidad de frames guardados.
+    pub fn len(&self) -> usize {
+        self.frames_rgba.len()
+    }
+
+    /// `true` si no hay frames (nunca válido, solo constructor vacío).
+    pub fn is_empty(&self) -> bool {
+        self.frames_rgba.is_empty()
+    }
+}
 
 /// Referencia de media pegada a un turno: thumbnail de 96px + replay.
 ///
 /// Puro Rust, sin egui ni wgpu: `thumb` guarda píxeles RGBA de
 /// 96×96 (`TURN_MEDIA_THUMB_MAX_BYTES` bytes como tope) serializables con
-/// serde. `frame_count` es el replay asociado al turno.
+/// serde. `frame_count` es el replay asociado al turno. `frames` guarda
+/// los frames RGBA completos compartidos (in-memory only, `#[serde(skip)]`):
+/// los últimos `HISTORY_FULL_FRAMES_MAX` turnos con media los conservan para
+/// que el player sea reutilizable sin re-render; el resto conserva thumb+meta
+/// (mini-card + replay re-renderiza por el camino existente).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnMediaRef {
     /// Título visible del historial (no vacío, cap 4096 caracteres).
@@ -619,10 +698,21 @@ pub struct TurnMediaRef {
     pub thumb: Vec<u8>,
     /// Frames del replay, 1..=64.
     pub frame_count: u8,
+    /// Frames RGBA completos compartidos (solo memoria, no serializa).
+    ///
+    /// `Some(Arc)` = player reutilizable sin re-render (clone barato en los
+    /// drains); `None` = evictado o nunca guardado (mini-card + replay con
+    /// re-render por el camino existente). La conversión RGBA↔ColorImage vive
+    /// en la app (`manim_orchestrator::shared_frames_from_media` /
+    /// `assistant_media_from_shared`).
+    #[serde(skip, default)]
+    pub frames: Option<std::sync::Arc<TurnFrameSet>>,
 }
 
 impl TurnMediaRef {
     /// Construye una referencia de media sin validar (usar [`Self::validate`]).
+    /// Los frames completos quedan en `None` (thumb-only); usar
+    /// [`Self::with_frames`] para pegar el `Arc` compartido del drain.
     pub fn new(
         title: impl Into<String>,
         template: impl Into<String>,
@@ -636,10 +726,46 @@ impl TurnMediaRef {
             concept: concept.into(),
             thumb,
             frame_count,
+            frames: None,
         }
     }
 
+    /// Constructor con frames compartidos ya validados (el drain clona el `Arc`).
+    pub fn with_frames(
+        title: impl Into<String>,
+        template: impl Into<String>,
+        concept: impl Into<String>,
+        thumb: Vec<u8>,
+        frame_count: u8,
+        frames: std::sync::Arc<TurnFrameSet>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            template: template.into(),
+            concept: concept.into(),
+            thumb,
+            frame_count,
+            frames: Some(frames),
+        }
+    }
+
+    /// Pega (o reemplaza) los frames compartidos (clone barato del `Arc`).
+    pub fn set_frames(&mut self, frames: std::sync::Arc<TurnFrameSet>) {
+        self.frames = Some(frames);
+    }
+
+    /// Suelta los frames completos conservando thumb+meta (evicción por cap).
+    pub fn clear_frames(&mut self) {
+        self.frames = None;
+    }
+
+    /// `true` si conserva frames completos reutilizables sin re-render.
+    pub fn has_full_frames(&self) -> bool {
+        self.frames.is_some()
+    }
+
     /// Comprueba campos no vacíos, topes y rango de frames antes de historiar.
+    /// Si hay frames compartidos, también valida dims y largos exactos.
     pub fn validate(&self) -> Result<(), String> {
         for (name, field) in [
             ("title", &self.title),
@@ -662,8 +788,41 @@ impl TurnMediaRef {
         if !(TURN_MEDIA_MIN_FRAMES..=TURN_MEDIA_MAX_FRAMES).contains(&self.frame_count) {
             return Err("assistant turn media frame count is outside the allowed range".into());
         }
+        if let Some(frames) = &self.frames {
+            frames.validate()?;
+            if frames.len() != usize::from(self.frame_count) {
+                return Err("assistant turn media frame count mismatch".into());
+            }
+        }
         Ok(())
     }
+}
+
+/// Conserva frames completos solo en los últimos `keep` turnos con media.
+///
+/// Recorre de nuevo a viejo y suelta (`clear_frames`, conserva thumb+meta)
+/// todo lo que exceda `keep`. Puro, sin I/O. El trim por par dropea todo
+/// junto (la media viaja dentro del turno); esto solo evicta bytes de frames.
+pub fn retain_full_frames_for_last_n(conversation: &mut [ConversationTurn], keep: usize) {
+    let mut vistos = 0_usize;
+    for turno in conversation.iter_mut().rev() {
+        let Some(media) = turno.media.as_mut() else {
+            continue;
+        };
+        if !media.has_full_frames() {
+            continue;
+        }
+        vistos = vistos.saturating_add(1);
+        if vistos > keep {
+            media.clear_frames();
+        }
+    }
+}
+
+/// Aplica el cap de frames completos ([`HISTORY_FULL_FRAMES_MAX`]).
+/// Puro, sin I/O: llamar tras cada attach en los drains.
+pub fn enforce_full_frames_cap(conversation: &mut [ConversationTurn]) {
+    retain_full_frames_for_last_n(conversation, HISTORY_FULL_FRAMES_MAX);
 }
 
 /// Rebasea un índice dueño (`anim_owner`/`anim_ia_owner`) tras dropear

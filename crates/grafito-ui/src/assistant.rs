@@ -5,15 +5,15 @@ use crate::{
     icons::{action_icon_button, Icon},
     theme::current_theme,
     tokens::{
-        HIT_TARGET_MIN, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXL,
-        TYPE_2XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
+        HIT_TARGET_MIN, RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXL, TYPE_2XS,
+        TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
     },
 };
 use grafito_anim::protocol::Timeline;
 use grafito_assistant_types::{
     AssistantExecutionOrigin, AssistantFocus, AssistantRepairFeedback, AttachmentLimits,
     ConversationRole, ConversationTurn, ImageAttachment, ImmutableDocumentContext, ProposedPlan,
-    ProviderProfile, RequestBudget, TurnMediaRef, MAX_CONVERSATION_TURNS,
+    ProviderProfile, RequestBudget, TurnFrameSet, TurnMediaRef, MAX_CONVERSATION_TURNS,
     MAX_CONVERSATION_TURN_CHARS, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES, TURN_MEDIA_THUMB_SIDE_PX,
 };
 pub use grafito_command::assistant_proposals::{AssistantParameterAssignment, AssistantProposal};
@@ -641,26 +641,22 @@ pub(crate) fn history_mini_card_indices(conversation: &[ConversationTurn]) -> Ve
 /// es `ancho * h/w` clampeado a este tope para no mover el scroll.
 const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 
-/// Upscale máximo del preview inline (M2-1: card capea, overlay libre).
+/// Upscale máximo del preview inline (nitidez).
 ///
 /// Decisión por nitidez (documentada): se capeó a 1.5× en vez de volver a
 /// `min(1.0)` porque los frames nativos salen a ~480px y los paneles miden
 /// 300..520 — el caso común escala ≤1.1× y `min(1.0)` dejaría bandas vacías
 /// en un layout que reserva todo el ancho. El cap solo muerde texturas
 /// chicas (tests/thumbnails), donde más de 1.5× pixela feo aun con filtrado
-/// lineal. "Ver grande" sigue disponible a tamaño real en el visor.
+/// lineal.
 ///
-/// Política card vs overlay (diferencia intencional, no bug): la card inline
-/// usa este cap (`media_preview_size`); el overlay usa upscale libre
-/// (`media_overlay_preview_size`, "ver grande" a pedido del usuario).
-/// La política se pinnea en `app::anim_ui::preview_upscale_cap`
-/// (`Some` inline / `None` en overlay) y en el test
-/// `media_caps_card_vs_overlay_difieren_con_motivo`.
+/// Política: la card inline usa este cap (`media_preview_size`); no hay
+/// visor grande (el botón ⛶/overlay se eliminó: sin glifo se veía como □
+/// mudo y la ventana se iba de los límites).
 pub const MAX_PREVIEW_UPSCALE: f32 = 1.5;
 
 /// Tooltips cortos de la toolbar única v3 (≤60 chars, sin cortes).
 const MEDIA_TIP_SPEED: &str = "Velocidad: elegí 0.5x, 1x o 2x";
-const MEDIA_TIP_FULLSCREEN: &str = "Ver grande. Esc para cerrar";
 const MEDIA_TIP_EXPORT: &str = "Exportar: elegís formato y calidad";
 const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual (Espacio)";
 const MEDIA_TIP_PLAY: &str = "Retoma donde quedó (Espacio)";
@@ -1720,6 +1716,24 @@ pub struct AssistantPanelState {
     /// Instante del último tick de gracia: varios mini-cards + slot vivo en el
     /// mismo frame comparten UN tick (la gracia son frames dibujados, no cards).
     retire_tick_time_s: std::cell::Cell<Option<f64>>,
+    /// Playheads propios por turno (`turn_idx → cursor`): cada turno con
+    /// frames propios avanza el suyo; darle play a uno pausa los demás
+    /// (ahorro de CPU) y los demás quedan congelados tal cual, jamás
+    /// colapsan a mini-card. `RefCell` porque la Piel dibuja con `&Estado`.
+    /// Se limpia en trim/limpiar (los índices corren) y se reconstruye lazy.
+    turn_players: std::cell::RefCell<std::collections::BTreeMap<usize, TurnPlayState>>,
+    /// Texturas vivas por turno (`turn_idx → frame_idx → handle`): ventana
+    /// `MEDIA_TEXTURE_WINDOW` alrededor del playhead propio, como el slot
+    /// vivo pero con píxeles decodificados SIEMPRE de la media propia del
+    /// turno (garantía: ningún turno dibuja frames ajenos). `RefCell` por
+    /// `&Estado`; lo que sale de la ventana se retira con gracia intacta.
+    turn_textures: std::cell::RefCell<
+        std::collections::BTreeMap<usize, std::collections::BTreeMap<usize, egui::TextureHandle>>,
+    >,
+    /// Huella de la media que llenó `turn_textures[turn_idx]`: ante reemplazo
+    /// (`attach_media`) se retiran las viejas con gracia y se reconstruyen
+    /// lazy (misma paridad que el caché de thumbs).
+    turn_texture_fingerprint: std::cell::RefCell<std::collections::BTreeMap<usize, u64>>,
     /// Guarda si ya se construyeron las texturas de la media actual.
     media_textures_ready: bool,
     /// Fotograma actual del reproductor en ms acumulados (B5). Avanza con el
@@ -1749,10 +1763,6 @@ pub struct AssistantPanelState {
     /// total, aspecto preservado) así el scroll no salta. `Cell` porque la
     /// Piel dibuja con `&Estado`. Se reinicia en `set_media`.
     media_last_shown: std::cell::Cell<Option<usize>>,
-    /// Overlay de pantalla completa (D2): `true` = ventana grande con la
-    /// animación + transporte + `Esc` para cerrar. Estado local de la card
-    /// (`Cell`, sin global mutable, sin I/O/spawn). Se reinicia en `set_media`.
-    media_fullscreen: std::cell::Cell<bool>,
     /// Exportación a GIF de la card (la app la actualiza desde el hilo de
     /// export; la UI solo la renderiza, cero I/O/spawn en `Ui::`).
     media_export: MediaExportState,
@@ -1864,6 +1874,9 @@ impl Default for AssistantPanelState {
             history_thumb_textures: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             history_thumb_clock: std::cell::Cell::new(0),
             retire_tick_time_s: std::cell::Cell::new(None),
+            turn_players: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            turn_textures: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            turn_texture_fingerprint: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             media_textures_ready: false,
             media_playhead_ms: std::cell::Cell::new(0),
             media_last_tick_s: std::cell::Cell::new(None),
@@ -1871,7 +1884,6 @@ impl Default for AssistantPanelState {
             media_speed: std::cell::Cell::new(MediaPlaybackSpeed::default()),
             media_easing_name: "linear".to_owned(),
             media_last_shown: std::cell::Cell::new(None),
-            media_fullscreen: std::cell::Cell::new(false),
             media_export: MediaExportState::default(),
             export_dialog: std::cell::RefCell::new(MediaExportDialog::new()),
             anim_progress: false,
@@ -2001,6 +2013,7 @@ impl AssistantPanelState {
         // Sin turnos no hay dueño: un índice rancio reclamaría el player.
         self.media_owner_turn = None;
         self.retire_all_history_thumbs();
+        self.retire_all_turn_players();
         self.reveal_pending = false;
         self.reveal_started_at = None;
         self.clear_proposal_cards();
@@ -2499,7 +2512,6 @@ impl AssistantPanelState {
         self.media_paused.set(false);
         self.media_easing_name = "linear".to_owned();
         self.media_last_shown.set(None);
-        self.media_fullscreen.set(false);
         self.media_export = MediaExportState::default();
         // Card nueva = diálogo cerrado pero con prefs intactas (M2-5): `close`
         // solo baja `open`/progreso/error; formato, calidad, bitrate, fps,
@@ -2771,6 +2783,164 @@ impl AssistantPanelState {
         if !old_map.is_empty() {
             self.retire_media_textures(old_map.into_values().map(|entry| entry.texture).collect());
         }
+    }
+
+    /// Cursor propio del turno (lo crea en pausa=no: arranca reproduciendo).
+    ///
+    /// `&self` por interior mutável (el draw presta `&state`). Puro estado UI.
+    pub(crate) fn turn_player_state(&self, turn_idx: usize) -> TurnPlayState {
+        *self.turn_players.borrow_mut().entry(turn_idx).or_default()
+    }
+
+    /// Pausa TODOS los players por turno (congelados tal cual, con su índice
+    /// intacto). Lo usa el play global y el play exclusivo entre turnos:
+    /// solo uno reproduce a la vez (ahorro de CPU). Puro estado UI.
+    pub(crate) fn pause_all_turn_players(&self) {
+        for player in self.turn_players.borrow_mut().values_mut() {
+            player.playing = false;
+        }
+    }
+
+    /// Dale play a UN turno y pausa el resto (global + demás turnos).
+    ///
+    /// El resto queda congelado tal cual (su `idx` intacto), jamás colapsa a
+    /// mini-card: al volver a darle play retoma donde quedó. Puro estado UI.
+    pub(crate) fn play_turn_exclusive(&self, turn_idx: usize) {
+        self.media_paused.set(true);
+        for (idx, player) in self.turn_players.borrow_mut().iter_mut() {
+            player.playing = *idx == turn_idx;
+        }
+        self.turn_players
+            .borrow_mut()
+            .entry(turn_idx)
+            .or_default()
+            .playing = true;
+    }
+
+    /// Garantiza la ventana viva del turno alrededor de `index`: decodifica
+    /// de la media PROPIA del turno (`turn_frame_image`) y retira con gracia
+    /// lo que sale. Ante media reemplazada (huella distinta) retira el set
+    /// viejo completo. `&self` porque corre en el draw; solo subida GPU.
+    pub(crate) fn ensure_turn_window(
+        &self,
+        turn_idx: usize,
+        media: &TurnMediaRef,
+        index: usize,
+        ctx: &egui::Context,
+    ) {
+        let Some(shared) = media.frames.as_ref() else {
+            return;
+        };
+        if shared.validate().is_err() || shared.is_empty() {
+            return;
+        }
+        let len = shared.len();
+        let index = index.min(len.saturating_sub(1));
+        let fingerprint = history_thumb_fingerprint(media);
+        {
+            let known = self.turn_texture_fingerprint.borrow();
+            if known.get(&turn_idx) != Some(&fingerprint) {
+                drop(known);
+                self.retire_turn_textures(turn_idx);
+                self.turn_texture_fingerprint
+                    .borrow_mut()
+                    .insert(turn_idx, fingerprint);
+            }
+        }
+        let lo = index.saturating_sub(MEDIA_TEXTURE_WINDOW);
+        let hi = (index + MEDIA_TEXTURE_WINDOW).min(len.saturating_sub(1));
+        let mut missing = Vec::new();
+        {
+            let viva = self.turn_textures.borrow();
+            let entry = viva.get(&turn_idx);
+            for i in lo..=hi {
+                let hit = entry.and_then(|frames| frames.get(&i)).is_some();
+                if !hit {
+                    missing.push(i);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let mut slots = self.turn_textures.borrow_mut();
+            let entry = slots.entry(turn_idx).or_default();
+            for i in missing {
+                if let Some(image) = turn_frame_image(shared, i) {
+                    entry.insert(
+                        i,
+                        ctx.load_texture(
+                            format!("assistant_turn_{turn_idx}_{fingerprint:016x}_{i:03}"),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ),
+                    );
+                }
+            }
+        }
+        let mut evictar = Vec::new();
+        {
+            let viva = self.turn_textures.borrow();
+            if let Some(entry) = viva.get(&turn_idx) {
+                for (frame_idx, handle) in entry.iter() {
+                    if *frame_idx < lo || *frame_idx > hi {
+                        evictar.push(handle.clone());
+                    }
+                }
+            }
+        }
+        if !evictar.is_empty() {
+            let mut viva = self.turn_textures.borrow_mut();
+            if let Some(entry) = viva.get_mut(&turn_idx) {
+                entry.retain(|frame_idx, _| *frame_idx >= lo && *frame_idx <= hi);
+            }
+            drop(viva);
+            self.retire_media_textures(evictar);
+        }
+    }
+
+    /// Handle vivo del frame `index` del turno (`None` si está fuera de la
+    /// ventana: el draw muestra el placeholder hasta que `ensure_turn_window`
+    /// corre). Solo devuelve handles decodificados de la media propia del
+    /// turno. Puro (`&Estado`), sin I/O.
+    pub(crate) fn turn_texture_for(
+        &self,
+        turn_idx: usize,
+        index: usize,
+    ) -> Option<egui::TextureHandle> {
+        self.turn_textures
+            .borrow()
+            .get(&turn_idx)
+            .and_then(|entry| entry.get(&index))
+            .cloned()
+    }
+
+    /// Retira con gracia las texturas vivas de UN turno (sin dropear en el
+    /// frame). Conserva su cursor (el índice retoma donde quedó).
+    fn retire_turn_textures(&self, turn_idx: usize) {
+        let old = self.turn_textures.borrow_mut().remove(&turn_idx);
+        if let Some(entry) = old {
+            if !entry.is_empty() {
+                self.retire_media_textures(entry.into_values().collect());
+            }
+        }
+    }
+
+    /// Retira con gracia TODAS las texturas por turno y suelta los cursores.
+    ///
+    /// El trim corre los índices: cualquier recorte invalida el mapa completo
+    /// (se reconstruye lazy). Garantía intacta: los cursores son solo números;
+    /// los píxeles siempre salen de la media propia del turno visible.
+    fn retire_all_turn_players(&self) {
+        let old_map = std::mem::take(&mut *self.turn_textures.borrow_mut());
+        if !old_map.is_empty() {
+            self.retire_media_textures(
+                old_map
+                    .into_values()
+                    .flat_map(|entry| entry.into_values())
+                    .collect(),
+            );
+        }
+        self.turn_texture_fingerprint.borrow_mut().clear();
+        self.turn_players.borrow_mut().clear();
     }
 
     /// Thumbs históricos cacheados (solo tests / debug).
@@ -3163,6 +3333,10 @@ impl AssistantPanelState {
             // se retira completo con gracia y se reconstruye lazy. La media
             // viaja dentro del turno, así que se recorta junto al par.
             self.retire_all_history_thumbs();
+            // Los playheads por turno también van por índice: se sueltan y se
+            // reconstruyen lazy (los píxeles siempre salen de la media propia
+            // del turno visible, jamás de un turno ajeno).
+            self.retire_all_turn_players();
         }
     }
 
@@ -3234,6 +3408,7 @@ impl AssistantPanelState {
     fn clear_remote_history(&mut self) {
         self.conversation.clear();
         self.retire_all_history_thumbs();
+        self.retire_all_turn_players();
         self.reveal_pending = false;
         self.reveal_started_at = None;
         self.clear_proposal_cards();
@@ -6382,6 +6557,128 @@ pub fn media_counter_text(index: usize, frame_count: usize) -> (String, String) 
     )
 }
 
+/// Playhead propio de un turno con frames (`fn render(&Estado) -> Frame`).
+///
+/// Cada turno con `media.frames = Some` dibuja SU player con este cursor: el
+/// índice es solo un número — los píxeles siempre se decodifican de la
+/// `media` propia del turno (`turn_frame_image`), así ningún turno dibuja
+/// frames ajenos ni siquiera con índices rancios tras un trim. `last_tick_s`
+/// es el reloj del cursor (retomar sin salto); `playing` congela tal cual.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TurnPlayState {
+    /// Fotograma visible (siempre clampado a `0..len` al avanzar/mostrar).
+    pub idx: usize,
+    /// `true` = avanza con el reloj; `false` = congelado tal cual.
+    pub playing: bool,
+    /// Último instante visto (`ui.input time`); `None` = reloj sin armar.
+    last_tick_s: Option<f64>,
+}
+
+impl TurnPlayState {
+    /// Cursor nuevo: arranca en el primer frame y reproduciendo (paridad con
+    /// el slot vivo, que arranca con `media_paused = false`).
+    pub fn new() -> Self {
+        Self {
+            idx: 0,
+            playing: true,
+            last_tick_s: None,
+        }
+    }
+
+    /// Avanza el cursor y devuelve el índice a mostrar. Puro estado UI.
+    ///
+    /// - Sin frames → 0 (reloj al día, sin panic).
+    /// - En pausa → congela (actualiza el reloj para retomar sin salto).
+    /// - Reproduciendo → suma `dt * fps * rate` con `dt` capado a 250 ms
+    ///   (volver de segundo plano no salta) y loopea. `fps`/`rate` no
+    ///   finitos o ≤ 0 caen a base/1x. Sin easing: el turno no guarda curva
+    ///   del wire (mapeo lineal honesto índice↔tiempo).
+    pub fn advance(&mut self, now_s: f64, frame_count: usize, fps: f32, rate: f32) -> usize {
+        if frame_count == 0 {
+            self.last_tick_s = Some(now_s);
+            self.idx = 0;
+            return 0;
+        }
+        let previous = self.last_tick_s.replace(now_s);
+        self.idx = self.idx.min(frame_count.saturating_sub(1));
+        if !self.playing {
+            return self.idx;
+        }
+        let Some(previous_s) = previous else {
+            return self.idx;
+        };
+        let fps = if fps.is_finite() && fps > 0.0 {
+            fps
+        } else {
+            MEDIA_CARD_BASE_FPS
+        };
+        let rate = if rate.is_finite() && rate > 0.0 {
+            rate
+        } else {
+            1.0
+        };
+        let dt_s = (now_s - previous_s).clamp(0.0, 0.25);
+        if !dt_s.is_finite() || dt_s <= 0.0 {
+            return self.idx;
+        }
+        let step = (f64::from(fps) * f64::from(rate) * dt_s).floor() as usize;
+        if step > 0 {
+            self.idx = (self.idx + step) % frame_count.max(1);
+        }
+        self.idx
+    }
+}
+
+impl Default for TurnPlayState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// ¿Este turno dibuja SU player? Solo con frames propios completos
+/// (`media.frames = Some`); sin frames → mini-card con thumb + replay.
+/// Puro (`&Estado`), sin I/O.
+pub fn turn_has_full_frames(turn: &ConversationTurn) -> bool {
+    turn.media
+        .as_ref()
+        .is_some_and(|media| media.frames.is_some())
+}
+
+/// Decodifica el frame `idx` del set propio del turno a `ColorImage`.
+///
+/// Puro (sin I/O): valida dims/conteo/largo exacto y convierte RGBA plano.
+/// `None` honesto si el set no valida o el índice está fuera de rango.
+/// La Piel no puede usar `app::manim_orchestrator::assistant_media_from_shared`
+/// (DAG `ui → app`): esta es la conversión local, mismo formato plano.
+pub fn turn_frame_image(set: &TurnFrameSet, idx: usize) -> Option<egui::ColorImage> {
+    if set.validate().is_err() {
+        return None;
+    }
+    let rgba = set.frames_rgba.get(idx)?;
+    let width = set.width as usize;
+    let height = set.height as usize;
+    if rgba.len() != width.checked_mul(height)?.checked_mul(4)? {
+        return None;
+    }
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [width, height],
+        rgba,
+    ))
+}
+
+/// Alto único de todos los botones del player (tokens, sin literales).
+///
+/// Táctil mínimo + aire: play/pausa, atrás, siguiente, velocidad y Exportar
+/// miden exactamente este alto (nada de cada botón con su medida).
+pub const PLAYER_BTN_H: f32 = HIT_TARGET_MIN + SPACE_XS;
+/// Ancho de los botones cuadrados (play/pausa, atrás, siguiente): cuadrado
+/// sobre el alto único.
+pub const PLAYER_BTN_SQ_W: f32 = PLAYER_BTN_H;
+/// Ancho del selector de velocidad (entra `0.5x ▾` sin recorte).
+pub const PLAYER_BTN_SPEED_W: f32 = SPACE_XXL + SPACE_SM;
+/// Ancho del botón de texto Exportar (siempre visible, jamás cortado).
+pub const PLAYER_BTN_EXPORT_W: f32 = SPACE_XXL * 2.0;
+
 /// Ancho mínimo del deslizador de la toolbar única v3 (tokens).
 ///
 /// Derivado de escala base 4 (`SPACE_XXL + SPACE_XS`): el deslizador usa el
@@ -6389,23 +6686,15 @@ pub fn media_counter_text(index: usize, frame_count: usize) -> (String, String) 
 /// piso solo evita el colapso en paneles angostos. Puro.
 const MEDIA_TOOLBAR_MIN_SLIDER_W: f32 = crate::tokens::SPACE_XXL + crate::tokens::SPACE_XS;
 
-/// Anchos honestos de los botones de la toolbar (tokens, sin literales).
+/// Anchos honestos de los botones de la toolbar (ver `PLAYER_BTN_*`).
 ///
 /// E2: los viejos (`24/24/40/76`) mentían — medían el piso táctil y no la
-/// fuente real del panel (emoji ⏸/⛶ con fallback más ancho que el texto,
+/// fuente real del panel (emoji ⏸ con fallback más ancho que el texto,
 /// `0.5x ▾` más largo que `1x`, `Exportar` con padding del Button) ni
 /// restaban el cromo (`Frame` turno + card) ni el overlay del scrollbar
-/// flotante (cero asignado pero ~10px que tapan el borde). Estos son cotas
-/// mínimas medidas con la fuente del panel: play/icono = táctil + aire
-/// emoji, velocidad = `SPACE_XXL + SPACE_SM` (entra `0.5x ▾`), exportar =
-/// `SPACE_XXL * 2` (sin recorte). Si sobra, la fila única igual entra; si
-/// falta, se colapsa a dos filas u overflow explícito antes de cortar nada.
-const MEDIA_TOOLBAR_PLAY_W: f32 = crate::tokens::HIT_TARGET_MIN + crate::tokens::SPACE_XS;
-const MEDIA_TOOLBAR_ICON_W: f32 = crate::tokens::HIT_TARGET_MIN + crate::tokens::SPACE_XS;
-const MEDIA_TOOLBAR_SPEED_W: f32 = crate::tokens::SPACE_XXL + crate::tokens::SPACE_SM;
-const MEDIA_TOOLBAR_EXPORT_W: f32 = crate::tokens::SPACE_XXL * 2.0;
-/// Botón ancho de cierre en overlay (`"Cerrar (Esc)"`): dos `SPACE_XXL`.
-const MEDIA_TOOLBAR_CLOSE_W: f32 = crate::tokens::SPACE_XXL * 2.0;
+/// flotante (cero asignado pero ~10px que tapan el borde). La única fuente
+/// son `PLAYER_BTN_H/SQ_W/SPEED_W/EXPORT_W`: un solo alto y anchos
+/// coherentes, nada de cada botón con su medida.
 /// Reserva del cromo anidado: `Frame` del turno (8+8) + `Frame` de la card
 /// (8+8) = `SPACE_SM * 4`. Los tests viejos pasaban el ancho del panel
 /// (300/340/520) como si fuera el disponible dentro de la card: mentían
@@ -6430,36 +6719,31 @@ pub fn media_effective_inner_width(panel_w: f32) -> f32 {
 
 /// Ancho que necesitan los botones derechos en una fila (puro).
 ///
-/// `Exportar + icono/Cerrar + velocidad + 2 gaps`. En overlay el cierre es
-/// ancho (`MEDIA_TOOLBAR_CLOSE_W`); inline es icono (`MEDIA_TOOLBAR_ICON_W`).
-pub fn media_right_buttons_need(in_fullscreen: bool) -> f32 {
-    let middle = if in_fullscreen {
-        MEDIA_TOOLBAR_CLOSE_W
-    } else {
-        MEDIA_TOOLBAR_ICON_W
-    };
-    MEDIA_TOOLBAR_EXPORT_W + middle + MEDIA_TOOLBAR_SPEED_W + crate::tokens::SPACE_XS * 2.0
+/// `Exportar + velocidad + 1 gap`: la velocidad colapsa al menú `···` antes
+/// de cortar nada (ver `media_needs_overflow`).
+pub fn media_right_buttons_need() -> f32 {
+    PLAYER_BTN_EXPORT_W + PLAYER_BTN_SPEED_W + SPACE_XS
 }
 
 /// Si la segunda fila necesita overflow explícito (puro).
 ///
-/// `Exportar` siempre visible: si no entran los tres botones, velocidad y
-/// grande/cerrar colapsan al menú `···`, jamás se cortan ni se vuelven
-/// iconos mudos sin etiqueta.
-pub fn media_needs_overflow(avail_w: f32, in_fullscreen: bool) -> bool {
+/// `Exportar` siempre visible: si no entra junto a la velocidad, la
+/// velocidad colapsa al menú `···`, jamás se corta ni se vuelve
+/// icono mudo sin etiqueta.
+pub fn media_needs_overflow(avail_w: f32) -> bool {
     if !avail_w.is_finite() || avail_w <= 0.0 {
         return true;
     }
-    avail_w < media_right_buttons_need(in_fullscreen)
+    avail_w < media_right_buttons_need()
 }
 
 /// Disposición de la toolbar única v3 (pura y testeable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaToolbarLayout {
-    /// Una fila: `[▶/⏸] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
+    /// Una fila: `[▶/⏸] [◀][▶] [deslizador + N/M] [1x▾] [Exportar]`.
     SingleRow,
-    /// Dos filas limpias: arriba `[▶/⏸] [deslizador + N/M]`, abajo
-    /// `[1x▾] [⛶/Cerrar] [Exportar]` a la derecha. Jamás iconos mudos:
+    /// Dos filas limpias: arriba `[▶/⏸] [◀][▶] [N/M]`, abajo
+    /// `[1x▾] [Exportar]` a la derecha. Jamás iconos mudos:
     /// cada acción conserva su etiqueta legible.
     TwoRows,
 }
@@ -6492,10 +6776,9 @@ fn media_toolbar_layout_on_visible(visible_w: f32, frame_count: usize) -> MediaT
         return MediaToolbarLayout::TwoRows;
     }
     let gaps = SPACE_XS * 5.0;
-    let fixed = MEDIA_TOOLBAR_PLAY_W
-        + MEDIA_TOOLBAR_ICON_W
-        + MEDIA_TOOLBAR_SPEED_W
-        + MEDIA_TOOLBAR_EXPORT_W
+    let fixed = PLAYER_BTN_SQ_W * 3.0
+        + PLAYER_BTN_SPEED_W
+        + PLAYER_BTN_EXPORT_W
         + media_counter_slot_width(frame_count)
         + gaps;
     if visible_w - fixed < MEDIA_TOOLBAR_MIN_SLIDER_W {
@@ -6619,68 +6902,6 @@ pub fn media_header_status(generating: bool, export: &MediaExportState) -> Strin
             }
         }
     }
-}
-
-/// Tamaño del preview en el overlay (N2, M2-1): llena `min(ancho, alto-disponible)`
-/// respetando aspecto. A diferencia de la card inline (cap 1.5× por nitidez,
-/// ver `MAX_PREVIEW_UPSCALE`), el overlay permite upscale libre: "ver grande"
-/// lo pide el usuario a propósito. Diferencia intencional pineada en
-/// `app::anim_ui::preview_upscale_cap` y en el test
-/// `media_caps_card_vs_overlay_difieren_con_motivo`. Puro, sin `unwrap`.
-pub fn media_overlay_preview_size(
-    frame_w: f32,
-    frame_h: f32,
-    avail_w: f32,
-    avail_h: f32,
-) -> (f32, f32) {
-    let fw = if frame_w.is_finite() && frame_w > 0.0 {
-        frame_w
-    } else {
-        1.0
-    };
-    let fh = if frame_h.is_finite() && frame_h > 0.0 {
-        frame_h
-    } else {
-        1.0
-    };
-    let aw = if avail_w.is_finite() && avail_w > 0.0 {
-        avail_w
-    } else {
-        80.0
-    };
-    let ah = if avail_h.is_finite() && avail_h > 0.0 {
-        avail_h
-    } else {
-        200.0
-    };
-    let scale = (aw / fw).min(ah / fh);
-    let scale = if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    };
-    let w = (fw * scale).ceil().max(1.0);
-    let h = (fh * scale).ceil().max(1.0);
-    (w, h)
-}
-
-/// Tamaño de la ventana overlay de la animación (N2, puro y testeable).
-///
-/// Centrada, hasta 86%×82% de pantalla, clampeada a `480..900 × 420..720`:
-/// el preview ocupa el resto (ver `media_preview_size`) y la toolbar una
-/// sola fila abajo. Sin columnas vacías. Pura, sin `unwrap`.
-pub fn media_overlay_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
-    let w = if screen_w.is_finite() && screen_w > 0.0 {
-        screen_w * 0.86
-    } else {
-        480.0
-    };
-    let h = if screen_h.is_finite() && screen_h > 0.0 {
-        screen_h * 0.82
-    } else {
-        420.0
-    };
-    (w.clamp(480.0, 900.0), h.clamp(420.0, 720.0))
 }
 
 /// Header v3 de la card (UNA línea): título del pedido con elide + estado
@@ -6835,8 +7056,318 @@ fn draw_history_mini_card(
     action
 }
 
+/// Retardo entre fotogramas del player por turno (puro y testeable).
+///
+/// Mapeo lineal sin easing (el turno no guarda curva del wire): a 12 fps/1x
+/// el contenido cambia cada ~83 ms. Piso 16 ms (un frame de UI) y techo
+/// 250 ms (el cursor capa `dt` ahí, como el slot vivo). `fps`/`rate` no
+/// finitos o ≤ 0 caen a base/1x. Puro, sin I/O ni panic.
+pub fn turn_frame_delay_ms(fps: f32, rate: f32) -> u64 {
+    let fps = if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        MEDIA_CARD_BASE_FPS
+    };
+    let rate = if rate.is_finite() && rate > 0.0 {
+        rate
+    } else {
+        1.0
+    };
+    let ms = (1000.0 / (fps * rate)).ceil();
+    if !ms.is_finite() || ms <= 0.0 {
+        return 40;
+    }
+    (ms as u64).clamp(16, 250)
+}
+
+/// Player propio de un turno con frames (`TurnMediaRef.frames = Some`).
+///
+/// Render puro con tokens: preview + toolbar completa (play/pausa con
+/// exclusividad, paso `◀/▶`, deslizador, contador `N/M`, velocidad) con el
+/// playhead PROPIO del turno (`TurnPlayState` en el panel). Los píxeles
+/// salen SIEMPRE de la media propia del turno (`ensure_turn_window` +
+/// `turn_texture_for`): ningún turno dibuja frames ajenos. Sin frames
+/// válidos cae a la mini-card honesta (thumb + replay). Cero I/O y cero
+/// spawn en la UI, solo subida GPU como `set_media`. Sin export: exportar
+/// trabaja sobre el slot vivo (replay primero).
+fn draw_turn_player(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    turn_idx: usize,
+    turn: &ConversationTurn,
+) -> Option<AssistantUiAction> {
+    let media = turn.media.as_ref()?;
+    let shared = media.frames.as_ref()?;
+    if shared.validate().is_err() || shared.is_empty() {
+        return draw_history_mini_card(ui, state, turn_idx, turn);
+    }
+    let now_s = ui.input(|input| input.time);
+    state.reap_retired_media_tick_once(now_s);
+    let theme = current_theme(ui.ctx());
+    let title_full = media.title.clone();
+    let title = media_elided_title(&title_full, HISTORY_MINI_CARD_TITLE_MAX_CHARS);
+    let frame_count = shared.len();
+    let mut cursor = state.turn_player_state(turn_idx);
+    let index = cursor
+        .advance(
+            now_s,
+            frame_count,
+            MEDIA_CARD_BASE_FPS,
+            state.media_playback_rate(),
+        )
+        .min(frame_count.saturating_sub(1));
+    cursor.idx = index;
+    state.ensure_turn_window(turn_idx, media, index, ui.ctx());
+    let texture = state.turn_texture_for(turn_idx, index);
+    let (frame_w, frame_h) = (shared.width as f32, shared.height as f32);
+    let speed_label = state.media_speed.get().label();
+    let (counter_compact, counter_long) = media_counter_text(index, frame_count);
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(RADIUS_MD)
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            draw_media_header(ui, &title, "lista", theme.success);
+            ui.add_space(SPACE_XS);
+            let max_w = ui.available_width().max(80.0);
+            let (dw, dh) = media_preview_size(frame_w, frame_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
+            let (full_rect, _) =
+                ui.allocate_exact_size(egui::vec2(max_w, dh), egui::Sense::hover());
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    full_rect.min.x + ((max_w - dw) / 2.0).max(0.0),
+                    full_rect.min.y,
+                ),
+                egui::vec2(dw, dh),
+            );
+            if let Some(texture) = &texture {
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            } else {
+                ui.painter().rect_filled(
+                    rect,
+                    egui::Rounding::same(RADIUS_SM),
+                    theme.separator.gamma_multiply(0.35),
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Preparando fotograma…",
+                    egui::FontId::new(TYPE_XS, egui::FontFamily::Proportional),
+                    theme.text_tertiary,
+                );
+            }
+            ui.add_space(SPACE_XS);
+            // Toolbar del turno: misma altura única (`PLAYER_BTN_H`) y mismo
+            // vocabulario que el slot vivo (play/paso/slider/N-M/velocidad),
+            // pero cableada al cursor propio. Sin export (vive en el slot).
+            let speed_view = MediaToolbarView {
+                counter_compact: &counter_compact,
+                counter_long: &counter_long,
+                speed_label,
+                duration_ms: media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS),
+                frame_count,
+                exporting: false,
+            };
+            if media_toolbar_layout(ui.available_width(), frame_count)
+                == MediaToolbarLayout::TwoRows
+            {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+                    draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
+                    draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        draw_media_counter_slot(ui, &speed_view);
+                    });
+                });
+                draw_turn_scrub_slider(ui, &mut cursor, frame_count, &counter_long, now_s);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if media_needs_overflow(ui.available_width()) {
+                            draw_turn_speed_overflow(ui, state);
+                        } else {
+                            draw_media_speed_menu(ui, state, &speed_view);
+                        }
+                    });
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+                    draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
+                    draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        draw_media_speed_menu(ui, state, &speed_view);
+                        draw_media_counter_slot(ui, &speed_view);
+                    });
+                    draw_turn_scrub_slider(ui, &mut cursor, frame_count, &counter_long, now_s);
+                });
+            }
+        });
+    state.turn_players.borrow_mut().insert(turn_idx, cursor);
+    if cursor.playing {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(turn_frame_delay_ms(
+                MEDIA_CARD_BASE_FPS,
+                state.media_playback_rate(),
+            )));
+    }
+    None
+}
+
+/// Botón play/pausa del player por turno (cuadrado `PLAYER_BTN_H`).
+///
+/// Al darle play se pausan el slot vivo y los demás turnos (exclusivo,
+/// ahorro de CPU); al pausar queda congelado tal cual. Piel pura.
+fn draw_turn_play_button(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    turn_idx: usize,
+    cursor: &mut TurnPlayState,
+    now_s: f64,
+) {
+    if ui
+        .add_sized(
+            egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+            egui::Button::new(if cursor.playing { "⏸" } else { "▶" }),
+        )
+        .on_hover_text(if cursor.playing {
+            MEDIA_TIP_PAUSE
+        } else {
+            MEDIA_TIP_PLAY
+        })
+        .clicked()
+    {
+        if cursor.playing {
+            cursor.playing = false;
+            cursor.last_tick_s = Some(now_s);
+        } else {
+            state.play_turn_exclusive(turn_idx);
+            cursor.playing = true;
+            cursor.last_tick_s = Some(now_s);
+        }
+    }
+}
+
+/// Botones de paso del player por turno (cuadrados `PLAYER_BTN_H`).
+///
+/// Mueven un fotograma exacto del set propio y dejan en pausa (retomar es
+/// explícito). Piel pura.
+fn draw_turn_step_buttons(
+    ui: &mut egui::Ui,
+    cursor: &mut TurnPlayState,
+    frame_count: usize,
+    now_s: f64,
+) {
+    if frame_count == 0 {
+        return;
+    }
+    let last = frame_count.saturating_sub(1);
+    if ui
+        .add_sized(
+            egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+            egui::Button::new("◀"),
+        )
+        .on_hover_text(MEDIA_TIP_STEP_BACK)
+        .clicked()
+    {
+        cursor.idx = cursor.idx.saturating_sub(1).min(last);
+        cursor.playing = false;
+        cursor.last_tick_s = Some(now_s);
+    }
+    if ui
+        .add_sized(
+            egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+            egui::Button::new("▶"),
+        )
+        .on_hover_text(MEDIA_TIP_STEP_FWD)
+        .clicked()
+    {
+        cursor.idx = cursor.idx.saturating_add(1).min(last);
+        cursor.playing = false;
+        cursor.last_tick_s = Some(now_s);
+    }
+}
+
+/// Deslizador del player por turno (mapeo lineal índice↔fracción).
+///
+/// Arrastrar fija el frame exacto y deja en pausa (retomar es explícito,
+/// nunca salta solo). Piso en angosto como el slot vivo. Piel pura.
+fn draw_turn_scrub_slider(
+    ui: &mut egui::Ui,
+    cursor: &mut TurnPlayState,
+    frame_count: usize,
+    counter_long: &str,
+    now_s: f64,
+) {
+    if frame_count > 1 {
+        let slider_w = ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W);
+        let last = frame_count.saturating_sub(1) as f32;
+        let mut fraction =
+            (cursor.idx.min(frame_count.saturating_sub(1)) as f32 / last).clamp(0.0, 1.0);
+        let response = ui
+            .add_sized(
+                egui::vec2(slider_w, ui.spacing().interact_size.y),
+                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
+            )
+            .on_hover_text(counter_long);
+        if response.dragged() || response.changed() {
+            cursor.idx = ((fraction.clamp(0.0, 1.0) * last).round() as usize)
+                .min(frame_count.saturating_sub(1));
+            cursor.playing = false;
+            cursor.last_tick_s = Some(now_s);
+        }
+    }
+}
+
+/// Velocidad del player por turno en overflow (`···`, etiquetas legibles).
+///
+/// La velocidad es preferencia compartida (sobrevive a `set_media`, solo
+/// Limpiar la resetea): el turno escribe el mismo `Cell` global. Piel pura.
+fn draw_turn_speed_overflow(ui: &mut egui::Ui, state: &AssistantPanelState) {
+    let popup_id = ui.make_persistent_id("turn_speed_overflow");
+    let boton = ui.add_sized(
+        egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+        egui::Button::new("···"),
+    );
+    let boton = boton.on_hover_text("Velocidad de la animación");
+    if boton.clicked() {
+        ui.memory_mut(|memoria| memoria.toggle_popup(popup_id));
+    }
+    egui::popup::popup_below_widget(
+        ui,
+        popup_id,
+        &boton,
+        egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            let mut velocidad = state.media_speed.get();
+            for opcion in MediaPlaybackSpeed::ALL {
+                if ui
+                    .selectable_label(
+                        velocidad == opcion,
+                        format!("Velocidad: {}", opcion.label()),
+                    )
+                    .on_hover_text(MEDIA_TIP_SPEED)
+                    .clicked()
+                {
+                    velocidad = opcion;
+                    ui.close_menu();
+                }
+            }
+            state.media_speed.set(velocidad);
+        },
+    );
+}
 /// Vista inmutable para la toolbar única v3 (todo copiado: la toolbar solo
 /// lee `Cell`s y emite intención; el export real lo ejecuta la app).
+/// La reutiliza el player por turno para el contador y la velocidad
+/// (el export y el play global no aplican al turno).
 struct MediaToolbarView<'a> {
     counter_compact: &'a str,
     counter_long: &'a str,
@@ -6844,38 +7375,31 @@ struct MediaToolbarView<'a> {
     duration_ms: u64,
     frame_count: usize,
     exporting: bool,
-    in_fullscreen: bool,
-}
-
-/// Salida de la toolbar única v3: intención de export + cierre del overlay.
-struct MediaToolbarOutcome {
-    action: Option<AssistantUiAction>,
-    close_requested: bool,
 }
 
 /// Toolbar ÚNICA v3: una fila en panel ancho, tres filas limpias en angosto.
 ///
-/// Ancha (`SingleRow`): `[▶/⏸] [◀][▶] [deslizador + N/M] [1x▾] [⛶] [Exportar]`.
+/// Ancha (`SingleRow`): `[▶/⏸] [◀][▶] [deslizador + N/M] [1x▾] [Exportar]`.
 /// Angosta (`TwoRows`, ver `media_toolbar_layout`): arriba `[▶/⏸] [◀][▶]
 /// [N/M]`, al medio el deslizador a todo el ancho (piso
 /// `MEDIA_TOOLBAR_MIN_SLIDER_W` garantizado: no compite con botones),
-/// abajo `[1x▾] [⛶/Cerrar] [Exportar]` a la derecha.
-/// E2: si ni la segunda fila entra (`media_needs_overflow`), velocidad y
-/// grande/cerrar colapsan al menú explícito `···`; `Exportar` siempre queda
+/// abajo `[1x▾] [Exportar]` a la derecha.
+/// E2: si ni la segunda fila entra (`media_needs_overflow`), la velocidad
+/// colapsa al menú explícito `···`; `Exportar` siempre queda
 /// visible como botón, jamás cortado al borde. La velocidad es menú
 /// explícito (0.5x/1x/2x), no solo ciclo. Teclas locales (sin globales que
 /// choquen, ver `app::shortcuts`): Espacio play/pausa, `←/→` paso frame a
 /// frame con pausa; solo cuando ningún editor pide teclado y consumidas para
 /// no duplicar con el slider/botón enfocado. UN solo contador (vive en
-/// `draw_media_counter_slot`, jamás etiqueta suelta). Piel pura: muta solo
-/// `Cell`s, emite `ExportMedia`.
+/// `draw_media_counter_slot`, jamás etiqueta suelta). Todos los botones
+/// miden `PLAYER_BTN_H` de alto (ancho cuadrado o de texto coherente).
+/// Piel pura: muta solo `Cell`s, emite `ExportMedia`.
 fn draw_media_toolbar(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
     view: &MediaToolbarView,
-) -> MediaToolbarOutcome {
+) -> Option<AssistantUiAction> {
     let mut action = None;
-    let mut close_requested = false;
     handle_media_player_keys(ui, state, view);
     if media_toolbar_layout(ui.available_width(), view.frame_count) == MediaToolbarLayout::TwoRows {
         ui.horizontal(|ui| {
@@ -6892,19 +7416,13 @@ fn draw_media_toolbar(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Reserva de la segunda fila: si no entran los tres, overflow
-                // explícito (Exportar + ···), jamás corte seco.
+                // Reserva de la segunda fila: si no entra la velocidad junto
+                // a Exportar, va al menú explícito (jamás corte seco).
                 let avail = ui.available_width();
-                if media_needs_overflow(avail, view.in_fullscreen) {
-                    draw_media_right_buttons_overflow(
-                        ui,
-                        state,
-                        view,
-                        &mut action,
-                        &mut close_requested,
-                    );
+                if media_needs_overflow(avail) {
+                    draw_media_right_buttons_overflow(ui, state, view, &mut action);
                 } else {
-                    draw_media_right_buttons(ui, state, view, &mut action, &mut close_requested);
+                    draw_media_right_buttons(ui, state, view, &mut action);
                 }
             });
         });
@@ -6915,23 +7433,28 @@ fn draw_media_toolbar(
             draw_media_step_buttons(ui, state, view);
             // Botones derechos primero: el deslizador ocupa lo que quede.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                draw_media_right_buttons(ui, state, view, &mut action, &mut close_requested);
+                draw_media_right_buttons(ui, state, view, &mut action);
                 draw_media_counter_slot(ui, view);
             });
             draw_media_scrub_slider(ui, state, view);
         });
     }
-    MediaToolbarOutcome {
-        action,
-        close_requested,
-    }
+    action
 }
 
 /// Botón play/pausa de la toolbar (extraído para no duplicar por fila).
+///
+/// Alto y ancho fijos (`PLAYER_BTN_H`, cuadrado): el mismo en todas las
+/// filas y vistas. Al darle play se pausan los players por turno (solo uno
+/// reproduce a la vez, ahorro de CPU); al pausar, los turnos quedan
+/// congelados tal cual.
 fn draw_media_play_button(ui: &mut egui::Ui, state: &AssistantPanelState) {
     let paused = state.media_paused.get();
     if ui
-        .small_button(if paused { "▶" } else { "⏸" })
+        .add_sized(
+            egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+            egui::Button::new(if paused { "▶" } else { "⏸" }),
+        )
         .on_hover_text(if paused {
             MEDIA_TIP_PLAY
         } else {
@@ -6939,12 +7462,17 @@ fn draw_media_play_button(ui: &mut egui::Ui, state: &AssistantPanelState) {
         })
         .clicked()
     {
+        let now_playing = paused;
         state.media_paused.set(!paused);
+        if now_playing {
+            state.pause_all_turn_players();
+        }
     }
 }
 
 /// Botones de paso frame a frame del player pro (pausan al pisar).
 ///
+/// Cuadrados de `PLAYER_BTN_H` (mismo alto que el resto de la toolbar).
 /// `◀`/`▶` mueven un fotograma exacto vía `media_frame_time_ms` (inversa
 /// del mapeo del slider, sin derivas) y dejan en pausa: retomar es
 /// explícito con `▶`/Espacio. Sin frames no hacen nada. Piel pura.
@@ -6954,14 +7482,20 @@ fn draw_media_step_buttons(
     view: &MediaToolbarView,
 ) {
     if ui
-        .small_button("◀")
+        .add_sized(
+            egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+            egui::Button::new("◀"),
+        )
         .on_hover_text(MEDIA_TIP_STEP_BACK)
         .clicked()
     {
         step_media_frame(state, view, -1);
     }
     if ui
-        .small_button("▶")
+        .add_sized(
+            egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+            egui::Button::new("▶"),
+        )
         .on_hover_text(MEDIA_TIP_STEP_FWD)
         .clicked()
     {
@@ -7067,59 +7601,63 @@ fn draw_media_counter_slot(ui: &mut egui::Ui, view: &MediaToolbarView) {
     );
 }
 
-/// Botones derechos de la toolbar (velocidad, grande/cerrar, exportar).
+/// Botones derechos de la toolbar (velocidad + exportar).
 /// Sin contador: el único vive en `draw_media_counter_slot`.
 /// La velocidad es menú explícito con las 3 opciones (no solo ciclo).
+/// Ambos miden `PLAYER_BTN_H` de alto (mismo que play/paso).
 fn draw_media_right_buttons(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
     view: &MediaToolbarView,
     action: &mut Option<AssistantUiAction>,
-    close_requested: &mut bool,
 ) {
     draw_media_export_button(ui, view, action);
-    if view.in_fullscreen {
-        if ui
-            .small_button("Cerrar (Esc)")
-            .on_hover_text("Cierra esta vista grande")
-            .clicked()
-        {
-            *close_requested = true;
-        }
-    } else if ui
-        .small_button("⛶")
-        .on_hover_text(MEDIA_TIP_FULLSCREEN)
-        .clicked()
-    {
-        state.media_fullscreen.set(true);
-    }
     draw_media_speed_menu(ui, state, view);
 }
 
 /// Menú explícito de velocidad del player pro (0.5x/1x/2x).
 ///
-/// Reemplaza el ciclo ciego del botón: cada opción visible elige directo.
-/// Piel pura: solo lee/escribe el `Cell` de velocidad.
+/// Botón de `PLAYER_BTN_SPEED_W × PLAYER_BTN_H` (mismo alto que el resto):
+/// `menu_button` no acepta tamaño, así que se usa un `Button` dimensionado
+/// que abre el popup manual (`popup_below_widget`). Reemplaza el ciclo ciego
+/// del botón: cada opción visible elige directo. Piel pura: solo lee/escribe
+/// el `Cell` de velocidad.
 fn draw_media_speed_menu(ui: &mut egui::Ui, state: &AssistantPanelState, view: &MediaToolbarView) {
     let mut velocidad = state.media_speed.get();
-    ui.menu_button(format!("{} ▾", view.speed_label), |ui| {
-        for opcion in MediaPlaybackSpeed::ALL {
-            if ui
-                .selectable_label(velocidad == opcion, opcion.label())
-                .on_hover_text(MEDIA_TIP_SPEED)
-                .clicked()
-            {
-                velocidad = opcion;
-                ui.close_menu();
+    let popup_id = ui.make_persistent_id("media_speed_menu");
+    let boton = ui.add_sized(
+        egui::vec2(PLAYER_BTN_SPEED_W, PLAYER_BTN_H),
+        egui::Button::new(format!("{} ▾", view.speed_label)),
+    );
+    let boton = boton.on_hover_text(MEDIA_TIP_SPEED);
+    if boton.clicked() {
+        ui.memory_mut(|memoria| memoria.toggle_popup(popup_id));
+    }
+    egui::popup::popup_below_widget(
+        ui,
+        popup_id,
+        &boton,
+        egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            for opcion in MediaPlaybackSpeed::ALL {
+                if ui
+                    .selectable_label(velocidad == opcion, opcion.label())
+                    .on_hover_text(MEDIA_TIP_SPEED)
+                    .clicked()
+                {
+                    velocidad = opcion;
+                    ui.close_menu();
+                }
             }
-        }
-    })
-    .response
-    .on_hover_text(MEDIA_TIP_SPEED);
+        },
+    );
     state.media_speed.set(velocidad);
 }
 
 /// Botón `Exportar` (extraído para reuso en overflow: siempre visible).
+///
+/// Botón de texto de `PLAYER_BTN_EXPORT_W × PLAYER_BTN_H`: mismo alto que
+/// el resto, ancho propio de texto (jamás cortado al borde).
 fn draw_media_export_button(
     ui: &mut egui::Ui,
     view: &MediaToolbarView,
@@ -7127,7 +7665,7 @@ fn draw_media_export_button(
 ) {
     let export_response = ui.add_enabled(
         view.frame_count > 0 && !view.exporting,
-        egui::Button::new("Exportar").small(),
+        egui::Button::new("Exportar").min_size(egui::vec2(PLAYER_BTN_EXPORT_W, PLAYER_BTN_H)),
     );
     if export_response.clicked() {
         *action = Some(AssistantUiAction::ExportMedia);
@@ -7143,53 +7681,48 @@ fn draw_media_export_button(
 
 /// Segunda fila en overflow explícito: `Exportar + ···` (puro dibujo).
 ///
-/// E2: cuando ni la segunda fila entra, velocidad y grande/cerrar viven en
-/// el menú `···` con etiquetas legibles (jamás iconos mudos ni corte seco).
-/// `Exportar` queda fuera del menú, siempre visible. Sin I/O ni spawn.
+/// E2: cuando ni la segunda fila entra, la velocidad vive en el menú `···`
+/// con etiquetas legibles (jamás iconos mudos ni corte seco). `Exportar`
+/// queda fuera del menú, siempre visible. Sin I/O ni spawn.
 fn draw_media_right_buttons_overflow(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
     view: &MediaToolbarView,
     action: &mut Option<AssistantUiAction>,
-    close_requested: &mut bool,
 ) {
     draw_media_export_button(ui, view, action);
-    ui.menu_button("···", |ui| {
-        let mut velocidad = state.media_speed.get();
-        for opcion in MediaPlaybackSpeed::ALL {
-            if ui
-                .selectable_label(
-                    velocidad == opcion,
-                    format!("Velocidad: {}", opcion.label()),
-                )
-                .on_hover_text(MEDIA_TIP_SPEED)
-                .clicked()
-            {
-                velocidad = opcion;
-                ui.close_menu();
+    let popup_id = ui.make_persistent_id("media_speed_overflow");
+    let boton = ui.add_sized(
+        egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+        egui::Button::new("···"),
+    );
+    let boton = boton.on_hover_text("Más acciones de la animación");
+    if boton.clicked() {
+        ui.memory_mut(|memoria| memoria.toggle_popup(popup_id));
+    }
+    egui::popup::popup_below_widget(
+        ui,
+        popup_id,
+        &boton,
+        egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            let mut velocidad = state.media_speed.get();
+            for opcion in MediaPlaybackSpeed::ALL {
+                if ui
+                    .selectable_label(
+                        velocidad == opcion,
+                        format!("Velocidad: {}", opcion.label()),
+                    )
+                    .on_hover_text(MEDIA_TIP_SPEED)
+                    .clicked()
+                {
+                    velocidad = opcion;
+                    ui.close_menu();
+                }
             }
-        }
-        state.media_speed.set(velocidad);
-        if view.in_fullscreen {
-            if ui
-                .small_button("Cerrar (Esc)")
-                .on_hover_text("Cierra esta vista grande")
-                .clicked()
-            {
-                *close_requested = true;
-                ui.close_menu();
-            }
-        } else if ui
-            .small_button("Ver grande ⛶")
-            .on_hover_text(MEDIA_TIP_FULLSCREEN)
-            .clicked()
-        {
-            state.media_fullscreen.set(true);
-            ui.close_menu();
-        }
-    })
-    .response
-    .on_hover_text("Más acciones de la animación");
+            state.media_speed.set(velocidad);
+        },
+    );
 }
 /// Deslizador de scrub con piso en angosto (player pro).
 ///
@@ -7415,9 +7948,8 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     duration_ms,
                     frame_count,
                     exporting,
-                    in_fullscreen: false,
                 };
-                if let Some(export_action) = draw_media_toolbar(ui, state, &toolbar_view).action {
+                if let Some(export_action) = draw_media_toolbar(ui, state, &toolbar_view) {
                     action = Some(export_action);
                 }
                 if exporting {
@@ -7442,90 +7974,9 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 );
             }
         });
-    // Overlay de pantalla completa: se conserva (ventana centrada + preview
-    // que llena + cierre con Esc/botón), solo ajustado a la misma toolbar
-    // única v3. Patrón `egui::Window` existente; sin I/O ni spawn, sólo
-    // renderiza `&Estado`.
-    if state.media_fullscreen.get() {
-        let mut open = true;
-        let mut close_requested = false;
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            close_requested = true;
-        }
-        let screen = ui.ctx().screen_rect();
-        let (win_w, win_h) = media_overlay_window_size(screen.width(), screen.height());
-        egui::Window::new("Animación")
-            .id(egui::Id::new("assistant_media_fullscreen"))
-            .open(&mut open)
-            .resizable(true)
-            .collapsible(false)
-            .constrain(true)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .default_width(win_w)
-            .default_height(win_h)
-            .frame(
-                egui::Frame::window(&ui.ctx().style())
-                    .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
-                    .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
-                    .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG)),
-            )
-            .show(ui.ctx(), |ui| {
-                ui.set_min_width(ui.available_width());
-                draw_media_header(ui, &title, &status, status_color);
-                ui.add_space(SPACE_XS);
-                if let Some(texture) = state.media_texture_for(index) {
-                    let size = texture.size_vec2();
-                    // Reserva honesta para título + toolbar (todo tokens): lo
-                    // que queda es para el preview, centrado.
-                    let reserve = SPACE_XXL * 3.0 + SPACE_LG + SPACE_SM;
-                    let max_h = (ui.available_height() - reserve)
-                        .clamp(200.0, screen.height())
-                        .max(200.0);
-                    let max_w = ui.available_width().max(80.0);
-                    let (dw, dh) = media_overlay_preview_size(size.x, size.y, max_w, max_h);
-                    ui.vertical_centered(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(dw, dh), egui::Sense::hover());
-                        ui.painter().image(
-                            texture.id(),
-                            rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
-                    });
-                } else {
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            egui::RichText::new("Preparando fotograma…")
-                                .color(theme.text_tertiary)
-                                .size(TYPE_SM),
-                        );
-                    });
-                }
-                ui.add_space(SPACE_SM);
-                // Misma toolbar única v3 (con [Cerrar] en vez de [⛶]).
-                let overlay_view = MediaToolbarView {
-                    counter_compact: &counter_compact,
-                    counter_long: &counter_long,
-                    speed_label,
-                    duration_ms,
-                    frame_count,
-                    exporting,
-                    in_fullscreen: true,
-                };
-                let outcome = draw_media_toolbar(ui, state, &overlay_view);
-                if let Some(export_action) = outcome.action {
-                    action = Some(export_action);
-                }
-                if outcome.close_requested {
-                    close_requested = true;
-                }
-            });
-        if !open || close_requested {
-            state.media_fullscreen.set(false);
-        }
-    }
+    // Sin overlay grande: el botón ⛶ se eliminó (sin glifo se veía como □
+    // mudo y su ventana "Animación" se iba de los límites del viewport).
+    // La card inline es el único visor, con toolbar uniforme y Exportar.
     // F17: playback media card — wake source local (no cubierto por is_pending).
     // Solo cuando reproduce: en pausa la card es estática (las interacciones
     // repintan solas) y no se quema CPU. FLICKER: despertar alineado al borde
@@ -8953,9 +9404,11 @@ fn draw_conversation_turn(
                 cache,
             );
             // Integración de animación dentro del mensaje, por turno y por
-            // dueño: el turno dueño del slot dibuja el player
+            // dueño: el turno dueño del slot dibuja el player global
             // (`draw_media_card` con toolbar/slider); el resto con `media`
-            // propia dibuja su mini-card con [Ver de nuevo]. Ningún turno que
+            // propia dibuja SU player si conserva frames (`draw_turn_player`
+            // con playhead propio y play exclusivo) o su mini-card con
+            // [Ver de nuevo] si solo conserva thumb. Ningún turno que
             // no sea dueño dibuja el slot (anti "tarjeta vieja bajo prosa
             // nueva"). El "Ver de nuevo" del dueño no aplica: ya tiene el
             // player; en mini-cards de otros turnos queda como está.
@@ -8981,10 +9434,17 @@ fn draw_conversation_turn(
                 }
                 LiveSlotKind::History => {
                     ui.add_space(SPACE_SM);
-                    retain_first_assistant_action(
-                        &mut action,
-                        draw_history_mini_card(ui, state, turn_index, turn),
-                    );
+                    if turn_has_full_frames(turn) {
+                        retain_first_assistant_action(
+                            &mut action,
+                            draw_turn_player(ui, state, turn_index, turn),
+                        );
+                    } else {
+                        retain_first_assistant_action(
+                            &mut action,
+                            draw_history_mini_card(ui, state, turn_index, turn),
+                        );
+                    }
                 }
                 LiveSlotKind::Hidden => {}
             }
@@ -13211,16 +13671,11 @@ mod tests {
     }
 
     #[test]
-    fn media_caps_card_vs_overlay_difieren_con_motivo() {
-        // M2-1: card capea a 1.5× (nitidez), overlay libre ("ver grande" a
-        // pedido). Diferencia intencional pineada (ver `MAX_PREVIEW_UPSCALE`).
+    fn media_caps_card_capea_upscale_por_nitidez() {
+        // Card capea a 1.5× (nitidez): el visor grande se eliminó con el
+        // botón ⛶, así que solo queda el cap inline pineado acá.
         assert_eq!(MAX_PREVIEW_UPSCALE, 1.5);
         assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (150.0, 75.0));
-        assert_eq!(
-            media_overlay_preview_size(100.0, 50.0, 340.0, 280.0),
-            (340.0, 170.0),
-            "el overlay no capea: llena el disponible"
-        );
     }
 
     #[test]
@@ -14686,33 +15141,24 @@ mod tests {
         // (300/340/520) como disponible dentro de la card y medían botones
         // con el piso táctil (24/24/40/76). Lo real resta cromo (turno 16 +
         // card 16 = 32) y overlay flotante (12) y mide botones con la fuente
-        // (28/28/48/80). Este test falla con las métricas viejas y pasa con
-        // las reales.
+        // (28/28/48/80, única fuente `PLAYER_BTN_*`). Este test falla con las
+        // métricas viejas y pasa con las reales.
         assert_eq!(media_effective_inner_width(300.0), 256.0);
         assert_eq!(media_effective_inner_width(340.0), 296.0);
         assert_eq!(media_effective_inner_width(520.0), 476.0);
         assert_eq!(media_effective_inner_width(f32::NAN), 0.0);
         assert_eq!(media_effective_inner_width(20.0), 0.0);
-        // Botones honestos más anchos que los viejos (emoji fallback + 0.5x).
+        // Botones uniformes: un solo alto y anchos coherentes (misma fuente).
+        assert_eq!(PLAYER_BTN_H, 28.0, "alto único: {PLAYER_BTN_H}");
+        assert_eq!(PLAYER_BTN_SQ_W, PLAYER_BTN_H, "cuadrado play/paso");
+        assert!(PLAYER_BTN_SQ_W > 24.0, "play honesto: {PLAYER_BTN_SQ_W}");
         assert!(
-            MEDIA_TOOLBAR_PLAY_W > 24.0,
-            "play honesto: {}",
-            MEDIA_TOOLBAR_PLAY_W
+            PLAYER_BTN_SPEED_W > 40.0,
+            "velocidad honesta: {PLAYER_BTN_SPEED_W}"
         );
         assert!(
-            MEDIA_TOOLBAR_ICON_W > 24.0,
-            "icono honesto: {}",
-            MEDIA_TOOLBAR_ICON_W
-        );
-        assert!(
-            MEDIA_TOOLBAR_SPEED_W > 40.0,
-            "velocidad honesta: {}",
-            MEDIA_TOOLBAR_SPEED_W
-        );
-        assert!(
-            MEDIA_TOOLBAR_EXPORT_W >= 80.0 - f32::EPSILON,
-            "export honesto: {}",
-            MEDIA_TOOLBAR_EXPORT_W
+            PLAYER_BTN_EXPORT_W >= 64.0 - f32::EPSILON,
+            "export honesto: {PLAYER_BTN_EXPORT_W}"
         );
         // La mentira concreta: a panel 380 el viejo (layout directo) decía
         // una fila y cortaba; el honesto (vía panel) dice dos filas.
@@ -14743,19 +15189,18 @@ mod tests {
 
     #[test]
     fn e2_overflow_explicito_exportar_siempre_visible() {
-        // E2: Exportar jamás se corta; si no entran los tres, van al menú.
-        let need_inline = media_right_buttons_need(false);
-        let need_overlay = media_right_buttons_need(true);
-        assert!(need_overlay > need_inline, "cerrar pesa más que icono");
-        assert!(!media_needs_overflow(need_inline, false));
-        assert!(!media_needs_overflow(need_inline + 40.0, false));
-        assert!(media_needs_overflow(need_inline - 1.0, false));
-        assert!(media_needs_overflow(80.0, false), "a 80px ni dos botones");
-        assert!(media_needs_overflow(f32::NAN, false));
+        // E2: Exportar jamás se corta; si no entra junto a la velocidad, la
+        // velocidad va al menú ···.
+        let need = media_right_buttons_need();
+        assert!(!media_needs_overflow(need));
+        assert!(!media_needs_overflow(need + 40.0));
+        assert!(media_needs_overflow(need - 1.0));
+        assert!(media_needs_overflow(80.0), "a 80px ni dos botones");
+        assert!(media_needs_overflow(f32::NAN));
         // Fila ancha real (256 = panel 300 efectivo) no necesita overflow;
         // la angosta extrema sí y ahí Exportar queda fuera del menú.
-        assert!(!media_needs_overflow(256.0, false));
-        assert!(media_needs_overflow(100.0, false));
+        assert!(!media_needs_overflow(256.0));
+        assert!(media_needs_overflow(100.0));
         // Headless: la rama overflow dibuja sin pánico y conserva Exportar.
         let context = egui::Context::default();
         let state = AssistantPanelState::default();
@@ -14777,25 +15222,33 @@ mod tests {
                         duration_ms: 4000,
                         frame_count: 48,
                         exporting: false,
-                        in_fullscreen: false,
                     };
                     // A 100px la segunda fila va a overflow (Exportar + ···).
-                    assert!(media_needs_overflow(ui.available_width(), false));
+                    assert!(media_needs_overflow(ui.available_width()));
                     let _ = draw_media_toolbar(ui, &state, &view);
                 });
             },
         );
         // Blindaje: el overflow existe con etiquetas legibles, no iconos mudos.
+        // El visor grande se eliminó (botón ⛶ + overlay): los patrones se
+        // arman concatenados para que este mismo test no los contenga y el
+        // `contains` sea honesto (no autorreferencial).
         let source = include_str!("assistant.rs");
         assert!(
             source.contains("draw_media_right_buttons_overflow"),
             "existe overflow"
         );
         assert!(source.contains("···"), "menú explícito ···");
-        assert!(
-            source.contains("Ver grande ⛶"),
-            "overflow con etiqueta legible"
-        );
+        for patron in [
+            ["media", "_fullscreen"].concat(),
+            ["assistant_media", "_fullscreen"].concat(),
+            ["media_overlay", "_window_size"].concat(),
+            ["media_overlay", "_preview_size"].concat(),
+            ["MEDIA_TIP_", "FULLSCREEN"].concat(),
+            ["in_", "fullscreen"].concat(),
+        ] {
+            assert!(!source.contains(&patron), "sin resto del visor: {patron}");
+        }
     }
 
     #[test]
@@ -14849,8 +15302,7 @@ mod tests {
     fn media_toolbar_dibuja_sin_panico_a_300_340_520() {
         // Frente layout §2 headless: ejerce la rama real de dibujo a cada
         // ancho (300/340 → dos filas, 520 → una) con el contador del
-        // screenshot (`9/48`), en card y en overlay. Si una rama cortara o
-        // panicara, acá cae.
+        // screenshot (`9/48`). Si una rama cortara o panicara, acá cae.
         for width in [300.0, 340.0, 520.0] {
             let context = egui::Context::default();
             let state = AssistantPanelState::default();
@@ -14873,19 +15325,8 @@ mod tests {
                             duration_ms: 4000,
                             frame_count: 48,
                             exporting: false,
-                            in_fullscreen: false,
                         };
                         let _ = draw_media_toolbar(ui, &state, &view);
-                        let overlay = MediaToolbarView {
-                            counter_compact: &compact,
-                            counter_long: &long,
-                            speed_label: "1x",
-                            duration_ms: 4000,
-                            frame_count: 48,
-                            exporting: false,
-                            in_fullscreen: true,
-                        };
-                        let _ = draw_media_toolbar(ui, &state, &overlay);
                     });
                 },
             );
@@ -14893,10 +15334,10 @@ mod tests {
     }
 
     #[test]
-    fn media_toolbar_un_solo_contador_y_dos_toolbar_por_vista() {
+    fn media_toolbar_un_solo_contador_y_una_toolbar_en_card() {
         // Frente layout §4 + §3: UN solo contador integrado (el largo vive
-        // solo en el hover) y UNA toolbar por vista (inline + overlay = 2
-        // llamadas en la card, cero duplicados por vista).
+        // solo en el hover) y UNA toolbar en la card (el overlay se eliminó
+        // con el botón ⛶: cero duplicados por vista).
         let source = include_str!("assistant.rs");
         let tb_start = source
             .find("fn draw_media_toolbar(")
@@ -14932,8 +15373,8 @@ mod tests {
         let card = &source[card_start..card_end];
         assert_eq!(
             card.matches("draw_media_toolbar(ui, state,").count(),
-            2,
-            "UNA toolbar en inline + UNA en overlay, cero duplicados por vista"
+            1,
+            "UNA toolbar en la card, cero duplicados (sin overlay)"
         );
         assert!(
             !card.contains("Fotograma"),
@@ -15006,10 +15447,11 @@ mod tests {
 
     #[test]
     fn z2_media_card_v3_una_toolbar_sin_controles_viejos() {
-        // Blindaje v3: UNA toolbar `[▶/⏸] [slider+N/M] [1x▾] [⛶]
+        // Blindaje v3: UNA toolbar `[▶/⏸] [◀][▶] [slider+N/M] [1x▾]
         // [Exportar]`; nada de Repetir/Secuencia, nada de etiquetas sueltas
         // (eran la fila "Exportar 7/48" y la fantasma arriba-izquierda), nada
-        // de `.text()` lateral en el deslizador (apretaba la fila).
+        // de `.text()` lateral en el deslizador (apretaba la fila), nada del
+        // visor grande (botón ⛶ + overlay eliminados).
         let source = include_str!("assistant.rs");
         let start = source
             .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
@@ -15049,35 +15491,11 @@ mod tests {
     }
 
     #[test]
-    fn media_overlay_ocupa_el_espacio_centrado() {
-        // N2 bug 3: overlay centrado 86%×82% clampeado; preview llena
-        // min(ancho, alto) respetando aspecto.
-        let (w, h) = media_overlay_window_size(800.0, 600.0);
-        assert!((w - 800.0 * 0.86).abs() < 0.01, "ancho: {w}");
-        assert!((h - 600.0 * 0.82).abs() < 0.01, "alto: {h}");
-        // Pantalla chica: pisos 480×420; gigante: techos 900×720.
-        assert_eq!(media_overlay_window_size(400.0, 300.0), (480.0, 420.0));
-        assert_eq!(media_overlay_window_size(4000.0, 3000.0), (900.0, 720.0));
-        assert_eq!(
-            media_overlay_window_size(f32::NAN, f32::NAN),
-            (480.0, 420.0)
-        );
-        // Preview overlay: ocupa min(ancho, alto), respeta aspecto.
-        let (pw, ph) = media_overlay_preview_size(400.0, 200.0, 800.0, 500.0);
-        assert_eq!((pw, ph), (800.0, 400.0), "debe llenar el ancho: {pw}x{ph}");
-        let (qw, qh) = media_overlay_preview_size(200.0, 800.0, 800.0, 500.0);
-        assert_eq!((qw, qh), (125.0, 500.0), "retrato manda el alto: {qw}x{qh}");
-        // Cuadrado chico en overlay grande: upscale permitido (ver grande).
-        let (sw, sh) = media_overlay_preview_size(64.0, 64.0, 800.0, 500.0);
-        assert_eq!((sw, sh), (500.0, 500.0), "overlay agranda: {sw}x{sh}");
-    }
-
-    #[test]
-    fn media_toolbar_tooltips_cortos_y_fullscreen_arranca_cerrado() {
+    fn media_toolbar_tooltips_cortos() {
         // D2: tooltips ≤60 chars para que no se corten en panel ~340px.
+        // (El tip del visor grande se fue con el botón ⛶.)
         for tip in [
             MEDIA_TIP_SPEED,
-            MEDIA_TIP_FULLSCREEN,
             MEDIA_TIP_EXPORT,
             MEDIA_TIP_PAUSE,
             MEDIA_TIP_PLAY,
@@ -15085,10 +15503,206 @@ mod tests {
             assert!(tip.chars().count() <= 60, "tooltip largo: {tip}");
             assert!(!tip.is_empty(), "tooltip mudo");
         }
-        // Estado nuevo vive en la card (Cell), arranca cerrado y limpio.
+        // Estado nuevo arranca limpio (sin playhead rancio).
         let state = AssistantPanelState::default();
-        assert!(!state.media_fullscreen.get());
         assert_eq!(state.media_last_shown.get(), None);
+    }
+
+    // ── Players por turno (fluidez) ────────────────────────────────────
+    fn muestra_turn_con_frames(titulo: &str, w: u32, h: u32, n: usize) -> ConversationTurn {
+        let pixeles = (w as usize) * (h as usize) * 4;
+        let set = TurnFrameSet {
+            width: w,
+            height: h,
+            frames_rgba: (0..n).map(|k| vec![k as u8; pixeles]).collect(),
+        };
+        assert!(set.validate().is_ok());
+        let mut turno = ConversationTurn::assistant("lista");
+        turno.attach_media(TurnMediaRef::with_frames(
+            titulo,
+            "derivada",
+            "concepto",
+            vec![7_u8; TURN_MEDIA_THUMB_SIDE_PX * TURN_MEDIA_THUMB_SIDE_PX * 4],
+            n as u8,
+            std::sync::Arc::new(set),
+        ));
+        turno
+    }
+
+    #[test]
+    fn turn_play_state_avanza_loopea_y_congela() {
+        // Reproduciendo a 12 fps: 100 ms ≈ 1 frame; loopea al llegar al fin.
+        let mut cursor = TurnPlayState::new();
+        assert_eq!((cursor.idx, cursor.playing), (0, true));
+        assert_eq!(cursor.advance(10.0, 4, MEDIA_CARD_BASE_FPS, 1.0), 0);
+        assert_eq!(cursor.advance(10.1, 4, MEDIA_CARD_BASE_FPS, 1.0), 1);
+        assert_eq!(cursor.advance(10.2, 4, MEDIA_CARD_BASE_FPS, 1.0), 2);
+        assert_eq!(cursor.advance(10.3, 4, MEDIA_CARD_BASE_FPS, 1.0), 3);
+        assert_eq!(cursor.advance(10.4, 4, MEDIA_CARD_BASE_FPS, 1.0), 0);
+        // Pausado: congela y retoma sin salto (reloj al día).
+        cursor.playing = false;
+        assert_eq!(cursor.advance(11.0, 4, MEDIA_CARD_BASE_FPS, 1.0), 0);
+        cursor.playing = true;
+        assert_eq!(cursor.advance(11.05, 4, MEDIA_CARD_BASE_FPS, 1.0), 0);
+        // Índice rancio (trim) se clampa, jamás panic.
+        cursor.idx = 99;
+        cursor.playing = false;
+        assert_eq!(cursor.advance(12.0, 4, MEDIA_CARD_BASE_FPS, 1.0), 3);
+        // Sin frames: 0 honesto.
+        let mut vacio = TurnPlayState::new();
+        assert_eq!(vacio.advance(12.0, 0, MEDIA_CARD_BASE_FPS, 1.0), 0);
+        // Entradas no finitas caen a base/1x sin panic.
+        let mut raro = TurnPlayState::new();
+        assert_eq!(raro.advance(13.0, 4, f32::NAN, f32::NAN), 0);
+        assert_eq!(raro.advance(13.2, 4, f32::NAN, f32::NAN), 2);
+    }
+
+    #[test]
+    fn turn_player_exclusivo_pausa_los_demas_sin_perder_indice() {
+        // Darle play a uno pausa el resto (ahorro de CPU); los demás quedan
+        // congelados tal cual, jamás colapsan a mini-card (su `idx` intacto).
+        let state = AssistantPanelState::default();
+        state.play_turn_exclusive(1);
+        state.turn_players.borrow_mut().insert(
+            0,
+            TurnPlayState {
+                idx: 5,
+                playing: true,
+                last_tick_s: None,
+            },
+        );
+        state.turn_players.borrow_mut().insert(
+            2,
+            TurnPlayState {
+                idx: 2,
+                playing: true,
+                last_tick_s: None,
+            },
+        );
+        state.play_turn_exclusive(1);
+        let mapa = state.turn_players.borrow();
+        assert!(mapa.get(&1).is_some_and(|c| c.playing));
+        assert!(mapa.get(&0).is_some_and(|c| !c.playing && c.idx == 5));
+        assert!(mapa.get(&2).is_some_and(|c| !c.playing && c.idx == 2));
+        drop(mapa);
+        assert!(state.media_paused.get(), "el slot vivo también se pausa");
+        // Pausar todo no borra cursores (retoman donde quedaron).
+        state.pause_all_turn_players();
+        let mapa = state.turn_players.borrow();
+        assert!(mapa.values().all(|c| !c.playing));
+        assert_eq!(mapa.get(&0).map(|c| c.idx), Some(5));
+    }
+
+    #[test]
+    fn turn_has_full_frames_decide_player_vs_mini_card() {
+        // Con frames propios → SU player; sin frames → mini-card + replay;
+        // sin media → nada.
+        let con_frames = muestra_turn_con_frames("Tangente", 4, 4, 3);
+        assert!(turn_has_full_frames(&con_frames));
+        let mut sin_frames = ConversationTurn::assistant("vieja");
+        sin_frames.attach_media(TurnMediaRef::new(
+            "Vieja",
+            "derivada",
+            "concepto",
+            vec![7_u8; TURN_MEDIA_THUMB_SIDE_PX * TURN_MEDIA_THUMB_SIDE_PX * 4],
+            8,
+        ));
+        assert!(!turn_has_full_frames(&sin_frames));
+        let pelado = ConversationTurn::assistant("nada");
+        assert!(!turn_has_full_frames(&pelado));
+    }
+
+    #[test]
+    fn turn_frame_image_decodifica_lo_propio_y_rechaza_honesto() {
+        // Decodifica RGBA plano del set propio con dims y píxeles exactos.
+        let turno = muestra_turn_con_frames("Tangente", 4, 4, 3);
+        let set = turno
+            .media
+            .as_ref()
+            .and_then(|m| m.frames.as_ref())
+            .expect("frames");
+        let img = turn_frame_image(set, 1).expect("frame 1");
+        assert_eq!(img.size, [4, 4]);
+        assert_eq!(img.pixels.len(), 16);
+        let img0 = turn_frame_image(set, 0).expect("frame 0");
+        assert_ne!(img.pixels, img0.pixels, "cada frame decodifica lo suyo");
+        assert!(turn_frame_image(set, 9).is_none(), "fuera de rango");
+        // Set inválido → None honesto, jamás panic.
+        let roto = TurnFrameSet {
+            width: 4,
+            height: 4,
+            frames_rgba: vec![vec![0_u8; 10]],
+        };
+        assert!(turn_frame_image(&roto, 0).is_none());
+    }
+
+    #[test]
+    fn turn_players_no_dibujan_frames_ajenos() {
+        // Garantía estructural: dos turnos con sets de distinto tamaño y
+        // contenido; cada textura cacheada mide lo propio de su turno.
+        let context = egui::Context::default();
+        let state = AssistantPanelState::default();
+        let a = muestra_turn_con_frames("A", 4, 4, 3);
+        let b = muestra_turn_con_frames("B", 8, 2, 2);
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            let media_a = a.media.as_ref().expect("media A");
+            let media_b = b.media.as_ref().expect("media B");
+            state.ensure_turn_window(0, media_a, 2, ctx);
+            state.ensure_turn_window(1, media_b, 1, ctx);
+            let ta = state.turn_texture_for(0, 2).expect("textura A");
+            let tb = state.turn_texture_for(1, 1).expect("textura B");
+            assert_eq!(ta.size_vec2(), egui::vec2(4.0, 4.0), "A mide lo suyo");
+            assert_eq!(tb.size_vec2(), egui::vec2(8.0, 2.0), "B mide lo suyo");
+        });
+        // Headless: el draw completo del player por turno no panica.
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(340.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let _ = draw_turn_player(ui, &state, 0, &a);
+                    let _ = draw_turn_player(ui, &state, 1, &b);
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn turn_frame_delay_ms_acotado_y_sano() {
+        // 12 fps/1x ≈ 83 ms; doble velocidad ≈ 42; piso 16 y techo 250.
+        assert_eq!(turn_frame_delay_ms(MEDIA_CARD_BASE_FPS, 1.0), 84);
+        assert_eq!(turn_frame_delay_ms(MEDIA_CARD_BASE_FPS, 2.0), 42);
+        assert_eq!(turn_frame_delay_ms(1.0, 1.0), 250);
+        assert_eq!(turn_frame_delay_ms(1000.0, 1.0), 16);
+        assert_eq!(turn_frame_delay_ms(f32::NAN, f32::NAN), 84);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn player_btn_consts_un_solo_alto_y_anchos_coherentes() {
+        // Tarea 2: un solo alto para todos los botones del player y anchos
+        // coherentes desde tokens (nada de cada botón con su medida).
+        assert_eq!(PLAYER_BTN_H, HIT_TARGET_MIN + SPACE_XS);
+        assert_eq!(PLAYER_BTN_SQ_W, PLAYER_BTN_H);
+        assert!(PLAYER_BTN_SPEED_W > PLAYER_BTN_SQ_W, "velocidad legible");
+        assert!(
+            PLAYER_BTN_EXPORT_W > PLAYER_BTN_SPEED_W,
+            "export texto aparte"
+        );
+        // Blindaje: los 5 dibujos de botones usan las consts (no literales).
+        let source = include_str!("assistant.rs");
+        for usada in [
+            "PLAYER_BTN_SQ_W, PLAYER_BTN_H",
+            "PLAYER_BTN_SPEED_W, PLAYER_BTN_H",
+            "PLAYER_BTN_EXPORT_W, PLAYER_BTN_H",
+        ] {
+            assert!(source.contains(usada), "toolbar uniforme usa {usada}");
+        }
     }
 
     #[test]

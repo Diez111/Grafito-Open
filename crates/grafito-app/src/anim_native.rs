@@ -5409,8 +5409,229 @@ fn render_taylor_frames_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    // Legacy intacto: orden 3 + etiqueta histórica (píxeles pineados).
+    // Histórico sin(x) orden 3, hoy progresivo (didáctica Taylor 20/60/20).
     render_taylor_frames_inner(width, height, 3, "taylor  sin(x)", con_rotulo, on_frame)
+}
+
+// ── Taylor progresiva didáctica ─────────────────────────────────────
+// Queja real: "no se explica bien": f+P3 superpuestas todo el tiempo,
+// sin progresión ni leyenda. Ahora 48 frames en 3 fases 20/60/20:
+// - Setup (t<0.2, frames 0..=9): solo f + punto P0 en el centro.
+// - Construcción (0.2<=t<0.8, frames 10..=37): revela P1,P3,P5… hasta
+//   el orden pedido (reparto uniforme por nivel).
+// - Hold (t>=0.8, frames 38..=47): sostiene P_orden.
+// Rótulo vivo "orden N" + leyenda "f"/"Pn c=.." (≤12ch, escala de h).
+// Zona de ajuste: banda |x-centro|<=radio donde |f-P|<=TOL (0.15 abs);
+// fuera de tolerancia el P_n se dibuja tenue (alfa 60 vs 235).
+// Todo parametriza centro/orden/expr: cero hardcode en el dibujo.
+
+/// Tolerancia abs de ajuste f≈P_n (banda + alfa por tramo). Pineada en test.
+pub(crate) const TAYLOR_TOL: f64 = 0.15;
+/// Alfa del P_n donde ajusta (sólido, paridad con `CURVE_MAIN` 235).
+pub(crate) const TAYLOR_ALFA_CERCA: u8 = 235;
+/// Alfa del P_n fuera de tolerancia (tenue honesto, sin ocultar).
+pub(crate) const TAYLOR_ALFA_LEJOS: u8 = 60;
+
+/// Niveles de la progresión para un orden pedido: `[0,1,3,5,…,orden]`.
+/// `0` = solo f (P0 es el punto en el centro). El final siempre es `orden`
+/// (los pares también importan para f genérica). Puro.
+pub(crate) fn taylor_niveles(orden: usize) -> Vec<usize> {
+    let tope = orden.clamp(TAYLOR_MIN_ORDER, TAYLOR_MAX_ORDER);
+    let mut niveles = vec![0, 1];
+    let mut k = 3usize;
+    while k < tope {
+        niveles.push(k);
+        k += 2;
+    }
+    if niveles.last().is_some_and(|u| *u != tope) {
+        niveles.push(tope);
+    }
+    niveles
+}
+
+/// Orden visible en el frame (`0` en setup, pedido en hold, reparto
+/// uniforme por nivel en construcción). Monótono no-decreciente. Puro.
+pub(crate) fn taylor_orden_en_frame(frame: usize, orden: usize) -> usize {
+    let tope = orden.clamp(TAYLOR_MIN_ORDER, TAYLOR_MAX_ORDER);
+    let niveles = taylor_niveles(tope);
+    match fase_para_frame(frame).0 {
+        FaseConstruccion::Setup => 0,
+        FaseConstruccion::Hold => tope,
+        FaseConstruccion::Construccion => {
+            let ultimo = NATIVE_ANIM_FRAME_COUNT.saturating_sub(1).max(1) as f64;
+            let t = (frame.min(NATIVE_ANIM_FRAME_COUNT.saturating_sub(1)) as f64 / ultimo)
+                .clamp(FASE_SETUP_HASTA, FASE_CONSTRUCCION_HASTA);
+            let local =
+                (t - FASE_SETUP_HASTA) / (FASE_CONSTRUCCION_HASTA - FASE_SETUP_HASTA).max(0.001);
+            let resto = niveles.len().saturating_sub(1).max(1);
+            let paso = (local.clamp(0.0, 1.0) * resto as f64).floor() as usize;
+            niveles
+                .get(1 + paso.min(resto.saturating_sub(1)))
+                .copied()
+                .unwrap_or(tope)
+        }
+    }
+}
+
+/// Rótulo vivo (`"orden 0"`…`"orden 10"`, siempre ≤12ch). Puro.
+pub(crate) fn taylor_rotulo_para_orden(orden_actual: usize) -> String {
+    format!("orden {}", orden_actual.min(TAYLOR_MAX_ORDER))
+}
+
+/// Leyenda del polinomio (`"P1"`…`"P10"`, ≤12ch). Puro.
+pub(crate) fn taylor_leyenda_p(orden_final: usize) -> String {
+    format!("P{}", orden_final.clamp(TAYLOR_MIN_ORDER, TAYLOR_MAX_ORDER))
+}
+
+/// Leyenda con centro (`"P5 c=0"`, ≤12ch en viewport ±3; el dibujo usa el
+/// centro real, el rótulo lo recorta al viewport documentado). Pura.
+pub(crate) fn taylor_leyenda_p_con_centro(orden_final: usize, centro: f64) -> String {
+    let c = if centro.is_finite() {
+        fmt_corto(centro.clamp(-3.0, 3.0))
+    } else {
+        "?".to_string()
+    };
+    format!("{} c={c}", taylor_leyenda_p(orden_final))
+}
+
+/// Alfa del tramo según error abs `|f-P|` (media de extremos): dentro de
+/// `TAYLOR_TOL` → sólido; fuera o sin dato → tenue honesto. Puro.
+pub(crate) fn taylor_alfa_para_error(err: Option<f64>) -> u8 {
+    match err {
+        Some(e) if e.is_finite() && e <= TAYLOR_TOL => TAYLOR_ALFA_CERCA,
+        _ => TAYLOR_ALFA_LEJOS,
+    }
+}
+
+/// Radio de ajuste: mayor `d` (paso 0.05) tal que `centro±d` cumple
+/// `|f-P|<=TOL`; sin dato o divergencia frena la expansión. Clamp
+/// `[0.25,3.0]`: banda siempre visible y dentro del viewport. Puro.
+pub(crate) fn taylor_radio_ajuste(
+    eval_f: impl Fn(f64) -> Option<f64>,
+    eval_p: impl Fn(f64) -> Option<f64>,
+    centro: f64,
+) -> f64 {
+    if !centro.is_finite() {
+        return 0.25;
+    }
+    let mut radio = 0.0f64;
+    let mut d = 0.05f64;
+    while d <= 3.0 {
+        let mut bien = true;
+        for signo in [-1.0f64, 1.0] {
+            match (eval_f(centro + signo * d), eval_p(centro + signo * d)) {
+                (Some(f), Some(p)) if f.is_finite() && p.is_finite() => {
+                    if (f - p).abs() > TAYLOR_TOL {
+                        bien = false;
+                        break;
+                    }
+                }
+                _ => {
+                    bien = false;
+                    break;
+                }
+            }
+        }
+        if bien {
+            radio = d;
+        } else {
+            break;
+        }
+        d += 0.05;
+    }
+    radio.clamp(0.25, 3.0)
+}
+
+/// Cajas de los 2 rótulos (título vivo + leyenda f/P_n) apilados con aire:
+/// disjuntas por construcción (paso > alto) y dentro de la franja superior
+/// (a 96×72 terminan en y=40, fuera de la banda media del contrato
+/// chat/export). Puras (test + dibujo).
+pub(crate) fn taylor_rotulos_cajas(w: usize, h: usize) -> Vec<LabelCaja> {
+    let escala = text_scale_for_h(h);
+    let x0 = w / 14;
+    let y0 = h / 12;
+    let cw = 6usize.saturating_mul(escala).max(1);
+    let alto_titulo = 12usize.saturating_mul(escala).saturating_add(8);
+    let alto_leyenda = 7usize.saturating_mul(escala).saturating_add(6);
+    vec![
+        LabelCaja {
+            x: x0,
+            y: y0,
+            w: 8usize.saturating_mul(cw).saturating_add(8),
+            h: alto_titulo,
+        },
+        LabelCaja {
+            x: x0,
+            y: y0.saturating_add(alto_titulo).saturating_add(1),
+            w: 13usize.saturating_mul(cw).saturating_add(30),
+            h: alto_leyenda,
+        },
+    ]
+}
+
+/// Título vivo + leyenda mínima permanente (chip amarillo = f, chip azul =
+/// P_n). Solo con rótulo (export): el chat ya titula en el header. Puro
+/// sobre el buffer.
+#[allow(clippy::too_many_arguments)]
+fn draw_taylor_rotulos(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    orden_dibujado: usize,
+    orden_final: usize,
+    centro: f64,
+) {
+    let cajas = taylor_rotulos_cajas(w, h);
+    if cajas.len() != 2 {
+        return;
+    }
+    for c in &cajas {
+        draw_filled_rect(buf, w, h, c.x, c.y, c.w, c.h, SCRIM);
+    }
+    let escala = text_scale_for_h(h);
+    let cw = 6usize.saturating_mul(escala).max(1);
+    draw_text_block(
+        buf,
+        w,
+        h,
+        cajas[0].x.saturating_add(4),
+        cajas[0].y.saturating_add(4),
+        &taylor_rotulo_para_orden(orden_dibujado),
+        TEXT_COLOR,
+        escala,
+    );
+    // Leyenda combinada: [chip f] "f" [chip P] "Pn c=..".
+    let chip_y = cajas[1]
+        .y
+        .saturating_add(cajas[1].h / 2)
+        .saturating_sub(3)
+        .min(h.saturating_sub(7));
+    let x_chip_f = cajas[1].x.saturating_add(4);
+    let x_txt_f = x_chip_f.saturating_add(10);
+    let x_chip_p = x_txt_f.saturating_add(cw).saturating_add(4);
+    let x_txt_p = x_chip_p.saturating_add(8);
+    draw_filled_rect(buf, w, h, x_chip_f, chip_y, 6, 6, CURVE_MAIN);
+    draw_text_block(
+        buf,
+        w,
+        h,
+        x_txt_f,
+        cajas[1].y.saturating_add(2),
+        "f",
+        TEXT_COLOR,
+        escala,
+    );
+    draw_filled_rect(buf, w, h, x_chip_p, chip_y, 6, 6, PAL_BLUE);
+    draw_text_block(
+        buf,
+        w,
+        h,
+        x_txt_p,
+        cajas[1].y.saturating_add(2),
+        &taylor_leyenda_p_con_centro(orden_final, centro),
+        TEXT_COLOR,
+        escala,
+    );
 }
 
 /// Suma parcial de `sin(x)` a grado `grado` (solo impares aportan).
@@ -5444,8 +5665,8 @@ pub(crate) fn taylor_partial_sum(grado: usize, x: f64) -> f64 {
 /// W-C T3 + F1: Taylor con orden vivo. `terms` se lee con
 /// `taylor_anim_order_from_params` (W2: 1..=7, def 3 = histórico; el slider
 /// del panel que llega a 10 se clampa a 7 para que el set siga legible).
-/// La animación de convergencia la da el frame `t` (fade de aparición)
-/// + el slider del panel que re-renderiza por orden.
+/// La didáctica la da la progresión 20/60/20 por frame (solo f → P1,P3…
+/// hasta el orden → hold) + el slider del panel que re-renderiza por orden.
 pub fn render_taylor_frames_with_params(
     width: u32,
     height: u32,
@@ -5481,77 +5702,18 @@ fn render_taylor_frames_inner(
     width: u32,
     height: u32,
     orden: usize,
-    etiqueta: &str,
+    _etiqueta: &str,
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
-    let f = |x: f64| x.sin();
-    let taylor = |x: f64| taylor_partial_sum(orden, x);
-    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
-    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
-        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
-        let t = fase_alpha(frame);
-        let byte_len =
-            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
-        let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h);
-        draw_subtle_grid(&mut buf, w, h);
-        draw_axes_with_labels(&mut buf, w, h);
-        for i in -60..60 {
-            let x0 = i as f64 / 20.0;
-            let x1 = (i + 1) as f64 / 20.0;
-            // `sin` vive en [-1,1] (en vista); el clip es no-op honesto.
-            draw_seg_mundo(
-                &mut buf,
-                w,
-                h,
-                x0,
-                f(x0),
-                x1,
-                f(x1),
-                CURVE_MAIN,
-                CURVE_ANCHO,
-            );
-        }
-        let alpha = (t * 255.0) as u8;
-        for i in -60..60 {
-            let x0 = i as f64 / 20.0;
-            let x1 = (i + 1) as f64 / 20.0;
-            let w0 = (1.0 - (x0.abs() / 3.0)).clamp(0.0, 1.0);
-            let w1 = (1.0 - (x1.abs() / 3.0)).clamp(0.0, 1.0);
-            // Polinomio sin saturar: fuera de vista se corta, no se aplasta.
-            let mut c = PAL_BLUE;
-            c[3] = (alpha as f64 * w0.min(w1)) as u8;
-            draw_seg_mundo(
-                &mut buf,
-                w,
-                h,
-                x0,
-                taylor(x0),
-                x1,
-                taylor(x1),
-                c,
-                CURVE_ANCHO,
-            );
-        }
-        if con_rotulo {
-            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, etiqueta);
-            draw_text_block(
-                &mut buf,
-                w,
-                h,
-                w / 14,
-                h / 12,
-                etiqueta,
-                TEXT_COLOR,
-                text_scale_for_h(h),
-            );
-        }
-        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
-        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
-    }
-    frames
+    // Sin hardcode en el dibujo: la vía canónica (motor real) con centro 0.
+    // La etiqueta histórica la reemplazan el rótulo vivo + leyenda.
+    let spec = grafito_anim::parametric::TaylorSpec {
+        expr: grafito_anim::parametric::TAYLOR_CANONICAL_EXPR.to_string(),
+        centro: 0.0,
+        orden,
+    };
+    render_taylor_frames_for_spec_impl(width, height, &spec, con_rotulo, on_frame)
 }
 
 // ── Frente A: Taylor con función explícita ──────────────────────────────
@@ -5619,9 +5781,10 @@ fn fmt_corto(v: f64) -> String {
 }
 
 /// Taylor REAL de un spec (f explícita o canónica declarada): f amarilla
-/// fija + `P_n` azul con fade de aparición y peso al centro (como el
-/// legacy) + ejes rotulados. Si el motor no deriva f (el infer lo impide;
-/// defensa en profundidad), dibuja solo f sin inventar polinomio.
+/// fija + `P_n` azul progresivo (P1,P3… hasta n) con banda de ajuste y alfa
+/// por tolerancia + punto P0 en el centro + ejes rotulados. Si el motor no
+/// deriva f (el infer lo impide; defensa en profundidad), dibuja solo f sin
+/// inventar polinomio.
 pub fn render_taylor_frames_for_spec(
     width: u32,
     height: u32,
@@ -5639,7 +5802,7 @@ pub(crate) fn render_taylor_frames_for_spec_impl(
     con_rotulo: bool,
     on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
-    let orden = spec.orden.clamp(TAYLOR_MIN_ORDER, TAYLOR_MAX_ORDER);
+    let orden_final = spec.orden.clamp(TAYLOR_MIN_ORDER, TAYLOR_MAX_ORDER);
     let centro = if spec.centro.is_finite() {
         spec.centro
     } else {
@@ -5647,11 +5810,8 @@ pub(crate) fn render_taylor_frames_for_spec_impl(
     };
     let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
     let expr = spec.expr.trim();
-    let expr_corta: String = expr.chars().take(12).collect();
-    let etiqueta = format!("taylor {expr_corta} c={} n={orden}", fmt_corto(centro));
     let f_anim = taylor_eval_anim(expr)
         .or_else(|| taylor_eval_anim(grafito_anim::parametric::TAYLOR_CANONICAL_EXPR));
-    let p_anim = taylor_poly_anim(expr, centro, orden);
     let Some(f_anim) = f_anim else {
         // Sin evaluador ni canónico (inconcebible: `sin(x)` construye
         // siempre): fondo + ejes honestos, jamás curva falsa.
@@ -5664,66 +5824,109 @@ pub(crate) fn render_taylor_frames_for_spec_impl(
             draw_subtle_grid(&mut buf, w, h);
             draw_axes_with_labels(&mut buf, w, h);
             if con_rotulo {
-                draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, &etiqueta);
-                draw_text_block(
-                    &mut buf,
-                    w,
-                    h,
-                    w / 14,
-                    h / 12,
-                    &etiqueta,
-                    TEXT_COLOR,
-                    text_scale_for_h(h),
-                );
+                draw_taylor_rotulos(&mut buf, w, h, 0, orden_final, centro);
             }
             frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
             on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
         }
         return frames;
     };
+    // Muestreo fijo en 121 puntos de [-3,3]. f es estática (frame 0 siempre:
+    // Taylor no tiene parámetro móvil), así que se precalcula una vez; un
+    // polinomio REAL por nivel con su radio de ajuste. El loop de frames es
+    // raster puro (rápido y determinista).
+    let xs: Vec<f64> = (0..=120).map(|k| -3.0 + 6.0 * (k as f64 / 120.0)).collect();
+    let f_pts: Vec<Option<f64>> = xs.iter().map(|x| f_anim.eval_frame(0, *x)).collect();
+    let f_en_centro = f_anim.eval_frame(0, centro);
+    let mut p_por_nivel: Vec<(usize, Vec<Option<f64>>, f64)> = Vec::new();
+    for nivel in taylor_niveles(orden_final) {
+        if nivel == 0 {
+            continue;
+        }
+        if let Some(p) = taylor_poly_anim(expr, centro, nivel) {
+            let pts: Vec<Option<f64>> = xs.iter().map(|x| p.eval_frame(0, *x)).collect();
+            let radio =
+                taylor_radio_ajuste(|x| f_anim.eval_frame(0, x), |x| p.eval_frame(0, x), centro);
+            p_por_nivel.push((nivel, pts, radio));
+        }
+    }
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
-        // Timeline por fases (setup 20% / construcción 60% cubic_in_out / hold 20%).
-        let t = fase_alpha(frame);
+        let orden_pedido = taylor_orden_en_frame(frame, orden_final);
+        // Nivel efectivamente dibujado (el mayor disponible ≤ pedido; 0 =
+        // solo f honesto si el motor no derivó).
+        let entrada = p_por_nivel
+            .iter()
+            .rev()
+            .find(|(nv, _, _)| *nv <= orden_pedido);
+        let nivel_dibujado = entrada.map_or(0, |(nv, _, _)| *nv);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
         fill_background(&mut buf, w, h);
         draw_subtle_grid(&mut buf, w, h);
         draw_axes_with_labels(&mut buf, w, h);
-        for i in -60..60 {
-            let x0 = i as f64 / 20.0;
-            let x1 = (i + 1) as f64 / 20.0;
-            if let (Some(y0), Some(y1)) = (f_anim.eval_frame(0, x0), f_anim.eval_frame(0, x1)) {
-                draw_seg_mundo(&mut buf, w, h, x0, y0, x1, y1, CURVE_MAIN, CURVE_ANCHO);
+        // Banda sutil de ajuste (debajo de las curvas): marca dónde P_n
+        // aproxima bien; fuera de ella el polinomio sale tenue.
+        if let Some((_, _, radio)) = entrada {
+            let xa = (centro - *radio).max(VIEW_X_MIN);
+            let xb = (centro + *radio).min(VIEW_X_MAX);
+            if xb > xa && w > 0 {
+                let px_a = ((xa - VIEW_X_MIN) / VIEW_SPAN_X * w as f64) as usize;
+                let px_b = ((xb - VIEW_X_MIN) / VIEW_SPAN_X * w as f64) as usize;
+                let (ini, fin) = (px_a.min(w), px_b.min(w));
+                if fin > ini {
+                    draw_filled_rect(&mut buf, w, h, ini, 0, fin - ini, h, FILL_SOFT_BLUE);
+                }
             }
         }
-        let alpha = (t * 255.0) as u8;
-        if let Some(p) = p_anim.as_ref() {
-            for i in -60..60 {
-                let x0 = i as f64 / 20.0;
-                let x1 = (i + 1) as f64 / 20.0;
-                let w0 = (1.0 - ((x0 - centro).abs() / 3.0)).clamp(0.0, 1.0);
-                let w1 = (1.0 - ((x1 - centro).abs() / 3.0)).clamp(0.0, 1.0);
-                if let (Some(y0), Some(y1)) = (p.eval_frame(0, x0), p.eval_frame(0, x1)) {
-                    let mut c = PAL_BLUE;
-                    c[3] = (alpha as f64 * w0.min(w1)) as u8;
-                    draw_seg_mundo(&mut buf, w, h, x0, y0, x1, y1, c, CURVE_ANCHO);
+        // f fija amarilla (idéntica en los 48: la escala no tiembla).
+        for k in 0..120 {
+            if let (Some(y0), Some(y1)) = (f_pts[k], f_pts[k + 1]) {
+                draw_seg_mundo(
+                    &mut buf,
+                    w,
+                    h,
+                    xs[k],
+                    y0,
+                    xs[k + 1],
+                    y1,
+                    CURVE_MAIN,
+                    CURVE_ANCHO,
+                );
+            }
+        }
+        // Punto P0 en el centro (ancla de la aproximación), solo en vista.
+        if let Some(fc) = f_en_centro {
+            if fc.is_finite() {
+                if let Some((px, py)) = to_pixel_opt(w, h, centro, fc) {
+                    draw_filled_circle(&mut buf, w, h, px, py, 3, POINT_RED);
+                }
+            }
+        }
+        // P_nivel azul: sólido donde ajusta, tenue donde diverge (criterio
+        // `TAYLOR_TOL` sobre la media de |f-P| en los extremos del tramo).
+        if let Some((_, p_pts, _)) = entrada {
+            for k in 0..120 {
+                if let (Some(y0), Some(y1)) = (p_pts[k], p_pts[k + 1]) {
+                    let err = match (f_pts[k], f_pts[k + 1]) {
+                        (Some(f0), Some(f1))
+                            if f0.is_finite()
+                                && f1.is_finite()
+                                && y0.is_finite()
+                                && y1.is_finite() =>
+                        {
+                            Some(((f0 - y0).abs() + (f1 - y1).abs()) * 0.5)
+                        }
+                        _ => None,
+                    };
+                    let c = with_alpha(PAL_BLUE, taylor_alfa_para_error(err));
+                    draw_seg_mundo(&mut buf, w, h, xs[k], y0, xs[k + 1], y1, c, CURVE_ANCHO);
                 }
             }
         }
         if con_rotulo {
-            draw_scrim_para_rotulo(&mut buf, w, h, w / 14, h / 12, &etiqueta);
-            draw_text_block(
-                &mut buf,
-                w,
-                h,
-                w / 14,
-                h / 12,
-                &etiqueta,
-                TEXT_COLOR,
-                text_scale_for_h(h),
-            );
+            draw_taylor_rotulos(&mut buf, w, h, nivel_dibujado, orden_final, centro);
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
@@ -8881,6 +9084,215 @@ mod tests {
             real[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
             "el orden debe mover Taylor de x³"
         );
+    }
+
+    #[test]
+    fn taylor_progresion_fases_20_60_20() {
+        // Niveles: arranca en 0 (solo f) y revela impares hasta el pedido.
+        assert_eq!(super::taylor_niveles(1), vec![0, 1]);
+        assert_eq!(super::taylor_niveles(2), vec![0, 1, 2]);
+        assert_eq!(super::taylor_niveles(3), vec![0, 1, 3]);
+        assert_eq!(super::taylor_niveles(5), vec![0, 1, 3, 5]);
+        assert_eq!(super::taylor_niveles(7), vec![0, 1, 3, 5, 7]);
+        assert_eq!(super::taylor_niveles(10), vec![0, 1, 3, 5, 7, 9, 10]);
+        // Ritmo 20/60/20 como el resto de plantillas: 10/28/10 frames.
+        let mut fases = (0usize, 0usize, 0usize);
+        for f in 0..NATIVE_ANIM_FRAME_COUNT {
+            match super::fase_para_frame(f).0 {
+                super::FaseConstruccion::Setup => fases.0 += 1,
+                super::FaseConstruccion::Construccion => fases.1 += 1,
+                super::FaseConstruccion::Hold => fases.2 += 1,
+            }
+        }
+        assert_eq!(fases, (10, 28, 10), "setup/construcción/hold");
+        // Setup solo f (orden 0), hold sostiene el pedido.
+        for f in 0..NATIVE_ANIM_FRAME_COUNT {
+            let fase = super::fase_para_frame(f).0;
+            let o = super::taylor_orden_en_frame(f, 5);
+            match fase {
+                super::FaseConstruccion::Setup => {
+                    assert_eq!(o, 0, "frame {f}: setup solo f");
+                }
+                super::FaseConstruccion::Hold => {
+                    assert_eq!(o, 5, "frame {f}: hold sostiene");
+                }
+                super::FaseConstruccion::Construccion => {
+                    assert!((1..=5).contains(&o), "frame {f}: construye {o}");
+                }
+            }
+        }
+        // Monótono no-decreciente y recorre los intermedios.
+        let mut previo = 0usize;
+        let mut vistos = std::collections::BTreeSet::new();
+        for f in 0..NATIVE_ANIM_FRAME_COUNT {
+            let o = super::taylor_orden_en_frame(f, 5);
+            assert!(o >= previo, "monótono en frame {f}");
+            previo = o;
+            vistos.insert(o);
+        }
+        for esperado in [0, 1, 3, 5] {
+            assert!(
+                vistos.contains(&esperado),
+                "debe mostrar P{esperado}: {vistos:?}"
+            );
+        }
+        // Progresión visible en píxeles (primero = solo f, último = P3).
+        let frames = super::render_taylor_frames(96, 72);
+        assert_ne!(
+            frames[0].pixels,
+            frames[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "setup vs hold difieren"
+        );
+    }
+
+    #[test]
+    fn taylor_rotulo_vivo_y_leyenda_acotados_sin_solape() {
+        // Rótulo vivo por fase (puro, sin render).
+        assert_eq!(super::taylor_rotulo_para_orden(0), "orden 0");
+        assert_eq!(super::taylor_rotulo_para_orden(3), "orden 3");
+        assert_eq!(super::taylor_orden_en_frame(0, 5), 0);
+        assert_eq!(
+            super::taylor_orden_en_frame(NATIVE_ANIM_FRAME_COUNT - 1, 5),
+            5
+        );
+        // ≤12 chars cada rótulo (lenguaje actual, escala de h).
+        for o in 0..=10usize {
+            let rotulo = super::taylor_rotulo_para_orden(o);
+            assert!(rotulo.chars().count() <= 12, "rótulo acotado: {rotulo}");
+            assert!(
+                super::taylor_leyenda_p(o.max(1)).chars().count() <= 3,
+                "leyenda P corta"
+            );
+            for centro in [-3.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0] {
+                let ley = super::taylor_leyenda_p_con_centro(o.max(1), centro);
+                assert!(ley.chars().count() <= 12, "leyenda acotada: {ley}");
+            }
+        }
+        assert_eq!(super::taylor_leyenda_p(5), "P5");
+        // Cajas disjuntas entre sí (sin solape geométrico).
+        for (w, h) in [(64usize, 64usize), (96, 72), (480, 360)] {
+            let cajas = super::taylor_rotulos_cajas(w, h);
+            assert_eq!(cajas.len(), 2, "{w}x{h}: título + leyenda");
+            let (a, b) = (cajas[0], cajas[1]);
+            let solapa = a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+            assert!(!solapa, "{w}x{h}: rótulos sin solape");
+        }
+        // Etiquetas dentro de la franja superior a 96×72 (banda media
+        // intacta para el contrato chat/export).
+        let cajas = super::taylor_rotulos_cajas(96, 72);
+        for (i, c) in cajas.iter().enumerate() {
+            assert!(
+                c.y + c.h <= 40,
+                "caja {i} en franja superior (y+h={})",
+                c.y + c.h
+            );
+        }
+        // Export quema el rótulo vivo, el chat no (el header ya titula)…
+        let vacio = params_map(&[]);
+        let chat = super::render_anim_with_progress(
+            "taylor-series",
+            "taylor-progresion-pin",
+            96,
+            72,
+            &vacio,
+            &mut |_, _| {},
+        );
+        let export =
+            super::render_anim_for_export("taylor-series", "taylor-progresion-pin", 96, 72, &vacio);
+        assert_eq!(
+            cuenta_texto_quemado(&chat[0], 40),
+            0,
+            "el chat no quema título"
+        );
+        assert!(
+            cuenta_texto_quemado(&export[0], 40) > 0,
+            "el export muestra el rótulo vivo"
+        );
+        // …pero la matemática no cambia: banda media idéntica.
+        assert!(
+            banda_media_igual(&chat[0], &export[0]),
+            "la banda media no debe cambiar"
+        );
+        // El rótulo avanza con la fase: setup "orden 0" vs hold final.
+        assert_ne!(
+            export[0].pixels,
+            export[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "el rótulo vivo avanza"
+        );
+    }
+
+    #[test]
+    fn taylor_zona_ajuste_tenua_fuera_de_tolerancia() {
+        // Criterio pineado: |f-P| ≤ 0.15 → sólido (235), si no → tenue (60).
+        assert_eq!(super::TAYLOR_TOL, 0.15);
+        assert_eq!(super::TAYLOR_ALFA_CERCA, 235);
+        assert_eq!(super::TAYLOR_ALFA_LEJOS, 60);
+        assert_eq!(super::taylor_alfa_para_error(Some(0.05)), 235);
+        assert_eq!(super::taylor_alfa_para_error(Some(0.15)), 235);
+        assert_eq!(super::taylor_alfa_para_error(Some(0.16)), 60);
+        assert_eq!(super::taylor_alfa_para_error(None), 60);
+        assert_eq!(super::taylor_alfa_para_error(Some(f64::NAN)), 60);
+        // Radio de P3 de sin en 0: determinista, en viewport y parcial
+        // (P3 diverge lejos: no cubre todo [-3,3]).
+        let radio = super::taylor_radio_ajuste(
+            |x| Some(x.sin()),
+            |x| Some(super::taylor_partial_sum(3, x)),
+            0.0,
+        );
+        assert_eq!(
+            radio,
+            super::taylor_radio_ajuste(
+                |x| Some(x.sin()),
+                |x| Some(super::taylor_partial_sum(3, x)),
+                0.0,
+            ),
+            "determinista"
+        );
+        assert!(
+            (0.25..3.0).contains(&radio),
+            "radio parcial en viewport: {radio}"
+        );
+        // Centro no finito → mínimo honesto, sin panic.
+        assert_eq!(
+            super::taylor_radio_ajuste(|x| Some(x.sin()), Some, f64::NAN),
+            0.25
+        );
+    }
+
+    #[test]
+    fn taylor_parametriza_centro_y_orden_con_presupuesto() {
+        // Centro y orden mueven el dibujo (nada hardcodeado).
+        let base = super::render_taylor_frames_for_spec(96, 72, &taylor_spec("sin(x)", 0.0, 5));
+        let movida = super::render_taylor_frames_for_spec(96, 72, &taylor_spec("sin(x)", 1.0, 5));
+        assert_ne!(
+            base[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            movida[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "el centro parametriza el dibujo"
+        );
+        let p1 = super::render_taylor_frames_for_spec(96, 72, &taylor_spec("sin(x)", 0.0, 1));
+        assert_ne!(
+            p1[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            base[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "el orden parametriza el dibujo"
+        );
+        // Presupuestos intactos: 48 frames, tamaño pedido, ≤64 MiB.
+        assert_eq!(base.len(), NATIVE_ANIM_FRAME_COUNT);
+        for (i, fr) in base.iter().enumerate() {
+            assert_eq!(fr.size, [96, 72], "frame {i}");
+        }
+        let bytes =
+            super::estimate_frames_bytes(96, 72, NATIVE_ANIM_FRAME_COUNT).expect("sin desborde");
+        assert!(
+            bytes <= super::NATIVE_MAX_SET_BYTES,
+            "set bajo el tope: {bytes}"
+        );
+        // Sin plateau: P_n diverge pero se corta limpio (clip, no aplaste).
+        for f in base.iter().step_by(12) {
+            assert!(!tiene_plateau_sup(f), "sin plateau superior");
+        }
+        // Determinista: mismo spec → mismos píxeles.
+        let otra = super::render_taylor_frames_for_spec(96, 72, &taylor_spec("sin(x)", 0.0, 5));
+        assert_eq!(base[0].pixels, otra[0].pixels, "determinista");
     }
 
     #[test]
