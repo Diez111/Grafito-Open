@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 build = "build.rs"
@@ -88,3 +89,35 @@ winresource = { version = "=0.1.31", default-features = false }
 
 [lints]
 workspace = true
+
+[package.metadata.deb]
+maintainer = "Lautaro Agustin Diez <71948453+Diez111@users.noreply.github.com>"
+copyright = "2026, Grafito Contributors (GPL-3.0-or-later)"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+Calculadora gráfica matemática interactiva 3D con asistente.
+Grafito es una calculadora gráfica matemática moderna y de alto
+rendimiento escrita en Rust: graficación 2D y 3D, curvas paramétricas,
+animaciones estilo Manim, asistente matemático con 21 herramientas,
+CAS simbólico, planilla viva y cómputo GPU con fallback CPU."""
+section = "graphics"
+priority = "optional"
+assets = [
+    ["../../target/release/grafito", "usr/bin/", "755"],
+    ["../../packaging/debian/grafito.desktop", "usr/share/applications/", "644"],
+    ["../../assets/grafito-icon-16x16.png", "usr/share/icons/hicolor/16x16/apps/grafito.png", "644"],
+    ["../../assets/grafito-icon-32x32.png", "usr/share/icons/hicolor/32x32/apps/grafito.png", "644"],
+    ["../../assets/grafito-icon-48x48.png", "usr/share/icons/hicolor/48x48/apps/grafito.png", "644"],
+    ["../../assets/grafito-icon-64x64.png", "usr/share/icons/hicolor/64x64/apps/grafito.png", "644"],
+    ["../../assets/grafito-icon-128x128.png", "usr/share/icons/hicolor/128x128/apps/grafito.png", "644"],
+    ["../../assets/grafito-icon-256x256.png", "usr/share/icons/hicolor/256x256/apps/grafito.png", "644"],
+    ["../../assets/grafito-icon-512x512.png", "usr/share/icons/hicolor/512x512/apps/grafito.png", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "../../target/release/grafito", dest = "/usr/bin/grafito", mode = "755" },
+    { source = "../../packaging/debian/grafito.desktop", dest = "/usr/share/applications/grafito.desktop", mode = "644" },
+    { source = "../../assets/grafito-icon-256x256.png", dest = "/usr/share/icons/hicolor/256x256/apps/grafito.png", mode = "644" },
+    { source = "../../assets/grafito-icon-512x512.png", dest = "/usr/share/icons/hicolor/512x512/apps/grafito.png", mode = "644" },
+]

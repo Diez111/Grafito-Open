@@ -1,0 +1,56 @@
+# Maintainer: Lautaro Agustin Diez <71948453+Diez111@users.noreply.github.com>
+# Pizarra geométrica con cerebro Rust puro y piel egui/wgpu + asistente matemático.
+pkgname=grafito
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="Calculadora gráfica matemática interactiva 3D con asistente (Manim en Rust, CAS, planilla viva)"
+arch=('x86_64')
+url="https://github.com/Diez111/Grafito"
+license=('GPL-3.0-or-later')
+depends=(
+  'gcc-libs'
+  'glibc'
+  'hicolor-icon-theme'
+  'desktop-file-utils'
+  'ffmpeg'
+)
+makedepends=('cargo' 'git')
+optdepends=(
+  'piper-tts: narración por voz en videos'
+  'texlive-basic: export LaTeX de alta fidelidad (pdflatex)'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/Diez111/Grafito/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_NET_OFFLINE=true
+  cargo build --release --locked -p grafito-app
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_NET_OFFLINE=true
+  cargo test --release --locked -p grafito-app --lib anim
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/grafito" "$pkgdir/usr/bin/grafito"
+  install -Dm644 "packaging/debian/grafito.desktop" "$pkgdir/usr/share/applications/grafito.desktop"
+  for size in 16 32 48 64 128 256 512; do
+    install -Dm644 "assets/grafito-icon-${size}x${size}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/grafito.png"
+  done
+  install -Dm644 "assets/grafito-icon.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/grafito.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
