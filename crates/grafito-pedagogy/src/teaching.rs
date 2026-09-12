@@ -26,6 +26,8 @@ pub enum TeachingTopic {
     Ecuacion,
     Trigonometria,
     Conica,
+    Subespacio,
+    Fractal,
     General(String),
 }
 
@@ -40,6 +42,19 @@ impl TeachingTopic {
             Self::Limite
         } else if lower.contains("fracc") {
             Self::Fraccion
+        } else if lower.contains("subespacio")
+            || lower.contains("span")
+            || lower.contains("combinacion")
+            || lower.contains("combinación")
+        {
+            Self::Subespacio
+        } else if lower.contains("fractal")
+            || lower.contains("koch")
+            || lower.contains("mandelbrot")
+            || lower.contains("julia")
+            || lower.contains("autosimil")
+        {
+            Self::Fractal
         } else if lower.contains("vector") {
             Self::Vector
         } else if lower.contains("matriz")
@@ -101,6 +116,8 @@ impl TeachingTopic {
             Self::Ecuacion => "Ecuaciones".into(),
             Self::Trigonometria => "Trigonometría".into(),
             Self::Conica => "Cónicas".into(),
+            Self::Subespacio => "Subespacios".into(),
+            Self::Fractal => "Fractales".into(),
             Self::General(s) => s.clone(),
         }
     }
@@ -122,6 +139,8 @@ impl TeachingTopic {
             Self::Ecuacion => Some("sec-ec".into()),
             Self::Trigonometria => Some("sec-trig".into()),
             Self::Conica => Some("alg-conicas".into()),
+            Self::Subespacio => Some("alg-subespacios".into()),
+            Self::Fractal => Some("sec-fractales".into()),
             Self::General(_) => None,
         }
     }
@@ -535,6 +554,28 @@ impl TeachingSession {
                 TeachingStep::new("con3", "Practiquemos", "Dibujá la cónica en la pizarra y reconocé sus elementos (focos, vértices).")
                     .with_whiteboard("Pizarra cónica"),
             ],
+            TeachingTopic::Subespacio => vec![
+                TeachingStep::new("sub1", "¿Qué es un subespacio?", "Un subespacio es un conjunto de vectores cerrado bajo suma y producto por escalar: si combinás vectores del conjunto, nunca salís de él. Abajo ves verificada la combinación general.")
+                    .with_math("a*u+b*v").with_whiteboard("Plano con dos vectores generadores y su paralelogramo").with_manim("subspace").with_cue(0),
+                TeachingStep::new("sub2", "Combinación lineal y span", "El span es todo lo que podés alcanzar mezclando los generadores. Cada punto del plano es una mezcla con pesos distintos. Abajo ves verificada una mezcla concreta.")
+                    .with_math("2*u+3*v").with_whiteboard("Mezclas con pesos que barren el plano").with_manim("subspace").with_cue(5_000),
+                TeachingStep::new("sub3", "Base y dimensión", "Una base es un equipo mínimo e independiente que genera todo el subespacio; la dimensión cuenta cuántos vectores trae esa base. Independientes y justos, sin redundancia.")
+                    .with_math("u+v").with_whiteboard("Base de dos flechas independientes y su grilla").with_manim("subspace").with_cue(10_000),
+                TeachingStep::new("sub4", "Verificá la dimensión", "Si los generadores son independientes, el span llena el plano. Calculá la dimensión del span y escribila: la corregimos juntos.")
+                    .with_whiteboard("Plano con ejes u y v marcados").with_manim("subspace").with_cue(15_000)
+                    .with_final_check("Si u=(1,0) y v=(0,1), ¿cuál es la dimensión del span(u,v)?", "2"),
+            ],
+            TeachingTopic::Fractal => vec![
+                TeachingStep::new("fr1", "Autosimilitud", "Un fractal se parece a sí mismo en cada escala: cada porción repite el todo. Hacé zoom mental y la forma vuelve a aparecer. Abajo ves verificada la regla de iteración compleja.")
+                    .with_math("z^2+c").with_whiteboard("Zoom que repite la misma forma").with_manim("fractal").with_cue(0),
+                TeachingStep::new("fr2", "Iteración", "Cada paso repite la misma regla sobre el resultado anterior. En el copo, cada segmento se quiebra y la cuenta crece como potencias de cuatro. Abajo ves verificada la cuenta de la segunda vuelta.")
+                    .with_math("3*4^2").with_whiteboard("Segmento que se quiebra paso a paso").with_manim("fractal").with_cue(5_000),
+                TeachingStep::new("fr3", "Dimensión fractal", "La dimensión fractal mide cómo llena el espacio: más que una línea, menos que un plano. El copo arruga tanto el borde que su dimensión vive entre ambas. Abajo ves verificada la razón de crecimiento.")
+                    .with_math("4/3").with_whiteboard("Borde arrugado entre línea y plano").with_manim("fractal").with_cue(10_000),
+                TeachingStep::new("fr4", "Verificá el conteo", "El copo parte de pocos segmentos y cada vuelta multiplica por cuatro. Contá los segmentos tras la primera vuelta y escribí el número: lo corregimos juntos.")
+                    .with_whiteboard("Copo con segmentos numerados").with_manim("fractal").with_cue(15_000)
+                    .with_final_check("El copo parte de 3 segmentos y cada iteración multiplica por 4. ¿Cuántos hay tras 1 iteración?", "12"),
+            ],
             _ => {
                 // General — selección por complejidad, no todo a la vez
                 let is_short = original.trim().chars().count() < 24;
@@ -862,6 +903,14 @@ mod tests {
             TeachingTopic::Matriz.lo_id().as_deref(),
             Some("alg-matrices")
         );
+        assert_eq!(
+            TeachingTopic::Subespacio.lo_id().as_deref(),
+            Some("alg-subespacios")
+        );
+        assert_eq!(
+            TeachingTopic::Fractal.lo_id().as_deref(),
+            Some("sec-fractales")
+        );
         assert!(TeachingTopic::General("x".into()).lo_id().is_none());
     }
     #[test]
@@ -943,5 +992,83 @@ mod tests {
             fsm.state,
             crate::socratic::SocraticState::Summarize
         ));
+    }
+    #[test]
+    fn subespacio_y_fractal_detectan_sesion_y_remate() {
+        assert_eq!(
+            TeachingTopic::from_text("subespacio generado por u y v"),
+            TeachingTopic::Subespacio
+        );
+        assert_eq!(
+            TeachingTopic::from_text("span de dos vectores"),
+            TeachingTopic::Subespacio
+        );
+        assert_eq!(
+            TeachingTopic::from_text("combinación lineal y base"),
+            TeachingTopic::Subespacio
+        );
+        assert_eq!(
+            TeachingTopic::from_text("fractal copo de Koch"),
+            TeachingTopic::Fractal
+        );
+        assert_eq!(
+            TeachingTopic::from_text("conjunto de Mandelbrot"),
+            TeachingTopic::Fractal
+        );
+        assert_eq!(
+            TeachingTopic::from_text("autosimilitud de Julia"),
+            TeachingTopic::Fractal
+        );
+        assert_eq!(TeachingTopic::Subespacio.label(), "Subespacios");
+        assert_eq!(TeachingTopic::Fractal.label(), "Fractales");
+        let sub = TeachingSession::for_topic("subespacios y span");
+        assert_eq!(sub.topic, TeachingTopic::Subespacio);
+        assert_eq!(sub.steps.len(), 4);
+        assert!(sub
+            .steps
+            .iter()
+            .any(|st| st.manim_template.as_deref() == Some("subspace")));
+        for st in sub.steps.iter().take(3) {
+            assert!(
+                st.math_expr.is_none() || st.verified,
+                "math sin verificar en {}",
+                st.id
+            );
+        }
+        assert!(sub.steps.iter().take(3).any(|st| st.verified));
+        let sub4 = sub
+            .steps
+            .iter()
+            .find(|st| st.id == "sub4")
+            .expect("sub4 existe");
+        assert_eq!(
+            sub4.check.as_ref().expect("sub4 tiene remate").expected,
+            "2"
+        );
+        assert!(sub4.assess_final("2").expect("assess").correct);
+        assert!(!sub4.assess_final("3").expect("assess").correct);
+        let fra = TeachingSession::for_topic("fractales de Koch");
+        assert_eq!(fra.topic, TeachingTopic::Fractal);
+        assert_eq!(fra.steps.len(), 4);
+        assert!(fra
+            .steps
+            .iter()
+            .any(|st| st.manim_template.as_deref() == Some("fractal")));
+        for st in fra.steps.iter().take(3) {
+            assert!(
+                st.math_expr.is_none() || st.verified,
+                "math sin verificar en {}",
+                st.id
+            );
+        }
+        assert!(fra.steps.iter().take(3).any(|st| st.verified));
+        let fr4 = fra
+            .steps
+            .iter()
+            .find(|st| st.id == "fr4")
+            .expect("fr4 existe");
+        assert_eq!(fr4.check.as_ref().expect("fr4 tiene remate").expected, "12");
+        assert!(fr4.assess_final("12").expect("assess").correct);
+        assert!(!fr4.assess_final("16").expect("assess").correct);
     }
 }

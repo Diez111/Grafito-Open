@@ -116,6 +116,17 @@ const CONCEPT_ALLOWLIST: &[(&str, &str)] = &[
     ("matrices", "matriz"),
     ("vector", "vector"),
     ("vectores", "vector"),
+    ("subespacio", "subespacio"),
+    ("subespacios", "subespacio"),
+    ("span", "span"),
+    ("combinacion", "combinación lineal"),
+    ("combinaciones", "combinación lineal"),
+    ("fractal", "fractal"),
+    ("fractales", "fractal"),
+    ("koch", "copo de Koch"),
+    ("mandelbrot", "conjunto de Mandelbrot"),
+    ("julia", "conjunto de Julia"),
+    ("autosimilitud", "autosimilitud"),
     ("fraccion", "fracción"),
     ("fracciones", "fracción"),
     ("probabilidad", "probabilidad"),
@@ -593,5 +604,25 @@ mod tests {
         assert!(is_exploratory_request("mostrame qué podés graficar"));
         assert!(!is_exploratory_request("¿qué es la derivada de x^2?"));
         assert!(!is_exploratory_request("derivada"));
+    }
+    #[test]
+    fn extract_concept_reconoce_subespacio_y_fractal() {
+        assert_eq!(
+            extract_concept("subespacio generado por u y v"),
+            Some("subespacio".into())
+        );
+        assert_eq!(extract_concept("span de dos vectores"), Some("span".into()));
+        assert_eq!(
+            extract_concept("combinación lineal y base"),
+            Some("combinación lineal".into())
+        );
+        assert_eq!(
+            extract_concept("fractal copo de Koch"),
+            Some("fractal".into())
+        );
+        assert_eq!(
+            extract_concept("conjunto de Mandelbrot"),
+            Some("conjunto de Mandelbrot".into())
+        );
     }
 }

@@ -194,6 +194,95 @@ impl ExerciseGenerator {
                     params,
                 )
             }
+            "alg-subespacios" => {
+                // 3 variantes por seed: dimensión del span, coordenada de
+                // combinación lineal, independencia (1=sí, 0=no).
+                let mut params = BTreeMap::new();
+                match seed % 3 {
+                    0 => {
+                        params.insert("dim".to_string(), 2.0);
+                        (
+                            "Si u=(1,0) y v=(0,1), ¿cuál es la dimensión del span(u,v)?"
+                                .to_string(),
+                            "2".to_string(),
+                            ExerciseKind::Numeric,
+                            ValidatorKind::NumericTol(0.02),
+                            params,
+                        )
+                    }
+                    1 => {
+                        let a = 1 + (h0 % 3);
+                        let b = 1 + (h1 % 3);
+                        params.insert("a".to_string(), a as f64);
+                        params.insert("b".to_string(), b as f64);
+                        let prompt = format!(
+                            "Si u=(1,1) y v=(1,-1), calculá la primera coordenada de {a}*u+{b}*v"
+                        );
+                        let solution = (a + b).to_string();
+                        (
+                            prompt,
+                            solution,
+                            ExerciseKind::Numeric,
+                            ValidatorKind::NumericTol(0.02),
+                            params,
+                        )
+                    }
+                    _ => {
+                        params.insert("independientes".to_string(), 0.0);
+                        (
+                            "¿Son linealmente independientes (1,0) y (2,0)? Respondé 1=sí, 0=no"
+                                .to_string(),
+                            "0".to_string(),
+                            ExerciseKind::Numeric,
+                            ValidatorKind::NumericTol(0.02),
+                            params,
+                        )
+                    }
+                }
+            }
+            "sec-fractales" => {
+                // 3 variantes por seed: Koch tras 1 y 2 iteraciones,
+                // Sierpinski tras 2 iteraciones.
+                let mut params = BTreeMap::new();
+                match seed % 3 {
+                    0 => {
+                        params.insert("base".to_string(), 3.0);
+                        params.insert("factor".to_string(), 4.0);
+                        params.insert("iter".to_string(), 1.0);
+                        (
+                            "El copo de Koch parte de 3 segmentos y cada iteración multiplica por 4. ¿Cuántos segmentos hay tras 1 iteración?".to_string(),
+                            "12".to_string(),
+                            ExerciseKind::Numeric,
+                            ValidatorKind::NumericTol(0.02),
+                            params,
+                        )
+                    }
+                    1 => {
+                        params.insert("base".to_string(), 3.0);
+                        params.insert("factor".to_string(), 4.0);
+                        params.insert("iter".to_string(), 2.0);
+                        (
+                            "El copo de Koch parte de 3 segmentos y cada iteración multiplica por 4. ¿Cuántos segmentos hay tras 2 iteraciones?".to_string(),
+                            "48".to_string(),
+                            ExerciseKind::Numeric,
+                            ValidatorKind::NumericTol(0.02),
+                            params,
+                        )
+                    }
+                    _ => {
+                        params.insert("base".to_string(), 1.0);
+                        params.insert("factor".to_string(), 3.0);
+                        params.insert("iter".to_string(), 2.0);
+                        (
+                            "El triángulo de Sierpinski parte de 1 triángulo y cada iteración multiplica por 3. ¿Cuántos triángulos hay tras 2 iteraciones?".to_string(),
+                            "9".to_string(),
+                            ExerciseKind::Numeric,
+                            ValidatorKind::NumericTol(0.02),
+                            params,
+                        )
+                    }
+                }
+            }
             _ => {
                 // Genérico paramétrico: Si f(x)=a*x+b, evalúa en x=c
                 // a,b,c en 1..5 vía wyhash
@@ -476,6 +565,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn subespacios_y_fractales_variantes_validas_y_verificables() {
+        use crate::feedback::{FeedbackEngine, Misconception};
+        let gen = ExerciseGenerator;
+        let sub = LearningObjective::new(
+            "alg-subespacios",
+            "Subespacios",
+            "span, base, dimensión",
+            None,
+        );
+        let fra = LearningObjective::new("sec-fractales", "Fractales", "Koch", None);
+        // 3 variantes por seed: válidas, con ValidatorKind numérico y
+        // auto-evaluación correcta.
+        for seed in [0u64, 1, 2] {
+            for lo in [&sub, &fra] {
+                let ex = gen.generate_with_seed(lo, PedagogicalLevel::Secondary, seed);
+                assert!(ex.validate().is_ok(), "LO {} seed {seed}", lo.id);
+                assert!(
+                    matches!(ex.validator, ValidatorKind::NumericTol(_)),
+                    "LO {} seed {seed} debe usar NumericTol",
+                    lo.id
+                );
+                let fb = FeedbackEngine.assess(&ex, &ex.solution);
+                assert!(fb.correct, "LO {} seed {seed} no verificable", lo.id);
+            }
+        }
+        // Soluciones esperadas por variante.
+        assert_eq!(
+            gen.generate_with_seed(&sub, PedagogicalLevel::Secondary, 0)
+                .solution,
+            "2"
+        );
+        assert_eq!(
+            gen.generate_with_seed(&fra, PedagogicalLevel::Secondary, 0)
+                .solution,
+            "12"
+        );
+        assert_eq!(
+            gen.generate_with_seed(&fra, PedagogicalLevel::Secondary, 1)
+                .solution,
+            "48"
+        );
+        assert_eq!(
+            gen.generate_with_seed(&fra, PedagogicalLevel::Secondary, 2)
+                .solution,
+            "9"
+        );
+        // Misconceptions del patrón existente: signo e independencia.
+        let dim = gen.generate_with_seed(&sub, PedagogicalLevel::Secondary, 0);
+        let fb_sign = FeedbackEngine.assess(&dim, "-2");
+        assert!(!fb_sign.correct);
+        assert_eq!(fb_sign.misconception, Misconception::Sign);
+        let koch = gen.generate_with_seed(&fra, PedagogicalLevel::Secondary, 0);
+        let fb_mal = FeedbackEngine.assess(&koch, "16");
+        assert!(!fb_mal.correct);
+        assert_ne!(fb_mal.misconception, Misconception::None);
+    }
     #[test]
     fn generate_valid_todos_los_los_con_semilla() {
         use crate::curriculum::Curriculum;

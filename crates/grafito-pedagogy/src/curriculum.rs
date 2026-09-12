@@ -432,6 +432,23 @@ impl Curriculum {
                 &["transformacion", "lineal", "nucleo", "imagen", "autovalor"],
                 6.0,
             ),
+            Self::lo(
+                "alg-subespacios",
+                "Subespacios",
+                "Subespacios, span, combinación lineal, independencia, base y dimensión",
+                Some(UTNProgram::Algebra),
+                13,
+                &["alg-vectores", "alg-transformaciones"],
+                &[
+                    "subespacio",
+                    "span",
+                    "combinacion lineal",
+                    "base",
+                    "dimension",
+                    "independencia",
+                ],
+                5.0,
+            ),
         ]
     }
 
@@ -644,6 +661,24 @@ impl Curriculum {
                 ],
                 3.0,
             ),
+            Self::lo(
+                "sec-fractales",
+                "Fractales",
+                "Autosimilitud, iteración, copo de Koch y dimensión fractal intuitiva",
+                None,
+                8,
+                &["sec-area"],
+                &[
+                    "fractal",
+                    "autosimilitud",
+                    "iteracion",
+                    "koch",
+                    "dimension fractal",
+                    "secundaria",
+                    "geometria",
+                ],
+                3.0,
+            ),
         ]
     }
 
@@ -813,12 +848,12 @@ mod tests {
     #[test]
     fn all_counts() {
         assert_eq!(Curriculum::primary().len(), 5);
-        assert_eq!(Curriculum::secondary().len(), 11);
+        assert_eq!(Curriculum::secondary().len(), 12);
         assert_eq!(Curriculum::utn_am1().len(), 8);
         assert_eq!(Curriculum::utn_am2().len(), 7);
-        assert_eq!(Curriculum::utn_algebra().len(), 6);
+        assert_eq!(Curriculum::utn_algebra().len(), 7);
         assert_eq!(Curriculum::utn_probabilidad().len(), 6);
-        assert_eq!(Curriculum::all().len(), 43);
+        assert_eq!(Curriculum::all().len(), 45);
     }
     #[test]
     fn get_and_prereqs() {
@@ -878,10 +913,10 @@ mod tests {
     }
 
     #[test]
-    fn cuarenta_y_tres_los_dag_valido() {
-        // 43 LOs: 5 primaria + 11 secundaria + 8 AM1 + 7 AM2 + 6 Álgebra + 6 Prob.
+    fn cuarenta_y_cinco_los_dag_valido() {
+        // 45 LOs: 5 primaria + 12 secundaria + 8 AM1 + 7 AM2 + 7 Álgebra + 6 Prob.
         let todos = Curriculum::all();
-        assert_eq!(todos.len(), 43, "el currículum debe tener 43 LOs");
+        assert_eq!(todos.len(), 45, "el currículum debe tener 45 LOs");
         // Sin IDs duplicados.
         let mut vistos = std::collections::HashSet::new();
         for lo in &todos {
@@ -907,7 +942,7 @@ mod tests {
         }
         // Orden topológico sin ciclos y respeta aristas.
         let orden = Curriculum::topological_order().expect("sin ciclos");
-        assert_eq!(orden.len(), 43);
+        assert_eq!(orden.len(), 45);
         let mut pos: HashMap<String, usize> = HashMap::new();
         for (i, lo) in orden.iter().enumerate() {
             pos.insert(lo.id.clone(), i);
@@ -976,5 +1011,22 @@ mod tests {
                 lo.level_min
             );
         }
+    }
+    #[test]
+    fn subespacios_y_fractales_en_curriculum() {
+        let sub = Curriculum::get("alg-subespacios").expect("debe existir");
+        assert_eq!(sub.level_min, 13);
+        assert!(sub.requires.contains(&"alg-vectores".to_string()));
+        let fra = Curriculum::get("sec-fractales").expect("debe existir");
+        assert_eq!(fra.level_min, 8);
+        assert!(fra.requires.contains(&"sec-area".to_string()));
+        assert!(Curriculum::find_for_concept("subespacio")
+            .iter()
+            .any(|lo| lo.id == "alg-subespacios"));
+        assert!(Curriculum::find_for_concept("koch")
+            .iter()
+            .any(|lo| lo.id == "sec-fractales"));
+        let prereqs = Curriculum::prerequisites_for("alg-subespacios");
+        assert!(prereqs.iter().any(|p| p.id == "alg-vectores"));
     }
 }
