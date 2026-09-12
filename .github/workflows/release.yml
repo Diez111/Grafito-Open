@@ -33,17 +33,22 @@ jobs:
       - name: Validate tag, version, changelog, and ancestry
         id: version
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           package_id="$(cargo pkgid --locked --package grafito-release-tests)"
           version="${package_id##*@}"
-          tag_ref="refs/tags/$tag"
 
           [[ "$tag" == "v$version" ]] || { echo "tag $tag does not match Cargo version $version" >&2; exit 1; }
           grep -F -- "## [$version]" CHANGELOG.md >/dev/null || { echo "CHANGELOG.md has no $version entry" >&2; exit 1; }
-          git rev-parse --verify --quiet "${tag_ref}^{tag}" >/dev/null || { echo "release tag must be annotated" >&2; exit 1; }
-          tag_commit="$(git rev-parse --verify "${tag_ref}^{commit}")"
+          # actions/checkout sobrescribe refs/tags/* con el commit (refspec
+          # explícito +<sha>:refs/tags/*), así que el objeto anotado NUNCA se
+          # puede verificar en el clon local: se lee por API.
+          read -r tag_obj tag_obj_type < <(gh api "repos/${{ github.repository }}/git/refs/tags/${tag}" --jq '[.object.sha, .object.type] | @tsv')
+          [[ "$tag_obj_type" == "tag" ]] || { echo "release tag must be annotated (got $tag_obj_type)" >&2; exit 1; }
+          tag_commit="$(gh api "repos/${{ github.repository }}/git/tags/${tag_obj}" --jq .object.sha)"
           main_commit="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
 
           git merge-base --is-ancestor "$tag_commit" "$main_commit" || { echo "release tag is not on main" >&2; exit 1; }
