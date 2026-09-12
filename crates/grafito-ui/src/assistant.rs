@@ -662,21 +662,6 @@ const MEDIA_TIP_PLAY: &str = "Retoma donde quedó (Espacio)";
 const MEDIA_TIP_STEP_BACK: &str = "Fotograma anterior (<-)";
 const MEDIA_TIP_STEP_FWD: &str = "Fotograma siguiente (->)";
 
-/// Ayuda visible de intents de animación invocables por texto (M2-3/M2-4).
-///
-/// Se dibuja en la card (`draw_media_card`); el parseo lo hace otro frente
-/// (parser del chat). Los 6 formatos más calidad, fps, bitrate, 720p y órbita
-/// hoy solo viven en el diálogo: este hint los hace descubribles por texto
-/// con ejemplos («exportar mp4 720p», «órbita», «reintentar») que el parser
-/// mapea a `ExportMedia`, la vista `Orbita` del diálogo y
-/// `ExportMedia`/`ReplayMedia` respectivamente. Reproducción fija 1x: no hay
-/// intent de velocidad. NOTA DUEÑO APP: `app::anim_ui::media_chat_intent_examples`
-/// aún lista 4 ejemplos con el intent de velocidad (ver `anim_ui.rs:480` +
-/// test `:923`); actualizar ese lado (ejemplos + parser) para paridad con
-/// este hint de 3.
-pub const MEDIA_CHAT_INTENTS_HINT: &str =
-    "Pedí en el chat: «exportar mp4 720p», «órbita» o «reintentar»";
-
 /// Estado de la exportación a GIF de la card (B5).
 ///
 /// Lo actualiza la app desde el hilo de export (`spawn_gif_export`); la UI
@@ -948,7 +933,8 @@ pub const MEDIA_EXPORT_LATEX_HINT: &str = "PDF/SVG requieren LaTeX — se usa vi
 /// Motivo visible cuando SVG está deshabilitado sin `dvisvgm`.
 /// Paridad con `app::anim_native::DVISVGM_MISSING_HINT` (texto corto del diálogo).
 pub const MEDIA_EXPORT_DVISVGM_HINT: &str = "SVG requiere dvisvgm — se exporta PDF o vista nativa";
-/// Nota Tex del diálogo: SVG real con fallback `ab_glyph`.
+/// Nota Tex legacy: ya no se renderiza en el diálogo (poda: no cambia
+/// decisión ni reporta estado). Se conserva la const por paridad/tests.
 pub const MEDIA_EXPORT_TEX_NOTE: &str =
     "Tex usa SVG real; si no hay formas, fallback ab_glyph (texto visible, jamás curva inventada).";
 /// Motivo visible de la órbita sin plantilla 3D.
@@ -6668,6 +6654,26 @@ pub fn media_more_button_need() -> f32 {
     PLAYER_BTN_SQ_W
 }
 
+/// Ancho mínimo del popup del menú `···` (tokens, sin literales).
+///
+/// El popup heredaba el ancho del botón cuadrado (28px) y "Exportar" se
+/// partía en vertical letra por letra. Piso generoso por tokens
+/// (`SPACE_XXL * 3.0` = 120) que cubre "Exportar" + futuros ítems en una
+/// sola línea. Puro.
+pub const MEDIA_MORE_MENU_MIN_W: f32 = crate::tokens::SPACE_XXL * 3.0;
+
+/// Ancho mínimo del popup medido sobre el texto (puro, testeable).
+///
+/// `máx(piso por tokens, texto + padding)`: el texto manda — "Exportar"
+/// (8 chars a `TYPE_SM`) + padding `SPACE_LG * 2`. Si mañana se suma un
+/// ítem más largo, el `máx` lo cubre sin volver al wrap por caracter.
+/// Ningún estilo global angosto lo pisa: el draw llama a
+/// `ui.set_min_width` con este valor antes de pintar el ítem.
+pub fn media_more_menu_min_width() -> f32 {
+    let texto_w = "Exportar".chars().count() as f32 * TYPE_SM * 0.6 + SPACE_LG * 2.0 + SPACE_SM;
+    MEDIA_MORE_MENU_MIN_W.max(texto_w)
+}
+
 /// Disposición de la toolbar única v3 (pura y testeable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaToolbarLayout {
@@ -7488,10 +7494,16 @@ fn draw_media_more_menu(
         &boton,
         egui::popup::PopupCloseBehavior::CloseOnClickOutside,
         |ui| {
+            // Piso real: el popup heredaba el ancho del botón cuadrado y
+            // partía "Exportar" en vertical. Una sola línea, sin wrap.
+            ui.set_min_width(media_more_menu_min_width());
             let habilitado = view.frame_count > 0 && !view.exporting;
             if habilitado {
                 if ui
-                    .add_enabled(true, egui::Button::new("Exportar"))
+                    .add_sized(
+                        egui::vec2(media_more_menu_min_width(), PLAYER_BTN_H),
+                        egui::Button::new("Exportar").truncate(),
+                    )
                     .on_hover_text(MEDIA_TIP_EXPORT)
                     .clicked()
                 {
@@ -7499,11 +7511,17 @@ fn draw_media_more_menu(
                     ui.close_menu();
                 }
             } else if view.frame_count == 0 {
-                ui.add_enabled(false, egui::Button::new("Exportar"))
-                    .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+                ui.add_sized(
+                    egui::vec2(media_more_menu_min_width(), PLAYER_BTN_H),
+                    egui::Button::new("Exportar").truncate(),
+                )
+                .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
             } else {
-                ui.add_enabled(false, egui::Button::new("Exportar"))
-                    .on_disabled_hover_text("Ya se está exportando…");
+                ui.add_sized(
+                    egui::vec2(media_more_menu_min_width(), PLAYER_BTN_H),
+                    egui::Button::new("Exportar").truncate(),
+                )
+                .on_disabled_hover_text("Ya se está exportando…");
             }
         },
     );
@@ -7746,15 +7764,6 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     ui.add_space(SPACE_XS);
                     ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
                 }
-                // M2-4: ayuda visible de intents por texto (el parseo lo hace
-                // otro frente). En `Failed` no se muestra: ahí solo quedan el
-                // error honesto + [Reintentar] (P0).
-                ui.add_space(SPACE_XS);
-                ui.label(
-                    egui::RichText::new(MEDIA_CHAT_INTENTS_HINT)
-                        .color(theme.text_secondary)
-                        .size(TYPE_2XS),
-                );
             }
         });
     // Sin overlay grande: el botón ⛶ se eliminó (sin glifo se veía como □
@@ -7875,7 +7884,6 @@ pub fn export_dialog_rect(viewport_w: f32, viewport_h: f32, panel_w: f32) -> (f3
 ///   por backend (ffmpeg / LaTeX), legible con teclado y táctil.
 /// - Calidad: 3 radios + `DragValue` de bitrate/fps acotados.
 /// - Vista: Plana 2D siempre; Órbita 3D solo si la plantilla lo soporta.
-/// - Nota Tex: SVG real con fallback `ab_glyph` (siempre visible).
 /// - Progreso (`ProgressBar`/spinner) + error honesto en `theme.danger` +
 ///   nota neutra de cancelación (cancelar no es error), fuera del scroll.
 /// - Botones [Exportar][Cancelar]: Exportar valida y devuelve
@@ -7916,12 +7924,7 @@ fn draw_media_export_dialog(
         .show(ui.ctx(), |ui| {
             let theme = current_theme(ui.ctx());
             let mut dialog = state.export_dialog.borrow_mut();
-            ui.label(
-                egui::RichText::new("Exportar animación")
-                    .size(TYPE_SM)
-                    .strong(),
-            );
-            ui.add_space(SPACE_XS);
+            // Título único: el de la ventana. Sin label interno duplicado.
             // Secciones con scroll interno: jamás recorte abajo. Los botones
             // [Exportar][Cancelar] viven FUERA del scroll (siempre visibles).
             egui::ScrollArea::vertical()
@@ -8053,7 +8056,7 @@ fn draw_media_export_dialog(
                         }
                     });
                     if let Some((pw, ph)) = dialog.preset_size() {
-                        ui.label(egui::RichText::new(format!("preset {pw}x{ph}")).size(TYPE_XS));
+                        ui.label(egui::RichText::new(format!("{pw}x{ph}")).size(TYPE_XS));
                     }
                     // Tope honesto visible antes de exportar (con la alternativa).
                     if !dialog.aviso_limite().is_empty() {
@@ -8205,23 +8208,13 @@ fn draw_media_export_dialog(
                             }
                         });
                         ui.label(
-                            egui::RichText::new(format!(
-                                "Quemados {}",
-                                MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT
-                            ))
-                            .size(TYPE_2XS)
-                            .color(theme.text_tertiary)
-                            .italics(),
+                            egui::RichText::new(MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT)
+                                .size(TYPE_2XS)
+                                .color(theme.text_tertiary)
+                                .italics(),
                         );
                         ui.add_space(SPACE_XS);
                     }
-                    // ── Nota Tex (siempre visible) ──
-                    ui.label(
-                        egui::RichText::new(MEDIA_EXPORT_TEX_NOTE)
-                            .size(TYPE_2XS)
-                            .color(theme.text_tertiary)
-                            .italics(),
-                    );
                 }); // ← cierra el ScrollArea: lo de abajo siempre visible.
             ui.add_space(SPACE_XS);
             // ── Progreso + error honesto visible (fuera del scroll) ──
@@ -8255,7 +8248,6 @@ fn draw_media_export_dialog(
                 let exportar_habilitado = !dialog.exporting;
                 if ui
                     .add_enabled(exportar_habilitado, egui::Button::new("Exportar"))
-                    .on_hover_text("Exporta con la selección actual")
                     .clicked()
                 {
                     match dialog.validate_selection() {
@@ -8273,11 +8265,7 @@ fn draw_media_export_dialog(
                         dialog.mark_cancelled("se canceló la exportación");
                         pending = Some(AssistantUiAction::CancelExport);
                     }
-                } else if ui
-                    .button("Cancelar")
-                    .on_hover_text("Cierra sin exportar")
-                    .clicked()
-                {
+                } else if ui.button("Cancelar").clicked() {
                     pending = Some(AssistantUiAction::CloseExportDialog);
                     close_window = true;
                 }
@@ -13304,6 +13292,83 @@ mod tests {
     }
 
     #[test]
+    fn export_dialog_poda_sin_duplicados_ni_verbosos() {
+        // Poda con regla "si no cambia una decisión ni reporta estado, se
+        // borra": título duplicado fuera, "preset" redundante fuera, nota
+        // "Quemados requiere ffmpeg" acortada al motivo, Tex fuera del
+        // draw, tooltips verbosos de botones fuera. Errores y motivos de
+        // disabled se conservan. Responsive/scroll/botones intactos.
+        let source = include_str!("assistant.rs");
+        let draw_at = source
+            .find("fn draw_media_export_dialog(")
+            .expect("existe draw_media_export_dialog");
+        let draw_end = source[draw_at..]
+            .find("\nfn ")
+            .map(|off| draw_at + off)
+            .expect("cierra draw_media_export_dialog");
+        let draw = &source[draw_at..draw_end];
+        // Título único: solo el de la ventana, sin label interno duplicado.
+        assert_eq!(
+            draw.matches("\"Exportar animación\"").count(),
+            1,
+            "título una sola vez (ventana)"
+        );
+        // Verbosos podados.
+        assert!(!draw.contains("preset {pw}x{ph}"), "preset acortado");
+        assert!(draw.contains("{pw}x{ph}"), "tamaño sigue visible");
+        assert!(
+            !draw.contains("\"Quemados {}\""),
+            "nota quemados acortada al motivo"
+        );
+        assert!(
+            !draw.contains("Exporta con la selección actual"),
+            "tooltip verboso de Exportar fuera"
+        );
+        assert!(
+            !draw.contains("Cierra sin exportar"),
+            "tooltip verboso de Cancelar fuera"
+        );
+        // Tex fuera del draw (la const legacy sigue para paridad, sin render).
+        assert!(
+            !draw.contains("MEDIA_EXPORT_TEX_NOTE"),
+            "nota Tex fuera del diálogo"
+        );
+        // Motivos de disabled y errores sí importan: siguen visibles.
+        for motivo in [
+            "MEDIA_EXPORT_FFMPEG_HINT",
+            "MEDIA_EXPORT_LATEX_HINT",
+            "MEDIA_EXPORT_DVISVGM_HINT",
+            "MEDIA_EXPORT_ORBITA_SOLO_3D_HINT",
+            "MEDIA_EXPORT_PIPER_MISSING_HINT",
+        ] {
+            assert!(draw.contains(motivo), "motivo conservado: {motivo}");
+        }
+        // Ningún label visible duplicado exacto: cada header de sección una vez.
+        for header in [
+            "\"Formato\"",
+            "\"Calidad\"",
+            "\"Tamaño\"",
+            "\"Vista\"",
+            "\"Narración\"",
+            "\"Subtítulos\"",
+        ] {
+            assert_eq!(
+                draw.matches(header).count(),
+                1,
+                "header {header} una sola vez"
+            );
+        }
+        // Cuenta de labels reducida (baseline 25 → 23: título duplicado
+        // + nota Tex fuera).
+        let labels = draw.matches("ui.label(").count();
+        assert!(labels <= 23, "labels podados, fueron {labels}");
+        // Responsive/scroll/botones ya logrados, intactos.
+        assert!(draw.contains("ScrollArea"), "scroll interno");
+        assert!(draw.contains("\"Exportar\""), "botón Exportar");
+        assert!(draw.contains("\"Cancelar\""), "botón Cancelar");
+    }
+
+    #[test]
     fn media_export_state_arranca_ocioso_y_set_media_lo_reinicia() {
         let context = egui::Context::default();
         let mut state = AssistantPanelState::default();
@@ -13573,17 +13638,20 @@ mod tests {
     }
 
     #[test]
-    fn chat_intents_hint_muestra_los_3_ejemplos_sin_velocidad() {
-        // M2-4: el hint visible cubre los intents que el parser acepta
-        // (reproducción fija 1x: sin «velocidad 2x»). NOTA DUEÑO APP:
-        // `app::anim_ui::media_chat_intent_examples` aún lista 4: actualizar
-        // ese lado para paridad con estos 3.
-        for ejemplo in ["exportar mp4 720p", "órbita", "reintentar"] {
-            assert!(
-                MEDIA_CHAT_INTENTS_HINT.contains(ejemplo),
-                "el hint debe mostrar {ejemplo:?}: {MEDIA_CHAT_INTENTS_HINT}"
-            );
-        }
+    fn chat_intents_hint_fuera_sin_texto_al_pedo() {
+        // El hint inferior se eliminó a pedido: la card ya no lo renderiza
+        // y la const quedó huérfana (borrada).
+        // `app::anim_ui::media_chat_intent_examples` NO se toca: es vocab
+        // del parser, fuera de este target.
+        // Patrones armados por concat para no autorreferenciar el test.
+        let source = include_str!("assistant.rs");
+        let const_patron = ["MEDIA_CHAT_INTENTS", "_HINT"].concat();
+        let texto_patron = ["Pedí en el ", "chat"].concat();
+        assert!(!source.contains(&const_patron), "const huérfana borrada");
+        assert!(
+            !source.contains(&texto_patron),
+            "hint inferior fuera del render"
+        );
     }
 
     #[test]
@@ -15197,6 +15265,46 @@ mod tests {
     }
 
     #[test]
+    fn more_menu_popup_ancho_real_sin_wrap_por_caracter() {
+        // Captura: el popup heredaba el ancho del botón cuadrado (28px) y
+        // "Exportar" se partía en vertical letra por letra. El popup mide
+        // el texto + padding y pinta en una sola línea (`truncate()`).
+        assert_eq!(MEDIA_MORE_MENU_MIN_W, SPACE_XXL * 3.0);
+        let estimado =
+            "Exportar".chars().count() as f32 * TYPE_SM * 0.6 + SPACE_LG * 2.0 + SPACE_SM;
+        let piso = media_more_menu_min_width();
+        assert!(
+            piso >= estimado,
+            "popup {piso} >= texto Exportar + padding {estimado}"
+        );
+        assert!(piso >= 80.0, "piso generoso, no 28px del botón: {piso}");
+        // Sin "\n" inducido: el ítem es una sola línea.
+        assert!(!"Exportar".contains('\n'));
+        // Blindaje source: el draw fija el piso y desactiva el wrap.
+        let source = include_str!("assistant.rs");
+        let menu_at = source
+            .find("fn draw_media_more_menu(")
+            .expect("existe draw_media_more_menu");
+        let menu_end = source[menu_at..]
+            .find("\nfn ")
+            .map(|off| menu_at + off)
+            .expect("cierra draw_media_more_menu");
+        let menu = &source[menu_at..menu_end];
+        assert!(
+            menu.contains("set_min_width"),
+            "piso con set_min_width, ningún estilo angosto lo pisa"
+        );
+        assert!(
+            menu.contains("media_more_menu_min_width()"),
+            "el piso sale de la medida, no de un literal"
+        );
+        assert!(
+            menu.contains("truncate()"),
+            "una sola línea, sin wrap por caracter (truncate)"
+        );
+    }
+
+    #[test]
     fn e2_header_estado_reservado_titulo_con_tooltip() {
         // E2: `lista` arriba-derecha jamás se trunca; el título usa el resto
         // con elide + tooltip. Lo viejo usaba 32 fijos + Truncate y el título
@@ -15713,7 +15821,7 @@ mod tests {
         for visible in [
             "Fotograma anterior (<-)",
             "Fotograma siguiente (->)",
-            "preset {pw}x{ph}",
+            "{pw}x{ph}",
         ] {
             assert!(
                 source.contains(visible),
