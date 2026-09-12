@@ -6234,7 +6234,7 @@ fn draw_panel_contents(
 }
 
 /// Tarjeta en vivo mientras se genera la animación (progreso sin fricción).
-/// Copy W3 con expectativa honesta (~20 s) y [Cancelar] real (`Cancel`).
+/// Copy W3 indeterminado honesto (sin ETA inventada) y [Cancelar] real (`Cancel`).
 fn draw_animation_progress(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -6260,7 +6260,7 @@ fn draw_animation_progress(
                 ui.painter().circle_filled(rect.center(), 5.0, color);
                 ui.add_space(SPACE_XS);
                 ui.add(egui::Label::new(
-                    egui::RichText::new("Armando tu animación… ~20 s")
+                    egui::RichText::new("Armando tu animación…")
                         .color(theme.text_primary)
                         .size(TYPE_SM)
                         .strong(),
@@ -7634,8 +7634,70 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         }
     };
     let Some(index) = index else {
+        // Sin frame dibujable: tres casos honestos, jamás player vacío.
+        if !generating && frame_count == 0 {
+            // Vacío real (sin media y sin job en curso): mensaje + sugerencia,
+            // estático (sin spinner eterno ni wake en loop). El título vacío
+            // cae al fallback "Animación" de `media_elided_title`.
+            let (vacio_estado, vacio_color) = match &state.media_export {
+                MediaExportState::Idle | MediaExportState::Done => {
+                    ("sin contenido".to_owned(), theme.text_secondary)
+                }
+                _ => (status.clone(), status_color),
+            };
+            egui::Frame::none()
+                .fill(theme.input_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .rounding(RADIUS_MD)
+                .inner_margin(egui::Margin::same(SPACE_SM))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.set_min_height(assistant_media_min_side());
+                    draw_media_header(ui, &title, &vacio_estado, vacio_color);
+                    ui.add_space(SPACE_XS);
+                    ui.label(
+                        egui::RichText::new("Todavía no hay animación para mostrar.")
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                    );
+                    ui.add_space(SPACE_XS);
+                    ui.label(
+                        egui::RichText::new(
+                            "Pedí una integral, tangente, Taylor, Pitágoras, subspace o fractal.",
+                        )
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS),
+                    );
+                });
+            return action;
+        }
+        if !generating {
+            // Media presente pero texturas aún no listas (transitorio:
+            // `set_media` sube la ventana inicial): placeholder estático sin
+            // prometer tiempo y sin [Cancelar] (nada que detener).
+            egui::Frame::none()
+                .fill(theme.input_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .rounding(RADIUS_MD)
+                .inner_margin(egui::Margin::same(SPACE_SM))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.set_min_height(assistant_media_min_side());
+                    draw_media_header(ui, &title, &status, status_color);
+                    ui.add_space(SPACE_XS);
+                    ui.label(
+                        egui::RichText::new("Preparando…")
+                            .color(theme.text_tertiary)
+                            .size(TYPE_XS),
+                    );
+                });
+            ui.ctx()
+                .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
+            return action;
+        }
         // v3 generando: header + barra fina + texto + [Cancelar], todo DENTRO
-        // de la card. Nada flota sobre otros paneles.
+        // de la card. Nada flota sobre otros paneles. Progreso indeterminado
+        // honesto: sin ETA inventada (la promesa fija en segundos mentía si tardaba más).
         egui::Frame::none()
             .fill(theme.input_bg)
             .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -7650,7 +7712,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 ui.add(egui::ProgressBar::new(0.2 + 0.55 * pulse as f32).desired_height(SPACE_XS));
                 ui.add_space(SPACE_XS);
                 ui.label(
-                    egui::RichText::new("Armando tu animación… ~20 s")
+                    egui::RichText::new("Armando tu animación…")
                         .color(theme.text_secondary)
                         .size(TYPE_SM),
                 );
@@ -16305,6 +16367,42 @@ mod tests {
             !card.contains("Fotograma"),
             "el contador largo no se dibuja como etiqueta"
         );
+    }
+
+    #[test]
+    fn card_loading_sin_eta_y_vacio_honesto() {
+        // La card jamás promete tiempo en segundos (la ETA fija mentía si
+        // tardaba más: el progreso es indeterminado honesto) y el vacío real
+        // trae mensaje y sugerencia en vez de player vacío o spinner eterno.
+        let source = include_str!("assistant.rs");
+        let start = source
+            .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
+            .expect("existe draw_media_card");
+        let end = source
+            .find("fn retain_first_assistant_action")
+            .expect("existe el cierre del bloque v3");
+        let card = &source[start..end];
+        assert!(!card.contains("~20 s"), "sin ETA inventada en la card");
+        assert!(
+            card.contains("Todavía no hay animación para mostrar."),
+            "vacío honesto"
+        );
+        assert!(
+            card.contains("Pitágoras, subspace o fractal"),
+            "el vacío sugiere qué pedir"
+        );
+        assert!(
+            card.contains("sin contenido"),
+            "estado vacío, jamás 'lista' sin media"
+        );
+        let prog_start = source
+            .find("fn draw_animation_progress(")
+            .expect("existe draw_animation_progress");
+        let prog_end = source
+            .find("fn media_loop_duration_ms(")
+            .expect("cierre del progreso");
+        let prog = &source[prog_start..prog_end];
+        assert!(!prog.contains("~20 s"), "sin ETA inventada en el progreso");
     }
 
     #[test]
