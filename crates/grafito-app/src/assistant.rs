@@ -1269,16 +1269,16 @@ pub(crate) fn titulo_curado_localized(
 
 /// Cura un concepto libre a título en el idioma pedido (sin eco crudo del
 /// pedido). Normaliza UNA sola vez (`normaliza_para_match`: minúsculas sin
-/// tildes) y reusa para área/tangente/nombres — antes eran 3
-/// (2× `pedido_menciona_*` + 1× `to_lowercase`).
+/// tildes) y reusa para área/tangente/nombres.
 ///
 /// - Menciona integral/área (fuzzy: "integrela" también) → canónica integral
 ///   (el typo jamás se muestra).
 /// - Menciona tangente/derivada → pendiente; Pitágoras/Taylor/conforme por
 ///   nombre.
-/// - Resto: recortado a 80 chars, sin sufijos "(nativa)" repetidos; vacío →
-///   título por defecto del catálogo. Sin `unwrap`: índices por chars, nunca
-///   slicing por bytes.
+/// - Resto: título genérico del catálogo ("Animación"). Un concepto libre
+///   desconocido JAMÁS se muestra tal cual: un pedido deforme tipo
+///   "de otra animacion" saldría como eco crudo en la prosa
+///   ("te muestro la animación con de otra animacion"). Sin `unwrap`.
 ///
 /// Los checks de área/tangente espejan `pedido_menciona_area` y
 /// `pedido_menciona_tangente` sobre la cadena ya normalizada (paridad pineada
@@ -1310,26 +1310,15 @@ fn titulo_desde_concepto_localized(concept: &str, locale: grafito_ui::i18n::Loca
     if norm.contains("conforme") || norm.contains("conformal") {
         return t("media.title.conformal", locale).to_string();
     }
-    let mut curado = concept.trim().to_string();
-    loop {
-        let recortado = curado.trim_end();
-        if recortado.len() >= "(nativa)".len() && recortado.to_lowercase().ends_with("(nativa)") {
-            let sin_sufijo = recortado.chars().count() - "(nativa)".chars().count();
-            curado = recortado.chars().take(sin_sufijo).collect();
-        } else {
-            curado = recortado.to_string();
-            break;
-        }
-    }
+    let curado = concept.trim();
     if curado.is_empty() {
         return t("media.title.default", locale).to_string();
     }
-    const MAX_TITULO_CHARS: usize = 80;
-    if curado.chars().count() > MAX_TITULO_CHARS {
-        curado.chars().take(MAX_TITULO_CHARS).collect()
-    } else {
-        curado
-    }
+    // Sin keyword conocida el concepto libre NO se muestra jamás: un pedido
+    // deforme ("de otra animacion") saldría como eco crudo en la prosa
+    // ("te muestro la animación con de otra animacion"). Título genérico
+    // honesto del catálogo en ese caso.
+    t("media.title.default", locale).to_string()
 }
 
 /// Parte un pedido playlist "X y después Y" / "X luego Y" / "X después Y"
@@ -11452,10 +11441,11 @@ mod tests {
             titulo_curado("derivative-slope", "una derivadaa (nativa)", Some(&anim)),
             "Tangente móvil · x^2"
         );
-        // Concepto libre desconocido: curado sin sufijo duplicado.
+        // Concepto libre desconocido: título genérico, jamás eco crudo
+        // (un pedido deforme tipo "de otra animacion" no se muestra tal cual).
         assert_eq!(
             titulo_curado("universal", "fractales raros (nativa)", None),
-            "fractales raros"
+            "Animación"
         );
         // Vacío: honesto, jamás título en blanco.
         assert_eq!(titulo_curado("universal", "   ", None), "Animación");
@@ -11487,7 +11477,7 @@ mod tests {
             ("mapeo conforme", "Mapeo conforme"),
             ("conformal map", "Mapeo conforme"),
             ("tarea pendiente", "Derivada como pendiente"),
-            ("fractales raros (nativa)", "fractales raros"),
+            ("fractales raros (nativa)", "Animación"),
             ("   ", "Animación"),
         ] {
             assert_eq!(
@@ -11496,8 +11486,13 @@ mod tests {
                 "concepto: {concepto}"
             );
         }
-        // "tarea" sola NO es área (exacta por token, evita "tarea"→área).
-        assert_eq!(titulo_curado("universal", "la tarea", None), "la tarea");
+        // "tarea" sola NO es área, y un concepto libre desconocido jamás hace
+        // eco crudo: título genérico honesto.
+        assert_eq!(titulo_curado("universal", "la tarea", None), "Animación");
+        assert_eq!(
+            titulo_curado("universal", "de otra animacion", None),
+            "Animación"
+        );
     }
 
     #[test]
