@@ -1,6 +1,6 @@
 //! Subtítulos deterministas para el voiceover mínimo (P1-core).
 //!
-//! El voiceover reparte la narración de cada [`PasoGuion`](crate::guion::PasoGuion)
+//! El voiceover reparte la narración de cada [`PasoGuion`]
 //! en su ventana de tiempo; este módulo la baja a pistas de subtítulos
 //! ([`CaptionTrack`]) serializables en dos formatos:
 //! - SRT (RFC: numeración 1-based, `HH:MM:SS,mmm`, ≤2 renglones, tags escapados)

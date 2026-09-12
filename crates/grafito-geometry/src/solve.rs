@@ -368,7 +368,7 @@ fn sturm_isolate(coeffs: &[f64], degree: usize, bound: f64) -> Vec<f64> {
 fn collect_coeffs(ast: &Expr, var: &str, max_deg: usize) -> Option<Vec<f64>> {
     fn add(a: Vec<f64>, b: Vec<f64>, sign: f64, max_deg: usize) -> Option<Vec<f64>> {
         let mut out = vec![0.0; max_deg + 1];
-        for (i, (x, y)) in a.into_iter().zip(b.into_iter()).enumerate() {
+        for (i, (x, y)) in a.into_iter().zip(b).enumerate() {
             let v = x + sign * y;
             if !v.is_finite() {
                 return None;

@@ -59,6 +59,17 @@ fn gpu_context_or_skip() -> Option<GpuContext> {
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .ok_or_else(|| "no compatible adapter was found".to_string())?;
+        // Diagnóstico para CI (lavapipe vs GPU real): `eprintln` sí aparece en
+        // el log de `cargo test`, a diferencia de `log::*` (sin logger en tests).
+        // Una sola vez por proceso aunque los tests corran en paralelo.
+        static ADAPTER_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ADAPTER_LOGGED.get_or_init(|| {
+            let info = adapter.get_info();
+            eprintln!(
+                "GPU adapter for compute coverage: backend={:?} name={:?} device_type={:?} driver={:?} driver_info={:?}",
+                info.backend, info.name, info.device_type, info.driver, info.driver_info,
+            );
+        });
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
             .await

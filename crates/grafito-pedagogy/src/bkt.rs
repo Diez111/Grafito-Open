@@ -530,7 +530,7 @@ pub fn auc_score(probs: &[f64], labels: &[bool]) -> Option<f64> {
     Some((concordant / total).clamp(0.0, 1.0))
 }
 
-/// Expected Calibration Error (ECE) con `n_bins` bins uniformes en [0,1].
+/// Expected Calibration Error (ECE) con `n_bins` bins uniformes en \[0,1\].
 ///
 /// Retorna `None` si `probs.len() != labels.len()` o vacío o n_bins==0 o probs no finitos.
 /// Rango 0..1 (0 = perfectamente calibrado).

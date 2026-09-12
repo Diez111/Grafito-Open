@@ -1910,10 +1910,7 @@ fn reduce_poly_ordered(
     let mut work = p.clone();
     let mut rest = PolyMap::new();
     let mut steps = 0_usize;
-    loop {
-        let Some((lm_w, lc_w)) = leading_term_ordered(&work, order) else {
-            break;
-        };
+    while let Some((lm_w, lc_w)) = leading_term_ordered(&work, order) {
         steps += 1;
         if steps > MAX_REDUCE_STEPS {
             return Err(CasError::ResourceLimit {

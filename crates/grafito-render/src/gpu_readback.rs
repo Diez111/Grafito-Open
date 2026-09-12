@@ -25,8 +25,11 @@
 //! `owned`/`Send`, como el marching-squares del resolve implícito—.
 //!
 //! Presupuestos (ver `docs/architecture.md:8`):
-//! - [`GPU_READBACK_TIMEOUT`]: 250 ms, mismo origen único que el path
-//!   síncrono legacy (`SYNC_GPU_READBACK_TIMEOUT` en `lib.rs`).
+//! - [`GPU_READBACK_TIMEOUT`]: 250 ms de frame. El path asíncrono
+//!   (`PendingGpuReadback::submit`) y la app lo usan siempre.
+//! - [`REQUIRED_GPU_READBACK_TIMEOUT`]: 10 s para cobertura requerida. El path
+//!   síncrono legacy lo usa vía [`sync_timeout`] cuando
+//!   `GRAFITO_REQUIRE_GPU_TESTS` está seteada (CI sobre lavapipe).
 //! - [`MAX_GPU_READBACK_JOBS_IN_FLIGHT`]: 1. Si llega otro job, se descarta el
 //!   viejo por generación: nunca hay cola infinita.
 //!
@@ -47,7 +50,46 @@ use std::time::{Duration, Instant};
 
 /// Timeout de un readback GPU antes de caer al fallback CPU (honesto, acotado).
 /// Origen único del presupuesto 250 ms compartido con el path síncrono legacy.
+/// El hilo UI nunca espera más que esto por frame (ver `sync_timeout`).
 pub const GPU_READBACK_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Presupuesto extendido para cobertura requerida (`GRAFITO_REQUIRE_GPU_TESTS`).
+/// El job `gpu-compute` de CI corre sobre lavapipe (Vulkan por software,
+/// ~16× más lento que una GPU real: 11.24 s vs 0.70 s para los mismos 26
+/// tests): los 250 ms del frame interactivo expiran antes de que el driver
+/// por software termine dispatches triviales y el test reporta `None`
+/// honesto-pero-falso ("must execute on the GPU"). Con cobertura requerida
+/// no hay frame que proteger —el test PUEDE esperar— así que se le dan 10 s:
+/// un error real (fallo de compilación, validación, `map` roto) sigue
+/// devolviendo `None`/`Failed`; solo la lentitud deja de ser un falso fallo.
+/// La app sin esa env conserva los 250 ms intactos.
+pub const REQUIRED_GPU_READBACK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout efectivo del path síncrono legacy (`sync_readback_with_timeout`).
+/// Orden: override explícito `GRAFITO_GPU_READBACK_TIMEOUT_MS` (ms, entero;
+/// ignorado si ausente o inválido) > cobertura requerida (10 s) > frame (250 ms).
+/// Puro salvo lectura de env (sin panic, sin unwrap: valor inválido = ignorado).
+pub(crate) fn sync_timeout() -> Duration {
+    if let Some(ms) = std::env::var_os("GRAFITO_GPU_READBACK_TIMEOUT_MS")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|text| text.trim().parse::<u64>().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    if coverage_is_required() {
+        return REQUIRED_GPU_READBACK_TIMEOUT;
+    }
+    GPU_READBACK_TIMEOUT
+}
+
+/// ¿La cobertura GPU es requerida? Misma regla que
+/// `gpu_tests_are_required` en `tests/gpu_compute.rs`: env presente y
+/// distinta de `"0"`/`"false"`. Solo la usa el path de tests/CI; la app
+/// nunca setea esta env en producción.
+pub(crate) fn coverage_is_required() -> bool {
+    std::env::var_os("GRAFITO_REQUIRE_GPU_TESTS")
+        .is_some_and(|value| value != "0" && value != "false")
+}
 
 /// Cap de jobs de readback en vuelo: 1. Un segundo dispatch descarta el viejo
 /// por generación en vez de encolar (nunca cola infinita).
@@ -174,5 +216,109 @@ mod tests {
     fn in_flight_cap_is_one_by_budget() {
         assert_eq!(MAX_GPU_READBACK_JOBS_IN_FLIGHT, 1);
         assert_eq!(GPU_READBACK_TIMEOUT, Duration::from_millis(250));
+    }
+
+    /// El env es global del proceso y los tests corren en paralelo: este lock
+    /// serializa solo los tests que mutan `GRAFITO_REQUIRE_GPU_TESTS` /
+    /// `GRAFITO_GPU_READBACK_TIMEOUT_MS`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Fija `vars` (o las quita con `None`), corre `check` y restaura todo.
+    /// Sin unwrap: el lock envenenado se recupera con el estado parcial.
+    fn with_env(vars: &[(&str, Option<&str>)], check: impl FnOnce()) {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous: Vec<(String, Option<std::ffi::OsString>)> = vars
+            .iter()
+            .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        check();
+        for (key, value) in &previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    /// Sin env requerida, el path síncrono conserva el presupuesto de frame
+    /// (250 ms): la app nunca espera más por un readback.
+    #[test]
+    fn frame_budget_is_250ms_without_required_env() {
+        with_env(
+            &[
+                ("GRAFITO_REQUIRE_GPU_TESTS", None),
+                ("GRAFITO_GPU_READBACK_TIMEOUT_MS", None),
+            ],
+            || {
+                assert!(!coverage_is_required());
+                assert_eq!(sync_timeout(), Duration::from_millis(250));
+            },
+        );
+    }
+
+    /// Con cobertura requerida el presupuesto síncrono se extiende a 10 s
+    /// (lavapipe por software); un error real sigue fallando, solo la
+    /// lentitud deja de ser un falso "must execute on the GPU".
+    #[test]
+    fn required_env_extends_sync_budget_to_10s() {
+        for value in ["1", "true", "yes"] {
+            with_env(
+                &[
+                    ("GRAFITO_REQUIRE_GPU_TESTS", Some(value)),
+                    ("GRAFITO_GPU_READBACK_TIMEOUT_MS", None),
+                ],
+                || {
+                    assert!(coverage_is_required());
+                    assert_eq!(sync_timeout(), Duration::from_secs(10));
+                },
+            );
+        }
+    }
+
+    /// `"0"` y `"false"` desactivan lo requerido (misma regla que el harness
+    /// de `tests/gpu_compute.rs`): vuelve el presupuesto de frame.
+    #[test]
+    fn zero_and_false_keep_frame_budget() {
+        for value in ["0", "false"] {
+            with_env(
+                &[
+                    ("GRAFITO_REQUIRE_GPU_TESTS", Some(value)),
+                    ("GRAFITO_GPU_READBACK_TIMEOUT_MS", None),
+                ],
+                || {
+                    assert!(!coverage_is_required());
+                    assert_eq!(sync_timeout(), Duration::from_millis(250));
+                },
+            );
+        }
+    }
+
+    /// El override explícito en ms gana a todo (escape hatch para diagnóstico
+    /// y para simular drivers lentos); si es inválido se ignora y manda la
+    /// regla general (acá: requerida → 10 s).
+    #[test]
+    fn explicit_ms_override_wins_over_required() {
+        with_env(
+            &[
+                ("GRAFITO_REQUIRE_GPU_TESTS", Some("1")),
+                ("GRAFITO_GPU_READBACK_TIMEOUT_MS", Some("33")),
+            ],
+            || assert_eq!(sync_timeout(), Duration::from_millis(33)),
+        );
+        with_env(
+            &[
+                ("GRAFITO_REQUIRE_GPU_TESTS", Some("1")),
+                ("GRAFITO_GPU_READBACK_TIMEOUT_MS", Some("no-es-numero")),
+            ],
+            || assert_eq!(sync_timeout(), Duration::from_secs(10)),
+        );
     }
 }

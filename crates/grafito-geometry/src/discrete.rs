@@ -751,7 +751,7 @@ fn voronoi_face_cell(
                 let mut poly: Vec<Point2> = Vec::with_capacity(ring.len() + 6);
                 poly.extend_from_slice(&ring);
                 poly.push(h_out);
-                poly.extend(bbox_path_corners(h_out, h_in, bb_min, bb_max, ccw).into_iter());
+                poly.extend(bbox_path_corners(h_out, h_in, bb_min, bb_max, ccw));
                 poly.push(h_in);
                 // Dedup consecutivos exactos + cierre.
                 let mut dedup: Vec<Point2> = Vec::with_capacity(poly.len());

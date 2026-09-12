@@ -4239,7 +4239,7 @@ pub enum AssistantUiAction {
     PickExportAudio,
     /// P1-UI: quitar el audio importado del export de video.
     ///
-    /// La emite [Quitar]; la Piel ya limpió `audio_path` y la app
+    /// La emite `Quitar`; la Piel ya limpió `audio_path` y la app
     /// descarta la pista pendiente. Sin I/O ni spawn en `Ui::`.
     ClearExportAudio,
     /// P1-UI: cambiar el modo de narración del export de video.
@@ -6895,7 +6895,7 @@ pub fn media_elided_title(title: &str, max_chars: usize) -> String {
 
 /// ¿La card muestra el player (toolbar + deslizador + export)?
 ///
-/// P0: en `Failed` el player se esconde y solo quedan error + [Reintentar].
+/// P0: en `Failed` el player se esconde y solo quedan error + `Reintentar`.
 /// `Cancelled` es neutro (cancelar no es error) y conserva el player.
 /// Puro (`&Estado`), sin I/O. Lo usa `draw_media_card` y los tests.
 pub fn media_card_shows_player_controls(export: &MediaExportState) -> bool {
@@ -9443,7 +9443,7 @@ pub fn greeting_answer(text: &str) -> Option<String> {
     }
 }
 
-/// W3 — Última pregunta del usuario (borrador a salvo para [Reintentar]).
+/// W3 — Última pregunta del usuario (borrador a salvo para `Reintentar`).
 ///
 /// Pura: recorre el historial; `None` si no hay turno de usuario no vacío.
 /// El turno del usuario ya queda visible vía `begin_request`, así que el
@@ -11635,10 +11635,7 @@ fn inline_layout_job(text: &str, formats: &InlineFormats) -> egui::text::LayoutJ
 fn inline_plain_text(text: &str) -> String {
     let mut out = text.to_string();
     for (open, close) in [("**", "**"), ("__", "__"), ("`", "`")] {
-        loop {
-            let Some(start) = out.find(open) else {
-                break;
-            };
+        while let Some(start) = out.find(open) {
             let after = start + open.len();
             if let Some(rel) = out[after..].find(close) {
                 let end = after + rel;

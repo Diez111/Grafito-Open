@@ -17,6 +17,8 @@ pub const MAX_ZIP_ENTRIES: usize = 4096;
 pub const MAX_ZIP_RATIO: u64 = 100;
 pub const MAX_EXPR_CHARS: usize = 2000;
 pub const MAX_ATTR_BYTES: usize = 8192;
+pub const MAX_XML_DEPTH: u32 = 64;
+pub const MAX_XML_ATTRS_PER_ELEMENT: usize = 128;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappedObject {
     pub etiqueta: String,

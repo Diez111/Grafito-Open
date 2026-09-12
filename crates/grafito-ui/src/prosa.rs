@@ -67,7 +67,7 @@ pub fn humanize_control_name(id: &str) -> Option<&'static str> {
 /// humano. Orden longest-first (`PlayPause` antes que `Play`/`Pause`) y
 /// reemplazos en minúsculas para no re-matchear. Puro, conserva UTF-8.
 /// Además absorbe el sufijo GeoGebra `Id[param]` (ej. `Button[a]`): el
-/// modelo a veces filtra `Button` dejando `[a]` suelto ("sin botón[a]");
+/// modelo a veces filtra `Button` dejando `[a]` suelto ("sin botón\[a]");
 /// la prosa final jamás tiene corchetes (D2): queda "sin botón".
 pub fn humanize_prose_text(text: &str) -> String {
     const KNOWN_IDS: &[&str] = &[

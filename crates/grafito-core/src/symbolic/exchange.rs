@@ -553,7 +553,7 @@ pub fn pie_chart_slices(data: &[f64]) -> Result<Vec<PieSlice>, ExchangeError> {
 }
 
 /// Medida exacta de un sólido 3D (frente W4, sin registry): expone el motor
-/// [`solids`](super::solids) sin tocar comandos ni paneles.
+/// [`solids`] sin tocar comandos ni paneles.
 ///
 /// `Ok` trae `(volumen, área)` finitos con estado `"exacto"`; si el objeto no
 /// tiene forma cerrada (cuádrica, superficies) devuelve `Err::NotImplemented`

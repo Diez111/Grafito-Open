@@ -237,10 +237,9 @@ pub fn action_view_of(obj: &GeoObject) -> Option<ActionObjectView> {
         .to_string();
     let mut variable: Option<String> = None;
     for part in parts {
-        if let Some(var) = part.strip_prefix("var=") {
+        {
+            let var = part.strip_prefix("var=")?;
             variable = Some(var.to_string());
-        } else {
-            return None;
         }
     }
     let script = if kind == ActionKind::Button {

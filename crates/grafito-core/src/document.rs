@@ -3526,7 +3526,7 @@ impl Document {
     /// pasada. La piel la usa para listar sin escanear 256 capas.
     pub fn used_layers(&self) -> Vec<(u32, usize)> {
         let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
-        for (id, _) in self.objects.iter() {
+        for id in self.objects.keys() {
             *counts.entry(self.layer_of(*id)).or_default() += 1;
         }
         counts.into_iter().collect()

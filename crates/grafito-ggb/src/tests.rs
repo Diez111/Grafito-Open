@@ -1,6 +1,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Goldens F2/F3 con ZIP a mano (PK + CRC32 propio) + fuzz-friendly y presupuestos.
-use crate::{import_ggb_bytes, GGB_XML_NAME, MAX_DATA_TABLE_ROWS, MAX_ELEMS, MAX_GGB_XML_BYTES};
+use crate::{
+    import_ggb_bytes, GGB_XML_NAME, MAX_ATTR_BYTES, MAX_DATA_TABLE_ROWS, MAX_ELEMS,
+    MAX_GGB_XML_BYTES, MAX_XML_ATTRS_PER_ELEMENT, MAX_XML_DEPTH, MAX_ZIP_ENTRIES,
+};
 fn crc32_ieee(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &b in data {
@@ -644,4 +647,170 @@ fn r2_v8_zip_corrupto_se_omite_sin_panic() {
         }
     }
     let _ = found;
+}
+
+// --- Adversariales XML/ZIP: todos deben dar `Err` honesto, jamás panic/OOM/hang.
+// Payloads chicos y acotados (el rechazo ocurre pre-expansión vía DOCTYPE o por
+// cotas), sin `#[ignore]` y sin timeouts externos: las cotas son el timeout.
+#[test]
+fn adversarial_billion_laughs_rejected() {
+    let xml = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<!DOCTYPE lolz ["#,
+        r#"<!ENTITY lol "lollollollollollollollol">"#,
+        r#"<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">"#,
+        r#"<!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">"#,
+        r#"]>"#,
+        r#"<geogebra format="5.0"><construction><element type="point" label="&lol3;">"#,
+        r#"<coords x="0" y="0"/></element></construction></geogebra>"#,
+    );
+    let res = import_ggb_bytes(&ggb_with_xml(xml));
+    assert!(res.is_err(), "billion laughs debe ser rechazado");
+    if let Err(e) = res {
+        assert!(
+            format!("{e}").contains("DOCTYPE/ENTITY"),
+            "error honesto esperado, got {e}"
+        );
+    }
+}
+#[test]
+fn adversarial_xxe_file_rejected_without_exfiltration() {
+    let xml = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>"#,
+        r#"<geogebra format="5.0"><construction>"#,
+        r#"<element type="point" label="&xxe;"><coords x="0" y="0"/></element>"#,
+        r#"</construction></geogebra>"#,
+    );
+    let res = import_ggb_bytes(&ggb_with_xml(xml));
+    assert!(res.is_err(), "XXE file:///etc/passwd debe ser rechazado");
+    if let Err(e) = res {
+        let msg = format!("{e}");
+        assert!(
+            msg.contains("DOCTYPE/ENTITY"),
+            "error honesto esperado, got {e}"
+        );
+        assert!(
+            !msg.contains("root:"),
+            "el error no debe exfiltrar el archivo: {e}"
+        );
+    }
+}
+#[test]
+fn adversarial_xxe_parameter_entity_rejected() {
+    let xml = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<!DOCTYPE r [<!ENTITY % pe SYSTEM "file:///etc/passwd"> %pe;]>"#,
+        r#"<geogebra format="5.0"><construction></construction></geogebra>"#,
+    );
+    let res = import_ggb_bytes(&ggb_with_xml(xml));
+    assert!(res.is_err(), "entidad parámetro externa debe ser rechazada");
+}
+#[test]
+fn adversarial_quadratic_blowup_rejected() {
+    let entidad = "x".repeat(4000);
+    let mut refs = String::new();
+    for _ in 0..64 {
+        refs.push_str("&q;");
+    }
+    let xml = format!(
+        r#"<?xml version="1.0"?><!DOCTYPE r [<!ENTITY q "{entidad}">]><geogebra format="5.0"><construction><element type="text" label="t"><caption val="{refs}"/></element></construction></geogebra>"#
+    );
+    let res = import_ggb_bytes(&ggb_with_xml(&xml));
+    assert!(res.is_err(), "quadratic blowup debe ser rechazado");
+}
+#[test]
+fn adversarial_attr_gigante_rechazado() {
+    let grande = "A".repeat(MAX_ATTR_BYTES + 1024);
+    let xml = format!(
+        r#"{}<element type="point" label="{grande}"><coords x="0" y="0"/></element>{}"#,
+        xml_header(),
+        xml_footer()
+    );
+    let res = import_ggb_bytes(&ggb_with_xml(&xml));
+    assert!(res.is_err(), "atributo gigante debe ser rechazado");
+    if let Err(e) = res {
+        assert!(
+            format!("{e}").contains("sobredimensionado"),
+            "error honesto esperado, got {e}"
+        );
+    }
+}
+#[test]
+fn adversarial_lluvia_atributos_rechazada() {
+    let mut attrs = String::new();
+    for i in 0..(MAX_XML_ATTRS_PER_ELEMENT + 4) {
+        attrs.push_str(&format!(r#" k{i}="v""#));
+    }
+    let xml = format!(
+        r#"{}<element type="point" label="A"{attrs}><coords x="0" y="0"/></element>{}"#,
+        xml_header(),
+        xml_footer()
+    );
+    let res = import_ggb_bytes(&ggb_with_xml(&xml));
+    assert!(res.is_err(), "lluvia de atributos debe ser rechazada");
+    if let Err(e) = res {
+        assert!(
+            format!("{e}").contains("demasiados atributos"),
+            "error honesto esperado, got {e}"
+        );
+    }
+}
+#[test]
+fn adversarial_profundidad_excesiva_rechazada() {
+    let niveles: usize = 72;
+    assert!(
+        u32::try_from(niveles).unwrap_or(0) > MAX_XML_DEPTH,
+        "el test debe superar MAX_XML_DEPTH ({MAX_XML_DEPTH})"
+    );
+    let mut xml = xml_header();
+    for _ in 0..niveles {
+        xml.push_str("<n>");
+    }
+    for _ in 0..niveles {
+        xml.push_str("</n>");
+    }
+    xml.push_str(&xml_footer());
+    let res = import_ggb_bytes(&ggb_with_xml(&xml));
+    assert!(res.is_err(), "profundidad excesiva debe ser rechazada");
+    if let Err(e) = res {
+        assert!(
+            format!("{e}").contains("profundidad"),
+            "error honesto esperado, got {e}"
+        );
+    }
+}
+#[test]
+fn adversarial_zip_muchas_entradas_rechazado() {
+    // Bomba-ZIP ligera: 1 XML válido + relleno hasta superar MAX_ZIP_ENTRIES.
+    // Debe fallar por cota de entradas, sin descomprimir nada pesado.
+    let xml = format!("{}{}", xml_header(), xml_footer());
+    let filler: &[u8] = b"x";
+    let mut owned: Vec<String> = Vec::with_capacity(MAX_ZIP_ENTRIES + 1);
+    owned.push(GGB_XML_NAME.to_string());
+    for i in 0..MAX_ZIP_ENTRIES {
+        owned.push(format!("relleno_{i}.txt"));
+    }
+    let mut files: Vec<(&str, &[u8])> = Vec::with_capacity(owned.len());
+    for (idx, name) in owned.iter().enumerate() {
+        let data: &[u8] = if idx == 0 { xml.as_bytes() } else { filler };
+        files.push((name.as_str(), data));
+    }
+    let res = import_ggb_bytes(&build_zip_store(&files));
+    assert!(res.is_err(), "exceso de entradas ZIP debe ser rechazado");
+    if let Err(e) = res {
+        assert!(
+            format!("{e}").contains(&MAX_ZIP_ENTRIES.to_string()),
+            "error honesto esperado, got {e}"
+        );
+    }
+}
+#[test]
+fn adversarial_parsear_rechaza_doctype_sin_zip() {
+    // Defensa en profundidad: `parsear` rechaza DOCTYPE aunque se saltee el
+    // filtro de `zip_read` (llamada directa, sin ZIP de por medio).
+    let xml = b"<?xml version=\"1.0\"?><!DOCTYPE x [<!ENTITY a \"b\">]>\
+        <geogebra format=\"5.0\"><construction></construction></geogebra>";
+    let res = crate::parse::parsear(xml);
+    assert!(res.is_err(), "parsear debe rechazar DOCTYPE directo");
 }

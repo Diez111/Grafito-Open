@@ -521,7 +521,7 @@ pub fn tool_slug(tool: Tool) -> &'static str {
 ///
 /// Las 11 de F3a aún sin entrada en el catálogo i18n (fuera de alcance:
 /// el reducer sincroniza i18n + docs) resuelven por fallback a la etiqueta
-/// estática de `GROUP_*` vía [`entry_display_name`], nunca vacío.
+/// estática de `GROUP_*` vía `entry_display_name`, nunca vacío.
 pub const ALL_TOOLS: &[Tool; 87] = &[
     Tool::Select,
     Tool::Point,

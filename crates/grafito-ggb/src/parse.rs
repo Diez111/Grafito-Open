@@ -1,7 +1,7 @@
 //! Parseo en streaming de `geogebra.xml` con `quick-xml`.
 use crate::error::GgbError;
 use crate::model::{Construccion, GgbComando, GgbElemento, GgbExpresion, ItemOrden};
-use crate::{MAX_ATTR_BYTES, MAX_ELEMS};
+use crate::{MAX_ATTR_BYTES, MAX_ELEMS, MAX_XML_ATTRS_PER_ELEMENT, MAX_XML_DEPTH};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
@@ -32,11 +32,16 @@ fn es_celda_hoja(etiqueta: &str) -> bool {
     true
 }
 pub(crate) fn parsear(xml: &[u8]) -> Result<Construccion, GgbError> {
+    // Fail-closed ante XML hostil: `quick-xml` no expande DTD ni entidades
+    // externas (los eventos `DocType` se ignorarían), pero se rechaza el
+    // DOCTYPE explícito aquí y en `zip_read` para no depender de un solo punto.
+    rechazar_doctype(xml)?;
     let mut lector = Reader::from_reader(xml);
     lector.config_mut().trim_text(true);
     let mut c = Construccion::default();
     let mut en_construccion = false;
     let mut conteo: usize = 0;
+    let mut profundidad: u32 = 0;
     let mut prof_cas: u32 = 0;
     let mut elem: Option<GgbElemento> = None;
     let mut cmd: Option<GgbComando> = None;
@@ -50,6 +55,12 @@ pub(crate) fn parsear(xml: &[u8]) -> Result<Construccion, GgbError> {
         match evento {
             Event::Eof => break,
             Event::Start(ref e) => {
+                profundidad = profundidad.saturating_add(1);
+                if profundidad > MAX_XML_DEPTH {
+                    return Err(GgbError::XmlMalformado {
+                        detalle: format!("profundidad XML excede {MAX_XML_DEPTH} niveles"),
+                    });
+                }
                 manejar_apertura(
                     e,
                     &mut c,
@@ -62,6 +73,11 @@ pub(crate) fn parsear(xml: &[u8]) -> Result<Construccion, GgbError> {
                 )?;
             }
             Event::Empty(ref e) => {
+                if profundidad.saturating_add(1) > MAX_XML_DEPTH {
+                    return Err(GgbError::XmlMalformado {
+                        detalle: format!("profundidad XML excede {MAX_XML_DEPTH} niveles"),
+                    });
+                }
                 manejar_apertura(
                     e,
                     &mut c,
@@ -74,6 +90,7 @@ pub(crate) fn parsear(xml: &[u8]) -> Result<Construccion, GgbError> {
                 )?;
             }
             Event::End(ref e) => {
+                profundidad = profundidad.saturating_sub(1);
                 let qname = e.name();
                 let nombre: &str = qname.as_ref();
                 match nombre {
@@ -136,6 +153,22 @@ fn manejar_apertura(
 ) -> Result<(), GgbError> {
     let qname = e.name();
     let nombre: &str = qname.as_ref();
+    // Cota anti-quadratic-blowup por elemento: falla antes de normalizar
+    // valores cuando un tag trae una lluvia de atributos.
+    let mut n_attrs: usize = 0;
+    for resultado in e.attributes() {
+        resultado.map_err(|e| GgbError::XmlMalformado {
+            detalle: GgbError::recorta(&e.to_string()),
+        })?;
+        n_attrs = n_attrs.saturating_add(1);
+        if n_attrs > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+    }
     if *prof_cas > 0 {
         return Ok(());
     }
@@ -421,4 +454,22 @@ fn io_attrs(e: &BytesStart<'_>) -> Result<Vec<String>, GgbError> {
     }
     pares.sort_by_key(|(i, _)| *i);
     Ok(pares.into_iter().map(|(_, v)| v).collect())
+}
+fn rechazar_doctype(xml: &[u8]) -> Result<(), GgbError> {
+    // Defensa en profundidad junto a `zip_read::extraer`: `quick-xml` 0.42 con
+    // `default-features = false` no expande DTD ni entidades externas (el
+    // lector solo emite `DocType` como evento, que este parser ignora), pero
+    // un `<!DOCTYPE` explícito se rechaza fail-closed sin llegar a parsear.
+    if contiene(xml, b"<!DOCTYPE") || contiene(xml, b"<!ENTITY") {
+        return Err(GgbError::XmlMalformado {
+            detalle: "DOCTYPE/ENTITY rechazado (bomba de entidades)".to_string(),
+        });
+    }
+    Ok(())
+}
+fn contiene(hay: &[u8], aguja: &[u8]) -> bool {
+    if aguja.is_empty() || hay.len() < aguja.len() {
+        return false;
+    }
+    hay.windows(aguja.len()).any(|v| v == aguja)
 }

@@ -142,6 +142,49 @@ identities, and expires automatically. Remove both IDs from
 compatible parent release lands. Re-review immediately if that boundary fails,
 XML parsing is added to application code, or either advisory is revised.
 
+### Reviewed direct quick-xml 0.42 dependency in grafito-ggb
+
+`crates/grafito-ggb` declares `quick-xml 0.42` directly (pinned `0.42`, locked
+`0.42.0` in `Cargo.lock`) with `default-features = false`. This is the only
+workspace manifest allowed to do so; the CI policy
+(`.github/scripts/verify_advisory_exceptions.py`,
+`REVIEWED_DIRECT_DEPENDENCIES`) fails closed on any other direct declaration,
+on version drift outside `0.42.x`, on a non-crates.io source, and on or after
+the expiry below.
+
+| Field | Value |
+| --- | --- |
+| Owner | Grafito maintainers (security contact above) |
+| Reviewed | 2026-09-12 |
+| CI expiry | 2026-12-31; CI fails on and after this date |
+| Removal condition | Untrusted XML is no longer parsed, or the crate is replaced/audited anew |
+
+Secure configuration (why XXE / billion-laughs cannot fire):
+
+- Streaming pull parser only: `Reader::from_reader` over the size-capped
+  `geogebra.xml` buffer; no DOM, no schema validation, no network access.
+- `quick-xml` 0.42 never expands DTD internal/external entities by itself:
+  custom entities resolve only through a caller-supplied resolver, and this
+  code supplies none — attribute normalization expands only the five
+  predefined entities plus character references and returns `Err` on unknown
+  references. `DocType`/`Comment`/`PI`/`Text` events fall into the ignored `_`
+  arm of the event loop (`crates/grafito-ggb/src/parse.rs`).
+- Fail-closed explicit rejection: any `<!DOCTYPE` / `<!ENTITY` byte sequence
+  is rejected with `DOCTYPE/ENTITY rechazado` both at ZIP extraction
+  (`zip_read.rs::rechazar_doctype`) and at parse entry (`parse.rs`), so a
+  future caller that skips the ZIP layer stays safe.
+- Bounds: file 64 MiB / XML 10 MiB / ZIP entries 4096 / compression ratio 100
+  with `checked_mul` (`zip_read.rs`, `lib.rs`); elements 5000, attribute
+  values 8 KiB, attributes per element 128, command I/O attrs 64, XML depth
+  64, expressions 2000 chars (`parse.rs`, `lib.rs`, `map.rs`).
+
+Adversarial coverage (`crates/grafito-ggb/src/tests.rs`, all asserting honest
+`Err`, none `#[ignore]`, all bounded payloads): billion laughs, XXE
+`file:///etc/passwd` (also asserting no `root:` exfiltration in the error),
+external parameter entity, quadratic blowup, oversized attribute, attribute
+flood, excessive nesting depth, ZIP entry flood past `MAX_ZIP_ENTRIES`, and a
+direct-`parsear` DOCTYPE rejection proving defense in depth.
+
 Repository branch-protection rules, reviewer requirements, and commit-signing
 requirements are configured in GitHub repository settings and cannot be
 enforced or attested by this file.

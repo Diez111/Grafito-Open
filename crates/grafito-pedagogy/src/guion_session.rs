@@ -5,7 +5,7 @@
 //! `id "g{i}"`, `explanation` como join de textos, `manim_template`
 //! `"guion:{i}/{n}"`, `math_expr` = primera verificada (vía
 //! [`verify_math_expr`]; si ninguna parsea → `None`, el paso se conserva),
-//! `cue_ms` tomado de [`Playlist::schedule`] (NO cues manuales: el paso del
+//! `cue_ms` tomado de `Playlist::schedule` (NO cues manuales: el paso del
 //! acto arranca donde el schedule dice) y `frame_range` como partición del
 //! total de frames del guion (`[acc, acc+frames_acto)`).
 //!

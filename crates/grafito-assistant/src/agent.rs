@@ -2437,7 +2437,7 @@ fn run_command_tool(call: &ToolCall) -> ToolResult {
 }
 
 /// Nombres canónicos de `solid_measure_3d` (los alias es/en se normalizan en
-/// [`solid_tipo_canonico`]).
+/// `solid_tipo_canonico`).
 pub const SOLID_MEASURE_TIPOS: [&str; 9] = [
     "esfera",
     "cubo",

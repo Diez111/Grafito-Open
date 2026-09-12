@@ -861,8 +861,8 @@ pub const SCENE_PARAM_SPAN: &str = "span";
 pub const SCENE_PARAM_A: &str = "a";
 /// Clave de la cota superior del área (integral-area).
 pub const SCENE_PARAM_B: &str = "b";
-/// Clave del nº máximo de parciales/armónicos (euler [1,7] / fourier [1,6])
-/// y del orden del polinomio (`taylor-series` [1,7] vía `taylor_anim_order`).
+/// Clave del nº máximo de parciales/armónicos (euler \[1,7\] / fourier \[1,6\])
+/// y del orden del polinomio (`taylor-series` \[1,7\] vía `taylor_anim_order`).
 pub const SCENE_PARAM_TERMS: &str = "terms";
 
 /// Orden mínimo del `taylor-series` animado (F1).

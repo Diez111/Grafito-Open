@@ -1811,7 +1811,7 @@ fn area_anim(
 /// - Sin expresión (ni tras `=` ni suelta) → `Canonica` (`x^2` en `[0,2]`,
 ///   o el rango pedido si lo trae).
 /// - Con expresión evaluable (constantes incluidas, con `=` o suelta como
-///   "integral x³ [0,2]") → `Explicita`.
+///   "integral x³ \[0,2\]") → `Explicita`.
 /// - Con prosa sin `x` no evaluable ("F=m*a") → se ignora la prosa y va
 ///   `Canonica` (no era una función).
 /// - Con `x` no evaluable en ningún punto ("foo(x)") → `Err` honesto
@@ -1834,10 +1834,8 @@ pub fn infer_area_anim(pedido: &str) -> ParametricResult<AreaPedido> {
     let normalizado = normaliza_superscripts(text_original);
     let text: &str = &normalizado;
     let lower = text.to_lowercase();
-    let (param_raw, p0, p1) = extract_range(text).map_or_else(
-        || (String::new(), INTEGRAL_CANONICAL_P0, INTEGRAL_CANONICAL_P1),
-        |(nombre, a, b)| (nombre, a, b),
-    );
+    let (param_raw, p0, p1) = extract_range(text)
+        .unwrap_or_else(|| (String::new(), INTEGRAL_CANONICAL_P0, INTEGRAL_CANONICAL_P1));
     let expr: String = match extract_single_expr(text) {
         Some(expr) => expr,
         None => match extract_bare_expr(text, &param_raw, p0, p1) {
@@ -1999,10 +1997,8 @@ pub fn infer_tangent_anim(pedido: &str) -> ParametricResult<TangentPedido> {
     let normalizado = normaliza_superscripts(text_original);
     let text: &str = &normalizado;
     let lower = text.to_lowercase();
-    let (param_raw, p0, p1) = extract_range(text).map_or_else(
-        || (String::new(), TANGENT_CANONICAL_P0, TANGENT_CANONICAL_P1),
-        |(nombre, a, b)| (nombre, a, b),
-    );
+    let (param_raw, p0, p1) = extract_range(text)
+        .unwrap_or_else(|| (String::new(), TANGENT_CANONICAL_P0, TANGENT_CANONICAL_P1));
     let expr: String = match extract_single_expr(text) {
         Some(expr) => expr,
         None => match extract_bare_expr(text, &param_raw, p0, p1) {

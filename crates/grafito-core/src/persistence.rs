@@ -671,9 +671,9 @@ fn create_temporary_file(
 /// 1. Al arranque con ruta conocida `P`: llamar `load_autosave_candidate(P)`;
 ///    si `Some(c)`, diálogo modal "Se encontró un autosave más nuevo
 ///    (sidecar {c.sidecar_modified_epoch} > documento
-///    {c.main_modified_epoch:?})" con [Recuperar autosave] (cargar
-///    `c.document`, luego borrar el sidecar) y [Descartar] (borrar sidecar,
-///    cargar `P`). Si `Err`, diálogo de sidecar corrupto con [Descartar].
+///    {c.main_modified_epoch:?})" con `Recuperar autosave` (cargar
+///    `c.document`, luego borrar el sidecar) y `Descartar` (borrar sidecar,
+///    cargar `P`). Si `Err`, diálogo de sidecar corrupto con `Descartar`.
 /// 2. En cada edición: `AutosaveDebouncer::mark_dirty(now)`; en el tick de la
 ///    UI, si `should_autosave(now)` → `write_autosave_sidecar(&doc, P)` en
 ///    background thread + `mark_saved()`. Nunca I/O en `Ui::`.

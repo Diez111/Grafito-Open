@@ -4849,7 +4849,7 @@ impl GrafitoApp {
                             let plantilla_efectiva: String = match template_crudo {
                                 None if concept.is_empty() => "derivative-slope".to_string(),
                                 None => plantilla_para_pedido(concept).to_string(),
-                                Some(crudo)
+                                Some(_)
                                     if grafito_anim::parametric::pedido_menciona_area(concept) =>
                                 {
                                     "integral-area".to_string()

@@ -37,6 +37,15 @@ FORBIDDEN_WORKSPACE_DEPENDENCIES = {
 REQUIRED_PROC_MACROS = {
     "zbus-lockstep-macros@0.4.4",
 }
+REVIEWED_DIRECT_DEPENDENCIES = (
+    {
+        "workspace": "grafito-ggb",
+        "dependency": "quick-xml",
+        "version_prefix": "0.42.",
+        "reason": "Streaming-only GeoGebra XML import with explicit DOCTYPE/ENTITY rejection and byte/element/depth bounds; see .github/SECURITY.md.",
+        "expires": date(2026, 12, 31),
+    },
+)
 POLICY_SCRIPT = ".github/scripts/verify_advisory_exceptions.py"
 CHECK_INVOCATION = f"python3 {POLICY_SCRIPT} check"
 AUDIT_INVOCATION = f"python3 {POLICY_SCRIPT} audit"
@@ -177,6 +186,99 @@ def find_forbidden_workspace_declarations(metadata: dict) -> list[str]:
                 f"(optional={dependency.get('optional', False)}, kind={kind}, target={target})"
             )
     return sorted(violations)
+
+
+def _is_reviewed_direct_declaration(
+    package_name: str, dependency_name: str, metadata: dict, *, today: date
+) -> bool:
+    for entry in REVIEWED_DIRECT_DEPENDENCIES:
+        if entry["workspace"] != package_name:
+            continue
+        if entry["dependency"] != dependency_name:
+            continue
+        if today >= entry["expires"]:
+            continue
+        locked = [
+            package
+            for package in metadata["packages"]
+            if package["name"] == dependency_name
+            and isinstance(package.get("version"), str)
+            and package["version"].startswith(entry["version_prefix"])
+        ]
+        if not locked:
+            continue
+        if any(package.get("source") != CRATES_IO_SOURCE for package in locked):
+            continue
+        return True
+    return False
+
+
+def find_unreviewed_forbidden_workspace_declarations(
+    metadata: dict, *, today: date | None = None
+) -> list[str]:
+    current_date = today or date.today()
+    workspace_ids = set(metadata["workspace_members"])
+    unreviewed = []
+    for package in metadata["packages"]:
+        if package["id"] not in workspace_ids:
+            continue
+        for dependency in package.get("dependencies", []):
+            if dependency["name"] not in FORBIDDEN_WORKSPACE_DEPENDENCIES:
+                continue
+            if _is_reviewed_direct_declaration(
+                package["name"], dependency["name"], metadata, today=current_date
+            ):
+                continue
+            kind = dependency.get("kind") or "normal"
+            target = dependency.get("target") or "*"
+            unreviewed.append(
+                f"{package['name']} declares {dependency['name']} "
+                f"(optional={dependency.get('optional', False)}, kind={kind}, target={target})"
+            )
+    return sorted(unreviewed)
+
+
+def assert_reviewed_direct_dependencies(
+    metadata: dict, *, today: date | None = None
+) -> None:
+    current_date = today or date.today()
+    workspace_ids = set(metadata["workspace_members"])
+    workspace_names = {
+        package["name"] for package in metadata["packages"] if package["id"] in workspace_ids
+    }
+    declared = {
+        (package["name"], dependency["name"])
+        for package in metadata["packages"]
+        if package["id"] in workspace_ids
+        for dependency in package.get("dependencies", [])
+    }
+    for entry in REVIEWED_DIRECT_DEPENDENCIES:
+        label = f"{entry['workspace']} -> {entry['dependency']} {entry['version_prefix']}*"
+        if current_date >= entry["expires"]:
+            raise PolicyError(
+                f"reviewed direct dependency {label} expired on {entry['expires']}"
+            )
+        if entry["workspace"] not in workspace_names:
+            raise PolicyError(
+                f"reviewed direct dependency {label} has no workspace member"
+            )
+        if (entry["workspace"], entry["dependency"]) not in declared:
+            raise PolicyError(
+                f"reviewed direct dependency {label} is not declared"
+            )
+        locked = [
+            package
+            for package in metadata["packages"]
+            if package["name"] == entry["dependency"]
+            and isinstance(package.get("version"), str)
+            and package["version"].startswith(entry["version_prefix"])
+            and package.get("source") == CRATES_IO_SOURCE
+        ]
+        if not locked:
+            raise PolicyError(
+                f"reviewed direct dependency {label} is stale: "
+                "no locked crates.io package matches"
+            )
 
 
 def _semver_key(version: str) -> _SemVerKey:
@@ -366,12 +468,15 @@ def validate_policy(repo_root: Path, *, today: date | None = None) -> None:
     validate_workflow_text(workflow_text)
 
     metadata = load_metadata(repo_root)
-    declaration_violations = find_forbidden_workspace_declarations(metadata)
+    declaration_violations = find_unreviewed_forbidden_workspace_declarations(
+        metadata, today=current_date
+    )
     if declaration_violations:
         raise PolicyError(
             "workspace manifests declare reviewed XML dependencies: "
             + "; ".join(declaration_violations)
         )
+    assert_reviewed_direct_dependencies(metadata, today=current_date)
     assert_expected_ancestor_edges(
         metadata,
         EXPECTED_ANCESTOR_EDGES,

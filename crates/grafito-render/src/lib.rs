@@ -71,20 +71,16 @@ const TRANSFORMED_CACHE_CAP: usize = 64;
 const TRANSFORMED_CACHE_SIZE: std::num::NonZeroUsize =
     unsafe { std::num::NonZeroUsize::new_unchecked(TRANSFORMED_CACHE_CAP) };
 
-/// Timeout for synchronous GPU readbacks. The caller already bounds this to
-/// one attempt per frame via `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` in
-/// canvas.rs, so a bounded poll here only guards against a hung GPU freezing
-/// the prepare thread indefinitely.
-///
-/// Origen único en [`gpu_readback::GPU_READBACK_TIMEOUT`]: el path asíncrono
-/// (`PendingGpuReadback`) comparte el mismo presupuesto 250 ms.
-const SYNC_GPU_READBACK_TIMEOUT: std::time::Duration = gpu_readback::GPU_READBACK_TIMEOUT;
-
 /// Bounded synchronous readback: wraps `map_async` + `poll` in
 /// `pollster::block_on` with a timeout. Uses `wgpu::Maintain::Poll` (non
 /// blocking) in a loop instead of `Maintain::Wait`, so a stuck GPU cannot
 /// block the prepare thread forever. Returns `true` if the buffer was mapped
 /// before the deadline.
+///
+/// El deadline sale de [`gpu_readback::sync_timeout`]: 250 ms de frame salvo
+/// cobertura requerida (10 s en lavapipe; un error real sigue devolviendo
+/// `false`, solo la lentitud del software deja de ser un falso fallo).
+/// El path asíncrono (`PendingGpuReadback`) conserva siempre los 250 ms.
 ///
 /// Path síncrono legacy: solo para callers sin slot background (tests,
 /// `evaluate_*` directos). El prepare 2D usa `PendingGpuReadback` (ver
@@ -96,12 +92,13 @@ pub(crate) fn sync_readback_with_timeout(
     map_ok: &std::sync::atomic::AtomicBool,
 ) -> bool {
     pollster::block_on(async {
-        let deadline = std::time::Instant::now() + SYNC_GPU_READBACK_TIMEOUT;
+        let timeout = crate::gpu_readback::sync_timeout();
+        let deadline = std::time::Instant::now() + timeout;
         while !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
             if std::time::Instant::now() >= deadline {
                 log::warn!(
                     "GPU readback timed out after {:?}; falling back to CPU (1 intento por frame)",
-                    SYNC_GPU_READBACK_TIMEOUT
+                    timeout
                 );
                 return false;
             }

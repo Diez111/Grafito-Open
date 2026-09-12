@@ -5361,7 +5361,7 @@ fn render_integral_frames_with_params_impl(
             }
         }
         // Cota móvil vertical en `x_end`: línea (DOT_BLUE), jamás un punto.
-        let y_end = integral_eval(anim_ref, frame, x_end).map_or(0.0, |v| v);
+        let y_end = integral_eval(anim_ref, frame, x_end).unwrap_or(0.0);
         draw_line(
             &mut buf,
             w,
@@ -8145,7 +8145,7 @@ pub fn render_parametric_frames_con_updater(
                         draw_line(&mut buf, w, h, base, top, FILL_SOFT_BLUE);
                     }
                 }
-                let y_b = anim.eval_frame_con_vivo(frame, b, vivo).map_or(0.0, |v| v);
+                let y_b = anim.eval_frame_con_vivo(frame, b, vivo).unwrap_or(0.0);
                 draw_line(
                     &mut buf,
                     w,
