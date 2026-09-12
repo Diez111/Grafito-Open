@@ -4668,17 +4668,32 @@ fn document_lifecycle_non_utf8_document_paths_are_not_lossy() {
     let mut file_name = format!("grafito-non-utf8-{}-", std::process::id()).into_bytes();
     file_name.extend_from_slice(&[0xff, b'.', b'j', b's', b'o', b'n']);
     let path = std::env::temp_dir().join(std::ffi::OsString::from_vec(file_name));
-    grafito_core::write_document_atomic(&document, &path).expect("write non-UTF-8 fixture");
+    match grafito_core::write_document_atomic(&document, &path) {
+        Ok(()) => {
+            let loaded = crate::app::load_document_candidate(&path);
+            let _ = std::fs::remove_file(&path);
 
-    let loaded = crate::app::load_document_candidate(&path);
-    let _ = std::fs::remove_file(path);
-
-    assert_eq!(
-        loaded
-            .expect("non-UTF-8 path should load")
-            .get_variable("non_utf8"),
-        Some(9.0)
-    );
+            assert_eq!(
+                loaded
+                    .expect("non-UTF-8 path should load")
+                    .get_variable("non_utf8"),
+                Some(9.0)
+            );
+        }
+        // macOS (APFS) rechaza nombres no-UTF-8 a nivel OS (EILSEQ): no hay
+        // roundtrip posible y lo honesto es verificar el fallo limpio (sin
+        // pánico, sin archivo a medias), no ignorar el test.
+        Err(error) => {
+            if cfg!(target_os = "macos") {
+                assert!(
+                    !path.exists(),
+                    "no debe quedar archivo a medias tras el rechazo del OS"
+                );
+            } else {
+                panic!("write non-UTF-8 fixture falló en plataforma que lo soporta: {error:?}");
+            }
+        }
+    }
 }
 
 #[test]
