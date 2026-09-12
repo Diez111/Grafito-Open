@@ -2475,3 +2475,70 @@ mod tests {
         assert!(parsed.validate().is_ok());
     }
 }
+#[cfg(test)]
+mod coverage_sweep_budgets {
+    use super::*;
+    #[test]
+    fn barrido_request_budget_valida_rangos() {
+        assert!(RequestBudget::default().validate().is_ok());
+        let b = RequestBudget {
+            max_input_chars: 0,
+            ..RequestBudget::default()
+        };
+        assert!(b.validate().is_err());
+        let b = RequestBudget {
+            timeout_ms: 50,
+            ..RequestBudget::default()
+        };
+        assert!(b.validate().is_err());
+        let b = RequestBudget {
+            max_steps: 0,
+            ..RequestBudget::default()
+        };
+        assert!(b.validate().is_err());
+    }
+    #[test]
+    fn barrido_attachment_limits_y_turnos() {
+        let limits = AttachmentLimits::default();
+        let ok = ImageAttachment::new("image/png", vec![0; 8], 2, 2);
+        assert!(ok.validate(&limits).is_ok());
+        let over_bytes = ImageAttachment::new("image/png", vec![0; limits.max_bytes + 1], 2, 2);
+        assert!(over_bytes.validate(&limits).is_err());
+        let t = ConversationTurn::user("hola");
+        assert!(t.validate().is_ok());
+        let t = ConversationTurn::assistant("mundo");
+        assert!(t.validate().is_ok());
+        let mut conv = vec![
+            ConversationTurn::user("a"),
+            ConversationTurn::assistant("b"),
+        ];
+        trim_conversation(&mut conv);
+        assert!(!conv.is_empty());
+        let mut conv = vec![ConversationTurn::user("a")];
+        assert!(attach_turn_media(
+            &mut conv,
+            0,
+            TurnMediaRef::new("t", "tpl", "c", vec![1, 2, 3], 1)
+        )
+        .is_ok());
+        assert_eq!(turn_media_map(&conv).len(), 1);
+        retain_full_frames_for_last_n(&mut conv, 1);
+        enforce_full_frames_cap(&mut conv);
+    }
+    #[test]
+    fn barrido_contexto_y_reparacion() {
+        let ctx = ImmutableDocumentContext::empty(3);
+        assert!(ctx.validate().is_ok());
+        let ctx = ImmutableDocumentContext::from_variables(1, [("x".to_string(), 1.0)]);
+        assert!(ctx.validate().is_ok());
+        let f = AssistantRepairFailure {
+            command: "Point".to_string(),
+            kind: AssistantRepairFailureKind::InvalidSyntax,
+            expected_syntax: vec!["Point[(x, y)]".to_string()],
+        };
+        assert!(f.validate().is_ok());
+        let fb = AssistantRepairFeedback { failures: vec![f] };
+        assert!(fb.validate().is_ok());
+        assert!(!fb.prompt_text().is_empty());
+    }
+}

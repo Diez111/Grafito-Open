@@ -1873,3 +1873,22 @@ mod autocomplete_budget_tests {
         assert_eq!(MAX_DOCUMENT_AUTOCOMPLETE_CANDIDATES, 64);
     }
 }
+#[cfg(test)]
+mod coverage_sweep_chrome_pure {
+    use super::*;
+    #[test]
+    fn barrido_umbrales_de_cromo() {
+        assert!(rail_labels_visible(200.0));
+        assert!(!rail_labels_visible(10.0));
+        assert!(left_drawer_content_visible(300.0));
+        assert!(!left_drawer_content_visible(10.0));
+        assert!(top_chrome_uses_overflow(300.0));
+        assert!(!top_chrome_uses_overflow(3000.0));
+        assert!(assistant_reopen_control_visible(false));
+        assert!(!assistant_reopen_control_visible(true));
+        assert_eq!(command_input_width(800.0, 200.0), 600.0);
+        assert_eq!(command_input_width(100.0, 200.0), 0.0);
+        let p = canvas_local_pointer(egui::Pos2::new(15.0, 20.0), egui::Pos2::new(5.0, 10.0));
+        assert_eq!((p.x, p.y), (10.0, 10.0));
+    }
+}

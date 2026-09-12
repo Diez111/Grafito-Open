@@ -1194,3 +1194,30 @@ mod hostile_crash_f10 {
         let _ = ArgumentKind::Unspecified;
     }
 }
+#[cfg(test)]
+mod coverage_sweep_palette {
+    use super::*;
+    #[test]
+    fn barrido_fuzzy_y_ancho() {
+        assert!(fuzzy_match("", "cualquier cosa"));
+        assert!(fuzzy_match("punto", "Crear punto libre"));
+        assert!(fuzzy_match("pnto", "Crear punto libre"));
+        assert!(!fuzzy_match("zzz", "Crear punto libre"));
+        assert!(fuzzy_match("FUNCIÓN", "función cuadrática"));
+        assert!(!fuzzy_match("punto extra largo que no existe", "punto"));
+        assert_eq!(palette_window_width(800.0), 640.0);
+        assert_eq!(palette_window_width(100.0), 84.0);
+        assert_eq!(palette_window_width(0.0), 1.0);
+        assert!(!all_commands().is_empty());
+        let rate = {
+            let st = CommandPaletteState {
+                search: "punto".to_string(),
+                ..Default::default()
+            };
+            st.filtered_commands().len()
+        };
+        assert!(rate > 0, "bilingüe encuentra punto");
+        let cmd = all_commands().into_iter().next().expect("hay comandos");
+        assert!(!rich_tooltip_for(&cmd).is_empty());
+    }
+}

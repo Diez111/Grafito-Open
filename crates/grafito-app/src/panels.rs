@@ -7304,3 +7304,73 @@ mod gc_piel_tests {
         assert!(wc_taylor_remainder_line("sin(x)", "0", 5, "c", &vars).is_none());
     }
 }
+#[cfg(test)]
+mod coverage_sweep_panels_pure {
+    use super::*;
+    use std::collections::BTreeMap;
+    #[test]
+    fn barrido_parse_statistics_input() {
+        assert_eq!(
+            parse_statistics_input("1, 2, 3").expect("nums"),
+            vec![1.0, 2.0, 3.0]
+        );
+        assert!(parse_statistics_input("").expect("vacío").is_empty());
+        assert!(parse_statistics_input("1, mal").is_err());
+        assert!(parse_statistics_input("1,,2").is_err());
+        assert!(parse_statistics_input("inf").is_err());
+    }
+    #[test]
+    fn barrido_statistics_summary_pinnea() {
+        let s = statistics_summary(&[1.0, 2.0, 3.0, 4.0]).expect("resumen");
+        assert!((s.mean - 2.5).abs() < 1e-9, "media 2.5, fue {}", s.mean);
+        assert!((s.median - 2.5).abs() < 1e-9);
+        assert!((s.minimum - 1.0).abs() < 1e-12 && (s.maximum - 4.0).abs() < 1e-12);
+        assert!(statistics_summary(&[]).is_err());
+        assert!(statistics_summary(&[1.0, f64::NAN]).is_err());
+        let cero = statistics_summary(&[0.0, 0.0]).expect("ceros");
+        assert_eq!(cero.mean, 0.0);
+    }
+    #[test]
+    fn barrido_inspector_textos_puros() {
+        assert_eq!(
+            wc_study_command_text("f").as_deref(),
+            Some("FunctionStudy[f]")
+        );
+        assert_eq!(wc_study_command_text("  "), None);
+        assert_eq!(
+            wc_riemann_command_text("x^2", "0", "1", 10.0, "simpson").as_deref(),
+            Some("RiemannSum[x^2, x, 0, 1, 10, simpson]")
+        );
+        assert_eq!(
+            wc_riemann_command_text("", "0", "1", 10.0, "simpson").as_deref(),
+            None
+        );
+        assert_eq!(
+            wc_riemann_command_text("x", "0", "1", 0.0, "simpson").as_deref(),
+            None
+        );
+        assert_eq!(
+            wc_exact_integral_command_text("x^2", "0", "1").as_deref(),
+            Some("Integral[x^2, x, 0, 1]")
+        );
+        assert_eq!(
+            wc_exact_integral_command_text("", "0", "1").as_deref(),
+            None
+        );
+        assert_eq!(
+            wc_taylor_command_text("sin(x)", "0", 5, "0.5").as_deref(),
+            Some("Taylor[sin(x), x, 0, 5]")
+        );
+        assert_eq!(
+            wc_taylor_command_text("sin(x)", "0", 0, "0.5").as_deref(),
+            None
+        );
+        let vars = BTreeMap::new();
+        let line = wc_taylor_remainder_line("sin(x)", "0", 5, "0.5", &vars).expect("resto");
+        assert!(line.contains("P5(0.5)"), "{line}");
+        assert!(wc_taylor_remainder_line("[[[", "0", 5, "0.5", &vars).is_none());
+        assert!(inspector_label_text("MiEtiqueta").is_some());
+        assert!(inspector_label_text("   ").is_none());
+        assert!(!inspector_identity_tooltip("Título", "f", true).is_empty());
+    }
+}

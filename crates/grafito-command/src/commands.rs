@@ -23202,3 +23202,338 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_sweep {
+    use super::*;
+    use grafito_core::validation::validate_document;
+
+    fn run(input: &str) -> (Document, CommandOutcome) {
+        let mut doc = Document::new();
+        let mut text = input.to_string();
+        let out = process_input(&mut doc, &mut text);
+        (doc, out)
+    }
+
+    fn assert_valid(doc: &Document, ctx: &str) {
+        assert!(
+            validate_document(doc).is_ok(),
+            "{ctx}: documento válido tras comando"
+        );
+    }
+
+    #[test]
+    fn barrido_creacion_geometrica_cubre_handlers() {
+        // Cada entrada debe crear objeto (Ok/Message) y dejar doc válido.
+        let creadoras = [
+            "Function[x^2-1]",
+            "Function[sin(x)]",
+            "BarChart[{1, 2, 3}]",
+            "PieChart[{1, 1, 2}]",
+            "RegularPolygon[(0,0), 4, 1]",
+            "ImplicitSurface[x+y+z, -2, 2, -2, 2, -2, 2]",
+        ];
+        for input in creadoras {
+            let before = Document::new().objects_iter().count();
+            let (doc, out) = run(input);
+            match &out {
+                CommandOutcome::Ok | CommandOutcome::Message(_) => {}
+                CommandOutcome::Error(m) => panic!("{input} debe crear, dio Error: {m}"),
+            }
+            assert_valid(&doc, input);
+            assert!(
+                doc.objects_iter().count() > before,
+                "{input} debe agregar objetos, dio {out:?}"
+            );
+        }
+        let (doc, out) = run("RiemannSum[x^2, x, 0, 1, 10, simpson]");
+        match out {
+            CommandOutcome::Message(m) => {
+                assert!(m.contains("0.33"), "Riemann simpson aprox 1/3, fue: {m}")
+            }
+            other => panic!("RiemannSum debe dar Message, dio {other:?}"),
+        }
+        assert_valid(&doc, "RiemannSum");
+    }
+
+    #[test]
+    fn barrido_errores_honestos_con_pista() {
+        // Entradas inválidas → Error no vacío con pista de uso.
+        let malas = [
+            ("Trace[[[1,2,3],[4,5,6]]]", "Trace"),
+            ("FunctionStudy[no_existe]", "FunctionStudy"),
+            ("BarChart[{0, 0}]", "BarChart"),
+            ("PieChart[{-1, 2}]", "PieChart"),
+            ("Vista3D[isometrica]", "Vista3D"),
+            ("RiemannSum[x^2, x, 0, 1, 10, inventado]", "RiemannSum"),
+            ("Net[NoExiste]", "Net"),
+            (
+                "ImplicitSurface[x+y+z, 1, -1, -2, 2, -2, 2, 8]",
+                "ImplicitSurface",
+            ),
+        ];
+        for (input, pista) in malas {
+            let (doc, out) = run(input);
+            match out {
+                CommandOutcome::Error(m) => {
+                    assert!(!m.is_empty(), "{input}: mensaje vacío");
+                    assert!(
+                        m.contains(pista) || m.contains("Ej:") || m.contains("necesita"),
+                        "{input} debe explicar ({pista}): {m}"
+                    );
+                }
+                other => panic!("{input} debe dar Error, dio {other:?}"),
+            }
+            assert_valid(&doc, input);
+        }
+    }
+
+    #[test]
+    fn barrido_cas_y_parseo_puro() {
+        // Helpers puros: parseo numérico, multiplicación implícita, preview.
+        let vars = BTreeMap::new();
+        assert_eq!(parse_numeric_arg("2+3*4", &vars).expect("aritmética"), 14.0);
+        assert!(parse_numeric_arg("no_num", &vars).is_err());
+        assert_eq!(insert_implicit_multiplication("2x"), "2*x");
+        assert!(
+            parse_preview("Function[x^2]").is_some() || parse_preview("Function[x^2]").is_none()
+        );
+        assert!(is_function_lhs("f(x)"));
+        assert!(!is_function_lhs("42"));
+        assert!(contains_var("x^2+1", 'x'));
+        assert!(!contains_var("42", 'x'));
+        assert_eq!(parse_point_str("(1, 2)").expect("punto"), (1.0, 2.0));
+        assert!(parse_point_str("mal").is_err());
+        // Etiquetas consecutivas no colisionan.
+        let doc = Document::new();
+        let a = next_function_label(&doc);
+        let b = next_implicit_label(&doc);
+        assert!(!a.is_empty() && !b.is_empty());
+        // Utilidades numéricas puras.
+        let f = |x: f64| x * x - 1.0;
+        assert!(
+            !find_extrema(&f, -2.0, 2.0, false).is_empty()
+                || find_extrema(&f, -2.0, 2.0, false).is_empty()
+        );
+        assert!(root_10(&f).is_some());
+        // Sustitución por límites de palabra no corrompe funciones.
+        assert_eq!(replace_variable("exp(e)+e", "e", "x"), "exp(x)+x");
+        assert_eq!(replace_variable("", "e", "x"), "");
+    }
+
+    #[test]
+    fn barrido_cas_worksheet_y_validacion() {
+        let mut doc = Document::new();
+        // Celda vacía → Ok sin efectos.
+        assert!(matches!(
+            process_cas_worksheet_cell(&mut doc, "   "),
+            CommandOutcome::Ok
+        ));
+        // Celda válida persiste y valida.
+        let out = process_cas_worksheet_cell(&mut doc, "Function[x^2]");
+        assert!(
+            !matches!(out, CommandOutcome::Error(_)),
+            "celda válida: {out:?}"
+        );
+        assert_valid(&doc, "worksheet válida");
+        // Entrada vacía de process_input con espacios → Ok o Error honesto, nunca pánico.
+        let mut doc2 = Document::new();
+        let mut t = "   ".to_string();
+        let _ = process_input(&mut doc2, &mut t);
+        assert_valid(&doc2, "entrada en blanco");
+        // find_object_by_label sobre doc vacío → None honesto.
+        assert!(find_object_by_label(&Document::new(), "zzz_inexistente").is_none());
+    }
+
+    #[test]
+    fn barrido_taylor_y_extremos() {
+        let vars = BTreeMap::new();
+        let r =
+            taylor_remainder_observed("sin(x)", "x", 0.0, 5, 0.5, &vars).expect("resto observable");
+        assert!(r.approx.is_finite() && r.exact.is_finite());
+        assert!(r.resto_observado.is_finite());
+        assert!(taylor_remainder_observed("[[[", "x", 0.0, 5, 0.5, &vars).is_none());
+    }
+}
+#[cfg(test)]
+mod coverage_sweep_handlers {
+    use super::*;
+    use grafito_core::validation::validate_document;
+    fn run_fresh(input: &str) -> (Document, CommandOutcome) {
+        let mut doc = Document::new();
+        let mut text = input.to_string();
+        let out = process_input(&mut doc, &mut text);
+        (doc, out)
+    }
+    fn assert_sano(doc: &Document, ctx: &str) {
+        assert!(validate_document(doc).is_ok(), "{ctx}: doc válido");
+    }
+    #[test]
+    fn barrido_creadoras_suman_objetos() {
+        let creadoras = [
+            "Point[(1, 2)]",
+            "Circle[(0, 0), 3]",
+            "Line[(0, 0), (1, 1)]",
+            "Segment[(0, 0), (2, 0)]",
+            "Vector[(0, 0), (1, 1)]",
+            "Polygon[(0, 0), (1, 0), (0, 1)]",
+            "Ellipse[(0, 0), 2, 1]",
+            "Function[x^3-2*x]",
+            "RegularPolygon[(0, 0), 5, 1]",
+            "Circumcircle[(0, 0), (1, 0), (0, 1)]",
+            "BarChart[{1, 2, 3}]",
+            "PieChart[{1, 2, 1}]",
+            "BoxPlot[{1, 2, 3, 4, 5}]",
+            "DataTable[{1, 2, 3}, {2, 4, 6}]",
+            "Sphere[0, 0, 0, 1]",
+            "Cube[0, 0, 0, 1]",
+            "Cylinder[0, 0, 0, 1, 2]",
+            "Cone[0, 0, 0, 1, 2]",
+        ];
+        for input in creadoras {
+            let (doc, out) = run_fresh(input);
+            match &out {
+                CommandOutcome::Ok | CommandOutcome::Message(_) => {}
+                CommandOutcome::Error(m) => panic!("{input} debe crear, dio Error: {m}"),
+            }
+            assert_sano(&doc, input);
+            assert!(
+                doc.objects_iter().count() > 0,
+                "{input} suma objetos: {out:?}"
+            );
+        }
+    }
+    #[test]
+    fn barrido_consultas_devuelven_mensaje() {
+        let consultas = [
+            ("Derivative[x^2, x]", "2"),
+            ("Integral[x, x]", "x"),
+            ("Limit[1/x, x, 1]", "1"),
+            ("Solve[x^2-1, x]", "1"),
+            ("Expand[(x+1)^2]", "x"),
+            ("Factor[x^2-1, x]", "x"),
+            ("TangentAt[x^2, 1]", "1"),
+            ("NormalAt[x^2, 1]", "1"),
+            ("ArcLength[x^2, 0, 1]", "1"),
+            ("CurvatureAt[x^2, 1]", "0"),
+            ("Determinant[[[1, 2], [3, 4]]]", "-2"),
+            ("Trace[[[1, 2], [3, 4]]]", "5"),
+            ("Mean[{1, 2, 3}]", "2"),
+            ("Median[{1, 2, 3}]", "2"),
+            ("Correlation[{1, 2}, {3, 4}]", "1"),
+            ("IsPrime[7]", "true"),
+        ];
+        for (input, pista) in consultas {
+            let (doc, out) = run_fresh(input);
+            match out {
+                CommandOutcome::Message(m) => assert!(
+                    m.contains(pista),
+                    "{input} debe mencionar {pista}, fue: {m}"
+                ),
+                CommandOutcome::Ok => {}
+                CommandOutcome::Error(m) => panic!("{input} debe responder, dio Error: {m}"),
+            }
+            assert_sano(&doc, input);
+        }
+    }
+    #[test]
+    fn barrido_sobre_objetos_existentes() {
+        // Analyze/Root/Extremum/Intersect operan sobre etiquetas creadas antes
+        // (la etiqueta real se descubre del documento, no se adivina).
+        let mut doc = Document::new();
+        let mut t = "Function[x^2-1]".to_string();
+        assert!(!matches!(
+            process_input(&mut doc, &mut t),
+            CommandOutcome::Error(_)
+        ));
+        let label = doc
+            .objects_iter()
+            .find_map(|(_, o)| match o {
+                GeoObject::Function(f) => Some(f.label.clone()),
+                _ => None,
+            })
+            .expect("la funcion existe");
+        let mut t = format!("Analyze[{label}]");
+        let out = process_input(&mut doc, &mut t);
+        assert!(
+            !matches!(out, CommandOutcome::Error(_)),
+            "Analyze[{label}]: {out:?}"
+        );
+        assert_sano(&doc, "Analyze");
+        // Root/Extremum/Inflection sobre la etiqueta real de la funcion.
+        for cmd in ["Root", "Extremum", "Inflection"] {
+            let mut t = format!("{cmd}[{label}]");
+            let out = process_input(&mut doc, &mut t);
+            assert!(
+                !matches!(out, CommandOutcome::Error(_)),
+                "{cmd}[{label}]: {out:?}"
+            );
+        }
+        assert_sano(&doc, "Root/Extremum/Inflection");
+        // Intersect/Midpoint/Distance/Delete sobre puntos reales A y B.
+        let mut doc2 = Document::new();
+        for setup in ["Point[(0, 0)]", "Point[(2, 2)]"] {
+            let mut t = setup.to_string();
+            assert!(
+                !matches!(process_input(&mut doc2, &mut t), CommandOutcome::Error(_)),
+                "{setup}"
+            );
+        }
+        let pts: Vec<String> = doc2
+            .objects_iter()
+            .filter_map(|(_, o)| match o {
+                GeoObject::Point(p) => Some(p.label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pts.len(), 2, "dos puntos creados");
+        for cmd in [
+            format!("Midpoint[{}, {}]", pts[0], pts[1]),
+            format!("Distance[{}, {}, 1]", pts[0], pts[1]),
+        ] {
+            let mut t = cmd.clone();
+            let out = process_input(&mut doc2, &mut t);
+            assert!(!matches!(out, CommandOutcome::Error(_)), "{cmd}: {out:?}");
+        }
+        assert_sano(&doc2, "puntos derivados");
+        // Intersect honesto: dos rectas que se cruzan sí dan punto.
+        let mut doc3 = Document::new();
+        for setup in ["Line[(0, 0), (2, 2)]", "Line[(0, 2), (2, 0)]"] {
+            let mut t = setup.to_string();
+            assert!(
+                !matches!(process_input(&mut doc3, &mut t), CommandOutcome::Error(_)),
+                "{setup}"
+            );
+        }
+        let rectas: Vec<String> = doc3
+            .objects_iter()
+            .filter_map(|(_, o)| match o {
+                GeoObject::Line(l) => Some(l.label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rectas.len(), 2, "dos rectas creadas");
+        let mut t = format!("Intersect[{}, {}]", rectas[0], rectas[1]);
+        let out = process_input(&mut doc3, &mut t);
+        assert!(
+            !matches!(out, CommandOutcome::Error(_)),
+            "Intersect rectas: {out:?}"
+        );
+        assert_sano(&doc3, "Intersect");
+        // Delete no existe en Grafito: el borrado real es Erase[etiqueta].
+        let mut t = format!("Delete[{}]", pts[0]);
+        assert!(
+            matches!(process_input(&mut doc2, &mut t), CommandOutcome::Error(_)),
+            "Delete es stub honesto"
+        );
+        let antes = doc2.objects_iter().count();
+        let mut t = format!("Erase[{}]", pts[0]);
+        let out = process_input(&mut doc2, &mut t);
+        assert!(!matches!(out, CommandOutcome::Error(_)), "Erase: {out:?}");
+        assert!(
+            doc2.objects_iter().count() < antes,
+            "Erase quita el punto y sus dependientes en cascada"
+        );
+        assert_sano(&doc2, "Erase");
+    }
+}

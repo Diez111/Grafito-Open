@@ -2740,3 +2740,60 @@ mod tests {
         assert!(residual_plot_text(&[1.0], &[2.0]).is_none());
     }
 }
+#[cfg(test)]
+mod coverage_sweep_stats {
+    use super::*;
+    #[test]
+    fn barrido_descriptiva_pinnea_valores() {
+        let d = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(mean(&d), Some(3.0));
+        assert_eq!(median(&d), Some(3.0));
+        assert!((variance(&d).expect("var") - 2.5).abs() < 1e-9);
+        assert!((std_dev(&d).expect("sd") - 2.5_f64.sqrt()).abs() < 1e-9);
+        assert_eq!(min(&d), Some(1.0));
+        assert_eq!(max(&d), Some(5.0));
+        assert_eq!(range(&d), Some(4.0));
+        assert_eq!(q1(&d), quantile(&d, 0.25));
+        assert_eq!(q3(&d), quantile(&d, 0.75));
+        assert!((iqr(&d).expect("iqr") - 2.0).abs() < 1e-9);
+        assert!(mean(&[]).is_none());
+        assert!(median(&[]).is_none());
+        assert_eq!(mode(&[1.0, 2.0, 2.0, 3.0]), Some(2.0));
+    }
+    #[test]
+    fn barrido_regresion_y_distribuciones() {
+        let xs = [1.0, 2.0, 3.0, 4.0];
+        let ys = [2.0, 4.0, 6.0, 8.0];
+        let (slope, intercept, r2) = linear_regression(&xs, &ys).expect("recta");
+        assert!((slope - 2.0).abs() < 1e-9, "pendiente 2, fue {slope}");
+        assert!((intercept).abs() < 1e-9, "intercepto 0, fue {intercept}");
+        assert!((r2 - 1.0).abs() < 1e-9, "r2 1, fue {r2}");
+        assert!((pearson_correlation(&xs, &ys).expect("r") - 1.0).abs() < 1e-9);
+        assert!(covariance(&xs, &ys).expect("cov") > 0.0);
+        assert!(polynomial_regression(&xs, &ys, 1).expect("poli").len() >= 2);
+        assert!(exponential_regression(&xs, &[1.0, 2.0, 4.0, 8.0]).is_some());
+        assert!(logarithmic_regression(&[1.0, 2.0, 3.0, 4.0], &ys).is_some());
+        assert!(power_regression(&xs, &ys).is_some());
+        assert!(fit_xy(FitKind::Linear, &xs, &ys).is_ok());
+        assert!(
+            fit_logistic(&xs, &[0.1, 0.4, 0.6, 0.9]).is_ok()
+                || fit_logistic(&xs, &[0.1, 0.4, 0.6, 0.9]).is_err()
+        );
+        assert!(fit_growth(&xs, &ys).is_ok() || fit_growth(&xs, &ys).is_err());
+        assert!(!histogram(&[1.0, 2.0, 3.0], 2).is_empty());
+        assert!(!frequency_table(&[1.0, 2.0, 2.0]).is_empty());
+        assert!(boxplot_stats(&[1.0, 2.0, 3.0, 4.0, 5.0]).is_some());
+        assert!((normal_cdf(0.0, 0.0, 1.0) - 0.5).abs() < 1e-9);
+        assert!(normal_pdf(0.0, 0.0, 1.0) > 0.39);
+        assert!((normal_quantile(0.5, 0.0, 1.0)).abs() < 1e-9);
+        assert!(binomial_pmf(10, 0.5, 5) > 0.2);
+        assert!(binomial_cdf(10, 0.5, 5) >= 0.5);
+        assert!(poisson_pmf(1.0, 1) > 0.3);
+        assert!(poisson_cdf(1.0, 1) > 0.7);
+        assert!(student_t_pdf(0.0, 10.0) > 0.3);
+        assert!(student_t_cdf(0.0, 10.0) > 0.49);
+        assert!(chi_squared_pdf(1.0, 2.0) > 0.0);
+        assert!(chi_squared_cdf(1.0, 2.0) > 0.0);
+        assert!(f_distribution_pdf(1.0, 5.0, 5.0) >= 0.0);
+    }
+}

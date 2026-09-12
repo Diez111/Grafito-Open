@@ -2399,3 +2399,31 @@ mod tests {
         assert_eq!(custom_tool_buttons(&store).len(), 2);
     }
 }
+#[cfg(test)]
+mod coverage_sweep_toolbar_pure {
+    use super::*;
+    #[test]
+    fn barrido_niveles_y_filtros() {
+        assert_eq!(toolbar_groups_for_level_value(0), PRIMARY_TOOL_GROUPS);
+        assert_eq!(toolbar_groups_for_level_value(2), PRIMARY_TOOL_GROUPS);
+        assert_eq!(toolbar_groups_for_level_value(8), SECONDARY_TOOL_GROUPS);
+        assert_eq!(toolbar_groups_for_level_value(12), UNIVERSITY_TOOL_GROUPS);
+        assert!(!toolbar_groups_for_level_value_owned(12).is_empty());
+        let all: Vec<ToolGroupId> = UNIVERSITY_TOOL_GROUPS.to_vec();
+        assert_eq!(
+            filter_groups_by_level(&all, 2).len(),
+            PRIMARY_TOOL_GROUPS.len()
+        );
+        assert_eq!(filter_groups_by_level(&[], 12).len(), 0);
+        assert_eq!(tool_slug(Tool::Select), "select");
+        assert!(!tool_slug(Tool::Function).is_empty());
+        assert!(toolbar_live_text(Tool::Select, Locale::Es).contains("Herramienta"));
+        assert!(toolbar_live_text(Tool::Select, Locale::En).contains("Tool"));
+        assert_eq!(toolbar_menu_nav(0, 0, ToolbarMenuKey::Down), None);
+        assert_eq!(toolbar_menu_nav(2, 3, ToolbarMenuKey::Down), Some(0));
+        assert_eq!(toolbar_menu_nav(0, 3, ToolbarMenuKey::Down), Some(1));
+        assert_eq!(toolbar_menu_nav(0, 3, ToolbarMenuKey::Up), Some(2));
+        assert_eq!(toolbar_menu_nav(1, 3, ToolbarMenuKey::Home), Some(0));
+        assert_eq!(toolbar_menu_nav(1, 3, ToolbarMenuKey::End), Some(2));
+    }
+}

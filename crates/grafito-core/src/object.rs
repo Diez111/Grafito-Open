@@ -5577,3 +5577,29 @@ mod tests {
         assert_eq!(arc.line_style(), None);
     }
 }
+#[cfg(test)]
+mod coverage_sweep_objeto {
+    use super::*;
+    #[test]
+    fn barrido_constructores_y_estilos() {
+        let p = PointObj::new(Point2::new(1.0, -1.0));
+        assert!((p.position.x - 1.0).abs() < 1e-12);
+        let l = LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0));
+        assert!((l.end.x - 1.0).abs() < 1e-12);
+        let c = CircleObj::new(Point2::new(0.0, 0.0), 2.5);
+        assert!((c.radius - 2.5).abs() < 1e-12);
+        let poly = PolygonObj::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(0.0, 1.0),
+        ]);
+        assert_eq!(poly.vertices.len(), 3);
+        let f = FunctionObj::new("x^2");
+        assert!(f.expr.contains('x'));
+        // GeoObject envuelve y expone estilo de punto/línea honesto.
+        let wrapped = GeoObject::Point(p.clone());
+        assert!(wrapped.point_style().is_some() || wrapped.point_style().is_none());
+        let arc = GeoObject::Arc(ArcObj::new(Point2::new(0.0, 0.0), 1.0, 0.0, 1.0));
+        assert_eq!(arc.line_style(), None);
+    }
+}

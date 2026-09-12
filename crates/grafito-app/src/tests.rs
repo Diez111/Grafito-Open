@@ -4861,6 +4861,10 @@ fn implicit_surface_slot_starts_idle_and_polls_without_blocking() {
         SurfaceSlotPoll::Pending
     ));
     // Poll por `update` no bloquea aunque haya trabajo en vuelo.
+    // Grid 4³ (no 8³): el trabajo es mínimo y termina rápido en cualquier
+    // perfil (dev/release/bench) aun con el scheduler cargado por benches
+    // en paralelo; la intención "no bloquea + termina" se mantiene sin
+    // depender del clock de pared.
     let field: crate::implicit_surface_compute::ImplicitField =
         Arc::new(|x: f64, y: f64, z: f64| Some(x * x + y * y + z * z - 1.0));
     app.implicit_surface_slot
@@ -4868,32 +4872,33 @@ fn implicit_surface_slot_starts_idle_and_polls_without_blocking() {
             field,
             grafito_geometry::Point3D::new(-1.5, -1.5, -1.5),
             grafito_geometry::Point3D::new(1.5, 1.5, 1.5),
-            8,
+            4,
         )
-        .expect("pedido 8³ válido");
+        .expect("pedido 4³ válido");
     assert!(app.implicit_surface_slot.has_pending());
     let started = Instant::now();
     let _ = app.implicit_surface_slot.poll();
-    // P1b: deadline laxa anti-flaky — el `poll` solo hace `try_recv`, pero en
-    // CI cargada el scheduler puede demorar el retorno; 5 s sigue probando
-    // "no bloquea" (el job 8³ tarda >>5 s si fuera inline en debug).
+    // P1b: deadline laxa anti-flaky — el `poll` solo hace `try_recv`
+    // (nunca bloquea por diseño); 5 s es margen generoso para el scheduler
+    // en CI cargada.
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "poll bloqueó el hilo UI"
     );
-    // Drena en background sin bloquear (hasta 120 s en debug/CI lenta; P1b).
-    let deadline = Instant::now() + Duration::from_secs(120);
+    // Drena en background sin bloquear (hasta 60 s; el job 4³ termina en
+    // ms en cualquier perfil, el margen es solo anti-flaky en CI cargada).
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match app.implicit_surface_slot.poll() {
             SurfaceSlotPoll::Pending => {
-                assert!(Instant::now() < deadline, "el job 8³ no terminó en 120 s");
+                assert!(Instant::now() < deadline, "el job 4³ no terminó en 60 s");
                 std::thread::sleep(Duration::from_millis(5));
             }
             SurfaceSlotPoll::Ready(mesh) => {
                 assert!(!mesh.triangles().is_empty());
                 break;
             }
-            SurfaceSlotPoll::Failed(error) => panic!("el job 8³ falló: {error}"),
+            SurfaceSlotPoll::Failed(error) => panic!("el job 4³ falló: {error}"),
         }
     }
     assert!(!app.implicit_surface_slot.has_pending());

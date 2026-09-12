@@ -2372,11 +2372,16 @@ mod tests {
 
     // ── B2-LOW #6: sin doble-spawn ──
 
-    // B2-LOW: en dev el doble-spawn es un bug loud (`debug_assert!`); en
-    // release el early-return conserva el slot para su drain. Este test
-    // pinea que la rama ocupada no llega al spawn.
+    // B2-LOW: sin doble-spawn — en dev el `debug_assert!` grita (loud,
+    // pineado por `should_panic` solo con `debug_assertions`); en
+    // release/bench (`debug_assertions` OFF) el early-return conserva el
+    // slot para su drain (pineado por los asserts de abajo). Entre ambos
+    // cubren todos los perfiles.
     #[test]
-    #[should_panic(expected = "start_remote con slot remoto ocupado")]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "start_remote con slot remoto ocupado")
+    )]
     fn start_remote_no_pisa_slot_ocupado() {
         with_test_ctx(|ctx, egui_ctx| {
             ctx.runtime.remote_job = Some(dummy_remote_job());
@@ -2389,11 +2394,13 @@ mod tests {
         });
     }
 
-    // B2-LOW: en dev el doble-spawn es un bug loud (`debug_assert!`); en
-    // release el early-return conserva el slot para su drain. Este test
-    // pinea que la rama ocupada no llega al spawn.
+    // B2-LOW: idem `start_remote` (loud en dev via `cfg_attr`, early-return
+    // en release pineado por asserts).
     #[test]
-    #[should_panic(expected = "start_agent con slot agente ocupado")]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "start_agent con slot agente ocupado")
+    )]
     fn start_agent_no_pisa_slot_ocupado() {
         with_test_ctx(|ctx, egui_ctx| {
             ctx.runtime.agent_job = Some(dummy_agent_job());
@@ -2409,11 +2416,13 @@ mod tests {
         });
     }
 
-    // B2-LOW: en dev el doble-spawn es un bug loud (`debug_assert!`); en
-    // release el early-return conserva el slot para su drain. Este test
-    // pinea que la rama ocupada no llega al spawn.
+    // B2-LOW: idem `start_remote` (loud en dev via `cfg_attr`, early-return
+    // en release pineado por asserts).
     #[test]
-    #[should_panic(expected = "start_remote_proposal con slot propuesta ocupado")]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "start_remote_proposal con slot propuesta ocupado")
+    )]
     fn start_remote_proposal_no_pisa_slot_ocupado() {
         with_test_ctx(|ctx, egui_ctx| {
             ctx.runtime.proposal_job = Some(dummy_proposal_job());
@@ -2443,11 +2452,13 @@ mod tests {
         });
     }
 
-    // B2-LOW: en dev el doble-spawn es un bug loud (`debug_assert!`); en
-    // release el early-return conserva el slot para su drain. Este test
-    // pinea que la rama ocupada no llega al spawn.
+    // B2-LOW: idem `start_remote` (loud en dev via `cfg_attr`, early-return
+    // en release pineado por asserts).
     #[test]
-    #[should_panic(expected = "start_model con slot modelos ocupado")]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "start_model con slot modelos ocupado")
+    )]
     fn start_model_no_pisa_slot_ocupado() {
         with_test_ctx(|ctx, egui_ctx| {
             ctx.runtime.model_job = Some(dummy_model_job());

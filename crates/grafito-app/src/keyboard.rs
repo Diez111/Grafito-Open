@@ -507,3 +507,30 @@ mod tests {
         }
     }
 }
+#[cfg(test)]
+mod coverage_sweep_keyboard_extra {
+    use super::*;
+    #[test]
+    fn barrido_insercion_y_layout() {
+        assert_eq!(keyboard_insertion(2, "q"), Some("q"));
+        assert_eq!(keyboard_insertion(2, "m"), Some("m"));
+        assert_eq!(keyboard_insertion(2, ","), Some(","));
+        assert_eq!(keyboard_insertion(0, "q"), None);
+        assert_eq!(keyboard_insertion(2, "NOPE"), None);
+        assert_eq!(
+            math_keyboard_layout(false, true, 900.0),
+            MathKeyboardLayout::Hidden
+        );
+        assert_eq!(
+            math_keyboard_layout(true, true, 900.0),
+            MathKeyboardLayout::Full
+        );
+        assert_eq!(
+            math_keyboard_layout(true, false, 900.0),
+            MathKeyboardLayout::Compact
+        );
+        assert_eq!(MathKeyboardLayout::Hidden.height(), 0.0);
+        assert!(keyboard_button_width(800.0) >= 18.0 && keyboard_button_width(800.0) <= 65.0);
+        assert!(keyboard_grid_padding(800.0, 40.0) >= MATH_KEYBOARD_EDGE_MARGIN);
+    }
+}

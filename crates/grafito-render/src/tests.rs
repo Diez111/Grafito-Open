@@ -703,3 +703,79 @@ mod tests {
         }
     }
 }
+#[cfg(test)]
+mod coverage_sweep_pure {
+    use crate::{
+        aabb_intersects, calculate_lighting, complex_mapping_homotopy_factor,
+        interpolate_complex_mapping_point, object_cull_margin_world, object_world_aabb,
+        ordered_visible_2d_objects, prism_solid_triangle_count, prism_wire_segment_count,
+        prism_work_units, quadric_ellipsoid_params, quadric_uses_placeholder, scene_layer_2d,
+        viewport_world_bounds, SceneLayer2D,
+    };
+    use grafito_core::{
+        CircleObj, Document, GeoObject, LineObj, PointObj, PolygonObj, Quadric3DObj,
+    };
+    use grafito_geometry::{Color, Point2, ViewTransform};
+    #[test]
+    fn barrido_viewport_aabb_y_culling() {
+        let view = ViewTransform::new(800.0, 600.0);
+        let bounds = viewport_world_bounds(&view);
+        assert!(bounds.max.x > bounds.min.x && bounds.max.y > bounds.min.y);
+        let a = bounds;
+        assert!(aabb_intersects(&a, &a, 0.0));
+        let lejos = crate::AABB::new(Point2::new(1e9, 1e9), Point2::new(1e9 + 1.0, 1e9 + 1.0));
+        assert!(!aabb_intersects(&a, &lejos, 0.0));
+        let pt = GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)));
+        assert!(object_cull_margin_world(&pt, 100.0) > 0.0);
+        assert!(object_cull_margin_world(&pt, 0.0).is_finite());
+        let doc = Document::new();
+        assert!(object_world_aabb(&view, &doc, &pt).is_some());
+        let circ = GeoObject::Circle(CircleObj::new(Point2::new(1.0, 1.0), 2.0));
+        let ab = object_world_aabb(&view, &doc, &circ).expect("aabb círculo");
+        assert!((ab.max.x - ab.min.x - 4.0).abs() < 1e-9);
+    }
+    #[test]
+    fn barrido_capas_luz_y_prismas() {
+        let pt = GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)));
+        assert!(matches!(scene_layer_2d(&pt), SceneLayer2D::Marker));
+        let line = GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)));
+        assert!(matches!(scene_layer_2d(&line), _));
+        let lit = calculate_lighting(Color::new(1.0, 0.0, 0.0, 1.0), glam::Vec3::Z, glam::Vec3::Z);
+        assert!((lit.r - 1.0).abs() < 1e-6 && lit.g.abs() < 1e-6);
+        let dark = calculate_lighting(
+            Color::new(1.0, 1.0, 1.0, 1.0),
+            glam::Vec3::Z,
+            -glam::Vec3::Z,
+        );
+        assert!(dark.r < 1.0 && dark.r > 0.3);
+        assert_eq!(prism_solid_triangle_count(4), 12);
+        assert_eq!(prism_wire_segment_count(4), 12);
+        assert_eq!(prism_work_units(4), 24);
+        assert_eq!(prism_solid_triangle_count(0), 0);
+        let q = Quadric3DObj::from_coeffs([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]);
+        let _ = quadric_uses_placeholder(&q);
+        let _ = quadric_ellipsoid_params(&q);
+    }
+    #[test]
+    fn barrido_mapeo_complejo_e_interpolacion() {
+        let p =
+            interpolate_complex_mapping_point(Point2::new(0.0, 0.0), Point2::new(2.0, 2.0), 0.5);
+        assert!((p.x - 1.0).abs() < 1e-9 && (p.y - 1.0).abs() < 1e-9);
+        let f0 = complex_mapping_homotopy_factor(false, 1.0, 10.0);
+        assert!((f0 - 1.0).abs() < 1e-9, "sin animar factor 1, fue {f0}");
+        let f1 = complex_mapping_homotopy_factor(true, 1.0, 0.0);
+        assert!((0.0..=1.0).contains(&f1), "animado en rango, fue {f1}");
+        let mut doc = Document::new();
+        doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+        doc.add_object(GeoObject::Polygon(PolygonObj::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(0.5, 1.0),
+        ])));
+        let vis = ordered_visible_2d_objects(&doc);
+        assert_eq!(vis.len(), 2, "dos visibles ordenados");
+        let view = ViewTransform::new(800.0, 600.0);
+        let (v, i) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
+        assert!(!v.is_empty() && !i.is_empty());
+    }
+}

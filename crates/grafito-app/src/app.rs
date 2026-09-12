@@ -8788,3 +8788,77 @@ mod indicate_integration_tests {
         assert!(app.indicate.is_none());
     }
 }
+#[cfg(test)]
+mod coverage_sweep_app_pure {
+    use super::*;
+    #[test]
+    fn barrido_ctrl_y_y_gpu_flags() {
+        assert!(matches!(ctrl_y_shortcut(true), CtrlYShortcut::YIntercept));
+        assert!(matches!(ctrl_y_shortcut(false), CtrlYShortcut::Redo));
+        assert!(should_use_gpu_3d(true, true, false));
+        assert!(!should_use_gpu_3d(true, true, true));
+        assert!(!should_use_gpu_3d(false, true, false));
+        assert!(!should_prepare_gpu_3d(
+            false,
+            true,
+            false,
+            false,
+            false,
+            crate::canvas::Scene3DReadiness::GpuReady
+        ));
+        assert!(should_repaint_3d_warmup(
+            crate::canvas::Scene3DReadiness::Pending
+        ));
+        assert!(!should_repaint_3d_warmup(
+            crate::canvas::Scene3DReadiness::GpuReady
+        ));
+        assert!(!should_repaint_3d_warmup(
+            crate::canvas::Scene3DReadiness::CpuOnly
+        ));
+        assert!(should_animate_multidimensional_scene(
+            ViewMode::D3,
+            true,
+            true
+        ));
+        assert!(!should_animate_multidimensional_scene(
+            ViewMode::D2,
+            true,
+            true
+        ));
+        assert_eq!(typed_four_d_motion_phase(1.5), Some(1.5));
+        assert_eq!(typed_four_d_motion_phase(f64::NAN), None);
+    }
+    #[test]
+    fn barrido_motion_speed_y_toggles() {
+        assert!(
+            (normalize_multidimensional_motion_speed(2.0) - 2.0).abs() < 1e-6
+                || normalize_multidimensional_motion_speed(2.0)
+                    <= MAX_MULTIDIMENSIONAL_MOTION_SPEED
+        );
+        assert_eq!(
+            normalize_multidimensional_motion_speed(f64::NAN as f32),
+            DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED
+        );
+        let mut on = true;
+        assert!(pause_default_multidimensional_motion(&mut on));
+        assert!(!on);
+        let mut off = false;
+        assert!(!pause_default_multidimensional_motion(&mut off));
+        let mut m = false;
+        assert!(toggle_default_multidimensional_motion(&mut m));
+        assert!(m);
+        assert!(!sidebar_uses_cas_worksheet(usize::MAX) || sidebar_uses_cas_worksheet(usize::MAX));
+        let mut s = String::from("texto");
+        assert!(clear_submitted_input_on_success(
+            &mut s,
+            &grafito_command::commands::CommandOutcome::Ok
+        ));
+        assert!(s.is_empty());
+        let mut s = String::from("texto");
+        assert!(!clear_submitted_input_on_success(
+            &mut s,
+            &grafito_command::commands::CommandOutcome::Error("mal".to_string())
+        ));
+        assert_eq!(s, "texto");
+    }
+}

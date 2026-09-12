@@ -2984,3 +2984,74 @@ mod tests {
             .is_err());
     }
 }
+#[cfg(test)]
+mod coverage_sweep_cas_steps {
+    use super::*;
+    fn op(s: &str) -> String {
+        s.to_string()
+    }
+    #[test]
+    fn barrido_pasos_basicos_no_vacios() {
+        let d = steps_for_derivative("x^2", "x").expect("pasos derivada");
+        assert!(!d.is_empty(), "derivada da pasos");
+        let i = steps_for_integral("x", "x").expect("pasos integral");
+        assert!(!i.is_empty(), "integral da pasos");
+        let l = steps_for_limit("1/x", "x", 1.0).expect("pasos límite");
+        assert!(!l.is_empty(), "límite da pasos");
+        let t = steps_for_taylor("sin(x)", "x", 0.0, 3).expect("pasos taylor");
+        assert!(!t.is_empty(), "taylor da pasos");
+        let s = steps_for_solve("x-1", "x").expect("pasos solve");
+        assert!(!s.is_empty(), "solve da pasos");
+        assert!(steps_for_derivative("[[[", "x").is_err());
+    }
+    #[test]
+    fn barrido_pasos_honestos_y_dispatch() {
+        // Gruntz/Risch/Groebner: Ok con pasos o Err honesto, nunca pánico.
+        let _ = steps_for_gruntz("1/x", "x", 0.0);
+        let _ = steps_for_risch("x", "x");
+        let _ = steps_for_groebner(&[op("x"), op("y")], &[op("x"), op("y")]);
+        let _ = steps_for_groebner_ordered(&[op("x")], &[op("x")], "lex");
+        let _ = steps_for_eliminate(&[op("x+y")], &[op("x")], &[op("y")]);
+        let _ = steps_for_residue("1/z", "z", 0.0, 1);
+        let _ = steps_for_laplace_direct("1", "t", "s");
+        let _ = steps_for_laplace_inverse("1/s", "s", "t");
+        let _ = steps_for_laplace_derivative(1, "x", "t", "s", &[]);
+        let _ = steps_for_laplace_integral("1", "t", "s");
+        let _ = steps_for_ode_linear("1", "x", "x");
+        let _ = steps_for_ode_separable("x", "y", "x", "y");
+        let _ = steps_for_ode_second_order("1", "0", "0", "0", "x");
+        let _ = steps_for_ode_system_2x2("1", "0", "0", "1", "x");
+        let _ = steps_for_ode_nth_order(&[op("1"), op("0")], "0", "x");
+        let _ = steps_for_ode_euler("1", "1", "0", "x");
+        let _ = steps_for_frobenius("0", "0", "x", 0.0, 3);
+        // Dispatch por CasOp pinnea que cada variante responde.
+        for caso in [
+            CasOp::Derivative {
+                expr: op("x^2"),
+                var: op("x"),
+            },
+            CasOp::Integral {
+                expr: op("x"),
+                var: op("x"),
+            },
+            CasOp::Limit {
+                expr: op("x"),
+                var: op("x"),
+                at: 0.0,
+            },
+            CasOp::Taylor {
+                expr: op("sin(x)"),
+                var: op("x"),
+                center: 0.0,
+                order: 2,
+            },
+            CasOp::Solve {
+                expr: op("x-1"),
+                var: op("x"),
+            },
+        ] {
+            let pasos = steps_for_op(&caso).expect("dispatch responde");
+            assert!(!pasos.is_empty(), "cada op da pasos: {caso:?}");
+        }
+    }
+}

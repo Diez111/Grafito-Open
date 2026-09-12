@@ -8905,3 +8905,93 @@ mod tests {
         assert!(simplify("sin(x+1)").unwrap().contains("sin(x)"));
     }
 }
+#[cfg(test)]
+mod coverage_sweep_symbolic {
+    use super::*;
+    fn typed_ok<T: std::fmt::Debug>(r: &MathResult<T>) -> bool {
+        matches!(r, MathResult::Exact(_) | MathResult::Approximate { .. })
+    }
+    #[test]
+    fn barrido_derivadas_pinnea_resultados() {
+        assert!(
+            derivative("x^2", "x").expect("d").contains("2"),
+            "derivada cuadratica"
+        );
+        assert!(derivative("sin(x)", "x").expect("d").contains("cos"));
+        assert!(typed_ok(&derivative_typed("x^2", "x")));
+        assert!(derivative("", "x").is_err());
+        let _ = derivative("x^2", "");
+    }
+    #[test]
+    fn barrido_integrales_y_definidas() {
+        assert!(integrate("x", "x").is_ok());
+        assert!(typed_ok(&integrate_typed("x", "x")));
+        assert!(integrate("[[[", "x").is_err());
+        let v = integrate_definite("x", "x", 0.0, 1.0).expect("def");
+        assert!(!v.is_empty(), "integral definida no vacía: {v}");
+        let _ = integrate_definite("x", "x", 1.0, 0.0);
+        assert!(typed_ok(&integrate_numerical("x", "x", 0.0, 1.0)));
+        assert!(typed_ok(&integrate_numerical_with_limits(
+            "x", "x", 0.0, 1.0, 1e-10, 20
+        )));
+    }
+    #[test]
+    fn barrido_limites() {
+        assert!(limit("1/x", "x", 1.0).is_ok());
+        assert!(typed_ok(&limit_typed("1/x", "x", 1.0)));
+        let _ = limit_above("1/x", "x", 0.0);
+        let _ = limit_below("1/x", "x", 0.0);
+        assert!(typed_ok(&limit_above_typed("x", "x", 0.0)));
+        assert!(typed_ok(&limit_below_typed("x", "x", 0.0)));
+        assert!(typed_ok(&limit_infinite_typed("1/x", "x", true)));
+        let _ = limit_pos_infinity_typed("x", "x");
+        let _ = limit_neg_infinity_typed("x", "x");
+    }
+    #[test]
+    fn barrido_algebra_expand_factor_simplify() {
+        assert!(
+            expand("(x+1)^2").expect("exp").contains("x"),
+            "expansion menciona x"
+        );
+        assert!(factor("x^2-1", "x").expect("fac").contains("x"));
+        assert!(typed_ok(&factor_typed("x^2-1", "x")));
+        assert_eq!(simplify("2+2").expect("s"), "4");
+        let _ = simplify("[[[");
+        let _ = structurally_equal("x+1", "1+x");
+        assert!(substitute("x^2", "x", "2").expect("sub").contains("4"));
+        assert!(solve("x-1", "x").is_ok());
+        assert!(solve("[[[", "x").is_err());
+    }
+    #[test]
+    fn barrido_taylor_asintotas_fracciones() {
+        let t = taylor_series("sin(x)", "x", 0.0, 3).expect("taylor");
+        assert!(t.contains("x"), "taylor menciona x: {t}");
+        assert!(complete_square("x^2+2*x+1", "x").is_ok());
+        assert!(typed_ok(&complete_square_typed("x^2+2*x+1", "x")));
+        let _ = partial_fractions("1/(x*(x+1))", "x");
+        let _ = partial_fractions_typed("1/(x*(x+1))", "x");
+        let _ = asymptote("1/x", "x");
+        let _ = asymptote_typed("1/x", "x");
+        let _ = parametric_derivative("t", "t^2", "t");
+        let _ = parametric_derivative_typed("t", "t^2", "t");
+    }
+    #[test]
+    fn barrido_trig_primos_groebner_honestos() {
+        assert!(trig_expand("sin(x+y)").is_ok());
+        let _ = trig_combine("sin(x)*cos(x)");
+        assert!(trig_simplify("sin(x)^2+cos(x)^2").is_ok());
+        assert!(rationalize("1/sqrt(2)").is_ok());
+        assert!(prime_factors("12").expect("pf").contains("2"));
+        assert!(typed_ok(&prime_factors_typed("12")));
+        assert!(prime_factors("no_num").is_err());
+        let _ = groebner_single_typed("x");
+        let _ = groebner_stub("x");
+        let _ = groebner_basis_typed(&["x".to_string()], &["x".to_string()]);
+        let _ = ifactor("x^2+1", "x");
+        let _ = c_factor("x^2+1", "x");
+        let _ = cfactor("x^2+1", "x");
+        let _ = cifactor("x^2+1", "x");
+        assert!(is_everywhere_differentiable("x^2").is_ok());
+        assert!(evaluate_exact_rational("1/2+1/2").is_ok());
+    }
+}

@@ -398,9 +398,17 @@ jobs:
       - name: Add cargo-llvm-cov to PATH
         run: echo "${RUNNER_TEMP}/cargo-llvm-cov/bin" >> "$GITHUB_PATH"
       - name: Generate coverage (lcov)
-        run: cargo llvm-cov --workspace --all-targets --all-features --locked --lcov --output-path lcov.info
+        # Exclusiones justificadas (solo cromo sin lógica testeable en este job):
+        # - `grafito-ui/src/icons.rs`: dibujo egui puro (Painter/Rect); sin ramas
+        #   de dominio, solo se ejercita vía smoke headless.
+        # - `grafito-render/src/fill_compute.rs`: pipeline WGSL que exige un
+        #   `wgpu::Device` real; este job NO instala Vulkan a propósito (ver pin
+        #   GPU abajo) y sus regresiones requeridas viven en `gpu-compute`.
+        # PROHIBIDO excluir archivos con lógica (commands, symbolic, app,
+        # panels, render, ast, input, document...): se cubren con tests.
+        run: cargo llvm-cov --workspace --all-targets --all-features --locked --ignore-filename-regex '(grafito-ui/src/icons\.rs|grafito-render/src/fill_compute\.rs)' --lcov --output-path lcov.info
       - name: Enforce 75% line coverage gate
-        run: cargo llvm-cov --workspace --all-targets --all-features --locked --fail-under-lines 75 --summary-only
+        run: cargo llvm-cov --workspace --all-targets --all-features --locked --ignore-filename-regex '(grafito-ui/src/icons\.rs|grafito-render/src/fill_compute\.rs)' --fail-under-lines 75 --summary-only
       # F5 honesto: SIN fallback `cargo test` en failure().
       # Por lectura, no por ideologia: el job `test` ya corre la suite completa en
       # matriz 1.92+stable; un fallback aqui duplicaba ~45min y confundia (en GitHub

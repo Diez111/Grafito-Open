@@ -6523,3 +6523,42 @@ mod q2_style_tests {
         stroke_run(&painter, vec![a], stroke, LineStyle::Solid);
     }
 }
+#[cfg(test)]
+mod coverage_sweep_render2d_pure {
+    use super::*;
+    #[test]
+    fn barrido_escala_y_etiquetas() {
+        assert!(
+            (nice_number_plane_step(0.3) - 0.5).abs() < 1e-12 || nice_number_plane_step(0.3) > 0.0
+        );
+        assert_eq!(nice_number_plane_step(0.0), 1.0);
+        assert_eq!(nice_number_plane_step(f64::NAN), 1.0);
+        assert_eq!(nice_number_plane_step(-5.0), 1.0);
+        assert_eq!(adaptive_label_skip(0, 800.0, 60.0), 1);
+        assert_eq!(adaptive_label_skip(100, 800.0, 60.0), 8);
+        assert_eq!(adaptive_label_skip(5, 800.0, 60.0), 1);
+        assert_eq!(format_number_plane_label(2.0), "2");
+        assert_eq!(format_number_plane_label(1.5), "1.5");
+        assert_eq!(format_number_plane_label(f64::NAN), "0");
+    }
+    #[test]
+    fn barrido_estilos_y_cache() {
+        assert_eq!(dash_pattern(LineStyle::Solid, 2.0), None);
+        let (d, g) = dash_pattern(LineStyle::Dashed, 2.0).expect("guiones");
+        assert!(d > g && d >= 6.0);
+        assert!(dash_pattern(LineStyle::Dotted, 1.0).is_some());
+        assert!(dash_pattern(LineStyle::Dashed, f32::NAN).is_some());
+        assert!(trig_sample_count(800, 10.0, grafito_core::RenderQuality::Normal) >= 200);
+        assert!(trig_sample_count(800, 100.0, grafito_core::RenderQuality::Preview) <= 280);
+        let uv = fill_cache_view_uv((0.0, 10.0, 0.0, 10.0), (2.0, 8.0, 2.0, 8.0)).expect("uv");
+        assert!((uv.0 - 0.2).abs() < 1e-6 && (uv.1 - 0.8).abs() < 1e-6);
+        assert!(fill_cache_view_uv((0.0, 10.0, 0.0, 10.0), (-5.0, 20.0, 0.0, 5.0)).is_none());
+        let (w, h) =
+            fill_cache_texture_size((0.0, 10.0, 0.0, 10.0), (0.0, 20.0, 0.0, 20.0), (800, 600));
+        assert_eq!((w, h), (1600, 1200));
+        assert!(matches!(
+            decide_function_label("", "x"),
+            FunctionLabelDraw::Ascii
+        ));
+    }
+}

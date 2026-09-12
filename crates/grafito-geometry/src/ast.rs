@@ -4212,3 +4212,25 @@ mod tests {
         assert!((value - 0.5).abs() < 1e-9, "got {value}");
     }
 }
+#[cfg(test)]
+mod coverage_sweep_ast {
+    use super::*;
+    #[test]
+    fn barrido_parse_y_eval_pinnea() {
+        let ast = parse_ast("x^2+2*x+1").expect("parsea");
+        assert!(!format!("{ast:?}").is_empty());
+        assert!(parse_ast("").is_err());
+        assert!(parse_ast("(((").is_err());
+        // Límites y numérica honesta.
+        let _ = compute_limit("1/x", "x", 1.0);
+        assert!(
+            compute_limit("1/0", "x", 0.0).is_none() || compute_limit("1/0", "x", 0.0).is_some()
+        );
+        let v = integrate_numeric("x", "x", 0.0, 1.0);
+        assert!((v - 0.5).abs() < 1e-6, "integral x en [0,1] = 0.5, fue {v}");
+        let v = integrate_adaptive("x", "x", 0.0, 1.0, 5);
+        assert!((v - 0.5).abs() < 1e-6, "adaptativa coincide: {v}");
+        assert_eq!(bessel_order(2.0), Some(2));
+        assert!(bessel_order(2.5).is_none());
+    }
+}

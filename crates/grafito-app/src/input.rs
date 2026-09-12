@@ -2145,3 +2145,54 @@ mod canvas_slider_widget_tests {
         assert!(!canvas_slider_is_internal_name("trigger"));
     }
 }
+#[cfg(test)]
+mod coverage_sweep_input_pure {
+    use super::*;
+    #[test]
+    fn barrido_sliders_y_velocidad() {
+        assert!(sanitize_animation_speed(2.0).abs() <= CANVAS_SLIDER_MAX_ANIMATION_SPEED);
+        assert_eq!(
+            sanitize_animation_speed(f64::NAN),
+            CANVAS_SLIDER_DEFAULT_ANIMATION_SPEED
+        );
+        assert!((canvas_slider_apply_drag(50.0, 0.0, 100.0, 0.0, 10.0, 0.0) - 5.0).abs() < 1e-9);
+        assert_eq!(
+            canvas_slider_apply_drag(50.0, 0.0, 100.0, f64::NAN, 10.0, 0.0),
+            0.0
+        );
+        assert_eq!(canvas_slider_value_to_t(5.0, 0.0, 10.0), 0.5);
+        assert_eq!(canvas_slider_value_to_t(99.0, 10.0, 0.0), 0.0);
+        let track =
+            egui::Rect::from_min_size(egui::Pos2::new(0.0, 0.0), egui::Vec2::new(100.0, 10.0));
+        assert!(canvas_slider_hit(
+            egui::Pos2::new(50.0, 5.0),
+            track,
+            egui::Pos2::new(50.0, 5.0),
+            6.0,
+            8.0
+        ));
+        assert!(!canvas_slider_hit(
+            egui::Pos2::new(500.0, 500.0),
+            track,
+            egui::Pos2::new(50.0, 5.0),
+            6.0,
+            8.0
+        ));
+    }
+    #[test]
+    fn barrido_perpendicular_y_puntero() {
+        let cmd = perpendicular_command(
+            Some(("P".to_string(), true, false)),
+            Some(("r".to_string(), false, true)),
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 1.0),
+        );
+        assert_eq!(cmd, "Perpendicular[P, r]");
+        let cmd = perpendicular_command(None, None, Point2::new(0.0, 0.0), Point2::new(1.0, 0.0));
+        assert!(cmd.starts_with("PerpendicularBisector["), "{cmd}");
+        let rect =
+            egui::Rect::from_min_size(egui::Pos2::new(0.0, 0.0), egui::Vec2::new(200.0, 200.0));
+        assert!(canvas_local_pointer(rect, egui::Pos2::new(10.0, 10.0)).is_some());
+        assert!(canvas_local_pointer(rect, egui::Pos2::new(500.0, 500.0)).is_none());
+    }
+}

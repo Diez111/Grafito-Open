@@ -105,3 +105,58 @@ pub fn evaluate_flow(
     }
     Ok((result.re, result.im))
 }
+#[cfg(test)]
+mod coverage_sweep_calculus {
+    use super::*;
+    use std::collections::HashMap;
+    fn expr_z() -> ComplexExpr {
+        crate::math::complex_expr::parse("z").expect("parse z")
+    }
+    fn circle(n: usize) -> Vec<Complex64> {
+        (0..=n)
+            .map(|i| {
+                let t = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
+                Complex64::new(t.cos(), t.sin())
+            })
+            .collect()
+    }
+    #[test]
+    fn barrido_contour_cauchy_pinnea_2pi() {
+        // ∮ z dz sobre círculo cerrado = 0 (campo conservativo).
+        let e = expr_z();
+        let vars = HashMap::new();
+        let r = contour_integral(&e, &circle(64), &vars, "z").expect("integral");
+        assert!(r.norm() < 1e-9, "cerrada de z es 0, fue {r}");
+        // ∮ 1/z dz = 2πi → residuos = 1.
+        let inv = crate::math::complex_expr::parse("1/z").expect("parse 1/z");
+        let res = sum_of_residues(&inv, &circle(128), &vars, "z").expect("residuos");
+        assert!(
+            (res.re - 1.0).abs() < 0.05 && res.im.abs() < 0.05,
+            "residuo 1, fue {res}"
+        );
+        // Camino corto / vacío honesto.
+        assert_eq!(
+            contour_integral(&e, &[], &vars, "z").expect("vacío"),
+            Complex64::new(0.0, 0.0)
+        );
+        assert!(contour_integral(&e, &vec![Complex64::new(0.0, 0.0); 10_001], &vars, "z").is_err());
+        assert!(contour_integral(
+            &inv,
+            &[Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)],
+            &vars,
+            "z"
+        )
+        .is_err());
+    }
+    #[test]
+    fn barrido_flow_pinnea_identidad() {
+        let e = expr_z();
+        let vars = HashMap::new();
+        assert_eq!(
+            evaluate_flow(&e, 3.0, -2.0, &vars, "z").expect("flujo"),
+            (3.0, -2.0)
+        );
+        assert!(evaluate_flow(&e, f64::NAN, 0.0, &vars, "z").is_err());
+        assert!(evaluate_flow(&e, 0.0, f64::INFINITY, &vars, "z").is_err());
+    }
+}

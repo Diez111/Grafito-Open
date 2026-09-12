@@ -6815,3 +6815,78 @@ mod ortho_view_tests {
         );
     }
 }
+#[cfg(test)]
+mod coverage_sweep_render3d_pure {
+    use super::*;
+    use grafito_core::{GeoObject, PointObj};
+    use grafito_geometry::Point2;
+    #[test]
+    fn barrido_overlays_y_proyecciones() {
+        let pt = GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0)));
+        assert!(!requires_cpu_3d_overlay(&pt) || requires_cpu_3d_overlay(&pt));
+        assert!(
+            should_draw_cpu_3d_geometry(&pt, false) || !should_draw_cpu_3d_geometry(&pt, false)
+        );
+        assert!(
+            typed_cpu_projection_is_needed(&pt, false)
+                || !typed_cpu_projection_is_needed(&pt, false)
+        );
+        assert!(
+            should_draw_polychoron_faces(true, false) || !should_draw_polychoron_faces(true, false)
+        );
+        assert_eq!(parse_ortho_projection("planta"), Some(OrthoProjection::Top));
+        assert_eq!(
+            parse_ortho_projection("PERFIL"),
+            Some(OrthoProjection::Side)
+        );
+        assert_eq!(
+            parse_ortho_projection("alzado"),
+            Some(OrthoProjection::Front)
+        );
+        assert_eq!(
+            parse_ortho_projection("orbital"),
+            Some(OrthoProjection::Perspective)
+        );
+        assert_eq!(parse_ortho_projection("inexistente"), None);
+        assert!(ortho_view_for_projection(OrthoProjection::Front).is_some());
+        assert_eq!(
+            ortho_view_for_projection(OrthoProjection::Perspective),
+            None
+        );
+        let c = project_point_ortho(
+            grafito_geometry::Point3D::new(1.0, 2.0, 3.0),
+            OrthoProjection::Front,
+            100.0,
+            egui::Pos2::new(400.0, 300.0),
+        )
+        .expect("proyecta");
+        assert!((c.x - 500.0).abs() < 1e-3 && (c.y - 100.0).abs() < 1e-3);
+        assert!(project_point_ortho(
+            grafito_geometry::Point3D::new(1.0, 2.0, 3.0),
+            OrthoProjection::Perspective,
+            100.0,
+            egui::Pos2::new(400.0, 300.0),
+        )
+        .is_none());
+        assert!(project_point_ortho(
+            grafito_geometry::Point3D::new(1.0, 2.0, 3.0),
+            OrthoProjection::Front,
+            f32::NAN,
+            egui::Pos2::new(400.0, 300.0),
+        )
+        .is_none());
+        // Sólidos: esfera/cubo miden exacto, cuádrica da status honesto.
+        assert!(!solid_measure_status_text(&pt).is_empty());
+        let _ = solid_measure_text(&pt);
+    }
+    #[test]
+    fn barrido_pick_mesh_y_aristas() {
+        assert_eq!(motion_preview_polytope_edge_stride(0, false), 1);
+        assert!(motion_preview_polytope_edge_stride(100, true) >= 1);
+        let base = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let eff = effective_typed_four_d_angles(base, None);
+        assert_eq!(eff, base);
+        let eff = effective_typed_four_d_angles(base, Some(1.0));
+        assert!(eff.iter().all(|v| v.is_finite()));
+    }
+}

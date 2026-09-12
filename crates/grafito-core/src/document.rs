@@ -8265,3 +8265,41 @@ mod live_param_tests {
         assert!(err.contains("excede"), "err honesto: {err}");
     }
 }
+#[cfg(test)]
+mod coverage_sweep_lifecycle {
+    use super::*;
+    use crate::{validation::validate_document, GeoObject, LineObj, PointObj};
+    #[test]
+    fn barrido_documento_crea_remueve_y_valida() {
+        let mut doc = Document::new();
+        let id_p = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0))));
+        let id_l = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(3.0, 4.0),
+        )));
+        assert_eq!(doc.objects_iter().count(), 2);
+        assert!(validate_document(&doc).is_ok());
+        assert!(doc.estimated_bytes() > 0);
+        let staged = doc.detached_clone_for_staging();
+        assert_eq!(staged.objects_iter().count(), 2);
+        assert!(doc.remove_object(id_p).is_some());
+        assert_eq!(doc.objects_iter().count(), 1);
+        assert!(validate_document(&doc).is_ok());
+        assert!(doc.remove_object(id_l).is_some());
+        assert_eq!(doc.objects_iter().count(), 0);
+    }
+    #[test]
+    fn barrido_worksheet_input_y_celdas() {
+        let mut doc = Document::new();
+        assert!(doc.validate_cas_worksheet_input("Function[x^2]").is_ok());
+        assert!(doc.validate_cas_worksheet_input("").is_err());
+        assert!(doc
+            .try_append_cas_worksheet_cell(
+                "1+1".to_string(),
+                "2".to_string(),
+                CasWorksheetStatus::Success
+            )
+            .is_ok());
+        assert!(validate_document(&doc).is_ok());
+    }
+}
