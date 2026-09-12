@@ -660,8 +660,8 @@ const MEDIA_TIP_SPEED: &str = "Velocidad: elegí 0.5x, 1x o 2x";
 const MEDIA_TIP_EXPORT: &str = "Exportar: elegís formato y calidad";
 const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual (Espacio)";
 const MEDIA_TIP_PLAY: &str = "Retoma donde quedó (Espacio)";
-const MEDIA_TIP_STEP_BACK: &str = "Fotograma anterior (←)";
-const MEDIA_TIP_STEP_FWD: &str = "Fotograma siguiente (→)";
+const MEDIA_TIP_STEP_BACK: &str = "Fotograma anterior (<-)";
+const MEDIA_TIP_STEP_FWD: &str = "Fotograma siguiente (->)";
 
 /// Ayuda visible de intents de animación invocables por texto (M2-3/M2-4).
 ///
@@ -6674,10 +6674,12 @@ pub const PLAYER_BTN_H: f32 = HIT_TARGET_MIN + SPACE_XS;
 /// Ancho de los botones cuadrados (play/pausa, atrás, siguiente): cuadrado
 /// sobre el alto único.
 pub const PLAYER_BTN_SQ_W: f32 = PLAYER_BTN_H;
-/// Ancho del selector de velocidad (entra `0.5x ▾` sin recorte).
+/// Ancho del selector de velocidad (entra `0.5x` + caret pintado sin recorte).
 pub const PLAYER_BTN_SPEED_W: f32 = SPACE_XXL + SPACE_SM;
 /// Ancho del botón de texto Exportar (siempre visible, jamás cortado).
 pub const PLAYER_BTN_EXPORT_W: f32 = SPACE_XXL * 2.0;
+/// Ancho del caret de velocidad pintado con el painter (tokens, sin fuente).
+const MEDIA_SPEED_CARET_W: f32 = 6.0;
 
 /// Ancho mínimo del deslizador de la toolbar única v3 (tokens).
 ///
@@ -6690,7 +6692,7 @@ const MEDIA_TOOLBAR_MIN_SLIDER_W: f32 = crate::tokens::SPACE_XXL + crate::tokens
 ///
 /// E2: los viejos (`24/24/40/76`) mentían — medían el piso táctil y no la
 /// fuente real del panel (emoji ⏸ con fallback más ancho que el texto,
-/// `0.5x ▾` más largo que `1x`, `Exportar` con padding del Button) ni
+/// `0.5x` + caret más largo que `1x`, `Exportar` con padding del Button) ni
 /// restaban el cromo (`Frame` turno + card) ni el overlay del scrollbar
 /// flotante (cero asignado pero ~10px que tapan el borde). La única fuente
 /// son `PLAYER_BTN_H/SQ_W/SPEED_W/EXPORT_W`: un solo alto y anchos
@@ -6740,10 +6742,10 @@ pub fn media_needs_overflow(avail_w: f32) -> bool {
 /// Disposición de la toolbar única v3 (pura y testeable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaToolbarLayout {
-    /// Una fila: `[▶/⏸] [◀][▶] [deslizador + N/M] [1x▾] [Exportar]`.
+    /// Una fila: `[▶/⏸] [◀][▶] [deslizador + N/M] [1x + caret] [Exportar]`.
     SingleRow,
     /// Dos filas limpias: arriba `[▶/⏸] [◀][▶] [N/M]`, abajo
-    /// `[1x▾] [Exportar]` a la derecha. Jamás iconos mudos:
+    /// `[1x + caret] [Exportar]` a la derecha. Jamás iconos mudos:
     /// cada acción conserva su etiqueta legible.
     TwoRows,
 }
@@ -7379,11 +7381,11 @@ struct MediaToolbarView<'a> {
 
 /// Toolbar ÚNICA v3: una fila en panel ancho, tres filas limpias en angosto.
 ///
-/// Ancha (`SingleRow`): `[▶/⏸] [◀][▶] [deslizador + N/M] [1x▾] [Exportar]`.
+/// Ancha (`SingleRow`): `[▶/⏸] [◀][▶] [deslizador + N/M] [1x + caret] [Exportar]`.
 /// Angosta (`TwoRows`, ver `media_toolbar_layout`): arriba `[▶/⏸] [◀][▶]
 /// [N/M]`, al medio el deslizador a todo el ancho (piso
 /// `MEDIA_TOOLBAR_MIN_SLIDER_W` garantizado: no compite con botones),
-/// abajo `[1x▾] [Exportar]` a la derecha.
+/// abajo `[1x + caret] [Exportar]` a la derecha.
 /// E2: si ni la segunda fila entra (`media_needs_overflow`), la velocidad
 /// colapsa al menú explícito `···`; `Exportar` siempre queda
 /// visible como botón, jamás cortado al borde. La velocidad es menú
@@ -7619,16 +7621,34 @@ fn draw_media_right_buttons(
 ///
 /// Botón de `PLAYER_BTN_SPEED_W × PLAYER_BTN_H` (mismo alto que el resto):
 /// `menu_button` no acepta tamaño, así que se usa un `Button` dimensionado
-/// que abre el popup manual (`popup_below_widget`). Reemplaza el ciclo ciego
-/// del botón: cada opción visible elige directo. Piel pura: solo lee/escribe
+/// que abre el popup manual (`popup_below_widget`). Sin glifo en el texto:
+/// el triangulito U+25BE es tofu en la fuente de egui (se veía `1x` con un
+/// cuadradito), así que la etiqueta es solo el texto (`0.5x`/`1x`/`2x`) y el
+/// caret se pinta con el painter a la derecha (no depende de la fuente). Piel pura: solo lee/escribe
 /// el `Cell` de velocidad.
 fn draw_media_speed_menu(ui: &mut egui::Ui, state: &AssistantPanelState, view: &MediaToolbarView) {
     let mut velocidad = state.media_speed.get();
     let popup_id = ui.make_persistent_id("media_speed_menu");
     let boton = ui.add_sized(
         egui::vec2(PLAYER_BTN_SPEED_W, PLAYER_BTN_H),
-        egui::Button::new(format!("{} ▾", view.speed_label)),
+        egui::Button::new(view.speed_label),
     );
+    // Caret hacia abajo pintado sobre el botón (a la derecha del texto):
+    // triángulo relleno con el color de texto secundario, misma capa sobre
+    // el botón ya dibujado. Cero I/O, cero fuente.
+    let caret_color = current_theme(ui.ctx()).text_secondary;
+    let caret_rect = boton.rect;
+    let caret_cy = caret_rect.center().y;
+    let caret_x0 = caret_rect.right() - SPACE_XS - MEDIA_SPEED_CARET_W;
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(caret_x0, caret_cy - 2.0),
+            egui::pos2(caret_x0 + MEDIA_SPEED_CARET_W, caret_cy - 2.0),
+            egui::pos2(caret_x0 + MEDIA_SPEED_CARET_W * 0.5, caret_cy + 2.5),
+        ],
+        caret_color,
+        egui::Stroke::NONE,
+    ));
     let boton = boton.on_hover_text(MEDIA_TIP_SPEED);
     if boton.clicked() {
         ui.memory_mut(|memoria| memoria.toggle_popup(popup_id));
@@ -7656,17 +7676,22 @@ fn draw_media_speed_menu(ui: &mut egui::Ui, state: &AssistantPanelState, view: &
 
 /// Botón `Exportar` (extraído para reuso en overflow: siempre visible).
 ///
-/// Botón de texto de `PLAYER_BTN_EXPORT_W × PLAYER_BTN_H`: mismo alto que
-/// el resto, ancho propio de texto (jamás cortado al borde).
+/// Alto fijo único `PLAYER_BTN_H` vía `add_sized` (igual que play/paso/
+/// velocidad): el `min_size` anterior dejaba 1-2px de diferencia porque solo
+/// era piso. Mismo widget `Button`, mismo `Frame`: cero padding distinto.
 fn draw_media_export_button(
     ui: &mut egui::Ui,
     view: &MediaToolbarView,
     action: &mut Option<AssistantUiAction>,
 ) {
-    let export_response = ui.add_enabled(
-        view.frame_count > 0 && !view.exporting,
-        egui::Button::new("Exportar").min_size(egui::vec2(PLAYER_BTN_EXPORT_W, PLAYER_BTN_H)),
-    );
+    let export_response = ui
+        .add_enabled_ui(view.frame_count > 0 && !view.exporting, |ui| {
+            ui.add_sized(
+                egui::vec2(PLAYER_BTN_EXPORT_W, PLAYER_BTN_H),
+                egui::Button::new("Exportar"),
+            )
+        })
+        .inner;
     if export_response.clicked() {
         *action = Some(AssistantUiAction::ExportMedia);
     }
@@ -8173,7 +8198,7 @@ fn draw_media_export_dialog(
                 }
             });
             if let Some((pw, ph)) = dialog.preset_size() {
-                ui.label(egui::RichText::new(format!("preset {pw}×{ph}")).size(TYPE_XS));
+                ui.label(egui::RichText::new(format!("preset {pw}x{ph}")).size(TYPE_XS));
             }
             // Tope honesto visible antes de exportar (con la alternativa).
             if !dialog.aviso_limite().is_empty() {
@@ -15447,7 +15472,7 @@ mod tests {
 
     #[test]
     fn z2_media_card_v3_una_toolbar_sin_controles_viejos() {
-        // Blindaje v3: UNA toolbar `[▶/⏸] [◀][▶] [slider+N/M] [1x▾]
+        // Blindaje v3: UNA toolbar `[▶/⏸] [◀][▶] [slider+N/M] [1x + caret]
         // [Exportar]`; nada de Repetir/Secuencia, nada de etiquetas sueltas
         // (eran la fila "Exportar 7/48" y la fantasma arriba-izquierda), nada
         // de `.text()` lateral en el deslizador (apretaba la fila), nada del
@@ -15703,6 +15728,146 @@ mod tests {
         ] {
             assert!(source.contains(usada), "toolbar uniforme usa {usada}");
         }
+    }
+
+    #[test]
+    fn player_sin_tofu_caret_pintado_y_export_alto_fijo() {
+        // Bug captura: el botón de velocidad mostraba `1x` con un cuadradito
+        // porque el U+25BE no tiene glifo en la fuente de egui. Auditoría de
+        // glifos del player/export/diálogo (solo este archivo):
+        // - FUERA: U+25BE (tofu probado) -> caret pintado con el painter;
+        //   `←/→` en tooltips -> ASCII `<-`/`->`; `×` en preset -> `x`.
+        // - DENTRO (probados o base Latin-1 de la fuente): `▶◀⏸` (visibles
+        //   en captura), `…` (pineado en docenas de asserts), `···`/`•` y
+        //   `«»` (Latin-1, sin reporte de tofu). `⛶`/`□` solo viven en
+        //   comentarios históricos de la eliminación (jamás en un `Button`).
+        // Los patrones prohibidos se arman concatenados o con escapes para
+        // que este mismo test no los contenga y el `contains` sea honesto.
+        let source = include_str!("assistant.rs");
+        assert!(
+            !source.contains('\u{25be}'),
+            "cero tofu U+25BE en el fuente"
+        );
+        for prohibido in [
+            ["Fotograma anterior (", "\u{2190})"].concat(),
+            ["Fotograma siguiente (", "\u{2192})"].concat(),
+            ["preset {pw}", "\u{d7}{ph}"].concat(),
+        ] {
+            assert!(
+                !source.contains(&prohibido),
+                "glifo riesgoso fuera del player: {prohibido}"
+            );
+        }
+        for visible in [
+            "Fotograma anterior (<-)",
+            "Fotograma siguiente (->)",
+            "preset {pw}x{ph}",
+        ] {
+            assert!(
+                source.contains(visible),
+                "reemplazo ASCII visible: {visible}"
+            );
+        }
+        // La velocidad etiqueta solo el texto y pinta el caret encima.
+        let menu_at = source
+            .find("fn draw_media_speed_menu(")
+            .expect("existe draw_media_speed_menu");
+        let menu_end = source[menu_at..]
+            .find("\nfn ")
+            .map(|off| menu_at + off)
+            .expect("cierra draw_media_speed_menu");
+        let menu = &source[menu_at..menu_end];
+        assert!(
+            menu.contains("Button::new(view.speed_label)"),
+            "etiqueta solo texto, sin glifo"
+        );
+        assert!(
+            menu.contains("convex_polygon"),
+            "caret dibujado con el painter (convex_polygon)"
+        );
+        // Exportar con alto fijo real (`add_sized`, no `min_size` que era piso).
+        let export_at = source
+            .find("fn draw_media_export_button(")
+            .expect("existe draw_media_export_button");
+        let export_end = source[export_at..]
+            .find("\nfn ")
+            .map(|off| export_at + off)
+            .expect("cierra draw_media_export_button");
+        let export_fn = &source[export_at..export_end];
+        assert!(
+            export_fn.contains("add_sized")
+                && export_fn.contains("PLAYER_BTN_EXPORT_W, PLAYER_BTN_H"),
+            "Exportar mide PLAYER_BTN_EXPORT_W x PLAYER_BTN_H fijos"
+        );
+        assert!(
+            !export_fn.contains("min_size"),
+            "sin min_size: era piso, no alto fijo"
+        );
+        // Sin reintroducir el visor eliminado: ningún `Button` usa ⛶/□
+        // (patrones con escapes: este test no los contiene literal; el
+        // alcance card lo pinea `z2_media_card_v3_una_toolbar_sin_controles_viejos`).
+        for patron in [
+            ["Button::new(\"", "\u{26f6}"].concat(),
+            ["Button::new(\"", "\u{25a1}"].concat(),
+        ] {
+            assert!(!source.contains(&patron), "sin resto del visor: {patron}");
+        }
+        // Geometría headless: los 5 botones de la fila miden PLAYER_BTN_H
+        // exacto (tolerancia sub-píxel), mismo Frame/Button en los 5.
+        let context = egui::Context::default();
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(520.0, 120.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let altos = [
+                            ui.add_sized(
+                                egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+                                egui::Button::new("▶"),
+                            )
+                            .rect
+                            .height(),
+                            ui.add_sized(
+                                egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+                                egui::Button::new("◀"),
+                            )
+                            .rect
+                            .height(),
+                            ui.add_sized(
+                                egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+                                egui::Button::new("▶"),
+                            )
+                            .rect
+                            .height(),
+                            ui.add_sized(
+                                egui::vec2(PLAYER_BTN_SPEED_W, PLAYER_BTN_H),
+                                egui::Button::new("1x"),
+                            )
+                            .rect
+                            .height(),
+                            ui.add_sized(
+                                egui::vec2(PLAYER_BTN_EXPORT_W, PLAYER_BTN_H),
+                                egui::Button::new("Exportar"),
+                            )
+                            .rect
+                            .height(),
+                        ];
+                        for alto in altos {
+                            assert!(
+                                (alto - PLAYER_BTN_H).abs() < 0.5,
+                                "fila uniforme: {alto} vs {PLAYER_BTN_H}"
+                            );
+                        }
+                    });
+                });
+            },
+        );
     }
 
     #[test]
