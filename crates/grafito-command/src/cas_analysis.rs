@@ -185,10 +185,6 @@ pub(crate) fn cmd_err(msg: impl Into<String>) -> CommandOutcome {
     CommandOutcome::Error(msg.into())
 }
 
-#[allow(dead_code)]
-pub(crate) const TODO_MIGRATION: &str =
-    "TODO fase 2: migrar Derivative/Integral/Solve/Taylor/Limit* completos";
-
 pub(crate) fn try_execute_analysis_command(
     document: &mut Document,
     cmd: &CasCmd,

@@ -1,7 +1,6 @@
 //! Avatar Scandinavian profesional — super configurable, eye-tracking y morph a burbuja.
 //!
-//! Reemplaza el habitáculo Pou por un avatar minimalista con 12 dimensiones
-//! personalizables. Todo el dibujo es vectorial `egui::Painter` sin assets,
+//! Avatar minimalista con 12 dimensiones personalizables. Todo el dibujo es vectorial `egui::Painter` sin assets,
 //! con eye-tracking determinista y testes headless para la lógica pura.
 
 use egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};

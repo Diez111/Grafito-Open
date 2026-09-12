@@ -41,9 +41,3 @@ pub(crate) struct Construccion {
     pub con_cas: bool,
     pub hoja_celdas: Vec<Vec<String>>,
 }
-impl Construccion {
-    #[allow(dead_code)]
-    pub(crate) fn has_hoja(&self) -> bool {
-        !self.hoja_celdas.is_empty()
-    }
-}

@@ -1362,9 +1362,7 @@ pub(crate) struct TrigGraphCache {
     pub asymptotes: Vec<f64>,
 }
 
-// Pou eliminado — ver avatar.rs
-
-/// Evaluador GPU para la ruta híbrida de integrales definidas.
+// Evaluador GPU para la ruta híbrida de integrales definidas.
 struct AppGpuFunctionEvaluator {
     renderer: Arc<RwLock<Option<grafito_render::Renderer>>>,
     device: Arc<wgpu::Device>,
@@ -8069,25 +8067,6 @@ impl GrafitoApp {
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.show_about = false;
         }
-    }
-
-    #[allow(dead_code)] // TODO: eliminar legado Pou window (compat, no usado en prod)
-    pub(crate) fn draw_pou_window(&mut self, _ctx: &egui::Context) {}
-    pub(crate) fn draw_mascot_config_window(&mut self, _ctx: &egui::Context) {
-        // Ventana legada unificada: ahora todo vive en Configuración (assistant.settings_open).
-        // Se mantiene para compatibilidad pero delega a la ventana única.
-        if self.show_mascot_config {
-            self.assistant.settings_open = true;
-            self.assistant.config_tab = 1;
-            self.avatar_draft = self.profile.avatar.clone();
-            self.assistant.avatar = self.profile.avatar.clone();
-            self.assistant.user_name = self.profile.display_name().to_owned();
-            self.show_mascot_config = false;
-        }
-    }
-    #[allow(dead_code)] // TODO: remover delegación legacy unified_config (compat, cubierto por assistant.settings_open)
-    pub(crate) fn draw_unified_config_window(&mut self, ctx: &egui::Context) {
-        self.draw_mascot_config_window(ctx);
     }
 }
 

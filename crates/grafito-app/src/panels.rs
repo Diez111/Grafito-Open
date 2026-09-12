@@ -4912,12 +4912,6 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
         });
 }
 
-// Perspectiva Mascota eliminada — avatar personalizable vive en Configuración
-#[allow(dead_code)] // TODO: picks legacy tras migración a Configuración unificada (mantener para compat, usado en tests legacy)
-pub(crate) fn draw_mascota_panel(_app: &mut GrafitoApp, _ctx: &egui::Context) {}
-#[allow(dead_code)] // TODO: picks legacy tras migración a Configuración unificada (mantener para compat, usado en tests legacy)
-pub(crate) fn draw_right_mascota_panel(_app: &mut GrafitoApp, _ctx: &egui::Context) {}
-
 #[cfg(test)]
 mod statistics_interpolation_tests {
     use super::stable_interpolate;

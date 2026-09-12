@@ -32,7 +32,7 @@ pub const FONT_FALLBACK_SANS: &str = "Inter";
 
 /// Texto doble-extra-pequeño: micro hints, eye-tracking status.
 /// Piso mínimo 11.0 (legibilidad: 9.0 viola el mínimo accesible).
-// MIGRATION: 9.0→11.0, update pou.rs/ui.rs in next phase.
+// Piso mínimo ya aplicado (11.0).
 pub const TYPE_2XS: f32 = 11.0;
 /// Texto extra-pequeño: notas, metadatos, hints.
 pub const TYPE_XS: f32 = 11.0;

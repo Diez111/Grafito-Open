@@ -26,7 +26,6 @@ pub mod command_palette;
 pub mod i18n;
 pub mod icons;
 pub mod keypad;
-pub mod pou;
 pub mod projector;
 pub mod prosa;
 pub mod teaching;
