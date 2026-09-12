@@ -29,10 +29,14 @@ use grafito_ui::animation::anim_axes::{
     cabe_label_entre, clip_seg_a_caja, short_tick_label, LabelCaja, TICK_CHAR_H_PX, TICK_CHAR_W_PX,
 };
 
-// ── Registro canónico nativo v4 (11 plantillas) ──────────────────────────
-// SYNC MECÁNICO 11↔11↔11 (ANIM-REVIVE):
+// ── Registro canónico nativo v4 (13 plantillas) ──────────────────────────
+// SYNC MECÁNICO 11↔11↔11 (ANIM-REVIVE) + 2 nativas nuevas en tránsito:
 // - `grafito-anim/src/protocol.rs::CANONICAL_TEMPLATES`: fuente única (11).
-// - Este `NATIVE_TEMPLATES`: idéntico orden y contenido (test pineado).
+// - Este `NATIVE_TEMPLATES`: prefijo 11 idéntico en orden y contenido +
+//   `subspace` + `fractal` al final (test pineado como superconjunto).
+//   El frente protocolo las registra en `CANONICAL_TEMPLATES` después;
+//   hasta entonces `sanitize_template` las rechaza y el nativo las atiende
+//   por dispatcher interno (`render_anim_by_template` / `resolve_native_template`).
 // - `anim_ui.rs::PLANTILLAS_COMBO`: mismo conjunto (test pineado, orden libre).
 // - `sanitize_template` usa `CANONICAL_TEMPLATES` (sin match duplicado).
 // DIVERGENCIA HONESTA residual (fuera de este scope):
@@ -58,6 +62,10 @@ pub const NATIVE_TEMPLATES: &[&str] = &[
     "gradient-field",
     "mobius-transform",
     "universal",
+    // Frente piel-ui: 2 plantillas nuevas con renderer propio en este archivo
+    // (al final para conservar el prefijo 11 idéntico al protocolo).
+    "subspace",
+    "fractal",
 ];
 
 /// ¿La plantilla tiene renderer nativo propio?
@@ -6338,6 +6346,8 @@ fn resolve_native_template(template: &str, concept: &str) -> &'static str {
         "logistic-bifurcation" | "bifurcacion-logistica" | "logistica" => "logistic-bifurcation",
         "gradient-field" | "campo-gradiente" | "gradiente" => "gradient-field",
         "mobius-transform" | "mobius" | "moebius" => "mobius-transform",
+        "subspace" => "subspace",
+        "fractal" => "fractal",
         // F5: templates pedagógicos inline — mapeo a nativos existentes
         "fraccion-visual" => "integral-area",
         "vector-anim" => "conformal-map",
@@ -6355,8 +6365,9 @@ fn resolve_native_template(template: &str, concept: &str) -> &'static str {
 /// aquí con el mapa vivo. Atienden params: `derivative-slope` (x0/span),
 /// `integral-area` (a/b), `taylor-series` (terms = orden 1..=7 vía
 /// `taylor_anim_order_from_params`, F1),
-/// `euler`/`fourier` (terms). El resto IGNORA params
-/// por ahora (TODO honesto: conformal/pitagoras/
+/// `euler`/`fourier` (terms), `subspace` (v1x/v1y/v2x/v2y con rank==2 o
+/// default). `fractal` IGNORA params (niveles 0→4 fijos, honesto). El resto
+/// IGNORA params por ahora (TODO honesto: conformal/pitagoras/
 /// logistic/gradient/mobius/universal aún no parametrizan) y delega al legacy.
 /// Firmas legacy intactas: ningún caller existente se rompe.
 pub fn render_anim_for_concept_with_params(
@@ -6531,6 +6542,10 @@ pub fn render_anim_with_progress_con_rotulo(
         "fourier" => {
             render_fourier_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
         }
+        "subspace" => {
+            render_subspace_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "fractal" => render_fractal_frames_with_params_impl(width, height, con_rotulo, on_frame),
         tmpl => render_anim_for_concept_legacy_with_progress(
             tmpl, concept, width, height, params, con_rotulo, on_frame,
         ),
@@ -6627,6 +6642,10 @@ fn render_anim_for_concept_legacy_with_progress(
         }
         "gradient-field" => render_gradient_field_frames_impl(width, height, con_rotulo, on_frame),
         "mobius-transform" => render_mobius_frames_impl(width, height, con_rotulo, on_frame),
+        "subspace" => {
+            render_subspace_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
+        }
+        "fractal" => render_fractal_frames_with_params_impl(width, height, con_rotulo, on_frame),
         "universal" => {
             render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame)
         }
@@ -7193,6 +7212,605 @@ fn render_mobius_frames_impl(
     frames
 }
 
+// ── subspace: el span como paralelogramo (estilo 3Blue1Brown) ─────────────
+// NumberPlane + ejes fijos de fondo; f0-12 fade in del plano; f12-24 flechas
+// v1/v2 con GrowFromCenter + rótulos; f24-40 paralelogramo {0,v1,v1+v2,v2}
+// con Write progresivo (reveal del span + hatch tenue); f40-48 rótulo
+// "span(v1,v2)" + Indicate (halo que crece monótono, sin plateau).
+// Default honesto v1=(2,1), v2=(-1,2) (det=5, rank 2); params vivos
+// `v1x/v1y/v2x/v2y` (−3..=3) con validación rank==2 (|det|≥1e-6, si no
+// default). Sin relleno alfa sólido: borde 3px + hatch (barato, O(miles)).
+// Texto didáctico solo con `con_rotulo` (convención del archivo: el chat no
+// quema texto, el export sí). Determinista, <2s, 48 frames.
+
+/// Default honesto de v1 (linealmente independiente de v2, det=5).
+pub const SUBSPACE_V1_DEFAULT: [f64; 2] = [2.0, 1.0];
+/// Default honesto de v2 (linealmente independiente de v1, det=5).
+pub const SUBSPACE_V2_DEFAULT: [f64; 2] = [-1.0, 2.0];
+/// Claves vivas de params (contrato para el frente dispatch).
+pub const SUBSPACE_PARAM_V1X: &str = "v1x";
+/// Clave viva: componente y de v1.
+pub const SUBSPACE_PARAM_V1Y: &str = "v1y";
+/// Clave viva: componente x de v2.
+pub const SUBSPACE_PARAM_V2X: &str = "v2x";
+/// Clave viva: componente y de v2.
+pub const SUBSPACE_PARAM_V2Y: &str = "v2y";
+/// Primer frame con flechas (f0-12 = plano).
+pub const SUBSPACE_F_VECTORES_DESDE: usize = 12;
+/// Primer frame con span (f12-24 = vectores).
+pub const SUBSPACE_F_SPAN_DESDE: usize = 24;
+/// Primer frame con rótulo+Indicate (f24-40 = span).
+pub const SUBSPACE_F_ROTULO_DESDE: usize = 40;
+/// Determinante mínimo para rank 2 (|det| menor → default honesto).
+pub const SUBSPACE_DET_MIN: f64 = 1e-6;
+
+/// Fase didáctica del frame (rangos pineados en test). Pura.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubspaceFase {
+    /// f0-12: NumberPlane + ejes con fade in.
+    Plano,
+    /// f12-24: flechas v1/v2 con GrowFromCenter.
+    Vectores,
+    /// f24-40: paralelogramo con Write progresivo.
+    Span,
+    /// f40-48: rótulo + Indicate sobre el paralelogramo.
+    Rotulo,
+}
+
+/// Fase para el frame (clamp a 47: frame ≥48 → `Rotulo`). Pura.
+pub fn subspace_fase_para_frame(frame: usize) -> SubspaceFase {
+    let f = frame.min(NATIVE_ANIM_FRAME_COUNT - 1);
+    if f < SUBSPACE_F_VECTORES_DESDE {
+        SubspaceFase::Plano
+    } else if f < SUBSPACE_F_SPAN_DESDE {
+        SubspaceFase::Vectores
+    } else if f < SUBSPACE_F_ROTULO_DESDE {
+        SubspaceFase::Span
+    } else {
+        SubspaceFase::Rotulo
+    }
+}
+
+/// Vectores vivos desde params (clamp −3..=3) con validación rank==2:
+/// no finitos, norma <1e-6 o |det|<1e-6 → default honesto. Pura.
+pub fn subspace_vectores_desde_params(
+    params: &std::collections::BTreeMap<String, f64>,
+) -> ([f64; 2], [f64; 2]) {
+    let v1 = [
+        scene_param_clamped(
+            params,
+            SUBSPACE_PARAM_V1X,
+            SUBSPACE_V1_DEFAULT[0],
+            -3.0,
+            3.0,
+        ),
+        scene_param_clamped(
+            params,
+            SUBSPACE_PARAM_V1Y,
+            SUBSPACE_V1_DEFAULT[1],
+            -3.0,
+            3.0,
+        ),
+    ];
+    let v2 = [
+        scene_param_clamped(
+            params,
+            SUBSPACE_PARAM_V2X,
+            SUBSPACE_V2_DEFAULT[0],
+            -3.0,
+            3.0,
+        ),
+        scene_param_clamped(
+            params,
+            SUBSPACE_PARAM_V2Y,
+            SUBSPACE_V2_DEFAULT[1],
+            -3.0,
+            3.0,
+        ),
+    ];
+    let det = v1[0] * v2[1] - v1[1] * v2[0];
+    let n1 = v1[0].hypot(v1[1]);
+    let n2 = v2[0].hypot(v2[1]);
+    if !det.is_finite()
+        || det.abs() < SUBSPACE_DET_MIN
+        || n1 < SUBSPACE_DET_MIN
+        || n2 < SUBSPACE_DET_MIN
+    {
+        (SUBSPACE_V1_DEFAULT, SUBSPACE_V2_DEFAULT)
+    } else {
+        (v1, v2)
+    }
+}
+
+/// Funde el buffer hacia el BG en `mezcla` 0..1 (0 = intacto, 1 = BG).
+/// Solo RGB: el alfa queda en 255 (contrato `assert_frames_valid`). Pura.
+fn fundir_hacia_bg(buf: &mut [u8], mezcla: f64) {
+    let m = mezcla.clamp(0.0, 1.0);
+    if m <= 0.0 {
+        return;
+    }
+    for px in buf.chunks_exact_mut(4) {
+        for (k, fondo) in BG.iter().enumerate().take(3) {
+            let v = f64::from(px[k]);
+            px[k] = (v + (f64::from(*fondo) - v) * m).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+/// Hatch vertical dentro del paralelogramo {0,v1,v1+v2,v2} (p=s·v1+t·v2 con
+/// s,t∈[0,1]): segmentos mundo listos para `draw_seg_mundo`. Se precomputa
+/// una vez por render (O(miles), barato). Pura.
+fn subspace_hatch(v1: [f64; 2], v2: [f64; 2]) -> Vec<([f64; 2], [f64; 2])> {
+    let det = v1[0] * v2[1] - v1[1] * v2[0];
+    if !det.is_finite() || det.abs() < SUBSPACE_DET_MIN {
+        return Vec::new();
+    }
+    let dentro = |x: f64, y: f64| -> bool {
+        let s = (x * v2[1] - y * v2[0]) / det;
+        let t = (v1[0] * y - v1[1] * x) / det;
+        (-1e-9..=1.0 + 1e-9).contains(&s) && (-1e-9..=1.0 + 1e-9).contains(&t)
+    };
+    let esq = [[0.0, 0.0], v1, [v1[0] + v2[0], v1[1] + v2[1]], v2];
+    let (mut xmin, mut xmax) = (esq[0][0], esq[0][0]);
+    let (mut ymin, mut ymax) = (esq[0][1], esq[0][1]);
+    for p in &esq {
+        xmin = xmin.min(p[0]);
+        xmax = xmax.max(p[0]);
+        ymin = ymin.min(p[1]);
+        ymax = ymax.max(p[1]);
+    }
+    let mut out = Vec::new();
+    let mut c = xmin + 0.09;
+    while c < xmax {
+        let mut y = ymin;
+        let mut inicio: Option<f64> = None;
+        while y <= ymax {
+            if dentro(c, y) {
+                if inicio.is_none() {
+                    inicio = Some(y);
+                }
+            } else if let Some(y0) = inicio.take() {
+                if y - y0 > 0.05 {
+                    out.push(([c, y0], [c, y]));
+                }
+            }
+            y += 0.03;
+        }
+        if let Some(y0) = inicio {
+            if ymax - y0 > 0.05 {
+                out.push(([c, y0], [c, ymax]));
+            }
+        }
+        c += 0.18;
+        if out.len() > 512 {
+            break;
+        }
+    }
+    out
+}
+
+/// Dibuja el span con Write progresivo: recorre el perímetro hasta
+/// `avance` 0..1 y revela esa fracción del hatch. Pura sobre el buffer.
+fn subspace_dibujar_span(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    esq: &[[f64; 2]; 4],
+    avance: f64,
+    hatch: &[([f64; 2], [f64; 2])],
+) {
+    let a = avance.clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return;
+    }
+    let lados = [
+        (esq[0], esq[1]),
+        (esq[1], esq[2]),
+        (esq[2], esq[3]),
+        (esq[3], esq[0]),
+    ];
+    let total: f64 = lados
+        .iter()
+        .map(|(p, q)| (q[0] - p[0]).hypot(q[1] - p[1]))
+        .sum();
+    if !total.is_finite() || total <= 0.0 {
+        return;
+    }
+    let mut resto = total * a;
+    for (p, q) in &lados {
+        if resto <= 0.0 {
+            break;
+        }
+        let len = (q[0] - p[0]).hypot(q[1] - p[1]);
+        let toma = len.min(resto);
+        if toma > 0.0 && len > 0.0 {
+            let f = toma / len;
+            draw_seg_mundo(
+                buf,
+                w,
+                h,
+                p[0],
+                p[1],
+                p[0] + (q[0] - p[0]) * f,
+                p[1] + (q[1] - p[1]) * f,
+                MINT_STRONG,
+                CURVE_ANCHO,
+            );
+        }
+        resto -= toma;
+    }
+    let n = ((hatch.len() as f64) * a).round().clamp(0.0, 512.0) as usize;
+    for (p, q) in hatch.iter().take(n) {
+        draw_seg_mundo(buf, w, h, p[0], p[1], q[0], q[1], MINT_FAINT, 1.0);
+    }
+}
+
+/// Rótulo de punta ("v1"/"v2"): texto real a la escala de `h`, anclado al
+/// tip con offset y clamp al frame. Solo la llama el camino con rótulo.
+fn subspace_etiqueta_punta(buf: &mut [u8], w: usize, h: usize, punta: [f64; 2], texto: &str) {
+    let (tx, ty) = to_pixel(w, h, punta[0], punta[1]);
+    let x = tx.saturating_add(6).min(w.saturating_sub(12));
+    let y = ty.saturating_sub(16);
+    draw_text_block(buf, w, h, x, y, texto, PAL_FG, text_scale_for_h(h));
+}
+
+/// Subspace standalone (defaults honestos, con rótulo quemado para export).
+pub fn render_subspace_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_subspace_frames_with_params(width, height, &std::collections::BTreeMap::new())
+}
+
+/// Subspace con params vivos (`v1x/v1y/v2x/v2y`, rank==2 o default).
+pub fn render_subspace_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_subspace_frames_with_params_impl(width, height, params, true, &mut |_, _| {})
+}
+
+fn render_subspace_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let (v1, v2) = subspace_vectores_desde_params(params);
+    let suma = [v1[0] + v2[0], v1[1] + v2[1]];
+    let esq = [[0.0, 0.0], v1, suma, v2];
+    let hatch = subspace_hatch(v1, v2);
+    let centro = [suma[0] / 2.0, suma[1] / 2.0];
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        let fase = subspace_fase_para_frame(frame);
+        // f0-12: fade in del plano (arranca tenue 15%, jamás invisible:
+        // el primer frame no debe ser sólido).
+        if fase == SubspaceFase::Plano {
+            let e = ease_in_out(frame as f64 / 11.0);
+            fundir_hacia_bg(&mut buf, 1.0 - (0.15 + 0.85 * e));
+        }
+        // f12-24: flechas con GrowFromCenter (longitud 0→1 con easing).
+        if frame >= SUBSPACE_F_VECTORES_DESDE {
+            let g =
+                ease_in_out(((frame - SUBSPACE_F_VECTORES_DESDE) as f64 / 11.0).clamp(0.0, 1.0))
+                    .max(0.02);
+            draw_arrow_world(
+                &mut buf,
+                w,
+                h,
+                [0.0, 0.0],
+                [v1[0] * g, v1[1] * g],
+                CURVE_MAIN,
+            );
+            draw_arrow_world(
+                &mut buf,
+                w,
+                h,
+                [0.0, 0.0],
+                [v2[0] * g, v2[1] * g],
+                TANGENT_BLUE,
+            );
+            let (ox, oy) = to_pixel(w, h, 0.0, 0.0);
+            draw_filled_circle(&mut buf, w, h, ox, oy, 2, DOT_BLUE);
+            let (ax, ay) = to_pixel(w, h, v1[0] * g, v1[1] * g);
+            draw_filled_circle(&mut buf, w, h, ax, ay, 2, CURVE_MAIN);
+            let (bx, by) = to_pixel(w, h, v2[0] * g, v2[1] * g);
+            draw_filled_circle(&mut buf, w, h, bx, by, 2, TANGENT_BLUE);
+        }
+        // f24-40: diagonal suma + span con Write progresivo.
+        if frame >= SUBSPACE_F_SPAN_DESDE {
+            draw_arrow_world(&mut buf, w, h, [0.0, 0.0], suma, POINT_RED);
+            let (sx, sy) = to_pixel(w, h, suma[0], suma[1]);
+            draw_filled_circle(&mut buf, w, h, sx, sy, 3, POINT_RED);
+            let p = ease_in_out(((frame - SUBSPACE_F_SPAN_DESDE) as f64 / 15.0).clamp(0.0, 1.0));
+            subspace_dibujar_span(&mut buf, w, h, &esq, p, &hatch);
+        }
+        // f40-48: span completo + Indicate (halo que crece monótono 0..7:
+        // cada frame difiere, sin plateau).
+        if fase == SubspaceFase::Rotulo {
+            subspace_dibujar_span(&mut buf, w, h, &esq, 1.0, &hatch);
+            let s = 1.0 + 0.05 * (frame - SUBSPACE_F_ROTULO_DESDE) as f64;
+            let halo: [[f64; 2]; 4] = esq.map(|p| {
+                [
+                    centro[0] + (p[0] - centro[0]) * s,
+                    centro[1] + (p[1] - centro[1]) * s,
+                ]
+            });
+            let lados = [
+                (halo[0], halo[1]),
+                (halo[1], halo[2]),
+                (halo[2], halo[3]),
+                (halo[3], halo[0]),
+            ];
+            for (p, q) in &lados {
+                draw_seg_mundo(&mut buf, w, h, p[0], p[1], q[0], q[1], MINT_FAINT, 1.0);
+            }
+        }
+        // Barra de progreso inferior (honesta: frame/47, como mobius).
+        let bar_y = h.saturating_sub(4);
+        let prog = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        let bar_w = (w as f64 * prog) as usize;
+        draw_filled_rect(&mut buf, w, h, 0, bar_y, bar_w, 2, PAL_ACCENT);
+        draw_filled_rect(
+            &mut buf,
+            w,
+            h,
+            bar_w,
+            bar_y,
+            w.saturating_sub(bar_w),
+            2,
+            TRACK,
+        );
+        // Rótulos didácticos (solo export: el chat no quema texto).
+        if con_rotulo {
+            let titulo = match fase {
+                SubspaceFase::Plano => "plano + ejes",
+                SubspaceFase::Vectores => "v1, v2",
+                SubspaceFase::Span | SubspaceFase::Rotulo => "span(v1,v2)",
+            };
+            // El rótulo del span se ancla a la esquina lejana (v1+v2) con
+            // desplazamiento: en la esquina superior-izquierda fija caía
+            // sobre la etiqueta de punta v1/v2 según orientación. Se clampa
+            // con el ancho real del texto para no recortarse a la derecha.
+            let (rx, ry) = match fase {
+                SubspaceFase::Span | SubspaceFase::Rotulo => {
+                    let (cx, cy) = to_pixel(w, h, suma[0], suma[1]);
+                    let ancho_txt = titulo
+                        .chars()
+                        .take(48)
+                        .count()
+                        .saturating_mul(6 * text_scale_for_h(h))
+                        .saturating_add(8);
+                    let max_x = w.saturating_sub(ancho_txt.min(w).saturating_add(4));
+                    (
+                        cx.saturating_add(10).min(max_x),
+                        cy.saturating_add(10).min(h.saturating_sub(4)),
+                    )
+                }
+                _ => (w / 14, h / 12),
+            };
+            draw_rotulo_con_scrim(&mut buf, w, h, rx, ry, titulo);
+            if frame >= SUBSPACE_F_VECTORES_DESDE {
+                subspace_etiqueta_punta(&mut buf, w, h, v1, "v1");
+                subspace_etiqueta_punta(&mut buf, w, h, v2, "v2");
+            }
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+    frames
+}
+
+// ── fractal: copo de Koch por segmentos (didáctico y barato) ─────────────
+// NADA de Mandelbrot por píxel (CPU inviable): el copo itera 0→4 en 48
+// frames por morph continuo entre niveles (cada frame difiere, sin plateau
+// largo). Nivel n = 3·4ⁿ segmentos (máx 768 en n=4, O(cientos) por frame).
+// Rótulo vivo "iteración N" + "S segmentos". Determinista, <2s, 48 frames.
+
+/// Nivel máximo del copo (0→4 en 48 frames).
+pub const FRACTAL_NIVEL_MAX: usize = 4;
+/// Radio del triángulo base en mundo (entra en [−3,3]² con margen).
+pub const FRACTAL_RADIO: f64 = 2.2;
+
+/// Segmentos del copo en el nivel n: 3·4ⁿ (3, 12, 48, 192, 768). Pura.
+pub fn koch_segmentos_por_nivel(nivel: usize) -> usize {
+    3usize.saturating_mul(4usize.saturating_pow(nivel.min(FRACTAL_NIVEL_MAX) as u32))
+}
+
+/// Progreso global 0..4 del frame (48 frames → niveles 0→4). Pura.
+fn koch_u_para_frame(frame: usize) -> f64 {
+    let f = frame.min(NATIVE_ANIM_FRAME_COUNT - 1) as f64;
+    f * FRACTAL_NIVEL_MAX as f64 / (NATIVE_ANIM_FRAME_COUNT - 1) as f64
+}
+
+/// `(base 0..3, e 0..1)` del morph para el frame. Pura.
+pub fn koch_morf_para_frame(frame: usize) -> (usize, f64) {
+    let u = koch_u_para_frame(frame);
+    let n = (u.floor() as usize).min(FRACTAL_NIVEL_MAX - 1);
+    (n, ease_in_out((u - n as f64).clamp(0.0, 1.0)))
+}
+
+/// Nivel mostrado en el rótulo (redondeo del progreso). Pura.
+pub fn koch_nivel_mostrado(frame: usize) -> usize {
+    (koch_u_para_frame(frame).round() as usize).min(FRACTAL_NIVEL_MAX)
+}
+
+/// Triángulo equilátero base (cerrado: último == primero). Pura.
+fn koch_triangulo_base() -> Vec<[f64; 2]> {
+    let mut pts = Vec::with_capacity(4);
+    for k in 0..3 {
+        let a = std::f64::consts::FRAC_PI_2 + k as f64 * 2.0 * std::f64::consts::PI / 3.0;
+        pts.push([FRACTAL_RADIO * a.cos(), FRACTAL_RADIO * a.sin()]);
+    }
+    pts.push(pts[0]);
+    pts
+}
+
+/// Un paso de Koch sobre una polilínea cerrada: cada lado → 4, pico hacia
+/// afuera (normal desde el centroide, independiente de la orientación).
+/// Pura.
+fn koch_paso(poli: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let n = poli.len().max(1) as f64;
+    let centro = poli
+        .iter()
+        .fold([0.0, 0.0], |acc, p| [acc[0] + p[0] / n, acc[1] + p[1] / n]);
+    let mut out = Vec::with_capacity(poli.len().saturating_mul(4));
+    if let Some(primero) = poli.first() {
+        out.push(*primero);
+    }
+    for par in poli.windows(2) {
+        let (a, b) = (par[0], par[1]);
+        let d = [b[0] - a[0], b[1] - a[1]];
+        let p1 = [a[0] + d[0] / 3.0, a[1] + d[1] / 3.0];
+        let p3 = [a[0] + 2.0 * d[0] / 3.0, a[1] + 2.0 * d[1] / 3.0];
+        let medio = [(p1[0] + p3[0]) / 2.0, (p1[1] + p3[1]) / 2.0];
+        let mut normal = [medio[0] - centro[0], medio[1] - centro[1]];
+        let largo = normal[0].hypot(normal[1]);
+        if largo.is_finite() && largo > 1e-9 {
+            normal = [normal[0] / largo, normal[1] / largo];
+        } else {
+            normal = [0.0, 0.0];
+        }
+        let alto = d[0].hypot(d[1]) * 3.0_f64.sqrt() / 6.0;
+        let pico = [medio[0] + normal[0] * alto, medio[1] + normal[1] * alto];
+        out.extend_from_slice(&[p1, pico, p3, b]);
+    }
+    out
+}
+
+/// Los 5 niveles del copo (índice = nivel). Se precomputa una vez por
+/// render (el nivel 4 son 769 puntos, trivial). Pura.
+fn koch_niveles() -> Vec<Vec<[f64; 2]>> {
+    let mut niveles = Vec::with_capacity(FRACTAL_NIVEL_MAX + 1);
+    niveles.push(koch_triangulo_base());
+    for _ in 0..FRACTAL_NIVEL_MAX {
+        let base: &[[f64; 2]] = match niveles.last() {
+            Some(v) => v.as_slice(),
+            None => &[],
+        };
+        niveles.push(koch_paso(base));
+    }
+    niveles
+}
+
+/// Morph entre `niveles[n]` y `niveles[n+1]`: cada lado se subdivide recto
+/// en cuartos y se interpola a su forma Koch con `e`. Con e=0 es el nivel n
+/// (refinado colineal), con e=1 el n+1. Pura.
+fn koch_morf(niveles: &[Vec<[f64; 2]>], n: usize, e: f64) -> Vec<[f64; 2]> {
+    let base: &[[f64; 2]] = match niveles.get(n) {
+        Some(v) => v.as_slice(),
+        None => &[],
+    };
+    let next: &[[f64; 2]] = match niveles.get(n + 1) {
+        Some(v) => v.as_slice(),
+        None => &[],
+    };
+    let mut out = Vec::with_capacity(next.len());
+    for (i, par) in base.windows(2).enumerate() {
+        let (a, b) = (par[0], par[1]);
+        for k in 0..4 {
+            let f = k as f64 / 4.0;
+            let q = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+            let p = next.get(4 * i + k).copied().unwrap_or(q);
+            out.push([q[0] + (p[0] - q[0]) * e, q[1] + (p[1] - q[1]) * e]);
+        }
+    }
+    if let Some(ultimo) = base.last() {
+        out.push(*ultimo);
+    }
+    out
+}
+
+/// Fractal standalone (con rótulo quemado para export).
+pub fn render_fractal_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_fractal_frames_with_params(width, height, &std::collections::BTreeMap::new())
+}
+
+/// Fractal con params (hoy los ignora: niveles 0→4 fijos; firma viva para
+/// el dispatcher de params sin mentir niveles configurables).
+pub fn render_fractal_frames_with_params(
+    width: u32,
+    height: u32,
+    _params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_fractal_frames_with_params_impl(width, height, true, &mut |_, _| {})
+}
+
+fn render_fractal_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let niveles = koch_niveles();
+    let guia = niveles.first().cloned().unwrap_or_default();
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        let byte_len =
+            checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        draw_axes_with_labels(&mut buf, w, h);
+        // Triángulo guía tenue (origen del copo) + copo en morph continuo.
+        let guia_tuplas: Vec<(f64, f64)> = guia.iter().map(|p| (p[0], p[1])).collect();
+        draw_curva_mundo(&mut buf, w, h, &guia_tuplas, FAINT_WHITE, 1.0);
+        let (n, e) = koch_morf_para_frame(frame);
+        let copo = koch_morf(&niveles, n, e);
+        let copo_tuplas: Vec<(f64, f64)> = copo.iter().map(|p| (p[0], p[1])).collect();
+        draw_curva_mundo(&mut buf, w, h, &copo_tuplas, CURVE_MAIN, CURVE_ANCHO);
+        // Barra de progreso inferior (honesta: frame/47, como mobius).
+        let bar_y = h.saturating_sub(4);
+        let prog = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        let bar_w = (w as f64 * prog) as usize;
+        draw_filled_rect(&mut buf, w, h, 0, bar_y, bar_w, 2, PAL_ACCENT);
+        draw_filled_rect(
+            &mut buf,
+            w,
+            h,
+            bar_w,
+            bar_y,
+            w.saturating_sub(bar_w),
+            2,
+            TRACK,
+        );
+        // Rótulo vivo (solo export): nivel + segmentos reales del nivel.
+        if con_rotulo {
+            let mostrado = koch_nivel_mostrado(frame);
+            let segs = koch_segmentos_por_nivel(mostrado);
+            draw_rotulo_con_scrim(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12,
+                &format!("iteración {mostrado}"),
+            );
+            draw_text_block(
+                &mut buf,
+                w,
+                h,
+                w / 14,
+                h / 12 + 16,
+                &format!("{segs} segmentos"),
+                PAL_FG,
+                text_scale_for_h(h),
+            );
+        }
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+    }
+    frames
+}
+
 pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<egui::ColorImage> {
     // Compat: si se llama solo con template, el fallback es el placeholder
     // neutro honesto (antes "elegante" con curva falsa).
@@ -7214,6 +7832,8 @@ pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<e
             render_gradient_field_frames(width, height)
         }
         "mobius-transform" | "mobius" | "moebius" => render_mobius_frames(width, height),
+        "subspace" => render_subspace_frames(width, height),
+        "fractal" => render_fractal_frames(width, height),
         _ => {
             // Template desconocido -> placeholder neutro con ese texto como
             // concepto (eco, no respuesta) para no quedar vacío.
@@ -9737,7 +10357,7 @@ mod tests {
 
     #[test]
     fn dispatcher_with_params_vacio_igual_a_legacy() {
-        // Sin params, el dispatcher v3 delega idéntico al legacy en las 11.
+        // Sin params, el dispatcher v3 delega idéntico al legacy en las 13.
         let empty = params_map(&[]);
         for tmpl in NATIVE_TEMPLATES {
             let legacy = render_anim_for_concept(tmpl, "concepto libre", 64, 64);
@@ -9751,8 +10371,8 @@ mod tests {
 
     // ── v3: registro + divergencia honesta ──────────────────────────────
     #[test]
-    fn native_templates_son_once_y_despachan() {
-        assert_eq!(NATIVE_TEMPLATES.len(), 11, "registro canónico = 11");
+    fn native_templates_son_trece_y_despachan() {
+        assert_eq!(NATIVE_TEMPLATES.len(), 13, "registro canónico = 13");
         for tmpl in NATIVE_TEMPLATES {
             assert!(is_known_native_template(tmpl), "{tmpl} conocido");
             let f = render_timed(tmpl, 64, 64, || render_anim_by_template(tmpl, 64, 64));
@@ -9788,15 +10408,213 @@ mod tests {
     // ── v4 sync mecánico + dispatch honesto (ANIM-REVIVE) ────────────────
     #[test]
     fn registros_nativo_protocolo_sync_once() {
-        // Fuente única: protocolo == nativo, mismo orden y contenido.
-        assert_eq!(NATIVE_TEMPLATES.len(), 11);
-        assert_eq!(CANONICAL_TEMPLATES.len(), 11);
+        // Nativo y protocolo sincronizados: 13 canónicas en ambos, mismo
+        // orden (las 11 históricas primero, `subspace` + `fractal` al final).
+        assert_eq!(NATIVE_TEMPLATES.len(), 13);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 13);
         assert_eq!(NATIVE_TEMPLATES, CANONICAL_TEMPLATES);
+    }
+
+    // ── subspace + fractal (frente piel-ui, 2 plantillas nuevas) ──────────
+    #[test]
+    fn subspace_fases_en_rangos() {
+        use super::SubspaceFase;
+        for f in 0..12 {
+            assert_eq!(
+                super::subspace_fase_para_frame(f),
+                SubspaceFase::Plano,
+                "f{f}"
+            );
+        }
+        for f in 12..24 {
+            assert_eq!(
+                super::subspace_fase_para_frame(f),
+                SubspaceFase::Vectores,
+                "f{f}"
+            );
+        }
+        for f in 24..40 {
+            assert_eq!(
+                super::subspace_fase_para_frame(f),
+                SubspaceFase::Span,
+                "f{f}"
+            );
+        }
+        for f in 40..48 {
+            assert_eq!(
+                super::subspace_fase_para_frame(f),
+                SubspaceFase::Rotulo,
+                "f{f}"
+            );
+        }
+        assert_eq!(
+            super::subspace_fase_para_frame(999),
+            SubspaceFase::Rotulo,
+            "clamp a 47"
+        );
+    }
+
+    #[test]
+    fn subspace_params_rank2_o_default() {
+        // Vacío → defaults honestos v1=(2,1), v2=(−1,2).
+        let (v1, v2) = super::subspace_vectores_desde_params(&params_map(&[]));
+        assert_eq!(v1, super::SUBSPACE_V1_DEFAULT);
+        assert_eq!(v2, super::SUBSPACE_V2_DEFAULT);
+        // Dependencia lineal (v2 = v1, det=0) → default honesto.
+        let deg = params_map(&[("v1x", 2.0), ("v1y", 1.0), ("v2x", 2.0), ("v2y", 1.0)]);
+        let (d1, d2) = super::subspace_vectores_desde_params(&deg);
+        assert_eq!(
+            (d1, d2),
+            (super::SUBSPACE_V1_DEFAULT, super::SUBSPACE_V2_DEFAULT)
+        );
+        // Vector nulo → default honesto.
+        let nulo = params_map(&[("v1x", 0.0), ("v1y", 0.0)]);
+        let (n1, n2) = super::subspace_vectores_desde_params(&nulo);
+        assert_eq!(
+            (n1, n2),
+            (super::SUBSPACE_V1_DEFAULT, super::SUBSPACE_V2_DEFAULT)
+        );
+        // Válidos e independientes → se respetan (det = 1·2−0·1 = 2).
+        let ok = params_map(&[("v1x", 1.0), ("v1y", 0.0), ("v2x", 1.0), ("v2y", 2.0)]);
+        let (o1, o2) = super::subspace_vectores_desde_params(&ok);
+        assert_eq!(o1, [1.0, 0.0]);
+        assert_eq!(o2, [1.0, 2.0]);
+        // Clamp a −3..=3 antes de validar.
+        let grande = params_map(&[("v1x", 99.0), ("v1y", 0.0), ("v2x", 0.0), ("v2y", 1.0)]);
+        let (g1, g2) = super::subspace_vectores_desde_params(&grande);
+        assert_eq!(g1, [3.0, 0.0]);
+        assert_eq!(g2, [0.0, 1.0]);
+    }
+
+    #[test]
+    fn subspace_render_fases_rotulos_y_determinismo() {
+        let f = render_timed("subspace", 96, 72, || super::render_subspace_frames(96, 72));
+        assert_frames_valid(&f, 96, 72, "subspace");
+        // Fases en rangos: representantes difieren (fade, grow, write, indicate).
+        assert_ne!(f[0].pixels, f[11].pixels, "fade in del plano");
+        assert_ne!(f[12].pixels, f[23].pixels, "grow de flechas");
+        assert_ne!(f[24].pixels, f[39].pixels, "write del span");
+        assert_ne!(f[40].pixels, f[47].pixels, "indicate sin plateau");
+        // Rótulos: el export trae texto arriba-izquierda, el chat no.
+        assert!(
+            cuenta_texto_quemado(&f[47], 40) > 0,
+            "export rotula span(v1,v2)"
+        );
+        assert!(cuenta_texto_quemado(&f[13], 40) > 0, "export rotula v1/v2");
+        let vacio = params_map(&[]);
+        let chat = super::render_anim_with_progress(
+            "subspace",
+            "concepto libre",
+            96,
+            72,
+            &vacio,
+            &mut |_, _| {},
+        );
+        assert_eq!(cuenta_texto_quemado(&chat[47], 40), 0, "chat sin quemado");
+        // Misma matemática en banda media (el flag solo toca el texto).
+        assert!(banda_media_igual(&chat[47], &f[47]), "banda media idéntica");
+        // Determinismo byte-idéntico: doble render igual.
+        let g = super::render_subspace_frames(96, 72);
+        for (i, (a, b)) in f.iter().zip(g.iter()).enumerate() {
+            assert_eq!(a.pixels, b.pixels, "frame {i} determinista");
+        }
+        // Params degenerados rinden igual que el default (fallback honesto).
+        let deg = params_map(&[("v1x", 2.0), ("v1y", 1.0), ("v2x", 2.0), ("v2y", 1.0)]);
+        let h = super::render_subspace_frames_with_params(96, 72, &deg);
+        for (i, (a, b)) in f.iter().zip(h.iter()).enumerate() {
+            assert_eq!(a.pixels, b.pixels, "degenerado == default frame {i}");
+        }
+        // Params válidos cambian el dibujo.
+        let ok = params_map(&[("v1x", 1.0), ("v1y", 0.0), ("v2x", 1.0), ("v2y", 2.0)]);
+        let k = super::render_subspace_frames_with_params(96, 72, &ok);
+        assert_ne!(f[47].pixels, k[47].pixels, "params vivos cambian el span");
+        // Presupuestos: 640×480 default y 480×360 chat con tamaño exacto.
+        for (w, h) in [(640u32, 480u32), (480u32, 360u32)] {
+            let set = super::render_subspace_frames(w, h);
+            assert_eq!(set.len(), super::NATIVE_ANIM_FRAME_COUNT, "48 frames");
+            for (i, frame) in set.iter().enumerate() {
+                assert_eq!(frame.size, [w as usize, h as usize], "frame {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn fractal_niveles_segmentos_y_morf() {
+        // 3·4ⁿ: 3, 12, 48, 192, 768 (máx O(cientos) por frame).
+        let niveles: Vec<usize> = (0..=4).map(super::koch_segmentos_por_nivel).collect();
+        assert_eq!(niveles, vec![3, 12, 48, 192, 768]);
+        assert_eq!(super::koch_segmentos_por_nivel(99), 768, "clamp al máx");
+        // Morph: f0 en nivel 0 (e=0), f47 en nivel 4 (e=1).
+        assert_eq!(super::koch_morf_para_frame(0), (0, 0.0));
+        let (n47, e47) = super::koch_morf_para_frame(47);
+        assert_eq!(n47, 3);
+        assert!((e47 - 1.0).abs() < 1e-12, "f47 cierra el nivel 4");
+        // Bases monótonas 0..3 a lo largo de los 48 frames.
+        let mut ultima_base = 0usize;
+        for f in 0..48 {
+            let (n, _) = super::koch_morf_para_frame(f);
+            assert!(n >= ultima_base, "base no retrocede en f{f}");
+            ultima_base = n;
+        }
+        // Rótulo vivo: arranca en 0 y termina en 4.
+        assert_eq!(super::koch_nivel_mostrado(0), 0);
+        assert_eq!(super::koch_nivel_mostrado(47), 4);
+    }
+
+    #[test]
+    fn fractal_render_rotulos_y_determinismo() {
+        let f = render_timed("fractal", 96, 72, || super::render_fractal_frames(96, 72));
+        assert_frames_valid(&f, 96, 72, "fractal");
+        // Sin plateau largo: los representantes de cada banda difieren y el
+        // total de frames distintos es alto (morph continuo + barra).
+        for (a, b) in [(5usize, 17usize), (17, 29), (29, 41), (41, 47)] {
+            assert_ne!(f[a].pixels, f[b].pixels, "banda {a} vs {b}");
+        }
+        let distintos = f
+            .windows(2)
+            .filter(|par| par[0].pixels != par[1].pixels)
+            .count();
+        assert!(
+            distintos >= 40,
+            "morph continuo sin plateau: {distintos}/47"
+        );
+        // Rótulo vivo en export ("iteración N" + "S segmentos" arriba-izq).
+        assert!(
+            cuenta_texto_quemado(&f[47], 40) > 0,
+            "export rotula iteración"
+        );
+        let vacio = params_map(&[]);
+        let chat = super::render_anim_with_progress(
+            "fractal",
+            "concepto libre",
+            96,
+            72,
+            &vacio,
+            &mut |_, _| {},
+        );
+        assert_eq!(cuenta_texto_quemado(&chat[0], 40), 0, "chat sin quemado");
+        assert!(banda_media_igual(&chat[47], &f[47]), "banda media idéntica");
+        // Determinismo byte-idéntico.
+        let g = super::render_fractal_frames(96, 72);
+        for (i, (a, b)) in f.iter().zip(g.iter()).enumerate() {
+            assert_eq!(a.pixels, b.pixels, "frame {i} determinista");
+        }
+        // Presupuestos: 640×480 default y 480×360 chat con tamaño exacto.
+        for (w, h) in [(640u32, 480u32), (480u32, 360u32)] {
+            let set = super::render_fractal_frames(w, h);
+            assert_eq!(set.len(), super::NATIVE_ANIM_FRAME_COUNT, "48 frames");
+            for (i, frame) in set.iter().enumerate() {
+                assert_eq!(frame.size, [w as usize, h as usize], "frame {i}");
+            }
+        }
+        // Set canónico entra en 64 MiB (48 × 640×480×4 = 58_982_400 B).
+        let bytes = super::estimate_frames_bytes(640, 480, super::NATIVE_ANIM_FRAME_COUNT);
+        assert!(bytes.is_some_and(|b| b <= super::NATIVE_MAX_SET_BYTES));
     }
 
     #[test]
     fn dispatch_honesto_direct_y_fallback() {
-        // Las 11 canónicas van directo al renderer (el resto se cubre abajo).
+        // Las 13 canónicas van directo al renderer (el resto se cubre abajo).
         for tmpl in NATIVE_TEMPLATES {
             match native_dispatch_for(tmpl, "concepto libre") {
                 NativeDispatch::Direct { canonical } => {
