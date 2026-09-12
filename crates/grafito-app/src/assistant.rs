@@ -955,6 +955,21 @@ pub(crate) fn validar_spec_anim_ia(spec: &SpecAnimIa) -> Result<(), String> {
     }
 }
 
+/// Respuesta vacía del modelo = síntoma de transporte (corte a mitad de
+/// stream), jamás una decisión: una IA que responde devuelve texto, aunque
+/// sea basura; el vacío es red cortada. Devuelve `Some(Transporte)` para
+/// esos casos (fallback local + aviso de una línea); `None` si hay texto
+/// (el parse decide: `Exito` o `Invalido` honesto). Puro, sin I/O.
+fn transporte_si_contenido_vacio(texto: &str) -> Option<PedidoSpecIa> {
+    if texto.trim().is_empty() {
+        Some(PedidoSpecIa::Transporte(
+            "la conexión se cortó antes de que la IA respondiera: muestro la versión local.".into(),
+        ))
+    } else {
+        None
+    }
+}
+
 /// W-B — parsea el JSON del SPEC venido de la IA y lo valida con `infer_*`.
 ///
 /// Acepta `{"expr_a"|"expr", "range":[p0,p1] o "p0"/"p1",
@@ -6354,6 +6369,10 @@ impl GrafitoApp {
                             let dispatcher = grafito_assistant::agent::SafeGrafitoDispatcher;
                             use grafito_agent::loop_engine::ToolDispatcher;
                             let resultado = dispatcher.dispatch(call);
+                            if let Some(corte) = transporte_si_contenido_vacio(&resultado.content) {
+                                primero = Some(corte);
+                                break;
+                            }
                             if resultado.ok {
                                 match parsear_spec_anim_ia(&resultado.content, &pedido) {
                                     Ok(spec) => {
@@ -6378,9 +6397,13 @@ impl GrafitoApp {
                     })
                 }
                 Ok(grafito_agent::loop_engine::AgentChatResponse::Text { content, .. }) => {
-                    match parsear_spec_anim_ia(&content, &pedido) {
-                        Ok(spec) => PedidoSpecIa::Exito(spec),
-                        Err(detalle) => PedidoSpecIa::Invalido(detalle),
+                    if let Some(corte) = transporte_si_contenido_vacio(&content) {
+                        corte
+                    } else {
+                        match parsear_spec_anim_ia(&content, &pedido) {
+                            Ok(spec) => PedidoSpecIa::Exito(spec),
+                            Err(detalle) => PedidoSpecIa::Invalido(detalle),
+                        }
                     }
                 }
                 Err(error) => PedidoSpecIa::Transporte(error),
@@ -6414,10 +6437,16 @@ impl GrafitoApp {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             match handle.join() {
-                Ok(Ok(completado)) => match parsear_spec_anim_ia(&completado.text, &pedido) {
-                    Ok(spec) => PedidoSpecIa::Exito(spec),
-                    Err(detalle) => PedidoSpecIa::Invalido(detalle),
-                },
+                Ok(Ok(completado)) => {
+                    if let Some(corte) = transporte_si_contenido_vacio(&completado.text) {
+                        corte
+                    } else {
+                        match parsear_spec_anim_ia(&completado.text, &pedido) {
+                            Ok(spec) => PedidoSpecIa::Exito(spec),
+                            Err(detalle) => PedidoSpecIa::Invalido(detalle),
+                        }
+                    }
+                }
                 Ok(Err(error)) => PedidoSpecIa::Transporte(error),
                 Err(_) => {
                     PedidoSpecIa::Transporte("el pedido de SPEC terminó sin responder.".into())
@@ -8727,16 +8756,17 @@ mod tests {
         remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
         should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
         socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
-        stage_assistant_parameter, titulo_curado, titulo_curado_localized, validar_pedido_narrado,
-        validar_spec_anim_ia, validate_assistant_command, verificar_prosa_de_turno,
-        verificar_prosa_vs_spec, verified_remote_proposals, wants_exercise_request,
-        AgentChannelMsg, AnimIaRender, AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob,
-        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
-        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
-        DecisionAnimacion, DesenlaceAnimIa, GifExportJob, IntegralPedido,
-        LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification, RemoteStage,
-        SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido, ANIM_IA_SPEC_TIMEOUT_MS,
-        ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS, ANIM_SIN_IA_AVISO,
+        stage_assistant_parameter, titulo_curado, titulo_curado_localized,
+        transporte_si_contenido_vacio, validar_pedido_narrado, validar_spec_anim_ia,
+        validate_assistant_command, verificar_prosa_de_turno, verificar_prosa_vs_spec,
+        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AnimIaRender,
+        AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation,
+        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
+        IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
+        RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido,
+        ANIM_IA_SPEC_TIMEOUT_MS, ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS,
+        ANIM_SIN_IA_AVISO,
     };
     use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
     use grafito_assistant_types::{
@@ -10344,6 +10374,31 @@ mod tests {
                 assert!(!detalle.is_empty());
             }
             otro => panic!("SPEC inválido debe ser error honesto, fue {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn wb_respuesta_vacia_ia_es_corte_y_va_a_fallback() {
+        // Corte a mitad de stream = texto vacío: síntoma de transporte,
+        // jamás decisión del modelo. Va a fallback local, no a dead-end.
+        for vacio in ["", "   ", " \n\t "] {
+            match transporte_si_contenido_vacio(vacio) {
+                Some(PedidoSpecIa::Transporte(_)) => {}
+                otro => panic!("vacío debía ser Transporte, fue {otro:?}"),
+            }
+        }
+        // Con texto (aunque sea basura) no dispara: eso lo decide el parse.
+        assert!(transporte_si_contenido_vacio("{}").is_none());
+        assert!(transporte_si_contenido_vacio("hola").is_none());
+        // Y el Transporte resuelve a fallback canónico con aviso.
+        match resolver_turno_anim_ia(
+            true,
+            transporte_si_contenido_vacio("").expect("vacío es corte"),
+        ) {
+            DesenlaceAnimIa::FallbackCanonico { aviso } => {
+                assert!(!aviso.is_empty());
+            }
+            otro => panic!("corte debía ir a fallback, fue {otro:?}"),
         }
     }
 
