@@ -157,9 +157,9 @@ pub(crate) fn clasifica_pedido_tangente(pedido: &str, template: &str) -> Tangent
 /// Estado del pedido de Taylor frente a la función (Frente A, puro).
 ///
 /// Espejo de [`TangentePedido`]: sin función se renderiza la canónica
-/// (`sin(x)` en x=0, orden 3) y la prosa la declara; con función inválida
-/// hay error honesto sin frames ni hilo. Antes la Taylor explícita caía a
-/// traza de `sin(x)` muda.
+/// (`sin(x)` en x=0, recorriendo los órdenes 1, 3, 5, 7 y 9) y la prosa la
+/// declara; con función inválida hay error honesto sin frames ni hilo.
+/// Antes la Taylor explícita caía a traza de `sin(x)` muda.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TaylorPedido {
     /// No es `taylor-series` o no menciona taylor (flujo intacto).
@@ -771,7 +771,10 @@ pub(crate) fn prosa_tangente_explicita(expr: &str, pedido: &str) -> String {
 }
 
 /// Frente A — prosa rioplatense para Taylor explícita: nombra f + centro +
-/// orden SIEMPRE (la queja era prosa huérfana sobre senoidal ajena).
+/// orden SIEMPRE (la queja era prosa huérfana sobre senoidal ajena) y declara
+/// que la animación recorre los órdenes 1, 3, 5, 7 y 9 (jamás un orden único
+/// falso: el `orden {n}` citado es el efectivo del spec y la puerta
+/// `verificar_prosa_vs_spec` lo sigue viendo).
 ///
 /// Re-infiere el spec del pedido para que la curva nunca quede huérfana;
 /// ante inferencia rota usa la expr dada con centro/orden canónicos.
@@ -790,21 +793,23 @@ pub(crate) fn prosa_taylor_explicita(expr: &str, pedido: &str) -> String {
             grafito_anim::parametric::taylor_prosa(&spec, false)
         });
     format!(
-        "{base}.\n\n{}",
+        "{base} (recorre los órdenes 1, 3, 5, 7 y 9).\n\n{}",
         crate::anim_ui::animation_reference_sentence()
     )
 }
 
 /// Frente A — prosa canónica Taylor desde el pedido: declara el spec
 /// EFECTIVO (la canónica hereda centro/orden del pedido; decir "x=0" cuando
-/// se dibuja x=1 mentiría). Si el pedido no infiere, la const por defecto.
+/// se dibuja x=1 mentiría) y que la animación recorre los órdenes 1, 3, 5, 7
+/// y 9 (el `orden {n}` citado es el efectivo del spec, no un orden único
+/// falso). Si el pedido no infiere, la const por defecto.
 /// Pura, sin I/O.
 pub(crate) fn prosa_taylor_canonica(pedido: &str) -> String {
     let base = grafito_anim::parametric::infer_taylor_anim(pedido)
         .map(|resuelto| grafito_anim::parametric::taylor_prosa(resuelto.spec(), true))
         .unwrap_or_else(|_| grafito_anim::parametric::TAYLOR_CANONICAL_PROSA.to_string());
     format!(
-        "{base}.\n\n{}",
+        "{base} (recorre los órdenes 1, 3, 5, 7 y 9).\n\n{}",
         crate::anim_ui::animation_reference_sentence()
     )
 }
@@ -10466,6 +10471,16 @@ mod tests {
         assert!(prosa.contains("x=0"), "{prosa}");
         assert!(prosa.contains("orden 5"), "{prosa}");
         assert!(!prosa.contains("pedime otra"), "{prosa}");
+        // Declara el recorrido 1/3/5/7/9 (no un orden único falso) y pasa
+        // la puerta prosa-vs-spec con el orden efectivo.
+        assert!(
+            prosa.contains("recorre los órdenes 1, 3, 5, 7 y 9"),
+            "{prosa}"
+        );
+        assert!(
+            verificar_prosa_vs_spec(&prosa, "taylor-series", "x^3", Some(5), None).is_ok(),
+            "la prosa explícita pasa la puerta: {prosa}"
+        );
         // El render del worker (for_spec) difiere de la canónica senoidal.
         let spec = grafito_anim::parametric::infer_taylor_anim(pedido)
             .expect("x^3 infiere")
@@ -10519,6 +10534,16 @@ mod tests {
         assert!(prosa.contains("x=0"), "{prosa}");
         assert!(prosa.contains("orden 3"), "{prosa}");
         assert!(prosa.contains("pedime otra"), "{prosa}");
+        // Declara el recorrido 1/3/5/7/9 (no un orden único falso) y pasa
+        // la puerta prosa-vs-spec con el orden efectivo.
+        assert!(
+            prosa.contains("recorre los órdenes 1, 3, 5, 7 y 9"),
+            "{prosa}"
+        );
+        assert!(
+            verificar_prosa_vs_spec(&prosa, "taylor-series", "sin(x)", Some(3), None).is_ok(),
+            "la prosa canónica pasa la puerta: {prosa}"
+        );
         // No es un pedido de área/tangente: esas puertas no aplican.
         assert_eq!(
             clasifica_pedido_integral(pedido, "taylor-series"),
