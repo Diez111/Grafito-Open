@@ -3934,10 +3934,10 @@ pub use crate::prosa::{humanize_control_name, humanize_prose_text};
 
 /// Tamaño del preview inline de la card (D2, puro y testeable).
 ///
-/// Fit real: ocupa hasta TODO el ancho disponible, jamás más. Escala =
-/// `min(1, MAX_PREVIEW_UPSCALE, disponible/ancho)`: achica si no entra,
-/// jamás agranda (sin upscale: evita pixelado y overflow derecho en panel
-/// angosto) y jamás deforma (aspecto preservado: `alto = ancho * h/w`).
+/// Fit real: ocupa TODO el ancho disponible (letterbox). Escala =
+/// `min(MAX_PREVIEW_UPSCALE, disponible/ancho)`: achica si no entra,
+/// agranda hasta 1.5× para llenar el ancho de la card (nitidez: más allá
+/// se pixela) y jamás deforma (aspecto preservado: `alto = ancho * h/w`).
 /// El alto se clampa a `max_h` (tokens) con downscale proporcional, sin
 /// recorte vertical. El llamador centra con [`media_preview_offset_x`].
 /// El llamador usa el tamaño del primer frame para que el bloque sea estable
@@ -3968,10 +3968,10 @@ pub fn media_preview_size(frame_w: f32, frame_h: f32, avail_w: f32, max_h: f32) 
     } else {
         MEDIA_CARD_MAX_PREVIEW_H
     };
-    // Fit real: achica si no entra, jamás agranda ni deforma. El techo
-    // histórico 1.5× queda subsumido por el 1.0 (sin upscale en panel
-    // angosto: el plot ya no se corre a la derecha ni se recorta).
-    let scale = (avail / fw).min(MAX_PREVIEW_UPSCALE).min(1.0);
+    // Fit real: llena el ancho preservando aspecto. Downscale si no entra;
+    // upscale con techo 1.5× (nitidez) para que el preview use todo el
+    // ancho de la card en vez de quedar angosto y descentrado.
+    let scale = (avail / fw).min(MAX_PREVIEW_UPSCALE);
     let mut w = (fw * scale).floor();
     let mut h = (fh * scale).floor();
     if h > cap {
@@ -7202,62 +7202,70 @@ fn draw_turn_player(
                 );
             }
             ui.add_space(SPACE_XS);
-            // Toolbar del turno: misma altura única (`PLAYER_BTN_H`):
-            // [play/pausa][atrás][siguiente] + contador `N/M` como texto +
-            // deslizador. Reproducción fija 1x, sin velocidad. Sin export
-            // (vive en el slot vivo: replay primero). Mini-card intacta.
-            let turn_view = MediaToolbarView {
-                counter_compact: &counter_compact,
-                counter_long: &counter_long,
-                duration_ms: media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS),
-                frame_count,
-                exporting: false,
-            };
-            if media_toolbar_layout(ui.available_width(), frame_count)
-                == MediaToolbarLayout::TwoRows
-            {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-                    draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
-                    draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        draw_media_counter_slot(ui, &turn_view);
-                    });
-                });
-                draw_turn_scrub_slider(
-                    ui,
-                    &mut cursor,
+            // Sin textura no hay toolbar activa: el knob circular del
+            // deslizador huérfano bajo la fila parecía un spinner trabado y
+            // la toolbar sobre un área vacía mentía. Placeholder honesto y
+            // nada más hasta que la ventana suba el frame.
+            if texture.is_some() {
+                // Toolbar del turno: misma altura única (`PLAYER_BTN_H`):
+                // [play/pausa][atrás][siguiente] + contador `N/M` como texto +
+                // deslizador. Reproducción fija 1x, sin velocidad. Sin export
+                // (vive en el slot vivo: replay primero). Mini-card intacta.
+                let turn_view = MediaToolbarView {
+                    counter_compact: &counter_compact,
+                    counter_long: &counter_long,
+                    duration_ms: media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS),
                     frame_count,
-                    &counter_long,
-                    now_s,
-                    ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W),
-                );
-            } else {
-                // SingleRow con R2L ÚLTIMO y deslizador de ancho explícito
-                // (3 cuadrados sin menú `···` + contador + 4 gaps): si el
-                // deslizador fuera después del R2L, el cursor rancio lo
-                // ubica tras el contador y derrama la fila (misma trampa
-                // que el header del media).
-                let slider_w = single_row_slider_width(
-                    ui.available_width(),
-                    PLAYER_BTN_SQ_W * 3.0 + media_counter_slot_width(frame_count) + SPACE_XS * 4.0,
-                );
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-                    draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
-                    draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
+                    exporting: false,
+                };
+                if media_toolbar_layout(ui.available_width(), frame_count)
+                    == MediaToolbarLayout::TwoRows
+                {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+                        draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
+                        draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            draw_media_counter_slot(ui, &turn_view);
+                        });
+                    });
                     draw_turn_scrub_slider(
                         ui,
                         &mut cursor,
                         frame_count,
                         &counter_long,
                         now_s,
-                        slider_w,
+                        ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        draw_media_counter_slot(ui, &turn_view);
+                } else {
+                    // SingleRow con R2L ÚLTIMO y deslizador de ancho explícito
+                    // (3 cuadrados sin menú `···` + contador + 4 gaps): si el
+                    // deslizador fuera después del R2L, el cursor rancio lo
+                    // ubica tras el contador y derrama la fila (misma trampa
+                    // que el header del media).
+                    let slider_w = single_row_slider_width(
+                        ui.available_width(),
+                        PLAYER_BTN_SQ_W * 3.0
+                            + media_counter_slot_width(frame_count)
+                            + SPACE_XS * 4.0,
+                    );
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+                        draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
+                        draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
+                        draw_turn_scrub_slider(
+                            ui,
+                            &mut cursor,
+                            frame_count,
+                            &counter_long,
+                            now_s,
+                            slider_w,
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            draw_media_counter_slot(ui, &turn_view);
+                        });
                     });
-                });
+                }
             }
         });
     state.turn_players.borrow_mut().insert(turn_idx, cursor);
@@ -7943,23 +7951,34 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 );
             }
             ui.add_space(SPACE_XS);
+            // Sin textura no hay toolbar activa (mismo bug que el turno: el
+            // knob circular del deslizador huérfano parecía un spinner
+            // trabado y la toolbar sobre un área vacía mentía). Placeholder
+            // honesto y, solo si hay algo en vuelo, su progreso visible;
+            // si el export falló, error + [Reintentar] sin player.
             // P0: en `Failed` el player se esconde (toolbar + deslizador +
             // export): solo error honesto + [Reintentar]. Player y error a la
             // vez confundían (¿qué se reproduce?) y el export roto invitaba a
             // reintentar a ciegas sobre el mismo fallo.
-            if export_failed {
-                if let Some((text, color)) = &export_line {
-                    ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
-                    ui.add_space(SPACE_XS);
-                }
+            if generating {
+                let pulse = ((now_s * 2.4).sin() + 1.0) * 0.5;
+                ui.add(egui::ProgressBar::new(0.2 + 0.55 * pulse as f32).desired_height(SPACE_XS));
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new("Armando tu animación…")
+                        .color(theme.text_secondary)
+                        .size(TYPE_SM),
+                );
+                ui.add_space(SPACE_XS);
                 if ui
-                    .button(egui::RichText::new("Reintentar").size(TYPE_XS).strong())
-                    .on_hover_text("Vuelve a abrir el diálogo de exportar")
+                    .small_button("Cancelar")
+                    .on_hover_text("Detiene la animación en curso")
                     .clicked()
                 {
-                    action = Some(AssistantUiAction::ExportMedia);
+                    action = Some(AssistantUiAction::Cancel);
                 }
-            } else {
+            }
+            if texture.is_some() && !export_failed {
                 let toolbar_view = MediaToolbarView {
                     counter_compact: &counter_compact,
                     counter_long: &counter_long,
@@ -7980,6 +7999,29 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 if let Some((text, color)) = &export_line {
                     ui.add_space(SPACE_XS);
                     ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
+                }
+            } else {
+                // Sin imagen y/o en fallo: nada de toolbar ni deslizador. El
+                // export en vuelo avisa igual; el fallo muestra su motivo.
+                if exporting {
+                    ui.add_space(SPACE_XS);
+                    let pulse = ((now_s * 2.4).sin() + 1.0) * 0.5;
+                    ui.add(
+                        egui::ProgressBar::new(0.2 + 0.55 * pulse as f32).desired_height(SPACE_XS),
+                    );
+                }
+                if export_failed {
+                    if let Some((text, color)) = &export_line {
+                        ui.label(egui::RichText::new(text).color(*color).size(TYPE_XS));
+                        ui.add_space(SPACE_XS);
+                    }
+                    if ui
+                        .button(egui::RichText::new("Reintentar").size(TYPE_XS).strong())
+                        .on_hover_text("Vuelve a abrir el diálogo de exportar")
+                        .clicked()
+                    {
+                        action = Some(AssistantUiAction::ExportMedia);
+                    }
                 }
             }
         });
@@ -8005,7 +8047,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         );
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(delay_ms));
-    } else if exporting {
+    } else if exporting || generating {
         ui.ctx()
             .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
     }
@@ -13911,11 +13953,11 @@ mod tests {
 
     #[test]
     fn media_caps_card_capea_upscale_por_nitidez() {
-        // Fit real (bug card corrida a la derecha): jamás agranda — la
-        // textura chica se pinta a tamaño nativo y centrada, sin upscale.
-        // El techo 1.5× queda como constante histórica subsumida por 1.0.
+        // Fit real a ancho completo (letterbox): la textura chica se agranda
+        // hasta el techo 1.5× de nitidez, nunca más (ni pixelado ni enano
+        // descentrado en la card).
         assert_eq!(MAX_PREVIEW_UPSCALE, 1.5);
-        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (100.0, 50.0));
+        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (150.0, 75.0));
     }
 
     #[test]
@@ -15269,8 +15311,9 @@ mod tests {
 
     #[test]
     fn media_preview_size_usa_todo_el_ancho_y_preserva_aspecto() {
-        // D2 + frente layout: fit real hasta el ancho (downscale si no
-        // entra, jamás upscale), alto = ancho * h/w clampeado a max_h.
+        // D2 + frente layout: fit real a ancho completo (letterbox).
+        // Downscale si no entra; upscale con techo 1.5× si sobra paño.
+        // Alto = ancho * h/w clampeado a max_h.
         let (w, h) = media_preview_size(400.0, 200.0, 340.0, 280.0);
         assert_eq!((w, h), (340.0, 170.0), "debe usar todo el ancho");
         // Retrato gigante: el alto se clampa sin cambiar el ancho de reserva
@@ -15278,9 +15321,13 @@ mod tests {
         let (w2, h2) = media_preview_size(200.0, 800.0, 340.0, 280.0);
         assert!(h2 <= 280.0, "alto sin clampear: {h2}");
         assert!(w2 <= 340.0, "ancho desbordado: {w2}");
-        // Textura chica: fit real sin upscale (nativo centrado, sin pixelar).
+        // Textura chica: fit a ancho completo con techo 1.5× de nitidez.
         let (w3, h3) = media_preview_size(100.0, 50.0, 340.0, 280.0);
-        assert_eq!((w3, h3), (100.0, 50.0), "sin upscale: {w3}x{h3}");
+        assert_eq!(
+            (w3, h3),
+            (150.0, 75.0),
+            "upscale pinchado en 1.5×: {w3}x{h3}"
+        );
         // Estable entre frames: mismo ref da misma reserva siempre.
         let a = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
         let b = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
@@ -15289,18 +15336,19 @@ mod tests {
 
     #[test]
     fn media_preview_upscale_pinnea_en_1_5x() {
-        // Fit real: `media_preview_size(100,50,340,280)` queda en nativo
-        // 100×50 (jamás upscale). La escala jamás supera 1.0 en ningún
-        // tamaño: el 1.5× histórico queda subsumido.
+        // Fit real a ancho completo con techo de nitidez: la escala jamás
+        // supera 1.5× (textura chica se agranda hasta ahí, nunca más).
         assert_eq!(MAX_PREVIEW_UPSCALE, 1.5);
-        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (100.0, 50.0));
+        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (150.0, 75.0));
         for (fw, fh) in [(8.0, 8.0), (100.0, 50.0), (480.0, 360.0)] {
             let (w, _) = media_preview_size(fw, fh, 340.0, 280.0);
             assert!(
-                w <= fw.ceil() + f32::EPSILON,
-                "sin upscale en {fw}x{fh}: {w}"
+                w <= (fw * MAX_PREVIEW_UPSCALE).ceil() + f32::EPSILON,
+                "upscale pinchado en 1.5× para {fw}x{fh}: {w}"
             );
         }
+        // Grande sigue en downscale para llenar sin desbordar.
+        assert_eq!(media_preview_size(480.0, 360.0, 340.0, 280.0).0, 340.0);
     }
 
     #[test]
@@ -16827,6 +16875,235 @@ mod tests {
             .expect("cierre del progreso");
         let prog = &source[prog_start..prog_end];
         assert!(!prog.contains("~20 s"), "sin ETA inventada en el progreso");
+    }
+
+    // ── Card sin área vacía con toolbar activa (bug captura) ─────────────
+    // La card con frames pero sin textura lista mostraba el área oscura
+    // vacía CON toolbar ([▶][◀][▶] N/M [···]): el knob circular del
+    // deslizador huérfano bajo la fila parecía un spinner trabado. Ahora la
+    // toolbar solo existe con imagen dibujable; sin textura hay mensaje
+    // honesto y, solo si hay job real, progreso + [Cancelar].
+    fn card_textos(salida: &egui::FullOutput) -> String {
+        salida
+            .shapes
+            .iter()
+            .filter_map(|pintada| match &pintada.shape {
+                egui::epaint::Shape::Text(texto) => Some(texto.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn card_imagen(salida: &egui::FullOutput, ids: &[egui::TextureId]) -> Option<egui::Rect> {
+        salida
+            .shapes
+            .iter()
+            .find_map(|pintada| match &pintada.shape {
+                egui::epaint::Shape::Mesh(malla) if ids.contains(&malla.texture_id) => {
+                    Some(malla.calc_bounds())
+                }
+                _ => None,
+            })
+    }
+
+    fn pinta_card(ctx: &egui::Context, estado: &AssistantPanelState) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let _ = draw_media_card(ui, estado);
+                });
+            },
+        )
+    }
+
+    fn card_ids(estado: &AssistantPanelState) -> Vec<egui::TextureId> {
+        estado
+            .media_textures()
+            .0
+            .iter()
+            .map(egui::TextureHandle::id)
+            .collect()
+    }
+
+    fn card_frames(n: usize) -> Vec<egui::ColorImage> {
+        (0..n)
+            .map(|k| {
+                egui::ColorImage::new(
+                    [64, 48],
+                    egui::Color32::from_rgb(40 + k as u8 * 10, 90, 140),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn card_con_frames_y_textura_muestra_imagen_y_toolbar() {
+        // Estado sano: preview dibujada a ancho de card + toolbar pareja.
+        let ctx = egui::Context::default();
+        let mut estado = AssistantPanelState::default();
+        estado.set_media(
+            Some(AssistantMedia {
+                title: "derivada".into(),
+                frames: card_frames(3),
+            }),
+            &ctx,
+        );
+        let salida = pinta_card(&ctx, &estado);
+        let textos = card_textos(&salida);
+        assert!(
+            card_imagen(&salida, &card_ids(&estado)).is_some(),
+            "con textura lista la imagen se pinta"
+        );
+        assert!(
+            textos.contains("···"),
+            "toolbar visible con imagen: {textos}"
+        );
+        assert!(
+            !textos.contains("Preparando"),
+            "nada de placeholder con imagen: {textos}"
+        );
+    }
+
+    #[test]
+    fn card_con_frames_sin_textura_no_muestra_toolbar() {
+        // El bug: frames presentes pero ventana sin subir (job colgado) →
+        // mensaje honesto, jamás área vacía con toolbar ni knob huérfano.
+        let ctx = egui::Context::default();
+        let estado = AssistantPanelState {
+            media: Some(AssistantMedia {
+                title: "derivada".into(),
+                frames: card_frames(3),
+            }),
+            ..Default::default()
+        };
+        assert!(estado.advance_media_playhead(1.0, 3, false).is_none());
+        let salida = pinta_card(&ctx, &estado);
+        let textos = card_textos(&salida);
+        assert!(textos.contains("Preparando"), "mensaje honesto: {textos}");
+        assert!(
+            !textos.contains("···"),
+            "sin textura no hay toolbar ni menú: {textos}"
+        );
+        assert!(
+            card_imagen(&salida, &card_ids(&estado)).is_none(),
+            "sin textura no hay malla de imagen"
+        );
+    }
+
+    #[test]
+    fn card_sin_frames_sin_job_muestra_vacio_honesto() {
+        let ctx = egui::Context::default();
+        let estado = AssistantPanelState::default();
+        let salida = pinta_card(&ctx, &estado);
+        let textos = card_textos(&salida);
+        assert!(
+            textos.contains("Todavía no hay animación"),
+            "vacío honesto: {textos}"
+        );
+        assert!(
+            !textos.contains("···"),
+            "sin media no hay toolbar: {textos}"
+        );
+    }
+
+    #[test]
+    fn card_job_en_vuelo_muestra_progreso_y_cancelar() {
+        // Spinner/progreso solo mientras hay job real (`anim_progress`).
+        let ctx = egui::Context::default();
+        let estado = AssistantPanelState {
+            anim_progress: true,
+            ..Default::default()
+        };
+        let salida = pinta_card(&ctx, &estado);
+        let textos = card_textos(&salida);
+        assert!(
+            textos.contains("Armando tu animación"),
+            "progreso visible en vuelo: {textos}"
+        );
+        assert!(textos.contains("Cancelar"), "se puede detener: {textos}");
+        assert!(
+            card_imagen(&salida, &card_ids(&estado)).is_none(),
+            "en vuelo sin frames no hay imagen"
+        );
+    }
+
+    #[test]
+    fn card_job_en_vuelo_con_preview_muestra_progreso_y_toolbar() {
+        // (c): con imagen vieja y job nuevo en vuelo, el progreso se ve y la
+        // toolbar sigue controlando el preview (no es área vacía).
+        let ctx = egui::Context::default();
+        let mut estado = AssistantPanelState::default();
+        estado.set_media(
+            Some(AssistantMedia {
+                title: "derivada".into(),
+                frames: card_frames(3),
+            }),
+            &ctx,
+        );
+        estado.anim_progress = true;
+        let salida = pinta_card(&ctx, &estado);
+        let textos = card_textos(&salida);
+        assert!(
+            card_imagen(&salida, &card_ids(&estado)).is_some(),
+            "el preview viejo sigue visible"
+        );
+        assert!(
+            textos.contains("Armando tu animación"),
+            "progreso visible en vuelo: {textos}"
+        );
+        assert!(textos.contains("···"), "toolbar del preview: {textos}");
+    }
+
+    #[test]
+    fn card_error_muestra_motivo_y_reintentar_sin_toolbar() {
+        // Si el job murió (export fallido): mensaje honesto + [Reintentar],
+        // jamás player ni spinner.
+        let ctx = egui::Context::default();
+        let mut estado = AssistantPanelState::default();
+        estado.set_media(
+            Some(AssistantMedia {
+                title: "derivada".into(),
+                frames: card_frames(3),
+            }),
+            &ctx,
+        );
+        estado.set_media_export(MediaExportState::Failed("corte".into()));
+        assert!(!media_card_shows_player_controls(
+            estado.media_export_state()
+        ));
+        let salida = pinta_card(&ctx, &estado);
+        let textos = card_textos(&salida);
+        assert!(textos.contains("Reintentar"), "reintento visible: {textos}");
+        assert!(
+            textos.contains("No se pudo exportar"),
+            "motivo honesto: {textos}"
+        );
+        assert!(!textos.contains("···"), "en fallo no hay toolbar: {textos}");
+    }
+
+    #[test]
+    fn card_y_turno_solo_toolbar_con_textura_lista() {
+        // Blindaje del gating: la toolbar del slot vive tras
+        // `texture.is_some() && !export_failed`; la del turno tras
+        // `texture.is_some()`. Sin textura no se dibuja deslizador (el knob
+        // huérfano era el "círculo suelto" de la captura).
+        let fuente = include_str!("assistant.rs");
+        assert!(
+            fuente.contains("if texture.is_some() && !export_failed {"),
+            "slot: toolbar solo con textura y sin fallo"
+        );
+        assert!(
+            fuente.contains("if texture.is_some() {"),
+            "turno: toolbar solo con textura"
+        );
     }
 
     #[test]
