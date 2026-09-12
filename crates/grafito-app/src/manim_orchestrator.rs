@@ -556,6 +556,149 @@ impl ManimOrchestrator {
     }
 }
 
+// ── Puerta anti-grilla-vacía (auditoría A5) ───────────────────────────────
+// Todos los caminos chequeaban `frames.is_empty()` pero NADA chequeaba
+// píxeles-fondo: `render_universal` devuelve 48 frames de fondo+grilla+
+// rótulo que se presentaban como listos, y `verificar_prosa_vs_spec` solo
+// mira texto. Este gate es el punto único tras el dispatch y antes de
+// publicar/attachear (`turn_media_for_completed_job`): muestrea píxeles
+// reales en vez de contar frames.
+//
+// DECISIÓN PINEADA: el gate aplica a los caminos que PROMETEN contenido
+// (single/IA/guion con template real: tangente, integral, Taylor,
+// Pitágoras, subspace, fractal). El placeholder honesto de
+// `render_universal` (template "universal"/desconocido) NO se publica como
+// "lista": pasa por este mismo mensaje honesto
+// (`verificar_frames_con_contenido` → `Err(mensaje_grilla_vacia)`).
+// Los tests unitarios de `render_universal` (48 frames, determinismo)
+// siguen verdes porque nunca llaman al gate: el gate vive acá, en el
+// orquestador, no en el renderer.
+
+/// Fracción mínima de píxeles de curva/punto/texto en la región central
+/// para considerar que el frame trae contenido (0,5%).
+pub(crate) const PUERTA_CURVA_FRACCION_MIN: f32 = 0.005;
+/// Fracción mínima de píxeles distintos entre frame0 y frame medio en la
+/// región central para considerar que hay animación y no congelado (0,1%).
+pub(crate) const PUERTA_MOVIMIENTO_FRACCION_MIN: f32 = 0.001;
+/// Umbral de brillo: fondo/grilla/eje/scrim quedan por debajo; la
+/// curva/punto/texto lo superan. Paridad con la paleta de `anim_native.rs`:
+/// `BG` 14..34, grilla ~55-70, eje ~80-90, scrim ~10, curva/texto ≥110.
+pub(crate) const PUERTA_BRILLO_CONTENIDO: u8 = 110;
+/// Filas superiores reservadas a banda-rótulo+scrim (se excluyen del conteo).
+pub(crate) const PUERTA_BANDA_SUP_PCT: usize = 18;
+/// Filas inferiores reservadas a la barra de progreso (cromo honesto de
+/// `render_universal`, se excluye para no confundirla con una curva azul).
+pub(crate) const PUERTA_BARRA_INF_PX: usize = 12;
+/// Diferencia mínima por canal para contar un píxel como distinto entre
+/// frames (ignora dithering/redondeo de mezcla).
+const PUERTA_DIFF_CANAL_MIN: u8 = 12;
+/// Techo de píxeles muestreados por frame (stride determinista más allá).
+const PUERTA_MUESTRA_MAX_PX: usize = 40_000;
+
+/// Mensaje honesto cuando el render salió vacío (solo fondo y grilla).
+///
+/// Dice qué pedir en su lugar en vez de publicar la grilla vacía como
+/// "lista". Acotado (~250 chars) para caber en `anexar_error_a_dueno`.
+pub(crate) fn mensaje_grilla_vacia(template: &str) -> String {
+    let pedido = template.trim();
+    let pedido = if pedido.is_empty() {
+        "ese pedido"
+    } else {
+        pedido
+    };
+    format!(
+        "La animación de ‘{pedido}’ salió vacía (solo fondo y grilla, sin curva). \
+         Pedí algo con contenido dibujable: integral (área bajo la curva), \
+         tangente/derivada, Taylor, Pitágoras, subspace o fractal."
+    )
+}
+
+/// ¿Los frames traen curva real y movimiento? (puro, sin I/O).
+///
+/// Muestrea el frame medio (y lo compara con el frame0): cuenta píxeles
+/// con brillo de contenido fuera de fondo/grilla/SCRIM/banda-rótulo/barra
+/// y exige `>0,5%` de píxeles de curva/punto/texto MÁS diferencia
+/// frame0 vs medio (no congelado). `false` conservador si hay menos de 2
+/// frames, dims inconsistentes o región central vacía: el pipeline real
+/// siempre es multi-frame, así que un unitario jamás se publica como listo.
+pub(crate) fn frames_tienen_curva(frames: &[egui::ColorImage]) -> bool {
+    if frames.len() < 2 {
+        return false;
+    }
+    let primera = &frames[0];
+    let media = &frames[frames.len() / 2];
+    if primera.size != media.size {
+        return false;
+    }
+    let [ancho, alto] = primera.size;
+    if ancho == 0 || alto == 0 {
+        return false;
+    }
+    if primera.pixels.len() != ancho.saturating_mul(alto)
+        || media.pixels.len() != primera.pixels.len()
+    {
+        return false;
+    }
+    // Región central: fuera la banda-rótulo (arriba) y la barra (abajo).
+    let y_desde = alto.saturating_mul(PUERTA_BANDA_SUP_PCT) / 100;
+    let y_hasta = alto.saturating_sub(PUERTA_BARRA_INF_PX);
+    if y_hasta <= y_desde {
+        return false;
+    }
+    let central = (y_hasta - y_desde).saturating_mul(ancho);
+    if central == 0 {
+        return false;
+    }
+    let paso = (central / PUERTA_MUESTRA_MAX_PX).isqrt().max(1);
+    let mut contenido = 0usize;
+    let mut distintos = 0usize;
+    let mut muestreados = 0usize;
+    for fila in (y_desde..y_hasta).step_by(paso) {
+        for columna in (0..ancho).step_by(paso) {
+            let indice = fila.saturating_mul(ancho).saturating_add(columna);
+            let (Some(a), Some(b)) = (primera.pixels.get(indice), media.pixels.get(indice)) else {
+                return false;
+            };
+            muestreados = muestreados.saturating_add(1);
+            if b.r().max(b.g()).max(b.b()) > PUERTA_BRILLO_CONTENIDO {
+                contenido = contenido.saturating_add(1);
+            }
+            if a.r().abs_diff(b.r()) > PUERTA_DIFF_CANAL_MIN
+                || a.g().abs_diff(b.g()) > PUERTA_DIFF_CANAL_MIN
+                || a.b().abs_diff(b.b()) > PUERTA_DIFF_CANAL_MIN
+            {
+                distintos = distintos.saturating_add(1);
+            }
+        }
+    }
+    if muestreados == 0 {
+        return false;
+    }
+    let fraccion_contenido = contenido as f32 / muestreados as f32;
+    let fraccion_distintos = distintos as f32 / muestreados as f32;
+    fraccion_contenido > PUERTA_CURVA_FRACCION_MIN
+        && fraccion_distintos > PUERTA_MOVIMIENTO_FRACCION_MIN
+}
+
+/// Puerta única antes de publicar/attachear: `Ok` solo con contenido real.
+///
+/// Vacío → error de revisión (paridad con `review_artifact`); sin curva →
+/// `mensaje_grilla_vacia` honesto con sugerencia (el placeholder de
+/// `render_universal` cae acá: jamás se publica como "lista").
+pub(crate) fn verificar_frames_con_contenido(
+    frames: &[egui::ColorImage],
+    template: &str,
+) -> Result<(), String> {
+    if frames.is_empty() {
+        return Err("revisión: el motor no devolvió fotogramas".into());
+    }
+    if frames_tienen_curva(frames) {
+        Ok(())
+    } else {
+        Err(mensaje_grilla_vacia(template))
+    }
+}
+
 // ── P0-app historial Thumb+Replay (lado app, puro sin `egui::Context`) ─────
 // El modelo W1 (`assistant-types`: `ConversationTurn.media`,
 // `attach_turn_media`, `trim_conversation`) pega al turno un thumb RGBA de
@@ -740,16 +883,25 @@ pub(crate) fn enforce_turn_frames_cap(conversation: &mut [ConversationTurn]) {
 /// Construye el `TurnMediaRef` de un job recién completado.
 ///
 /// `None` honesto si no hay frames, si exceden `TURN_MEDIA_MAX_FRAMES`
-/// (64), si el thumb no es RGBA 96×96 exacto o si algún campo no valida:
-/// el job completa igual con el slot vivo, solo sin mini-card. Los frames
-/// completos se pegan como `Arc` compartido (clone barato en el drain);
-/// si no caben o son inconsistentes, el turno queda thumb-only (mini-card +
-/// replay con re-render) sin invalidar el historial.
+/// (64), si el thumb no es RGBA 96×96 exacto, si algún campo no valida O SI
+/// LA PUERTA ANTI-GRILLA-VACÍA RECHAZA (`verificar_frames_con_contenido`):
+/// sin curva real no se publica mini-card ni se guardan frames para replay
+/// (el placeholder de `render_universal` cae acá: jamás se historía como
+/// "lista"). El job completa igual con el slot vivo, solo sin mini-card.
+/// Los drains que quieran el motivo honesto llaman a
+/// `verificar_frames_con_contenido` y lo anexan al turno dueño vía
+/// `anexar_error_a_dueno`. Los frames completos se pegan como `Arc`
+/// compartido (clone barato en el drain); si no caben o son
+/// inconsistentes, el turno queda thumb-only (mini-card + replay con
+/// re-render) sin invalidar el historial.
 pub(crate) fn turn_media_for_completed_job(
     media: &AssistantMedia,
     coords: &AnimHistoryCoords,
 ) -> Option<TurnMediaRef> {
     if media.frames.is_empty() || media.frames.len() > usize::from(TURN_MEDIA_MAX_FRAMES) {
+        return None;
+    }
+    if verificar_frames_con_contenido(&media.frames, &coords.template).is_err() {
         return None;
     }
     let thumb = thumb_rgba_96_from_media(media)?;
@@ -1044,12 +1196,22 @@ mod tests {
 
     // ── P0-app historial Thumb+Replay ──────────────────────────────────
     fn media_de_prueba(titulo: &str, frames: usize) -> AssistantMedia {
+        // Contenido real (tangente nativa 64×48): la puerta
+        // anti-grilla-vacía exige curva+movimiento, así que el historial de
+        // prueba usa frames de verdad como producción (el uniforme plano ya
+        // no se historía: cae en la puerta como el placeholder universal).
+        let base = crate::render_anim_by_template("derivative-slope", 64, 48);
+        assert!(!base.is_empty(), "el renderer nativo da frames");
+        let mut elegidos = Vec::with_capacity(frames);
+        // Espaciados a lo largo de la animación (no consecutivos): a 64×48
+        // dos frames vecinos pueden salir pixel-idénticos por cuantizado y
+        // la puerta los leería como congelado.
+        for i in 0..frames {
+            elegidos.push(base[(i * base.len()) / frames].clone());
+        }
         AssistantMedia {
             title: titulo.to_string(),
-            frames: vec![
-                egui::ColorImage::new([64, 48], egui::Color32::from_rgb(10, 20, 30));
-                frames
-            ],
+            frames: elegidos,
         }
     }
 
@@ -1070,8 +1232,13 @@ mod tests {
 
     #[test]
     fn thumb_baja_a_rgba_96x96_exactos() {
-        let media = media_de_prueba("T", 3);
-        let thumb = thumb_rgba_96_from_media(&media).expect("thumb válido");
+        // Thumb uniforme construido inline (no pasa por la puerta: el
+        // historial de prueba usa contenido real vía `media_de_prueba`).
+        let uniforme = AssistantMedia {
+            title: "T".to_string(),
+            frames: vec![egui::ColorImage::new([64, 48], egui::Color32::from_rgb(10, 20, 30)); 3],
+        };
+        let thumb = thumb_rgba_96_from_media(&uniforme).expect("thumb válido");
         assert_eq!(thumb.len(), TURN_MEDIA_THUMB_MAX_BYTES);
         // Vecino más cercano sobre uniforme: todo el thumb es el mismo píxel.
         assert_eq!(&thumb[0..4], &[10, 20, 30, 255]);
@@ -1376,5 +1543,77 @@ mod tests {
             );
             assert!(reusable_media_from_turn(&conversacion[idx]).is_some());
         }
+    }
+
+    // ── Puerta anti-grilla-vacía ─────────────────────────────────────────
+    #[test]
+    fn puerta_rechaza_placeholder_y_acepta_curva_real() {
+        // Placeholder universal: fondo+grilla+rótulo+barra, sin curva en la
+        // región central → false (jamás se publica como "lista").
+        let vacios = crate::render_anim_by_template("universal", 96, 72);
+        assert!(!vacios.is_empty(), "el placeholder trae frames");
+        assert!(
+            !frames_tienen_curva(&vacios),
+            "el placeholder no pasa como contenido"
+        );
+        // Templates reales que prometen contenido → true.
+        let tangente = crate::render_anim_by_template("derivative-slope", 96, 72);
+        assert!(
+            frames_tienen_curva(&tangente),
+            "la tangente trae curva y movimiento"
+        );
+        let integral = crate::render_anim_by_template("integral-area", 96, 72);
+        assert!(frames_tienen_curva(&integral), "la integral trae área");
+    }
+
+    #[test]
+    fn puerta_rechaza_congelado_aunque_haya_curva() {
+        let curva = crate::render_anim_by_template("derivative-slope", 96, 72);
+        assert!(!curva.is_empty());
+        let congelado = vec![curva[0].clone(), curva[0].clone()];
+        assert!(
+            !frames_tienen_curva(&congelado),
+            "idénticos = congelado, no animación"
+        );
+    }
+
+    #[test]
+    fn puerta_rechaza_uniforme_unitario_e_inconsistente() {
+        // Uniforme (como `media_de_prueba` del historial): sin contenido.
+        let plano = egui::ColorImage::new([64, 48], egui::Color32::from_rgb(10, 20, 30));
+        assert!(!frames_tienen_curva(&[plano.clone(), plano.clone()]));
+        assert!(!frames_tienen_curva(&[]));
+        // Un solo frame no prueba movimiento → false conservador.
+        let curva = crate::render_anim_by_template("pitagoras", 64, 64);
+        assert!(!frames_tienen_curva(&curva[..1]));
+        // Dims inconsistentes entre frame0 y medio → false.
+        let otro = egui::ColorImage::new([32, 24], egui::Color32::from_rgb(235, 211, 84));
+        let mezcla = vec![plano, otro];
+        assert!(!frames_tienen_curva(&mezcla));
+    }
+
+    #[test]
+    fn verificar_da_mensaje_honesto_con_sugerencia() {
+        let vacios = crate::render_anim_by_template("universal", 96, 72);
+        let err = verificar_frames_con_contenido(&vacios, "universal")
+            .expect_err("el placeholder no es lista");
+        for pista in [
+            "integral",
+            "tangente",
+            "Taylor",
+            "Pitágoras",
+            "subspace",
+            "fractal",
+        ] {
+            assert!(err.contains(pista), "sugiere {pista}: {err}");
+        }
+        assert!(
+            err.chars().count() <= 500,
+            "acotado para el turno: {}",
+            err.chars().count()
+        );
+        assert!(verificar_frames_con_contenido(&[], "x").is_err());
+        let curva = crate::render_anim_by_template("integral-area", 96, 72);
+        assert!(verificar_frames_con_contenido(&curva, "integral-area").is_ok());
     }
 }

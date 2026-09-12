@@ -2,7 +2,8 @@
 
 use crate::manim_orchestrator::{
     anexar_error_a_dueno, attach_media_to_owner_turn, es_dueno_vivo,
-    trim_conversation_dropping_pair_media, turn_media_for_completed_job, AnimHistoryCoords,
+    trim_conversation_dropping_pair_media, turn_media_for_completed_job,
+    verificar_frames_con_contenido, AnimHistoryCoords,
 };
 use crate::{assistant_credentials, GrafitoApp};
 use grafito_assistant::{
@@ -189,6 +190,76 @@ pub(crate) fn clasifica_pedido_taylor(pedido: &str, template: &str) -> TaylorPed
     }
 }
 
+/// ¿El pedido menciona subespacio/span? (Frente asistente-subspace, puro).
+///
+/// Copia LOCAL a propósito: los clasificadores en `parametric`/`protocol` y
+/// el registro en `CANONICAL_TEMPLATES` (ya en 13 con subspace/fractal)
+/// existen en el núcleo; este lado usa despacho nativo directo
+/// (`render_anim_with_progress` → `resolve_native_template`, con brazos
+/// explícitos para ambas).
+///
+/// Claves con tolerancia documentada (espejo del resto): "subespacio" y
+/// "subespacios" (contiene o fuzzy Levenshtein ≤2, p. ej. "subespasio";
+/// "espacio" solo NO dispara, distancia 3); "span" por token EXACTO
+/// (paridad con "area" exacta: un `contains` mentiría con "hispano"); o el
+/// par "combinación"+"lineal" (ambos fuzzy; "álgebra lineal" o "ecuación
+/// lineal" solas no disparan).
+/// El render es siempre el default declarado (`SUBSPACE_V1_DEFAULT=(2,1)`,
+/// `SUBSPACE_V2_DEFAULT=(-1,2)`, clamp −3..3, rank==2 o default): sin
+/// `infer_*`, sin params vivos en el pedido. Puro, sin I/O, sin `unwrap`.
+pub(crate) fn pedido_menciona_subspace(pedido: &str) -> bool {
+    use grafito_anim::parametric::{normaliza_para_match, token_matchea_clave};
+    let norma = normaliza_para_match(pedido);
+    let mut trae_combinacion = false;
+    let mut trae_lineal = false;
+    for token in norma.split(|c: char| !c.is_alphabetic()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token_matchea_clave(token, "subespacio") || token == "span" {
+            return true;
+        }
+        if token_matchea_clave(token, "combinacion") {
+            trae_combinacion = true;
+        }
+        if token_matchea_clave(token, "lineal") {
+            trae_lineal = true;
+        }
+    }
+    trae_combinacion && trae_lineal
+}
+
+/// ¿El pedido menciona fractal? (Frente asistente-fractal, puro).
+///
+/// Copia LOCAL por el mismo motivo que [`pedido_menciona_subspace`] (otro
+/// frente registra `CANONICAL_TEMPLATES`; acá despacho nativo directo).
+///
+/// Claves con tolerancia documentada (espejo del resto): "fractal" y
+/// "fractales" (contiene o fuzzy ≤2, p. ej. "fractl"), "mandelbrot" (fuzzy
+/// ≤2), "julia" (fuzzy ≤2 como el resto de claves de largo ≥5); "koch" por
+/// token EXACTO y "copo" por `contains` del token (cubre el plural "copos";
+/// claves de largo ≤4 sin fuzzy, paridad con "area").
+/// El render ignora params (copo de Koch, niveles 0→4 fijos,
+/// `FRACTAL_NIVEL_MAX=4`). Puro, sin I/O, sin `unwrap`.
+pub(crate) fn pedido_menciona_fractal(pedido: &str) -> bool {
+    use grafito_anim::parametric::{normaliza_para_match, token_matchea_clave};
+    let norma = normaliza_para_match(pedido);
+    for token in norma.split(|c: char| !c.is_alphabetic()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token_matchea_clave(token, "fractal")
+            || token_matchea_clave(token, "mandelbrot")
+            || token_matchea_clave(token, "julia")
+            || token == "koch"
+            || token.contains("copo")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Plantilla honesta para un pedido de animación (punto único de resolución).
 ///
 /// Si el pedido menciona integral/área (con typos acotados vía
@@ -197,7 +268,10 @@ pub(crate) fn clasifica_pedido_taylor(pedido: &str, template: &str) -> TaylorPed
 /// por el typo. Espejo M1: si menciona derivada/tangente/pendiente (fuzzy
 /// "derivadaa"→"derivada"), es `derivative-slope`. Frente A: si menciona
 /// taylor, es `taylor-series` (después de área/tangente para no robarles
-/// ningún pedido que ya resolvían). El resto delega al detector clásico.
+/// ningún pedido que ya resolvían). Frente asistente-subspace/fractal: si
+/// menciona subespacio/span/combinación-lineal es `subspace`, si menciona
+/// fractal/koch/mandelbrot/julia/copo es `fractal` (después de taylor para
+/// no robar nada existente). El resto delega al detector clásico.
 /// Puro, sin I/O.
 pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
     if grafito_anim::parametric::pedido_menciona_area(pedido) {
@@ -208,6 +282,15 @@ pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
     }
     if grafito_anim::parametric::pedido_menciona_taylor(pedido) {
         return "taylor-series";
+    }
+    // Frente asistente-subspace/fractal: ANTES del fallback universal (si no
+    // caerían a `universal` mudo: el detector clásico no conoce estas
+    // claves), DESPUÉS de área/tangente/taylor para no robarles pedidos.
+    if pedido_menciona_subspace(pedido) {
+        return "subspace";
+    }
+    if pedido_menciona_fractal(pedido) {
+        return "fractal";
     }
     crate::anim_native::detect_template_for_concept(pedido)
 }
@@ -423,13 +506,22 @@ pub(crate) fn prosa_para_spec_anim_ia(spec: &SpecAnimIa) -> String {
 /// M1 — prosa canónica declarada según plantilla (punto único local).
 ///
 /// Tangente → `TANGENT_CANONICAL_PROSA`, Taylor → `TAYLOR_CANONICAL_PROSA`,
-/// resto → `INTEGRAL_CANONICAL_PROSA`, siempre con la frase de referencia.
+/// subspace → `prosa_subspace_canonica` (nombra v1/v2 reales), fractal →
+/// `prosa_fractal_canonica` (declara Koch 0→4), resto →
+/// `INTEGRAL_CANONICAL_PROSA`, siempre con la frase de referencia.
 /// La usan Submit, los fallbacks sin IA y el worker IA-primero: la misma
 /// canónica en todos lados. Pura.
 pub(crate) fn prosa_canonica_para_plantilla(plantilla: &str) -> String {
-    let canonica = if plantilla.trim().to_lowercase() == "derivative-slope" {
+    let normalizada = plantilla.trim().to_lowercase();
+    if normalizada == "subspace" {
+        return prosa_subspace_canonica();
+    }
+    if normalizada == "fractal" {
+        return prosa_fractal_canonica();
+    }
+    let canonica = if normalizada == "derivative-slope" {
         grafito_anim::parametric::TANGENT_CANONICAL_PROSA
-    } else if plantilla.trim().to_lowercase() == "taylor-series" {
+    } else if normalizada == "taylor-series" {
         grafito_anim::parametric::TAYLOR_CANONICAL_PROSA
     } else {
         grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
@@ -462,12 +554,15 @@ pub(crate) fn aviso_fallback_canonico(spec: &SpecAnimIa) -> String {
 ///
 /// Punto único para que prosa, aviso y verificación nombren lo mismo:
 /// `integral-area`→"la integral", `derivative-slope`→"la tangente",
-/// `taylor-series`→"Taylor", resto→"la animación".
+/// `taylor-series`→"Taylor", `subspace`→"el span", `fractal`→"el fractal",
+/// resto→"la animación".
 pub(crate) fn keyword_plantilla_anim(plantilla: &str) -> &'static str {
     match plantilla.trim().to_lowercase().as_str() {
         "integral-area" => "la integral",
         "derivative-slope" => "la tangente",
         "taylor-series" => "Taylor",
+        "subspace" => "el span",
+        "fractal" => "el fractal",
         _ => "la animación",
     }
 }
@@ -545,6 +640,21 @@ pub(crate) fn prosa_y_aviso_offline_para_pedido(plantilla: &str, pedido: &str) -
             return (prosa, aviso);
         }
     }
+    // Frente asistente-subspace/fractal: canónicas sin inferencia (el pedido
+    // no trae params vivos; el worker renderiza los defaults declarados en
+    // la prosa dedicada). Aviso de UNA línea con lo efectivamente
+    // renderizado, jamás canónica cruzada.
+    if normalizada == "subspace" {
+        let aviso =
+            "sin conexión: te muestro el span de v1=(2,1) y v2=(-1,2), pedime otra".to_string();
+        return (prosa_subspace_canonica(), aviso);
+    }
+    if normalizada == "fractal" {
+        let aviso =
+            "sin conexión: te muestro el fractal del copo de Koch (iteraciones 0 a 4), pedime otra"
+                .to_string();
+        return (prosa_fractal_canonica(), aviso);
+    }
     prosa_y_aviso_canonicos_para_pedido(plantilla, pedido)
 }
 
@@ -557,7 +667,17 @@ pub(crate) fn prosa_y_aviso_offline_para_pedido(plantilla: &str, pedido: &str) -
 /// `verificar_prosa_vs_spec` (acepta el canónico como cita de función).
 /// Un pedido deforme tipo "hace una animacion explicando pitagoras" sale
 /// como "Teorema de Pitágoras", sin eco del crudo.
+///
+/// Frente asistente-subspace/fractal: estas dos declaran su canónica
+/// dedicada (el concepto libre jamás se echa crudo y la puerta
+/// `verificar_prosa_vs_spec` exige v1/v2 o Koch+iteraciones: la genérica
+/// con solo título no pasaría y el drain la vetaría con ruido).
 pub(crate) fn prosa_turno_generica(plantilla: &str, concepto: &str) -> String {
+    match plantilla.trim().to_lowercase().as_str() {
+        "subspace" => return prosa_subspace_canonica(),
+        "fractal" => return prosa_fractal_canonica(),
+        _ => {}
+    }
     let titulo = titulo_curado(plantilla, concepto, None);
     format!(
         "te muestro {} con {}.\n\n{}",
@@ -654,7 +774,8 @@ pub(crate) fn normalizar_prosa_para_spec(texto: &str) -> String {
 /// R6a — puerta final prosa-vs-spec: `Ok` o veto (pura, sin I/O).
 ///
 /// La prosa que acompaña frames DEBE citar lo EFECTIVAMENTE renderizado:
-/// - keyword de `template_real` (`la integral`/`la tangente`/`taylor`…),
+/// - keyword de `template_real` (`la integral`/`la tangente`/`taylor`/`span`/
+///   `fractal`…),
 /// - función normalizada (`normalizar_prosa_para_spec`) O título canónico
 ///   (`titulo_curado`: la prosa genérica jamás echa el crudo del pedido,
 ///   cita el canónico — p. ej. "hace una animacion explicando pitagoras"
@@ -662,6 +783,9 @@ pub(crate) fn normalizar_prosa_para_spec(texto: &str) -> String {
 /// - taylor: `orden {n}` exacto si `orden` es `Some`, o cualquier "orden"
 ///   si es `None`; resto: rango `[p0,p1]` exacto si `rango` es `Some`, o
 ///   sin chequeo de rango si es `None` (drain genérico).
+/// - Frente asistente-subspace/fractal: no citan función (el concepto libre
+///   jamás se echa crudo): el contenido declarado ES la cita — `v1`+`v2`
+///   del span, `koch`+`iteracion` del fractal. Sin claims falsos.
 ///
 /// Genérico sin claims = VETO (`Err` sin PII, solo la plantilla). Ante
 /// veto loguea `prose_vs_spec_refuted{template,func_hash FNV}` (sin PII).
@@ -673,13 +797,17 @@ pub(crate) fn verificar_prosa_vs_spec(
     rango: Option<(f64, f64)>,
 ) -> Result<(), String> {
     let norma = normalizar_prosa_para_spec(prosa);
-    let keyword = match template_real.trim().to_lowercase().as_str() {
+    let plantilla_norm = template_real.trim().to_lowercase();
+    let keyword = match plantilla_norm.as_str() {
         "integral-area" => "integral",
         "derivative-slope" => "tangente",
         "taylor-series" => "taylor",
+        "subspace" => "span",
+        "fractal" => "fractal",
         _ => "animación",
     };
-    let es_taylor = template_real.trim().to_lowercase() == "taylor-series";
+    let es_taylor = plantilla_norm == "taylor-series";
+    let es_nueva_sin_funcion = matches!(plantilla_norm.as_str(), "subspace" | "fractal");
     let func_norma = normalizar_prosa_para_spec(func_real);
     // Título canónico como cita alternativa: la prosa genérica usa
     // `titulo_curado` (jamás el crudo), así que el crudo deforme no necesita
@@ -693,7 +821,20 @@ pub(crate) fn verificar_prosa_vs_spec(
     } else {
         func_norma.is_empty() || norma.contains(&func_norma)
     };
-    let func_citada = cita_crudo || (!titulo_norma.is_empty() && norma.contains(&titulo_norma));
+    // Frente asistente-subspace/fractal: la función no se cita (ver doc
+    // arriba); el contenido declarado hace de cita en su lugar.
+    let func_citada = if es_nueva_sin_funcion {
+        true
+    } else {
+        cita_crudo || (!titulo_norma.is_empty() && norma.contains(&titulo_norma))
+    };
+    // Frente asistente-subspace/fractal: contenido declarado obligatorio
+    // (vectores del span, Koch+iteraciones del fractal).
+    let contenido_ok = match plantilla_norm.as_str() {
+        "subspace" => norma.contains("v1") && norma.contains("v2"),
+        "fractal" => norma.contains("koch") && norma.contains("iteracion"),
+        _ => true,
+    };
     let cita_orden_rango = if es_taylor {
         match orden {
             Some(n) => norma.contains(&format!("orden{n}")),
@@ -708,7 +849,7 @@ pub(crate) fn verificar_prosa_vs_spec(
             None => true,
         }
     };
-    if norma.contains(keyword) && func_citada && cita_orden_rango {
+    if norma.contains(keyword) && func_citada && cita_orden_rango && contenido_ok {
         Ok(())
     } else {
         log::warn!(
@@ -811,6 +952,30 @@ pub(crate) fn prosa_taylor_canonica(pedido: &str) -> String {
     format!(
         "{base} (recorre los órdenes 1, 3, 5, 7 y 9).\n\n{}",
         crate::anim_ui::animation_reference_sentence()
+    )
+}
+
+/// Frente asistente — prosa canónica subspace: declara los vectores REALES
+/// renderizados. El worker usa params vacíos → `subspace_vectores_desde_params`
+/// devuelve los defaults (`SUBSPACE_V1_DEFAULT=(2,1)`,
+/// `SUBSPACE_V2_DEFAULT=(-1,2)`, clamp −3..3, rank==2 o default; verificado
+/// en `anim_native.rs:7227-7229`): la prosa los nombra, jamás eco crudo del
+/// pedido. Pura, sin I/O.
+pub(crate) fn prosa_subspace_canonica() -> String {
+    format!(
+        "te muestro el span de v1=(2,1) y v2=(-1,2), la familia de sus combinaciones lineales.\n\n{}",
+        crate::anim_ui::animation_reference_sentence(),
+    )
+}
+
+/// Frente asistente — prosa canónica fractal: declara el copo de Koch con
+/// sus iteraciones REALES 0 a 4 (`FRACTAL_NIVEL_MAX=4`, 48 frames con morph
+/// continuo entre niveles; verificado en `anim_native.rs`). `fractal`
+/// IGNORA params (niveles fijos, honesto). Jamás eco crudo. Pura, sin I/O.
+pub(crate) fn prosa_fractal_canonica() -> String {
+    format!(
+        "te muestro el fractal del copo de Koch, iteraciones 0 a 4.\n\n{}",
+        crate::anim_ui::animation_reference_sentence(),
     )
 }
 
@@ -1189,7 +1354,11 @@ pub(crate) fn spec_canonico_para_fallback(plantilla: &str) -> Option<SpecAnimIa>
 ///
 /// R6a: RECHAZA `taylor-series` con `Err` honesto (obliga al renderer
 /// taylor dedicado: la vía paramétrica genérica dibujaría la traza de f,
-/// no f vs su serie — ese fue el bug de la captura). Construye el
+/// no f vs su serie — ese fue el bug de la captura). Frente
+/// asistente-subspace/fractal: RECHAZA ambas con `Err` honesto por el mismo
+/// motivo (la vía paramétrica dibujaría un barrido, no el span ni el copo;
+/// el worker usa el despacho nativo directo con params vacíos).
+/// Construye el
 /// `ParametricAnim` con `anim_desde_spec_ia` y renderiza con progreso
 /// cancelable (mismo presupuesto que la canónica: 48 frames). Título
 /// curado por el punto único (nombra la función del SPEC).
@@ -1201,6 +1370,15 @@ pub(crate) fn render_media_desde_spec_ia(
     if spec.plantilla.trim().to_lowercase() == "taylor-series" {
         return Err(
             "el SPEC taylor va por el renderer taylor dedicado, no por la vía paramétrica."
+                .to_string(),
+        );
+    }
+    if matches!(
+        spec.plantilla.trim().to_lowercase().as_str(),
+        "subspace" | "fractal"
+    ) {
+        return Err(
+            "el SPEC subspace/fractal va por despacho nativo directo, no por la vía paramétrica."
                 .to_string(),
         );
     }
@@ -1220,6 +1398,53 @@ pub(crate) fn render_media_desde_spec_ia(
     }
     let title = titulo_curado(&spec.plantilla, &spec.expr, Some(&anim));
     Ok(grafito_ui::assistant::AssistantMedia { title, frames })
+}
+
+/// Frente asistente-subspace/fractal — render nativo directo para workers
+/// (vía única compartida por el single y el IA-primero).
+///
+/// Despacha por `render_anim_with_progress` (resuelve por
+/// `resolve_native_template`, con brazos explícitos para ambas). Viewport 480×360 canónico (`CHAT_CANON_W/H`,
+/// igual que taylor), params vacíos → defaults declarados en la prosa
+/// (v1=(2,1) v2=(-1,2); Koch 0→4 fijos), cancelable entre frames, título
+/// curado dedicado sin sufijo (como taylor). Prosa+aviso por el punto
+/// único offline (dedicados, misma canónica que Submit).
+/// Historial/replay/export intactos: devuelve `AnimIaRender` con las coords
+/// EFECTIVAS (plantilla+concepto) y el drain historía igual que el resto.
+/// Hilo background, sin tocar UI. Sin `unwrap`.
+pub(crate) fn render_nativo_subspace_fractal(
+    plantilla: &str,
+    concepto: &str,
+    cancel: &CancellationToken,
+) -> Result<AnimIaRender, String> {
+    let mut saw_cancel = false;
+    let frames = crate::anim_native::render_anim_with_progress(
+        plantilla,
+        concepto,
+        crate::anim_native::CHAT_CANON_W,
+        crate::anim_native::CHAT_CANON_H,
+        &std::collections::BTreeMap::new(),
+        &mut |_, _| {
+            if cancel.is_cancelled() {
+                saw_cancel = true;
+            }
+        },
+    );
+    if cancel.is_cancelled() || saw_cancel {
+        return Err("La generación se canceló antes de completarse.".to_string());
+    }
+    if frames.is_empty() {
+        return Err(crate::anim_native::error_sin_fotogramas("el motor nativo"));
+    }
+    let (prosa, aviso) = prosa_y_aviso_offline_para_pedido(plantilla, concepto);
+    let title = titulo_curado(plantilla, concepto, None);
+    Ok(AnimIaRender {
+        media: grafito_ui::assistant::AssistantMedia { title, frames },
+        prosa,
+        aviso: Some(aviso),
+        template: plantilla.to_string(),
+        concept: concepto.to_string(),
+    })
 }
 
 /// Título curado de la card de animación (punto único, puro y testeable).
@@ -1278,6 +1503,18 @@ pub(crate) fn titulo_curado_localized(
         "pitagoras" | "pythagoras" => t("media.title.pitagoras", locale).to_string(),
         "taylor-series" => t("media.title.taylor", locale).to_string(),
         "conformal-map" => t("media.title.conformal", locale).to_string(),
+        // Frente asistente-subspace/fractal: literales ES/EN curados a
+        // propósito (más específicos que el catálogo genérico
+        // `media.title.subspace/fractal`, que queda para otros usos).
+        // Sin `unwrap`, sin I/O.
+        "subspace" => match locale {
+            grafito_ui::i18n::Locale::En => "Subspace — span of two vectors".to_string(),
+            _ => "Subespacio — span de dos vectores".to_string(),
+        },
+        "fractal" => match locale {
+            grafito_ui::i18n::Locale::En => "Fractal — Koch snowflake".to_string(),
+            _ => "Fractal — copo de Koch".to_string(),
+        },
         _ => titulo_desde_concepto_localized(concept, locale),
     }
 }
@@ -1463,7 +1700,8 @@ pub(crate) fn extraer_guion_texto(texto: &str) -> Option<String> {
 /// Punto único de decisión para animación (puro, sin I/O ni spawn).
 ///
 /// Orden: gatillo → concepto → integral (canónica/explícita/inválida) →
-/// tangente (idem) → taylor (idem, Frente A) → genérico. Sin `unwrap`: los
+/// tangente (idem) → taylor (idem, Frente A) → subspace/fractal (siempre
+/// canónica dedicada, sin `infer_*`) → genérico. Sin `unwrap`: los
 /// `Err` se vuelven `PreguntarSinMedia`.
 pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
     if !crate::anim_ui::wants_animation_request(pedido) {
@@ -1535,9 +1773,18 @@ pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
                         expr,
                     }
                 }
-                TaylorPedido::NoAplica => DecisionAnimacion::RenderGenerico {
-                    plantilla,
-                    concepto,
+                TaylorPedido::NoAplica => match plantilla.trim().to_lowercase().as_str() {
+                    // Frente asistente-subspace/fractal: sin `infer_*` ni
+                    // params (siempre el default declarado en la prosa
+                    // canónica): RenderCanonico directo, jamás genérico mudo.
+                    "subspace" | "fractal" => DecisionAnimacion::RenderCanonico {
+                        plantilla,
+                        concepto,
+                    },
+                    _ => DecisionAnimacion::RenderGenerico {
+                        plantilla,
+                        concepto,
+                    },
                 },
             },
         },
@@ -3611,6 +3858,32 @@ impl GrafitoApp {
                         // Stale (reemplazo o pregunta nueva en el medio):
                         // se descarta sin contaminar ni revivir el slot.
                         self.notify("Se descartó una animación desactualizada.", ToastKind::Info);
+                    } else if let Some(rechazo) = verificar_frames_con_contenido(
+                        &media.frames,
+                        history
+                            .as_ref()
+                            .map_or(media.title.as_str(), |coords| coords.template.as_str()),
+                    )
+                    .err()
+                    {
+                        // F4 — la puerta anti-grilla-vacía también vale para el
+                        // slot VIVO (single/guion/playlist comparten este
+                        // drain; el historial ya la trae vía
+                        // `turn_media_for_completed_job`, que devuelve `None`
+                        // sin curva). Si rechaza: el motivo se anexa al turno
+                        // dueño y NO se publica nada (ni slot ni mini-card; el
+                        // slot queda intacto, sin `set_media(None)` que
+                        // barrería la media vigente de otro turno). El replay
+                        // de turnos viejos no pasa por acá (rama `replay_owner`
+                        // de arriba + `reusable_media_from_turn`: ya pasaron la
+                        // puerta al crearse). Sin voz: igual que el camino
+                        // `Ok(Err)`, el fallo no deja narración.
+                        self.assistant_runtime.anim_voiceover_rx = None;
+                        self.assistant_runtime.ultimo_voiceover = None;
+                        anexar_error_a_dueno(&mut self.assistant.conversation, owner, &rechazo);
+                        let message = format!("No se pudo generar la animación: {rechazo}");
+                        self.notify(&message, ToastKind::Error);
+                        self.show_assistant_error(message);
                     } else {
                         // La animación vive DENTRO del turno del chat:
                         // `set_media` la instala para el reproductor del
@@ -3808,6 +4081,24 @@ impl GrafitoApp {
                                 "Se descartó una animación desactualizada.",
                                 ToastKind::Info,
                             );
+                        } else if let Some(rechazo) =
+                            verificar_frames_con_contenido(&render.media.frames, &render.template)
+                                .err()
+                        {
+                            // F4 — la puerta anti-grilla-vacía también vale para
+                            // el slot VIVO del drain IA (el historial ya la trae
+                            // vía `turn_media_for_completed_job`). La prosa ya se
+                            // publicó (pasó su puerta) y el turno dueño existe
+                            // (futuro ya creado por el `complete` de arriba): el
+                            // motivo se anexa ahí y NO se publica ningún frame
+                            // (ni slot ni mini-card). Sin voz: sin media no hay
+                            // narración que persistir (paridad con `Ok(Err)`).
+                            self.assistant_runtime.anim_voiceover_rx = None;
+                            self.assistant_runtime.ultimo_voiceover = None;
+                            anexar_error_a_dueno(&mut self.assistant.conversation, owner, &rechazo);
+                            let message = format!("No se pudo generar la animación: {rechazo}");
+                            self.notify(&message, ToastKind::Error);
+                            self.show_assistant_error(message);
                         } else {
                             // P0-app: historía Thumb+Replay (W1) del SPEC
                             // efectivamente renderizado, igual que el job
@@ -6531,29 +6822,55 @@ impl GrafitoApp {
             let desenlace = resolver_turno_anim_ia(true, salida);
             let resultado = match desenlace {
                 DesenlaceAnimIa::RenderIa { spec, prosa } => {
-                    // R6a: puerta final en el worker IA (single) — re-verifica
-                    // la prosa contra el spec antes de publicar; veto → Err
-                    // honesto sin media mentirosa.
-                    let es_taylor = spec.plantilla.trim().to_lowercase() == "taylor-series";
-                    let (orden, rango) = if es_taylor {
-                        (Some(spec.orden), None)
-                    } else {
-                        (None, Some((spec.p0, spec.p1)))
-                    };
-                    if let Err(veto) =
-                        verificar_prosa_vs_spec(&prosa, &spec.plantilla, &spec.expr, orden, rango)
+                    // Frente asistente-subspace/fractal: la IA no conoce estas
+                    // plantillas (el prompt SPEC solo ofrece integral/taylor):
+                    // un SPEC de otra plantilla para este pedido cae al nativo
+                    // dedicado honesto, jamás integral muda sobre pedido de span.
+                    let hilo_pide_nueva = matches!(
+                        plantilla_hilo.trim().to_lowercase().as_str(),
+                        "subspace" | "fractal"
+                    );
+                    if hilo_pide_nueva
+                        && spec.plantilla.trim().to_lowercase()
+                            != plantilla_hilo.trim().to_lowercase()
                     {
-                        Err(veto)
-                    } else {
-                        match render_media_desde_spec_ia(&spec, &worker_cancel) {
-                            Ok(media) => Ok(AnimIaRender {
-                                media,
-                                prosa,
-                                aviso: None,
-                                template: spec.plantilla.clone(),
-                                concept: spec.expr.clone(),
-                            }),
+                        match render_nativo_subspace_fractal(
+                            &plantilla_hilo,
+                            &pedido_hilo,
+                            &worker_cancel,
+                        ) {
+                            Ok(render) => Ok(render),
                             Err(error) => Err(error),
+                        }
+                    } else {
+                        // R6a: puerta final en el worker IA (single) — re-verifica
+                        // la prosa contra el spec antes de publicar; veto → Err
+                        // honesto sin media mentirosa.
+                        let es_taylor = spec.plantilla.trim().to_lowercase() == "taylor-series";
+                        let (orden, rango) = if es_taylor {
+                            (Some(spec.orden), None)
+                        } else {
+                            (None, Some((spec.p0, spec.p1)))
+                        };
+                        if let Err(veto) = verificar_prosa_vs_spec(
+                            &prosa,
+                            &spec.plantilla,
+                            &spec.expr,
+                            orden,
+                            rango,
+                        ) {
+                            Err(veto)
+                        } else {
+                            match render_media_desde_spec_ia(&spec, &worker_cancel) {
+                                Ok(media) => Ok(AnimIaRender {
+                                    media,
+                                    prosa,
+                                    aviso: None,
+                                    template: spec.plantilla.clone(),
+                                    concept: spec.expr.clone(),
+                                }),
+                                Err(error) => Err(error),
+                            }
                         }
                     }
                 }
@@ -6565,7 +6882,19 @@ impl GrafitoApp {
                     // canónica declarada; resto → pipeline clásico local.
                     // Prosa+aviso describen lo EFECTIVAMENTE renderizado.
                     let normalizada = plantilla_hilo.trim().to_lowercase();
-                    if normalizada == "taylor-series" {
+                    if normalizada == "subspace" || normalizada == "fractal" {
+                        // Frente asistente: nativo dedicado con prosa+aviso
+                        // del punto único (vectores/Koch reales, jamás
+                        // integral muda). Historía igual que el resto.
+                        match render_nativo_subspace_fractal(
+                            &plantilla_hilo,
+                            &pedido_hilo,
+                            &worker_cancel,
+                        ) {
+                            Ok(render) => Ok(render),
+                            Err(error) => Err(error),
+                        }
+                    } else if normalizada == "taylor-series" {
                         match grafito_anim::parametric::infer_taylor_anim(&pedido_hilo) {
                             Ok(resuelto) => {
                                 let spec = resuelto.spec().clone();
@@ -7147,6 +7476,43 @@ impl GrafitoApp {
                             },
                         );
                         if worker_cancellation.is_cancelled() || saw_cancel {
+                            return Err(
+                                "La generación se canceló antes de completarse.".to_string()
+                            );
+                        }
+                        if frames.is_empty() {
+                            return Err(crate::anim_native::error_sin_fotogramas(
+                                "el motor nativo",
+                            ));
+                        }
+                        let title = titulo_curado(&template_owned, &concept_owned, None);
+                        return Ok(grafito_ui::assistant::AssistantMedia { title, frames });
+                    }
+                    // Frente asistente-subspace/fractal: despacho nativo
+                    // directo a 480×360 canónico, ANTES de la vía paramétrica
+                    // genérica (para estas plantillas no hay `ParametricAnim`:
+                    // caerían al clásico igual, pero explícito es honesto y
+                    // no depende de `sanitize_template` — ver
+                    // `render_nativo_subspace_fractal`). Params vacíos →
+                    // defaults declarados en la prosa. Sin `unwrap`.
+                    if matches!(
+                        template_owned.trim().to_lowercase().as_str(),
+                        "subspace" | "fractal"
+                    ) {
+                        let mut vio_cancel = false;
+                        let frames = crate::anim_native::render_anim_with_progress(
+                            &template_owned,
+                            &concept_owned,
+                            crate::anim_native::CHAT_CANON_W,
+                            crate::anim_native::CHAT_CANON_H,
+                            &std::collections::BTreeMap::new(),
+                            &mut |_, _| {
+                                if worker_cancellation.is_cancelled() {
+                                    vio_cancel = true;
+                                }
+                            },
+                        );
+                        if worker_cancellation.is_cancelled() || vio_cancel {
                             return Err(
                                 "La generación se canceló antes de completarse.".to_string()
                             );
@@ -8745,11 +9111,12 @@ mod tests {
         is_agent_spark_responses_unsupported_error, is_session_or_account_error,
         is_socratic_repair_error, join_gif_handle_bounded, join_puente_bounded,
         keyword_plantilla_anim, limpiar_media_si_no_animacion, parsear_spec_anim_ia,
-        plantilla_para_pedido, playlist_para_pedido, pop_provisional_stream_turn,
-        preflight_assistant_flower_scene, preflight_assistant_graph_command,
-        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
-        preflight_assistant_scene, prompt_spec_anim_ia, prosa_canonica_para_plantilla,
-        prosa_integral_explicita, prosa_para_spec_anim_ia, prosa_tangente_explicita,
+        pedido_menciona_fractal, pedido_menciona_subspace, plantilla_para_pedido,
+        playlist_para_pedido, pop_provisional_stream_turn, preflight_assistant_flower_scene,
+        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
+        preflight_assistant_parameter, preflight_assistant_scene, prompt_spec_anim_ia,
+        prosa_canonica_para_plantilla, prosa_fractal_canonica, prosa_integral_explicita,
+        prosa_para_spec_anim_ia, prosa_subspace_canonica, prosa_tangente_explicita,
         prosa_taylor_canonica, prosa_taylor_explicita, prosa_turno_generica,
         prosa_turno_para_guion, prosa_turno_para_playlist, prosa_y_aviso_canonicos_para_pedido,
         prosa_y_aviso_offline_para_pedido, read_bounded_attachment, remote_error_message,
@@ -9804,6 +10171,169 @@ mod tests {
         crate::manim_orchestrator::anexar_error_a_dueno(&mut conversacion, None, "x");
         let despues: Vec<bool> = conversacion.iter().map(|t| t.media.is_some()).collect();
         assert_eq!(antes, despues, "sin dueño no se toca nada");
+    }
+
+    #[test]
+    fn f4_drain_single_rechaza_frames_vacios_sin_publicar() {
+        // F4: la puerta `verificar_frames_con_contenido` corre TAMBIÉN en el
+        // slot vivo, no solo en el historial. Drain con frames vacíos → error
+        // anexado al turno dueño + slot intacto (sin frames ajenos) + sin
+        // mini-card.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        app.assistant
+            .begin_request("derivada con animación".to_string());
+        app.assistant
+            .complete_local_request("miramos la derivada como pendiente".to_string());
+        let dueno = app.assistant.conversation.len().checked_sub(1);
+        let coords = crate::manim_orchestrator::AnimHistoryCoords::new(
+            "derivative-slope".to_string(),
+            "derivada".to_string(),
+        )
+        .expect("coords válidas");
+        let (tx, rx) = sync_channel(1);
+        tx.send(Ok(grafito_ui::assistant::AssistantMedia {
+            title: "Derivada (nativa)".to_string(),
+            frames: Vec::new(),
+        }))
+        .expect("canal del test");
+        app.assistant_runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: CancellationToken::default(),
+            receiver: rx,
+            history: Some(coords),
+        });
+        app.assistant_runtime.anim_owner = dueno;
+        app.sync_assistant_for_frame(&ctx);
+        assert!(
+            app.assistant_runtime.anim_job.is_none(),
+            "el drain consumió el job"
+        );
+        assert!(
+            app.assistant.media.is_none(),
+            "slot intacto: frames vacíos no se publican"
+        );
+        let turno = app
+            .assistant
+            .conversation
+            .get(dueno.expect("dueño del test"))
+            .expect("turno dueño");
+        assert!(turno.media.is_none(), "sin mini-card para frames vacíos");
+        assert!(
+            turno.content.contains("No se pudo generar la animación"),
+            "error anexado al dueño: {}",
+            turno.content
+        );
+    }
+
+    #[test]
+    fn f4_drain_single_publica_frames_reales_en_slot_e_historial() {
+        // F4: el drain normal sigue intacto — frames con curva real se
+        // publican en el slot vivo Y se historían (mini-card en el dueño).
+        use std::collections::BTreeMap;
+        let frames = crate::anim_native::render_anim_with_progress(
+            "derivative-slope",
+            "derivada",
+            64,
+            48,
+            &BTreeMap::new(),
+            &mut |_, _| {},
+        );
+        assert!(!frames.is_empty(), "el nativo debe producir frames");
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        app.assistant
+            .begin_request("derivada con animación".to_string());
+        app.assistant
+            .complete_local_request("miramos la derivada como pendiente".to_string());
+        let dueno = app.assistant.conversation.len().checked_sub(1);
+        let coords = crate::manim_orchestrator::AnimHistoryCoords::new(
+            "derivative-slope".to_string(),
+            "derivada".to_string(),
+        )
+        .expect("coords válidas");
+        let (tx, rx) = sync_channel(1);
+        tx.send(Ok(grafito_ui::assistant::AssistantMedia {
+            title: "Derivada (nativa)".to_string(),
+            frames,
+        }))
+        .expect("canal del test");
+        app.assistant_runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: CancellationToken::default(),
+            receiver: rx,
+            history: Some(coords),
+        });
+        app.assistant_runtime.anim_owner = dueno;
+        app.sync_assistant_for_frame(&ctx);
+        assert!(
+            app.assistant_runtime.anim_job.is_none(),
+            "el drain consumió el job"
+        );
+        assert!(
+            app.assistant.media.is_some(),
+            "slot vivo publicado para frames reales"
+        );
+        let turno = app
+            .assistant
+            .conversation
+            .get(dueno.expect("dueño del test"))
+            .expect("turno dueño");
+        assert!(
+            turno.media.is_some(),
+            "mini-card historíada para frames reales"
+        );
+    }
+
+    #[test]
+    fn f4_drain_ia_rechaza_frames_vacios_sin_publicar() {
+        // F4: el drain IA también cierra la puerta del slot vivo. Con frames
+        // vacíos la prosa válida igual crea su turno (pasó su puerta), el
+        // motivo se anexa al dueño futuro y NO se publica ningún frame.
+        let mut app = crate::app::dummy_grafito_app();
+        let ctx = egui::Context::default();
+        let dueno_futuro = app.assistant.conversation.len();
+        let (tx, rx) = sync_channel(1);
+        tx.send(Ok(AnimIaRender {
+            media: grafito_ui::assistant::AssistantMedia {
+                title: "Derivada (nativa)".to_string(),
+                frames: Vec::new(),
+            },
+            prosa: prosa_turno_generica("derivative-slope", "derivada"),
+            aviso: None,
+            template: "derivative-slope".to_string(),
+            concept: "derivada".to_string(),
+        }))
+        .expect("canal del test");
+        app.assistant_runtime.anim_ia_job = Some(AssistantAnimIaJob {
+            cancellation: CancellationToken::default(),
+            receiver: rx,
+        });
+        app.assistant_runtime.anim_ia_owner = Some(dueno_futuro);
+        let turnos_antes = app.assistant.conversation.len();
+        app.sync_assistant_for_frame(&ctx);
+        assert!(
+            app.assistant_runtime.anim_ia_job.is_none(),
+            "el drain consumió el job"
+        );
+        assert!(
+            app.assistant.media.is_none(),
+            "slot intacto: frames vacíos no se publican"
+        );
+        assert_eq!(
+            app.assistant.conversation.len(),
+            turnos_antes + 1,
+            "la prosa válida crea su turno"
+        );
+        let ultimo = app
+            .assistant
+            .conversation
+            .last()
+            .expect("turno recién creado");
+        assert!(ultimo.media.is_none(), "sin mini-card para frames vacíos");
+        assert!(
+            ultimo.content.contains("No se pudo generar la animación"),
+            "error anexado al dueño: {}",
+            ultimo.content
+        );
     }
 
     #[test]
@@ -11460,6 +11990,213 @@ mod tests {
             decide_animacion("derivá x^2"),
             DecisionAnimacion::NoAnimacion
         );
+    }
+
+    // ── Frente asistente: subspace + fractal cableados ──────────────────
+    #[test]
+    fn asistente_subspace_decide_prosa_titulo_puerta_y_render() {
+        // decide: keywords → plantilla canónica ANTES del fallback universal.
+        for pedido in [
+            "animame el subespacio generado por dos vectores con animación",
+            "mostrame el span de v1 y v2 con animación",
+            "combinación lineal de vectores con animación",
+            "quiero ver subespacios con animación",
+        ] {
+            assert_eq!(plantilla_para_pedido(pedido), "subspace", "{pedido}");
+            match decide_animacion(pedido) {
+                DecisionAnimacion::RenderCanonico { plantilla, .. } => {
+                    assert_eq!(plantilla, "subspace", "{pedido}");
+                }
+                otra => panic!("{pedido:?} debe ser RenderCanonico, fue {otra:?}"),
+            }
+        }
+        // Fuzzy documentado (Levenshtein ≤2): "subespasio".
+        assert!(pedido_menciona_subspace(
+            "animación del subespasio con animación"
+        ));
+        // No roba: tarea/integral/taylor intactos; "espacio" o "lineal"
+        // solos no disparan (el par combinación+lineal sí).
+        assert!(!pedido_menciona_subspace("tarea de matemática"));
+        assert!(!pedido_menciona_subspace(
+            "el espacio de trabajo con animación"
+        ));
+        assert!(!pedido_menciona_subspace("álgebra lineal con animación"));
+        assert_eq!(
+            plantilla_para_pedido("integral de x^2 con animación"),
+            "integral-area"
+        );
+        // Prosa declara los vectores REALES + referencia, jamás eco crudo.
+        let prosa = prosa_subspace_canonica();
+        assert!(prosa.contains("span"), "{prosa}");
+        assert!(prosa.contains("v1=(2,1)"), "{prosa}");
+        assert!(prosa.contains("v2=(-1,2)"), "{prosa}");
+        assert!(prosa.contains("deslizador"), "{prosa}");
+        assert!(
+            prosa_canonica_para_plantilla("subspace").contains("v1=(2,1)"),
+            "punto único"
+        );
+        // La genérica declara la canónica dedicada (pasa la puerta, sin eco).
+        let generica = prosa_turno_generica("subspace", "pedido deforme");
+        assert!(generica.contains("v1=(2,1)"), "{generica}");
+        assert!(!generica.contains("pedido deforme"), "{generica}");
+        // Título dedicado (literales ES; el catálogo i18n lo amplía otro frente).
+        assert_eq!(
+            titulo_curado("subspace", "cualquier concepto", None),
+            "Subespacio — span de dos vectores"
+        );
+        // Puerta: la dedicada pasa a presencia; la cruzada y la muda se vetan.
+        assert!(
+            verificar_prosa_vs_spec(&prosa, "subspace", "subespacio", None, None).is_ok(),
+            "la dedicada pasa: {prosa}"
+        );
+        assert!(
+            verificar_prosa_vs_spec(&generica, "subspace", "pedido deforme", None, None).is_ok(),
+            "la genérica declara: {generica}"
+        );
+        assert!(verificar_prosa_vs_spec(&prosa, "fractal", "subespacio", None, None).is_err());
+        assert!(verificar_prosa_vs_spec(
+            crate::anim_ui::animation_reference_sentence(),
+            "subspace",
+            "subespacio",
+            None,
+            None,
+        )
+        .is_err());
+        // Offline punto único: prosa dedicada + aviso de UNA línea.
+        let (po, ao) = prosa_y_aviso_offline_para_pedido("subspace", "subespacio con animación");
+        assert!(po.contains("v1=(2,1)"), "{po}");
+        assert!(!ao.contains('\n'), "UNA línea: {ao}");
+        assert!(ao.contains("span"), "{ao}");
+        // Keyword punto único.
+        assert_eq!(keyword_plantilla_anim("subspace"), "el span");
+        // Render nativo directo canónico 480×360: 48 frames, sin `sanitize_template`.
+        let frames = crate::anim_native::render_anim_with_progress(
+            "subspace",
+            "span de v1 y v2",
+            crate::anim_native::CHAT_CANON_W,
+            crate::anim_native::CHAT_CANON_H,
+            &std::collections::BTreeMap::new(),
+            &mut |_, _| {},
+        );
+        assert_eq!(frames.len(), 48);
+        assert_ne!(
+            frames.first().map(|f| &f.pixels),
+            frames.last().map(|f| &f.pixels),
+            "el span progresa entre frames"
+        );
+        // La vía paramétrica la rechaza honesta (jamás un barrido mudo).
+        let cancel = CancellationToken::default();
+        let spec = SpecAnimIa {
+            expr: "x".to_string(),
+            p0: 0.0,
+            p1: 1.0,
+            plantilla: "subspace".to_string(),
+            param: "p".to_string(),
+            centro: 0.0,
+            orden: 3,
+        };
+        assert!(render_media_desde_spec_ia(&spec, &cancel).is_err());
+    }
+
+    #[test]
+    fn asistente_fractal_decide_prosa_titulo_puerta_y_render() {
+        // decide: keywords → plantilla canónica ANTES del fallback universal.
+        for pedido in [
+            "animame un fractal con animación",
+            "mostrame el copo de Koch con animación",
+            "conjunto de Mandelbrot con animación",
+            "conjunto de Julia con animación",
+            "el copo de nieve con animación",
+        ] {
+            assert_eq!(plantilla_para_pedido(pedido), "fractal", "{pedido}");
+            match decide_animacion(pedido) {
+                DecisionAnimacion::RenderCanonico { plantilla, .. } => {
+                    assert_eq!(plantilla, "fractal", "{pedido}");
+                }
+                otra => panic!("{pedido:?} debe ser RenderCanonico, fue {otra:?}"),
+            }
+        }
+        // Fuzzy documentado (Levenshtein ≤2): "fractl".
+        assert!(pedido_menciona_fractal(
+            "animación del fractl con animación"
+        ));
+        // No roba: tarea/integral/taylor intactos.
+        assert!(!pedido_menciona_fractal("tarea de matemática"));
+        assert_eq!(
+            plantilla_para_pedido("taylor de sin(x) con animación"),
+            "taylor-series"
+        );
+        // Prosa declara Koch + iteraciones REALES + referencia, sin eco crudo.
+        let prosa = prosa_fractal_canonica();
+        assert!(prosa.contains("fractal"), "{prosa}");
+        assert!(prosa.contains("Koch"), "{prosa}");
+        assert!(prosa.contains("0 a 4"), "{prosa}");
+        assert!(prosa.contains("deslizador"), "{prosa}");
+        assert!(
+            prosa_canonica_para_plantilla("fractal").contains("Koch"),
+            "punto único"
+        );
+        // La genérica declara la canónica dedicada (pasa la puerta, sin eco).
+        let generica = prosa_turno_generica("fractal", "pedido deforme");
+        assert!(generica.contains("Koch"), "{generica}");
+        assert!(!generica.contains("pedido deforme"), "{generica}");
+        // Título dedicado (literales ES; el catálogo i18n lo amplía otro frente).
+        assert_eq!(
+            titulo_curado("fractal", "cualquier concepto", None),
+            "Fractal — copo de Koch"
+        );
+        // Puerta: la dedicada pasa a presencia; la cruzada y la muda se vetan.
+        assert!(
+            verificar_prosa_vs_spec(&prosa, "fractal", "copo de Koch", None, None).is_ok(),
+            "la dedicada pasa: {prosa}"
+        );
+        assert!(
+            verificar_prosa_vs_spec(&generica, "fractal", "pedido deforme", None, None).is_ok(),
+            "la genérica declara: {generica}"
+        );
+        assert!(verificar_prosa_vs_spec(&prosa, "subspace", "copo", None, None).is_err());
+        assert!(verificar_prosa_vs_spec(
+            crate::anim_ui::animation_reference_sentence(),
+            "fractal",
+            "copo",
+            None,
+            None,
+        )
+        .is_err());
+        // Offline punto único: prosa dedicada + aviso de UNA línea.
+        let (po, ao) = prosa_y_aviso_offline_para_pedido("fractal", "copo de Koch con animación");
+        assert!(po.contains("Koch"), "{po}");
+        assert!(!ao.contains('\n'), "UNA línea: {ao}");
+        assert!(ao.contains("Koch"), "{ao}");
+        // Keyword punto único.
+        assert_eq!(keyword_plantilla_anim("fractal"), "el fractal");
+        // Render nativo directo canónico 480×360: 48 frames, sin `sanitize_template`.
+        let frames = crate::anim_native::render_anim_with_progress(
+            "fractal",
+            "copo de Koch",
+            crate::anim_native::CHAT_CANON_W,
+            crate::anim_native::CHAT_CANON_H,
+            &std::collections::BTreeMap::new(),
+            &mut |_, _| {},
+        );
+        assert_eq!(frames.len(), 48);
+        assert_ne!(
+            frames.first().map(|f| &f.pixels),
+            frames.last().map(|f| &f.pixels),
+            "el copo itera 0→4 entre frames"
+        );
+        // La vía paramétrica la rechaza honesta (jamás un barrido mudo).
+        let cancel = CancellationToken::default();
+        let spec = SpecAnimIa {
+            expr: "x".to_string(),
+            p0: 0.0,
+            p1: 1.0,
+            plantilla: "fractal".to_string(),
+            param: "p".to_string(),
+            centro: 0.0,
+            orden: 3,
+        };
+        assert!(render_media_desde_spec_ia(&spec, &cancel).is_err());
     }
 
     #[test]
