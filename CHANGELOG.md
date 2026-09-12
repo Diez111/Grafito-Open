@@ -5,6 +5,22 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-12
+
+#### Agregado
+- **Asistente-harness (21 tools)**: `run_command` (comandos no destructivos con allowlist por categoría/riesgo + undo real), `solid_measure_3d` (volúmenes/áreas exactos), `generate_short_script` (guion 4 beats ≤60s con narración), schemas con enums cerrados (18 easings, quality/view/effect/format/tracker).
+- **Video long-form + narración**: `AnimDuration` 0.1..=60s, 1500 frames por chunks de 64MiB (jamás `Vec` total), preset 720p + Horizontal/Vertical, calidades `-ql/-qm/-qh` reales, pista voiceover (Piper sidecar) + subtítulos SRT sidecar/quemados, mux AAC + faststart.
+- **Plantillas `subspace` (span 3B1B) y `fractal` (Koch 0→4)**: renderers dedicados + dispatch + prosa + puerta + schemas + pedagogía (LOs, steps, ejercicios) + export (13 plantillas).
+- **Taylor discreta 1-3-5-7-9** en $[-2\pi, 2\pi]$ con fórmulas por escalón, sin morphing ni banda.
+- **LaTeX**: pipeline offline (`pulldown-latex`→`formulary`→tiny-skia, STIX embebida, GPOS) + export PDF/SVG.
+- **Packaging**: `cargo-deb`/`cargo-generate-rpm` + `packaging/arch/PKGBUILD` + workflow `release-artifacts.yml` (deb/rpm/Windows/macOS).
+
+#### Corregido
+- **Puerta prosa-vs-spec + fallback por plantilla**: prosa Taylor jamás sobre frames integral; SPEC vacío (corte de conexión) va a fallback local en vez de callejón; owners con rebase en trim; slot vivo solo del dueño.
+- **BTreeMap total** en documento/constraints/ejercicios (determinismo + JSON idéntico).
+- **God objects partidos**: `assistant_preflight/jobs/media` + `Document/View/FileController` con wiring.
+- **CI verde**: lints compatibles stable-1.98, `libflint-dev` en jobs `--all-features`, `cargo-llvm-cov` a versión existente, shellcheck SC2012, excepción revisada quick-xml 0.42 (hardening + tests adversariales + expiración 2026-12-31), timeout de readback GPU 10s para lavapipe.
+
 ## [1.2.34-beta] - 2026-08-24
 
 #### Corregido
