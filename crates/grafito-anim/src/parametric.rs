@@ -777,6 +777,13 @@ pub fn infer_parametric_anim(pedido: &str) -> ParametricResult<ParametricAnim> {
 }
 
 fn detect_kind(lower: &str) -> Option<ParametricKind> {
+    // `subspace` / `fractal` tienen clasificador propio
+    // (`infer_subspace_anim` / `infer_fractal_anim`): jamás se reclaman
+    // como barrido/traza genéricos aunque el pedido traiga "con p en" o
+    // mencione vectores. Exclusión primera, antes de lo específico.
+    if pedido_menciona_subspace(lower) || pedido_menciona_fractal(lower) {
+        return None;
+    }
     // De específico a general (la tangente/área contienen "móvil" como locus).
     if lower.contains("morph")
         || lower.contains("interpola")
@@ -2299,6 +2306,437 @@ pub fn infer_taylor_anim(pedido: &str) -> ParametricResult<TaylorPedido> {
     Ok(TaylorPedido::Canonica(spec_con(
         TAYLOR_CANONICAL_EXPR.to_string(),
     )))
+}
+
+// ── subspace + fractal: clasificadores del núcleo ───────────────────────
+// `subspace` (el span como paralelogramo) y `fractal` (copo de Koch 0→4)
+// ya tienen renderer nativo (`grafito-app/src/anim_native.rs`) y registro
+// en `protocol::CANONICAL_TEMPLATES`; acá viven los clasificadores puros
+// pedido→params, espejo de área/tangente/taylor. Puros, sin I/O, sin egui.
+
+/// Default honesto de v1 (espejo de `anim_native::SUBSPACE_V1_DEFAULT`).
+pub const SUBSPACE_V1_DEFAULT: [f64; 2] = [2.0, 1.0];
+/// Default honesto de v2 (espejo de `anim_native::SUBSPACE_V2_DEFAULT`).
+pub const SUBSPACE_V2_DEFAULT: [f64; 2] = [-1.0, 2.0];
+/// Determinante mínimo para rank 2 (espejo de `SUBSPACE_DET_MIN`).
+pub const SUBSPACE_DET_MIN: f64 = 1e-6;
+/// Cota de cada componente (espejo del clamp −3..=3 del nativo).
+pub const SUBSPACE_COMPONENT_MIN: f64 = -3.0;
+/// Cota de cada componente (espejo del clamp −3..=3 del nativo).
+pub const SUBSPACE_COMPONENT_MAX: f64 = 3.0;
+/// Clave viva: componente x de v1 (contrato con el dispatcher nativo).
+pub const SUBSPACE_PARAM_V1X: &str = "v1x";
+/// Clave viva: componente y de v1.
+pub const SUBSPACE_PARAM_V1Y: &str = "v1y";
+/// Clave viva: componente x de v2.
+pub const SUBSPACE_PARAM_V2X: &str = "v2x";
+/// Clave viva: componente y de v2.
+pub const SUBSPACE_PARAM_V2Y: &str = "v2y";
+/// Nivel inicial del copo de Koch (espejo del nativo 0→4).
+pub const FRACTAL_NIVEL_MIN: usize = 0;
+/// Nivel final del copo de Koch (espejo del nativo 0→4).
+pub const FRACTAL_NIVEL_MAX: usize = 4;
+
+/// ¿El pedido menciona subespacio/span/combinación lineal? Espejo de
+/// `pedido_menciona_taylor`: normaliza sin tildes + fuzzy acotado
+/// ("subespaco" matchea "subespacio"); `span` va exacto por token
+/// (clave corta, como `area`). Puro, sin I/O.
+pub fn pedido_menciona_subspace(pedido: &str) -> bool {
+    let norm = normaliza_para_match(pedido);
+    let mut hay_combinacion = false;
+    let mut hay_lineal = false;
+    for token in norm.split(|c: char| !c.is_alphabetic()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token == "span" {
+            return true;
+        }
+        if token_matchea_clave(token, "subespacio") || token_matchea_clave(token, "subespacios") {
+            return true;
+        }
+        if token_matchea_clave(token, "combinacion") {
+            hay_combinacion = true;
+        }
+        if token_matchea_clave(token, "lineal") {
+            hay_lineal = true;
+        }
+    }
+    hay_combinacion && hay_lineal
+}
+
+/// ¿El pedido menciona fractal/Koch/Mandelbrot/Julia/copo? `copo` va
+/// exacto por token (clave corta: "copos" no reclama); el resto fuzzy
+/// acotado como `taylor`. `frac` suelto NO reclama (ambiguo entre
+/// fracción y fractal: el honesto es no reclamar). Puro, sin I/O.
+pub fn pedido_menciona_fractal(pedido: &str) -> bool {
+    let norm = normaliza_para_match(pedido);
+    for token in norm.split(|c: char| !c.is_alphabetic()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token == "copo" {
+            return true;
+        }
+        if token_matchea_clave(token, "fractal")
+            || token_matchea_clave(token, "koch")
+            || token_matchea_clave(token, "mandelbrot")
+            || token_matchea_clave(token, "mandelb")
+            || token_matchea_clave(token, "julia")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pedido de subespacio ya resuelto: vectores efectivos + mapa vivo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubspacePedido {
+    /// Mapa vivo listo para el dispatcher (`v1x/v1y/v2x/v2y`).
+    pub params: std::collections::BTreeMap<String, f64>,
+    /// Primer vector efectivo (validado rank==2 o default honesto).
+    pub v1: [f64; 2],
+    /// Segundo vector efectivo (validado rank==2 o default honesto).
+    pub v2: [f64; 2],
+    /// `true` cuando se usó el default honesto (la prosa debe declararlo).
+    pub es_canonica: bool,
+}
+
+/// Par `(a, b)` tras una clave (`v1=(2,1)`, `v1 (2; 1)`, `v2 0,1`).
+/// Primer candidato que parsea dos finitos gana; si ninguno parsea,
+/// `None` (el llamador usa el default, jamás inventa). Puro, sin I/O.
+///
+/// OJO: acá la coma es SEPARADOR (`v1=(2,1)` → 2 y 1), no decimal como en
+/// `number_prefix` (que leería 2,1): por eso se parte por delimitador antes
+/// de `parse_finite`.
+fn par_tras_clave(norm: &str, clave: &str) -> Option<[f64; 2]> {
+    // Primer número del cuerpo + resto tras él (hasta `,`, `;`, espacio o
+    // `)`; el token se valida con `parse_finite`).
+    fn numero_en_par(cuerpo: &str) -> Option<(f64, &str)> {
+        let fin = cuerpo
+            .find([',', ';', ' ', '\t', ')'])
+            .unwrap_or(cuerpo.len());
+        let v = parse_finite(cuerpo.get(..fin)?)?;
+        let v = if v == 0.0 { 0.0 } else { v };
+        Some((v, cuerpo.get(fin..)?))
+    }
+    let mut from = 0usize;
+    while let Some(rel) = norm.get(from..)?.find(clave) {
+        let pos = from + rel + clave.len();
+        from = pos;
+        let mut rest = norm.get(pos..)?.trim_start();
+        rest = rest.strip_prefix(['=', ':']).unwrap_or(rest).trim_start();
+        // Paréntesis de apertura opcional (`v1 (a,b)` o `v1 a,b`).
+        let cuerpo = rest.strip_prefix('(').unwrap_or(rest);
+        let Some((a, tras_a)) = numero_en_par(cuerpo) else {
+            continue;
+        };
+        let tras_a = tras_a.trim_start();
+        let tras_a = tras_a
+            .strip_prefix([',', ';'])
+            .unwrap_or(tras_a)
+            .trim_start();
+        let Some((b, _)) = numero_en_par(tras_a) else {
+            continue;
+        };
+        return Some([a, b]);
+    }
+    None
+}
+
+/// Vectores efectivos desde componentes crudas: clamp −3..=3 + rank==2
+/// (`|det| ≥ 1e-6` y normas ≥ 1e-6, espejo del nativo). No finitos o
+/// degenerados → default honesto (`true` = se usó el default). Puro.
+fn subspace_vectores_efectivos(
+    v1x: f64,
+    v1y: f64,
+    v2x: f64,
+    v2y: f64,
+) -> ([f64; 2], [f64; 2], bool) {
+    if !v1x.is_finite() || !v1y.is_finite() || !v2x.is_finite() || !v2y.is_finite() {
+        return (SUBSPACE_V1_DEFAULT, SUBSPACE_V2_DEFAULT, true);
+    }
+    let v1 = [
+        v1x.clamp(SUBSPACE_COMPONENT_MIN, SUBSPACE_COMPONENT_MAX),
+        v1y.clamp(SUBSPACE_COMPONENT_MIN, SUBSPACE_COMPONENT_MAX),
+    ];
+    let v2 = [
+        v2x.clamp(SUBSPACE_COMPONENT_MIN, SUBSPACE_COMPONENT_MAX),
+        v2y.clamp(SUBSPACE_COMPONENT_MIN, SUBSPACE_COMPONENT_MAX),
+    ];
+    let n1 = v1[0].hypot(v1[1]);
+    let n2 = v2[0].hypot(v2[1]);
+    let det = v1[0] * v2[1] - v1[1] * v2[0];
+    if n1 < 1e-6 || n2 < 1e-6 || !det.is_finite() || det.abs() < SUBSPACE_DET_MIN {
+        return (SUBSPACE_V1_DEFAULT, SUBSPACE_V2_DEFAULT, true);
+    }
+    (v1, v2, false)
+}
+
+/// Infiere un pedido de subespacio a `SubspacePedido`.
+///
+/// - Sin vectores explícitos → default honesto v1=(2,1), v2=(−1,2) con
+///   `es_canonica` (la prosa debe declararlo).
+/// - Con vectores explícitos (`v1x/v1y/v2x/v2y` o `v1=(a,b) v2=(c,d)`)
+///   independientes (rank==2) → se respetan (clamp −3..=3).
+/// - Con vectores dependientes, nulos o no finitos → default honesto
+///   (jamás span degenerado en silencio).
+/// - Sin mención a subespacio → `FaltaTipo` (no es este pedido).
+pub fn infer_subspace_anim(pedido: &str) -> ParametricResult<SubspacePedido> {
+    let text_original = pedido.trim();
+    if text_original.is_empty() {
+        return Err(ParametricError::PedidoVacio);
+    }
+    if text_original.chars().count() > 2000 {
+        return Err(ParametricError::ExpresionMuyLarga {
+            got: text_original.chars().count(),
+            max: 2000,
+        });
+    }
+    if !pedido_menciona_subspace(pedido) {
+        return Err(ParametricError::FaltaTipo);
+    }
+    let norm = normaliza_para_match(text_original);
+    // Vía 1: claves sueltas (`v1x 1 v1y 0 …`); vía 2: pares (`v1=(1,0)`).
+    // Las claves mandan por vector; el par solo entra si el vector no trae
+    // ninguna clave (evita que `v1` matchee dentro de `v1x`).
+    let v1x_exp = numero_tras_clave(&norm, "v1x");
+    let v1y_exp = numero_tras_clave(&norm, "v1y");
+    let v2x_exp = numero_tras_clave(&norm, "v2x");
+    let v2y_exp = numero_tras_clave(&norm, "v2y");
+    let par1 = if v1x_exp.is_none() && v1y_exp.is_none() {
+        par_tras_clave(&norm, "v1")
+    } else {
+        None
+    };
+    let par2 = if v2x_exp.is_none() && v2y_exp.is_none() {
+        par_tras_clave(&norm, "v2")
+    } else {
+        None
+    };
+    let crudo: [f64; 4] = [
+        v1x_exp
+            .or(par1.map(|p| p[0]))
+            .unwrap_or(SUBSPACE_V1_DEFAULT[0]),
+        v1y_exp
+            .or(par1.map(|p| p[1]))
+            .unwrap_or(SUBSPACE_V1_DEFAULT[1]),
+        v2x_exp
+            .or(par2.map(|p| p[0]))
+            .unwrap_or(SUBSPACE_V2_DEFAULT[0]),
+        v2y_exp
+            .or(par2.map(|p| p[1]))
+            .unwrap_or(SUBSPACE_V2_DEFAULT[1]),
+    ];
+    let hubo_explicito = v1x_exp.is_some()
+        || v1y_exp.is_some()
+        || v2x_exp.is_some()
+        || v2y_exp.is_some()
+        || par1.is_some()
+        || par2.is_some();
+    let (v1, v2, degenerado) = subspace_vectores_efectivos(crudo[0], crudo[1], crudo[2], crudo[3]);
+    let es_canonica = !hubo_explicito || degenerado;
+    let mut params = std::collections::BTreeMap::new();
+    params.insert(SUBSPACE_PARAM_V1X.to_string(), v1[0]);
+    params.insert(SUBSPACE_PARAM_V1Y.to_string(), v1[1]);
+    params.insert(SUBSPACE_PARAM_V2X.to_string(), v2[0]);
+    params.insert(SUBSPACE_PARAM_V2Y.to_string(), v2[1]);
+    Ok(SubspacePedido {
+        params,
+        v1,
+        v2,
+        es_canonica,
+    })
+}
+
+/// Pedido de fractal ya resuelto: niveles fijos del copo de Koch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FractalPedido {
+    /// Nivel inicial (siempre 0: el renderer itera 0→4 fijos).
+    pub nivel_min: usize,
+    /// Nivel final (siempre 4).
+    pub nivel_max: usize,
+}
+
+impl FractalPedido {
+    /// Mapa vivo para el dispatcher: vacío (el fractal ignora params por
+    /// contrato: niveles 0→4 fijos, honesto).
+    pub fn params(&self) -> std::collections::BTreeMap<String, f64> {
+        std::collections::BTreeMap::new()
+    }
+}
+
+/// Infiere un pedido de fractal a `FractalPedido`.
+///
+/// - Con mención (fractal/Koch/Mandelbrot/Julia/copo) → niveles 0→4
+///   (el renderer los itera fijos; el pedido no parametriza nada).
+/// - Sin mención → `FaltaTipo` (no es este pedido).
+pub fn infer_fractal_anim(pedido: &str) -> ParametricResult<FractalPedido> {
+    let text_original = pedido.trim();
+    if text_original.is_empty() {
+        return Err(ParametricError::PedidoVacio);
+    }
+    if text_original.chars().count() > 2000 {
+        return Err(ParametricError::ExpresionMuyLarga {
+            got: text_original.chars().count(),
+            max: 2000,
+        });
+    }
+    if !pedido_menciona_fractal(pedido) {
+        return Err(ParametricError::FaltaTipo);
+    }
+    Ok(FractalPedido {
+        nivel_min: FRACTAL_NIVEL_MIN,
+        nivel_max: FRACTAL_NIVEL_MAX,
+    })
+}
+
+#[cfg(test)]
+mod subspace_fractal_tests {
+    use super::*;
+
+    #[test]
+    fn menciona_subspace_cubre_sinonimos_y_typos() {
+        for pedido in [
+            "subespacio generado por v1 y v2",
+            "subespacios de R2",
+            "span de dos vectores",
+            "span(v1,v2)",
+            "combinación lineal de vectores",
+            "combinacion lineal",
+            "subespaco generado", // typo: falta la `i` (distancia 1)
+        ] {
+            assert!(pedido_menciona_subspace(pedido), "{pedido}");
+        }
+        for pedido in ["tarea de matemática", "", "espacio vectorial", "vectores"] {
+            assert!(!pedido_menciona_subspace(pedido), "{pedido}");
+        }
+    }
+
+    #[test]
+    fn menciona_fractal_cubre_sinonimos_y_no_reclama_frac() {
+        for pedido in [
+            "fractal copo de Koch",
+            "copo de Koch nivel 3",
+            "conjunto de Mandelbrot",
+            "mandelbrot zoom",
+            "conjunto de Julia",
+            "koch snowflake",
+            "fractla de koch", // typo con distancia 2
+        ] {
+            assert!(pedido_menciona_fractal(pedido), "{pedido}");
+        }
+        // `frac` suelto y `fracción` NO reclaman (alias muerto a propósito:
+        // ambiguo entre fracción y fractal; el honesto es no reclamar).
+        for pedido in ["frac", "fracción con común denominador", "", "tarea"] {
+            assert!(!pedido_menciona_fractal(pedido), "{pedido}");
+        }
+    }
+
+    #[test]
+    fn detect_kind_no_reclama_subspace_ni_fractal() {
+        // Ni con gatillos de barrido/traza encima: el clasificador propio
+        // manda y el genérico devuelve `FaltaTipo` honesto.
+        for pedido in [
+            "fractal copo de Koch",
+            "fractal con p en [0,1]",
+            "copo de nieve fractal progresivo",
+            "subespacio span de v1 y v2",
+            "subespacio con p en [0,1]",
+            "combinación lineal variando p",
+        ] {
+            assert!(detect_kind(&pedido.to_lowercase()).is_none(), "{pedido}");
+            assert_eq!(
+                infer_parametric_anim(pedido).unwrap_err(),
+                ParametricError::FaltaTipo,
+                "{pedido}"
+            );
+        }
+        // El genérico sigue atendiendo lo suyo.
+        assert_eq!(
+            infer_parametric_anim("barrido de f(x)=x^2+p*x con p en [-2,2]")
+                .unwrap()
+                .kind,
+            ParametricKind::Sweep
+        );
+    }
+
+    #[test]
+    fn infer_subspace_default_es_honesto() {
+        let res = infer_subspace_anim("mostrame el subespacio span(v1,v2)").unwrap();
+        assert_eq!(res.v1, SUBSPACE_V1_DEFAULT);
+        assert_eq!(res.v2, SUBSPACE_V2_DEFAULT);
+        assert!(res.es_canonica);
+        assert_eq!(res.params.len(), 4);
+        assert_eq!(res.params[SUBSPACE_PARAM_V1X], 2.0);
+        assert_eq!(res.params[SUBSPACE_PARAM_V1Y], 1.0);
+        assert_eq!(res.params[SUBSPACE_PARAM_V2X], -1.0);
+        assert_eq!(res.params[SUBSPACE_PARAM_V2Y], 2.0);
+    }
+
+    #[test]
+    fn infer_subspace_respeta_vectores_validos() {
+        let res = infer_subspace_anim("subespacio con v1=(1,0) y v2=(1,2)").unwrap();
+        assert_eq!(res.v1, [1.0, 0.0]);
+        assert_eq!(res.v2, [1.0, 2.0]);
+        assert!(!res.es_canonica);
+        let claves = infer_subspace_anim("span con v1x 1 v1y 0 v2x 0 v2y 1").unwrap();
+        assert_eq!(claves.v1, [1.0, 0.0]);
+        assert_eq!(claves.v2, [0.0, 1.0]);
+        assert!(!claves.es_canonica);
+    }
+
+    #[test]
+    fn infer_subspace_degenerado_cae_a_default() {
+        // Dependencia lineal (det=0) → default honesto.
+        let deg = infer_subspace_anim("subespacio con v1=(2,1) y v2=(2,1)").unwrap();
+        assert_eq!((deg.v1, deg.v2), (SUBSPACE_V1_DEFAULT, SUBSPACE_V2_DEFAULT));
+        assert!(deg.es_canonica);
+        // Vector nulo → default honesto.
+        let nulo = infer_subspace_anim("span con v1x 0 v1y 0").unwrap();
+        assert_eq!(
+            (nulo.v1, nulo.v2),
+            (SUBSPACE_V1_DEFAULT, SUBSPACE_V2_DEFAULT)
+        );
+        assert!(nulo.es_canonica);
+        // Clamp a −3..=3 antes de validar.
+        let grande = infer_subspace_anim("subespacio con v1=(99,0) y v2=(0,1)").unwrap();
+        assert_eq!(grande.v1, [3.0, 0.0]);
+        assert_eq!(grande.v2, [0.0, 1.0]);
+        assert!(!grande.es_canonica);
+    }
+
+    #[test]
+    fn infer_subspace_y_fractal_rechazan_bordes() {
+        assert_eq!(
+            infer_subspace_anim("").unwrap_err(),
+            ParametricError::PedidoVacio
+        );
+        assert_eq!(
+            infer_subspace_anim("barrido de f(x)=x^2 con p en [0,1]").unwrap_err(),
+            ParametricError::FaltaTipo
+        );
+        assert_eq!(
+            infer_fractal_anim("").unwrap_err(),
+            ParametricError::PedidoVacio
+        );
+        assert_eq!(
+            infer_fractal_anim("derivada de x^2").unwrap_err(),
+            ParametricError::FaltaTipo
+        );
+        let grande = "fractal ".to_string() + &"x".repeat(2000);
+        assert!(infer_fractal_anim(&grande).is_err());
+    }
+
+    #[test]
+    fn infer_fractal_da_niveles_fijos_sin_params() {
+        let res = infer_fractal_anim("animame el copo de Koch").unwrap();
+        assert_eq!(res.nivel_min, FRACTAL_NIVEL_MIN);
+        assert_eq!(res.nivel_max, FRACTAL_NIVEL_MAX);
+        assert_eq!((res.nivel_min, res.nivel_max), (0, 4));
+        assert!(res.params().is_empty(), "fractal ignora params");
+    }
 }
 
 #[cfg(test)]

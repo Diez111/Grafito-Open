@@ -1340,12 +1340,30 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     {
         return "taylor-series";
     }
+    // `subspace` / `fractal` tienen renderer nativo propio: van a su
+    // canónica, jamás al conforme genérico (antes `fractal` / `mandelbrot`
+    // caían a `conformal-map` fingiendo mapeo complejo). Tokens cortos
+    // (`span`, `copo`) por palabra exacta (`contiene_palabra`, como `area`);
+    // largos por `contains`, como el resto.
+    if c.contains("subespacio")
+        || c.contains("subspace")
+        || contiene_palabra(&c, "span")
+        || (c.contains("combinaci") && c.contains("lineal"))
+    {
+        return "subspace";
+    }
+    if c.contains("fractal")
+        || c.contains("koch")
+        || c.contains("mandelb")
+        || c.contains("julia")
+        || contiene_palabra(&c, "copo")
+    {
+        return "fractal";
+    }
     if c.contains("conformal")
         || c.contains("conforme")
         || c.contains("complej")
         || c.contains("complex")
-        || c.contains("fractal")
-        || c.contains("mandelb")
     {
         return "conformal-map";
     }
@@ -1372,12 +1390,9 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     if c.contains("vector") || (c.contains("campo") && c.contains("vectorial")) {
         // R6d: `vector` pelado no dibuja conforme solo (antes cualquier
         // mención caía a `conformal-map` fingiendo respuesta): exige token
-        // explícito de conforme/complejo/fractal, si no `universal`.
-        if c.contains("conforme")
-            || c.contains("complej")
-            || c.contains("complex")
-            || c.contains("fractal")
-        {
+        // explícito de conforme/complejo, si no `universal`. (`fractal` ya
+        // no entra acá: tiene canónica propia y se resuelve arriba.)
+        if c.contains("conforme") || c.contains("complej") || c.contains("complex") {
             return "conformal-map";
         }
     }
@@ -1430,9 +1445,9 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     "universal"
 }
 
-/// Registro canónico de plantillas (sync 11↔11↔11, ANIM-REVIVE).
+/// Registro canónico de plantillas (sync 13↔13↔13, ANIM-REVIVE).
 ///
-/// Única fuente del protocolo: las 11 canónicas con renderer nativo propio.
+/// Única fuente del protocolo: las 13 canónicas con renderer nativo propio.
 /// `sanitize_template` la usa (sin `match` duplicado que diverja);
 /// `anim_native::NATIVE_TEMPLATES` y `anim_ui::PLANTILLAS_COMBO` (crate
 /// `grafito-app`) se pinean iguales por test, en el mismo orden.
@@ -1441,7 +1456,7 @@ pub fn template_for_concept(concept: &str) -> &'static str {
 ///
 /// F0: el worker Python está jubilado y su divergencia 11/6 ya no existe.
 /// La paridad vive en `native_templates_once_y_wire_v1_paridad` (tests
-/// abajo): las 11 son nativas y el wire v1 hace roundtrip solo para tests.
+/// abajo): las 13 son nativas y el wire v1 hace roundtrip solo para tests.
 pub const CANONICAL_TEMPLATES: &[&str] = &[
     "derivative-slope",
     "integral-area",
@@ -1454,6 +1469,8 @@ pub const CANONICAL_TEMPLATES: &[&str] = &[
     "gradient-field",
     "mobius-transform",
     "universal",
+    "subspace",
+    "fractal",
 ];
 
 /// Sanitiza un template libre a uno conocido (R6d: devuelve `Result`).
@@ -1538,7 +1555,13 @@ mod universal_tests {
             ("vector conforme complejo", "conformal-map"),
             ("graficá sin(x)", "universal"),
             ("serie de taylor de sin(x)", "taylor-series"),
-            ("fractal mandelbrot", "conformal-map"),
+            // `fractal` / `mandelbrot` tienen canónica propia (antes caían a
+            // `conformal-map` fingiendo mapeo complejo).
+            ("fractal mandelbrot", "fractal"),
+            ("copo de Koch nivel 3", "fractal"),
+            ("conjunto de Julia", "fractal"),
+            ("subespacio span de v1 y v2", "subspace"),
+            ("combinación lineal de vectores", "subspace"),
         ];
         for (concept, expected) in cases {
             assert_eq!(
@@ -1562,6 +1585,8 @@ mod universal_tests {
             // T2: el fallback honesto SÍ es `universal` (placeholder neutro);
             // nunca una plantilla con renderer matemático para texto libre.
             "universal",
+            "subspace",
+            "fractal",
         ];
         for txt in [
             "random",
@@ -1585,6 +1610,44 @@ mod universal_tests {
         let req3 = request_for_concept(&"a".repeat(1000), "auto").expect("auto resuelve");
         assert!(req3.validate().is_ok());
         assert!(req3.concept.len() <= 500);
+    }
+    #[test]
+    fn subspace_y_fractal_son_primera_clase() {
+        // Registro: literales pasan (ya no `Err`).
+        for t in ["subspace", "fractal", "  SUBSPACE  ", "Fractal"] {
+            let canon = sanitize_template(t, "cualquier concepto").expect("canónica");
+            assert!(canon == "subspace" || canon == "fractal", "{t} → {canon}");
+        }
+        // Concepto: mapeo directo sin hint.
+        assert_eq!(
+            sanitize_template("", "subespacio generado por v1 y v2").expect("vacío resuelve"),
+            "subspace"
+        );
+        assert_eq!(
+            sanitize_template("auto", "copo de Koch").expect("auto resuelve"),
+            "fractal"
+        );
+        // `request_for_concept` + `validate` + `build_succession` las tratan
+        // como primera clase (validate usa la allowlist canónica).
+        for (concepto, hint) in [
+            ("subespacio span(v1,v2)", "subspace"),
+            ("fractal copo de Koch", "fractal"),
+            ("combinación lineal", ""),
+            ("conjunto de Mandelbrot", "auto"),
+        ] {
+            let req = request_for_concept(concepto, hint).expect("pedido válido");
+            assert!(req.validate().is_ok(), "{concepto}/{hint}");
+            assert!(req.template == "subspace" || req.template == "fractal");
+            let lista = build_succession(vec![req]).expect("succession válida");
+            assert_eq!(lista.len(), 1);
+        }
+        // `frac` suelto no reclama nada: ni integral ni fractal (ambiguo
+        // entre fracción y fractal; el honesto es `universal`).
+        assert_eq!(template_for_concept("frac"), "universal");
+        assert_eq!(
+            sanitize_template("", "frac").expect("vacío resuelve"),
+            "universal"
+        );
     }
     #[test]
     fn placeholder_budget_under_2s_for_any_text() {
@@ -1881,9 +1944,9 @@ mod universal_tests {
 
     #[test]
     fn canonical_templates_once_y_sanitize_roundtrip() {
-        // Sync 11↔11↔11: este registro es la fuente; anim_native y anim_ui
+        // Sync 13↔13↔13: este registro es la fuente; anim_native y anim_ui
         // se pinean iguales por test en grafito-app (mismo orden).
-        assert_eq!(CANONICAL_TEMPLATES.len(), 11);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 13);
         for t in CANONICAL_TEMPLATES {
             assert_eq!(
                 sanitize_template(t, "cualquier concepto").expect("canónica"),
@@ -1918,14 +1981,14 @@ mod universal_tests {
     fn native_templates_once_y_wire_v1_paridad() {
         // F0: jubilado el worker Python, la divergencia 11/6 ya no existe.
         // Paridad portada del viejo `TestParidad11_6` (Python, borrado):
-        // las 11 canónicas son las soportadas y el wire v1 hace roundtrip
+        // las 13 canónicas son las soportadas y el wire v1 hace roundtrip
         // para los 5 mensajes que el puente lee (hello/pong/progress/
         // render_result/error). Presupuestos pineados: canvas 64..=4096,
         // duration 0.1..=60 s (P0.1 long-form), line_cap 64 KiB (engine), mensaje 500 chars.
         use std::collections::BTreeSet;
-        assert_eq!(CANONICAL_TEMPLATES.len(), 11);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 13);
         let canon: BTreeSet<&&str> = CANONICAL_TEMPLATES.iter().collect();
-        assert_eq!(canon.len(), 11, "canónicas sin duplicados");
+        assert_eq!(canon.len(), 13, "canónicas sin duplicados");
         // Las 5 ex-"solo Rust" hoy son nativas como el resto: sanitize las
         // pasa literales en lugar de degradarlas por concepto.
         for t in [
@@ -1934,6 +1997,9 @@ mod universal_tests {
             "logistic-bifurcation",
             "gradient-field",
             "mobius-transform",
+            // `subspace` / `fractal` registradas: primera clase, literal.
+            "subspace",
+            "fractal",
         ] {
             assert_eq!(
                 sanitize_template(t, "cualquier concepto").expect("canónica"),
