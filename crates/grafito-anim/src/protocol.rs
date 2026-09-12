@@ -1655,12 +1655,13 @@ mod universal_tests {
         for i in 0..200 {
             let concept = format!("concepto {i} con texto libre y alguna matem\u{00e1}tica");
             let tmpl = template_for_concept(&concept);
-            let _req = request_for_concept(&concept, tmpl);
+            let req = request_for_concept(&concept, tmpl).expect("pedido v\u{00e1}lido");
+            assert!(req.validate().is_ok(), "pedido {i} v\u{00e1}lido");
         }
-        assert!(
-            start.elapsed().as_millis() < 1800,
-            "universal mapping debe ser <1.8s para 200 conceptos"
-        );
+        let ms = start.elapsed().as_millis();
+        // Perf informativa: se pinea en benches criterion, no en unit tests
+        // (llvm-cov 2-5x + CI cargado rompen el <1800ms).
+        println!("universal mapping 200 conceptos: {ms}ms");
     }
     #[test]
     fn area_token_no_matchea_tarea() {
