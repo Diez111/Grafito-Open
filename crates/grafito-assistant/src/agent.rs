@@ -2165,7 +2165,7 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
         json!({
             "type": "object",
             "properties": {
-                "template": {"type": "string", "description": "Plantilla opcional: derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, auto"},
+                "template": {"type": "string", "description": "Plantilla opcional: las 13 canónicas (derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal, subspace para subespacios/span/combinación lineal, fractal para fractales Koch/Mandelbrot/Julia) o auto"},
                 "concept": {"type": "string", "description": "Concepto en lenguaje natural, ej. derivada como pendiente"},
                 "params": {"type": "object", "description": "Mapa opcional de parámetros numéricos finitos", "additionalProperties": {"type": "number"}},
                 "pedido": {"type": "string", "description": "Pedido libre para plan paramétrico, ej. barrido de f(x)=x^2+p·x con p en [-2,2] (tiene precedencia; el tamaño puede ir dentro, ej. en 320x240)"},
@@ -2198,9 +2198,11 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
 /// ≤500 chars, `run_ms` 100..=60000 (la espera sola 1..=10000 con
 /// `wait_after_ms` 0), `wait_after_ms` 0..=10000, `params` ≤16 entradas
 /// finitas.
-/// `template_hint` solo las 11 canónicas: derivative-slope, integral-area,
+/// `template_hint` solo las 13 canónicas: derivative-slope, integral-area,
 /// taylor-series, conformal-map, pitagoras, euler, fourier,
-/// logistic-bifurcation, gradient-field, mobius-transform, universal (alias
+/// logistic-bifurcation, gradient-field, mobius-transform, universal,
+/// subspace (subespacios/span/combinación lineal), fractal (fractales
+/// Koch/Mandelbrot/Julia) (alias
 /// histórico pythagoras→pitagoras). `efecto` solo los 7: create, write,
 /// fade, grow, indicate, tracker, wait (con alias en español: crear/traza,
 /// escribir/texto, aparecer, crecer, indicar/pulso, espera/pausa).
@@ -2211,11 +2213,11 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
 pub fn generate_guion_tool_schema() -> ToolSchema {
     ToolSchema::new(
         "generate_guion",
-        "Valida un guion del director (JSON GuionTexto: 1..=5 actos, pasos 1..=3 por acto, frames 4..=16 y total ≤96, set ≤64 MiB, template_hint de las 11 canónicas [derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal], efecto de los 7 [create, write, fade, grow, indicate, tracker, wait]) y lo baja a sesión de enseñanza (1 acto = 1 paso, steps:[{titulo, verified}]); el render corre en la UI tras aprobación explícita. Para shorts con narración incluí voiceover por paso (110-130 palabras totales) o usá el atajo generate_short_script.",
+        "Valida un guion del director (JSON GuionTexto: 1..=5 actos, pasos 1..=3 por acto, frames 4..=16 y total ≤96, set ≤64 MiB, template_hint de las 13 canónicas [derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal, subspace para subespacios/span/combinación lineal, fractal para fractales Koch/Mandelbrot/Julia], efecto de los 7 [create, write, fade, grow, indicate, tracker, wait]) y lo baja a sesión de enseñanza (1 acto = 1 paso, steps:[{titulo, verified}]); el render corre en la UI tras aprobación explícita. Para shorts con narración incluí voiceover por paso (110-130 palabras totales) o usá el atajo generate_short_script.",
         json!({
             "type": "object",
             "properties": {
-                "guion_texto": {"type": "string", "description": "JSON de GuionTexto (máx 32768 bytes): {concepto (≤500 chars), width/height (64..=4096, únicos), actos[1..=5] de {titulo (1..=80), fondo ([r,g,b] opcional), limpiar (bool), pasos[1..=3] de {texto (1..=500), math_expr? (≤200, inválida→None), whiteboard_hint (≤200), template_hint (11 canónicas), params (≤16 finitos), efecto (7), frames (4..=16), run_ms (100..=60000; espera 1..=10000), wait_after_ms (0..=10000; espera exige 0), voiceover? (texto plano ≤40 palabras; para shorts 110-130 en total o usá generate_short_script)}}}"},
+                "guion_texto": {"type": "string", "description": "JSON de GuionTexto (máx 32768 bytes): {concepto (≤500 chars), width/height (64..=4096, únicos), actos[1..=5] de {titulo (1..=80), fondo ([r,g,b] opcional), limpiar (bool), pasos[1..=3] de {texto (1..=500), math_expr? (≤200, inválida→None), whiteboard_hint (≤200), template_hint (13 canónicas: las 11 + subspace para subespacios/span/combinación lineal + fractal para fractales Koch/Mandelbrot/Julia), params (≤16 finitos), efecto (7), frames (4..=16), run_ms (100..=60000; espera 1..=10000), wait_after_ms (0..=10000; espera exige 0), voiceover? (texto plano ≤40 palabras; para shorts 110-130 en total o usá generate_short_script)}}}"},
                 "guion": {"type": "string", "description": "Alias de guion_texto"}
             },
             "required": ["guion_texto"]
@@ -5108,7 +5110,7 @@ mod tests {
         assert_eq!(props["height"]["minimum"], json!(64));
         assert_eq!(props["height"]["maximum"], json!(4096));
         // generate_guion: el arg es un JSON string, así que el enum cerrado
-        // (11 templates + 7 efectos) vive pineado en la description y el
+        // (13 templates + 7 efectos) vive pineado en la description y el
         // rechazo en `Guion::try_new` (ver test siguiente).
         let guion = generate_guion_tool_schema();
         for template in [
@@ -5123,6 +5125,8 @@ mod tests {
             "gradient-field",
             "mobius-transform",
             "universal",
+            "subspace",
+            "fractal",
         ] {
             assert!(
                 guion.description.contains(template),
@@ -5439,9 +5443,15 @@ mod tests {
         let required = schema.parameters["required"].as_array().expect("required");
         assert!(required.iter().any(|r| r == "guion_texto"));
         assert!(schema.parameters["properties"]["guion_texto"].is_object());
-        // El contrato interno va documentado: 11 canónicas, 7 efectos, presupuestos.
+        // El contrato interno va documentado: 13 canónicas, 7 efectos, presupuestos.
         let texto = format!("{} {}", schema.description, schema.parameters);
-        for canonica in ["derivative-slope", "pitagoras", "universal"] {
+        for canonica in [
+            "derivative-slope",
+            "pitagoras",
+            "universal",
+            "subspace",
+            "fractal",
+        ] {
             assert!(texto.contains(canonica), "falta {canonica}");
         }
         for efecto in ["create", "tracker", "wait"] {

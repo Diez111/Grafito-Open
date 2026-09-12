@@ -3036,7 +3036,7 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
         json!({
             "type": "object",
             "properties": {
-                "template": {"type": "string", "description": "Plantilla opcional: derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal, auto"},
+                "template": {"type": "string", "description": "Plantilla opcional: derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, universal, subspace, fractal, auto"},
                 "concept": {"type": "string", "description": "Concepto en lenguaje natural, ej. derivada como pendiente"},
                 "params": {"type": "object", "description": "Mapa opcional de parámetros numéricos finitos", "additionalProperties": {"type": "number"}},
                 "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096", "items": {"type": "integer", "minimum": 64, "maximum": 4096}, "minItems": 2, "maxItems": 2},
