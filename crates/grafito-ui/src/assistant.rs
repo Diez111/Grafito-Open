@@ -641,14 +641,13 @@ pub(crate) fn history_mini_card_indices(conversation: &[ConversationTurn]) -> Ve
 /// es `ancho * h/w` clampeado a este tope para no mover el scroll.
 const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 
-/// Upscale máximo del preview inline (nitidez).
+/// Upscale máximo histórico del preview inline (nitidez).
 ///
-/// Decisión por nitidez (documentada): se capeó a 1.5× en vez de volver a
-/// `min(1.0)` porque los frames nativos salen a ~480px y los paneles miden
-/// 300..520 — el caso común escala ≤1.1× y `min(1.0)` dejaría bandas vacías
-/// en un layout que reserva todo el ancho. El cap solo muerde texturas
-/// chicas (tests/thumbnails), donde más de 1.5× pixela feo aun con filtrado
-/// lineal.
+/// Techo 1.5× conservado por compatibilidad: el fit real de
+/// `media_preview_size` lo subsume con `min(1.0)` — jamás agranda (en panel
+/// 300..520 con frames de ~480px el caso común es downscale; agrandar
+/// pixelaba y empujaba el plot al borde derecho). El cap solo documenta el
+/// máximo teórico para texturas chicas de test.
 ///
 /// Política: la card inline usa este cap (`media_preview_size`); no hay
 /// visor grande (el botón ⛶/overlay se eliminó: sin glifo se veía como □
@@ -3935,11 +3934,12 @@ pub use crate::prosa::{humanize_control_name, humanize_prose_text};
 
 /// Tamaño del preview inline de la card (D2, puro y testeable).
 ///
-/// Ocupa TODO el ancho disponible, aspecto preservado (`alto = ancho * h/w`),
-/// alto clampeado a `max_h` (tokens). El upscale se capea a
-/// [`MAX_PREVIEW_UPSCALE`] (1.5×): llenar el ancho con texturas chicas
-/// pixela feo aun con filtrado GPU (los nativos salen a ~480px; solo
-/// texturas de test de 8px lo notarían, jamás contenido real).
+/// Fit real: ocupa hasta TODO el ancho disponible, jamás más. Escala =
+/// `min(1, MAX_PREVIEW_UPSCALE, disponible/ancho)`: achica si no entra,
+/// jamás agranda (sin upscale: evita pixelado y overflow derecho en panel
+/// angosto) y jamás deforma (aspecto preservado: `alto = ancho * h/w`).
+/// El alto se clampa a `max_h` (tokens) con downscale proporcional, sin
+/// recorte vertical. El llamador centra con [`media_preview_offset_x`].
 /// El llamador usa el tamaño del primer frame para que el bloque sea estable
 /// entre fotogramas.
 ///
@@ -3968,23 +3968,42 @@ pub fn media_preview_size(frame_w: f32, frame_h: f32, avail_w: f32, max_h: f32) 
     } else {
         MEDIA_CARD_MAX_PREVIEW_H
     };
-    // Ancho hasta llenar, con upscale capeado a 1.5× por nitidez; el alto
-    // deriva del aspecto.
-    let scale = (avail / fw).min(MAX_PREVIEW_UPSCALE);
-    let mut w = (fw * scale).ceil();
-    let mut h = (fh * scale).ceil();
+    // Fit real: achica si no entra, jamás agranda ni deforma. El techo
+    // histórico 1.5× queda subsumido por el 1.0 (sin upscale en panel
+    // angosto: el plot ya no se corre a la derecha ni se recorta).
+    let scale = (avail / fw).min(MAX_PREVIEW_UPSCALE).min(1.0);
+    let mut w = (fw * scale).floor();
+    let mut h = (fh * scale).floor();
     if h > cap {
         let down = cap / h;
-        w = (w * down).ceil();
+        w = (w * down).floor();
         h = cap;
     }
-    if w < 1.0 {
-        w = 1.0;
+    // Contención dura: ni error de f32 ni redondeo pueden exceder el
+    // disponible o el tope (el llamador reserva `avail` y centra adentro).
+    w = w.clamp(1.0, avail.max(1.0));
+    h = h.clamp(1.0, cap.max(1.0));
+    if w > avail {
+        w = avail;
     }
-    if h < 1.0 {
-        h = 1.0;
+    if h > cap {
+        h = cap;
     }
     (w, h)
+}
+
+/// Desplazamiento X para centrar el preview dentro del ancho reservado.
+///
+/// Puro (`&Estado` sin I/O): `((disponible - imagen) / 2).max(0)`. Con fit
+/// real (`w <= disponible`) siempre centra; si el ancho fuera inválido o la
+/// imagen excediera (defensa), pinnea a 0 en vez de anclar a la izquierda
+/// con overflow derecho. Lo usan `draw_media_card` y `draw_turn_player`
+/// (helper compartido: el fix vive una vez acá).
+pub fn media_preview_offset_x(avail_w: f32, img_w: f32) -> f32 {
+    if !avail_w.is_finite() || !img_w.is_finite() {
+        return 0.0;
+    }
+    ((avail_w - img_w) / 2.0).max(0.0)
 }
 
 fn parse_markdown_table_row(line: &str) -> Option<Vec<String>> {
@@ -7063,9 +7082,11 @@ fn draw_turn_player(
             let (dw, dh) = media_preview_size(frame_w, frame_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
             let (full_rect, _) =
                 ui.allocate_exact_size(egui::vec2(max_w, dh), egui::Sense::hover());
+            // Fit + centrado vía helper compartido (jamás anclado a la
+            // izquierda con overflow derecho en panel angosto).
             let rect = egui::Rect::from_min_size(
                 egui::pos2(
-                    full_rect.min.x + ((max_w - dw) / 2.0).max(0.0),
+                    full_rect.min.x + media_preview_offset_x(max_w, dw),
                     full_rect.min.y,
                 ),
                 egui::vec2(dw, dh),
@@ -7697,9 +7718,11 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             let (dw, dh) = media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
             let (full_rect, _) =
                 ui.allocate_exact_size(egui::vec2(max_w, dh), egui::Sense::hover());
+            // Fit + centrado vía helper compartido (jamás anclado a la
+            // izquierda con overflow derecho en panel angosto).
             let rect = egui::Rect::from_min_size(
                 egui::pos2(
-                    full_rect.min.x + ((max_w - dw) / 2.0).max(0.0),
+                    full_rect.min.x + media_preview_offset_x(max_w, dw),
                     full_rect.min.y,
                 ),
                 egui::vec2(dw, dh),
@@ -13694,10 +13717,11 @@ mod tests {
 
     #[test]
     fn media_caps_card_capea_upscale_por_nitidez() {
-        // Card capea a 1.5× (nitidez): el visor grande se eliminó con el
-        // botón ⛶, así que solo queda el cap inline pineado acá.
+        // Fit real (bug card corrida a la derecha): jamás agranda — la
+        // textura chica se pinta a tamaño nativo y centrada, sin upscale.
+        // El techo 1.5× queda como constante histórica subsumida por 1.0.
         assert_eq!(MAX_PREVIEW_UPSCALE, 1.5);
-        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (150.0, 75.0));
+        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (100.0, 50.0));
     }
 
     #[test]
@@ -15051,8 +15075,8 @@ mod tests {
 
     #[test]
     fn media_preview_size_usa_todo_el_ancho_y_preserva_aspecto() {
-        // D2 + frente layout: ancho total (con upscale capeado a 1.5× por
-        // nitidez), alto = ancho * h/w clampeado a max_h.
+        // D2 + frente layout: fit real hasta el ancho (downscale si no
+        // entra, jamás upscale), alto = ancho * h/w clampeado a max_h.
         let (w, h) = media_preview_size(400.0, 200.0, 340.0, 280.0);
         assert_eq!((w, h), (340.0, 170.0), "debe usar todo el ancho");
         // Retrato gigante: el alto se clampa sin cambiar el ancho de reserva
@@ -15060,10 +15084,9 @@ mod tests {
         let (w2, h2) = media_preview_size(200.0, 800.0, 340.0, 280.0);
         assert!(h2 <= 280.0, "alto sin clampear: {h2}");
         assert!(w2 <= 340.0, "ancho desbordado: {w2}");
-        // Textura chica: upscale capeado a 1.5× (aspecto preservado, sin
-        // pixelar de más).
+        // Textura chica: fit real sin upscale (nativo centrado, sin pixelar).
         let (w3, h3) = media_preview_size(100.0, 50.0, 340.0, 280.0);
-        assert_eq!((w3, h3), (150.0, 75.0), "cap 1.5×: {w3}x{h3}");
+        assert_eq!((w3, h3), (100.0, 50.0), "sin upscale: {w3}x{h3}");
         // Estable entre frames: mismo ref da misma reserva siempre.
         let a = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
         let b = media_preview_size(400.0, 200.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
@@ -15072,16 +15095,16 @@ mod tests {
 
     #[test]
     fn media_preview_upscale_pinnea_en_1_5x() {
-        // Frente upscale libre: `media_preview_size(100,50,340,280)` pinneado
-        // al cap (antes 340×170 = 3.4×, pixelado). La escala jamás supera el
-        // cap en ningún tamaño.
+        // Fit real: `media_preview_size(100,50,340,280)` queda en nativo
+        // 100×50 (jamás upscale). La escala jamás supera 1.0 en ningún
+        // tamaño: el 1.5× histórico queda subsumido.
         assert_eq!(MAX_PREVIEW_UPSCALE, 1.5);
-        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (150.0, 75.0));
+        assert_eq!(media_preview_size(100.0, 50.0, 340.0, 280.0), (100.0, 50.0));
         for (fw, fh) in [(8.0, 8.0), (100.0, 50.0), (480.0, 360.0)] {
             let (w, _) = media_preview_size(fw, fh, 340.0, 280.0);
             assert!(
-                w <= (fw * MAX_PREVIEW_UPSCALE).ceil() + f32::EPSILON,
-                "upscale con cap en {fw}x{fh}: {w}"
+                w <= fw.ceil() + f32::EPSILON,
+                "sin upscale en {fw}x{fh}: {w}"
             );
         }
     }
@@ -15119,6 +15142,108 @@ mod tests {
         assert_eq!(
             media_preview_size(480.0, 360.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H).0,
             340.0
+        );
+    }
+
+    #[test]
+    fn media_preview_fit_contenido_centrado_300_400_520() {
+        // Bug card corrida a la derecha: panel angosto (~300px) con frames
+        // de 480px — el plot empezaba a mitad de la card y se salía por el
+        // borde derecho. Fit real + centrado vía helper compartido:
+        // caja imagen ⊆ caja disponible y centrada ±1px, sin recorte.
+        for panel in [300.0, 400.0, 520.0] {
+            let avail = media_effective_inner_width(panel);
+            assert!(avail > 0.0, "panel {panel}: disponible positivo");
+            for (fw, fh) in [(480.0, 360.0), (640.0, 480.0)] {
+                let (w, h) = media_preview_size(fw, fh, avail, MEDIA_CARD_MAX_PREVIEW_H);
+                assert!(
+                    w <= avail + 0.001,
+                    "panel {panel} frame {fw}x{fh}: {w} > {avail}"
+                );
+                assert!(
+                    h <= MEDIA_CARD_MAX_PREVIEW_H + 0.001,
+                    "panel {panel}: alto {h} sobre tope"
+                );
+                assert!(
+                    (w / h - fw / fh).abs() < 0.02,
+                    "panel {panel} frame {fw}x{fh}: aspecto {w}x{h}"
+                );
+                let dx = media_preview_offset_x(avail, w);
+                assert!(dx >= -0.001, "panel {panel}: offset negativo {dx}");
+                assert!(
+                    (dx - (avail - w) / 2.0).abs() <= 1.0,
+                    "panel {panel}: no centrado ±1px (dx {dx})"
+                );
+                assert!(
+                    dx + w <= avail + 1.0,
+                    "panel {panel}: borde derecho fuera ({dx}+{w} > {avail})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn media_preview_fit_en_bottom_sheet_menor_740() {
+        // Bottom-sheet (<740px viewport): mismo helper, misma contención y
+        // centrado que en panel lateral.
+        for viewport in [360.0, 500.0, 700.0] {
+            assert!(
+                assistant_uses_bottom_sheet(viewport),
+                "viewport {viewport} debe ser bottom-sheet"
+            );
+            let avail = media_effective_inner_width(viewport);
+            for (fw, fh) in [(480.0, 360.0), (640.0, 480.0)] {
+                let (w, h) = media_preview_size(fw, fh, avail, MEDIA_CARD_MAX_PREVIEW_H);
+                assert!(w <= avail + 0.001, "sheet {viewport}: {w} > {avail}");
+                assert!(
+                    h <= MEDIA_CARD_MAX_PREVIEW_H + 0.001,
+                    "sheet {viewport}: alto {h}"
+                );
+                let dx = media_preview_offset_x(avail, w);
+                assert!(
+                    (dx - (avail - w) / 2.0).abs() <= 1.0,
+                    "sheet {viewport}: no centrado ±1px ({dx})"
+                );
+                assert!(dx + w <= avail + 1.0, "sheet {viewport}: desborda derecha");
+            }
+        }
+        assert!(
+            !assistant_uses_bottom_sheet(740.0),
+            "740px ya es panel lateral"
+        );
+    }
+
+    #[test]
+    fn media_preview_offset_x_centra_y_jamas_desborda() {
+        assert_eq!(media_preview_offset_x(300.0, 300.0), 0.0);
+        assert_eq!(media_preview_offset_x(300.0, 100.0), 100.0);
+        // Defensa: imagen mayor que el hueco → pinnea a 0, jamás negativo
+        // (antes: anclado a la izquierda con overflow derecho).
+        assert_eq!(media_preview_offset_x(300.0, 400.0), 0.0);
+        assert_eq!(media_preview_offset_x(f32::NAN, 100.0), 0.0);
+        assert_eq!(media_preview_offset_x(300.0, f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn media_preview_draws_usan_helper_compartido_y_prosa_sin_crudo() {
+        // El fix vive una vez en el helper: ambos draws lo usan.
+        let source = include_str!("assistant.rs");
+        assert!(
+            source.contains("media_preview_offset_x(max_w, dw)"),
+            "draw_media_card y draw_turn_player centran vía helper"
+        );
+        // Secundario: la prosa jamás usa el pedido crudo en este archivo —
+        // el título canónico vive en `media.title`. Se arma el patrón por
+        // partes para que este mismo test no lo contenga literalmente.
+        let prosa_cruda = ["te muestro la anim", "aci\u{00f3}n con"].concat();
+        let var_cruda = ["texto", "_crudo"].concat();
+        assert!(
+            !source.contains(&prosa_cruda),
+            "sin prosa con pedido crudo en assistant.rs"
+        );
+        assert!(
+            !source.contains(&var_cruda),
+            "sin variable de pedido crudo en assistant.rs"
         );
     }
 
