@@ -28,7 +28,7 @@
 //! - [`GPU_READBACK_TIMEOUT`]: 250 ms de frame. El path asíncrono
 //!   (`PendingGpuReadback::submit`) y la app lo usan siempre.
 //! - [`REQUIRED_GPU_READBACK_TIMEOUT`]: 10 s para cobertura requerida. El path
-//!   síncrono legacy lo usa vía [`sync_timeout`] cuando
+//!   síncrono legacy lo usa vía `sync_timeout` cuando
 //!   `GRAFITO_REQUIRE_GPU_TESTS` está seteada (CI sobre lavapipe).
 //! - [`MAX_GPU_READBACK_JOBS_IN_FLIGHT`]: 1. Si llega otro job, se descarta el
 //!   viejo por generación: nunca hay cola infinita.

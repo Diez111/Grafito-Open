@@ -5007,7 +5007,7 @@ mod layer_panel_tests {
         // Q2: la tabla vive en el documento (persistente); el estado del
         // panel solo guarda la capa elegida.
         let document = Document::new();
-        assert_eq!(document.used_layers(), vec![]);
+        assert_eq!(document.used_layers(), Vec::<(u32, usize)>::new());
         assert!(document.is_layer_visible(0));
     }
 }
