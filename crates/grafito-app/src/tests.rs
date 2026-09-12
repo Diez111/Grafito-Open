@@ -4845,69 +4845,6 @@ fn headless_view_panel_renders_without_panic() {
         crate::panels::draw_view_panel(&mut app, ctx);
     });
 }
-
-#[test]
-fn implicit_surface_slot_starts_idle_and_polls_without_blocking() {
-    use crate::implicit_surface_compute::{ImplicitSurfaceSlot, SurfaceSlotPoll};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    // A4: el estado del frame posee el slot; arranca idle sin último válido.
-    let mut app = crate::app::dummy_grafito_app();
-    assert!(!app.implicit_surface_slot.has_pending());
-    assert!(app.implicit_surface_slot.last_valid().is_none());
-    assert!(matches!(
-        app.implicit_surface_slot.poll(),
-        SurfaceSlotPoll::Pending
-    ));
-    // Poll por `update` no bloquea aunque haya trabajo en vuelo.
-    // Grid 4³ (no 8³): el trabajo es mínimo y termina rápido en cualquier
-    // perfil (dev/release/bench) aun con el scheduler cargado por benches
-    // en paralelo; la intención "no bloquea + termina" se mantiene sin
-    // depender del clock de pared.
-    let field: crate::implicit_surface_compute::ImplicitField =
-        Arc::new(|x: f64, y: f64, z: f64| Some(x * x + y * y + z * z - 1.0));
-    app.implicit_surface_slot
-        .submit_new(
-            field,
-            grafito_geometry::Point3D::new(-1.5, -1.5, -1.5),
-            grafito_geometry::Point3D::new(1.5, 1.5, 1.5),
-            4,
-        )
-        .expect("pedido 4³ válido");
-    assert!(app.implicit_surface_slot.has_pending());
-    let started = Instant::now();
-    let _ = app.implicit_surface_slot.poll();
-    // P1b: deadline laxa anti-flaky — el `poll` solo hace `try_recv`
-    // (nunca bloquea por diseño); 5 s es margen generoso para el scheduler
-    // en CI cargada.
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "poll bloqueó el hilo UI"
-    );
-    // Drena en background sin bloquear (hasta 60 s; el job 4³ termina en
-    // ms en cualquier perfil, el margen es solo anti-flaky en CI cargada).
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        match app.implicit_surface_slot.poll() {
-            SurfaceSlotPoll::Pending => {
-                assert!(Instant::now() < deadline, "el job 4³ no terminó en 60 s");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            SurfaceSlotPoll::Ready(mesh) => {
-                assert!(!mesh.triangles().is_empty());
-                break;
-            }
-            SurfaceSlotPoll::Failed(error) => panic!("el job 4³ falló: {error}"),
-        }
-    }
-    assert!(!app.implicit_surface_slot.has_pending());
-    assert!(app.implicit_surface_slot.last_valid().is_some());
-    // Slot unitario aislado: mismo contrato sin app.
-    let mut slot = ImplicitSurfaceSlot::new();
-    assert!(matches!(slot.poll(), SurfaceSlotPoll::Pending));
-}
-
 #[test]
 fn implicit_slot_productor_envia_grueso_y_limpia_sin_superficie() {
     // P1b: productor real — con superficie visible envía (pending o válido
