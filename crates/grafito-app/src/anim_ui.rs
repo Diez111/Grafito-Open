@@ -477,7 +477,7 @@ pub fn history_thumb_uv_crop(src_w: u32, src_h: u32) -> (f32, f32, f32, f32) {
 /// (`grafito-ui::assistant::MEDIA_CHAT_INTENTS_HINT`, paridad de texto) y que
 /// el parser acepta. Puro.
 pub fn media_chat_intent_examples() -> &'static [&'static str] {
-    &["exportar mp4 720p", "velocidad 2x", "órbita", "reintentar"]
+    &["exportar mp4 720p", "órbita", "reintentar"]
 }
 
 // ── Diálogo Exportar profesional (Piel, `fn render(&Estado) -> Frame`) ─────
@@ -920,12 +920,11 @@ mod tests {
     }
 
     #[test]
-    fn intents_de_chat_cubren_los_4_ejemplos_visibles() {
+    fn intents_de_chat_cubren_los_3_ejemplos_visibles() {
         // M2-4: vocabulario que la Piel muestra y el parser acepta.
         let ejemplos = media_chat_intent_examples();
-        assert_eq!(ejemplos.len(), 4);
+        assert_eq!(ejemplos.len(), 3);
         assert!(ejemplos.contains(&"exportar mp4 720p"));
-        assert!(ejemplos.contains(&"velocidad 2x"));
         assert!(ejemplos.contains(&"órbita"));
         assert!(ejemplos.contains(&"reintentar"));
     }

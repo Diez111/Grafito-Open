@@ -5,8 +5,8 @@ use crate::{
     icons::{action_icon_button, Icon},
     theme::current_theme,
     tokens::{
-        HIT_TARGET_MIN, RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXL, TYPE_2XS,
-        TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
+        HIT_TARGET_MIN, RADIUS_LG, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
+        SPACE_XXL, TYPE_2XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
     },
 };
 use grafito_anim::protocol::Timeline;
@@ -656,7 +656,6 @@ const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 pub const MAX_PREVIEW_UPSCALE: f32 = 1.5;
 
 /// Tooltips cortos de la toolbar única v3 (≤60 chars, sin cortes).
-const MEDIA_TIP_SPEED: &str = "Velocidad: elegí 0.5x, 1x o 2x";
 const MEDIA_TIP_EXPORT: &str = "Exportar: elegís formato y calidad";
 const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual (Espacio)";
 const MEDIA_TIP_PLAY: &str = "Retoma donde quedó (Espacio)";
@@ -668,62 +667,15 @@ const MEDIA_TIP_STEP_FWD: &str = "Fotograma siguiente (->)";
 /// Se dibuja en la card (`draw_media_card`); el parseo lo hace otro frente
 /// (parser del chat). Los 6 formatos más calidad, fps, bitrate, 720p y órbita
 /// hoy solo viven en el diálogo: este hint los hace descubribles por texto
-/// con ejemplos («exportar mp4 720p», «velocidad 2x», «órbita», «reintentar»)
-/// que el parser mapea a `ExportMedia`, `set_media_speed`, la vista `Orbita`
-/// del diálogo y `ExportMedia`/`ReplayMedia` respectivamente. Paridad de
-/// vocabulario con `app::anim_ui::media_chat_intent_examples` (DAG `ui → app`:
-/// duplicado pineado en tests de ambos lados).
+/// con ejemplos («exportar mp4 720p», «órbita», «reintentar») que el parser
+/// mapea a `ExportMedia`, la vista `Orbita` del diálogo y
+/// `ExportMedia`/`ReplayMedia` respectivamente. Reproducción fija 1x: no hay
+/// intent de velocidad. NOTA DUEÑO APP: `app::anim_ui::media_chat_intent_examples`
+/// aún lista 4 ejemplos con el intent de velocidad (ver `anim_ui.rs:480` +
+/// test `:923`); actualizar ese lado (ejemplos + parser) para paridad con
+/// este hint de 3.
 pub const MEDIA_CHAT_INTENTS_HINT: &str =
-    "Pedí en el chat: «exportar mp4 720p», «velocidad 2x», «órbita» o «reintentar»";
-
-/// Velocidad del reproductor de la card (B5, M2-5).
-///
-/// Preferencia por card que SOBREVIVE a `set_media` (pedir otra animación no
-/// pierde lo elegido); solo `clear_conversation` (Limpiar) la resetea.
-/// Sin global mutable: vive en el estado.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MediaPlaybackSpeed {
-    /// Mitad de velocidad.
-    Half,
-    /// Velocidad base (12 fps).
-    #[default]
-    Normal,
-    /// Doble velocidad.
-    Double,
-}
-
-impl MediaPlaybackSpeed {
-    /// Las 3 del menú explícito, en orden visible.
-    pub const ALL: [Self; 3] = [Self::Half, Self::Normal, Self::Double];
-
-    /// Factor sobre `MEDIA_CARD_BASE_FPS` (la app lo usa para el delay del GIF).
-    pub fn rate(self) -> f32 {
-        match self {
-            Self::Half => 0.5,
-            Self::Normal => 1.0,
-            Self::Double => 2.0,
-        }
-    }
-
-    /// Etiqueta visible (sin IDs literales).
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Half => "0.5x",
-            Self::Normal => "1x",
-            Self::Double => "2x",
-        }
-    }
-
-    /// Rota media → normal → rápida → media (compat: lo usan tests y el
-    /// menú lo ofrece explícito sin depender del ciclo).
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Half => Self::Normal,
-            Self::Normal => Self::Double,
-            Self::Double => Self::Half,
-        }
-    }
-}
+    "Pedí en el chat: «exportar mp4 720p», «órbita» o «reintentar»";
 
 /// Estado de la exportación a GIF de la card (B5).
 ///
@@ -1089,7 +1041,7 @@ impl CaptionsMode {
 ///
 /// Sin I/O, sin spawn: la card lo dibuja y la app ejecuta el `spawn_*`
 /// correspondiente fuera del draw. Interior mutável vía `RefCell` en el
-/// estado porque la Piel dibuja con `&Estado` (igual que playhead/velocidad).
+/// estado porque la Piel dibuja con `&Estado` (igual que el playhead).
 #[derive(Debug, Clone)]
 pub struct MediaExportDialog {
     /// ¿Ventana visible? Privado a propósito: el panel asistente es docked
@@ -1749,14 +1701,13 @@ pub struct AssistantPanelState {
     /// en pausa con estado visible («en pausa» + botón Reproducir): retomar
     /// es explícito y nunca salta solo. Se reinicia en `set_media`.
     media_paused: std::cell::Cell<bool>,
-    /// Velocidad por card (media/lenta/rápida); sin global mutable.
-    media_speed: std::cell::Cell<MediaPlaybackSpeed>,
+
     /// Easing del scrub por nombre del wire (`EASING_NAMES` de
     /// `grafito-anim`): el deslizador aplica esta curva a la fracción del
     /// segmento antes del lerp (`Timeline::sample_with`), la misma que
     /// `RateFunc` en los casos exactos. Desconocido → `linear` honesto
     /// (lo resuelve `easing::by_name` al samplear). Se reinicia en
-    /// `set_media` como la velocidad.
+    /// `set_media` lo reinicia (es contenido del wire, no pref).
     pub media_easing_name: String,
     /// Último fotograma pintado (D2): gate anti-parpadeo. La textura sólo
     /// se re-selecciona si el índice cambió; el rect es estable (ancho
@@ -1881,7 +1832,6 @@ impl Default for AssistantPanelState {
             media_playhead_ms: std::cell::Cell::new(0),
             media_last_tick_s: std::cell::Cell::new(None),
             media_paused: std::cell::Cell::new(false),
-            media_speed: std::cell::Cell::new(MediaPlaybackSpeed::default()),
             media_easing_name: "linear".to_owned(),
             media_last_shown: std::cell::Cell::new(None),
             media_export: MediaExportState::default(),
@@ -2022,9 +1972,9 @@ impl AssistantPanelState {
         self.clear_proposed_plan();
         self.clear_pending_clarification();
         self.error = None;
-        // M2-5: Limpiar es el ÚNICO reset de las prefs de reproducción y
+        // M2-5: Limpiar es el ÚNICO reset de las prefs de
         // export (`set_media` las conserva entre animaciones).
-        self.media_speed.set(MediaPlaybackSpeed::default());
+        // Reproducción fija 1x: sin estado de velocidad que resetear.
         self.media_export = MediaExportState::default();
         *self.export_dialog.borrow_mut() = MediaExportDialog::new();
     }
@@ -2502,11 +2452,12 @@ impl AssistantPanelState {
             .set(self.media_generation.get().wrapping_add(1));
         // Card nueva = reproductor fresco (B5): playhead en 0, reloj sin
         // armar, reproduciendo y sin resultado de export rancio de la
-        // animación anterior. M2-5: la velocidad y las prefs del diálogo
-        // (formato, calidad, bitrate, fps, preset, orientación) SOBREVIVEN:
-        // pedir otra animación no pierde lo elegido; solo Limpiar resetea
-        // (ver `clear_conversation`). El easing sí se reinicia: es contenido
-        // del wire de cada animación, no preferencia del usuario.
+        // animación anterior. M2-5: las prefs del diálogo (formato, calidad,
+        // bitrate, fps, preset, orientación) SOBREVIVEN: pedir otra animación
+        // no pierde lo elegido; solo Limpiar resetea (ver
+        // `clear_conversation`). Reproducción fija 1x. El easing sí se
+        // reinicia: es contenido del wire de cada animación, no preferencia
+        // del usuario.
         self.media_playhead_ms.set(0);
         self.media_last_tick_s.set(None);
         self.media_paused.set(false);
@@ -2949,20 +2900,13 @@ impl AssistantPanelState {
         self.history_thumb_textures.borrow().len()
     }
 
-    /// Factor de velocidad actual del reproductor (lo usa la app para el
+    /// Factor de reproducción del player, FIJO 1x (lo usa la app para el
     /// delay del GIF exportado). Puro, sin I/O.
-    pub fn media_playback_rate(&self) -> f32 {
-        self.media_speed.get().rate()
-    }
-
-    /// Fija la velocidad del reproductor (intent de chat «velocidad 2x», M2-4).
     ///
-    /// La emite el parser del chat (otro frente); el menú de la card escribe
-    /// el mismo `Cell`. Puro estado UI (`&self` por interior mutável), sin
-    /// I/O ni spawn. Sobrevive a `set_media`; solo `clear_conversation`
-    /// (Limpiar) la resetea (M2-5).
-    pub fn set_media_speed(&self, speed: MediaPlaybackSpeed) {
-        self.media_speed.set(speed);
+    /// Se conserva la firma para el dueño app (`app::assistant` la llama al
+    /// exportar): siempre 1.0, sin estado de velocidad en la Piel.
+    pub fn media_playback_rate(&self) -> f32 {
+        1.0
     }
 
     /// Estado de exportación para la app (hilo de export).
@@ -3136,9 +3080,9 @@ impl AssistantPanelState {
         if let Some(previous_s) = last {
             let dt_s = (now_s - previous_s).clamp(0.0, 0.25);
             if dt_s.is_finite() && dt_s > 0.0 {
-                // El playhead va en ms de timeline (tiempo real a 1x): los fps
-                // ya viven en la duración, acá solo pesan dt y velocidad.
-                let step_ms = dt_s * f64::from(self.media_speed.get().rate()) * 1000.0;
+                // El playhead va en ms de timeline a tasa fija 1x: los fps
+                // ya viven en la duración, acá solo pesa dt.
+                let step_ms = dt_s * 1000.0;
                 if step_ms.is_finite() && step_ms > 0.0 {
                     let step_ms = step_ms.min(u64::MAX as f64) as u64;
                     self.media_playhead_ms.set(
@@ -6668,18 +6612,14 @@ pub fn turn_frame_image(set: &TurnFrameSet, idx: usize) -> Option<egui::ColorIma
 
 /// Alto único de todos los botones del player (tokens, sin literales).
 ///
-/// Táctil mínimo + aire: play/pausa, atrás, siguiente, velocidad y Exportar
+/// Táctil mínimo + aire: play/pausa, atrás, siguiente y el menú `···`
 /// miden exactamente este alto (nada de cada botón con su medida).
+/// Reproducción fija 1x: sin selector de velocidad. Exportar vive en el
+/// menú `···` (emite la acción `ExportMedia` existente).
 pub const PLAYER_BTN_H: f32 = HIT_TARGET_MIN + SPACE_XS;
-/// Ancho de los botones cuadrados (play/pausa, atrás, siguiente): cuadrado
-/// sobre el alto único.
+/// Ancho de los botones cuadrados (play/pausa, atrás, siguiente, `···`):
+/// cuadrado sobre el alto único.
 pub const PLAYER_BTN_SQ_W: f32 = PLAYER_BTN_H;
-/// Ancho del selector de velocidad (entra `0.5x` + caret pintado sin recorte).
-pub const PLAYER_BTN_SPEED_W: f32 = SPACE_XXL + SPACE_SM;
-/// Ancho del botón de texto Exportar (siempre visible, jamás cortado).
-pub const PLAYER_BTN_EXPORT_W: f32 = SPACE_XXL * 2.0;
-/// Ancho del caret de velocidad pintado con el painter (tokens, sin fuente).
-const MEDIA_SPEED_CARET_W: f32 = 6.0;
 
 /// Ancho mínimo del deslizador de la toolbar única v3 (tokens).
 ///
@@ -6691,12 +6631,12 @@ const MEDIA_TOOLBAR_MIN_SLIDER_W: f32 = crate::tokens::SPACE_XXL + crate::tokens
 /// Anchos honestos de los botones de la toolbar (ver `PLAYER_BTN_*`).
 ///
 /// E2: los viejos (`24/24/40/76`) mentían — medían el piso táctil y no la
-/// fuente real del panel (emoji ⏸ con fallback más ancho que el texto,
-/// `0.5x` + caret más largo que `1x`, `Exportar` con padding del Button) ni
+/// fuente real del panel (emoji ⏸ con fallback más ancho que el texto) ni
 /// restaban el cromo (`Frame` turno + card) ni el overlay del scrollbar
 /// flotante (cero asignado pero ~10px que tapan el borde). La única fuente
-/// son `PLAYER_BTN_H/SQ_W/SPEED_W/EXPORT_W`: un solo alto y anchos
-/// coherentes, nada de cada botón con su medida.
+/// son `PLAYER_BTN_H/SQ_W`: un solo alto y botones cuadrados coherentes,
+/// nada de cada botón con su medida. Sin velocidad ni botón Exportar en la
+/// fila: Exportar vive en el menú `···`.
 /// Reserva del cromo anidado: `Frame` del turno (8+8) + `Frame` de la card
 /// (8+8) = `SPACE_SM * 4`. Los tests viejos pasaban el ancho del panel
 /// (300/340/520) como si fuera el disponible dentro de la card: mentían
@@ -6719,34 +6659,23 @@ pub fn media_effective_inner_width(panel_w: f32) -> f32 {
     (panel_w - MEDIA_CARD_CHROME_W - MEDIA_SCROLLBAR_OVERLAY_W).max(0.0)
 }
 
-/// Ancho que necesitan los botones derechos en una fila (puro).
+/// Ancho que necesita el menú `···` de la card en una fila (puro).
 ///
-/// `Exportar + velocidad + 1 gap`: la velocidad colapsa al menú `···` antes
-/// de cortar nada (ver `media_needs_overflow`).
-pub fn media_right_buttons_need() -> f32 {
-    PLAYER_BTN_EXPORT_W + PLAYER_BTN_SPEED_W + SPACE_XS
-}
-
-/// Si la segunda fila necesita overflow explícito (puro).
-///
-/// `Exportar` siempre visible: si no entra junto a la velocidad, la
-/// velocidad colapsa al menú `···`, jamás se corta ni se vuelve
-/// icono mudo sin etiqueta.
-pub fn media_needs_overflow(avail_w: f32) -> bool {
-    if !avail_w.is_finite() || avail_w <= 0.0 {
-        return true;
-    }
-    avail_w < media_right_buttons_need()
+/// Un solo botón cuadrado (`PLAYER_BTN_SQ_W`): Exportar vive adentro y emite
+/// la acción `ExportMedia` existente. Sin velocidad, sin botón Exportar en
+/// la fila: nada que colapsar, jamás corte seco.
+pub fn media_more_button_need() -> f32 {
+    PLAYER_BTN_SQ_W
 }
 
 /// Disposición de la toolbar única v3 (pura y testeable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaToolbarLayout {
-    /// Una fila: `[▶/⏸] [◀][▶] [deslizador + N/M] [1x + caret] [Exportar]`.
+    /// Una fila: `[▶/⏸] [◀][▶] [deslizador] [N/M] [···]`.
     SingleRow,
-    /// Dos filas limpias: arriba `[▶/⏸] [◀][▶] [N/M]`, abajo
-    /// `[1x + caret] [Exportar]` a la derecha. Jamás iconos mudos:
-    /// cada acción conserva su etiqueta legible.
+    /// Dos filas limpias: arriba `[▶/⏸] [◀][▶] [N/M] [···]`, abajo el
+    /// deslizador a todo el ancho. Jamás iconos mudos: cada acción conserva
+    /// su etiqueta legible; Exportar vive en el `···`.
     TwoRows,
 }
 
@@ -6778,11 +6707,7 @@ fn media_toolbar_layout_on_visible(visible_w: f32, frame_count: usize) -> MediaT
         return MediaToolbarLayout::TwoRows;
     }
     let gaps = SPACE_XS * 5.0;
-    let fixed = PLAYER_BTN_SQ_W * 3.0
-        + PLAYER_BTN_SPEED_W
-        + PLAYER_BTN_EXPORT_W
-        + media_counter_slot_width(frame_count)
-        + gaps;
+    let fixed = PLAYER_BTN_SQ_W * 4.0 + media_counter_slot_width(frame_count) + gaps;
     if visible_w - fixed < MEDIA_TOOLBAR_MIN_SLIDER_W {
         return MediaToolbarLayout::TwoRows;
     }
@@ -7085,8 +7010,9 @@ pub fn turn_frame_delay_ms(fps: f32, rate: f32) -> u64 {
 /// Player propio de un turno con frames (`TurnMediaRef.frames = Some`).
 ///
 /// Render puro con tokens: preview + toolbar completa (play/pausa con
-/// exclusividad, paso `◀/▶`, deslizador, contador `N/M`, velocidad) con el
-/// playhead PROPIO del turno (`TurnPlayState` en el panel). Los píxeles
+/// exclusividad, paso `◀/▶`, deslizador, contador `N/M` como texto) con el
+/// playhead PROPIO del turno (`TurnPlayState` en el panel). Reproducción
+/// fija 1x, sin velocidad. Los píxeles
 /// salen SIEMPRE de la media propia del turno (`ensure_turn_window` +
 /// `turn_texture_for`): ningún turno dibuja frames ajenos. Sin frames
 /// válidos cae a la mini-card honesta (thumb + replay). Cero I/O y cero
@@ -7111,18 +7037,12 @@ fn draw_turn_player(
     let frame_count = shared.len();
     let mut cursor = state.turn_player_state(turn_idx);
     let index = cursor
-        .advance(
-            now_s,
-            frame_count,
-            MEDIA_CARD_BASE_FPS,
-            state.media_playback_rate(),
-        )
+        .advance(now_s, frame_count, MEDIA_CARD_BASE_FPS, 1.0)
         .min(frame_count.saturating_sub(1));
     cursor.idx = index;
     state.ensure_turn_window(turn_idx, media, index, ui.ctx());
     let texture = state.turn_texture_for(turn_idx, index);
     let (frame_w, frame_h) = (shared.width as f32, shared.height as f32);
-    let speed_label = state.media_speed.get().label();
     let (counter_compact, counter_long) = media_counter_text(index, frame_count);
     egui::Frame::none()
         .fill(theme.input_bg)
@@ -7166,13 +7086,13 @@ fn draw_turn_player(
                 );
             }
             ui.add_space(SPACE_XS);
-            // Toolbar del turno: misma altura única (`PLAYER_BTN_H`) y mismo
-            // vocabulario que el slot vivo (play/paso/slider/N-M/velocidad),
-            // pero cableada al cursor propio. Sin export (vive en el slot).
-            let speed_view = MediaToolbarView {
+            // Toolbar del turno: misma altura única (`PLAYER_BTN_H`):
+            // [play/pausa][atrás][siguiente] + contador `N/M` como texto +
+            // deslizador. Reproducción fija 1x, sin velocidad. Sin export
+            // (vive en el slot vivo: replay primero). Mini-card intacta.
+            let turn_view = MediaToolbarView {
                 counter_compact: &counter_compact,
                 counter_long: &counter_long,
-                speed_label,
                 duration_ms: media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS),
                 frame_count,
                 exporting: false,
@@ -7185,28 +7105,17 @@ fn draw_turn_player(
                     draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
                     draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        draw_media_counter_slot(ui, &speed_view);
+                        draw_media_counter_slot(ui, &turn_view);
                     });
                 });
                 draw_turn_scrub_slider(ui, &mut cursor, frame_count, &counter_long, now_s);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if media_needs_overflow(ui.available_width()) {
-                            draw_turn_speed_overflow(ui, state);
-                        } else {
-                            draw_media_speed_menu(ui, state, &speed_view);
-                        }
-                    });
-                });
             } else {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
                     draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
                     draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        draw_media_speed_menu(ui, state, &speed_view);
-                        draw_media_counter_slot(ui, &speed_view);
+                        draw_media_counter_slot(ui, &turn_view);
                     });
                     draw_turn_scrub_slider(ui, &mut cursor, frame_count, &counter_long, now_s);
                 });
@@ -7217,7 +7126,7 @@ fn draw_turn_player(
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(turn_frame_delay_ms(
                 MEDIA_CARD_BASE_FPS,
-                state.media_playback_rate(),
+                1.0,
             )));
     }
     None
@@ -7328,74 +7237,33 @@ fn draw_turn_scrub_slider(
     }
 }
 
-/// Velocidad del player por turno en overflow (`···`, etiquetas legibles).
-///
-/// La velocidad es preferencia compartida (sobrevive a `set_media`, solo
-/// Limpiar la resetea): el turno escribe el mismo `Cell` global. Piel pura.
-fn draw_turn_speed_overflow(ui: &mut egui::Ui, state: &AssistantPanelState) {
-    let popup_id = ui.make_persistent_id("turn_speed_overflow");
-    let boton = ui.add_sized(
-        egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
-        egui::Button::new("···"),
-    );
-    let boton = boton.on_hover_text("Velocidad de la animación");
-    if boton.clicked() {
-        ui.memory_mut(|memoria| memoria.toggle_popup(popup_id));
-    }
-    egui::popup::popup_below_widget(
-        ui,
-        popup_id,
-        &boton,
-        egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-        |ui| {
-            let mut velocidad = state.media_speed.get();
-            for opcion in MediaPlaybackSpeed::ALL {
-                if ui
-                    .selectable_label(
-                        velocidad == opcion,
-                        format!("Velocidad: {}", opcion.label()),
-                    )
-                    .on_hover_text(MEDIA_TIP_SPEED)
-                    .clicked()
-                {
-                    velocidad = opcion;
-                    ui.close_menu();
-                }
-            }
-            state.media_speed.set(velocidad);
-        },
-    );
-}
 /// Vista inmutable para la toolbar única v3 (todo copiado: la toolbar solo
 /// lee `Cell`s y emite intención; el export real lo ejecuta la app).
-/// La reutiliza el player por turno para el contador y la velocidad
-/// (el export y el play global no aplican al turno).
+/// La reutiliza el player por turno para el contador (el export y el play
+/// global no aplican al turno). Reproducción fija 1x: sin velocidad.
 struct MediaToolbarView<'a> {
     counter_compact: &'a str,
     counter_long: &'a str,
-    speed_label: &'a str,
     duration_ms: u64,
     frame_count: usize,
     exporting: bool,
 }
 
-/// Toolbar ÚNICA v3: una fila en panel ancho, tres filas limpias en angosto.
+/// Toolbar ÚNICA v3: una fila en panel ancho, dos filas limpias en angosto.
 ///
-/// Ancha (`SingleRow`): `[▶/⏸] [◀][▶] [deslizador + N/M] [1x + caret] [Exportar]`.
+/// Ancha (`SingleRow`): `[▶/⏸] [◀][▶] [deslizador] [N/M] [···]`.
 /// Angosta (`TwoRows`, ver `media_toolbar_layout`): arriba `[▶/⏸] [◀][▶]
-/// [N/M]`, al medio el deslizador a todo el ancho (piso
-/// `MEDIA_TOOLBAR_MIN_SLIDER_W` garantizado: no compite con botones),
-/// abajo `[1x + caret] [Exportar]` a la derecha.
-/// E2: si ni la segunda fila entra (`media_needs_overflow`), la velocidad
-/// colapsa al menú explícito `···`; `Exportar` siempre queda
-/// visible como botón, jamás cortado al borde. La velocidad es menú
-/// explícito (0.5x/1x/2x), no solo ciclo. Teclas locales (sin globales que
-/// choquen, ver `app::shortcuts`): Espacio play/pausa, `←/→` paso frame a
-/// frame con pausa; solo cuando ningún editor pide teclado y consumidas para
-/// no duplicar con el slider/botón enfocado. UN solo contador (vive en
-/// `draw_media_counter_slot`, jamás etiqueta suelta). Todos los botones
-/// miden `PLAYER_BTN_H` de alto (ancho cuadrado o de texto coherente).
-/// Piel pura: muta solo `Cell`s, emite `ExportMedia`.
+/// [N/M] [···]`, abajo el deslizador a todo el ancho (piso
+/// `MEDIA_TOOLBAR_MIN_SLIDER_W` garantizado: no compite con botones).
+/// Reproducción fija 1x: sin velocidad. Exportar vive en el menú `···`
+/// (emite la acción `ExportMedia` existente, jamás botón en la fila).
+/// Teclas locales (sin globales que choquen, ver `app::shortcuts`): Espacio
+/// play/pausa, `←/→` paso frame a frame con pausa; solo cuando ningún editor
+/// pide teclado y consumidas para no duplicar con el slider/botón enfocado.
+/// UN solo contador como texto (vive en `draw_media_counter_slot`, jamás
+/// etiqueta suelta ni botón). Todos los botones miden `PLAYER_BTN_H` de alto
+/// (cuadrados `PLAYER_BTN_SQ_W`). Piel pura: muta solo `Cell`s, emite
+/// `ExportMedia` desde el `···`.
 fn draw_media_toolbar(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -7408,34 +7276,23 @@ fn draw_media_toolbar(
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
             draw_media_play_button(ui, state);
             draw_media_step_buttons(ui, state, view);
-            // Solo el contador a la derecha: el deslizador vive en su propia
+            // Contador + `···` a la derecha: el deslizador vive en su propia
             // fila a todo el ancho (piso garantizado en angosto).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                draw_media_more_menu(ui, view, &mut action);
                 draw_media_counter_slot(ui, view);
             });
         });
         draw_media_scrub_slider(ui, state, view);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Reserva de la segunda fila: si no entra la velocidad junto
-                // a Exportar, va al menú explícito (jamás corte seco).
-                let avail = ui.available_width();
-                if media_needs_overflow(avail) {
-                    draw_media_right_buttons_overflow(ui, state, view, &mut action);
-                } else {
-                    draw_media_right_buttons(ui, state, view, &mut action);
-                }
-            });
-        });
     } else {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
             draw_media_play_button(ui, state);
             draw_media_step_buttons(ui, state, view);
-            // Botones derechos primero: el deslizador ocupa lo que quede.
+            // `···` + contador a la derecha primero: el deslizador ocupa lo
+            // que quede.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                draw_media_right_buttons(ui, state, view, &mut action);
+                draw_media_more_menu(ui, view, &mut action);
                 draw_media_counter_slot(ui, view);
             });
             draw_media_scrub_slider(ui, state, view);
@@ -7535,7 +7392,7 @@ fn step_media_frame(state: &AssistantPanelState, view: &MediaToolbarView, delta:
 ///
 /// Solo cuando ningún editor pide teclado (`!wants_keyboard_input`: el
 /// composer escribe espacios y flechas sin que el player robe nada) y sin
-/// popup abierto (el menú de velocidad usa las flechas). Ningún atajo
+/// popup abierto (el menú `···` usa el foco). Ningún atajo
 /// global usa estas teclas (ver `app::shortcuts`), así que no hay choque:
 /// se consumen para que el slider/botón enfocado no reaccione doble en el
 /// mismo frame. Piel pura: solo `Cell`s.
@@ -7603,120 +7460,20 @@ fn draw_media_counter_slot(ui: &mut egui::Ui, view: &MediaToolbarView) {
     );
 }
 
-/// Botones derechos de la toolbar (velocidad + exportar).
-/// Sin contador: el único vive en `draw_media_counter_slot`.
-/// La velocidad es menú explícito con las 3 opciones (no solo ciclo).
-/// Ambos miden `PLAYER_BTN_H` de alto (mismo que play/paso).
-fn draw_media_right_buttons(
-    ui: &mut egui::Ui,
-    state: &AssistantPanelState,
-    view: &MediaToolbarView,
-    action: &mut Option<AssistantUiAction>,
-) {
-    draw_media_export_button(ui, view, action);
-    draw_media_speed_menu(ui, state, view);
-}
-
-/// Menú explícito de velocidad del player pro (0.5x/1x/2x).
+/// Menú `···` de la card: Exportar vive acá (sin botón en la fila).
 ///
-/// Botón de `PLAYER_BTN_SPEED_W × PLAYER_BTN_H` (mismo alto que el resto):
-/// `menu_button` no acepta tamaño, así que se usa un `Button` dimensionado
-/// que abre el popup manual (`popup_below_widget`). Sin glifo en el texto:
-/// el triangulito U+25BE es tofu en la fuente de egui (se veía `1x` con un
-/// cuadradito), así que la etiqueta es solo el texto (`0.5x`/`1x`/`2x`) y el
-/// caret se pinta con el painter a la derecha (no depende de la fuente). Piel pura: solo lee/escribe
-/// el `Cell` de velocidad.
-fn draw_media_speed_menu(ui: &mut egui::Ui, state: &AssistantPanelState, view: &MediaToolbarView) {
-    let mut velocidad = state.media_speed.get();
-    let popup_id = ui.make_persistent_id("media_speed_menu");
-    let boton = ui.add_sized(
-        egui::vec2(PLAYER_BTN_SPEED_W, PLAYER_BTN_H),
-        egui::Button::new(view.speed_label),
-    );
-    // Caret hacia abajo pintado sobre el botón (a la derecha del texto):
-    // triángulo relleno con el color de texto secundario, misma capa sobre
-    // el botón ya dibujado. Cero I/O, cero fuente.
-    let caret_color = current_theme(ui.ctx()).text_secondary;
-    let caret_rect = boton.rect;
-    let caret_cy = caret_rect.center().y;
-    let caret_x0 = caret_rect.right() - SPACE_XS - MEDIA_SPEED_CARET_W;
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(caret_x0, caret_cy - 2.0),
-            egui::pos2(caret_x0 + MEDIA_SPEED_CARET_W, caret_cy - 2.0),
-            egui::pos2(caret_x0 + MEDIA_SPEED_CARET_W * 0.5, caret_cy + 2.5),
-        ],
-        caret_color,
-        egui::Stroke::NONE,
-    ));
-    let boton = boton.on_hover_text(MEDIA_TIP_SPEED);
-    if boton.clicked() {
-        ui.memory_mut(|memoria| memoria.toggle_popup(popup_id));
-    }
-    egui::popup::popup_below_widget(
-        ui,
-        popup_id,
-        &boton,
-        egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-        |ui| {
-            for opcion in MediaPlaybackSpeed::ALL {
-                if ui
-                    .selectable_label(velocidad == opcion, opcion.label())
-                    .on_hover_text(MEDIA_TIP_SPEED)
-                    .clicked()
-                {
-                    velocidad = opcion;
-                    ui.close_menu();
-                }
-            }
-        },
-    );
-    state.media_speed.set(velocidad);
-}
-
-/// Botón `Exportar` (extraído para reuso en overflow: siempre visible).
-///
-/// Alto fijo único `PLAYER_BTN_H` vía `add_sized` (igual que play/paso/
-/// velocidad): el `min_size` anterior dejaba 1-2px de diferencia porque solo
-/// era piso. Mismo widget `Button`, mismo `Frame`: cero padding distinto.
-fn draw_media_export_button(
+/// Botón cuadrado (`PLAYER_BTN_SQ_W × PLAYER_BTN_H`, mismo alto que
+/// play/paso): abre el popup manual (`popup_below_widget`) con el ítem
+/// `Exportar`, que emite la acción `ExportMedia` EXISTENTE (la app abre el
+/// diálogo con lo detectado fuera del draw). Sin velocidad: reproducción
+/// fija 1x. Deshabilitado honesto sin frames o exportando (motivo visible,
+/// jamás mudo). Piel pura: solo emite intención, cero I/O/spawn.
+fn draw_media_more_menu(
     ui: &mut egui::Ui,
     view: &MediaToolbarView,
     action: &mut Option<AssistantUiAction>,
 ) {
-    let export_response = ui
-        .add_enabled_ui(view.frame_count > 0 && !view.exporting, |ui| {
-            ui.add_sized(
-                egui::vec2(PLAYER_BTN_EXPORT_W, PLAYER_BTN_H),
-                egui::Button::new("Exportar"),
-            )
-        })
-        .inner;
-    if export_response.clicked() {
-        *action = Some(AssistantUiAction::ExportMedia);
-    }
-    if view.frame_count == 0 {
-        export_response.on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
-    } else if view.exporting {
-        export_response.on_disabled_hover_text("Ya se está exportando…");
-    } else {
-        export_response.on_hover_text(MEDIA_TIP_EXPORT);
-    }
-}
-
-/// Segunda fila en overflow explícito: `Exportar + ···` (puro dibujo).
-///
-/// E2: cuando ni la segunda fila entra, la velocidad vive en el menú `···`
-/// con etiquetas legibles (jamás iconos mudos ni corte seco). `Exportar`
-/// queda fuera del menú, siempre visible. Sin I/O ni spawn.
-fn draw_media_right_buttons_overflow(
-    ui: &mut egui::Ui,
-    state: &AssistantPanelState,
-    view: &MediaToolbarView,
-    action: &mut Option<AssistantUiAction>,
-) {
-    draw_media_export_button(ui, view, action);
-    let popup_id = ui.make_persistent_id("media_speed_overflow");
+    let popup_id = ui.make_persistent_id("media_more_menu");
     let boton = ui.add_sized(
         egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
         egui::Button::new("···"),
@@ -7731,21 +7488,23 @@ fn draw_media_right_buttons_overflow(
         &boton,
         egui::popup::PopupCloseBehavior::CloseOnClickOutside,
         |ui| {
-            let mut velocidad = state.media_speed.get();
-            for opcion in MediaPlaybackSpeed::ALL {
+            let habilitado = view.frame_count > 0 && !view.exporting;
+            if habilitado {
                 if ui
-                    .selectable_label(
-                        velocidad == opcion,
-                        format!("Velocidad: {}", opcion.label()),
-                    )
-                    .on_hover_text(MEDIA_TIP_SPEED)
+                    .add_enabled(true, egui::Button::new("Exportar"))
+                    .on_hover_text(MEDIA_TIP_EXPORT)
                     .clicked()
                 {
-                    velocidad = opcion;
+                    *action = Some(AssistantUiAction::ExportMedia);
                     ui.close_menu();
                 }
+            } else if view.frame_count == 0 {
+                ui.add_enabled(false, egui::Button::new("Exportar"))
+                    .on_disabled_hover_text("Todavía no hay fotogramas para exportar.");
+            } else {
+                ui.add_enabled(false, egui::Button::new("Exportar"))
+                    .on_disabled_hover_text("Ya se está exportando…");
             }
-            state.media_speed.set(velocidad);
         },
     );
 }
@@ -7793,13 +7552,14 @@ fn draw_media_scrub_slider(
 ///   primer frame); la textura solo se re-selecciona si cambió el frame; sin
 ///   textura lista se reserva el mismo rect con placeholder centrado (jamás
 ///   etiqueta suelta fuera de rango).
-/// - UNA toolbar: una fila en panel ancho, tres filas limpias en angosto
-///   (ver `media_toolbar_layout`); UN solo contador `N/M`, jamás duplicado.
-///   Player pro: menú explícito 0.5x/1x/2x, paso `◀/▶` + `←/→` con pausa,
-///   Espacio play/pausa, slider a todo el ancho en angosto.
-/// - Botón Exportar emite `AssistantUiAction::ExportMedia` (la app abre el
-///   diálogo con ffmpeg detectado fuera del draw; cero I/O/spawn en `Ui::`).
-///   El diálogo emite `ConfirmExport`/`CancelExport`/`CloseExportDialog`.
+/// - UNA toolbar: una fila en panel ancho, dos filas limpias en angosto
+///   (ver `media_toolbar_layout`); UN solo contador `N/M` como texto, jamás
+///   duplicado. Player pro: paso `◀/▶` + `←/→` con pausa, Espacio
+///   play/pausa, slider a todo el ancho en angosto. Reproducción fija 1x.
+/// - Menú `···` con el ítem Exportar: emite `AssistantUiAction::ExportMedia`
+///   (la app abre el diálogo con ffmpeg detectado fuera del draw; cero
+///   I/O/spawn en `Ui::`). El diálogo emite
+///   `ConfirmExport`/`CancelExport`/`CloseExportDialog`.
 ///   Progreso/error de export vía diálogo + `MediaExportState`, jamás mudo.
 ///   Prosa sin IDs literales.
 fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<AssistantUiAction> {
@@ -7885,7 +7645,6 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         state.media_last_shown.set(Some(index));
     }
     let duration_ms = media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS);
-    let speed_label = state.media_speed.get().label();
     let (counter_compact, counter_long) = media_counter_text(index, frame_count);
     let exporting = matches!(state.media_export, MediaExportState::Exporting);
     let export_failed = !media_card_shows_player_controls(&state.media_export);
@@ -7969,7 +7728,6 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 let toolbar_view = MediaToolbarView {
                     counter_compact: &counter_compact,
                     counter_long: &counter_long,
-                    speed_label,
                     duration_ms,
                     frame_count,
                     exporting,
@@ -7994,14 +7752,15 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 ui.add_space(SPACE_XS);
                 ui.label(
                     egui::RichText::new(MEDIA_CHAT_INTENTS_HINT)
-                        .color(theme.text_tertiary)
+                        .color(theme.text_secondary)
                         .size(TYPE_2XS),
                 );
             }
         });
     // Sin overlay grande: el botón ⛶ se eliminó (sin glifo se veía como □
     // mudo y su ventana "Animación" se iba de los límites del viewport).
-    // La card inline es el único visor, con toolbar uniforme y Exportar.
+    // La card inline es el único visor, con toolbar uniforme y Exportar en
+    // el menú `···`.
     // F17: playback media card — wake source local (no cubierto por is_pending).
     // Solo cuando reproduce: en pausa la card es estática (las interacciones
     // repintan solas) y no se quema CPU. FLICKER: despertar alineado al borde
@@ -8016,7 +7775,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             state.media_playhead_ms.get(),
             frame_count,
             MEDIA_CARD_BASE_FPS,
-            state.media_speed.get().rate(),
+            1.0,
         );
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(delay_ms));
@@ -8032,6 +7791,72 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
     action
 }
 
+/// Margen del diálogo Exportar contra viewport/panel (tokens).
+pub const EXPORT_DIALOG_MARGIN: f32 = SPACE_LG;
+/// Ancho mínimo del diálogo Exportar (tokens: 6× base 40).
+pub const EXPORT_DIALOG_MIN_W: f32 = SPACE_XXL * 6.0;
+/// Alto máximo del diálogo Exportar (tokens: 14× base 40).
+pub const EXPORT_DIALOG_MAX_H: f32 = SPACE_XXL * 14.0;
+/// Reserva vertical fuera del scroll: título + progreso/error + botones +
+/// aire (tokens, sin literales). El scroll interno usa el resto.
+const EXPORT_DIALOG_CHROME_H: f32 = SPACE_XXL * 3.0 + SPACE_LG * 2.0;
+
+/// Tamaño del diálogo Exportar clampado a viewport y panel (puro).
+///
+/// Ancho = `min(viewport, panel) − 2×margen`, con piso `EXPORT_DIALOG_MIN_W`
+/// salvo pantalla más chica (ahí manda la pantalla: jamás desborda).
+/// Alto = `min(viewport − 2×margen, EXPORT_DIALOG_MAX_H)`, jamás negativo.
+/// Entradas no finitas caen a defaults sanos. Puro, sin I/O ni panic.
+pub fn export_dialog_size(viewport_w: f32, viewport_h: f32, panel_w: f32) -> (f32, f32) {
+    let vw = if viewport_w.is_finite() && viewport_w > 0.0 {
+        viewport_w
+    } else {
+        ASSISTANT_PANEL_MAX_WIDTH
+    };
+    let vh = if viewport_h.is_finite() && viewport_h > 0.0 {
+        viewport_h
+    } else {
+        ASSISTANT_PANEL_MAX_WIDTH
+    };
+    let pw = if panel_w.is_finite() && panel_w > 0.0 {
+        panel_w
+    } else {
+        vw
+    };
+    let max_w = (vw - EXPORT_DIALOG_MARGIN * 2.0).max(0.0);
+    let want_w = (vw.min(pw) - EXPORT_DIALOG_MARGIN * 2.0)
+        .max(0.0)
+        .min(max_w);
+    let w = want_w
+        .max(EXPORT_DIALOG_MIN_W.min(max_w))
+        .min(max_w)
+        .max(0.0);
+    let max_h = (vh - EXPORT_DIALOG_MARGIN * 2.0).max(0.0);
+    let h = max_h.clamp(0.0, EXPORT_DIALOG_MAX_H);
+    (w, h)
+}
+
+/// Caja centrada del diálogo ⊆ pantalla (pura, testeable).
+///
+/// Centra `export_dialog_size` en el viewport: devuelve `(x, y, w, h)` con
+/// `0 ≤ x`, `0 ≤ y`, `x+w ≤ viewport_w`, `y+h ≤ viewport_h`. Pura.
+pub fn export_dialog_rect(viewport_w: f32, viewport_h: f32, panel_w: f32) -> (f32, f32, f32, f32) {
+    let (w, h) = export_dialog_size(viewport_w, viewport_h, panel_w);
+    let vw = if viewport_w.is_finite() && viewport_w > 0.0 {
+        viewport_w
+    } else {
+        ASSISTANT_PANEL_MAX_WIDTH
+    };
+    let vh = if viewport_h.is_finite() && viewport_h > 0.0 {
+        viewport_h
+    } else {
+        ASSISTANT_PANEL_MAX_WIDTH
+    };
+    let x = ((vw - w) / 2.0).max(0.0);
+    let y = ((vh - h) / 2.0).max(0.0);
+    (x, y, w, h)
+}
+
 /// Diálogo Exportar profesional (`fn render(&Estado) -> Frame`).
 ///
 /// Dibuja el `MediaExportDialog` del estado SIN I/O ni spawn: solo muta el
@@ -8039,18 +7864,24 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
 /// `CloseExportDialog`). La app ejecuta el `spawn_*` del formato fuera del
 /// draw y publica progreso/error (jamás mudo).
 ///
-/// - Formatos: radio por formato con `add_enabled` + motivo inline cuando
-///   falta ffmpeg (`MEDIA_EXPORT_FFMPEG_HINT`) o LaTeX/dvisvgm
-///   (`MEDIA_EXPORT_LATEX_HINT` / `MEDIA_EXPORT_DVISVGM_HINT`): texto visible
-///   bajo el radio, no solo tooltip (el tooltip no se lee con teclado).
+/// Responsive: ancho `min(viewport, panel)` con márgenes
+/// (`export_dialog_size`), alto máximo con `ScrollArea` interno (jamás
+/// recorte abajo). Secciones compactas: Formato / Calidad / Bitrate+FPS /
+/// Tamaño / Vista (+ Narración/Subtítulos solo en video). El hint LaTeX va
+/// UNA sola vez como nota al pie de Formato (no triplicado). Botones
+/// [Exportar][Cancelar] siempre visibles fuera del scroll.
+/// - Formatos: radio por formato con `add_enabled` + tooltip con el motivo
+///   (`format_disabled_reason`); el motivo visible vive en UNA nota al pie
+///   por backend (ffmpeg / LaTeX), legible con teclado y táctil.
 /// - Calidad: 3 radios + `DragValue` de bitrate/fps acotados.
 /// - Vista: Plana 2D siempre; Órbita 3D solo si la plantilla lo soporta.
 /// - Nota Tex: SVG real con fallback `ab_glyph` (siempre visible).
 /// - Progreso (`ProgressBar`/spinner) + error honesto en `theme.danger` +
-///   nota neutra de cancelación (cancelar no es error).
-/// - Botones [Exportar]/[Cancelar]/[Cerrar]: Exportar valida y devuelve
+///   nota neutra de cancelación (cancelar no es error), fuera del scroll.
+/// - Botones [Exportar][Cancelar]: Exportar valida y devuelve
 ///   `ConfirmExport`; si no valida, setea el error visible y no devuelve nada.
-///   Cancelar marca neutro (`mark_cancelled`) y devuelve `CancelExport`.
+///   Cancelar exportando marca neutro (`mark_cancelled`, `CancelExport`);
+///   sin export en curso cierra (`CloseExportDialog`).
 fn draw_media_export_dialog(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -8060,19 +7891,27 @@ fn draw_media_export_dialog(
     }
     let mut pending: Option<AssistantUiAction> = None;
     let mut close_window = false;
+    // Caja clampada a viewport y panel (jamás de borde a borde): el panel se
+    // estima desde el ancho real de la card (cromo + overlay del scrollbar).
+    let viewport_size = ui.ctx().input(|entrada| entrada.screen_rect()).size();
+    let panel_est = ui.available_width() + MEDIA_CARD_CHROME_W + MEDIA_SCROLLBAR_OVERLAY_W;
+    let (dialog_w, dialog_h) = export_dialog_size(viewport_size.x, viewport_size.y, panel_est);
+    let scroll_h = (dialog_h - EXPORT_DIALOG_CHROME_H).max(SPACE_XXL * 2.0);
     egui::Window::new("Exportar animación")
         .id(egui::Id::new("assistant_media_export_dialog"))
         .collapsible(false)
         .resizable(true)
         .constrain(true)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .default_width(380.0)
+        .default_width(dialog_w)
+        .max_width(dialog_w.max(1.0))
+        .max_height(dialog_h.max(1.0))
         .frame(
             egui::Frame::window(&ui.ctx().style())
                 .fill(current_theme(ui.ctx()).panel_bg)
                 .stroke(egui::Stroke::new(1.0, current_theme(ui.ctx()).separator))
-                .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
-                .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG)),
+                .rounding(egui::Rounding::same(RADIUS_LG))
+                .inner_margin(egui::Margin::same(SPACE_LG)),
         )
         .show(ui.ctx(), |ui| {
             let theme = current_theme(ui.ctx());
@@ -8083,285 +7922,309 @@ fn draw_media_export_dialog(
                     .strong(),
             );
             ui.add_space(SPACE_XS);
-            // ── Formato (selector visible, 4 opciones) ──
-            ui.label(egui::RichText::new("Formato").size(TYPE_XS).strong());
-            for formato in MediaExportFormat::ALL {
-                let habilitado = dialog.is_format_enabled(formato);
-                let mut radio = ui.add_enabled(
-                    habilitado,
-                    egui::RadioButton::new(dialog.format == formato, formato.display_name()),
-                );
-                if !habilitado {
-                    if let Some(motivo) = dialog.format_disabled_reason(formato) {
-                        radio = radio.on_hover_text(motivo);
-                        // P1: motivo inline además del tooltip (el tooltip no
-                        // se lee con teclado ni en táctil): texto chico bajo
-                        // el radio, jamás silencio.
+            // Secciones con scroll interno: jamás recorte abajo. Los botones
+            // [Exportar][Cancelar] viven FUERA del scroll (siempre visibles).
+            egui::ScrollArea::vertical()
+                .max_height(scroll_h)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    // ── Formato (6 opciones compactas, 2 filas de 3) ──
+                    ui.label(egui::RichText::new("Formato").size(TYPE_XS).strong());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                        for formato in MediaExportFormat::ALL {
+                            let habilitado = dialog.is_format_enabled(formato);
+                            let radio = ui.add_enabled(
+                                habilitado,
+                                egui::RadioButton::new(
+                                    dialog.format == formato,
+                                    formato.display_name(),
+                                ),
+                            );
+                            if !habilitado {
+                                if let Some(motivo) = dialog.format_disabled_reason(formato) {
+                                    let _ = radio.on_hover_text(motivo);
+                                }
+                            } else if radio.clicked() {
+                                dialog.set_format_con_defaults(formato);
+                            }
+                        }
+                    });
+                    // Notas al pie de Formato, UNA vez cada una (jamás triplicado):
+                    // el motivo por formato ya vive en el tooltip de cada radio.
+                    if !dialog.ffmpeg_available {
                         ui.label(
-                            egui::RichText::new(motivo)
+                            egui::RichText::new(MEDIA_EXPORT_FFMPEG_HINT)
                                 .size(TYPE_2XS)
                                 .color(theme.text_tertiary)
                                 .italics(),
                         );
                     }
-                }
-                if radio.clicked() && habilitado {
-                    dialog.set_format_con_defaults(formato);
-                }
-            }
-            if !dialog.ffmpeg_available {
-                ui.label(
-                    egui::RichText::new(MEDIA_EXPORT_FFMPEG_HINT)
-                        .size(TYPE_XS)
-                        .italics(),
-                );
-            }
-            if !dialog.latex_available || !dialog.dvisvgm_available {
-                ui.label(
-                    egui::RichText::new(MEDIA_EXPORT_LATEX_HINT)
-                        .size(TYPE_XS)
-                        .italics(),
-                );
-            }
-            ui.add_space(SPACE_XS);
-            // ── Calidad + bitrate + fps ──
-            ui.label(egui::RichText::new("Calidad").size(TYPE_XS).strong());
-            ui.horizontal(|ui| {
-                for calidad in MediaExportQuality::DIALOG_ALL {
-                    if ui
-                        .radio(dialog.quality == calidad, calidad.display_name())
-                        .clicked()
-                    {
-                        dialog.quality = calidad;
-                        dialog.bitrate_kbps = calidad.suggested_bitrate_kbps();
-                        dialog.error = None;
-                        dialog.cancelled_note = None;
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Bitrate (kbps)").size(TYPE_XS));
-                let respuesta = ui.add(
-                    egui::DragValue::new(&mut dialog.bitrate_kbps)
-                        .range(MEDIA_EXPORT_BITRATE_MIN_KBPS..=MEDIA_EXPORT_BITRATE_MAX_KBPS)
-                        .speed(100),
-                );
-                if respuesta.changed() {
-                    dialog.error = None;
-                    dialog.cancelled_note = None;
-                }
-                ui.label(egui::RichText::new("FPS").size(TYPE_XS));
-                let respuesta_fps = ui.add(
-                    egui::DragValue::new(&mut dialog.fps)
-                        .range(MEDIA_EXPORT_FPS_MIN..=MEDIA_EXPORT_FPS_MAX),
-                );
-                if respuesta_fps.changed() {
-                    dialog.error = None;
-                    dialog.cancelled_note = None;
-                }
-            });
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} fps · {} kbps · {} frames",
-                    dialog.fps, dialog.bitrate_kbps, dialog.frame_count
-                ))
-                .size(TYPE_XS),
-            );
-            ui.add_space(SPACE_XS);
-            // ── Tamaño: Original o preset 720p + orientación ──
-            ui.label(egui::RichText::new("Tamaño").size(TYPE_XS).strong());
-            ui.horizontal(|ui| {
-                for preset in MediaExportPreset::DIALOG_ALL {
-                    if ui
-                        .radio(dialog.preset == preset, preset.display_name())
-                        .clicked()
-                    {
-                        dialog.preset = preset;
-                        dialog.error = None;
-                        dialog.cancelled_note = None;
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                for orientacion in MediaExportOrientation::DIALOG_ALL {
-                    if ui
-                        .radio(
-                            dialog.orientation == orientacion,
-                            orientacion.display_name(),
-                        )
-                        .clicked()
-                    {
-                        dialog.orientation = orientacion;
-                        dialog.error = None;
-                        dialog.cancelled_note = None;
-                    }
-                }
-            });
-            if let Some((pw, ph)) = dialog.preset_size() {
-                ui.label(egui::RichText::new(format!("preset {pw}x{ph}")).size(TYPE_XS));
-            }
-            // Tope honesto visible antes de exportar (con la alternativa).
-            if !dialog.aviso_limite().is_empty() {
-                ui.label(
-                    egui::RichText::new(dialog.aviso_limite())
-                        .size(TYPE_XS)
-                        .italics()
-                        .color(theme.text_secondary),
-                );
-            }
-            ui.add_space(SPACE_XS);
-            // ── Vista 2D/Órbita (si cabe sin romper) ──
-            ui.label(egui::RichText::new("Vista").size(TYPE_XS).strong());
-            let orbita_habilitada = dialog.is_orbit_enabled();
-            ui.horizontal(|ui| {
-                if ui
-                    .radio(
-                        dialog.view == MediaExportView::Plana,
-                        MediaExportView::Plana.display_name(),
-                    )
-                    .clicked()
-                {
-                    dialog.view = MediaExportView::Plana;
-                    dialog.error = None;
-                    dialog.cancelled_note = None;
-                }
-                let mut radio_orbita = ui.add_enabled(
-                    orbita_habilitada,
-                    egui::RadioButton::new(
-                        dialog.view == MediaExportView::Orbita,
-                        MediaExportView::Orbita.display_name(),
-                    ),
-                );
-                if !orbita_habilitada {
-                    radio_orbita = radio_orbita.on_hover_text(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT);
-                }
-                if radio_orbita.clicked() && orbita_habilitada {
-                    dialog.view = MediaExportView::Orbita;
-                    dialog.error = None;
-                    dialog.cancelled_note = None;
-                }
-            });
-            if !orbita_habilitada {
-                ui.label(
-                    egui::RichText::new(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT)
-                        .size(TYPE_XS)
-                        .italics(),
-                );
-            }
-            ui.add_space(SPACE_XS);
-            // ── P1-UI: Narración + Subtítulos (solo video MP4/WebM) ──
-            // En GIF/PNG/PDF/SVG la sección no aplica: ni radios ni notas.
-            // Cero I/O/spawn: los radios mutan el estado puro y emiten la
-            // intención; [Elegir…]/[Quitar] emiten picker/clear y la app
-            // resuelve fuera del draw.
-            if dialog.is_audio_section_visible() {
-                ui.label(egui::RichText::new("Narración").size(TYPE_XS).strong());
-                ui.horizontal(|ui| {
-                    for modo in VozMode::ALL {
-                        let habilitado = modo != VozMode::Piper || dialog.is_piper_enabled();
-                        let radio = ui.add_enabled(
-                            habilitado,
-                            egui::RadioButton::new(dialog.voz_mode == modo, modo.display_name()),
+                    if !dialog.latex_available || !dialog.dvisvgm_available {
+                        ui.label(
+                            egui::RichText::new(MEDIA_EXPORT_LATEX_HINT)
+                                .size(TYPE_2XS)
+                                .color(theme.text_tertiary)
+                                .italics(),
                         );
-                        if !habilitado {
-                            let _ = radio.on_hover_text(MEDIA_EXPORT_PIPER_MISSING_HINT);
-                        } else if radio.clicked() && dialog.voz_mode != modo {
-                            dialog.set_voz_mode(modo);
-                            if pending.is_none() {
-                                pending = Some(AssistantUiAction::SetExportVozMode(modo));
+                    }
+                    if dialog.latex_available && !dialog.dvisvgm_available {
+                        ui.label(
+                            egui::RichText::new(MEDIA_EXPORT_DVISVGM_HINT)
+                                .size(TYPE_2XS)
+                                .color(theme.text_tertiary)
+                                .italics(),
+                        );
+                    }
+                    ui.add_space(SPACE_XS);
+                    // ── Calidad + bitrate + fps ──
+                    ui.label(egui::RichText::new("Calidad").size(TYPE_XS).strong());
+                    ui.horizontal(|ui| {
+                        for calidad in MediaExportQuality::DIALOG_ALL {
+                            if ui
+                                .radio(dialog.quality == calidad, calidad.display_name())
+                                .clicked()
+                            {
+                                dialog.quality = calidad;
+                                dialog.bitrate_kbps = calidad.suggested_bitrate_kbps();
+                                dialog.error = None;
+                                dialog.cancelled_note = None;
                             }
                         }
-                    }
-                });
-                if !dialog.is_piper_enabled() {
-                    ui.label(
-                        egui::RichText::new(MEDIA_EXPORT_PIPER_MISSING_HINT)
-                            .size(TYPE_2XS)
-                            .color(theme.text_tertiary)
-                            .italics(),
-                    );
-                }
-                if dialog.voz_mode == VozMode::Importar {
-                    match dialog.audio_path().map(str::to_owned) {
-                        Some(ruta) => {
-                            ui.label(
-                                egui::RichText::new(ruta)
-                                    .size(TYPE_XS)
-                                    .color(theme.text_secondary),
-                            );
-                            ui.horizontal(|ui| {
-                                if ui.button("Elegir…").clicked() && pending.is_none() {
-                                    pending = Some(AssistantUiAction::PickExportAudio);
-                                }
-                                if ui.button("Quitar").clicked() {
-                                    dialog.clear_audio();
-                                    pending = Some(AssistantUiAction::ClearExportAudio);
-                                }
-                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Bitrate (kbps)").size(TYPE_XS));
+                        let respuesta = ui.add(
+                            egui::DragValue::new(&mut dialog.bitrate_kbps)
+                                .range(
+                                    MEDIA_EXPORT_BITRATE_MIN_KBPS..=MEDIA_EXPORT_BITRATE_MAX_KBPS,
+                                )
+                                .speed(100),
+                        );
+                        if respuesta.changed() {
+                            dialog.error = None;
+                            dialog.cancelled_note = None;
                         }
-                        None => {
+                        ui.label(egui::RichText::new("FPS").size(TYPE_XS));
+                        let respuesta_fps = ui.add(
+                            egui::DragValue::new(&mut dialog.fps)
+                                .range(MEDIA_EXPORT_FPS_MIN..=MEDIA_EXPORT_FPS_MAX),
+                        );
+                        if respuesta_fps.changed() {
+                            dialog.error = None;
+                            dialog.cancelled_note = None;
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} fps · {} kbps · {} frames",
+                            dialog.fps, dialog.bitrate_kbps, dialog.frame_count
+                        ))
+                        .size(TYPE_XS),
+                    );
+                    ui.add_space(SPACE_XS);
+                    // ── Tamaño: Original o preset 720p + orientación ──
+                    ui.label(egui::RichText::new("Tamaño").size(TYPE_XS).strong());
+                    ui.horizontal(|ui| {
+                        for preset in MediaExportPreset::DIALOG_ALL {
+                            if ui
+                                .radio(dialog.preset == preset, preset.display_name())
+                                .clicked()
+                            {
+                                dialog.preset = preset;
+                                dialog.error = None;
+                                dialog.cancelled_note = None;
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        for orientacion in MediaExportOrientation::DIALOG_ALL {
+                            if ui
+                                .radio(
+                                    dialog.orientation == orientacion,
+                                    orientacion.display_name(),
+                                )
+                                .clicked()
+                            {
+                                dialog.orientation = orientacion;
+                                dialog.error = None;
+                                dialog.cancelled_note = None;
+                            }
+                        }
+                    });
+                    if let Some((pw, ph)) = dialog.preset_size() {
+                        ui.label(egui::RichText::new(format!("preset {pw}x{ph}")).size(TYPE_XS));
+                    }
+                    // Tope honesto visible antes de exportar (con la alternativa).
+                    if !dialog.aviso_limite().is_empty() {
+                        ui.label(
+                            egui::RichText::new(dialog.aviso_limite())
+                                .size(TYPE_XS)
+                                .italics()
+                                .color(theme.text_secondary),
+                        );
+                    }
+                    ui.add_space(SPACE_XS);
+                    // ── Vista 2D/Órbita (si cabe sin romper) ──
+                    ui.label(egui::RichText::new("Vista").size(TYPE_XS).strong());
+                    let orbita_habilitada = dialog.is_orbit_enabled();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .radio(
+                                dialog.view == MediaExportView::Plana,
+                                MediaExportView::Plana.display_name(),
+                            )
+                            .clicked()
+                        {
+                            dialog.view = MediaExportView::Plana;
+                            dialog.error = None;
+                            dialog.cancelled_note = None;
+                        }
+                        let mut radio_orbita = ui.add_enabled(
+                            orbita_habilitada,
+                            egui::RadioButton::new(
+                                dialog.view == MediaExportView::Orbita,
+                                MediaExportView::Orbita.display_name(),
+                            ),
+                        );
+                        if !orbita_habilitada {
+                            radio_orbita =
+                                radio_orbita.on_hover_text(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT);
+                        }
+                        if radio_orbita.clicked() && orbita_habilitada {
+                            dialog.view = MediaExportView::Orbita;
+                            dialog.error = None;
+                            dialog.cancelled_note = None;
+                        }
+                    });
+                    if !orbita_habilitada {
+                        ui.label(
+                            egui::RichText::new(MEDIA_EXPORT_ORBITA_SOLO_3D_HINT)
+                                .size(TYPE_XS)
+                                .italics(),
+                        );
+                    }
+                    ui.add_space(SPACE_XS);
+                    // ── P1-UI: Narración + Subtítulos (solo video MP4/WebM) ──
+                    // En GIF/PNG/PDF/SVG la sección no aplica: ni radios ni notas.
+                    // Cero I/O/spawn: los radios mutan el estado puro y emiten la
+                    // intención; [Elegir…]/[Quitar] emiten picker/clear y la app
+                    // resuelve fuera del draw.
+                    if dialog.is_audio_section_visible() {
+                        ui.label(egui::RichText::new("Narración").size(TYPE_XS).strong());
+                        ui.horizontal(|ui| {
+                            for modo in VozMode::ALL {
+                                let habilitado =
+                                    modo != VozMode::Piper || dialog.is_piper_enabled();
+                                let radio = ui.add_enabled(
+                                    habilitado,
+                                    egui::RadioButton::new(
+                                        dialog.voz_mode == modo,
+                                        modo.display_name(),
+                                    ),
+                                );
+                                if !habilitado {
+                                    let _ = radio.on_hover_text(MEDIA_EXPORT_PIPER_MISSING_HINT);
+                                } else if radio.clicked() && dialog.voz_mode != modo {
+                                    dialog.set_voz_mode(modo);
+                                    if pending.is_none() {
+                                        pending = Some(AssistantUiAction::SetExportVozMode(modo));
+                                    }
+                                }
+                            }
+                        });
+                        if !dialog.is_piper_enabled() {
                             ui.label(
-                                egui::RichText::new(MEDIA_EXPORT_AUDIO_EMPTY_HINT)
+                                egui::RichText::new(MEDIA_EXPORT_PIPER_MISSING_HINT)
+                                    .size(TYPE_2XS)
+                                    .color(theme.text_tertiary)
+                                    .italics(),
+                            );
+                        }
+                        if dialog.voz_mode == VozMode::Importar {
+                            match dialog.audio_path().map(str::to_owned) {
+                                Some(ruta) => {
+                                    ui.label(
+                                        egui::RichText::new(ruta)
+                                            .size(TYPE_XS)
+                                            .color(theme.text_secondary),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Elegir…").clicked() && pending.is_none() {
+                                            pending = Some(AssistantUiAction::PickExportAudio);
+                                        }
+                                        if ui.button("Quitar").clicked() {
+                                            dialog.clear_audio();
+                                            pending = Some(AssistantUiAction::ClearExportAudio);
+                                        }
+                                    });
+                                }
+                                None => {
+                                    ui.label(
+                                        egui::RichText::new(MEDIA_EXPORT_AUDIO_EMPTY_HINT)
+                                            .size(TYPE_XS)
+                                            .italics()
+                                            .color(theme.text_secondary),
+                                    );
+                                    if ui.button("Elegir…").clicked() && pending.is_none() {
+                                        pending = Some(AssistantUiAction::PickExportAudio);
+                                    }
+                                }
+                            }
+                        }
+                        if dialog.voz_mode == VozMode::Piper && !dialog.voiceover_disponible {
+                            ui.label(
+                                egui::RichText::new(MEDIA_EXPORT_NO_VOICEOVER_HINT)
                                     .size(TYPE_XS)
                                     .italics()
                                     .color(theme.text_secondary),
                             );
-                            if ui.button("Elegir…").clicked() && pending.is_none() {
-                                pending = Some(AssistantUiAction::PickExportAudio);
-                            }
                         }
-                    }
-                }
-                if dialog.voz_mode == VozMode::Piper && !dialog.voiceover_disponible {
-                    ui.label(
-                        egui::RichText::new(MEDIA_EXPORT_NO_VOICEOVER_HINT)
-                            .size(TYPE_XS)
-                            .italics()
-                            .color(theme.text_secondary),
-                    );
-                }
-                ui.add_space(SPACE_XS);
-                ui.label(egui::RichText::new("Subtítulos").size(TYPE_XS).strong());
-                ui.horizontal(|ui| {
-                    for modo in CaptionsMode::ALL {
-                        let habilitado =
-                            modo != CaptionsMode::Quemado || dialog.is_burned_enabled();
-                        let radio = ui.add_enabled(
-                            habilitado,
-                            egui::RadioButton::new(
-                                dialog.captions_mode == modo,
-                                modo.display_name(),
-                            ),
+                        ui.add_space(SPACE_XS);
+                        ui.label(egui::RichText::new("Subtítulos").size(TYPE_XS).strong());
+                        ui.horizontal(|ui| {
+                            for modo in CaptionsMode::ALL {
+                                let habilitado =
+                                    modo != CaptionsMode::Quemado || dialog.is_burned_enabled();
+                                let radio = ui.add_enabled(
+                                    habilitado,
+                                    egui::RadioButton::new(
+                                        dialog.captions_mode == modo,
+                                        modo.display_name(),
+                                    ),
+                                );
+                                if !habilitado {
+                                    let _ =
+                                        radio.on_hover_text(MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT);
+                                } else if radio.clicked() && dialog.captions_mode != modo {
+                                    dialog.set_captions(modo);
+                                    if pending.is_none() {
+                                        pending = Some(AssistantUiAction::SetExportCaptions(modo));
+                                    }
+                                }
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Quemados {}",
+                                MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT
+                            ))
+                            .size(TYPE_2XS)
+                            .color(theme.text_tertiary)
+                            .italics(),
                         );
-                        if !habilitado {
-                            let _ = radio.on_hover_text(MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT);
-                        } else if radio.clicked() && dialog.captions_mode != modo {
-                            dialog.set_captions(modo);
-                            if pending.is_none() {
-                                pending = Some(AssistantUiAction::SetExportCaptions(modo));
-                            }
-                        }
+                        ui.add_space(SPACE_XS);
                     }
-                });
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Quemados {}",
-                        MEDIA_EXPORT_BURNED_NEEDS_FFMPEG_HINT
-                    ))
-                    .size(TYPE_2XS)
-                    .color(theme.text_tertiary)
-                    .italics(),
-                );
-                ui.add_space(SPACE_XS);
-            }
-            // ── Nota Tex (siempre visible) ──
-            ui.label(
-                egui::RichText::new(MEDIA_EXPORT_TEX_NOTE)
-                    .size(TYPE_XS)
-                    .italics(),
-            );
-            ui.add_space(SPACE_SM);
-            // ── Progreso + error honesto visible ──
+                    // ── Nota Tex (siempre visible) ──
+                    ui.label(
+                        egui::RichText::new(MEDIA_EXPORT_TEX_NOTE)
+                            .size(TYPE_2XS)
+                            .color(theme.text_tertiary)
+                            .italics(),
+                    );
+                }); // ← cierra el ScrollArea: lo de abajo siempre visible.
+            ui.add_space(SPACE_XS);
+            // ── Progreso + error honesto visible (fuera del scroll) ──
             if dialog.exporting {
                 if let Some(progreso) = dialog.progress {
                     ui.add(egui::ProgressBar::new(progreso.clamp(0.0, 1.0)).show_percentage());
@@ -8386,11 +8249,13 @@ fn draw_media_export_dialog(
                 );
                 ui.add_space(SPACE_XS);
             }
-            // ── Acciones (intención, sin spawn) ──
+            // ── Acciones (intención, sin spawn; fuera del scroll) ──
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
                 let exportar_habilitado = !dialog.exporting;
                 if ui
                     .add_enabled(exportar_habilitado, egui::Button::new("Exportar"))
+                    .on_hover_text("Exporta con la selección actual")
                     .clicked()
                 {
                     match dialog.validate_selection() {
@@ -8408,7 +8273,11 @@ fn draw_media_export_dialog(
                         dialog.mark_cancelled("se canceló la exportación");
                         pending = Some(AssistantUiAction::CancelExport);
                     }
-                } else if ui.button("Cerrar").clicked() {
+                } else if ui
+                    .button("Cancelar")
+                    .on_hover_text("Cierra sin exportar")
+                    .clicked()
+                {
                     pending = Some(AssistantUiAction::CloseExportDialog);
                     close_window = true;
                 }
@@ -13028,7 +12897,7 @@ mod tests {
         assert!(state.agent_ledger.is_none());
     }
 
-    // ── B5: scrub + velocidad + export de la card (puros, sin ctx) ──────
+    // ── B5: scrub + export de la card (puros, sin ctx; 1x fijo) ──────────
     #[test]
     fn media_scrub_timeline_mapea_slider_a_frame_via_sample() {
         // 48 frames a 12 fps → 4000 ms; sample en los extremos da 0 y N-1.
@@ -13103,37 +12972,46 @@ mod tests {
     }
 
     #[test]
-    fn media_playback_speed_rota_y_reporta_factor() {
-        assert_eq!(MediaPlaybackSpeed::default(), MediaPlaybackSpeed::Normal);
-        assert_eq!(MediaPlaybackSpeed::Half.rate(), 0.5);
-        assert_eq!(MediaPlaybackSpeed::Normal.rate(), 1.0);
-        assert_eq!(MediaPlaybackSpeed::Double.rate(), 2.0);
-        assert_eq!(MediaPlaybackSpeed::Half.label(), "0.5x");
-        assert_eq!(MediaPlaybackSpeed::Normal.label(), "1x");
-        assert_eq!(MediaPlaybackSpeed::Double.label(), "2x");
-        assert_eq!(MediaPlaybackSpeed::Half.cycle(), MediaPlaybackSpeed::Normal);
-        assert_eq!(
-            MediaPlaybackSpeed::Normal.cycle(),
-            MediaPlaybackSpeed::Double
+    fn media_playback_rate_fijo_1x_sin_selector() {
+        // Rediseño player: reproducción fija 1x, sin selector de velocidad
+        // (ni botón, ni menú, ni caret, ni estado). El getter se conserva
+        // para el dueño app (delay del GIF) y siempre da 1.0.
+        let state = AssistantPanelState::default();
+        assert_eq!(state.media_playback_rate(), 1.0);
+        // Blindaje: el selector no existe en este archivo (ni tipo, ni
+        // setter, ni consts, ni tips, ni dibujos). Patrones concatenados para
+        // que este mismo test no los contenga y el `contains` sea honesto
+        // (no autorreferencial).
+        let source = include_str!("assistant.rs");
+        for resto in [
+            ["MediaPlayback", "Speed"].concat(),
+            ["set_media", "_speed"].concat(),
+            ["media", "_speed"].concat(),
+            ["PLAYER_BTN_", "SPEED_W"].concat(),
+            ["PLAYER_BTN_", "EXPORT_W"].concat(),
+            ["MEDIA_TIP_", "SPEED"].concat(),
+            ["MEDIA_SPEED_", "CARET_W"].concat(),
+            ["draw_media_", "speed_menu"].concat(),
+            ["draw_media_", "export_button"].concat(),
+            ["draw_media_", "right_buttons"].concat(),
+            ["draw_turn_", "speed_overflow"].concat(),
+            ["media_needs_", "overflow"].concat(),
+            ["media_right_buttons", "_need"].concat(),
+            ["speed", "_label"].concat(),
+            ["\"0.5", "x\""].concat(),
+            ["\"2", "x\""].concat(),
+        ] {
+            assert!(!source.contains(&resto), "sin resto de velocidad: {resto}");
+        }
+        // El `···` sí existe y emite la acción Exportar existente.
+        assert!(
+            source.contains("draw_media_more_menu"),
+            "existe el menú ···"
         );
-        assert_eq!(MediaPlaybackSpeed::Double.cycle(), MediaPlaybackSpeed::Half);
-    }
-
-    #[test]
-    fn media_playback_speed_menu_explicito_cubre_las_3() {
-        // El menú ofrece las 3 sin depender del ciclo: etiquetas y factores
-        // alineados con `rate`/`label`.
-        assert_eq!(MediaPlaybackSpeed::ALL.len(), 3);
-        let etiquetas: Vec<&str> = MediaPlaybackSpeed::ALL
-            .iter()
-            .map(|velocidad| velocidad.label())
-            .collect();
-        assert_eq!(etiquetas, vec!["0.5x", "1x", "2x"]);
-        let factores: Vec<f32> = MediaPlaybackSpeed::ALL
-            .iter()
-            .map(|velocidad| velocidad.rate())
-            .collect();
-        assert_eq!(factores, vec![0.5, 1.0, 2.0]);
+        assert!(
+            source.contains("AssistantUiAction::ExportMedia"),
+            "el ··· emite ExportMedia"
+        );
     }
 
     #[test]
@@ -13178,9 +13056,8 @@ mod tests {
         assert_eq!(state.advance_media_playhead(11.0, 12, true), Some(1));
         state.media_paused.set(false);
         assert_eq!(state.advance_media_playhead(11.0, 12, true), Some(1));
-        // Velocidad doble avanza el doble: 0.1 s → 200 ms → frame 3.
-        state.media_speed.set(MediaPlaybackSpeed::Double);
-        assert_eq!(state.advance_media_playhead(11.1, 12, true), Some(3));
+        // Tasa fija 1x: 0.1 s → 100 ms → frame 2 (sin selector que la cambie).
+        assert_eq!(state.advance_media_playhead(11.1, 12, true), Some(2));
         // Salto de segundo plano (dt > 250 ms) se capa: no recorre todo.
         let before = state
             .advance_media_playhead(99.0, 12, true)
@@ -13376,6 +13253,57 @@ mod tests {
     }
 
     #[test]
+    fn export_dialog_caja_siempre_dentro_de_pantalla() {
+        // Tarea 3: el diálogo ENORME desbordaba (de borde a borde, recorte
+        // abajo). Geometría headless: caja centrada ⊆ pantalla para
+        // 800×600, 1366×768, 1920×1080 con panel 300 y 520.
+        for (vw, vh) in [(800.0, 600.0), (1366.0, 768.0), (1920.0, 1080.0)] {
+            for panel in [300.0, 520.0] {
+                let (w, h) = export_dialog_size(vw, vh, panel);
+                assert!(w > 0.0 && w <= vw, "ancho {w} en {vw}x{vh} panel {panel}");
+                assert!(h > 0.0 && h <= vh, "alto {h} en {vw}x{vh} panel {panel}");
+                assert!(w <= panel, "ancho {w} respeta panel {panel} en {vw}x{vh}");
+                let (x, y, rw, rh) = export_dialog_rect(vw, vh, panel);
+                assert_eq!((rw, rh), (w, h), "rect usa el tamaño clampado");
+                assert!(x >= 0.0 && y >= 0.0, "origen visible en {vw}x{vh}");
+                assert!(
+                    x + rw <= vw + 1.0 && y + rh <= vh + 1.0,
+                    "caja ⊆ pantalla en {vw}x{vh} panel {panel}: ({x},{y}) {rw}x{rh}"
+                );
+            }
+        }
+        // Márgenes con tokens y cotas sanas.
+        assert_eq!(EXPORT_DIALOG_MARGIN, SPACE_LG);
+        assert_eq!(EXPORT_DIALOG_MIN_W, SPACE_XXL * 6.0);
+        assert_eq!(EXPORT_DIALOG_MAX_H, SPACE_XXL * 14.0);
+        // Entradas rancias no panican ni desbordan.
+        let (w, h) = export_dialog_size(f32::NAN, f32::NAN, f32::NAN);
+        assert!(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0);
+        let (w, h) = export_dialog_size(0.0, 0.0, 300.0);
+        assert!(w >= 0.0 && h >= 0.0 && w <= 300.0);
+        // LaTeX UNA sola vez al pie de Formato (no triplicado): el draw
+        // nombra el hint una sola vez fuera de su definición y tests.
+        let source = include_str!("assistant.rs");
+        let draw_at = source
+            .find("fn draw_media_export_dialog(")
+            .expect("existe draw_media_export_dialog");
+        let draw_end = source[draw_at..]
+            .find("\nfn ")
+            .map(|off| draw_at + off)
+            .expect("cierra draw_media_export_dialog");
+        let draw = &source[draw_at..draw_end];
+        assert_eq!(
+            draw.matches("MEDIA_EXPORT_LATEX_HINT").count(),
+            1,
+            "hint LaTeX una sola vez al pie de Formato"
+        );
+        // Botones siempre visibles fuera del scroll.
+        assert!(draw.contains("ScrollArea"), "scroll interno");
+        assert!(draw.contains("Exportar"), "botón Exportar");
+        assert!(draw.contains("Cancelar"), "botón Cancelar");
+    }
+
+    #[test]
     fn media_export_state_arranca_ocioso_y_set_media_lo_reinicia() {
         let context = egui::Context::default();
         let mut state = AssistantPanelState::default();
@@ -13386,8 +13314,7 @@ mod tests {
             frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
         };
         state.set_media(Some(media), &context);
-        // Card nueva: playhead en 0, reproduciendo, export ocioso. La
-        // velocidad es pref (M2-5): acá sigue la default porque nunca se tocó.
+        // Card nueva: playhead en 0, reproduciendo a 1x fijo, export ocioso.
         assert_eq!(*state.media_export_state(), MediaExportState::Idle);
         assert!(!state.media_paused.get());
         assert_eq!(state.media_playback_rate(), 1.0);
@@ -13395,11 +13322,11 @@ mod tests {
     }
 
     #[test]
-    fn prefs_velocidad_formato_calidad_sobreviven_a_set_media() {
-        // M2-5: pedir otra animación no pierde lo elegido.
+    fn prefs_formato_calidad_sobreviven_a_set_media() {
+        // M2-5: pedir otra animación no pierde lo elegido (1x es fijo, sin
+        // pref de velocidad).
         let context = egui::Context::default();
         let mut state = AssistantPanelState::default();
-        state.set_media_speed(MediaPlaybackSpeed::Double);
         state.export_dialog_set_format(MediaExportFormat::Mp4);
         state.export_dialog.borrow_mut().quality = MediaExportQuality::Alta;
         state.export_dialog.borrow_mut().bitrate_kbps =
@@ -13409,8 +13336,8 @@ mod tests {
             frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
         };
         state.set_media(Some(media), &context);
-        // Prefs intactas…
-        assert_eq!(state.media_playback_rate(), 2.0);
+        // Prefs intactas (reproducción fija 1x)…
+        assert_eq!(state.media_playback_rate(), 1.0);
         assert_eq!(
             state.export_dialog_snapshot().format,
             MediaExportFormat::Mp4
@@ -13430,11 +13357,11 @@ mod tests {
     }
 
     #[test]
-    fn limpiar_resetea_prefs_velocidad_formato_calidad() {
-        // M2-5: Limpiar es el único reset de prefs.
+    fn limpiar_resetea_prefs_formato_calidad() {
+        // M2-5: Limpiar es el único reset de prefs (1x es fijo, nada de
+        // velocidad que resetear).
         let context = egui::Context::default();
         let mut state = AssistantPanelState::default();
-        state.set_media_speed(MediaPlaybackSpeed::Half);
         state.export_dialog_set_format(MediaExportFormat::Webm);
         state.export_dialog.borrow_mut().quality = MediaExportQuality::Baja;
         let media = AssistantMedia {
@@ -13646,10 +13573,12 @@ mod tests {
     }
 
     #[test]
-    fn chat_intents_hint_muestra_los_4_ejemplos() {
+    fn chat_intents_hint_muestra_los_3_ejemplos_sin_velocidad() {
         // M2-4: el hint visible cubre los intents que el parser acepta
-        // (paridad con `app::anim_ui::media_chat_intent_examples`).
-        for ejemplo in ["exportar mp4 720p", "velocidad 2x", "órbita", "reintentar"] {
+        // (reproducción fija 1x: sin «velocidad 2x»). NOTA DUEÑO APP:
+        // `app::anim_ui::media_chat_intent_examples` aún lista 4: actualizar
+        // ese lado para paridad con estos 3.
+        for ejemplo in ["exportar mp4 720p", "órbita", "reintentar"] {
             assert!(
                 MEDIA_CHAT_INTENTS_HINT.contains(ejemplo),
                 "el hint debe mostrar {ejemplo:?}: {MEDIA_CHAT_INTENTS_HINT}"
@@ -15173,17 +15102,16 @@ mod tests {
         assert_eq!(media_effective_inner_width(520.0), 476.0);
         assert_eq!(media_effective_inner_width(f32::NAN), 0.0);
         assert_eq!(media_effective_inner_width(20.0), 0.0);
-        // Botones uniformes: un solo alto y anchos coherentes (misma fuente).
+        // Botones uniformes: un solo alto, cuadrados coherentes (misma
+        // fuente). Sin velocidad ni botón Exportar en la fila: Exportar vive
+        // en el menú `···` (cuadrado del mismo alto).
         assert_eq!(PLAYER_BTN_H, 28.0, "alto único: {PLAYER_BTN_H}");
-        assert_eq!(PLAYER_BTN_SQ_W, PLAYER_BTN_H, "cuadrado play/paso");
+        assert_eq!(PLAYER_BTN_SQ_W, PLAYER_BTN_H, "cuadrado play/paso/···");
         assert!(PLAYER_BTN_SQ_W > 24.0, "play honesto: {PLAYER_BTN_SQ_W}");
-        assert!(
-            PLAYER_BTN_SPEED_W > 40.0,
-            "velocidad honesta: {PLAYER_BTN_SPEED_W}"
-        );
-        assert!(
-            PLAYER_BTN_EXPORT_W >= 64.0 - f32::EPSILON,
-            "export honesto: {PLAYER_BTN_EXPORT_W}"
+        assert_eq!(
+            media_more_button_need(),
+            PLAYER_BTN_SQ_W,
+            "el ··· pide un cuadrado"
         );
         // La mentira concreta: a panel 380 el viejo (layout directo) decía
         // una fila y cortaba; el honesto (vía panel) dice dos filas.
@@ -15213,20 +15141,13 @@ mod tests {
     }
 
     #[test]
-    fn e2_overflow_explicito_exportar_siempre_visible() {
-        // E2: Exportar jamás se corta; si no entra junto a la velocidad, la
-        // velocidad va al menú ···.
-        let need = media_right_buttons_need();
-        assert!(!media_needs_overflow(need));
-        assert!(!media_needs_overflow(need + 40.0));
-        assert!(media_needs_overflow(need - 1.0));
-        assert!(media_needs_overflow(80.0), "a 80px ni dos botones");
-        assert!(media_needs_overflow(f32::NAN));
-        // Fila ancha real (256 = panel 300 efectivo) no necesita overflow;
-        // la angosta extrema sí y ahí Exportar queda fuera del menú.
-        assert!(!media_needs_overflow(256.0));
-        assert!(media_needs_overflow(100.0));
-        // Headless: la rama overflow dibuja sin pánico y conserva Exportar.
+    fn e2_more_menu_exportar_vive_en_el_puntos() {
+        // E2 rediseño: sin botón Exportar en la fila y sin velocidad; Exportar
+        // vive en el menú `···` y emite la acción existente. El `···` pide un
+        // cuadrado y dibuja sin pánico hasta en angosto extremo.
+        assert_eq!(media_more_button_need(), PLAYER_BTN_SQ_W);
+        // Headless: la toolbar dibuja sin pánico a 100px con el contador del
+        // screenshot (el `···` siempre visible, jamás corte seco).
         let context = egui::Context::default();
         let state = AssistantPanelState::default();
         let _ = context.run(
@@ -15243,25 +15164,24 @@ mod tests {
                     let view = MediaToolbarView {
                         counter_compact: &compact,
                         counter_long: &long,
-                        speed_label: "0.5x",
                         duration_ms: 4000,
                         frame_count: 48,
                         exporting: false,
                     };
-                    // A 100px la segunda fila va a overflow (Exportar + ···).
-                    assert!(media_needs_overflow(ui.available_width()));
                     let _ = draw_media_toolbar(ui, &state, &view);
+                    draw_media_more_menu(ui, &view, &mut None);
                 });
             },
         );
-        // Blindaje: el overflow existe con etiquetas legibles, no iconos mudos.
+        // Blindaje: el menú `···` existe con el ítem Exportar (acción
+        // existente, sin variantes nuevas) y sin rastro de velocidad.
         // El visor grande se eliminó (botón ⛶ + overlay): los patrones se
         // arman concatenados para que este mismo test no los contenga y el
         // `contains` sea honesto (no autorreferencial).
         let source = include_str!("assistant.rs");
         assert!(
-            source.contains("draw_media_right_buttons_overflow"),
-            "existe overflow"
+            source.contains("draw_media_more_menu"),
+            "existe el menú ···"
         );
         assert!(source.contains("···"), "menú explícito ···");
         for patron in [
@@ -15346,7 +15266,6 @@ mod tests {
                         let view = MediaToolbarView {
                             counter_compact: &compact,
                             counter_long: &long,
-                            speed_label: "1x",
                             duration_ms: 4000,
                             frame_count: 48,
                             exporting: false,
@@ -15472,8 +15391,9 @@ mod tests {
 
     #[test]
     fn z2_media_card_v3_una_toolbar_sin_controles_viejos() {
-        // Blindaje v3: UNA toolbar `[▶/⏸] [◀][▶] [slider+N/M] [1x + caret]
-        // [Exportar]`; nada de Repetir/Secuencia, nada de etiquetas sueltas
+        // Blindaje v3: UNA toolbar `[▶/⏸] [◀][▶] [slider] [N/M] [···]`
+        // (Exportar en el `···`); nada de Repetir/Secuencia, nada de
+        // etiquetas sueltas
         // (eran la fila "Exportar 7/48" y la fantasma arriba-izquierda), nada
         // de `.text()` lateral en el deslizador (apretaba la fila), nada del
         // visor grande (botón ⛶ + overlay eliminados).
@@ -15508,23 +15428,38 @@ mod tests {
             "Pantalla completa",
             "Reproducir\"",
             "Pausar\"",
-            "horizontal_wrapped",
             "show_counter_label",
         ] {
             assert!(!card.contains(gone), "v3 sin {gone:?}");
         }
+        // `horizontal_wrapped` vive en el diálogo Exportar (Formato compacto
+        // en 2 filas) pero JAMÁS en la toolbar: la fila es `horizontal` puro.
+        let tb_at = source
+            .find("fn draw_media_toolbar(")
+            .expect("existe draw_media_toolbar");
+        let tb_end = source[tb_at..]
+            .find("\nfn ")
+            .map(|off| tb_at + off)
+            .expect("cierra draw_media_toolbar");
+        assert!(
+            !source[tb_at..tb_end].contains("horizontal_wrapped"),
+            "toolbar en horizontal puro, sin wrapped"
+        );
     }
 
     #[test]
     fn media_toolbar_tooltips_cortos() {
         // D2: tooltips ≤60 chars para que no se corten en panel ~340px.
-        // (El tip del visor grande se fue con el botón ⛶.)
+        // (El tip del visor grande se fue con el botón ⛶; el de velocidad
+        // se fue con el selector: reproducción fija 1x.)
         for tip in [
-            MEDIA_TIP_SPEED,
             MEDIA_TIP_EXPORT,
             MEDIA_TIP_PAUSE,
             MEDIA_TIP_PLAY,
+            MEDIA_TIP_STEP_BACK,
+            MEDIA_TIP_STEP_FWD,
         ] {
+            let tip: &str = tip;
             assert!(tip.chars().count() <= 60, "tooltip largo: {tip}");
             assert!(!tip.is_empty(), "tooltip mudo");
         }
@@ -15710,32 +15645,35 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn player_btn_consts_un_solo_alto_y_anchos_coherentes() {
-        // Tarea 2: un solo alto para todos los botones del player y anchos
-        // coherentes desde tokens (nada de cada botón con su medida).
+        // Tarea 2 rediseño: un solo alto para todos los botones del player y
+        // anchos cuadrados desde tokens (nada de cada botón con su medida).
+        // Sin velocidad ni botón Exportar en la fila: play/paso/`···` son los
+        // 4 cuadrados; Exportar vive en el `···`.
         assert_eq!(PLAYER_BTN_H, HIT_TARGET_MIN + SPACE_XS);
         assert_eq!(PLAYER_BTN_SQ_W, PLAYER_BTN_H);
-        assert!(PLAYER_BTN_SPEED_W > PLAYER_BTN_SQ_W, "velocidad legible");
-        assert!(
-            PLAYER_BTN_EXPORT_W > PLAYER_BTN_SPEED_W,
-            "export texto aparte"
-        );
-        // Blindaje: los 5 dibujos de botones usan las consts (no literales).
+        assert_eq!(media_more_button_need(), PLAYER_BTN_SQ_W);
+        // Blindaje: los dibujos de botones usan las consts (no literales).
         let source = include_str!("assistant.rs");
-        for usada in [
-            "PLAYER_BTN_SQ_W, PLAYER_BTN_H",
-            "PLAYER_BTN_SPEED_W, PLAYER_BTN_H",
-            "PLAYER_BTN_EXPORT_W, PLAYER_BTN_H",
+        assert!(
+            source.contains("PLAYER_BTN_SQ_W, PLAYER_BTN_H"),
+            "toolbar uniforme usa PLAYER_BTN_SQ_W, PLAYER_BTN_H"
+        );
+        for resto in [
+            ["PLAYER_BTN_", "SPEED_W"].concat(),
+            ["PLAYER_BTN_", "EXPORT_W"].concat(),
         ] {
-            assert!(source.contains(usada), "toolbar uniforme usa {usada}");
+            assert!(!source.contains(&resto), "sin resto: {resto}");
         }
     }
 
     #[test]
-    fn player_sin_tofu_caret_pintado_y_export_alto_fijo() {
+    fn player_sin_tofu_y_menu_mas_con_export() {
         // Bug captura: el botón de velocidad mostraba `1x` con un cuadradito
-        // porque el U+25BE no tiene glifo en la fuente de egui. Auditoría de
-        // glifos del player/export/diálogo (solo este archivo):
-        // - FUERA: U+25BE (tofu probado) -> caret pintado con el painter;
+        // porque el U+25BE no tiene glifo en la fuente de egui. Rediseño: sin
+        // velocidad (ni caret que pintar) y sin botón Exportar en la fila;
+        // Exportar vive como ítem de texto en el menú `···`. Auditoría de
+        // glifos del player/diálogo (solo este archivo):
+        // - FUERA: U+25BE (tofu probado, se fue con el selector);
         //   `←/→` en tooltips -> ASCII `<-`/`->`; `×` en preset -> `x`.
         // - DENTRO (probados o base Latin-1 de la fuente): `▶◀⏸` (visibles
         //   en captura), `…` (pineado en docenas de asserts), `···`/`•` y
@@ -15747,6 +15685,20 @@ mod tests {
         assert!(
             !source.contains('\u{25be}'),
             "cero tofu U+25BE en el fuente"
+        );
+        // El único `convex_polygon` del archivo es el blob del avatar
+        // (Mora): el player ya no pinta ningún caret (sin selector).
+        let caret_patron = ["convex_poly", "gon"].concat();
+        let player_at = source
+            .find("fn draw_turn_player(")
+            .expect("existe draw_turn_player");
+        let player_end = source[player_at..]
+            .find("fn retain_first_assistant_action")
+            .map(|off| player_at + off)
+            .expect("cierra el bloque player");
+        assert!(
+            !source[player_at..player_end].contains(&caret_patron),
+            "player sin caret pintado: no hay selector de velocidad"
         );
         for prohibido in [
             ["Fotograma anterior (", "\u{2190})"].concat(),
@@ -15768,39 +15720,30 @@ mod tests {
                 "reemplazo ASCII visible: {visible}"
             );
         }
-        // La velocidad etiqueta solo el texto y pinta el caret encima.
+        // El menú `···` existe, es cuadrado del alto único y su ítem
+        // Exportar emite la acción existente (sin botón en la fila).
         let menu_at = source
-            .find("fn draw_media_speed_menu(")
-            .expect("existe draw_media_speed_menu");
+            .find("fn draw_media_more_menu(")
+            .expect("existe draw_media_more_menu");
         let menu_end = source[menu_at..]
             .find("\nfn ")
             .map(|off| menu_at + off)
-            .expect("cierra draw_media_speed_menu");
+            .expect("cierra draw_media_more_menu");
         let menu = &source[menu_at..menu_end];
         assert!(
-            menu.contains("Button::new(view.speed_label)"),
-            "etiqueta solo texto, sin glifo"
+            menu.contains("PLAYER_BTN_SQ_W, PLAYER_BTN_H"),
+            "··· cuadrado del alto único"
         );
         assert!(
-            menu.contains("convex_polygon"),
-            "caret dibujado con el painter (convex_polygon)"
-        );
-        // Exportar con alto fijo real (`add_sized`, no `min_size` que era piso).
-        let export_at = source
-            .find("fn draw_media_export_button(")
-            .expect("existe draw_media_export_button");
-        let export_end = source[export_at..]
-            .find("\nfn ")
-            .map(|off| export_at + off)
-            .expect("cierra draw_media_export_button");
-        let export_fn = &source[export_at..export_end];
-        assert!(
-            export_fn.contains("add_sized")
-                && export_fn.contains("PLAYER_BTN_EXPORT_W, PLAYER_BTN_H"),
-            "Exportar mide PLAYER_BTN_EXPORT_W x PLAYER_BTN_H fijos"
+            menu.contains("Button::new(\"Exportar\")"),
+            "ítem Exportar de texto en el ···"
         );
         assert!(
-            !export_fn.contains("min_size"),
+            menu.contains("AssistantUiAction::ExportMedia"),
+            "el ··· emite la acción ExportMedia existente"
+        );
+        assert!(
+            !menu.contains("min_size"),
             "sin min_size: era piso, no alto fijo"
         );
         // Sin reintroducir el visor eliminado: ningún `Button` usa ⛶/□
@@ -15812,8 +15755,9 @@ mod tests {
         ] {
             assert!(!source.contains(&patron), "sin resto del visor: {patron}");
         }
-        // Geometría headless: los 5 botones de la fila miden PLAYER_BTN_H
-        // exacto (tolerancia sub-píxel), mismo Frame/Button en los 5.
+        // Geometría headless: los 4 botones de la fila (play/paso/`···`)
+        // miden PLAYER_BTN_H exacto (tolerancia sub-píxel), mismo
+        // Frame/Button en los 4. El contador es texto, no botón.
         let context = egui::Context::default();
         let _ = context.run(
             egui::RawInput {
@@ -15846,14 +15790,8 @@ mod tests {
                             .rect
                             .height(),
                             ui.add_sized(
-                                egui::vec2(PLAYER_BTN_SPEED_W, PLAYER_BTN_H),
-                                egui::Button::new("1x"),
-                            )
-                            .rect
-                            .height(),
-                            ui.add_sized(
-                                egui::vec2(PLAYER_BTN_EXPORT_W, PLAYER_BTN_H),
-                                egui::Button::new("Exportar"),
+                                egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
+                                egui::Button::new("···"),
                             )
                             .rect
                             .height(),
