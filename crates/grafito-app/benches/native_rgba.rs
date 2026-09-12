@@ -1,4 +1,4 @@
-//! Bench RGBA por plantilla nativa (11): tiempo + presupuestos.
+//! Bench RGBA por plantilla nativa (13): tiempo + presupuestos.
 //!
 //! Sin criterion (no es dependencia del workspace): son `#[test]`s
 //! temporizados con `Instant` que imprimen `ms` por plantilla y pinean los
@@ -51,7 +51,7 @@ fn mide_plantilla(template: &str) {
 }
 
 #[test]
-fn plantillas_son_11() {
+fn plantillas_son_13() {
     assert_eq!(
         NATIVE_TEMPLATES,
         &[
@@ -66,6 +66,8 @@ fn plantillas_son_11() {
             "gradient-field",
             "mobius-transform",
             "universal",
+            "subspace",
+            "fractal",
         ]
     );
 }
@@ -123,6 +125,16 @@ fn rgba_mobius_transform() {
 #[test]
 fn rgba_universal() {
     mide_plantilla("universal");
+}
+
+#[test]
+fn rgba_subspace() {
+    mide_plantilla("subspace");
+}
+
+#[test]
+fn rgba_fractal() {
+    mide_plantilla("fractal");
 }
 
 #[test]

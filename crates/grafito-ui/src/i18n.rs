@@ -82,12 +82,12 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 185;
+pub const MSG_COUNT: usize = 187;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
 /// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (19) +
 /// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) +
-/// `anim` (2) + `media.title` (12) + `panel.conformal` (3) = 185.
+/// `anim` (2) + `media.title` (14) + `panel.conformal` (3) = 187.
 pub static MESSAGES: &[Msg] = &[
     // ── toolbar.group (18) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
@@ -270,7 +270,7 @@ pub static MESSAGES: &[Msg] = &[
     // `{motor}`/`{guia}` se sustituyen en el call-site (igual que `{path}` en toast).
     Msg { key: "anim.empty.guide", es: "probá bajar la resolución o reintentá", en: "try lowering the resolution or retry" },
     Msg { key: "anim.empty.message", es: "{motor} no produjo fotogramas; {guia}", en: "{motor} produced no frames; {guia}" },
-    // ── media.title (12) — títulos curados de cards de animación (antes en
+    // ── media.title (14) — títulos curados de cards de animación (antes en
     // `assistant.rs::titulo_curado`). `{expr}`/`{p0}`/`{p1}`/`{param}` se
     // sustituyen en el call-site; las fijas viajan tal cual.
     Msg { key: "media.title.tangent", es: "Tangente móvil · {expr}", en: "Moving tangent · {expr}" },
@@ -284,6 +284,8 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "media.title.pitagoras", es: "Teorema de Pitágoras", en: "Pythagorean theorem" },
     Msg { key: "media.title.taylor", es: "Serie de Taylor", en: "Taylor series" },
     Msg { key: "media.title.conformal", es: "Mapeo conforme", en: "Conformal map" },
+    Msg { key: "media.title.subspace", es: "Span lineal", en: "Linear span" },
+    Msg { key: "media.title.fractal", es: "Fractal de Koch", en: "Koch fractal" },
     Msg { key: "media.title.default", es: "Animación", en: "Animation" },
     // ── panel.conformal (3) — sección de mapeo conforme en `panels.rs`.
     Msg { key: "panel.conformal.title", es: "Animación de Mapeo Conforme", en: "Conformal mapping animation" },
@@ -598,8 +600,8 @@ pub fn toast_msg(suffix: &'static str, locale: Locale) -> &'static str {
     }
 }
 
-/// Sufijos válidos de `media.title.*` (12).
-pub const MEDIA_TITLE_KEYS: &[&str; 12] = &[
+/// Sufijos válidos de `media.title.*` (14).
+pub const MEDIA_TITLE_KEYS: &[&str; 14] = &[
     "tangent",
     "area",
     "sweep",
@@ -611,6 +613,8 @@ pub const MEDIA_TITLE_KEYS: &[&str; 12] = &[
     "pitagoras",
     "taylor",
     "conformal",
+    "subspace",
+    "fractal",
     "default",
 ];
 
@@ -630,6 +634,8 @@ pub fn media_title_msg(suffix: &'static str, locale: Locale) -> &'static str {
         "pitagoras" => t("media.title.pitagoras", locale),
         "taylor" => t("media.title.taylor", locale),
         "conformal" => t("media.title.conformal", locale),
+        "subspace" => t("media.title.subspace", locale),
+        "fractal" => t("media.title.fractal", locale),
         "default" => t("media.title.default", locale),
         _ => suffix,
     }
@@ -654,13 +660,13 @@ pub fn anim_msg(suffix: &'static str, locale: Locale) -> &'static str {
 // call-site porque añadir la variante rompía matches exhaustivos fuera del
 // frente. W2 levanta esa restricción: `Locale::Pt` existe y `t(key, Pt)`
 // resuelve PT→ES→EN solo (ver `t`). R3.4 completa el overlay al 100%:
-// 185 claves (18 grupos + 19 paleta + 12 onboarding + 10 cheat + 10 toast +
-// 12 app/misc + 2 anim + 12 media.title + 87 `toolbar.tool` + 3
+// 187 claves (18 grupos + 19 paleta + 12 onboarding + 10 cheat + 10 toast +
+// 12 app/misc + 2 anim + 14 media.title + 87 `toolbar.tool` + 3
 // `panel.conformal`).
 // El lint `unwrap_used` sigue prohibido en prod: el fallback se escribe con
 // `match` o `if let`.
 //
-// Cobertura: 185/185 (100%). Medida real en el test `pt_covers_main_ui_keys`
+// Cobertura: 187/187 (100%). Medida real en el test `pt_covers_main_ui_keys`
 // (imprime el % por `--nocapture`).
 
 /// Una entrada del overlay portugués: clave del catálogo + texto PT.
@@ -673,9 +679,9 @@ pub struct PtMsg {
     pub pt: &'static str,
 }
 
-/// Claves principales de UI con traducción PT (185). Ordenado por dominio como
+/// Claves principales de UI con traducción PT (187). Ordenado por dominio como
 /// [`MESSAGES`]: grupos (18) + paleta (19) + onboarding (12) + cheat (10) +
-/// toast (10) + app/misc (12) + anim (2) + media.title (12) + tools (87) +
+/// toast (10) + app/misc (12) + anim (2) + media.title (14) + tools (87) +
 /// panel.conformal (3).
 pub static PT_MESSAGES: &[PtMsg] = &[
     // ── grupos (18) ──
@@ -768,7 +774,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     // ── anim (2) ──
     PtMsg { key: "anim.empty.guide", pt: "tente reduzir a resolução ou tentar de novo" },
     PtMsg { key: "anim.empty.message", pt: "{motor} não produziu quadros; {guia}" },
-    // ── media.title (12) ──
+    // ── media.title (14) ──
     PtMsg { key: "media.title.tangent", pt: "Tangente móvel · {expr}" },
     PtMsg { key: "media.title.area", pt: "Área acumulada · {expr} [{p0},{p1}]" },
     PtMsg { key: "media.title.sweep", pt: "Varredura · {expr} ({param})" },
@@ -780,6 +786,8 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "media.title.pitagoras", pt: "Teorema de Pitágoras" },
     PtMsg { key: "media.title.taylor", pt: "Série de Taylor" },
     PtMsg { key: "media.title.conformal", pt: "Mapeamento conforme" },
+    PtMsg { key: "media.title.subspace", pt: "Span linear" },
+    PtMsg { key: "media.title.fractal", pt: "Fractal de Koch" },
     PtMsg { key: "media.title.default", pt: "Animação" },
     // ── toolbar.tool (87) — R3.4 cierra el recorte F3d/W2 ──
     PtMsg { key: "toolbar.tool.select", pt: "Selecionar" },
@@ -876,7 +884,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
 ];
 
 /// Texto PT de `key`, o `None` si la clave no está en el catálogo.
-/// Desde R3.4 el overlay es total (185/185): `None` solo para claves
+/// Desde R3.4 el overlay es total (187/187): `None` solo para claves
 /// inexistentes. Lookup lineal como [`t`]: el overlay es chico (<200 claves).
 pub fn pt(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
@@ -890,7 +898,7 @@ pub fn pt(key: &'static str) -> Option<&'static str> {
 }
 
 /// Cobertura del overlay PT: `(cubiertas, total del catálogo)`.
-/// El numerador lo fija el test `pt_covers_main_ui_keys` en 185.
+/// El numerador lo fija el test `pt_covers_main_ui_keys` en 187.
 pub fn pt_coverage() -> (usize, usize) {
     (PT_MESSAGES.len(), MESSAGES.len())
 }
@@ -902,13 +910,13 @@ pub fn pt_coverage() -> (usize, usize) {
 /// con conteo para el hover histórico y el test que pinnea el 100%.
 pub const PT_PARTIAL_BADGE: &str = "Português parcial";
 
-/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 185/185 = falso).
+/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 187/187 = falso).
 pub fn pt_is_partial() -> bool {
     let (cubiertas, total) = pt_coverage();
     cubiertas < total
 }
 
-/// Texto del badge con conteo real, p. ej. `"Português parcial · 185/185"`.
+/// Texto del badge con conteo real, p. ej. `"Português parcial · 187/187"`.
 /// Puro, sin I/O: el selector lo muestra solo si `pt_is_partial()`.
 pub fn pt_partial_badge_text() -> String {
     let (cubiertas, total) = pt_coverage();
@@ -987,7 +995,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 185);
+        assert_eq!(MSG_COUNT, 187);
     }
 
     #[test]
@@ -1135,7 +1143,7 @@ mod tests {
         assert_eq!(ONBOARDING_KEYS.len(), 12);
         assert_eq!(CHEAT_KEYS.len(), 10);
         assert_eq!(TOAST_KEYS.len(), 10);
-        assert_eq!(MEDIA_TITLE_KEYS.len(), 12);
+        assert_eq!(MEDIA_TITLE_KEYS.len(), 14);
         assert_eq!(ANIM_KEYS.len(), 2);
         for k in ONBOARDING_KEYS {
             assert!(!onboarding_msg(k, Locale::Es).is_empty());
@@ -1173,10 +1181,10 @@ mod tests {
 
     #[test]
     fn pt_covers_main_ui_keys() {
-        // R3.4: overlay total PT — 185 claves, sin duplicados ni vacíos,
+        // R3.4: overlay total PT — 187 claves, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 185);
-        assert_eq!(pt_coverage(), (185, 185));
+        assert_eq!(PT_MESSAGES.len(), 187);
+        assert_eq!(pt_coverage(), (187, 187));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -1334,6 +1342,8 @@ mod tests {
             Some("Integral — área sob a curva")
         );
         assert_eq!(pt("media.title.default"), Some("Animação"));
+        assert_eq!(pt("media.title.subspace"), Some("Span linear"));
+        assert_eq!(pt("media.title.fractal"), Some("Fractal de Koch"));
         assert_eq!(
             pt("anim.empty.guide"),
             Some("tente reduzir a resolução ou tentar de novo")
@@ -1404,11 +1414,11 @@ mod tests {
 
     #[test]
     fn pt_coverage_prints_real_percentage() {
-        // Cobertura PT medida: 185/185 = 100%. Se imprime el % real con
+        // Cobertura PT medida: 187/187 = 100%. Se imprime el % real con
         // `--nocapture`; el assert fija el numerador para que cualquier
         // agregado (o faltante) de PT rompa el test a propósito.
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (185, 185));
+        assert_eq!((covered, total), (187, 187));
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (overlay total R3.4)");
         assert!((pct - 100.0).abs() < 0.1, "pct real: {pct}");
@@ -1419,10 +1429,10 @@ mod tests {
         // R3.4: cobertura 100% — el badge parcial ya no se muestra (ver
         // `toolbar.rs`: solo dibuja si `pt_is_partial()`). Se pinnea el 100%
         // y el texto con conteo para el hover histórico.
-        assert!(!pt_is_partial(), "R3.4 185/185 = 100%: sin badge parcial");
+        assert!(!pt_is_partial(), "R3.4 187/187 = 100%: sin badge parcial");
         assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
-        assert_eq!(pt_partial_badge_text(), "Português parcial · 185/185");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 187/187");
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (185, 185));
+        assert_eq!((covered, total), (187, 187));
     }
 }

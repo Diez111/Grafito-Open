@@ -6953,3 +6953,250 @@ mod anim_export_budget_tests {
         assert_eq!((ANIM_EXPORT_FPS_MIN, ANIM_EXPORT_FPS_MAX), (1, 60));
     }
 }
+
+// ── piel-ui: subspace/fractal por export/preview igual que las 11 ────────
+// Las 2 plantillas nuevas tienen renderer propio en `anim_native` y ya están
+// en `CANONICAL_TEMPLATES` (13); el export GIF/PNG/MP4/WebM + preview son
+// genéricos (toman frames). Estos tests pinnean que ambas fluyen por todos
+// los formatos igual que las 11 viejas: puerta por nombre, params subspace
+// preservados, fractal sin params, autofit/budgets y errores honestos.
+// Juguete hermético: renders 96×72, exports recortados a 4 frames, tempdirs
+// únicos con cleanup. Solo tests: el genérico ya las cubre.
+#[cfg(test)]
+mod anim_export_subspace_fractal_tests {
+    use crate::anim_native::{
+        check_gif_export_budget, encajar_anim_a_chat, encode_frames_to_gif_bytes,
+        export_frames_to_gif_file, export_frames_to_mp4_file, export_frames_to_png_dir,
+        export_frames_to_webm_file, gif_autofit_size, is_known_native_template,
+        render_anim_by_template, render_anim_for_concept_with_params, render_anim_for_export,
+        render_fractal_frames_with_params, render_subspace_frames_with_params,
+        subspace_vectores_desde_params, GifExportError, Mp4ExportError, VideoQuality,
+        WebmExportError, NATIVE_ANIM_FRAME_COUNT,
+    };
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    /// Set de juguete: 4 frames recortados del render 96×72 (rápido).
+    fn juguete_set_export(template: &str) -> Vec<egui::ColorImage> {
+        render_anim_by_template(template, 96, 72)
+            .into_iter()
+            .take(4)
+            .collect()
+    }
+
+    /// Tempdir único con cleanup del llamador.
+    fn juguete_dir_export(sufijo: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|nanos| nanos.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "grafito-export-{}-{nanos}-{sufijo}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("tempdir juguete");
+        dir
+    }
+
+    fn params_subspace_export() -> BTreeMap<String, f64> {
+        BTreeMap::from([
+            ("v1x".to_string(), 2.0),
+            ("v1y".to_string(), 0.5),
+            ("v2x".to_string(), -0.5),
+            ("v2y".to_string(), 2.0),
+        ])
+    }
+
+    #[test]
+    fn puerta_acepta_subspace_y_fractal_export() {
+        for plantilla in ["subspace", "fractal", "  SUBSPACE  ", "Fractal"] {
+            let canonica =
+                grafito_anim::protocol::sanitize_template(plantilla, "vectores").expect("puerta");
+            assert!(
+                canonica == "subspace" || canonica == "fractal",
+                "{plantilla} → {canonica}"
+            );
+        }
+        assert!(grafito_anim::protocol::CANONICAL_TEMPLATES.contains(&"subspace"));
+        assert!(grafito_anim::protocol::CANONICAL_TEMPLATES.contains(&"fractal"));
+        assert_eq!(grafito_anim::protocol::CANONICAL_TEMPLATES.len(), 13);
+        assert!(is_known_native_template("subspace"));
+        assert!(is_known_native_template("fractal"));
+    }
+
+    #[test]
+    fn preview_subspace_y_fractal_48_distintos_export() {
+        for plantilla in ["subspace", "fractal"] {
+            let set = render_anim_by_template(plantilla, 96, 72);
+            assert_eq!(set.len(), NATIVE_ANIM_FRAME_COUNT, "{plantilla}");
+            let talla = set[0].size;
+            assert!(set.iter().all(|frame| frame.size == talla), "{plantilla}");
+            assert!(
+                set.first().expect("frame").pixels != set.last().expect("frame").pixels,
+                "{plantilla}: preview sin movimiento"
+            );
+            // Vía con params (camino scrub/UI) también 48.
+            let vivo = render_anim_for_concept_with_params(
+                plantilla,
+                "span de v1 y v2",
+                96,
+                72,
+                &BTreeMap::new(),
+            );
+            assert_eq!(
+                vivo.len(),
+                NATIVE_ANIM_FRAME_COUNT,
+                "{plantilla} con params"
+            );
+            // Camino export (con rótulo) también 48.
+            let para_export =
+                render_anim_for_export(plantilla, "span de v1 y v2", 96, 72, &BTreeMap::new());
+            assert_eq!(
+                para_export.len(),
+                NATIVE_ANIM_FRAME_COUNT,
+                "{plantilla} export"
+            );
+        }
+    }
+
+    #[test]
+    fn params_subspace_viajan_y_fractal_ignora_export() {
+        let params = params_subspace_export();
+        let (v1, v2) = subspace_vectores_desde_params(&params);
+        assert_eq!(v1, [2.0, 0.5]);
+        assert_eq!(v2, [-0.5, 2.0]);
+        let base = render_subspace_frames_with_params(96, 72, &BTreeMap::new());
+        let custom = render_subspace_frames_with_params(96, 72, &params);
+        assert_eq!(base.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert_eq!(custom.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert!(
+            base[40].pixels != custom[40].pixels,
+            "params subspace deben viajar al preview/export"
+        );
+        // Degenerados (colineales) → defaults honestos, sin NaN.
+        let malos = BTreeMap::from([
+            ("v1x".to_string(), 1.0),
+            ("v1y".to_string(), 1.0),
+            ("v2x".to_string(), 2.0),
+            ("v2y".to_string(), 2.0),
+        ]);
+        assert_eq!(
+            subspace_vectores_desde_params(&malos),
+            ([2.0, 1.0], [-1.0, 2.0])
+        );
+        // Fractal ignora params: mismo set con y sin mapa.
+        let f0 = render_fractal_frames_with_params(96, 72, &BTreeMap::new());
+        let f1 = render_fractal_frames_with_params(96, 72, &params);
+        assert_eq!(f0.len(), NATIVE_ANIM_FRAME_COUNT);
+        assert!(
+            f0.iter().zip(f1.iter()).all(|(a, b)| a.pixels == b.pixels),
+            "fractal debe ignorar params"
+        );
+    }
+
+    #[test]
+    fn export_gif_juguete_ambas_export() {
+        for plantilla in ["subspace", "fractal"] {
+            let set = juguete_set_export(plantilla);
+            assert_eq!(set.len(), 4, "{plantilla}");
+            check_gif_export_budget(&set).expect("preflight juguete");
+            assert_eq!(gif_autofit_size(96, 72, 4), None, "{plantilla}: autofit");
+            let bytes = encode_frames_to_gif_bytes(&set, 8).expect("gif juguete");
+            assert!(!bytes.is_empty(), "{plantilla}");
+            assert_eq!(&bytes[..6], b"GIF89a", "{plantilla}");
+            // A archivo: atómico, sin parcial.
+            let dir = juguete_dir_export(plantilla);
+            let destino = dir.join("clip.gif");
+            let publicado =
+                export_frames_to_gif_file(&set, &destino, 8).expect("gif archivo juguete");
+            assert_eq!(publicado, destino);
+            assert!(!std::fs::read(&destino).expect("leer gif").is_empty());
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn export_png_juguete_ambas_export() {
+        for plantilla in ["subspace", "fractal"] {
+            let set = juguete_set_export(plantilla);
+            let base = juguete_dir_export(plantilla);
+            let destino = base.join("seq");
+            export_frames_to_png_dir(&set, &destino).expect("png juguete");
+            for indice in 0..4 {
+                let frame = destino.join(format!("frame_{indice:04}.png"));
+                assert!(frame.is_file(), "{plantilla}: falta {frame:?}");
+                assert!(!std::fs::read(&frame).expect("leer png").is_empty());
+            }
+            std::fs::remove_dir_all(&base).ok();
+        }
+    }
+
+    #[test]
+    fn export_mp4_honesto_ambas_export() {
+        for plantilla in ["subspace", "fractal"] {
+            let set = juguete_set_export(plantilla);
+            let dir = juguete_dir_export(plantilla);
+            let destino = dir.join("clip.mp4");
+            match export_frames_to_mp4_file(&set, &destino, 8, 500, VideoQuality::Media) {
+                Ok(publicado) => {
+                    assert_eq!(publicado, destino);
+                    assert!(!std::fs::read(&destino).expect("leer mp4").is_empty());
+                }
+                Err(Mp4ExportError::FfmpegMissing) | Err(Mp4ExportError::FfmpegFailed(_)) => {
+                    assert!(!destino.exists(), "{plantilla}: error honesto sin parcial");
+                }
+                Err(otro) => panic!("{plantilla}: mp4 inesperado: {otro}"),
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn export_webm_honesto_ambas_export() {
+        for plantilla in ["subspace", "fractal"] {
+            let set = juguete_set_export(plantilla);
+            let dir = juguete_dir_export(plantilla);
+            let destino = dir.join("clip.webm");
+            match export_frames_to_webm_file(&set, &destino, 8, 500, VideoQuality::Media) {
+                Ok(publicado) => {
+                    assert_eq!(publicado, destino);
+                    assert!(!std::fs::read(&destino).expect("leer webm").is_empty());
+                }
+                Err(WebmExportError::FfmpegMissing) | Err(WebmExportError::FfmpegFailed(_)) => {
+                    assert!(!destino.exists(), "{plantilla}: error honesto sin parcial");
+                }
+                Err(otro) => panic!("{plantilla}: webm inesperado: {otro}"),
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn autofit_y_budgets_aplican_ambas_export() {
+        // El canónico del chat excede 8M px totales → autofit con aviso.
+        let plan = gif_autofit_size(480, 360, NATIVE_ANIM_FRAME_COUNT).expect("autofit");
+        assert!(plan.0 < 480 && plan.1 < 360, "plan = {plan:?}");
+        assert_eq!(plan.0 % 2, 0);
+        assert_eq!(plan.1 % 2, 0);
+        // Errores honestos del preflight (mismo para las 13).
+        assert!(matches!(
+            check_gif_export_budget(&[]),
+            Err(GifExportError::EmptyFrames)
+        ));
+        let uno = juguete_set_export("subspace")
+            .into_iter()
+            .next()
+            .expect("frame");
+        let muchos = vec![uno; 65];
+        assert!(matches!(
+            check_gif_export_budget(&muchos),
+            Err(GifExportError::TooManyFrames { got: 65 })
+        ));
+        // Encaje al chat: nunca amplía, dims pares.
+        assert_eq!(encajar_anim_a_chat(96, 72), (96, 72));
+        let (ancho, alto) = encajar_anim_a_chat(960, 720);
+        assert!(ancho <= 480 && alto <= 360, "{ancho}x{alto}");
+        assert_eq!(ancho % 2, 0);
+        assert_eq!(alto % 2, 0);
+    }
+}

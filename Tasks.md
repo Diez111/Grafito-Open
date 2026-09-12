@@ -87,3 +87,10 @@
 - [x] F11.3 Frente C3 en §14.1: Piper sidecar honesto (`voice.rs:39-56`), captions sidecar/quemadas (`:102-134`), short 4 beats (`guion.rs:933` + tool `:1828-1907`), Write por trazo (`player.rs:469,482`), Rectangle/Ellipse/Arc (`scene.rs:533-542`), run_command allowlist+undo (`agent.rs:2381-2432`), solid_measure_3d (`:2705-2720`), LaTeX offline (`grafito-tex` + `draw_math :10649-10820`), long-form streaming
 - [x] F11.4 Crates: 18 members en `Cargo.toml` (tex incluido) + root; 19 dirs en `crates/` (release-tests no listado) — §8/§13 actualizados
 - [x] F11.5 AGENTS.md: conteos sincerados (18 members/19 dirs, grupos 5/8/18, panel 300..520, tamaños app medidos hoy); `docs/production.md` no existe, nada que sync
+
+## F12 — Sync 13 plantillas docs↔código 2026-09-12 — DONE (cerebro-audit, targets exclusivos, sin código prod)
+- [x] F12.1 i18n `media.title.*` 12→14: `subspace` ("Span lineal"/"Linear span"/"Span linear") + `fractal` ("Fractal de Koch"/"Koch fractal"/"Fractal de Koch") ES+EN+PT; `MSG_COUNT` 185→187, `MEDIA_TITLE_KEYS`/`media_title_msg` 14, overlay PT 187/187 (100%, `pt_coverage_media` pineado)
+- [x] F12.2 `titulo_curado` app: `titulo_curado_localized` sigue con literales propios para subspace/fractal (`assistant.rs:1515-1523`, comentario "hasta que el frente i18n registre"); catálogo queda listo para migrarlas — NO tocado (fuera de scope)
+- [x] F12.3 Gate anti-vacío: `t()` jamás vacío (fallback clave visible) + `pt_coverage_media` exige PT por cada `media.*`/`anim.*` + `helper_prefixes_resolve_all_keys` pineea 14 sufijos ES/EN no vacíos
+- [x] F12.4 Schemas 13↔13↔13: `protocol.rs::CANONICAL_TEMPLATES` ↔ `anim_native.rs::NATIVE_TEMPLATES` ↔ `anim_ui.rs::PLANTILLAS_COMBO` (verificado, sin cambios); docs `architecture.md` §7 11→13 + fila §13; bench `native_rgba` 11→13 (`subspace`/`fractal`); `native_frames` no pinea plantillas (nada)
+- [x] F12.5 Gates: `cargo fmt -p`, clippy `-D warnings` 0 en crates tocados, tests verdes
