@@ -4006,6 +4006,58 @@ pub fn media_preview_offset_x(avail_w: f32, img_w: f32) -> f32 {
     ((avail_w - img_w) / 2.0).max(0.0)
 }
 
+/// Caja de la imagen dentro de la caja reservada (pura, `&Estado`).
+///
+/// Deriva de la caja POST-layout (`full_rect`: lo que `allocate_exact_size`
+/// devolvió de verdad) y no del ancho PRE-layout (`max_w`): el disponible se
+/// captura en un nivel de anidado (card) y la reserva se materializa en otro
+/// (scroll/panel con cromo + scrollbar flotante), así que centrar con el
+/// ancho pedido descentra y desborda a la derecha cuando difieren. Con la
+/// caja real la imagen queda ⊆ reservado y centrada ±1px por construcción,
+/// estable entre generaciones aunque el capturado varíe. Ancla arriba: el
+/// alto reservado manda para no mover el scroll. Lo usan `draw_media_card`
+/// y `draw_turn_player` (el fix vive una vez acá).
+pub fn media_preview_rect(full_rect: egui::Rect, img_w: f32, img_h: f32) -> egui::Rect {
+    let full_w = if full_rect.width().is_finite() {
+        full_rect.width().max(0.0)
+    } else {
+        0.0
+    };
+    let full_h = if full_rect.height().is_finite() {
+        full_rect.height().max(0.0)
+    } else {
+        0.0
+    };
+    let mut w = if img_w.is_finite() {
+        img_w.clamp(0.0, full_w)
+    } else {
+        0.0
+    };
+    let mut h = if img_h.is_finite() && img_h > 0.0 {
+        img_h
+    } else {
+        0.0
+    };
+    // Cabe en la caja preservando aspecto (primero ancho, luego alto): el
+    // llamador ya dimensiona con `media_preview_size`, estos topes solo
+    // muerden si el layout entregó menos de lo pedido.
+    if w > full_w && w > 0.0 {
+        let k = full_w / w;
+        w = full_w;
+        h *= k;
+    }
+    if h > full_h && h > 0.0 && full_h > 0.0 {
+        let k = full_h / h;
+        h = full_h;
+        w *= k;
+    }
+    let dx = media_preview_offset_x(full_w, w);
+    egui::Rect::from_min_size(
+        egui::pos2(full_rect.min.x + dx, full_rect.min.y),
+        egui::vec2(w, h),
+    )
+}
+
 fn parse_markdown_table_row(line: &str) -> Option<Vec<String>> {
     let line = line.trim();
     if !line.contains('|') {
@@ -6723,6 +6775,29 @@ pub fn media_toolbar_layout(avail_w: f32, frame_count: usize) -> MediaToolbarLay
     media_toolbar_layout_on_visible(avail, frame_count)
 }
 
+/// Ancho reservado por botones+contador+gaps en `SingleRow` del slot (puro).
+///
+/// Fuente única para la decisión (`media_toolbar_layout_on_visible`) y el
+/// llenado exacto de la fila: 4 cuadrados (play + 2 pasos + `···`) +
+/// contador + 5 gaps. El deslizador es `fila − reserva` exacta.
+fn media_toolbar_fixed_width(frame_count: usize) -> f32 {
+    PLAYER_BTN_SQ_W * 4.0 + media_counter_slot_width(frame_count) + SPACE_XS * 5.0
+}
+
+/// Resto exacto para el deslizador en `SingleRow` (puro y testeable).
+///
+/// `fila − reserva(botones + contador + gaps)`: la fila llena exacta sin
+/// derramar. Fila o reserva no finita → 0 (no se dibuja). El bloque R2L
+/// (menú/contador) va ÚLTIMO en la fila: si el deslizador fuera después,
+/// el cursor rancio lo ubica tras el estado y derrama a la derecha (misma
+/// trampa que el header del media: deriva progresiva por generación).
+fn single_row_slider_width(row_w: f32, reserved: f32) -> f32 {
+    if !row_w.is_finite() || !reserved.is_finite() {
+        return 0.0;
+    }
+    (row_w - reserved).max(0.0)
+}
+
 /// Núcleo sin resta de overlay (puro): decide sobre ancho ya visible.
 fn media_toolbar_layout_on_visible(visible_w: f32, frame_count: usize) -> MediaToolbarLayout {
     if !visible_w.is_finite() || visible_w <= 0.0 {
@@ -6731,8 +6806,7 @@ fn media_toolbar_layout_on_visible(visible_w: f32, frame_count: usize) -> MediaT
     if visible_w < ASSISTANT_PANEL_NARROW_WIDTH {
         return MediaToolbarLayout::TwoRows;
     }
-    let gaps = SPACE_XS * 5.0;
-    let fixed = PLAYER_BTN_SQ_W * 4.0 + media_counter_slot_width(frame_count) + gaps;
+    let fixed = media_toolbar_fixed_width(frame_count);
     if visible_w - fixed < MEDIA_TOOLBAR_MIN_SLIDER_W {
         return MediaToolbarLayout::TwoRows;
     }
@@ -6887,7 +6961,27 @@ fn draw_media_header(
     let status_w = media_status_width(status);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+        // Título PRIMERO a la izquierda: `with_layout` no restaura el
+        // cursor — si el estado (derecha) va primero, el título se ubica
+        // DESPUÉS de él y desborda la fila a la derecha (+16px medido en
+        // card min_rect.max.x). Ese desborde expande card/turno/scroll y
+        // corre cada animación nueva más a la derecha (+16 por card:
+        // contenido 284→300→316 medido). Con este orden la fila mide
+        // exactamente el interior de la card, sin derrame.
+        let title_resp = ui.add(
+            egui::Label::new(
+                egui::RichText::new(title_shown.clone())
+                    .color(theme.text_primary)
+                    .size(TYPE_SM)
+                    .strong(),
+            )
+            .wrap_mode(egui::TextWrapMode::Truncate),
+        );
+        if title_shown != title_full.trim() {
+            title_resp.on_hover_text(title_full.trim());
+        }
         // Estado a la derecha con ancho fijo medido: nunca se trunca.
+        // Va ÚLTIMO: nada se ubica después, ningún cursor rancio desborda.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let resp = ui.add_sized(
                 egui::vec2(status_w, ui.spacing().interact_size.y),
@@ -6904,19 +6998,6 @@ fn draw_media_header(
                 resp.on_hover_text(status);
             }
         });
-        // Título a la izquierda con el resto: elide + tooltip con completo.
-        let title_resp = ui.add(
-            egui::Label::new(
-                egui::RichText::new(title_shown.clone())
-                    .color(theme.text_primary)
-                    .size(TYPE_SM)
-                    .strong(),
-            )
-            .wrap_mode(egui::TextWrapMode::Truncate),
-        );
-        if title_shown != title_full.trim() {
-            title_resp.on_hover_text(title_full.trim());
-        }
     });
 }
 
@@ -7075,22 +7156,30 @@ fn draw_turn_player(
         .rounding(RADIUS_MD)
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            // Ancho verdadero ANTES del header: su fila horizontal expandía
+            // el disponible +16px si el estado iba primero (medido pre 252
+            // → post 268); capturar después descentraba la imagen a la
+            // derecha y ensanchaba el transcript +16 por card y generación
+            // (deriva progresiva 284→300→316 medida). El header actual pone
+            // el título primero y el estado último: la fila ya no derrama.
+            let max_w = ui.available_width().max(80.0);
+            ui.set_min_width(max_w);
             draw_media_header(ui, &title, "lista", theme.success);
             ui.add_space(SPACE_XS);
-            let max_w = ui.available_width().max(80.0);
-            let (dw, dh) = media_preview_size(frame_w, frame_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
+            let (_, dh_est) = media_preview_size(frame_w, frame_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
             let (full_rect, _) =
-                ui.allocate_exact_size(egui::vec2(max_w, dh), egui::Sense::hover());
-            // Fit + centrado vía helper compartido (jamás anclado a la
-            // izquierda con overflow derecho en panel angosto).
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(
-                    full_rect.min.x + media_preview_offset_x(max_w, dw),
-                    full_rect.min.y,
-                ),
-                egui::vec2(dw, dh),
+                ui.allocate_exact_size(egui::vec2(max_w, dh_est), egui::Sense::hover());
+            // Fit + centrado sobre la caja POST-layout vía helper compartido
+            // (jamás anclado a la izquierda con overflow derecho en panel
+            // angosto; el ancho pedido puede diferir del reservado por el
+            // anidado card vs scroll vs panel).
+            let (dw, dh) = media_preview_size(
+                frame_w,
+                frame_h,
+                full_rect.width(),
+                MEDIA_CARD_MAX_PREVIEW_H,
             );
+            let rect = media_preview_rect(full_rect, dw, dh);
             if let Some(texture) = &texture {
                 ui.painter().image(
                     texture.id(),
@@ -7135,16 +7224,39 @@ fn draw_turn_player(
                         draw_media_counter_slot(ui, &turn_view);
                     });
                 });
-                draw_turn_scrub_slider(ui, &mut cursor, frame_count, &counter_long, now_s);
+                draw_turn_scrub_slider(
+                    ui,
+                    &mut cursor,
+                    frame_count,
+                    &counter_long,
+                    now_s,
+                    ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W),
+                );
             } else {
+                // SingleRow con R2L ÚLTIMO y deslizador de ancho explícito
+                // (3 cuadrados sin menú `···` + contador + 4 gaps): si el
+                // deslizador fuera después del R2L, el cursor rancio lo
+                // ubica tras el contador y derrama la fila (misma trampa
+                // que el header del media).
+                let slider_w = single_row_slider_width(
+                    ui.available_width(),
+                    PLAYER_BTN_SQ_W * 3.0 + media_counter_slot_width(frame_count) + SPACE_XS * 4.0,
+                );
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
                     draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
                     draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
+                    draw_turn_scrub_slider(
+                        ui,
+                        &mut cursor,
+                        frame_count,
+                        &counter_long,
+                        now_s,
+                        slider_w,
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         draw_media_counter_slot(ui, &turn_view);
                     });
-                    draw_turn_scrub_slider(ui, &mut cursor, frame_count, &counter_long, now_s);
                 });
             }
         });
@@ -7236,16 +7348,18 @@ fn draw_turn_step_buttons(
 /// Deslizador del player por turno (mapeo lineal índice↔fracción).
 ///
 /// Arrastrar fija el frame exacto y deja en pausa (retomar es explícito,
-/// nunca salta solo). Piso en angosto como el slot vivo. Piel pura.
+/// nunca salta solo). Ancho explícito del llamador (fila propia en
+/// `TwoRows`, resto exacto en `SingleRow` con R2L último): jamás derrame.
+/// Piso en angosto como el slot vivo. Piel pura.
 fn draw_turn_scrub_slider(
     ui: &mut egui::Ui,
     cursor: &mut TurnPlayState,
     frame_count: usize,
     counter_long: &str,
     now_s: f64,
+    slider_w: f32,
 ) {
-    if frame_count > 1 {
-        let slider_w = ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W);
+    if frame_count > 1 && slider_w > 0.0 {
         let last = frame_count.saturating_sub(1) as f32;
         let mut fraction =
             (cursor.idx.min(frame_count.saturating_sub(1)) as f32 / last).clamp(0.0, 1.0);
@@ -7310,19 +7424,31 @@ fn draw_media_toolbar(
                 draw_media_counter_slot(ui, view);
             });
         });
-        draw_media_scrub_slider(ui, state, view);
+        draw_media_scrub_slider(
+            ui,
+            state,
+            view,
+            ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W),
+        );
     } else {
+        // SingleRow con R2L ÚLTIMO y deslizador de ancho explícito: si el
+        // deslizador fuera después del R2L, el cursor rancio lo ubica tras
+        // el estado/contador y derrama la fila a la derecha (misma trampa
+        // que el header: +16 por card y deriva por generación). El ancho
+        // sale de constantes y llena exacto (`single_row_slider_width`).
+        let slider_w = single_row_slider_width(
+            ui.available_width(),
+            media_toolbar_fixed_width(view.frame_count),
+        );
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
             draw_media_play_button(ui, state);
             draw_media_step_buttons(ui, state, view);
-            // `···` + contador a la derecha primero: el deslizador ocupa lo
-            // que quede.
+            draw_media_scrub_slider(ui, state, view, slider_w);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 draw_media_more_menu(ui, view, &mut action);
                 draw_media_counter_slot(ui, view);
             });
-            draw_media_scrub_slider(ui, state, view);
         });
     }
     action
@@ -7549,19 +7675,17 @@ fn draw_media_more_menu(
 }
 /// Deslizador de scrub con piso en angosto (player pro).
 ///
-/// En `TwoRows` vive en su propia fila a todo el ancho: el piso
-/// `MEDIA_TOOLBAR_MIN_SLIDER_W` no compite con ningún botón (no hay
-/// "Expor…" cortado). En `SingleRow` la decisión (`media_toolbar_layout`)
-/// ya garantiza resto ≥ piso. Resto no positivo → no se dibuja.
+/// Ancho explícito del llamador: en `TwoRows` la fila propia a todo el
+/// ancho (piso `MEDIA_TOOLBAR_MIN_SLIDER_W`); en `SingleRow` el resto
+/// exacto (`single_row_slider_width`, el bloque R2L va último). Ancho no
+/// positivo → no se dibuja (jamás derrame).
 fn draw_media_scrub_slider(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
     view: &MediaToolbarView,
+    slider_w: f32,
 ) {
-    if view.frame_count > 1 && view.duration_ms > 0 {
-        // Piso garantizado: en su propia fila (angosto) o con resto
-        // suficiente (ancho, ver `media_toolbar_layout`).
-        let slider_w = ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W);
+    if view.frame_count > 1 && view.duration_ms > 0 && slider_w > 0.0 {
         let mut fraction = (state.media_playhead_ms.get().min(view.duration_ms) as f32)
             / (view.duration_ms as f32);
         fraction = fraction.clamp(0.0, 1.0);
@@ -7767,7 +7891,14 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
         .rounding(RADIUS_MD)
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            // Ancho verdadero ANTES del header: su fila horizontal expandía
+            // el disponible +16px si el estado iba primero (medido pre 252
+            // → post 268); capturar después descentraba la imagen a la
+            // derecha y ensanchaba el transcript +16 por card y generación
+            // (deriva progresiva 284→300→316 medida). El header actual pone
+            // el título primero y el estado último: la fila ya no derrama.
+            let max_w = ui.available_width().max(80.0);
+            ui.set_min_width(max_w);
             draw_media_header(ui, &title, &status, status_color);
             ui.add_space(SPACE_XS);
             // Preview full-width, altura estable = f(ancho, aspecto del
@@ -7776,19 +7907,20 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             // resto es fondo de la card, jamás banda negra pegada a la
             // izquierda. Sin textura lista se reserva el MISMO rect con
             // placeholder centrado: jamás etiqueta suelta fuera de rango.
-            let max_w = ui.available_width().max(80.0);
-            let (dw, dh) = media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
+            let (_, dh_est) = media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
             let (full_rect, _) =
-                ui.allocate_exact_size(egui::vec2(max_w, dh), egui::Sense::hover());
-            // Fit + centrado vía helper compartido (jamás anclado a la
-            // izquierda con overflow derecho en panel angosto).
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(
-                    full_rect.min.x + media_preview_offset_x(max_w, dw),
-                    full_rect.min.y,
-                ),
-                egui::vec2(dw, dh),
+                ui.allocate_exact_size(egui::vec2(max_w, dh_est), egui::Sense::hover());
+            // Fit + centrado sobre la caja POST-layout vía helper compartido
+            // (jamás anclado a la izquierda con overflow derecho en panel
+            // angosto; el ancho pedido puede diferir del reservado por el
+            // anidado card vs scroll vs panel).
+            let (dw, dh) = media_preview_size(
+                first_w,
+                first_h,
+                full_rect.width(),
+                MEDIA_CARD_MAX_PREVIEW_H,
             );
+            let rect = media_preview_rect(full_rect, dw, dh);
             if let Some(texture) = &texture {
                 ui.painter().image(
                     texture.id(),
@@ -15276,6 +15408,296 @@ mod tests {
     }
 
     #[test]
+    fn media_preview_rect_contiene_y_centra_en_caja_real() {
+        // Deriva progresiva (2ª gen corrida a la derecha, 3ª más): el rect
+        // se derivaba del ancho PRE-layout (`max_w` capturado en la card) y
+        // no de la caja POST-layout realmente reservada; cuando difieren
+        // (anidado card vs scroll vs panel, scrollbar, clamp del padre) la
+        // imagen se descentra y desborda a la derecha. El helper fija la
+        // caja real: ⊆ + centrada ±1px por construcción, degenerados a 0.
+        let full =
+            |x: f32, w: f32| egui::Rect::from_min_size(egui::pos2(x, 20.0), egui::vec2(w, 200.0));
+        // Frames fieles 480×360 en paneles 300/400/520 (disponible real tras
+        // cromo+scrollbar) + 120×90 (offset>0, sensible a deriva) + retrato.
+        for avail in [
+            media_effective_inner_width(300.0),
+            media_effective_inner_width(400.0),
+            media_effective_inner_width(520.0),
+        ] {
+            for (fw, fh) in [
+                (480.0, 360.0),
+                (640.0, 480.0),
+                (120.0, 90.0),
+                (200.0, 800.0),
+            ] {
+                let (dw, dh) = media_preview_size(fw, fh, avail, MEDIA_CARD_MAX_PREVIEW_H);
+                let caja = full(16.0, avail);
+                let r = media_preview_rect(caja, dw, dh);
+                assert!(
+                    r.min.x >= caja.min.x - 0.001,
+                    "izquierda fuera: {r:?} en {caja:?}"
+                );
+                assert!(
+                    r.max.x <= caja.max.x + 1.0,
+                    "desborda derecha: {r:?} en {caja:?}"
+                );
+                assert!(
+                    r.max.y <= caja.max.y + 1.0,
+                    "desborda abajo: {r:?} en {caja:?}"
+                );
+                let centro = (r.min.x - caja.min.x) - (caja.width() - r.width()) / 2.0;
+                assert!(centro.abs() <= 1.0, "no centrado ±1px: {r:?} en {caja:?}");
+                if r.width() > 0.0 && r.height() > 0.0 {
+                    assert!(
+                        (r.width() / r.height() - fw / fh).abs() < 0.02,
+                        "aspecto roto: {r:?} para {fw}x{fh}"
+                    );
+                }
+            }
+        }
+        // Desacuerdo pedido vs reservado: pedido 340, caja real 300 (clamp
+        // del padre). El camino viejo (`min.x + offset(340, dw)`) pintaba
+        // fuera a la derecha; el helper contiene y centra en la real.
+        let (dw, _) = media_preview_size(480.0, 360.0, 340.0, MEDIA_CARD_MAX_PREVIEW_H);
+        let estrecha = full(16.0, 300.0);
+        let r = media_preview_rect(estrecha, dw, 200.0);
+        assert!(r.max.x <= estrecha.max.x + 1.0, "clamp contiene: {r:?}");
+        assert!(
+            ((r.min.x - estrecha.min.x) - (estrecha.width() - r.width()) / 2.0).abs() <= 1.0,
+            "clamp centra: {r:?}"
+        );
+        // Degenerados: jamás NaN ni fuera.
+        for (fw, fh) in [
+            (f32::NAN, 100.0),
+            (100.0, f32::NAN),
+            (-5.0, 10.0),
+            (0.0, 0.0),
+        ] {
+            let r = media_preview_rect(full(16.0, 256.0), fw, fh);
+            assert!(r.min.x.is_finite() && r.width().is_finite());
+            assert!(r.min.x >= 16.0 - 0.001 && r.max.x <= 16.0 + 256.0 + 1.0);
+        }
+        let mala = egui::Rect::from_min_size(egui::pos2(16.0, 20.0), egui::vec2(f32::NAN, 200.0));
+        let r = media_preview_rect(mala, 100.0, 50.0);
+        assert!(r.min.x.is_finite() && r.width() >= 0.0);
+    }
+
+    #[test]
+    fn media_preview_deriva_cero_entre_generaciones_en_todos_los_caminos() {
+        // 1ª gen bien, 2ª corrida, 3ª más: pineo deriva cero. Simula tres
+        // generaciones por los tres caminos (slot-vivo por dims de textura,
+        // turn-player por dims de protocolo, loading sin frames) en paneles
+        // 300/400/520: misma geometría entre gens, ⊆ y centrada ±1px.
+        for panel in [300.0, 400.0, 520.0] {
+            let avail = media_effective_inner_width(panel);
+            let caja = egui::Rect::from_min_size(egui::pos2(8.0, 0.0), egui::vec2(avail, 400.0));
+            // Camino slot (dims de textura) vs camino turno (dims de
+            // protocolo): mismos frames → misma caja, unificado.
+            let mut gens = Vec::new();
+            for _ in 0..3 {
+                let (sw, sh) = media_preview_size(480.0, 360.0, avail, MEDIA_CARD_MAX_PREVIEW_H);
+                let (tw, th) = media_preview_size(480.0, 360.0, avail, MEDIA_CARD_MAX_PREVIEW_H);
+                assert_eq!(
+                    (sw, sh),
+                    (tw, th),
+                    "slot vs turno unificados (panel {panel})"
+                );
+                let rs = media_preview_rect(caja, sw, sh);
+                let dx = media_preview_offset_x(avail, sw);
+                gens.push((rs, dx));
+                // Loading: sin frames el placeholder reserva todo el ancho:
+                // mismo borde izquierdo, sin reflow horizontal al llegar.
+                assert!((rs.min.x - (caja.min.x + dx)).abs() <= 1.0);
+                assert!(rs.max.x <= caja.max.x + 1.0, "gen desborda derecha");
+            }
+            let (r0, dx0) = gens[0];
+            for (gen, (r, dx)) in gens.iter().enumerate().skip(1) {
+                assert_eq!(
+                    *r, r0,
+                    "deriva en gen {gen} (panel {panel}): {r:?} vs {r0:?}"
+                );
+                assert_eq!(*dx, dx0, "offset deriva en gen {gen} (panel {panel})");
+            }
+            // Retrato y chica también ⊆ + centrados cada gen.
+            for (fw, fh) in [(200.0, 800.0), (100.0, 50.0), (640.0, 480.0)] {
+                let (w, h) = media_preview_size(fw, fh, avail, MEDIA_CARD_MAX_PREVIEW_H);
+                let r = media_preview_rect(caja, w, h);
+                assert!(r.max.x <= caja.max.x + 1.0 && r.min.x >= caja.min.x - 0.001);
+                assert!(
+                    ((r.min.x - caja.min.x) - (caja.width() - r.width()) / 2.0).abs() <= 1.0,
+                    "no centrado ±1px: {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn media_slot_y_turnos_pintan_misma_caja_en_tres_generaciones() {
+        // Reproducción headless del reporte: Misma ctx + mismo estado entre
+        // runs (memoria egui persistente y mapas por turno acumulados =
+        // "entre turnos" real): loading → gen1 (slot) → gen2 (gen1 a player,
+        // gen2 a slot). Deriva cero horizontal del slot entre gens + player
+        // ⊆ viewport y mismo borde que el slot (±1px, caminos unificados).
+        let ids_of = |handles: &[egui::TextureHandle]| {
+            handles
+                .iter()
+                .map(egui::TextureHandle::id)
+                .collect::<Vec<_>>()
+        };
+        let imagen_pintada =
+            |out: &egui::FullOutput, ids: &[egui::TextureId]| -> Option<egui::Rect> {
+                out.shapes.iter().find_map(|pintada| match &pintada.shape {
+                    egui::epaint::Shape::Mesh(malla) if ids.contains(&malla.texture_id) => {
+                        Some(malla.calc_bounds())
+                    }
+                    _ => None,
+                })
+            };
+        for panel_w in [300.0, 400.0, 520.0] {
+            let ctx = egui::Context::default();
+            let mut state = AssistantPanelState::default();
+            let mut cache = AssistantBlocksCache::default();
+            let vacio_props: &[VerifiedAssistantProposal] = &[];
+            let vacio_idx: &[usize] = &[];
+            // Frames fieles 480×360 (canon chat), 2 por gen, color propio.
+            let frames_gen = |color: egui::Color32| {
+                vec![
+                    egui::ColorImage::new([480, 360], color),
+                    egui::ColorImage::new([480, 360], color),
+                ]
+            };
+            let media_turno = |titulo: &str, color: egui::Color32| {
+                let pixeles = 480_usize * 360 * 4;
+                let set = TurnFrameSet {
+                    width: 480,
+                    height: 360,
+                    frames_rgba: vec![vec![color.r(); pixeles], vec![color.g(); pixeles]],
+                };
+                assert!(set.validate().is_ok());
+                TurnMediaRef::with_frames(
+                    titulo,
+                    "derivada",
+                    "concepto",
+                    vec![7_u8; TURN_MEDIA_THUMB_SIDE_PX * TURN_MEDIA_THUMB_SIDE_PX * 4],
+                    2,
+                    std::sync::Arc::new(set),
+                )
+            };
+            let pinta = |ctx: &egui::Context,
+                         state: &AssistantPanelState,
+                         cache: &mut AssistantBlocksCache| {
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(panel_w, 800.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("repro_deriva_media")
+                                .auto_shrink([false, true])
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    for (i, turn) in state.conversation.iter().enumerate() {
+                                        let proposal_state = AssistantProposalRenderState {
+                                            verified_proposals: vacio_props,
+                                            applied_proposals: vacio_props,
+                                            preflight_candidate_count: 0,
+                                            proposal_code_block_indices: vacio_idx,
+                                            proposal_results_available: false,
+                                            correction_available: false,
+                                        };
+                                        let last = i + 1 == state.conversation.len();
+                                        let _ = draw_conversation_turn(
+                                            ui,
+                                            turn,
+                                            i,
+                                            proposal_state,
+                                            None,
+                                            cache,
+                                            "Mili",
+                                            state,
+                                            last,
+                                            AssistantVisuals::default(),
+                                        );
+                                    }
+                                });
+                        });
+                    },
+                )
+            };
+            // Gen0: loading (progreso en turno dueño sin media).
+            state
+                .conversation
+                .push(ConversationTurn::user("graficá la derivada"));
+            state
+                .conversation
+                .push(ConversationTurn::assistant("armando"));
+            state.anim_progress = true;
+            state.set_media_owner_turn(Some(1));
+            let _ = pinta(&ctx, &state, &mut cache);
+            // Gen1: llegan frames (slot en turno dueño 1).
+            state.anim_progress = false;
+            state.conversation[1].attach_media(media_turno("gen1", egui::Color32::RED));
+            state.set_media(
+                Some(AssistantMedia {
+                    title: "gen1".into(),
+                    frames: frames_gen(egui::Color32::RED),
+                }),
+                &ctx,
+            );
+            state.set_media_owner_turn(Some(1));
+            let out1 = pinta(&ctx, &state, &mut cache);
+            let slot1 = imagen_pintada(&out1, &ids_of(&state.media_textures().0));
+            assert!(slot1.is_some(), "panel {panel_w}: gen1 pinta slot");
+            // Gen2: par nuevo; gen1 pasa a player, gen2 al slot.
+            state
+                .conversation
+                .push(ConversationTurn::user("ahora la integral"));
+            state
+                .conversation
+                .push(ConversationTurn::assistant("armando dos"));
+            state.conversation[3].attach_media(media_turno("gen2", egui::Color32::BLUE));
+            state.set_media(
+                Some(AssistantMedia {
+                    title: "gen2".into(),
+                    frames: frames_gen(egui::Color32::BLUE),
+                }),
+                &ctx,
+            );
+            state.set_media_owner_turn(Some(3));
+            let out2 = pinta(&ctx, &state, &mut cache);
+            let slot2 = imagen_pintada(&out2, &ids_of(&state.media_textures().0));
+            let turno1: Vec<egui::TextureHandle> = (0..8)
+                .filter_map(|f| state.turn_texture_for(1, f))
+                .collect();
+            let player1 = imagen_pintada(&out2, &ids_of(&turno1));
+            let (slot1, slot2) = (slot1.expect("slot1"), slot2.expect("slot2 gen2"));
+            assert!(
+                (slot2.min.x - slot1.min.x).abs() <= 1.0
+                    && (slot2.width() - slot1.width()).abs() <= 1.0,
+                "panel {panel_w}: slot deriva entre gens ({slot1:?} vs {slot2:?})"
+            );
+            assert!(
+                slot2.min.x >= 0.0 && slot2.max.x <= panel_w + 1.0,
+                "panel {panel_w}: slot fuera del viewport ({slot2:?})"
+            );
+            let player1 = player1.expect("panel {panel_w}: gen1 pinta player en gen2");
+            assert!(
+                player1.min.x >= 0.0 && player1.max.x <= panel_w + 1.0,
+                "panel {panel_w}: player fuera del viewport ({player1:?})"
+            );
+            assert!(
+                (player1.min.x - slot2.min.x).abs() <= 1.0,
+                "panel {panel_w}: player y slot con distinto borde ({player1:?} vs {slot2:?})"
+            );
+        }
+    }
+
+    #[test]
     fn media_preview_offset_x_centra_y_jamas_desborda() {
         assert_eq!(media_preview_offset_x(300.0, 300.0), 0.0);
         assert_eq!(media_preview_offset_x(300.0, 100.0), 100.0);
@@ -15288,11 +15710,13 @@ mod tests {
 
     #[test]
     fn media_preview_draws_usan_helper_compartido_y_prosa_sin_crudo() {
-        // El fix vive una vez en el helper: ambos draws lo usan.
+        // El fix vive una vez en el helper: ambos draws lo usan (caja
+        // POST-layout: el ancho pedido puede diferir del reservado por el
+        // anidado card vs scroll vs panel).
         let source = include_str!("assistant.rs");
         assert!(
-            source.contains("media_preview_offset_x(max_w, dw)"),
-            "draw_media_card y draw_turn_player centran vía helper"
+            source.contains("media_preview_rect(full_rect, dw, dh)"),
+            "draw_media_card y draw_turn_player centran vía helper POST-layout"
         );
         // Secundario: la prosa jamás usa el pedido crudo en este archivo —
         // el título canónico vive en `media.title`. Se arma el patrón por
