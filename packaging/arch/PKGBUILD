@@ -14,7 +14,7 @@ depends=(
   'desktop-file-utils'
   'ffmpeg'
 )
-makedepends=('cargo' 'git')
+makedepends=('cargo' 'git' 'rustup')
 optdepends=(
   'piper-tts: narración por voz en videos'
   'texlive-basic: export LaTeX de alta fidelidad (pdflatex)'
@@ -24,20 +24,20 @@ sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
+  export RUSTUP_TOOLCHAIN=1.92  # MSRV del proyecto (stable trae lints nuevos que rompen el build)
   cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
 }
 
 build() {
   cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
+  export RUSTUP_TOOLCHAIN=1.92  # MSRV del proyecto (stable trae lints nuevos que rompen el build)
   export CARGO_NET_OFFLINE=true
   cargo build --release --locked -p grafito-app
 }
 
 check() {
   cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
+  export RUSTUP_TOOLCHAIN=1.92  # MSRV del proyecto (stable trae lints nuevos que rompen el build)
   export CARGO_NET_OFFLINE=true
   cargo test --release --locked -p grafito-app --lib anim
 }
