@@ -59,7 +59,10 @@ pub fn parse_series_mode(raw: &str) -> Result<SeriesKind, String> {
 ///
 /// Reglas idénticas al resto de la planilla: letras + fila ≥ 1 sin cero
 /// inicial, validación canónica por reconstrucción y cotas 400×400.
-fn parse_series_cell(cell: &str) -> Option<(usize, usize)> {
+///
+/// Pública para que la Piel navegue la hoja ("Ir a") con el mismo parser
+/// del cerebro: una sola definición de "celda válida".
+pub fn parse_cell_reference(cell: &str) -> Option<(usize, usize)> {
     let trimmed = cell
         .trim()
         .trim_matches(|c| c == '"' || c == '\'')
@@ -130,7 +133,10 @@ pub fn parse_series_range(range: &str) -> Result<Vec<(usize, usize)>, String> {
                 .filter(|part| !part.is_empty())
                 .collect();
             if parts.len() == 2 {
-                match (parse_series_cell(parts[0]), parse_series_cell(parts[1])) {
+                match (
+                    parse_cell_reference(parts[0]),
+                    parse_cell_reference(parts[1]),
+                ) {
                     (Some(a), Some(b)) => Some((a, b)),
                     _ => None,
                 }
@@ -138,7 +144,7 @@ pub fn parse_series_range(range: &str) -> Result<Vec<(usize, usize)>, String> {
                 None
             }
         })
-        .or_else(|| parse_series_cell(trimmed).map(|cell| (cell, cell)));
+        .or_else(|| parse_cell_reference(trimmed).map(|cell| (cell, cell)));
     let Some(((r1, c1), (r2, c2))) = endpoints else {
         return Err(format!("FillSeries: rango inválido '{trimmed}'"));
     };
@@ -301,9 +307,9 @@ mod tests {
 
     #[test]
     fn invalid_cells_rejected() {
-        assert!(parse_series_cell("A0").is_none());
-        assert!(parse_series_cell("1A").is_none());
-        assert!(parse_series_cell("").is_none());
+        assert!(parse_cell_reference("A0").is_none());
+        assert!(parse_cell_reference("1A").is_none());
+        assert!(parse_cell_reference("").is_none());
         assert!(parse_series_range("").is_err());
         assert!(parse_series_range("A1:B").is_err());
     }

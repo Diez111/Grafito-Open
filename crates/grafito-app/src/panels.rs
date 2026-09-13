@@ -124,8 +124,18 @@ fn panel_primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 
 /// Ancho responsive de celda de hoja: reparte el ancho entre 6 columnas.
-fn sheet_cell_width(available_width: f32) -> f32 {
-    ((available_width - 28.0) / SHEET_VIEW_COLS as f32).clamp(52.0, 96.0)
+/// Columnas visibles de la hoja según el ancho real del contenido (3..=6).
+/// La grilla entra siempre sin scroll horizontal: celdas ≥ 44 px mientras
+/// el ancho lo permita (táctil WCAG 2.5.8), mínimo duro 36 px.
+fn visible_sheet_cols(available_width: f32) -> usize {
+    (((available_width - 32.0) / 48.0).floor() as i64).clamp(3, SHEET_VIEW_COLS as i64) as usize
+}
+
+/// Ancho de celda para `cols` columnas visibles: descuenta rótulo de fila,
+/// espaciado y margen del marco; nunca desborda el ancho disponible.
+fn sheet_cell_width_for(available_width: f32, cols: usize) -> f32 {
+    let cols = cols.max(1) as f32;
+    ((available_width - 32.0 - cols * SPACE_XS) / cols).clamp(36.0, 96.0)
 }
 
 /// Botón pill centrado de ancho completo para la sección Exportación
@@ -3059,7 +3069,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         "Distribución",
                         "Densidad y acumulada en vivo.",
                         |ui| {
-                            draw_probability_section(ui, ctx);
+                            draw_probability_section(ui, ctx, app);
                         },
                     );
                     ui.add_space(SPACE_SM);
@@ -6597,11 +6607,103 @@ const PROB_DISTS: [(u8, &str, &str); 9] = [
     ),
 ];
 
+/// ¿Distribución discreta? Rótulo honesto junto a la ayuda del selector.
+fn prob_distribution_is_discrete(dist: u8) -> bool {
+    matches!(dist, 1 | 2 | 6)
+}
+
+/// Momentos analíticos (media, varianza) de la distribución seleccionada.
+/// `None` = no definido con esos parámetros (p. ej. t con gl ≤ 2, F con
+/// gl2 ≤ 4, Uniforme con a ≥ b): el panel muestra `—` sin inventar.
+fn distribution_moments(state: &ProbabilityPanelState) -> (Option<f64>, Option<f64>) {
+    match state.dist {
+        0 => (Some(state.mu), Some(state.sigma * state.sigma)),
+        1 => {
+            let n = state.n.round().max(0.0);
+            let p = state.p;
+            (Some(n * p), Some(n * p * (1.0 - p)))
+        }
+        2 => (Some(state.lambda), Some(state.lambda)),
+        3 => {
+            let df = state.df;
+            let mean = (df > 1.0).then_some(0.0);
+            let variance = (df > 2.0).then_some(df / (df - 2.0));
+            (mean, variance)
+        }
+        4 => (Some(state.df), Some(2.0 * state.df)),
+        5 => {
+            let (df1, df2) = (state.df1, state.df2);
+            let mean = (df2 > 2.0).then_some(df2 / (df2 - 2.0));
+            let variance = (df2 > 4.0).then_some(
+                2.0 * df2 * df2 * (df1 + df2 - 2.0) / (df1 * (df2 - 2.0).powi(2) * (df2 - 4.0)),
+            );
+            (mean, variance)
+        }
+        6 => {
+            let p = state.p;
+            (Some((1.0 - p) / p), Some((1.0 - p) / (p * p)))
+        }
+        7 => {
+            let (a, b) = (state.ua, state.ub);
+            if a < b {
+                (Some((a + b) / 2.0), Some((b - a).powi(2) / 12.0))
+            } else {
+                (None, None)
+            }
+        }
+        _ => {
+            let lambda = state.lambda;
+            (Some(1.0 / lambda), Some(1.0 / (lambda * lambda)))
+        }
+    }
+}
+
+/// Comando real para llevar el caso actual a la entrada. Solo donde el
+/// motor tiene comando forward (Normal/Binomial/Poisson/ChiSquared/Uniform/
+/// Exponential): t, F y Geométrica devuelven `None` — nunca botón fantasma.
+fn prob_case_command(state: &ProbabilityPanelState) -> Option<String> {
+    Some(match state.dist {
+        0 => format!("Normal[{}, {}, {}]", state.mu, state.sigma, state.x),
+        1 => {
+            let n = state.n.round().max(1.0);
+            let k = state.k.round().clamp(0.0, n);
+            format!("Binomial[{n}, {}, {k}]", state.p)
+        }
+        2 => {
+            let k = state.k.round().max(0.0);
+            format!("Poisson[{}, {k}]", state.lambda)
+        }
+        4 => format!("ChiSquared[{}, {}]", state.df, state.x),
+        7 => format!("Uniform[{}, {}, {}]", state.ua, state.ub, state.x),
+        8 => format!("Exponential[{}, {}]", state.lambda, state.x),
+        _ => return None,
+    })
+}
+
+/// Comando real de cuantil (Inverse*) para la entrada; `None` donde el
+/// motor no lo expone (Binomial, Poisson, Geométrica).
+fn prob_quantile_command(state: &ProbabilityPanelState) -> Option<String> {
+    let p = state.p_inv;
+    Some(match state.dist {
+        0 => format!("InverseNormal[{p}, {}, {}]", state.mu, state.sigma),
+        3 => format!("InverseT[{p}, {}]", state.df),
+        4 => format!("InverseChiSquared[{p}, {}]", state.df),
+        5 => format!("InverseF[{p}, {}, {}]", state.df1, state.df2),
+        7 => format!("InverseUniform[{p}, {}, {}]", state.ua, state.ub),
+        8 => format!("InverseExponential[{p}, {}]", state.lambda),
+        _ => return None,
+    })
+}
+
 /// Sección Probabilidad: Normal / Binomial / Poisson / t-Student / χ² / F
 /// / Geométrica / Uniforme / Exponencial con PDF/CDF honestos. Llamada desde el panel Vista (alcanzable) — sin
 /// botones mudos: el selector cambia la distribución y cada parámetro
 /// recalcula en vivo.
-pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
+pub(crate) fn draw_probability_section(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    app: &mut GrafitoApp,
+) {
     let id = egui::Id::new("gc_probability_state");
     let mut state: ProbabilityPanelState = ctx
         .data_mut(|data| data.get_temp::<ProbabilityPanelState>(id))
@@ -6625,7 +6727,16 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         });
     if let Some((_, _, tip)) = PROB_DISTS.iter().find(|(index, _, _)| *index == state.dist) {
-        ui.label(egui::RichText::new(*tip).color(txt_dim).size(TYPE_XS));
+        let kind = if prob_distribution_is_discrete(state.dist) {
+            "Discreta"
+        } else {
+            "Continua"
+        };
+        ui.label(
+            egui::RichText::new(format!("{kind} · {tip}"))
+                .color(txt_dim)
+                .size(TYPE_XS),
+        );
     }
     ui.add_space(SPACE_XS);
 
@@ -6863,7 +6974,71 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                     .size(TYPE_XS),
             );
             ui.add_space(SPACE_XS);
+            // Momentos analíticos (media/varianza) con `—` honesto si no
+            // están definidos para estos parámetros.
+            ui.label(
+                egui::RichText::new("Momentos")
+                    .color(hdr_col)
+                    .size(TYPE_SM)
+                    .strong(),
+            );
+            ui.add_space(SPACE_XS);
+            let (mean, variance) = distribution_moments(&state);
+            egui::Grid::new("gc_prob_moments")
+                .num_columns(2)
+                .striped(true)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    let mut row = |key: &str, value: Option<f64>| {
+                        ui.label(egui::RichText::new(key).color(txt_dim).size(TYPE_SM));
+                        match value {
+                            Some(v) => {
+                                ui.label(
+                                    egui::RichText::new(format!("{v:.6}"))
+                                        .color(txt_col)
+                                        .size(TYPE_SM)
+                                        .strong(),
+                                );
+                            }
+                            None => {
+                                ui.label(
+                                    egui::RichText::new("—")
+                                        .color(txt_dim)
+                                        .size(TYPE_SM)
+                                        .strong(),
+                                )
+                                .on_hover_text("No definido con estos parámetros");
+                            }
+                        }
+                        ui.end_row();
+                    };
+                    row("Media", mean);
+                    row("Varianza", variance);
+                });
+            ui.add_space(SPACE_XS);
             draw_probability_plot(ui, &state, accent, txt_dim);
+            // Puente al motor: solo donde existe comando real (cero fantasma).
+            if let Some(command) = prob_case_command(&state) {
+                ui.add_space(SPACE_XS);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), PANEL_BUTTON_H],
+                        egui::Button::new(
+                            egui::RichText::new("Usar caso en la entrada").size(TYPE_SM),
+                        )
+                        .rounding(RADIUS_PILL),
+                    )
+                    .on_hover_text("Pone el comando del caso actual en la entrada")
+                    .clicked()
+                {
+                    app.input_text = command;
+                    app.command_input_focus_requested = true;
+                    app.cas_result =
+                        "Caso de probabilidad listo en la entrada (Enter para evaluar)."
+                            .to_string();
+                    ctx.request_repaint();
+                }
+            }
         }
         Err(error) => {
             ui.label(
@@ -6876,7 +7051,7 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
     ui.add_space(SPACE_XS);
     ui.label(
         egui::RichText::new("Cuantil (inversa)")
-            .color(txt_dim)
+            .color(hdr_col)
             .size(TYPE_SM)
             .strong(),
     );
@@ -6976,6 +7151,26 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
                 .color(txt_dim)
                 .size(TYPE_XS),
             );
+            if let Some(command) = prob_quantile_command(&state) {
+                ui.add_space(SPACE_XS);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), PANEL_BUTTON_H],
+                        egui::Button::new(
+                            egui::RichText::new("Usar cuantil en la entrada").size(TYPE_SM),
+                        )
+                        .rounding(RADIUS_PILL),
+                    )
+                    .on_hover_text("Pone el Inverse* del cuantil actual en la entrada")
+                    .clicked()
+                {
+                    app.input_text = command;
+                    app.command_input_focus_requested = true;
+                    app.cas_result =
+                        "Cuantil listo en la entrada (Enter para evaluar).".to_string();
+                    ctx.request_repaint();
+                }
+            }
         }
         Err(error) => {
             ui.label(
@@ -6991,11 +7186,13 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
 /// Ventana visible de la hoja vinculada (F3b). La hoja real vive en el
 /// documento (`Document::MAX_SPREADSHEET_ROWS/COLS = 400×400`,
 /// `MAX_SPREADSHEET_RECOMPUTE_CELLS = 10_000`): la UI solo muestra esta
-/// ventana navegable de 6×8 por rendimiento (`SheetViewState` guarda el
-/// origen); el resto se alcanza con las flechas, con `Ir a A1` o con
-/// `FillColumn`/`FillCells`/`FillRow` y la serie de abajo (`FillSeries`,
-/// mismo motor). No es infinita como Excel a propósito: el presupuesto
-/// 400×400/10k del core mantiene la recomputación acotada y honesta.
+/// ventana navegable de hasta 6×8 por rendimiento (`SheetViewState` guarda
+/// el origen; las columnas visibles bajan a 3..=4 si el panel es angosto
+/// para que nunca se corten); el resto se alcanza con las flechas, con
+/// `Ir a A1` o con `FillColumn`/`FillCells`/`FillRow` y la serie de abajo
+/// (`FillSeries`, mismo motor). No es infinita como Excel a propósito: el
+/// presupuesto 400×400/10k del core mantiene la recomputación acotada y
+/// honesta.
 const SHEET_VIEW_COLS: usize = 6;
 const SHEET_VIEW_ROWS: usize = 8;
 
@@ -7019,8 +7216,9 @@ impl SheetViewState {
         }
     }
 
-    /// Etiqueta del rango visible (`C3:H10`).
-    fn window_label(&self) -> String {
+    /// Etiqueta del rango visible (`C3:H10`) para `cols` columnas visibles.
+    fn window_label(&self, cols: usize) -> String {
+        let cols = cols.clamp(1, SHEET_VIEW_COLS);
         let first = format!(
             "{}{}",
             sheet_col_label(self.origin_col),
@@ -7028,10 +7226,20 @@ impl SheetViewState {
         );
         let last = format!(
             "{}{}",
-            sheet_col_label(self.origin_col + SHEET_VIEW_COLS - 1),
+            sheet_col_label(self.origin_col + cols - 1),
             self.origin_row + SHEET_VIEW_ROWS
         );
         format!("{first}:{last}")
+    }
+
+    /// Mueve la ventana para que la celda `(row, col)` quede en la página
+    /// visible (esquina superior izquierda del bloque de `cols`×8), con el
+    /// mismo clamp que la navegación con flechas.
+    fn focus_cell(&mut self, row: usize, col: usize, cols: usize) {
+        let cols = cols.clamp(1, SHEET_VIEW_COLS);
+        self.origin_row = (row / SHEET_VIEW_ROWS) * SHEET_VIEW_ROWS;
+        self.origin_col = (col / cols) * cols;
+        *self = self.clamped();
     }
 }
 
@@ -7046,6 +7254,9 @@ struct SheetEditState {
     /// Celda en edición (muestra la fórmula). El resto muestra el valor
     /// calculado, como una planilla real: clic para editar, Enter para confirmar.
     editing: Option<(usize, usize)>,
+    /// Texto del salto directo ("Ir a C3") y su último error honesto.
+    goto: String,
+    goto_error: Option<String>,
 }
 
 fn sheet_col_label(col: usize) -> String {
@@ -7081,97 +7292,103 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         .clamped();
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
     let mut dirty: Vec<(usize, usize, String)> = Vec::new();
+    // Grilla adaptativa: las columnas visibles dependen del ancho real del
+    // contenido (252 px en el drawer compacto → 4 columnas; panel ancho → 6).
+    // Nunca hay columnas cortadas fuera del marco.
+    let cols = visible_sheet_cols(ui.available_width());
 
-    // Navegación de la ventana: la hoja es 400×400, la grilla muestra 6×8.
-    // En panel angosto se apila (etiqueta arriba, flechas abajo) para no comprimir.
+    // Navegación de la ventana: la hoja es 400×400, la grilla muestra
+    // `cols`×8. Toolbar única (misma estructura en todo ancho): rango visible
+    // a la izquierda, flechas agrupadas y reset a la derecha, sin textos que
+    // envuelvan. La fila "Ir a" salta directo a una celda con el parser
+    // del cerebro (`parse_cell_reference`).
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-    if panel_is_narrow(ui) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         ui.label(
-            egui::RichText::new(view.window_label())
+            egui::RichText::new(view.window_label(cols))
                 .color(hdr_col)
                 .size(TYPE_XS)
-                .strong(),
+                .strong()
+                .monospace(),
         )
-        .on_hover_text("Esquina visible de la hoja de 400×400. Movete con las flechas.");
-        ui.horizontal(|ui| {
+        .on_hover_text("Esquina visible de la hoja de 400×400. Movete con las flechas o «Ir a».");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = SPACE_XS;
-            for (glyph, tip) in [
-                ("◀", "Retroceder 6 columnas"),
-                ("▶", "Avanzar 6 columnas"),
-                ("▲", "Subir 8 filas"),
-                ("▼", "Bajar 8 filas"),
-                ("A1", "Volver al origen A1"),
-            ] {
-                if ui
-                    .add_sized([32.0, 24.0], egui::Button::new(glyph))
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    match glyph {
-                        "◀" => view.origin_col = view.origin_col.saturating_sub(SHEET_VIEW_COLS),
-                        "▶" => {
-                            view.origin_col = view.origin_col.saturating_add(SHEET_VIEW_COLS);
-                            view = view.clamped();
-                        }
-                        "▲" => view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS),
-                        "▼" => {
-                            view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
-                            view = view.clamped();
-                        }
-                        _ => view = SheetViewState::default(),
-                    }
-                }
+            let nav = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
+                ui.add_sized(
+                    [26.0, SHEET_CELL_H],
+                    egui::Button::new(egui::RichText::new(glyph).size(TYPE_XS)),
+                )
+                .on_hover_text(tip)
+                .clicked()
+            };
+            if nav(ui, "A1", "Volver al origen A1") {
+                view = SheetViewState::default();
+            }
+            if nav(ui, "▼", "Bajar 8 filas") {
+                view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
+                view = view.clamped();
+            }
+            if nav(ui, "▲", "Subir 8 filas") {
+                view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS);
+            }
+            let step = cols.max(1);
+            if nav(ui, "▶", "Avanzar columnas") {
+                view.origin_col = view.origin_col.saturating_add(step);
+                view = view.clamped();
+            }
+            if nav(ui, "◀", "Retroceder columnas") {
+                view.origin_col = view.origin_col.saturating_sub(step);
             }
         });
-    } else {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(view.window_label())
-                    .color(hdr_col)
-                    .size(TYPE_XS)
-                    .strong(),
+    });
+    // Ir a celda: "C3" mueve la ventana para que la celda quede visible.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        ui.label(
+            egui::RichText::new("Ir a")
+                .color(txt_dim)
+                .size(TYPE_XS)
+                .strong(),
+        );
+        let field_w = (ui.available_width() - 60.0).max(64.0);
+        let resp = ui.add_sized(
+            [field_w, SHEET_CELL_H],
+            egui::TextEdit::singleline(&mut edit.goto)
+                .hint_text("C3")
+                .font(egui::FontId::monospace(TYPE_XS)),
+        );
+        let pressed = ui
+            .add_sized(
+                [52.0, SHEET_CELL_H],
+                egui::Button::new(egui::RichText::new("Ir").size(TYPE_XS)).rounding(RADIUS_PILL),
             )
-            .on_hover_text("Esquina visible de la hoja de 400×400. Movete con las flechas.");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("A1")
-                    .on_hover_text("Volver al origen A1")
-                    .clicked()
-                {
-                    view = SheetViewState::default();
+            .clicked()
+            || (resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+        if resp.changed() {
+            edit.goto_error = None;
+        }
+        if pressed && !edit.goto.trim().is_empty() {
+            match spreadsheet_series::parse_cell_reference(&edit.goto) {
+                Some((row, col)) => {
+                    view.focus_cell(row, col, cols);
+                    edit.goto.clear();
+                    edit.goto_error = None;
                 }
-                if ui
-                    .small_button("▼")
-                    .on_hover_text("Bajar 8 filas")
-                    .clicked()
-                {
-                    view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
-                    view = view.clamped();
+                None => {
+                    edit.goto_error = Some(format!("«{}» no es una celda válida", edit.goto.trim()))
                 }
-                if ui
-                    .small_button("▲")
-                    .on_hover_text("Subir 8 filas")
-                    .clicked()
-                {
-                    view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS);
-                }
-                if ui
-                    .small_button("▶")
-                    .on_hover_text("Avanzar 6 columnas")
-                    .clicked()
-                {
-                    view.origin_col = view.origin_col.saturating_add(SHEET_VIEW_COLS);
-                    view = view.clamped();
-                }
-                if ui
-                    .small_button("◀")
-                    .on_hover_text("Retroceder 6 columnas")
-                    .clicked()
-                {
-                    view.origin_col = view.origin_col.saturating_sub(SHEET_VIEW_COLS);
-                }
-            });
-        });
+            }
+        }
+    });
+    if let Some(error) = &edit.goto_error {
+        ui.label(
+            egui::RichText::new(error)
+                .color(current_theme(&ctx).danger)
+                .size(TYPE_XS),
+        );
     }
     ui.add_space(SPACE_SM);
 
@@ -7187,18 +7404,18 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         .rounding(egui::Rounding::same(RADIUS_SM))
         .inner_margin(egui::Margin::same(SPACE_XS))
         .show(ui, |ui| {
-            let cell_w = sheet_cell_width(ui.available_width());
+            let cell_w = sheet_cell_width_for(ui.available_width(), cols);
             egui::ScrollArea::horizontal()
                 .id_salt("gc_sheet_editable_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     egui::Grid::new("gc_sheet_editable")
-                        .num_columns(SHEET_VIEW_COLS + 1)
+                        .num_columns(cols + 1)
                         .striped(true)
                         .spacing([SPACE_XS, 2.0])
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new("").size(TYPE_XS));
-                            for col in 0..SHEET_VIEW_COLS {
+                            for col in 0..cols {
                                 ui.label(
                                     egui::RichText::new(sheet_col_label(view.origin_col + col))
                                         .color(hdr_col)
@@ -7214,7 +7431,7 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                                         .color(txt_dim)
                                         .size(TYPE_XS),
                                 );
-                                for view_col in 0..SHEET_VIEW_COLS {
+                                for view_col in 0..cols {
                                     let col = view.origin_col + view_col;
                                     let source = app.document.get_spreadsheet_cell(row, col);
                                     let draft = edit
@@ -7392,7 +7609,7 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.label(
         egui::RichText::new(format!(
             "Ventana {} de 400×400 · 10 000 celdas vivas. `—` = fórmula sin resolver.",
-            view.window_label()
+            view.window_label(cols)
         ))
         .color(txt_dim)
         .size(TYPE_XS),
@@ -7708,7 +7925,7 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
         |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Clic en una celda para editar su fórmula · Enter confirma · ventana navegable de 6×8 sobre la hoja de 400×400.",
+                    "Clic en una celda para editar su fórmula · Enter confirma · ventana navegable de hasta 6×8 sobre la hoja de 400×400 (las columnas visibles se adaptan al ancho).",
                 )
                 .color(txt_dim)
                 .size(TYPE_XS),
@@ -7929,12 +8146,12 @@ mod gc_piel_tests {
         chi_squared_quantile_honest, f_distribution_cdf, f_distribution_pdf, f_quantile_honest,
         geometric_cdf, geometric_pmf, geometric_quantile_honest, normal_cdf, normal_pdf,
         normal_quantile_honest, parse_series_scalar, parse_slider_prompt, plot_df_or_fuera_de_cota,
-        poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_cell_width, sheet_col_label,
+        poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_cell_width_for, sheet_col_label,
         student_t_cdf, student_t_pdf, student_t_quantile_honest, uniform_cdf, uniform_pdf,
-        uniform_quantile_honest, wc_exact_integral_command_text, wc_riemann_command_text,
-        wc_study_command_text, wc_taylor_command_text, wc_taylor_remainder_line, MAX_BINOMIAL_N,
-        MAX_GEOMETRIC_K, MAX_PANEL_DF, PANEL_BUTTON_H, PANEL_NARROW_WIDTH, SHEET_CELL_H,
-        SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
+        uniform_quantile_honest, visible_sheet_cols, wc_exact_integral_command_text,
+        wc_riemann_command_text, wc_study_command_text, wc_taylor_command_text,
+        wc_taylor_remainder_line, MAX_BINOMIAL_N, MAX_GEOMETRIC_K, MAX_PANEL_DF, PANEL_BUTTON_H,
+        PANEL_NARROW_WIDTH, SHEET_CELL_H, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
     use grafito_ui::tokens::HIT_TARGET_MIN;
@@ -7948,13 +8165,27 @@ mod gc_piel_tests {
         assert!(SHEET_CELL_H >= HIT_TARGET_MIN);
         // Panel angosto: el umbral vive entre el mínimo (180) y el default (260).
         assert!(PANEL_NARROW_WIDTH > 180.0 && PANEL_NARROW_WIDTH < 340.0);
-        // Celdas: 6 columnas repartidas, clamp 52..=96.
-        assert_eq!(sheet_cell_width(240.0), 52.0);
-        assert_eq!(sheet_cell_width(10_000.0), 96.0);
-        let mid = sheet_cell_width(400.0);
-        assert!(mid > 52.0 && mid < 96.0, "ancho medio = {mid}");
-        // Monótono creciente.
-        assert!(sheet_cell_width(300.0) <= sheet_cell_width(500.0));
+        // Celdas: 6 columnas repartidas, clamp 36..=96. A 300-360 px de panel
+        // las 6 columnas + rótulo + espaciado entran sin scroll horizontal.
+        // Grilla adaptativa: columnas visibles según ancho real (3..=6) y
+        // ancho de celda que nunca desborda el contenido disponible.
+        assert_eq!(visible_sheet_cols(252.0), 4); // drawer compacto medido
+        assert_eq!(visible_sheet_cols(336.0), 6); // panel ancho
+        assert_eq!(visible_sheet_cols(120.0), 3); // piso
+        assert_eq!(visible_sheet_cols(10_000.0), SHEET_VIEW_COLS);
+        for width in [252.0_f32, 300.0, 336.0, 180.0] {
+            let cols = visible_sheet_cols(width);
+            let cell_w = sheet_cell_width_for(width, cols);
+            assert!(
+                (36.0..=96.0).contains(&cell_w),
+                "ancho de celda fuera de rango: {cell_w}"
+            );
+            let total = 32.0 + cols as f32 * (cell_w + grafito_ui::tokens::SPACE_XS);
+            assert!(
+                total <= width + 0.5,
+                "ancho {width}: grilla {total} desborda con {cols} columnas"
+            );
+        }
     }
 
     #[test]
@@ -8386,5 +8617,79 @@ mod coverage_sweep_panels_pure {
         assert!(series_preview("ZZZ", "1", "1", false).is_none());
         assert!(series_preview("A1:A3", "mal", "1", false).is_none());
         assert!(series_preview("A1:A3", "1", "inf", false).is_none());
+    }
+    #[test]
+    fn barrido_prob_momentos_y_puente_motor() {
+        let mut state = ProbabilityPanelState::default();
+        // Normal por defecto: media 0, varianza 1.
+        assert_eq!(distribution_moments(&state), (Some(0.0), Some(1.0)));
+        assert_eq!(
+            prob_case_command(&state).as_deref(),
+            Some("Normal[0, 1, 0]")
+        );
+        assert_eq!(
+            prob_quantile_command(&state).as_deref(),
+            Some("InverseNormal[0.95, 0, 1]")
+        );
+        // t con gl=1: media y varianza no definidas (— honesto).
+        state.dist = 3;
+        state.df = 1.0;
+        assert_eq!(distribution_moments(&state), (None, None));
+        assert!(
+            prob_case_command(&state).is_none(),
+            "t aún sin comando forward"
+        );
+        state.df = 10.0;
+        assert_eq!(distribution_moments(&state), (Some(0.0), Some(1.25)));
+        assert_eq!(
+            prob_quantile_command(&state).as_deref(),
+            Some("InverseT[0.95, 10]")
+        );
+        // F con gl2≤4: media/varianza no definidas según el gl.
+        state.dist = 5;
+        state.df1 = 5.0;
+        state.df2 = 4.0;
+        assert_eq!(distribution_moments(&state), (Some(2.0), None));
+        // Geométrica: sin comando forward ni cuantil Inverse.
+        state.dist = 6;
+        state.p = 0.5;
+        assert_eq!(distribution_moments(&state), (Some(1.0), Some(2.0)));
+        assert!(prob_case_command(&state).is_none());
+        assert!(prob_quantile_command(&state).is_none());
+        // Uniforme con a ≥ b: nada definido, ningún valor inventado.
+        state.dist = 7;
+        state.ua = 2.0;
+        state.ub = 1.0;
+        assert_eq!(distribution_moments(&state), (None, None));
+        // Discretas vs continuas (rótulo del selector).
+        assert!(prob_distribution_is_discrete(1));
+        assert!(prob_distribution_is_discrete(2));
+        assert!(prob_distribution_is_discrete(6));
+        assert!(!prob_distribution_is_discrete(0));
+        assert!(!prob_distribution_is_discrete(5));
+        // "Ir a": el parser del cerebro acepta la celda canónica.
+        assert_eq!(
+            grafito_core::symbolic::series::parse_cell_reference("C3"),
+            Some((2, 2))
+        );
+        assert!(grafito_core::symbolic::series::parse_cell_reference("ZZZ").is_none());
+        // Navegación por celda: K10 con 4 columnas visibles abre I9:L16.
+        let mut view = SheetViewState::default();
+        view.focus_cell(9, 10, 4);
+        assert_eq!(view.origin_row, 8);
+        assert_eq!(view.origin_col, 8);
+        assert_eq!(view.window_label(4), "I9:L16");
+        // Con 6 columnas visibles la página cambia (K10 → G9:L16).
+        view.focus_cell(9, 10, 6);
+        assert_eq!(view.origin_col, 6);
+        assert_eq!(view.window_label(6), "G9:L16");
+        // Cota dura del borde de la hoja 400×400 (clamp a la ventana de 6).
+        view.focus_cell(399, 399, 4);
+        assert_eq!(view.origin_row, 392);
+        assert_eq!(view.origin_col, 394);
+        assert_eq!(
+            view.window_label(4),
+            format!("{}393:{}400", sheet_col_label(394), sheet_col_label(397))
+        );
     }
 }
