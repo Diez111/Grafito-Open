@@ -2054,7 +2054,7 @@ pub struct ImplicitSurface3DObj {
     /// (orden de inserción; se expulsa la más vieja). Se ignora en
     /// `Clone`/`PartialEq`/serde.
     #[serde(skip)]
-    pub mesh_slots: RwLock<Vec<(u64, grafito_geometry::TriangleMesh3D)>>,
+    pub mesh_slots: RwLock<Vec<(u64, Arc<grafito_geometry::TriangleMesh3D>)>>,
 }
 
 impl Clone for ImplicitSurface3DObj {
@@ -2194,14 +2194,15 @@ impl ImplicitSurface3DObj {
     pub fn mesh_snapshot(
         &self,
         variables: &BTreeMap<String, f64>,
-    ) -> Result<grafito_geometry::TriangleMesh3D, grafito_geometry::MeshError> {
+    ) -> Result<Arc<grafito_geometry::TriangleMesh3D>, grafito_geometry::MeshError> {
         let key = self.cache_key(variables);
         if let Ok(guard) = self.mesh_slots.read() {
             if let Some((_, mesh)) = guard.iter().find(|(slot_key, _)| *slot_key == key) {
+                // Cache hit: clonar el `Arc` (refcount), no la malla completa.
                 return Ok(mesh.clone());
             }
         }
-        let fresh = self.compute_mesh(variables)?;
+        let fresh = Arc::new(self.compute_mesh(variables)?);
         if let Ok(mut guard) = self.mesh_slots.write() {
             if let Some((_, mesh)) = guard.iter().find(|(slot_key, _)| *slot_key == key) {
                 return Ok(mesh.clone());
@@ -2215,7 +2216,7 @@ impl ImplicitSurface3DObj {
     }
 
     /// Malla más reciente, si ya se computó alguna con éxito.
-    pub fn cached_mesh(&self) -> Option<grafito_geometry::TriangleMesh3D> {
+    pub fn cached_mesh(&self) -> Option<Arc<grafito_geometry::TriangleMesh3D>> {
         self.mesh_slots
             .read()
             .ok()

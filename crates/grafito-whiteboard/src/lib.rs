@@ -120,11 +120,25 @@ pub struct WhiteboardDoc {
     elements: Vec<WhiteboardElement>,
     #[serde(skip)]
     selected: Option<usize>,
+    /// Contador monotónico de mutaciones de contenido (no se serializa).
+    /// Permite detectar cambios de la MISMA instancia sin clonar ni comparar
+    /// los elementos (la ruta de commit de la app lo usa por frame).
+    #[serde(skip)]
+    revision: u64,
 }
 
 impl WhiteboardDoc {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Revisión de contenido: cambia en cada mutación de `elements`.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn len(&self) -> usize {
@@ -137,6 +151,7 @@ impl WhiteboardDoc {
 
     pub fn add(&mut self, element: WhiteboardElement) {
         self.elements.push(element);
+        self.bump_revision();
     }
 
     pub fn elements(&self) -> &[WhiteboardElement] {
@@ -144,11 +159,13 @@ impl WhiteboardDoc {
     }
 
     pub fn elements_mut(&mut self) -> &mut [WhiteboardElement] {
+        self.bump_revision();
         &mut self.elements
     }
 
     #[allow(clippy::manual_map)]
     pub fn element_mut(&mut self, index: usize) -> Option<&mut WhiteboardElement> {
+        self.bump_revision();
         self.elements.get_mut(index)
     }
 
@@ -172,12 +189,14 @@ impl WhiteboardDoc {
         let index = self.select_at(pos, tolerance)?;
         self.elements.remove(index);
         self.selected = None;
+        self.bump_revision();
         Some(index)
     }
 
     pub fn clear(&mut self) {
         self.elements.clear();
         self.selected = None;
+        self.bump_revision();
     }
 
     /// Descripción estructurada compacta del contenido (para análisis con IA).
@@ -366,6 +385,24 @@ mod tests {
         assert_eq!(max, (8.0, 9.0));
         let distance = element.distance_to((6.5, 7.0));
         assert!(distance.is_finite() && distance >= 0.0);
+    }
+
+    #[test]
+    fn revision_tracks_content_mutations_only() {
+        let mut doc = WhiteboardDoc::new();
+        assert_eq!(doc.revision(), 0);
+        doc.add(WhiteboardElement::Arrow {
+            from: (0.0, 0.0),
+            to: (1.0, 1.0),
+        });
+        assert_eq!(doc.revision(), 1);
+        // Seleccionar es estado de UI: no muta contenido.
+        assert_eq!(doc.select_at((0.0, 0.0), 1.0), Some(0));
+        assert_eq!(doc.revision(), 1);
+        assert_eq!(doc.erase_at((0.0, 0.0), 1.0), Some(0));
+        assert_eq!(doc.revision(), 2);
+        doc.clear();
+        assert_eq!(doc.revision(), 3);
     }
 
     #[test]

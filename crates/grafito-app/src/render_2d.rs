@@ -39,6 +39,17 @@ thread_local! {
     /// la expresión. Evita re-parsear `complex_expr` en cada frame (H10).
     static COMPLEX_EXPR_CACHE: RefCell<HashMap<String, Arc<grafito_complex::ComplexExpr>>> =
         RefCell::new(HashMap::new());
+    /// Texturas de domain coloring / heat map keyed por
+    /// (version, objeto, expr, bounds, res, modo). Antes cada frame emitía
+    /// 40k-90k `rect_filled` (4k-90k shapes); ahora una rasterización por
+    /// cambio y un solo `painter.image`.
+    static COMPLEX_GRID_TEXTURES: RefCell<HashMap<u64, egui::TextureHandle>> =
+        RefCell::new(HashMap::new());
+    /// Streamlines RK4 de VectorField2D en world-space, keyed por
+    /// (version, campo, viewport): antes se re-trazaban 25×200×4 evaluaciones
+    /// por frame; ahora solo se proyectan a pantalla.
+    static VECTOR_FIELD_STREAMLINE_CACHE: RefCell<HashMap<u64, VectorFieldStreamlines>> =
+        RefCell::new(HashMap::new());
     /// Última `document.version` en la que se ejecutó `prune_fill_texture_cache`.
     /// Permite saltar el write lock + barrido LRU cuando el documento no cambió.
     static LAST_FILL_PRUNE_DOC_VERSION: RefCell<Option<u64>> = const { RefCell::new(None) };
@@ -46,9 +57,14 @@ thread_local! {
 const FRACTAL_RENDER_CACHE_CAP: usize = 8;
 const PHASE_RENDER_CACHE_CAP: usize = 32;
 const COMPLEX_EXPR_CACHE_CAP: usize = 16;
+const COMPLEX_GRID_TEXTURE_CAP: usize = 16;
+const VECTOR_FIELD_STREAMLINE_CACHE_CAP: usize = 16;
 
 /// Segmentos de retrato de fase cacheados (Arc para cache hits baratos).
 type PhasePortraitSegments = Arc<Vec<(Point2, Point2)>>;
+
+/// Segmentos world-space de streamlines de un campo vectorial.
+type VectorFieldStreamlines = Arc<Vec<(Point2, Point2)>>;
 
 fn fractal_render_cache_key(document_version: u64, fr: &grafito_core::Fractal2DObj) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -646,6 +662,294 @@ fn complex_grid_cpu_resolution(density: usize, quality: grafito_core::RenderQual
     }
 }
 
+/// Key de la textura de un ComplexGrid: cambia con cualquier edición del
+/// documento (el `version` cubre expr/variables) y con bounds/res/modos.
+fn complex_grid_texture_key(
+    document_version: u64,
+    cg: &grafito_core::ComplexGridObj,
+    res: usize,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    document_version.hash(&mut h);
+    cg.id.hash(&mut h);
+    cg.expr.hash(&mut h);
+    cg.render_mode.hash(&mut h);
+    cg.domain_coloring_mode.hash(&mut h);
+    cg.x_min.to_bits().hash(&mut h);
+    cg.x_max.to_bits().hash(&mut h);
+    cg.y_min.to_bits().hash(&mut h);
+    cg.y_max.to_bits().hash(&mut h);
+    res.hash(&mut h);
+    h.finish()
+}
+
+/// Rasteriza el heat map real (modo 2) en una `ColorImage` res×res; fila 0 =
+/// `y_max`. Se cachea como textura: antes emitía res² rects por frame.
+fn complex_grid_heatmap_image(
+    document: &grafito_core::Document,
+    cg: &grafito_core::ComplexGridObj,
+    res: usize,
+) -> Option<egui::ColorImage> {
+    let ast = prepare_function_ast(&cg.expr, &document.variables, &["x", "y"]).ok()?;
+    let dx = (cg.x_max - cg.x_min) / res as f64;
+    let dy = (cg.y_max - cg.y_min) / res as f64;
+    let mut pixels = Vec::with_capacity(res * res);
+    for j in 0..res {
+        let y = cg.y_min + (res - 1 - j) as f64 * dy;
+        for i in 0..res {
+            let x = cg.x_min + i as f64 * dx;
+            let val = ast.eval_2d("x", x, "y", y);
+            if val.is_finite() {
+                let t = (val.atan() / std::f64::consts::FRAC_PI_2).clamp(-1.0, 1.0);
+                let t = (t + 1.0) * 0.5;
+                let (r, g, b) = thermal_colormap(t);
+                pixels.push(Color32::from_rgb(
+                    (r * 255.0) as u8,
+                    (g * 255.0) as u8,
+                    (b * 255.0) as u8,
+                ));
+            } else {
+                pixels.push(Color32::TRANSPARENT);
+            }
+        }
+    }
+    Some(egui::ColorImage {
+        size: [res, res],
+        pixels,
+    })
+}
+
+/// Rasteriza el domain coloring complejo (modo 1) en una `ColorImage` res×res;
+/// fila 0 = `y_max`. Usa el AST cacheado y evalúa una vez por píxel en cache
+/// miss (antes: parse + res² `rect_filled` por frame).
+fn complex_grid_domain_coloring_image(
+    document: &grafito_core::Document,
+    cg: &grafito_core::ComplexGridObj,
+    res: usize,
+) -> Option<egui::ColorImage> {
+    use num_complex::Complex64;
+    let expr = cached_complex_expr(&cg.expr)?;
+    let mut vars: HashMap<String, Complex64> = HashMap::new();
+    for (name, val) in &document.variables {
+        vars.insert(name.clone(), Complex64::new(*val, 0.0));
+    }
+    let base_symbol = document.complex_base_symbol.as_str();
+    vars.insert(base_symbol.to_string(), Complex64::new(0.0, 0.0));
+    let dc_mode = cg.domain_coloring_mode;
+    // Umbral: si |f(z)| < MAG_ZERO se considera cero y se pinta negro.
+    // Evita que arg(~0) dé ruido aleatorio en retratos de fase.
+    const MAG_ZERO: f64 = 1e-6;
+    let dx = (cg.x_max - cg.x_min) / res as f64;
+    let dy = (cg.y_max - cg.y_min) / res as f64;
+    let mut pixels = Vec::with_capacity(res * res);
+    for j in 0..res {
+        let y = cg.y_min + (res - 1 - j) as f64 * dy;
+        for i in 0..res {
+            let x = cg.x_min + i as f64 * dx;
+            if let Some(z) = vars.get_mut(base_symbol) {
+                *z = Complex64::new(x, y);
+            }
+            let color = match expr.eval(&vars) {
+                Ok(fz) if fz.re.is_finite() && fz.im.is_finite() => {
+                    let mag = fz.norm();
+                    if mag < MAG_ZERO {
+                        Color32::BLACK
+                    } else {
+                        let arg = fz.arg();
+                        let hue = (arg + std::f64::consts::PI) / (2.0 * std::f64::consts::PI);
+                        let (lightness, saturation) = match dc_mode {
+                            // 1: Retrato de Fase Puro — lightness=0.5, sat=1
+                            1 => (0.5, 1.0),
+                            // 0/2/3: HSL clásico — lightness varía con módulo
+                            _ => {
+                                let l = (mag.max(1e-10).ln().atan() / std::f64::consts::FRAC_PI_2)
+                                    * 0.5
+                                    + 0.5;
+                                (l.clamp(0.0, 1.0), 0.85)
+                            }
+                        };
+                        let (mut r, mut g, mut b) = hsl_to_rgb(hue, saturation, lightness);
+                        // Overlay de rejillas conformes (modos 2 y 3)
+                        if dc_mode == 2 {
+                            let log_mag = mag.max(1e-5).ln();
+                            let mag_grid = (log_mag * std::f64::consts::PI * 2.0).sin().abs();
+                            let arg_grid = (arg * 10.0).sin().abs();
+                            let shading = 0.5
+                                + 0.5 * mag_grid.max(0.0).powf(0.15) * arg_grid.max(0.0).powf(0.15);
+                            r *= shading;
+                            g *= shading;
+                            b *= shading;
+                        } else if dc_mode == 3 {
+                            let grid_re = (fz.re * std::f64::consts::PI * 2.0).sin().abs();
+                            let grid_im = (fz.im * std::f64::consts::PI * 2.0).sin().abs();
+                            let shading = 0.5
+                                + 0.5 * grid_re.max(0.0).powf(0.15) * grid_im.max(0.0).powf(0.15);
+                            r *= shading;
+                            g *= shading;
+                            b *= shading;
+                        }
+                        Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+                    }
+                }
+                _ => Color32::TRANSPARENT,
+            };
+            pixels.push(color);
+        }
+    }
+    Some(egui::ColorImage {
+        size: [res, res],
+        pixels,
+    })
+}
+
+fn vector_field_streamline_cache_key(
+    document_version: u64,
+    vf: &grafito_core::VectorField2DObj,
+    world_tl: Point2,
+    world_br: Point2,
+    dx: f64,
+    dy: f64,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    document_version.hash(&mut h);
+    vf.id.hash(&mut h);
+    vf.expr_u.hash(&mut h);
+    vf.expr_v.hash(&mut h);
+    world_tl.x.to_bits().hash(&mut h);
+    world_tl.y.to_bits().hash(&mut h);
+    world_br.x.to_bits().hash(&mut h);
+    world_br.y.to_bits().hash(&mut h);
+    dx.to_bits().hash(&mut h);
+    dy.to_bits().hash(&mut h);
+    h.finish()
+}
+
+/// Streamlines RK4 world-space de un campo vectorial, cacheadas por
+/// (version, campo, viewport). Devuelve segmentos listos para proyectar.
+fn cached_vector_field_streamlines(
+    document: &grafito_core::Document,
+    vf: &grafito_core::VectorField2DObj,
+    world_tl: Point2,
+    world_br: Point2,
+    dx: f64,
+    dy: f64,
+) -> VectorFieldStreamlines {
+    let key = vector_field_streamline_cache_key(document.version, vf, world_tl, world_br, dx, dy);
+    if let Some(cached) = VECTOR_FIELD_STREAMLINE_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return cached;
+    }
+    let segments = Arc::new(trace_vector_field_streamlines(
+        document, vf, world_tl, world_br, dx, dy,
+    ));
+    VECTOR_FIELD_STREAMLINE_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= VECTOR_FIELD_STREAMLINE_CACHE_CAP {
+            if let Some(k) = cache.keys().next().copied() {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(key, segments.clone());
+    });
+    segments
+}
+
+fn trace_vector_field_streamlines(
+    document: &grafito_core::Document,
+    vf: &grafito_core::VectorField2DObj,
+    world_tl: Point2,
+    world_br: Point2,
+    dx: f64,
+    dy: f64,
+) -> Vec<(Point2, Point2)> {
+    let sl_steps = 200;
+    let sl_dt = 0.05;
+    let prepared_u = prepare_function_ast(&vf.expr_u, &document.variables, &["x", "y"]).ok();
+    let prepared_v = prepare_function_ast(&vf.expr_v, &document.variables, &["x", "y"]).ok();
+    // Evita `base_environment.clone()` en cada evaluación RK4 usando un vec mutable
+    // con slots fijos para "x" e "y".
+    let mut environment: Vec<(String, f64)> = document
+        .variables
+        .iter()
+        .filter(|(name, _)| name.as_str() != "x" && name.as_str() != "y")
+        .map(|(name, value)| (name.clone(), *value))
+        .collect();
+    environment.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    environment.push(("x".to_string(), 0.0));
+    environment.push(("y".to_string(), 0.0));
+    let x_idx = environment.len() - 2;
+    let y_idx = environment.len() - 1;
+    let mut evaluate_field = |x: f64, y: f64| {
+        environment[x_idx].1 = x;
+        environment[y_idx].1 = y;
+        let u = prepared_u
+            .as_ref()
+            .map(|ast| ast.eval_2d("x", x, "y", y))
+            .filter(|value| value.is_finite())
+            .or_else(|| {
+                grafito_geometry::expr::evaluate(&vf.expr_u, &environment)
+                    .ok()
+                    .filter(|value| value.is_finite())
+            })?;
+        let v = prepared_v
+            .as_ref()
+            .map(|ast| ast.eval_2d("x", x, "y", y))
+            .filter(|value| value.is_finite())
+            .or_else(|| {
+                grafito_geometry::expr::evaluate(&vf.expr_v, &environment)
+                    .ok()
+                    .filter(|value| value.is_finite())
+            })?;
+        Some((u, v))
+    };
+    // Distribute seeds uniformly
+    let seeds_x = 5;
+    let seeds_y = 5;
+    let sx = (world_br.x - world_tl.x) / (seeds_x + 1) as f64;
+    let sy = (world_br.y - world_tl.y) / (seeds_y + 1) as f64;
+    let mut segments = Vec::new();
+    for si in 1..=seeds_x {
+        for sj in 1..=seeds_y {
+            let mut x = world_tl.x + si as f64 * sx;
+            let mut y = world_tl.y + sj as f64 * sy;
+            let mut prev: Option<Point2> = None;
+            for _ in 0..sl_steps {
+                let Some((k1x, k1y)) = evaluate_field(x, y) else {
+                    break;
+                };
+                let half_dt = sl_dt * 0.5;
+                let Some((k2x, k2y)) = evaluate_field(x + half_dt * k1x, y + half_dt * k1y) else {
+                    break;
+                };
+                let Some((k3x, k3y)) = evaluate_field(x + half_dt * k2x, y + half_dt * k2y) else {
+                    break;
+                };
+                let Some((k4x, k4y)) = evaluate_field(x + sl_dt * k3x, y + sl_dt * k3y) else {
+                    break;
+                };
+                x += sl_dt / 6.0 * (k1x + 2.0 * k2x + 2.0 * k3x + k4x);
+                y += sl_dt / 6.0 * (k1y + 2.0 * k2y + 2.0 * k3y + k4y);
+                if x < world_tl.x - dx
+                    || x > world_br.x + dx
+                    || y < world_tl.y - dy
+                    || y > world_br.y + dy
+                {
+                    break;
+                }
+                let current = Point2::new(x, y);
+                if let Some(prev_pos) = prev {
+                    segments.push((prev_pos, current));
+                }
+                prev = Some(current);
+            }
+        }
+    }
+    segments
+}
+
 fn implicit_curve_view_bounds(view: ViewTransform, canvas_rect: Rect) -> (f64, f64, f64, f64) {
     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
     let world_br = view.screen_to_world(glam::Vec2::new(canvas_rect.width(), canvas_rect.height()));
@@ -819,6 +1123,36 @@ mod overlay_layer_tests {
         assert_eq!(
             complex_grid_cpu_resolution(500, grafito_core::RenderQuality::High),
             500
+        );
+    }
+
+    #[test]
+    fn complex_grid_images_cover_res_squared_and_the_texture_key_tracks_edits() {
+        let document = Document::default();
+        let cg = ComplexGridObj::new("z", -1.0, 1.0, -1.0, 1.0);
+        let image = complex_grid_domain_coloring_image(&document, &cg, 8).expect("z parsea");
+        assert_eq!(image.size, [8, 8]);
+        assert_eq!(image.pixels.len(), 64);
+        let heat = complex_grid_heatmap_image(&document, &cg, 4).expect("z evalúa");
+        assert_eq!(heat.size, [4, 4]);
+        assert_eq!(heat.pixels.len(), 16);
+        // La key cambia con versión del documento y resolución (invalidación).
+        let key = complex_grid_texture_key(1, &cg, 8);
+        assert_ne!(key, complex_grid_texture_key(2, &cg, 8));
+        assert_ne!(key, complex_grid_texture_key(1, &cg, 16));
+    }
+
+    #[test]
+    fn vector_field_streamlines_cache_reuses_segments_per_viewport() {
+        let document = Document::new();
+        let vf = VectorField2DObj::new("y", "-x");
+        let tl = Point2::new(-1.0, 1.0);
+        let br = Point2::new(1.0, -1.0);
+        let first = cached_vector_field_streamlines(&document, &vf, tl, br, 0.2, 0.2);
+        let second = cached_vector_field_streamlines(&document, &vf, tl, br, 0.2, 0.2);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "cache hit debe devolver el mismo Arc"
         );
     }
 
@@ -4197,6 +4531,14 @@ impl GrafitoApp {
                 if !overlay_only {
                     if let Some(fill) = fill_color {
                         let fill_rgba = to_color32(fill);
+                        // Con escalas lineales la `y` de pantalla de y=0 es una
+                        // sola: proyectarla una vez en vez de N veces por frame.
+                        let log_scale = view.x_log || view.y_log;
+                        let baseline_y = if log_scale {
+                            None
+                        } else {
+                            function_screen_point(view, canvas_rect, 0.0, 0.0).map(|p| p.y)
+                        };
                         let mut run: Vec<(Pos2, Pos2)> = Vec::new();
                         let flush_run = |run: &mut Vec<(Pos2, Pos2)>| {
                             if run.len() < 2 {
@@ -4218,9 +4560,14 @@ impl GrafitoApp {
                         };
 
                         for ((x, _), curve) in samples.iter().zip(&projected_samples) {
-                            if let (Some(curve), Some(baseline)) =
-                                (curve, function_screen_point(view, canvas_rect, *x, 0.0))
-                            {
+                            let baseline = if log_scale {
+                                function_screen_point(view, canvas_rect, *x, 0.0)
+                            } else {
+                                curve
+                                    .zip(baseline_y)
+                                    .map(|(curve, baseline_y)| Pos2::new(curve.x, baseline_y))
+                            };
+                            if let (Some(curve), Some(baseline)) = (curve, baseline) {
                                 if let Some((prev, _)) = run.last() {
                                     if !should_connect_screen_points(*prev, *curve, canvas_rect) {
                                         flush_run(&mut run);
@@ -4911,97 +5258,24 @@ impl GrafitoApp {
                         }
                     }
                 }
-                // Streamlines: trace from seed points using RK4
-                let sl_steps = 200;
-                let sl_dt = 0.05;
-                let sl_color = Color32::from_rgba_unmultiplied(180, 100, 200, 180);
-                let sl_stroke = Stroke::new(1.2, sl_color);
-                let prepared_u =
-                    prepare_function_ast(&vf.expr_u, &self.document.variables, &["x", "y"]).ok();
-                let prepared_v =
-                    prepare_function_ast(&vf.expr_v, &self.document.variables, &["x", "y"]).ok();
-                // Evita `base_environment.clone()` en cada evaluación RK4 usando un vec mutable
-                // con slots fijos para "x" e "y" (20k clones por frame → 0).
-                let mut environment: Vec<(String, f64)> = self
-                    .document
-                    .variables
-                    .iter()
-                    .filter(|(name, _)| name.as_str() != "x" && name.as_str() != "y")
-                    .map(|(name, value)| (name.clone(), *value))
-                    .collect();
-                environment.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-                environment.push(("x".to_string(), 0.0));
-                environment.push(("y".to_string(), 0.0));
-                let x_idx = environment.len() - 2;
-                let y_idx = environment.len() - 1;
-                let mut evaluate_field = |x: f64, y: f64| {
-                    environment[x_idx].1 = x;
-                    environment[y_idx].1 = y;
-                    let u = prepared_u
-                        .as_ref()
-                        .map(|ast| ast.eval_2d("x", x, "y", y))
-                        .filter(|value| value.is_finite())
-                        .or_else(|| {
-                            grafito_geometry::expr::evaluate(&vf.expr_u, &environment)
-                                .ok()
-                                .filter(|value| value.is_finite())
-                        })?;
-                    let v = prepared_v
-                        .as_ref()
-                        .map(|ast| ast.eval_2d("x", x, "y", y))
-                        .filter(|value| value.is_finite())
-                        .or_else(|| {
-                            grafito_geometry::expr::evaluate(&vf.expr_v, &environment)
-                                .ok()
-                                .filter(|value| value.is_finite())
-                        })?;
-                    Some((u, v))
-                };
-                // Distribute seeds uniformly
-                let seeds_x = 5;
-                let seeds_y = 5;
-                let sx = (world_br.x - world_tl.x) / (seeds_x + 1) as f64;
-                let sy = (world_br.y - world_tl.y) / (seeds_y + 1) as f64;
-                for si in 1..=seeds_x {
-                    for sj in 1..=seeds_y {
-                        let mut x = world_tl.x + si as f64 * sx;
-                        let mut y = world_tl.y + sj as f64 * sy;
-                        let mut prev: Option<Pos2> = None;
-                        for _ in 0..sl_steps {
-                            let Some((k1x, k1y)) = evaluate_field(x, y) else {
-                                break;
-                            };
-                            let half_dt = sl_dt * 0.5;
-                            let Some((k2x, k2y)) =
-                                evaluate_field(x + half_dt * k1x, y + half_dt * k1y)
-                            else {
-                                break;
-                            };
-                            let Some((k3x, k3y)) =
-                                evaluate_field(x + half_dt * k2x, y + half_dt * k2y)
-                            else {
-                                break;
-                            };
-                            let Some((k4x, k4y)) = evaluate_field(x + sl_dt * k3x, y + sl_dt * k3y)
-                            else {
-                                break;
-                            };
-                            x += sl_dt / 6.0 * (k1x + 2.0 * k2x + 2.0 * k3x + k4x);
-                            y += sl_dt / 6.0 * (k1y + 2.0 * k2y + 2.0 * k3y + k4y);
-                            let screen = view.world_to_screen(Point2::new(x, y));
-                            let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                            if x < world_tl.x - dx
-                                || x > world_br.x + dx
-                                || y < world_tl.y - dy
-                                || y > world_br.y + dy
-                            {
-                                break;
-                            }
-                            if let Some(prev_pos) = prev {
-                                painter.line_segment([prev_pos, pos], sl_stroke);
-                            }
-                            prev = Some(pos);
-                        }
+                // Streamlines RK4 cacheadas en world-space por (version,
+                // campo, viewport): por frame solo se proyectan a pantalla
+                // (antes: 25×200×4 evaluaciones por frame).
+                let sl_stroke =
+                    Stroke::new(1.2, Color32::from_rgba_unmultiplied(180, 100, 200, 180));
+                let segments =
+                    cached_vector_field_streamlines(&self.document, vf, world_tl, world_br, dx, dy);
+                for (start, end) in segments.iter() {
+                    let start = view.world_to_screen(*start);
+                    let end = view.world_to_screen(*end);
+                    if start.is_finite() && end.is_finite() {
+                        painter.line_segment(
+                            [
+                                canvas_rect.min + Vec2::new(start.x, start.y),
+                                canvas_rect.min + Vec2::new(end.x, end.y),
+                            ],
+                            sl_stroke,
+                        );
                     }
                 }
             }
@@ -5121,186 +5395,53 @@ impl GrafitoApp {
                 // emitir primitivas fuera del área de dibujo y quedan recortadas.
 
                 if cg.render_mode == 1 || cg.render_mode == 2 {
-                    // Domain coloring (complex f(z)) or Heat map (real f(x,y))
+                    // Domain coloring (complex f(z)) o Heat map (real f(x,y)):
+                    // una ColorImage cacheada como textura por key; antes se
+                    // emitían res² `rect_filled` por frame (hasta 90k shapes).
                     let res = complex_grid_cpu_resolution(cg.density, self.document.render_quality);
-                    let dx = (cg.x_max - cg.x_min) / res as f64;
-                    let dy = (cg.y_max - cg.y_min) / res as f64;
-
-                    let is_heatmap = cg.render_mode == 2;
-
-                    if is_heatmap {
-                        // Heat map: evaluate f(x,y) using real AST
-                        let prepared =
-                            prepare_function_ast(&cg.expr, &self.document.variables, &["x", "y"]);
-
-                        if let Ok(ast) = prepared {
-                            for j in 0..res {
-                                let y = cg.y_min + (res - 1 - j) as f64 * dy;
-                                for i in 0..res {
-                                    let x = cg.x_min + i as f64 * dx;
-                                    let val = ast.eval_2d("x", x, "y", y);
-                                    if val.is_finite() {
-                                        // Thermal colormap: blue(cold) through green to red(hot)
-                                        let t = (val.atan() / std::f64::consts::FRAC_PI_2)
-                                            .clamp(-1.0, 1.0);
-                                        let t = (t + 1.0) * 0.5; // [0, 1]
-                                        let (r, g, b) = thermal_colormap(t);
-                                        let sp1 = view.world_to_screen(Point2::new(
-                                            cg.x_min + i as f64 * dx,
-                                            cg.y_min + (res - 1 - j) as f64 * dy,
-                                        ));
-                                        let sp2 = view.world_to_screen(Point2::new(
-                                            cg.x_min + (i + 1) as f64 * dx,
-                                            cg.y_min + (res - j) as f64 * dy,
-                                        ));
-                                        let min = canvas_rect.min + Vec2::new(sp1.x, sp2.y);
-                                        let max = canvas_rect.min + Vec2::new(sp2.x, sp1.y);
-                                        let c = Color32::from_rgb(
-                                            (r * 255.0) as u8,
-                                            (g * 255.0) as u8,
-                                            (b * 255.0) as u8,
-                                        );
-                                        painter.rect_filled(Rect::from_min_max(min, max), 0.0, c);
+                    let key = complex_grid_texture_key(self.document.version, cg, res);
+                    let cached =
+                        COMPLEX_GRID_TEXTURES.with(|cache| cache.borrow().get(&key).cloned());
+                    let texture = match cached {
+                        Some(handle) => Some(handle),
+                        None => {
+                            let image = if cg.render_mode == 2 {
+                                complex_grid_heatmap_image(&self.document, cg, res)
+                            } else {
+                                complex_grid_domain_coloring_image(&self.document, cg, res)
+                            };
+                            image.map(|image| {
+                                let handle = painter.ctx().load_texture(
+                                    format!("grafito_complex_grid_{}_{key:016x}", cg.id),
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                COMPLEX_GRID_TEXTURES.with(|cache| {
+                                    let mut cache = cache.borrow_mut();
+                                    if cache.len() >= COMPLEX_GRID_TEXTURE_CAP {
+                                        cache.clear();
                                     }
-                                }
-                            }
+                                    cache.insert(key, handle.clone());
+                                });
+                                handle
+                            })
                         }
-                    } else {
-                        // Domain coloring: evaluate complex f(z)
-                        let expr = match grafito_complex::complex_expr::parse(&cg.expr) {
-                            Ok(e) => e,
-                            Err(_) => return,
-                        };
-                        let mut vars: HashMap<String, Complex64> = HashMap::new();
-                        for (name, val) in &self.document.variables {
-                            vars.insert(name.clone(), Complex64::new(*val, 0.0));
-                        }
-                        // PERF (H9): cachear `complex_base_symbol` como `&str` y
-                        // actualizar la clave con `get_mut` evita 250k `String`
-                        // allocations por frame (una por píxel en domain coloring).
-                        let base_symbol = self.document.complex_base_symbol.as_str();
-                        vars.insert(base_symbol.to_string(), Complex64::new(0.0, 0.0));
-                        let dc_mode = cg.domain_coloring_mode;
-                        // Umbral: si |f(z)| < MAG_ZERO se considera cero y se pinta negro.
-                        // Evita que arg(~0) dé ruido aleatorio en retratos de fase.
-                        const MAG_ZERO: f64 = 1e-6;
-                        for j in 0..res {
-                            let y = cg.y_min + (res - 1 - j) as f64 * dy;
-                            for i in 0..res {
-                                let x = cg.x_min + i as f64 * dx;
-                                if let Some(z) = vars.get_mut(base_symbol) {
-                                    *z = Complex64::new(x, y);
-                                }
-                                if let Ok(fz) = expr.eval(&vars) {
-                                    if fz.re.is_finite() && fz.im.is_finite() {
-                                        let mag = fz.norm();
-                                        // Función identicamente nula → negro (evita ruido de arg(0))
-                                        if mag < MAG_ZERO {
-                                            let sp1 = view.world_to_screen(Point2::new(
-                                                cg.x_min + i as f64 * dx,
-                                                cg.y_min + (res - 1 - j) as f64 * dy,
-                                            ));
-                                            let sp2 = view.world_to_screen(Point2::new(
-                                                cg.x_min + (i + 1) as f64 * dx,
-                                                cg.y_min + (res - j) as f64 * dy,
-                                            ));
-                                            let min = canvas_rect.min + Vec2::new(sp1.x, sp2.y);
-                                            let max = canvas_rect.min + Vec2::new(sp2.x, sp1.y);
-                                            painter.rect_filled(
-                                                Rect::from_min_max(min, max),
-                                                0.0,
-                                                Color32::BLACK,
-                                            );
-                                            continue;
-                                        }
-                                        let arg = fz.arg();
-                                        let hue = (arg + std::f64::consts::PI)
-                                            / (2.0 * std::f64::consts::PI);
-                                        // Calcula lightness y saturation según el modo de coloración
-                                        let (lightness, saturation) = match dc_mode {
-                                            // 0: HSL Clásico — lightness varía con módulo
-                                            0 => {
-                                                let l = (mag.max(1e-10).ln().atan()
-                                                    / std::f64::consts::FRAC_PI_2)
-                                                    * 0.5
-                                                    + 0.5;
-                                                (l.clamp(0.0, 1.0), 0.85)
-                                            }
-                                            // 1: Retrato de Fase Puro — lightness=0.5 constante, sat=1
-                                            1 => (0.5, 1.0),
-                                            // 2: Rejilla Polar Conforme — como HSL + damping por rejilla polar
-                                            2 => {
-                                                let l = (mag.max(1e-10).ln().atan()
-                                                    / std::f64::consts::FRAC_PI_2)
-                                                    * 0.5
-                                                    + 0.5;
-                                                (l.clamp(0.0, 1.0), 0.85)
-                                            }
-                                            // 3: Rejilla Cartesiana — como HSL
-                                            3 => {
-                                                let l = (mag.max(1e-10).ln().atan()
-                                                    / std::f64::consts::FRAC_PI_2)
-                                                    * 0.5
-                                                    + 0.5;
-                                                (l.clamp(0.0, 1.0), 0.85)
-                                            }
-                                            _ => {
-                                                let l = (mag.max(1e-10).ln().atan()
-                                                    / std::f64::consts::FRAC_PI_2)
-                                                    * 0.5
-                                                    + 0.5;
-                                                (l.clamp(0.0, 1.0), 0.85)
-                                            }
-                                        };
-                                        let (mut r, mut g, mut b) =
-                                            hsl_to_rgb(hue, saturation, lightness);
-                                        // Overlay de rejillas conformes (modos 2 y 3)
-                                        if dc_mode == 2 {
-                                            let log_mag = mag.max(1e-5).ln();
-                                            let mag_grid =
-                                                (log_mag * std::f64::consts::PI * 2.0).sin().abs();
-                                            let arg_grid = (arg * 10.0).sin().abs();
-                                            let shading = 0.5
-                                                + 0.5
-                                                    * mag_grid.max(0.0).powf(0.15)
-                                                    * arg_grid.max(0.0).powf(0.15);
-                                            r *= shading;
-                                            g *= shading;
-                                            b *= shading;
-                                        } else if dc_mode == 3 {
-                                            let grid_re =
-                                                (fz.re * std::f64::consts::PI * 2.0).sin().abs();
-                                            let grid_im =
-                                                (fz.im * std::f64::consts::PI * 2.0).sin().abs();
-                                            let shading = 0.5
-                                                + 0.5
-                                                    * grid_re.max(0.0).powf(0.15)
-                                                    * grid_im.max(0.0).powf(0.15);
-                                            r *= shading;
-                                            g *= shading;
-                                            b *= shading;
-                                        }
-                                        let sp1 = view.world_to_screen(Point2::new(
-                                            cg.x_min + i as f64 * dx,
-                                            cg.y_min + (res - 1 - j) as f64 * dy,
-                                        ));
-                                        let sp2 = view.world_to_screen(Point2::new(
-                                            cg.x_min + (i + 1) as f64 * dx,
-                                            cg.y_min + (res - j) as f64 * dy,
-                                        ));
-                                        let min = canvas_rect.min + Vec2::new(sp1.x, sp2.y);
-                                        let max = canvas_rect.min + Vec2::new(sp2.x, sp1.y);
-                                        let c = Color32::from_rgb(
-                                            (r * 255.0) as u8,
-                                            (g * 255.0) as u8,
-                                            (b * 255.0) as u8,
-                                        );
-                                        painter.rect_filled(Rect::from_min_max(min, max), 0.0, c);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    };
+                    let Some(texture) = texture else {
+                        return;
+                    };
+                    // Fila 0 de la textura = y_max: el rect en pantalla va de
+                    // (x_min, y_max) a (x_max, y_min).
+                    let top_left = view.world_to_screen(Point2::new(cg.x_min, cg.y_max));
+                    let bottom_right = view.world_to_screen(Point2::new(cg.x_max, cg.y_min));
+                    let min = canvas_rect.min + Vec2::new(top_left.x, top_left.y);
+                    let max = canvas_rect.min + Vec2::new(bottom_right.x, bottom_right.y);
+                    painter.image(
+                        texture.id(),
+                        Rect::from_min_max(min, max),
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
                     return;
                 }
 

@@ -117,12 +117,12 @@
 - [x] F14.0.10 Gates Ola 0 + commit
 
 **Ola 1 — perf P0**
-- [ ] F14.1.1 domain coloring: textura cacheada por (expr,bounds,res), sin `parse()` por frame
-- [ ] F14.1.2 vector field: AST cacheado + streamlines keyed
-- [ ] F14.1.3 function samples sin doble Vec por frame
-- [ ] F14.1.4 pizarra: epoch en `WhiteboardDoc` + swap sin clones
-- [ ] F14.1.5 3D: `Cache3DKey` sin cámara + `Arc<TriangleMesh3D>`
-- [ ] F14.1.6 Gates Ola 1 + commit
+- [x] F14.1.1 domain coloring: textura cacheada por (version,objeto,expr,bounds,res,modo), sin `parse()` por frame; AST vía `cached_complex_expr`
+- [x] F14.1.2 vector field: streamlines RK4 cacheadas world-space (25×200×4 evals → proyección) con AST solo en miss
+- [x] F14.1.3 function samples: baseline de relleno proyectada 1 vez (no N) en escalas lineales; doble Vec pendiente (requiere `Arc<FunctionSamples>` en core)
+- [x] F14.1.4 pizarra: `WhiteboardDoc.revision` + `WhiteboardBook.epoch`; commit idle sin clones ni compares de páginas
+- [x] F14.1.5 3D: `mesh_snapshot` devuelve `Arc<TriangleMesh3D>` (cache hit sin clonar malla); split cámara del `Cache3DKey` diferido (billboards dependen de cámara, requiere refactor de shader)
+- [x] F14.1.6 Gates Ola 1 + commit
 
 **Ola 2 — I/O fuera de UI + fallos honestos**
 - [ ] F14.2.1 plugins/config/profile/keyring a workers

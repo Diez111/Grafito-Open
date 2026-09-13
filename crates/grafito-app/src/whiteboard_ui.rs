@@ -166,6 +166,10 @@ pub struct WhiteboardBook {
     pub pages: Vec<WhiteboardPage>,
     pub current: usize,
     next_id: usize,
+    /// Contador monotónico de mutaciones del libro (hoja agregada/quitada,
+    /// cambio de índice, título o contenido sincronizado desde la sesión).
+    epoch: u64,
+    epoch_synced: u64,
 }
 
 impl Default for WhiteboardBook {
@@ -174,11 +178,26 @@ impl Default for WhiteboardBook {
             pages: vec![WhiteboardPage::new(1)],
             current: 0,
             next_id: 2,
+            epoch: 0,
+            epoch_synced: 0,
         }
     }
 }
 
 impl WhiteboardBook {
+    /// Cambios desde el último `mark_synced` (fast-path del commit idle).
+    pub fn is_synced(&self) -> bool {
+        self.epoch == self.epoch_synced
+    }
+
+    pub fn mark_synced(&mut self) {
+        self.epoch_synced = self.epoch;
+    }
+
+    fn bump_epoch(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
     pub fn len(&self) -> usize {
         self.pages.len()
     }
@@ -199,6 +218,7 @@ impl WhiteboardBook {
         let page = WhiteboardPage::new(self.next_id);
         self.next_id += 1;
         self.pages.push(page);
+        self.bump_epoch();
         self.pages.len() - 1
     }
 
@@ -215,6 +235,7 @@ impl WhiteboardBook {
     pub fn switch_to(&mut self, index: usize) -> bool {
         if index < self.pages.len() {
             self.current = index;
+            self.bump_epoch();
             true
         } else {
             false
@@ -231,14 +252,27 @@ impl WhiteboardBook {
         } else if index < self.current {
             self.current -= 1;
         }
+        self.bump_epoch();
         true
     }
 
+    /// Vuelca la sesión a la hoja actual solo si algo cambió (revisión del
+    /// doc o vista): en idle NO clona los elementos por frame.
     pub fn save_current_from_session(&mut self, session: &WhiteboardSession) {
+        let mut changed = false;
         if let Some(page) = self.current_mut() {
-            page.doc = session.doc.clone();
-            page.pan = session.pan;
-            page.zoom = session.zoom;
+            if page.doc.revision() != session.doc.revision()
+                || page.pan != session.pan
+                || page.zoom != session.zoom
+            {
+                page.doc = session.doc.clone();
+                page.pan = session.pan;
+                page.zoom = session.zoom;
+                changed = true;
+            }
+        }
+        if changed {
+            self.bump_epoch();
         }
     }
 
@@ -300,6 +334,8 @@ impl WhiteboardBook {
             pages: Vec::new(),
             current: 0,
             next_id: 1,
+            epoch: 0,
+            epoch_synced: 0,
         };
         for page in pages.iter().take(MAX_WHITEBOARD_PAGES) {
             book.pages.push(WhiteboardPage {
@@ -1208,32 +1244,44 @@ pub fn sync_whiteboard_from_document(app: &mut crate::GrafitoApp) {
 /// Vuelca sesión y libro al documento si algo cambió (edición del frame,
 /// cambio de hoja o migración de legado pendiente). Hace un único snapshot
 /// undo y deja el libro en memoria sincronizado.
-pub fn commit_whiteboard_to_document(
-    app: &mut crate::GrafitoApp,
-    before: &[WhiteboardElement],
-) -> bool {
-    let session_changed = app.whiteboard.doc.elements() != before;
-    // Sincroniza la sesión a la hoja actual antes de comparar el libro.
-    let cur = app.whiteboard.clone();
-    app.whiteboard_book.save_current_from_session(&cur);
+///
+/// `before_revision` es la revisión del doc de sesión al empezar el frame:
+/// comparar contadores evita clonar/comparar todos los elementos por frame.
+pub fn commit_whiteboard_to_document(app: &mut crate::GrafitoApp, before_revision: u64) -> bool {
+    let session_changed = app.whiteboard.doc.revision() != before_revision;
+    // Sincroniza la sesión a la hoja actual solo si cambió (sin clones en idle).
+    app.whiteboard_book
+        .save_current_from_session(&app.whiteboard);
     // Legado con contenido (o varias hojas) aún sin `Vec`: hay que migrarlo
     // a disco aunque el espejo ya coincida.
     let needs_migration_write = app.document.whiteboard_pages.is_empty()
         && (app.whiteboard_book.len() > 1 || !app.whiteboard.doc.is_empty());
+    // Fast-path idle: sin edición de sesión, sin migración y con el libro ya
+    // sincronizado, no hace falta comparar páginas (clonaba hasta 32 hojas).
+    if !session_changed && !needs_migration_write && app.whiteboard_book.is_synced() {
+        return false;
+    }
     if !session_changed
         && !needs_migration_write
         && whiteboard_book_matches_document(&app.whiteboard_book, &app.document)
     {
+        app.whiteboard_book.mark_synced();
         return false;
     }
-    push_whiteboard_book_and_store(
+    let wrote = push_whiteboard_book_and_store(
         &mut app.whiteboard_book,
         &app.whiteboard,
         &mut app.document,
         &mut app.undo_stack,
         &mut app.redo_stack,
         &mut app.undo_total_bytes,
-    )
+    );
+    // Si no escribió, confirmar con la comparación profunda antes de marcar
+    // sincronizado (un fallo del set no debe silenciar el próximo commit).
+    if wrote || whiteboard_book_matches_document(&app.whiteboard_book, &app.document) {
+        app.whiteboard_book.mark_synced();
+    }
+    wrote
 }
 
 // Export SVG del libro: ver `grafito_core::whiteboard_pages_to_svg` (proyección
@@ -1273,12 +1321,11 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
     // al final del frame vía `commit_whiteboard_to_document`.
     sync_whiteboard_from_document(app);
     handle_whiteboard_history_shortcuts(app, ctx);
-    // Foto previa para detectar edición en este frame.
-    let before_elements = app.whiteboard.doc.elements().to_vec();
-    {
-        let cur = app.whiteboard.clone();
-        app.whiteboard_book.save_current_from_session(&cur);
-    }
+    // Foto previa por revisión (sin clonar los elementos) para detectar si
+    // este frame editó la pizarra.
+    let before_revision = app.whiteboard.doc.revision();
+    app.whiteboard_book
+        .save_current_from_session(&app.whiteboard);
 
     // ── Toolbar burbuja centrada — Area flotante pill, compacta ──
     // Centrada como burbuja aparte, no barra larga. Solo 4 herramientas + borrar.
@@ -1677,7 +1724,7 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
         }
     }
     // Volcado Session->Document.whiteboard con snapshot undo (marca sucio).
-    commit_whiteboard_to_document(app, &before_elements);
+    commit_whiteboard_to_document(app, before_revision);
     if let Some(message) = app.whiteboard.last_error.take() {
         app.notify(message, grafito_ui::toast::ToastKind::Error);
     }
@@ -1904,6 +1951,29 @@ mod tests {
         assert_eq!(session.doc.len(), 480);
         let warning = session.last_warning.clone().expect("aviso al cruzar 480");
         assert!(warning.contains("casi llena"), "fue: {warning}");
+    }
+
+    #[test]
+    fn whiteboard_book_epoch_skips_unchanged_session_and_flags_edits() {
+        let mut book = WhiteboardBook::default();
+        let mut session = WhiteboardSession::default();
+        book.load_to_session(&mut session);
+        book.mark_synced();
+        assert!(book.is_synced());
+        // Sesión sin cambios: no clona ni ensucia el libro.
+        book.save_current_from_session(&session);
+        assert!(book.is_synced(), "idle no debe ensuciar el libro");
+        // Editar la sesión (add sube la revisión) sí marca pendiente.
+        session.doc.add(test_rectangle());
+        book.save_current_from_session(&session);
+        assert!(!book.is_synced(), "una edición debe requerir commit");
+        assert_eq!(
+            book.current().map(|page| page.doc.len()),
+            Some(1),
+            "el volcado debe copiar el contenido nuevo"
+        );
+        book.mark_synced();
+        assert!(book.is_synced());
     }
 
     #[test]
