@@ -179,14 +179,13 @@ fn rate_limit_cooldown_secs(retry_after_secs: Option<u64>) -> u64 {
     }
 }
 
-/// Mensaje criollo de pausa por cuota, con cuenta regresiva y sin jerga
-/// (nada de `429`/`quota`/`retry-after` crudos: eso queda en logs).
-/// Puro y determinista: la app lo usa en disparadores y en el mapeo de
-/// errores de workers.
+/// Mensaje de pausa por cuota, con cuenta regresiva y sin jerga (nada de
+/// `429`/`quota`/`retry-after` crudos: eso queda en logs). Tono profesional:
+/// lo lee el cliente final, no el desarrollador. Puro y determinista.
 pub fn rate_limit_paused_message(remaining_secs: u64) -> String {
     let remaining = remaining_secs.max(1);
     format!(
-        "El proveedor pausó la cuota por un rato, che: probá de nuevo en {remaining}s. No hace falta cambiar el modelo ni la clave."
+        "El proveedor limitó la cuota temporalmente: reintentá en {remaining}s. No hace falta cambiar el modelo ni la clave."
     )
 }
 

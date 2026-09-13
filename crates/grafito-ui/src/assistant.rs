@@ -6136,6 +6136,8 @@ fn draw_panel_contents(
         .stick_to_bottom(stick)
         .show(ui, |ui| {
             if let Some(error) = state.error.clone() {
+                // El apoyo se calcula antes de mover `error` al label.
+                let secondary_hint = error_secondary_hint(&error);
                 egui::Frame::none()
                     .fill(theme.danger.gamma_multiply(0.08))
                     .stroke(egui::Stroke::new(1.0, theme.danger.gamma_multiply(0.2)))
@@ -6154,9 +6156,11 @@ fn draw_panel_contents(
                             crate::toolbar::tag_live_region(&err_resp, live);
                         }
                         // W3 — el error no culpa: el borrador sigue a salvo en
-                        // el historial (begin_request lo dejó visible).
+                        // el historial (begin_request lo dejó visible). El
+                        // apoyo sólo dice "conexión" si el fallo fue de
+                        // transporte (cuota/clave no lo son).
                         ui.label(
-                            egui::RichText::new("Se cortó la conexión. Tu texto está a salvo.")
+                            egui::RichText::new(secondary_hint)
                                 .color(theme.text_secondary)
                                 .size(crate::tokens::TYPE_XS),
                         );
@@ -11773,6 +11777,34 @@ fn provider_label(provider: ProviderProfile) -> &'static str {
 /// Cota del resumen de respuesta para la live-region (evita nodos gigantes).
 const ASSISTANT_LIVE_RESPONSE_CHARS: usize = 200;
 
+/// Línea de apoyo bajo el error del asistente. Sólo menciona "se cortó la
+/// conexión" si el fallo fue de transporte: en cuota/clave/contexto el texto
+/// principal ya explica el qué-hacer y decir "conexión" lo contradecía (el
+/// usuario con clave recién puesta creía que la clave fallaba). Pura.
+pub fn error_secondary_hint(error: &str) -> &'static str {
+    let lower = error.to_lowercase();
+    const TRANSPORT_HINTS: [&str; 12] = [
+        "cortó",
+        "conexión",
+        "conexion",
+        "colgó",
+        "colgo",
+        "primer token",
+        "recibía",
+        "recibia",
+        "timed out",
+        "timeout",
+        "network",
+        "socket",
+    ];
+    let is_transport = TRANSPORT_HINTS.iter().any(|needle| lower.contains(needle));
+    if is_transport {
+        "Se cortó la conexión. Tu texto está a salvo."
+    } else {
+        "Tu texto está a salvo."
+    }
+}
+
 /// Texto polite para la live-region del lector. Puro (`&Estado`): error >
 /// turno en curso (con etapa visible) > última respuesta > silencio.
 /// Sin I/O ni spawn.
@@ -12504,6 +12536,31 @@ mod tests {
         failed.error = Some("corte de red".to_owned());
         let announced = assistant_live_text(&failed).expect("error anuncia");
         assert!(announced.contains("corte de red"));
+    }
+
+    #[test]
+    fn error_secondary_hint_no_culpa_a_la_conexion_en_cuota_o_clave() {
+        // Caso real: clave recién puesta + pausa de cuota. El apoyo no debe
+        // decir "se cortó la conexión" (contradecía el mensaje principal).
+        let cuota = "El proveedor limitó la cuota temporalmente: reintentá en 86s. No hace falta cambiar el modelo ni la clave.";
+        assert_eq!(error_secondary_hint(cuota), "Tu texto está a salvo.");
+        assert_eq!(
+            error_secondary_hint("La clave de API no es válida o expiró: 401."),
+            "Tu texto está a salvo."
+        );
+        // Transporte real: sí lo menciona.
+        assert_eq!(
+            error_secondary_hint(
+                "Se colgó esperando el primer token: el proveedor no mandó nada a tiempo."
+            ),
+            "Se cortó la conexión. Tu texto está a salvo."
+        );
+        assert_eq!(
+            error_secondary_hint(
+                "Se cortó mientras recibía la respuesta (ya habías visto una parte)."
+            ),
+            "Se cortó la conexión. Tu texto está a salvo."
+        );
     }
 
     // ── D1 A11Y resto: la respuesta lista también anuncia ──
