@@ -7328,17 +7328,11 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         chip_resp.on_hover_text(
             "Esquina visible de la hoja de 400×400. Movete con las flechas o «Ir a».",
         );
-        ui.label(
-            egui::RichText::new("Ir a")
-                .color(txt_dim)
-                .size(TYPE_XS)
-                .strong(),
-        );
         let field_w = ui.available_width().max(56.0);
         let resp = ui.add_sized(
             [field_w, control_h],
             egui::TextEdit::singleline(&mut edit.goto)
-                .hint_text("C3")
+                .hint_text("Ir a celda (C3)")
                 .font(egui::FontId::monospace(TYPE_XS)),
         );
         if resp.changed() {
