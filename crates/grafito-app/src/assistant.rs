@@ -8573,6 +8573,14 @@ pub(crate) fn remote_error_message(error: &str, current_model: &str) -> String {
         } else {
             "El gateway Go rechazó la cuenta o la clave. Re-conectá tu clave Go en Configuración avanzada, verificá tu región, o seguí con deepseek.".into()
         }
+    } else if error.contains("obsoleta porque cambió") || error.contains("obsoleta") {
+        // Contexto rancio (el documento o la selección cambió mientras el
+        // proveedor pensaba): no es tema de modelo ni de clave, así que NO
+        // lleva el sufijo "Revisá Configuración → Modelo". Fail-closed es
+        // correcto (no se aplican propuestas contra otro contexto), pero la
+        // pregunta sigue en el historial y el cartel de error ya ofrece
+        // [Reintentar], que reenvía sobre lo actual.
+        "Cambió el documento o la selección mientras pensaba, así que no apliqué nada para no mezclar contextos. Tocá Reintentar para responder sobre lo actual.".into()
     } else if error.contains("cancel") {
         "La consulta remota se canceló antes de completarse.".into()
     } else if error.contains("401") || error.contains("403") || error.contains("unauthorized") {
@@ -12930,6 +12938,26 @@ mod tests {
         );
         assert!(conectando.contains("conectando"), "{conectando}");
         assert!(!conectando.contains("could not connect"), "{conectando}");
+    }
+
+    #[test]
+    fn stale_context_error_is_honest_without_model_blame() {
+        // El descarte por contexto rancio NO es tema de modelo: el mensaje
+        // no manda a Configuración → Modelo y ofrece Reintentar (el cartel
+        // de error ya trae el botón que reenvía el borrador).
+        for crudo in [
+            "La respuesta quedó obsoleta porque cambió el documento o el foco; no se aceptó ni se verificaron sus propuestas.",
+            "La propuesta quedó obsoleta porque cambió el documento o el foco; no se aplicó nada.",
+        ] {
+            let visible =
+                remote_error_message(crudo, "muse-spark-1.3-contributor");
+            assert!(
+                !visible.contains("Revisá Configuración"),
+                "sin culpar al modelo: {visible}"
+            );
+            assert!(!visible.contains("obsoleta"), "sin jerga interna: {visible}");
+            assert!(visible.contains("Reintentar"), "{visible}");
+        }
     }
 
     #[test]

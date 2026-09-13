@@ -1561,7 +1561,8 @@ fn test_left_panel_default_sidebar_tab() {
     assert_eq!(LeftPanelContent::AlgebraAndCas.default_sidebar_tab(), 0);
     assert_eq!(LeftPanelContent::Tools.default_sidebar_tab(), 1);
     assert_eq!(LeftPanelContent::Cas.default_sidebar_tab(), 2);
-    assert_eq!(LeftPanelContent::Stats.default_sidebar_tab(), 0);
+    assert_eq!(LeftPanelContent::Data.default_sidebar_tab(), 2);
+    assert_eq!(LeftPanelContent::Stats.default_sidebar_tab(), 3);
     assert_eq!(LeftPanelContent::Complex.default_sidebar_tab(), 0);
     assert_eq!(LeftPanelContent::Attractor.default_sidebar_tab(), 1);
 }
@@ -1955,10 +1956,10 @@ fn statistics_panel_has_vertical_scroll_and_persistent_validation_feedback() {
 }
 
 #[test]
-fn statistics_panel_tiene_entrada_visible() {
+fn panel_tabs_datos_prob_con_entrada_visible() {
     use crate::{LeftPanelContent, Perspective};
-    // Onda 2, regla visible ⇒ botón: toda perspectiva que declara Stats
-    // tiene que estar cableada al panel (helper) y el panel tiene que ser
+    // Regla visible ⇒ botón: toda perspectiva que declara Stats/Data tiene
+    // que estar cableada a su tab (helper) y cada tab tiene que ser
     // alcanzable desde el dispatch y desde el menú Paneles.
     for perspective in Perspective::ALL {
         let declara_stats = perspective.layout().left_panel == LeftPanelContent::Stats;
@@ -1968,23 +1969,33 @@ fn statistics_panel_tiene_entrada_visible() {
             "uses_statistics_panel debe coincidir con LeftPanelContent::Stats para {:?}",
             perspective
         );
+        let declara_data = perspective.layout().left_panel == LeftPanelContent::Data;
+        assert_eq!(
+            crate::uses_data_panel(perspective),
+            declara_data,
+            "uses_data_panel debe coincidir con LeftPanelContent::Data para {:?}",
+            perspective
+        );
     }
     assert!(crate::uses_statistics_panel(Perspective::Statistics));
     assert!(crate::uses_statistics_panel(Perspective::Probability));
-    assert!(crate::uses_statistics_panel(Perspective::DataAnalysis));
+    assert!(!crate::uses_statistics_panel(Perspective::DataAnalysis));
     assert!(!crate::uses_statistics_panel(Perspective::Geometry2D));
     assert!(!crate::uses_statistics_panel(Perspective::Complex));
+    assert!(crate::uses_data_panel(Perspective::DataAnalysis));
+    assert!(!crate::uses_data_panel(Perspective::Statistics));
 
     let app_source = include_str!("app.rs");
     assert!(
-        app_source.contains("uses_statistics_panel(self.perspective)")
-            && app_source.contains("draw_statistics_panel(self, ctx)"),
-        "el drawer izquierdo debe rutear a draw_statistics_panel vía uses_statistics_panel"
+        app_source.contains("draw_data_panel(self, ctx)")
+            && app_source.contains("draw_statistics_panel(self, ctx)")
+            && app_source.contains("draw_view_panel(self, ctx)"),
+        "el drawer izquierdo debe rutear a los paneles Datos/Prob./Vista"
     );
     let ui_source = include_str!("ui.rs");
     assert!(
-        ui_source.contains("\"Estadística\"") && ui_source.contains("Perspective::Statistics"),
-        "el menú Paneles debe exponer la entrada «Estadística»"
+        ui_source.contains("\"Datos\"") && ui_source.contains("Probabilidad y Estadística"),
+        "el menú Paneles debe exponer las entradas «Datos» y «Probabilidad y Estadística»"
     );
 }
 
@@ -4860,6 +4871,56 @@ fn headless_view_panel_renders_without_panic() {
         crate::panels::draw_view_panel(&mut app, ctx);
     });
 }
+
+#[test]
+fn vista_es_solo_visual_exportar_datos_y_prob_viven_en_su_tab() {
+    // Vista no debe volver a tragar Exportación, hoja ni probabilidad:
+    // cada una tiene tab propio (Herram./Datos/Prob.).
+    let source = include_str!("panels.rs");
+    let start = source
+        .find("pub(crate) fn draw_view_panel")
+        .expect("vista panel");
+    let end = source[start..]
+        .find("pub(crate) fn draw_trig_animation_panel")
+        .map(|offset| start + offset)
+        .expect("next panel");
+    let vista = &source[start..end];
+    assert!(
+        !vista.contains("draw_spreadsheet_section"),
+        "la hoja vive en Datos, no en Vista"
+    );
+    assert!(
+        !vista.contains("draw_probability_section"),
+        "la probabilidad vive en Prob., no en Vista"
+    );
+    assert!(
+        !vista.contains("\"Exportación\""),
+        "exportar vive en Herramientas, no en Vista"
+    );
+    assert!(vista.contains("\"Capas\""), "Vista conserva Capas");
+    assert!(vista.contains("\"Vista 3D\""), "Vista conserva Vista 3D");
+}
+
+#[test]
+fn headless_data_panel_renders_without_panic() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::DataAnalysis);
+    // El tab Datos es la casa de Análisis de datos.
+    assert_eq!(
+        app.perspective.layout().left_panel,
+        crate::LeftPanelContent::Data
+    );
+    assert_eq!(crate::LeftPanelContent::Data.default_sidebar_tab(), 2);
+    let output = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_data_panel(&mut app, ctx);
+    });
+    assert!(output.shapes.len() < 15_000);
+    let output_export = ctx.run(headless_raw_input(), |ctx| {
+        crate::tools_panel::draw_tools_panel(&mut app, ctx);
+    });
+    assert!(output_export.shapes.len() < 15_000);
+}
+
 #[test]
 fn implicit_slot_productor_envia_grueso_y_limpia_sin_superficie() {
     // P1b: productor real — con superficie visible envía (pending o válido

@@ -329,7 +329,7 @@ impl Perspective {
                 title: Self::title(self),
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::D2,
-                left_panel: LeftPanelContent::Stats,
+                left_panel: LeftPanelContent::Data,
                 right_panel: Some(RightPanelContent::Regression),
                 visible_tool_groups: &[G::Move, G::Advanced],
                 show_math_keyboard: false,
@@ -475,6 +475,9 @@ impl ShellLayout {
 }
 
 /// Contenido del panel izquierdo según la perspectiva.
+///
+/// Tabs del sidebar (5 + Aula): 0=Álgebra, 1=Herram., 2=Datos, 3=Prob.,
+/// 4=Vista. `Vista` no tiene contenido asociado: es el tab visual puro.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeftPanelContent {
     /// Vista de álgebra (objetos, variables, comandos).
@@ -484,8 +487,10 @@ pub enum LeftPanelContent {
     Cas,
     /// Álgebra + CAS combinados (álgebra como tab por defecto).
     AlgebraAndCas,
-    /// Estadística / datos.
+    /// Estadística / probabilidad (tab Prob.).
     Stats,
+    /// Hoja de cálculo + tablas del documento (tab Datos).
+    Data,
     /// Números complejos / mapeos conformes.
     Complex,
     /// Atractores / parámetros dinámicos.
@@ -495,31 +500,52 @@ pub enum LeftPanelContent {
 }
 
 impl LeftPanelContent {
-    /// Mapea el contenido declarado al índice del tab del sidebar (3 tabs
-    /// armonizados: 0=Álgebra, 1=Herram., 2=Vista — CAS oculto en Álgebra).
+    /// Mapea el contenido declarado al índice del tab del sidebar (5 tabs
+    /// armonizados: 0=Álgebra, 1=Herram., 2=Datos, 3=Prob., 4=Vista —
+    /// CAS oculto en Datos por compatibilidad histórica).
     pub const fn default_sidebar_tab(self) -> usize {
         match self {
             LeftPanelContent::Algebra
             | LeftPanelContent::AlgebraAndCas
-            | LeftPanelContent::Complex
-            | LeftPanelContent::Stats => 0,
+            | LeftPanelContent::Complex => 0,
             LeftPanelContent::Tools | LeftPanelContent::Attractor => 1,
-            LeftPanelContent::Cas => 2,
+            LeftPanelContent::Cas | LeftPanelContent::Data => 2,
+            LeftPanelContent::Stats => 3,
+        }
+    }
+
+    /// Etiqueta corta del tab para el rail y el menú Paneles.
+    pub const fn sidebar_label(self) -> &'static str {
+        match self {
+            LeftPanelContent::Algebra
+            | LeftPanelContent::AlgebraAndCas
+            | LeftPanelContent::Complex
+            | LeftPanelContent::Cas => "Álgebra",
+            LeftPanelContent::Tools | LeftPanelContent::Attractor => "Herram.",
+            LeftPanelContent::Data => "Datos",
+            LeftPanelContent::Stats => "Prob.",
         }
     }
 }
 
-/// Perspectivas cuyo tab 0 dibuja el panel de estadística
+/// Perspectivas cuyo tab Prob. dibuja el panel de probabilidad y estadística
 /// (`panels::draw_statistics_panel`) en vez del panel de álgebra.
 ///
 /// Onda 2: pinnea la entrada visible del panel — si una perspectiva declara
 /// `LeftPanelContent::Stats`, esta función debe devolver `true` para ella
-/// (regla visible ⇒ botón, test `statistics_panel_tiene_entrada_visible`).
+/// (regla visible ⇒ botón, test `panel_tabs_datos_prob_con_entrada_visible`).
+/// Análisis de datos vive en el tab Datos (`LeftPanelContent::Data`).
 pub(crate) const fn uses_statistics_panel(perspective: Perspective) -> bool {
     matches!(
         perspective,
-        Perspective::Statistics | Perspective::Probability | Perspective::DataAnalysis
+        Perspective::Statistics | Perspective::Probability
     )
+}
+
+/// Perspectivas cuyo tab Datos dibuja la hoja de cálculo vinculada
+/// (`panels::draw_data_panel`): solo Análisis de datos.
+pub(crate) const fn uses_data_panel(perspective: Perspective) -> bool {
+    matches!(perspective, Perspective::DataAnalysis)
 }
 
 /// Contenido del panel derecho según la perspectiva.

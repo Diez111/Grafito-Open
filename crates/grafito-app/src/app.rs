@@ -5108,7 +5108,9 @@ impl GrafitoApp {
         }
     }
 
-    pub(crate) const AULA_TAB_INDEX: usize = 3;
+    /// Índice del tab Aula en el sidebar (detrás de los 5 tabs base:
+    /// 0=Álgebra, 1=Herram., 2=Datos, 3=Prob., 4=Vista). Solo visible opt-in.
+    pub(crate) const AULA_TAB_INDEX: usize = 5;
     #[allow(dead_code)]
     pub(crate) const AULA_TAB_LABEL: &'static str = "Aula";
     pub(crate) fn is_aula_tab_visible(&self) -> bool {
@@ -6280,25 +6282,25 @@ impl eframe::App for GrafitoApp {
                 if !self.is_aula_tab_visible() && self.sidebar_tab == Self::AULA_TAB_INDEX {
                     self.sidebar_tab = 0;
                 }
+                // 5 tabs: 0=Álgebra, 1=Herram., 2=Datos, 3=Prob., 4=Vista
+                // (+ Aula en AULA_TAB_INDEX cuando está habilitada). Vista es
+                // solo visual; Exportar vive en Herramientas, la hoja en Datos
+                // y la probabilidad en Prob.
                 match self.sidebar_tab {
-                    0 => {
-                        if crate::uses_statistics_panel(self.perspective) {
-                            crate::panels::draw_statistics_panel(self, ctx);
-                        } else {
-                            match self.perspective {
-                                Perspective::Complex => {
-                                    crate::panels::draw_complex_panel(self, ctx);
-                                }
-                                _ => crate::algebra::draw_algebra_panel(self, ctx),
-                            }
+                    0 => match self.perspective {
+                        Perspective::Complex => {
+                            crate::panels::draw_complex_panel(self, ctx);
                         }
-                    }
+                        _ => crate::algebra::draw_algebra_panel(self, ctx),
+                    },
                     1 => match self.perspective {
                         Perspective::Dynamics => crate::panels::draw_attractor_panel(self, ctx),
                         _ => crate::tools_panel::draw_tools_panel(self, ctx),
                     },
-                    2 => crate::panels::draw_view_panel(self, ctx),
-                    3 if self.is_aula_tab_visible() => {
+                    2 => crate::panels::draw_data_panel(self, ctx),
+                    3 => crate::panels::draw_statistics_panel(self, ctx),
+                    4 => crate::panels::draw_view_panel(self, ctx),
+                    i if i == Self::AULA_TAB_INDEX && self.is_aula_tab_visible() => {
                         crate::classroom::draw_classroom_panel(self, ctx)
                     }
                     _ => crate::panels::draw_empty_panel(self, ctx),
@@ -6754,6 +6756,24 @@ impl eframe::App for GrafitoApp {
                                 ),
                             );
                         }
+                    }
+                    // Chip de vista 3D: que siempre se sepa en qué vista se está
+                    // (la planta ortográfica es indistinguible del 2D a simple
+                    // vista y esa fue la confusión reportada).
+                    {
+                        let view_label = match self.view3d {
+                            crate::canvas::View3D::Perspective => "perspectiva",
+                            crate::canvas::View3D::Front => "alzado · XY",
+                            crate::canvas::View3D::Top => "planta · XZ",
+                            crate::canvas::View3D::Side => "perfil · YZ",
+                        };
+                        ui.painter().text(
+                            canvas_rect.min + egui::Vec2::new(8.0, 8.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("3D · {view_label}"),
+                            egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
+                            theme.text_tertiary,
+                        );
                     }
                 });
             }

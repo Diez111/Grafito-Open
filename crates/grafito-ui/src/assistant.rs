@@ -641,6 +641,42 @@ pub(crate) fn history_mini_card_indices(conversation: &[ConversationTurn]) -> Ve
 /// es `ancho * h/w` clampeado a este tope para no mover el scroll.
 const MEDIA_CARD_MAX_PREVIEW_H: f32 = crate::tokens::SPACE_XXL * 7.0;
 
+/// Tope de alto del preview según el ancho real de la card (puro).
+///
+/// El tope fijo desperdiciaba el espacio en panel ancho: un cuadrado de
+/// ~480px en 470px de card quedaba en 280×280 centrado (60% del ancho con
+/// márgenes vacíos a los lados). El tope sube a 85% del ancho cuando eso
+/// supera la base; en angosto manda la base intacta. Jamás deforma (el
+/// aspecto lo preserva `media_preview_size`). Puro, sin panic.
+pub fn media_preview_max_h_for(avail_w: f32) -> f32 {
+    if !avail_w.is_finite() || avail_w <= 0.0 {
+        return MEDIA_CARD_MAX_PREVIEW_H;
+    }
+    MEDIA_CARD_MAX_PREVIEW_H.max(avail_w * 0.85)
+}
+
+/// Altura táctil de la barra de scrub propia (tokens, par con botones).
+///
+/// La barra vive en fila propia a todo el ancho (estilo YouTube): el área
+/// de impacto iguala a `PLAYER_BTN_H` pero el rail visible es fino y
+/// centrado. Puro.
+pub const SCRUB_BAR_HIT_H: f32 = HIT_TARGET_MIN + SPACE_XS;
+/// Grosor del rail visible de la barra de scrub (token base 4).
+pub const SCRUB_RAIL_H: f32 = SPACE_XS;
+/// Radio del knob de la barra de scrub (+1.5 en hover/drag).
+pub const SCRUB_KNOB_R: f32 = 7.0;
+
+/// Fracción 0..=1 desde una coordenada X sobre la barra de scrub (pura).
+///
+/// Coordenada fuera de la barra clampeada (click en bordes no salta raro);
+/// barra degenerada o no finita → 0. Pura, sin panic.
+pub fn scrub_fraction_from_x(x: f32, bar_min_x: f32, bar_w: f32) -> f32 {
+    if !x.is_finite() || !bar_min_x.is_finite() || !bar_w.is_finite() || bar_w <= 0.0 {
+        return 0.0;
+    }
+    ((x - bar_min_x) / bar_w).clamp(0.0, 1.0)
+}
+
 /// Upscale máximo histórico del preview inline (nitidez).
 ///
 /// Techo 1.5× conservado por compatibilidad: el fit real de
@@ -6775,27 +6811,14 @@ pub fn media_toolbar_layout(avail_w: f32, frame_count: usize) -> MediaToolbarLay
     media_toolbar_layout_on_visible(avail, frame_count)
 }
 
-/// Ancho reservado por botones+contador+gaps en `SingleRow` del slot (puro).
+/// Ancho reservado por botones+contador+gaps en `SingleRow` (puro).
 ///
-/// Fuente única para la decisión (`media_toolbar_layout_on_visible`) y el
-/// llenado exacto de la fila: 4 cuadrados (play + 2 pasos + `···`) +
-/// contador + 5 gaps. El deslizador es `fila − reserva` exacta.
+/// Fuente de la decisión (`media_toolbar_layout_on_visible`): 4 cuadrados
+/// (play + 2 pasos + `···`) + contador + 5 gaps. El draw ya no encaja el
+/// scrub en la fila (siempre fila propia a todo el ancho): este cálculo
+/// solo decide el layout histórico testeado, no dimensiona widgets.
 fn media_toolbar_fixed_width(frame_count: usize) -> f32 {
     PLAYER_BTN_SQ_W * 4.0 + media_counter_slot_width(frame_count) + SPACE_XS * 5.0
-}
-
-/// Resto exacto para el deslizador en `SingleRow` (puro y testeable).
-///
-/// `fila − reserva(botones + contador + gaps)`: la fila llena exacta sin
-/// derramar. Fila o reserva no finita → 0 (no se dibuja). El bloque R2L
-/// (menú/contador) va ÚLTIMO en la fila: si el deslizador fuera después,
-/// el cursor rancio lo ubica tras el estado y derrama a la derecha (misma
-/// trampa que el header del media: deriva progresiva por generación).
-fn single_row_slider_width(row_w: f32, reserved: f32) -> f32 {
-    if !row_w.is_finite() || !reserved.is_finite() {
-        return 0.0;
-    }
-    (row_w - reserved).max(0.0)
 }
 
 /// Núcleo sin resta de overlay (puro): decide sobre ancho ya visible.
@@ -7166,7 +7189,8 @@ fn draw_turn_player(
             ui.set_min_width(max_w);
             draw_media_header(ui, &title, "lista", theme.success);
             ui.add_space(SPACE_XS);
-            let (_, dh_est) = media_preview_size(frame_w, frame_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
+            let (_, dh_est) =
+                media_preview_size(frame_w, frame_h, max_w, media_preview_max_h_for(max_w));
             let (full_rect, _) =
                 ui.allocate_exact_size(egui::vec2(max_w, dh_est), egui::Sense::hover());
             // Fit + centrado sobre la caja POST-layout vía helper compartido
@@ -7177,7 +7201,7 @@ fn draw_turn_player(
                 frame_w,
                 frame_h,
                 full_rect.width(),
-                MEDIA_CARD_MAX_PREVIEW_H,
+                media_preview_max_h_for(full_rect.width()),
             );
             let rect = media_preview_rect(full_rect, dw, dh);
             if let Some(texture) = &texture {
@@ -7207,9 +7231,10 @@ fn draw_turn_player(
             // la toolbar sobre un área vacía mentía. Placeholder honesto y
             // nada más hasta que la ventana suba el frame.
             if texture.is_some() {
-                // Toolbar del turno: misma altura única (`PLAYER_BTN_H`):
-                // [play/pausa][atrás][siguiente] + contador `N/M` como texto +
-                // deslizador. Reproducción fija 1x, sin velocidad. Sin export
+                // Toolbar del turno, misma estructura que el slot vivo:
+                // fila 1 la barra de scrub propia a todo el ancho, fila 2
+                // `[play/pausa][atrás][siguiente]` + contador `N/M` como
+                // texto. Reproducción fija 1x, sin velocidad. Sin export
                 // (vive en el slot vivo: replay primero). Mini-card intacta.
                 let turn_view = MediaToolbarView {
                     counter_compact: &counter_compact,
@@ -7218,54 +7243,15 @@ fn draw_turn_player(
                     frame_count,
                     exporting: false,
                 };
-                if media_toolbar_layout(ui.available_width(), frame_count)
-                    == MediaToolbarLayout::TwoRows
-                {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-                        draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
-                        draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            draw_media_counter_slot(ui, &turn_view);
-                        });
+                draw_turn_scrub_bar(ui, &mut cursor, frame_count, &counter_long, now_s);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+                    draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
+                    draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        draw_media_counter_slot(ui, &turn_view);
                     });
-                    draw_turn_scrub_slider(
-                        ui,
-                        &mut cursor,
-                        frame_count,
-                        &counter_long,
-                        now_s,
-                        ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W),
-                    );
-                } else {
-                    // SingleRow con R2L ÚLTIMO y deslizador de ancho explícito
-                    // (3 cuadrados sin menú `···` + contador + 4 gaps): si el
-                    // deslizador fuera después del R2L, el cursor rancio lo
-                    // ubica tras el contador y derrama la fila (misma trampa
-                    // que el header del media).
-                    let slider_w = single_row_slider_width(
-                        ui.available_width(),
-                        PLAYER_BTN_SQ_W * 3.0
-                            + media_counter_slot_width(frame_count)
-                            + SPACE_XS * 4.0,
-                    );
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-                        draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
-                        draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
-                        draw_turn_scrub_slider(
-                            ui,
-                            &mut cursor,
-                            frame_count,
-                            &counter_long,
-                            now_s,
-                            slider_w,
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            draw_media_counter_slot(ui, &turn_view);
-                        });
-                    });
-                }
+                });
             }
         });
     state.turn_players.borrow_mut().insert(turn_idx, cursor);
@@ -7353,36 +7339,28 @@ fn draw_turn_step_buttons(
     }
 }
 
-/// Deslizador del player por turno (mapeo lineal índice↔fracción).
+/// Barra de scrub del player por turno sobre la barra propia.
 ///
 /// Arrastrar fija el frame exacto y deja en pausa (retomar es explícito,
-/// nunca salta solo). Ancho explícito del llamador (fila propia en
-/// `TwoRows`, resto exacto en `SingleRow` con R2L último): jamás derrame.
-/// Piso en angosto como el slot vivo. Piel pura.
-fn draw_turn_scrub_slider(
+/// nunca salta solo). Vive en fila propia a todo el ancho, igual que el
+/// slot vivo. Piel pura.
+fn draw_turn_scrub_bar(
     ui: &mut egui::Ui,
     cursor: &mut TurnPlayState,
     frame_count: usize,
     counter_long: &str,
     now_s: f64,
-    slider_w: f32,
 ) {
-    if frame_count > 1 && slider_w > 0.0 {
-        let last = frame_count.saturating_sub(1) as f32;
-        let mut fraction =
-            (cursor.idx.min(frame_count.saturating_sub(1)) as f32 / last).clamp(0.0, 1.0);
-        let response = ui
-            .add_sized(
-                egui::vec2(slider_w, ui.spacing().interact_size.y),
-                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
-            )
-            .on_hover_text(counter_long);
-        if response.dragged() || response.changed() {
-            cursor.idx = ((fraction.clamp(0.0, 1.0) * last).round() as usize)
-                .min(frame_count.saturating_sub(1));
-            cursor.playing = false;
-            cursor.last_tick_s = Some(now_s);
-        }
+    if frame_count <= 1 {
+        return;
+    }
+    let last = frame_count.saturating_sub(1) as f32;
+    let fraction = (cursor.idx.min(frame_count.saturating_sub(1)) as f32 / last).clamp(0.0, 1.0);
+    if let Some(nueva) = draw_scrub_bar(ui, fraction, counter_long) {
+        cursor.idx =
+            ((nueva.clamp(0.0, 1.0) * last).round() as usize).min(frame_count.saturating_sub(1));
+        cursor.playing = false;
+        cursor.last_tick_s = Some(now_s);
     }
 }
 
@@ -7398,12 +7376,76 @@ struct MediaToolbarView<'a> {
     exporting: bool,
 }
 
-/// Toolbar ÚNICA v3: una fila en panel ancho, dos filas limpias en angosto.
+/// Barra de scrub propia estilo YouTube (rail + progreso + knob, Piel pura).
 ///
-/// Ancha (`SingleRow`): `[▶/⏸] [◀][▶] [deslizador] [N/M] [···]`.
-/// Angosta (`TwoRows`, ver `media_toolbar_layout`): arriba `[▶/⏸] [◀][▶]
-/// [N/M] [···]`, abajo el deslizador a todo el ancho (piso
-/// `MEDIA_TOOLBAR_MIN_SLIDER_W` garantizado: no compite con botones).
+/// El `egui::Slider` heredaba el estilo global y su track se fundía con el
+/// fondo de la card en tema oscuro: la barra no se veía y solo quedaba el
+/// knob suelto. Esta barra pinta sus tres piezas con colores del tema
+/// garantizados: rail `separator`, progreso `accent`, knob blanco con borde
+/// `accent` (radio mayor en hover/drag). Vive en fila propia a todo el
+/// ancho (jamás enana entre botones). Click/drag devuelve la fracción
+/// 0..=1; `None` = sin interacción. Piel pura: muta nada, emite fracción.
+fn draw_scrub_bar(ui: &mut egui::Ui, fraction: f32, hover_text: &str) -> Option<f32> {
+    let avail = ui.available_width().max(0.0);
+    if avail <= 0.0 {
+        return None;
+    }
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(avail, SCRUB_BAR_HIT_H),
+        egui::Sense::click_and_drag(),
+    );
+    let theme = current_theme(ui.ctx());
+    let frac = fraction.clamp(0.0, 1.0);
+    let rail_y = rect.center().y;
+    let half = SCRUB_RAIL_H / 2.0;
+    let rail = egui::Rect::from_min_max(
+        egui::pos2(rect.min.x, rail_y - half),
+        egui::pos2(rect.max.x, rail_y + half),
+    );
+    // Rail completo siempre visible sobre `input_bg` + progreso encima.
+    ui.painter()
+        .rect_filled(rail, egui::Rounding::same(half), theme.separator);
+    let fill_w = (rect.width() * frac).clamp(0.0, rect.width());
+    if fill_w >= 1.0 {
+        let fill = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, rail_y - half),
+            egui::pos2(rect.min.x + fill_w, rail_y + half),
+        );
+        ui.painter()
+            .rect_filled(fill, egui::Rounding::same(half), theme.accent);
+    }
+    // Knob clampado adentro (en barra ultra-angosta va al centro).
+    let knob_r = if resp.hovered() || resp.dragged() {
+        SCRUB_KNOB_R + 1.5
+    } else {
+        SCRUB_KNOB_R
+    };
+    let cx = if rect.width() <= knob_r * 2.0 {
+        rect.center().x
+    } else {
+        (rect.min.x + fill_w).clamp(rect.min.x + knob_r, rect.max.x - knob_r)
+    };
+    let center = egui::pos2(cx, rail_y);
+    ui.painter()
+        .circle_filled(center, knob_r, egui::Color32::WHITE);
+    ui.painter()
+        .circle_stroke(center, knob_r, egui::Stroke::new(1.5, theme.accent));
+    let resp = resp.on_hover_text(hover_text);
+    if resp.dragged() || resp.clicked() {
+        // Click de teclado/foco sin posición no adivina fracción.
+        if let Some(pos) = resp.interact_pointer_pos() {
+            return Some(scrub_fraction_from_x(pos.x, rect.min.x, rect.width()));
+        }
+    }
+    None
+}
+
+/// Toolbar ÚNICA v3: SIEMPRE dos filas estilo YouTube (scrub arriba, botones abajo).
+///
+/// Arriba la barra de scrub propia a todo el ancho (jamás enana: el camino
+/// `SingleRow` con el deslizador encajado entre botones y contador dejaba
+/// el track de `egui::Slider` fundido con el fondo y solo se veía el knob).
+/// Abajo `[▶/⏸] [◀][▶]` a la izquierda y `[N/M] [···]` a la derecha.
 /// Reproducción fija 1x: sin velocidad. Exportar vive en el menú `···`
 /// (emite la acción `ExportMedia` existente, jamás botón en la fila).
 /// Teclas locales (sin globales que choquen, ver `app::shortcuts`): Espacio
@@ -7413,6 +7455,10 @@ struct MediaToolbarView<'a> {
 /// etiqueta suelta ni botón). Todos los botones miden `PLAYER_BTN_H` de alto
 /// (cuadrados `PLAYER_BTN_SQ_W`). Piel pura: muta solo `Cell`s, emite
 /// `ExportMedia` desde el `···`.
+///
+/// `MediaToolbarLayout` se conserva como API pura testeada (los paneles
+/// angostos siempre fueron dos filas); el draw ya no ramifica: una sola
+/// estructura en todos los anchos, sin matemática frágil de llenado exacto.
 fn draw_media_toolbar(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
@@ -7420,45 +7466,19 @@ fn draw_media_toolbar(
 ) -> Option<AssistantUiAction> {
     let mut action = None;
     handle_media_player_keys(ui, state, view);
-    if media_toolbar_layout(ui.available_width(), view.frame_count) == MediaToolbarLayout::TwoRows {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-            draw_media_play_button(ui, state);
-            draw_media_step_buttons(ui, state, view);
-            // Contador + `···` a la derecha: el deslizador vive en su propia
-            // fila a todo el ancho (piso garantizado en angosto).
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                draw_media_more_menu(ui, view, &mut action);
-                draw_media_counter_slot(ui, view);
-            });
+    // Fila 1: scrub propio a todo el ancho. Fila 2: botones + contador.
+    draw_media_scrub_bar(ui, state, view);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+        draw_media_play_button(ui, state);
+        draw_media_step_buttons(ui, state, view);
+        // Contador + `···` a la derecha: el bloque R2L va ÚLTIMO para que
+        // ningún cursor rancio derrame la fila a la derecha.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            draw_media_more_menu(ui, view, &mut action);
+            draw_media_counter_slot(ui, view);
         });
-        draw_media_scrub_slider(
-            ui,
-            state,
-            view,
-            ui.available_width().max(MEDIA_TOOLBAR_MIN_SLIDER_W),
-        );
-    } else {
-        // SingleRow con R2L ÚLTIMO y deslizador de ancho explícito: si el
-        // deslizador fuera después del R2L, el cursor rancio lo ubica tras
-        // el estado/contador y derrama la fila a la derecha (misma trampa
-        // que el header: +16 por card y deriva por generación). El ancho
-        // sale de constantes y llena exacto (`single_row_slider_width`).
-        let slider_w = single_row_slider_width(
-            ui.available_width(),
-            media_toolbar_fixed_width(view.frame_count),
-        );
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-            draw_media_play_button(ui, state);
-            draw_media_step_buttons(ui, state, view);
-            draw_media_scrub_slider(ui, state, view, slider_w);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                draw_media_more_menu(ui, view, &mut action);
-                draw_media_counter_slot(ui, view);
-            });
-        });
-    }
+    });
     action
 }
 
@@ -7635,9 +7655,11 @@ fn draw_media_more_menu(
     action: &mut Option<AssistantUiAction>,
 ) {
     let popup_id = ui.make_persistent_id("media_more_menu");
+    // Etiqueta con tamaño explícito: con el tamaño por defecto el glifo
+    // `···` podía heredar métricas chicas y verse como un punto mudo.
     let boton = ui.add_sized(
         egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
-        egui::Button::new("···"),
+        egui::Button::new(egui::RichText::new("···").size(TYPE_SM).strong()),
     );
     let boton = boton.on_hover_text("Más acciones de la animación");
     if boton.clicked() {
@@ -7681,35 +7703,22 @@ fn draw_media_more_menu(
         },
     );
 }
-/// Deslizador de scrub con piso en angosto (player pro).
+/// Barra de scrub del slot vivo sobre la barra propia (player pro).
 ///
-/// Ancho explícito del llamador: en `TwoRows` la fila propia a todo el
-/// ancho (piso `MEDIA_TOOLBAR_MIN_SLIDER_W`); en `SingleRow` el resto
-/// exacto (`single_row_slider_width`, el bloque R2L va último). Ancho no
-/// positivo → no se dibuja (jamás derrame).
-fn draw_media_scrub_slider(
-    ui: &mut egui::Ui,
-    state: &AssistantPanelState,
-    view: &MediaToolbarView,
-    slider_w: f32,
-) {
-    if view.frame_count > 1 && view.duration_ms > 0 && slider_w > 0.0 {
-        let mut fraction = (state.media_playhead_ms.get().min(view.duration_ms) as f32)
-            / (view.duration_ms as f32);
-        fraction = fraction.clamp(0.0, 1.0);
-        let response = ui
-            .add_sized(
-                egui::vec2(slider_w, ui.spacing().interact_size.y),
-                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
-            )
-            .on_hover_text(view.counter_long);
-        if response.dragged() || response.changed() {
-            // Se pausa al arrastrar y queda en pausa (retomar es
-            // explícito, nunca salta solo).
-            let t_ms = (fraction.clamp(0.0, 1.0) * (view.duration_ms as f32)).round() as u64;
-            state.media_playhead_ms.set(t_ms.min(view.duration_ms));
-            state.media_paused.set(true);
-        }
+/// Mapea fracción→`t_ms` del loop y pausa al tocar (retomar es explícito,
+/// nunca salta solo). Sin frames o sin duración no dibuja nada. Piel pura.
+fn draw_media_scrub_bar(ui: &mut egui::Ui, state: &AssistantPanelState, view: &MediaToolbarView) {
+    if view.frame_count <= 1 || view.duration_ms == 0 {
+        return;
+    }
+    let fraction =
+        (state.media_playhead_ms.get().min(view.duration_ms) as f32) / (view.duration_ms as f32);
+    if let Some(nueva) = draw_scrub_bar(ui, fraction, view.counter_long) {
+        // Se pausa al arrastrar y queda en pausa (retomar es
+        // explícito, nunca salta solo).
+        let t_ms = (nueva.clamp(0.0, 1.0) * (view.duration_ms as f32)).round() as u64;
+        state.media_playhead_ms.set(t_ms.min(view.duration_ms));
+        state.media_paused.set(true);
     }
 }
 
@@ -7915,7 +7924,8 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
             // resto es fondo de la card, jamás banda negra pegada a la
             // izquierda. Sin textura lista se reserva el MISMO rect con
             // placeholder centrado: jamás etiqueta suelta fuera de rango.
-            let (_, dh_est) = media_preview_size(first_w, first_h, max_w, MEDIA_CARD_MAX_PREVIEW_H);
+            let (_, dh_est) =
+                media_preview_size(first_w, first_h, max_w, media_preview_max_h_for(max_w));
             let (full_rect, _) =
                 ui.allocate_exact_size(egui::vec2(max_w, dh_est), egui::Sense::hover());
             // Fit + centrado sobre la caja POST-layout vía helper compartido
@@ -7926,7 +7936,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                 first_w,
                 first_h,
                 full_rect.width(),
-                MEDIA_CARD_MAX_PREVIEW_H,
+                media_preview_max_h_for(full_rect.width()),
             );
             let rect = media_preview_rect(full_rect, dw, dh);
             if let Some(texture) = &texture {
@@ -15921,6 +15931,92 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn scrub_bar_fraccion_desde_x_clampea_y_no_panica() {
+        // Click en bordes no salta raro; barra degenerada o NaN → 0.
+        assert_eq!(scrub_fraction_from_x(0.0, 0.0, 200.0), 0.0);
+        assert_eq!(scrub_fraction_from_x(100.0, 0.0, 200.0), 0.5);
+        assert_eq!(scrub_fraction_from_x(200.0, 0.0, 200.0), 1.0);
+        assert_eq!(scrub_fraction_from_x(-50.0, 0.0, 200.0), 0.0);
+        assert_eq!(scrub_fraction_from_x(500.0, 0.0, 200.0), 1.0);
+        assert_eq!(scrub_fraction_from_x(50.0, 0.0, 0.0), 0.0);
+        assert_eq!(scrub_fraction_from_x(f32::NAN, 0.0, 200.0), 0.0);
+        assert_eq!(scrub_fraction_from_x(50.0, 0.0, f32::NAN), 0.0);
+        // Métricas de la barra: área táctil par con botones, rail fino.
+        assert_eq!(SCRUB_BAR_HIT_H, PLAYER_BTN_H);
+        assert_eq!(SCRUB_RAIL_H, SPACE_XS);
+        assert!(SCRUB_KNOB_R > SCRUB_RAIL_H);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn preview_max_h_angosto_base_y_ancho_aprovecha() {
+        // Angosto: base intacta (retratos no gigantes, scroll estable).
+        assert_eq!(media_preview_max_h_for(250.0), MEDIA_CARD_MAX_PREVIEW_H);
+        assert_eq!(media_preview_max_h_for(300.0), MEDIA_CARD_MAX_PREVIEW_H);
+        // Ancho: el cuadrado llenaba 60% (280 en 470); el tope sube al 85%.
+        let ancho = media_preview_max_h_for(470.0);
+        assert!(
+            (ancho - 470.0 * 0.85).abs() < 0.01,
+            "en panel ancho el tope acompaña: {ancho}"
+        );
+        assert!(ancho > MEDIA_CARD_MAX_PREVIEW_H);
+        // Degenerado → base, jamás 0/negativo/NaN.
+        assert_eq!(media_preview_max_h_for(0.0), MEDIA_CARD_MAX_PREVIEW_H);
+        assert_eq!(media_preview_max_h_for(-5.0), MEDIA_CARD_MAX_PREVIEW_H);
+        assert_eq!(media_preview_max_h_for(f32::NAN), MEDIA_CARD_MAX_PREVIEW_H);
+        // El draw usa el tope dinámico en slot vivo y por turno.
+        let source = include_str!("assistant.rs");
+        for f in ["fn draw_media_card(", "fn draw_turn_player("] {
+            let at = source.find(f).expect("existe draw");
+            let end = source[at..]
+                .find("\nfn ")
+                .map(|off| at + off)
+                .expect("cierra draw");
+            assert!(
+                source[at..end].contains("media_preview_max_h_for("),
+                "{f} con tope dinámico"
+            );
+        }
+    }
+
+    #[test]
+    fn toolbar_siempre_apilada_sin_slider_de_egui_en_player() {
+        // Blindaje: el player (slot + turno) ya no usa `egui::Slider` — su
+        // track se fundía con el fondo y solo quedaba el knob suelto. La
+        // barra propia (`draw_scrub_bar`) pinta rail+progreso+knob con el
+        // tema garantizado, en fila propia a todo el ancho.
+        let source = include_str!("assistant.rs");
+        // Cierre propio de cada fn (`\n}\n` a columna 0): el doc de la
+        // siguiente menciona `egui::Slider` en pasado y no debe entrar.
+        fn cuerpo<'a>(source: &'a str, f: &str) -> &'a str {
+            let at = source.find(f).expect("existe la fn");
+            let end = source[at..]
+                .find("\n}\n")
+                .map(|off| at + off)
+                .expect("cierra la fn");
+            &source[at..end]
+        }
+        for f in ["fn draw_media_toolbar(", "fn draw_turn_scrub_bar("] {
+            assert!(
+                !cuerpo(source, f).contains("egui::Slider"),
+                "{f} sin egui::Slider (barra propia)"
+            );
+        }
+        let bar_at = source
+            .find("fn draw_scrub_bar(")
+            .expect("existe draw_scrub_bar");
+        let bar_end = source[bar_at..]
+            .find("\nfn ")
+            .map(|off| bar_at + off)
+            .expect("cierra draw_scrub_bar");
+        let bar = &source[bar_at..bar_end];
+        assert!(bar.contains("theme.separator"), "rail visible");
+        assert!(bar.contains("theme.accent"), "progreso + knob visibles");
+        assert!(bar.contains("circle_filled"), "knob dibujado");
+    }
+
+    #[test]
     fn more_menu_popup_ancho_real_sin_wrap_por_caracter() {
         // Captura: el popup heredaba el ancho del botón cuadrado (28px) y
         // "Exportar" se partía en vertical letra por letra. El popup mide
@@ -16055,22 +16151,24 @@ mod tests {
             .map(|off| tb_start + off)
             .expect("existe el cierre de la toolbar");
         let toolbar = &source[tb_start..tb_end];
+        // Estructura apilada única (scrub arriba, botones abajo): el
+        // contador se dibuja UNA vez, sin ramas una/dos filas.
         assert_eq!(
             toolbar.matches("draw_media_counter_slot(ui, view)").count(),
-            2,
-            "contador en ambas ramas (una/dos filas), una vez por rama"
+            1,
+            "contador una sola vez (toolbar siempre apilada)"
         );
         assert!(
             !toolbar.contains(".text("),
-            "sin etiqueta lateral en el deslizador (apretaba la fila)"
+            "sin etiqueta lateral en la barra (apretaba la fila)"
         );
         assert!(
-            toolbar.contains("show_value(false)"),
-            "el deslizador no muestra valor: N/M manda"
+            toolbar.contains("draw_media_scrub_bar(ui, state, view)"),
+            "el scrub va en fila propia a todo el ancho (barra propia)"
         );
         assert!(
-            toolbar.contains("TwoRows"),
-            "la rama angosta existe (dos filas limpias)"
+            !toolbar.contains("media_toolbar_layout("),
+            "sin ramificación por ancho en el draw (una estructura)"
         );
         let card_start = source
             .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")

@@ -1885,12 +1885,23 @@ impl GrafitoApp {
             self.canvas_is_panning = true;
         }
 
-        // Orbit with right drag
+        // Orbit with right drag. En vistas ortográficas (alzado/planta/perfil)
+        // la cámara no se mueve: el primer intento de orbitar vuelve a
+        // perspectiva en vez de dejar la vista clavada en un plano que
+        // parece 2D (trampa planta-vs-2D).
         if response.dragged_by(egui::PointerButton::Secondary) {
             #[cfg(feature = "profile")]
             puffin::profile_scope!("input_orbit");
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             self.pause_multidimensional_motion();
+            if self.view3d.is_orthographic() {
+                let prev = self.view3d.name();
+                self.view3d = crate::canvas::View3D::Perspective;
+                self.notify(
+                    format!("Vista en perspectiva (venías de {prev})"),
+                    grafito_ui::toast::ToastKind::Info,
+                );
+            }
             let delta = response.drag_delta();
             self.camera.orbit(delta.x * 0.005, delta.y * 0.005);
         }

@@ -379,24 +379,22 @@ fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 
 fn draw_panels_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.menu_button("Paneles", |ui| {
-        for (tab, label) in [(0, "Álgebra"), (1, "Herramientas"), (2, "Vista")] {
+        // 5 tabs de primera clase (regla visible ⇒ botón): cada entrada abre
+        // su tab. Datos y Prob. tienen casa propia; las perspectivas
+        // Estadística/Probabilidad/Análisis de datos solo eligen el tab
+        // inicial (ver `LeftPanelContent::default_sidebar_tab`).
+        for (tab, label) in [
+            (0, "Álgebra"),
+            (1, "Herramientas"),
+            (2, "Datos"),
+            (3, "Probabilidad y Estadística"),
+            (4, "Vista"),
+        ] {
             let selected = app.compact_drawer_open && app.sidebar_tab == tab;
             if ui.selectable_label(selected, label).clicked() {
                 app.sidebar_tab = tab;
                 app.compact_drawer_open = true;
-                ui.close_menu();
-            }
-        }
-        // Onda 2: entrada visible del panel de estadística (regla visible ⇒
-        // botón). Lleva a la perspectiva Estadística, cuyo tab 0 dibuja
-        // `draw_statistics_panel` (ver `uses_statistics_panel`).
-        {
-            let stats_selected =
-                crate::uses_statistics_panel(app.perspective) && app.compact_drawer_open;
-            if ui.selectable_label(stats_selected, "Estadística").clicked() {
-                let _ = app.try_set_perspective(Perspective::Statistics);
-                app.sidebar_tab = 0;
-                app.compact_drawer_open = true;
+                app.left_drawer_open = true;
                 ui.close_menu();
             }
         }
@@ -625,7 +623,7 @@ pub(crate) fn draw_top_bar(
         });
     let _ = top_bar_response;
     // ── LEFT SIDEBAR (60px icon rail) ──
-    // 3 tabs armonizados: un icono representativo por panel + etiqueta corta
+    // 5 tabs armonizados: un icono representativo por panel + etiqueta corta
     // legible. Las perspectivas se cambian únicamente desde la barra superior.
     let tabs: &[(&str, Icon, &str)] = &[
         ("Álgebra", Icon::Function, "Objetos, variables y CAS"),
@@ -634,7 +632,17 @@ pub(crate) fn draw_top_bar(
             Icon::Settings,
             "Herramientas de construcción y análisis",
         ),
-        ("Vista", Icon::Eye, "Cuadrícula, ejes y estilo"),
+        (
+            "Datos",
+            Icon::Spreadsheet,
+            "Hoja de cálculo vinculada y tablas",
+        ),
+        ("Prob.", Icon::Histogram, "Probabilidad y Estadística"),
+        (
+            "Vista",
+            Icon::Eye,
+            "Solo visual: cuadrícula, ejes, 3D y capas",
+        ),
     ];
     if show_sidebar {
         egui::SidePanel::left("icon_bar")
@@ -1008,7 +1016,11 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
                 } else {
                     match app.current_view {
                         ViewMode::D2 => status_hint_for_tool(app.current_tool),
-                        ViewMode::D3 => status_hint_for_3d_tool(app.current_tool),
+                        ViewMode::D3 => format!(
+                            "{} · {}",
+                            app.view3d.name(),
+                            status_hint_for_3d_tool(app.current_tool)
+                        ),
                     }
                 };
                 if !hint.is_empty() {

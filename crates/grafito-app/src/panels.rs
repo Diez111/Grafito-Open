@@ -15,9 +15,10 @@ use grafito_geometry::{Color, RegularPolychoron, RegularPolytopeFamily};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
-    CARD_SPACING, DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION,
-    PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM,
-    SPACE_XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
+    DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, HIT_TARGET_MIN, PANEL_LEFT_DEFAULT,
+    PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM,
+    SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
+    ZOOM_ICON_HIT,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
@@ -33,6 +34,98 @@ const MAX_LOCAL_DATA_IMPORT_BYTES: usize = 2_000_000;
 #[derive(Debug, Clone, Default)]
 struct LayerPanelState {
     selected_layer: u32,
+}
+
+// ── Helpers escandinavos de panel (una sola fuente de header/botón) ──────
+// Todos los paneles izquierdos comparten: título TYPE_LG acento + subtítulo
+// terciario con wrap + hairline + aire SPACE_MD. Los botones primarios son
+// pill de ancho completo (alto 28 ≥ HIT_TARGET_MIN 24) para que nunca se
+// compriman hasta partir el texto ("Asig/nar" en Vista).
+
+/// Ancho bajo el cual las filas horizontales se apilan en vertical.
+const PANEL_NARROW_WIDTH: f32 = 280.0;
+/// Ancho máximo real de Datos/Prob: evita que 45% del viewport en
+/// pantallas anchas estire el panel a 800+ px (reporte "muy ancho").
+/// 360 = múltiplo de base 4, deja hoja 6×8 legible sin muro.
+const PANEL_DATA_MAX_WIDTH: f32 = 360.0;
+/// Alto de botones de panel (≥ `HIT_TARGET_MIN` 24, WCAG 2.5.8).
+const PANEL_BUTTON_H: f32 = 28.0;
+/// Alto de celdas editables de la hoja.
+const SHEET_CELL_H: f32 = 24.0;
+
+/// `true` si el panel está angosto y conviene apilar en vertical.
+fn panel_is_narrow(ui: &egui::Ui) -> bool {
+    ui.available_width() < PANEL_NARROW_WIDTH
+}
+
+/// Header unificado: título + subtítulo + cerrar. Devuelve `true` si se pidió cerrar.
+fn draw_panel_header(ui: &mut egui::Ui, title: &str, subtitle: &str, close_tip: &str) -> bool {
+    let theme = current_theme(ui.ctx());
+    let accent = theme.accent;
+    let mut close = false;
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+    ui.add_space(SPACE_SM);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
+        ui.add_space(SPACE_XS);
+        ui.label(
+            egui::RichText::new(title)
+                .color(accent)
+                .strong()
+                .size(TYPE_LG),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(SPACE_SM);
+            if action_icon_button(ui, Icon::Close, theme.text_secondary, close_tip).clicked() {
+                close = true;
+            }
+        });
+    });
+    if !subtitle.is_empty() {
+        ui.add_space(SPACE_XS);
+        ui.horizontal(|ui| {
+            ui.add_space(SPACE_XS);
+            ui.label(
+                egui::RichText::new(subtitle)
+                    .color(theme.text_tertiary)
+                    .size(TYPE_XS),
+            );
+            ui.add_space(SPACE_SM);
+        });
+    }
+    ui.add_space(SPACE_SM);
+    ui.painter().line_segment(
+        [
+            ui.cursor().min,
+            ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
+        ],
+        theme.hairline_stroke(),
+    );
+    ui.add_space(SPACE_SM);
+    close
+}
+
+/// Botón primario pill de ancho completo (nunca parte el texto).
+fn panel_primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let theme = current_theme(ui.ctx());
+    let btn = egui::Button::new(
+        egui::RichText::new(label)
+            .size(TYPE_SM)
+            .strong()
+            .color(theme.keyboard_enter_text),
+    )
+    .fill(theme.keyboard_enter_bg)
+    .stroke(egui::Stroke::NONE)
+    .rounding(RADIUS_PILL);
+    ui.add_sized(
+        [ui.available_width().max(HIT_TARGET_MIN), PANEL_BUTTON_H],
+        btn,
+    )
+}
+
+/// Ancho responsive de celda de hoja: reparte el ancho entre 6 columnas.
+fn sheet_cell_width(available_width: f32) -> f32 {
+    ((available_width - 28.0) / SHEET_VIEW_COLS as f32).clamp(52.0, 96.0)
 }
 
 /// Botón pill centrado de ancho completo para la sección Exportación
@@ -82,6 +175,149 @@ pub(crate) fn parse_statistics_input(input: &str) -> Result<Vec<f64>, String> {
             Ok(value)
         })
         .collect()
+}
+
+/// Muestra honesta de datos para el asistente: primeros 24 valores con
+/// `:.6`, más `…y N más` si hay más. Nunca inventa ni trunca en silencio.
+pub(crate) fn statistics_data_preview(data: &[f64]) -> String {
+    const PREVIEW_N: usize = 24;
+    let shown: Vec<String> = data
+        .iter()
+        .take(PREVIEW_N)
+        .map(|v| format!("{v:.6}"))
+        .collect();
+    if data.len() > PREVIEW_N {
+        format!(
+            "{} …y {} más (N={})",
+            shown.join(", "),
+            data.len() - PREVIEW_N,
+            data.len()
+        )
+    } else {
+        shown.join(", ")
+    }
+}
+
+/// Prompt para ordenar/analizar con el asistente: lleva N + preview +
+/// comandos disponibles. Puro y testeable; el caller lo pone en
+/// `assistant.problem` y abre el workspace.
+pub(crate) fn statistics_assistant_prompt(data: &[f64]) -> String {
+    if data.is_empty() {
+        return "Tengo datos para ordenar pero la lista está vacía. \
+            ¿Cómo los pego (uno por línea o comas) en Prob. → Tus datos, o importo un CSV en Datos?"
+            .to_string();
+    }
+    format!(
+        "Ordená y analizá estos {} datos: [{}]. \
+        Pasos: 1) ordenalos con Sort, 2) resumen (Media, Mediana, Desvío, Q1/Q3/IQR), \
+        3) sugerí gráfico (Histogram/BoxPlot) y 4) proponé inferencia (TTest/ZTest/ChiSqTest/ANOVA/Correlation/LinearRegression) \
+        con comandos listos para pegar en la entrada.",
+        data.len(),
+        statistics_data_preview(data)
+    )
+}
+
+/// Lista inline honesta para comandos (hasta 200 valores; más → `None` para
+/// no reventar la entrada y derivar al asistente/hoja).
+fn statistics_inline_list(data: &[f64]) -> Option<String> {
+    const MAX_INLINE: usize = 200;
+    if data.is_empty() || data.len() > MAX_INLINE {
+        return None;
+    }
+    Some(
+        data.iter()
+            .map(|v| format!("{v}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+pub(crate) fn statistics_histogram_command(data: &[f64]) -> Option<String> {
+    statistics_inline_list(data).map(|list| format!("Histogram[{{{list}}}, 10]"))
+}
+
+pub(crate) fn statistics_boxplot_command(data: &[f64]) -> Option<String> {
+    statistics_inline_list(data).map(|list| format!("BoxPlot[{{{list}}}]"))
+}
+
+pub(crate) fn statistics_mean_command(data: &[f64]) -> Option<String> {
+    statistics_inline_list(data).map(|list| format!("Mean[{{{list}}}]"))
+}
+
+/// Lleva los datos 1D de Prob. al asistente: arma el prompt puro y abre el
+/// workspace. Cero I/O en el panel salvo abrir el drawer.
+fn open_statistics_in_assistant(app: &mut GrafitoApp, ctx: &egui::Context) {
+    app.assistant.problem = statistics_assistant_prompt(&app.statistics_data);
+    app.assistant_visible = true;
+    app.open_assistant_workspace();
+    app.cas_result = "Datos enviados al asistente para ordenar y analizar.".to_string();
+    ctx.request_repaint();
+}
+
+/// Lleva las tablas 2D de Datos al asistente: resume hasta 4 tablas
+/// (etiqueta + N + preview x/y) en un prompt accionable. Si no hay tablas,
+/// el prompt explica cómo importar.
+fn open_data_tables_in_assistant(app: &mut GrafitoApp, ctx: &egui::Context) {
+    use grafito_core::GeoObject;
+    let mut parts: Vec<String> = Vec::new();
+    for (_, object) in app.document.objects_iter_sorted().take(64) {
+        if parts.len() >= 4 {
+            break;
+        }
+        if let GeoObject::DataTable(table) = object {
+            let n = table.xs.len().min(table.ys.len());
+            if n == 0 {
+                continue;
+            }
+            let xs: Vec<String> = table
+                .xs
+                .iter()
+                .take(12)
+                .map(|v| format!("{v:.4}"))
+                .collect();
+            let ys: Vec<String> = table
+                .ys
+                .iter()
+                .take(12)
+                .map(|v| format!("{v:.4}"))
+                .collect();
+            let more = if n > 12 {
+                format!(" …+{} más", n - 12)
+            } else {
+                String::new()
+            };
+            let label = if table.label.is_empty() {
+                "<sin etiqueta>"
+            } else {
+                &table.label
+            };
+            parts.push(format!(
+                "«{label}» N={n} x=[{}{more}] y=[{}{more}]",
+                xs.join(", "),
+                ys.join(", "),
+                more = more
+            ));
+        }
+    }
+    let prompt = if parts.is_empty() {
+        "Quiero ordenar muchos datos pero no hay tablas. \
+        ¿Importo un CSV/TSV de dos columnas en Datos → Importar, o pego listas con DataTable[{1,2,3}, {2,4,6}]? \
+        Después ordená con Sort, resumí y proponé Histogram/ScatterPlot/LinearRegression con comandos listos."
+            .to_string()
+    } else {
+        format!(
+            "Ordená y analizá estas tablas: {}. \
+            Pasos por tabla: 1) Sort si hace falta, 2) resumen y correlación, \
+            3) gráfico (ScatterPlot/Histogram/BoxPlot/BarChart/PieChart) y 4) ajuste (FitLinear/FitPoly/FitExp/FitLog/FitPow/FitSin) \
+            o inferencia (TTest/ANOVA) con comandos listos para pegar.",
+            parts.join(" · ")
+        )
+    };
+    app.assistant.problem = prompt;
+    app.assistant_visible = true;
+    app.open_assistant_workspace();
+    app.cas_result = "Tablas enviadas al asistente para ordenar y analizar.".to_string();
+    ctx.request_repaint();
 }
 
 /// Parses an explicitly selected local two-column CSV/TSV payload. The result
@@ -919,13 +1155,18 @@ fn draw_inspector_section(
         .fill(theme.panel_bg)
         .stroke(theme.hairline_stroke())
         .rounding(egui::Rounding::same(RADIUS_SM))
-        .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
+        .inner_margin(egui::Margin {
+            left: SPACE_MD,
+            right: SPACE_MD,
+            top: SPACE_SM,
+            bottom: SPACE_MD,
+        })
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.label(
                 egui::RichText::new(title)
-                    .color(theme.text_secondary)
+                    .color(theme.text_primary)
                     .size(TYPE_SM)
                     .strong(),
             );
@@ -1143,10 +1384,10 @@ fn draw_object_cards_where(
     predicate: impl Fn(&GeoObject) -> bool,
 ) {
     let theme = current_theme(ui.ctx());
-    ui.add_space(SPACE_SM + 2.0);
+    ui.add_space(SPACE_SM);
     ui.label(
         egui::RichText::new(title)
-            .color(theme.text_secondary)
+            .color(theme.text_primary)
             .size(TYPE_SM)
             .strong(),
     );
@@ -1720,10 +1961,229 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         });
 }
 
+/// Sección Exportar / Compartir — vive en el tab Herramientas y en
+/// Archivo > Exportar. NUNCA en Vista: Vista es solo visual (cuadrícula,
+/// ejes, 3D y capas). Piel pura: el diálogo rfd queda en UI thread (modal
+/// nativo); render+write van a workers y el summary se aplica en
+/// `poll_background_jobs`.
+pub(crate) fn draw_export_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
+    draw_inspector_section(
+        ui,
+        "Exportación",
+        "Generá un archivo del lienzo actual o copialo al portapapeles.",
+        |ui| {
+            for format in [
+                crate::export::ExportFormat::Svg,
+                crate::export::ExportFormat::Png,
+                crate::export::ExportFormat::Tikz,
+            ] {
+                if export_pill_button(ui, &format!("Exportar {}", format.display_name())).clicked()
+                {
+                    app.export_with_dialog(format, Some(ui.ctx()));
+                }
+            }
+            if export_pill_button(ui, "Exportar PDF").on_hover_text(
+                "Vectorial de 1 página por ahora: vista + hoja actual (rectas, círculos, polígonos y texto Helvetica). Si el libro tiene varias hojas con contenido, avisa sin escribir.",
+            ).clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PDF", &["pdf"])
+                    .set_file_name("grafito_export.pdf")
+                    .save_file()
+                {
+                    app.pending_export_job = Some(crate::app::PendingExportJob {
+                        receiver: spawn_pdf_export(app.document.clone(), path, ui.ctx()),
+                    });
+                    app.notify("Exportando PDF…", grafito_ui::toast::ToastKind::Info);
+                }
+            }
+            let tables: Vec<(ObjectId, String, usize)> = app
+                .document
+                .objects_iter_sorted()
+                .filter_map(|(id, object)| match object {
+                    GeoObject::DataTable(table) => Some((*id, table.label.clone(), table.xs.len())),
+                    _ => None,
+                })
+                .collect();
+            if !tables.is_empty() {
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new("Tablas (CSV RFC 4180)")
+                        .size(TYPE_XS)
+                        .color(current_theme(ui.ctx()).text_secondary),
+                );
+            }
+            for (id, label, rows) in tables {
+                ui.horizontal(|ui| {
+                    let name = if label.is_empty() {
+                        "<sin etiqueta>"
+                    } else {
+                        &label
+                    };
+                    ui.label(egui::RichText::new(format!("{name} · {rows} filas")).size(TYPE_SM));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("CSV")
+                            .on_hover_text(
+                                "Descarga honesta: escribe el CSV real o informa el error",
+                            )
+                            .clicked()
+                        {
+                            match datatable_csv_text(&app.document, id) {
+                                Ok((table_label, csv)) => {
+                                    let stem = sanitize_export_stem(&table_label);
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("CSV", &["csv"])
+                                        .set_file_name(format!("{stem}.csv"))
+                                        .save_file()
+                                    {
+                                        app.pending_export_job =
+                                            Some(crate::app::PendingExportJob {
+                                                receiver: spawn_csv_export(
+                                                    csv,
+                                                    table_label,
+                                                    path,
+                                                    ui.ctx(),
+                                                ),
+                                            });
+                                        app.notify(
+                                            "Exportando CSV…",
+                                            grafito_ui::toast::ToastKind::Info,
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    app.cas_result = error.clone();
+                                    app.notify(error, grafito_ui::toast::ToastKind::Error);
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+            ui.add_space(SPACE_XS);
+            ui.horizontal(|ui| {
+                if ui
+                    .small_button("Copiar SVG")
+                    .on_hover_text("Copia el SVG real del lienzo al portapapeles")
+                    .clicked()
+                {
+                    match clipboard_svg(&app.document) {
+                        Ok(svg) => {
+                            let bytes = svg.len();
+                            ui.ctx().output_mut(|out| {
+                                out.copied_text = svg;
+                            });
+                            app.cas_result =
+                                format!("SVG copiado al portapapeles ({bytes} bytes)");
+                            app.notify(
+                                app.cas_result.clone(),
+                                grafito_ui::toast::ToastKind::Success,
+                            );
+                        }
+                        Err(error) => {
+                            app.cas_result = format!("No se pudo copiar SVG: {error}");
+                            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+                        }
+                    }
+                }
+                if ui
+                    .small_button("Guardar PNG…")
+                    .on_hover_text("Rasteriza el lienzo a PNG real (tiny-skia) y lo guarda donde elijas")
+                    .clicked()
+                {
+                    app.export_with_dialog(crate::export::ExportFormat::Png, Some(ui.ctx()));
+                }
+                if ui
+                    .small_button("Copiar PNG")
+                    .on_hover_text(
+                        "Copia el PNG real del lienzo al portapapeles del sistema (para Word/Moodle)",
+                    )
+                    .clicked()
+                {
+                    match copy_png_to_os_clipboard(&app.document) {
+                        Ok(summary) => {
+                            app.cas_result = summary.clone();
+                            app.notify(summary, grafito_ui::toast::ToastKind::Success);
+                        }
+                        Err(error) => {
+                            app.cas_result = error.clone();
+                            app.notify(error, grafito_ui::toast::ToastKind::Error);
+                        }
+                    }
+                }
+            });
+            // Texto (G-C): MathML / TikZ-eje / HTML puros al portapapeles.
+            // Piel pura: builders sin I/O + egui output (igual que Copiar SVG);
+            // el guardado a archivo queda para P2 (cableado menú en app.rs/ui.rs).
+            ui.add_space(SPACE_XS);
+            ui.horizontal(|ui| {
+                for (label, tip, build) in [
+                    (
+                        "MathML",
+                        "Copia las funciones y puntos como MathML al portapapeles",
+                        crate::export::document_to_mathml
+                            as fn(&Document) -> Result<String, String>,
+                    ),
+                    (
+                        "TikZ-eje",
+                        "Copia un entorno pgfplots axis con tus funciones al portapapeles",
+                        crate::export::document_to_tikz_axis
+                            as fn(&Document) -> Result<String, String>,
+                    ),
+                    (
+                        "HTML",
+                        "Copia una página autónoma con el SVG del lienzo al portapapeles",
+                        crate::export::document_to_html as fn(&Document) -> Result<String, String>,
+                    ),
+                ] {
+                    if ui.small_button(label).on_hover_text(tip).clicked() {
+                        match build(&app.document) {
+                            Ok(text) => {
+                                let bytes = text.len();
+                                ui.ctx().output_mut(|out| {
+                                    out.copied_text = text;
+                                });
+                                app.cas_result =
+                                    format!("{label} copiado al portapapeles ({bytes} bytes)");
+                                app.notify(
+                                    app.cas_result.clone(),
+                                    grafito_ui::toast::ToastKind::Success,
+                                );
+                            }
+                            Err(error) => {
+                                app.cas_result = error;
+                                app.notify(
+                                    app.cas_result.clone(),
+                                    grafito_ui::toast::ToastKind::Error,
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+            // W3 — la exportación deja de ser muda: revela la carpeta de la
+            // última exportación exitosa (igual que Archivo > Exportar).
+            if app.last_export_dir.is_some() {
+                ui.add_space(SPACE_XS);
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Mostrar en carpeta")
+                        .on_hover_text("Abre la carpeta de tu última exportación.")
+                        .clicked()
+                    {
+                        app.reveal_last_export();
+                    }
+                });
+            }
+        },
+    );
+}
+
 pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    // Panel Vista — Scandinavian quiet
+    // Panel Vista — solo visual (cuadrícula, ejes, 3D y capas). Exportar vive
+    // en Herramientas, la hoja en Datos y la probabilidad en Prob.
     let theme = current_theme(ctx);
-    let accent = theme.accent;
 
     // Estado Capas (Q2: tabla persistente en el documento; en temp egui
     // solo la capa elegida). Se poda al dibujar para acotar memoria.
@@ -1753,40 +2213,15 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
-            ui.add_space(SPACE_SM);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = SPACE_SM;
-                ui.add_space(SPACE_XS);
-                ui.label(
-                    egui::RichText::new("Vista")
-                        .color(accent)
-                        .strong()
-                        .size(TYPE_LG),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(SPACE_SM);
-                    if action_icon_button(
-                        ui,
-                        Icon::Close,
-                        theme.text_secondary,
-                        "Ocultar panel Vista",
-                    )
-                    .clicked()
-                    {
-                        app.left_drawer_open = false;
-                        app.compact_drawer_open = false;
-                    }
-                });
-            });
-            ui.add_space(SPACE_SM);
-            ui.painter().line_segment(
-                [
-                    ui.cursor().min,
-                    ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
-                ],
-                theme.hairline_stroke(),
-            );
-            ui.add_space(SPACE_SM);
+            if draw_panel_header(
+                ui,
+                "Vista",
+                "Cuadrícula, ejes, 3D, parámetro vivo y capas.",
+                "Ocultar panel Vista",
+            ) {
+                app.left_drawer_open = false;
+                app.compact_drawer_open = false;
+            }
 
             egui::ScrollArea::vertical()
                 .id_salt("view_panel_scroll")
@@ -1794,12 +2229,14 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     egui::Frame::none()
                         .inner_margin(egui::Margin {
-                            left: SPACE_SM,
-                            right: SPACE_SM,
+                            left: SPACE_MD,
+                            right: SPACE_MD,
                             top: SPACE_SM,
-                            bottom: SPACE_SM,
+                            bottom: SPACE_LG,
                         })
                         .show(ui, |ui| {
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                            ui.spacing_mut().item_spacing.y = SPACE_SM;
                             // General — 4 toggles básicos
                             draw_inspector_section(ui, "General", "Cuadrícula y tema.", |ui| {
                                 ui.checkbox(&mut app.show_grid, "Mostrar cuadrícula");
@@ -1816,7 +2253,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 // D2: salida de examen con confirmación (nunca directo).
                                 app.exam_mode_checkbox(ui);
                             });
-                            ui.add_space(CARD_SPACING);
+                            ui.add_space(SPACE_LG);
 
                             // Ejes — escala logarítmica + plano numerado (F2c)
                             draw_inspector_section(
@@ -1841,7 +2278,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     );
                                 },
                             );
-                            ui.add_space(CARD_SPACING);
+                            ui.add_space(SPACE_LG);
 
                             // Vista 3D (dueño canvas.rs): perspectiva orbital u
                             // ortográficas. Escribe `app.view3d`; el dibujo y
@@ -1853,6 +2290,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 |ui| {
                                     let mut vista = app.view3d;
                                     egui::ComboBox::from_id_salt("view3d_selector")
+                                        .width(ui.available_width().max(120.0))
                                         .selected_text(vista.name())
                                         .show_ui(ui, |ui| {
                                             for candidata in crate::canvas::View3D::all() {
@@ -1869,14 +2307,14 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     }
                                     ui.label(
                                         egui::RichText::new(
-                                            "En ortográficas la cámara no orbita; el zoom y el paneo se conservan.",
+                                            "En ortográficas el zoom y el paneo se conservan; orbitar con botón derecho vuelve a perspectiva.",
                                         )
                                         .color(current_theme(ui.ctx()).text_tertiary)
                                         .size(TYPE_XS),
                                     );
                                 },
                             );
-                            ui.add_space(CARD_SPACING);
+                            ui.add_space(SPACE_LG);
 
                             // Parámetro vivo (F2c · ValueTracker→slider).
                             // Un parámetro nombrado (`p`) bound al slider y a la
@@ -1945,11 +2383,9 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             .size(TYPE_XS)
                                             .color(current_theme(ui.ctx()).text_secondary),
                                         );
-                                        if ui
-                                            .small_button("Crear parámetro p en [-5, 5]")
-                                            .on_hover_text(
-                                                "Crea la variable `p` con slider y la deja lista para la animación paramétrica",
-                                            )
+                                        ui.add_space(SPACE_XS);
+                                        if panel_primary_button(ui, "Crear parámetro p en [-5, 5]")
+                                            .on_hover_text("Crea la variable `p` con slider")
                                             .clicked()
                                         {
                                             let mut snapshot =
@@ -1983,40 +2419,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     }
                                 },
                             );
-                            ui.add_space(CARD_SPACING);
-
-                            // Alta precisión — Double-Double
-                            draw_inspector_section(
-                                ui,
-                                "Alta Precisión",
-                                "Double-Double (~106 bits / 32 dígitos).",
-                                |ui| {
-                                    let mut high_prec =
-                                        grafito_geometry::precision::is_high_precision_mode();
-                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                                    if ui
-                                        .add(egui::Checkbox::new(
-                                            &mut high_prec,
-                                            egui::RichText::new("Alta Precisión (Double-Double)")
-                                                .size(TYPE_SM),
-                                        ))
-                                        .on_hover_text(
-                                            "Usa aritmética Double-Double (~106 bits / 32 dígitos) \
-                                             para evaluar expresiones simbólicas sin pérdida de precisión.",
-                                        )
-                                        .changed()
-                                    {
-                                        grafito_geometry::precision::set_high_precision_mode(high_prec);
-                                        app.document.invalidate_all_caches();
-                                        app.document.bump_version();
-                                        if let Ok(mut cache) = app.trig_graph_cache.write() {
-                                            *cache = None;
-                                        }
-                                        app.re_evaluate_constraints(&[]);
-                                    }
-                                },
-                            );
-                            ui.add_space(CARD_SPACING);
+                            ui.add_space(SPACE_LG);
 
                             // Capas — orden + visibilidad (Q2, tabla persistente).
                             // Piel pura: lee &Estado, muta documento con snapshot
@@ -2110,24 +2513,34 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             .size(TYPE_XS)
                                             .color(current_theme(ui.ctx()).text_secondary),
                                     );
+                                    ui.add_space(SPACE_XS);
+                                    ui.label(
+                                        egui::RichText::new("Asignar a capa:").size(TYPE_SM),
+                                    );
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("Asignar a capa:").size(TYPE_SM),
-                                        );
-                                        ui.add(
+                                        ui.add_sized(
+                                            [72.0, PANEL_BUTTON_H],
                                             egui::DragValue::new(
                                                 &mut layer_state.selected_layer,
                                             )
                                             .range(0..=MAX_LAYERS)
                                             .speed(1),
                                         );
-                                        if ui
-                                            .add_enabled(
-                                                selection.is_some(),
-                                                egui::Button::new(
-                                                    egui::RichText::new("Asignar").size(TYPE_SM),
-                                                ),
-                                            )
+                                        let btn_w = ui.available_width().max(96.0);
+                                        let resp = ui.add_enabled_ui(
+                                            selection.is_some(),
+                                            |ui| {
+                                                ui.add_sized(
+                                                    [btn_w, PANEL_BUTTON_H],
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Asignar")
+                                                            .size(TYPE_SM),
+                                                    ),
+                                                )
+                                            },
+                                        );
+                                        if resp
+                                            .inner
                                             .on_hover_text(
                                                 "Mueve el objeto seleccionado a la capa elegida",
                                             )
@@ -2172,25 +2585,28 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             }
                                         }
                                     });
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("Resaltar:").size(TYPE_SM),
-                                        );
-                                        let puede = selection.as_ref().is_some_and(
-                                            |(id, _, _)| {
-                                                app.document.get_object(*id).is_some()
-                                            },
-                                        );
-                                        if ui
-                                            .add_enabled(
-                                                puede,
+                                    ui.add_space(SPACE_XS);
+                                    ui.label(
+                                        egui::RichText::new("Resaltar:").size(TYPE_SM),
+                                    );
+                                    let puede = selection.as_ref().is_some_and(
+                                        |(id, _, _)| {
+                                            app.document.get_object(*id).is_some()
+                                        },
+                                    );
+                                    {
+                                        let btn_w = ui.available_width().max(96.0);
+                                        let resp = ui.add_enabled_ui(puede, |ui| {
+                                            ui.add_sized(
+                                                [btn_w, PANEL_BUTTON_H],
                                                 egui::Button::new(
                                                     egui::RichText::new("Indicar").size(TYPE_SM),
                                                 ),
                                             )
-                                            .on_hover_text(
-                                                "Hace latir el objeto seleccionado ~1.2 s en el lienzo",
-                                            )
+                                        });
+                                        if resp
+                                            .inner
+                                            .on_hover_text("Hace latir la selección ~1.2 s")
                                             .clicked()
                                         {
                                             if let Some((id, _, _)) = selection.as_ref() {
@@ -2212,303 +2628,43 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                 }
                                             }
                                         }
-                                    });
+                                    }
                                 },
                             );
-                            ui.add_space(CARD_SPACING);
+                            ui.add_space(SPACE_LG);
 
-                            // Exportación — vectorial pill centered + oleada M:
-                            // PNG/TikZ/PDF/CSV y portapapeles. Piel pura: el
-                            // diálogo rfd queda en UI thread (modal nativo);
-                            // render+write van a workers y el summary se aplica
-                            // en `poll_background_jobs`.
+                            // Alta precisión — Double-Double (avanzado, al final).
                             draw_inspector_section(
                                 ui,
-                                "Exportación",
-                                "Generá un archivo del lienzo actual o copialo al portapapeles.",
+                                "Alta Precisión",
+                                "Double-Double (~106 bits / 32 dígitos).",
                                 |ui| {
-                                    for format in [
-                                        crate::export::ExportFormat::Svg,
-                                        crate::export::ExportFormat::Png,
-                                        crate::export::ExportFormat::Tikz,
-                                    ] {
-                                        if export_pill_button(
-                                            ui,
-                                            &format!("Exportar {}", format.display_name()),
-                                        )
-                                        .clicked()
-                                        {
-                                            app.export_with_dialog(format, Some(ui.ctx()));
-                                        }
-                                    }
-                                    if export_pill_button(ui, "Exportar PDF").on_hover_text(
-                                        "Vectorial de 1 página por ahora: vista + hoja actual (rectas, círculos, polígonos y texto Helvetica). Si el libro tiene varias hojas con contenido, avisa sin escribir.",
-                                    ).clicked()
-                                    {
-                                        if let Some(path) = rfd::FileDialog::new()
-                                            .add_filter("PDF", &["pdf"])
-                                            .set_file_name("grafito_export.pdf")
-                                            .save_file()
-                                        {
-                                            app.pending_export_job = Some(
-                                                crate::app::PendingExportJob {
-                                                    receiver: spawn_pdf_export(
-                                                        app.document.clone(),
-                                                        path,
-                                                        ui.ctx(),
-                                                    ),
-                                                },
-                                            );
-                                            app.notify(
-                                                "Exportando PDF…",
-                                                grafito_ui::toast::ToastKind::Info,
-                                            );
-                                        }
-                                    }
-                                    let tables: Vec<(ObjectId, String, usize)> = app
-                                        .document
-                                        .objects_iter_sorted()
-                                        .filter_map(|(id, object)| match object {
-                                            GeoObject::DataTable(table) => Some((
-                                                *id,
-                                                table.label.clone(),
-                                                table.xs.len(),
-                                            )),
-                                            _ => None,
-                                        })
-                                        .collect();
-                                    if !tables.is_empty() {
-                                        ui.add_space(SPACE_XS);
-                                        ui.label(
-                                            egui::RichText::new("Tablas (CSV RFC 4180)")
-                                                .size(TYPE_XS)
-                                                .color(
-                                                    current_theme(ui.ctx()).text_secondary,
-                                                ),
-                                        );
-                                    }
-                                    for (id, label, rows) in tables {
-                                        ui.horizontal(|ui| {
-                                            let name = if label.is_empty() {
-                                                "<sin etiqueta>"
-                                            } else {
-                                                &label
-                                            };
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "{name} · {rows} filas"
-                                                ))
+                                    let mut high_prec =
+                                        grafito_geometry::precision::is_high_precision_mode();
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                                    if ui
+                                        .add(egui::Checkbox::new(
+                                            &mut high_prec,
+                                            egui::RichText::new("Alta Precisión (Double-Double)")
                                                 .size(TYPE_SM),
-                                            );
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if ui
-                                                        .small_button("CSV")
-                                                        .on_hover_text(
-                                                            "Descarga honesta: escribe el CSV real o informa el error",
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        match datatable_csv_text(&app.document, id)
-                                                        {
-                                                            Ok((table_label, csv)) => {
-                                                                let stem = sanitize_export_stem(
-                                                                    &table_label,
-                                                                );
-                                                                if let Some(path) =
-                                                                    rfd::FileDialog::new()
-                                                                        .add_filter(
-                                                                            "CSV",
-                                                                            &["csv"],
-                                                                        )
-                                                                        .set_file_name(format!(
-                                                                            "{stem}.csv"
-                                                                        ))
-                                                                        .save_file()
-                                                                {
-                                                                    app.pending_export_job = Some(
-                                                                        crate::app::PendingExportJob {
-                                                                            receiver:
-                                                                                spawn_csv_export(
-                                                                                    csv,
-                                                                                    table_label,
-                                                                                    path,
-                                                                                    ui.ctx(),
-                                                                                ),
-                                                                        },
-                                                                    );
-                                                                    app.notify(
-                                                                        "Exportando CSV…",
-                                                                        grafito_ui::toast::ToastKind::Info,
-                                                                    );
-                                                                }
-                                                            }
-                                                            Err(error) => {
-                                                                app.cas_result = error.clone();
-                                                                app.notify(
-                                                                    error,
-                                                                    grafito_ui::toast::ToastKind::Error,
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                },
-                                            );
-                                        });
+                                        ))
+                                        .on_hover_text(
+                                            "Usa aritmética Double-Double (~106 bits / 32 dígitos) \
+                                             para evaluar expresiones simbólicas sin pérdida de precisión.",
+                                        )
+                                        .changed()
+                                    {
+                                        grafito_geometry::precision::set_high_precision_mode(high_prec);
+                                        app.document.invalidate_all_caches();
+                                        app.document.bump_version();
+                                        if let Ok(mut cache) = app.trig_graph_cache.write() {
+                                            *cache = None;
+                                        }
+                                        app.re_evaluate_constraints(&[]);
                                     }
-                                    ui.add_space(SPACE_XS);
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .small_button("Copiar SVG")
-                                            .on_hover_text(
-                                                "Copia el SVG real del lienzo al portapapeles",
-                                            )
-                                            .clicked()
-                                        {
-                                            match clipboard_svg(&app.document) {
-                                                Ok(svg) => {
-                                                    let bytes = svg.len();
-                                                    ui.ctx().output_mut(|out| {
-                                                        out.copied_text = svg;
-                                                    });
-                                                    app.cas_result = format!(
-                                                        "SVG copiado al portapapeles ({bytes} bytes)"
-                                                    );
-                                                    app.notify(
-                                                        app.cas_result.clone(),
-                                                        grafito_ui::toast::ToastKind::Success,
-                                                    );
-                                                }
-                                                Err(error) => {
-                                                    app.cas_result = format!(
-                                                        "No se pudo copiar SVG: {error}"
-                                                    );
-                                                    app.notify(
-                                                        app.cas_result.clone(),
-                                                        grafito_ui::toast::ToastKind::Error,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        if ui
-                                            .small_button("Guardar PNG…")
-                                            .on_hover_text(
-                                                "Rasteriza el lienzo a PNG real (tiny-skia) y lo guarda donde elijas",
-                                            )
-                                            .clicked()
-                                        {
-                                            app.export_with_dialog(
-                                                crate::export::ExportFormat::Png,
-                                                Some(ui.ctx()),
-                                            );
-                                        }
-                                        if ui
-                                            .small_button("Copiar PNG")
-                                            .on_hover_text(
-                                                "Copia el PNG real del lienzo al portapapeles del sistema (para Word/Moodle)",
-                                            )
-                                            .clicked()
-                                        {
-                                            match copy_png_to_os_clipboard(&app.document) {
-                                                Ok(summary) => {
-                                                    app.cas_result = summary.clone();
-                                                    app.notify(
-                                                        summary,
-                                                        grafito_ui::toast::ToastKind::Success,
-                                                    );
-                                                }
-                                                Err(error) => {
-                                                    app.cas_result = error.clone();
-                                                    app.notify(
-                                                        error,
-                                                        grafito_ui::toast::ToastKind::Error,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    });
-                                    // Texto (G-C): MathML / TikZ-eje / HTML puros al portapapeles.
-                                    // Piel pura: builders sin I/O + egui output (igual que Copiar SVG);
-                                    // el guardado a archivo queda para P2 (cableado menú en app.rs/ui.rs).
-                                    ui.add_space(SPACE_XS);
-                                    ui.horizontal(|ui| {
-                                        for (label, tip, build) in [
-                                            (
-                                                "MathML",
-                                                "Copia las funciones y puntos como MathML al portapapeles",
-                                                crate::export::document_to_mathml as fn(
-                                                    &Document,
-                                                )
-                                                    -> Result<String, String>,
-                                            ),
-                                            (
-                                                "TikZ-eje",
-                                                "Copia un entorno pgfplots axis con tus funciones al portapapeles",
-                                                crate::export::document_to_tikz_axis as fn(
-                                                    &Document,
-                                                )
-                                                    -> Result<String, String>,
-                                            ),
-                                            (
-                                                "HTML",
-                                                "Copia una página autónoma con el SVG del lienzo al portapapeles",
-                                                crate::export::document_to_html as fn(
-                                                    &Document,
-                                                )
-                                                    -> Result<String, String>,
-                                            ),
-                                        ] {
-                                            if ui.small_button(label).on_hover_text(tip).clicked() {
-                                                match build(&app.document) {
-                                                    Ok(text) => {
-                                                        let bytes = text.len();
-                                                        ui.ctx().output_mut(|out| {
-                                                            out.copied_text = text;
-                                                        });
-                                                        app.cas_result = format!(
-                                                            "{label} copiado al portapapeles ({bytes} bytes)"
-                                                        );
-                                                        app.notify(
-                                                            app.cas_result.clone(),
-                                                            grafito_ui::toast::ToastKind::Success,
-                                                        );
-                                                    }
-                                                    Err(error) => {
-                                                        app.cas_result = error;
-                                                        app.notify(
-                                                            app.cas_result.clone(),
-                                                            grafito_ui::toast::ToastKind::Error,
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    });
                                 },
                             );
-                            ui.add_space(CARD_SPACING);
 
-                            // Datos — hoja viva en lectura (G-C): tablas del documento.
-                            draw_inspector_section(
-                                ui,
-                                "Datos",
-                                "Hoja viva en lectura: valores de las tablas del documento.",
-                                |ui| {
-                                    draw_spreadsheet_section(ui, app);
-                                },
-                            );
-                            ui.add_space(CARD_SPACING);
-
-                            // Probabilidad — Normal/Binomial/Poisson (G-C).
-                            draw_inspector_section(
-                                ui,
-                                "Probabilidad",
-                                "Densidad y acumulada honestas en f64.",
-                                |ui| {
-                                    draw_probability_section(ui, ctx);
-                                },
-                            );
                         });
                 });
         });
@@ -2794,14 +2950,27 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
 // Paneles izquierdos específicos por perspectiva (Fase 2)
 // ══════════════════════════════════════════════════════════════════════════
 
-/// Panel izquierdo de Estadística. Permite ingresar datos y ver resumen.
-pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+/// Tab Datos: hoja de cálculo vinculada + tablas del documento.
+/// Casa de la perspectiva Análisis de datos; accesible global como tab 2.
+/// La hoja navegable y la serie viven en `draw_spreadsheet_section`.
+pub(crate) fn draw_data_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let (_is_dark, _accent, alg_fill, _sep_col, _txt_col, _txt_dim, _hdr_col) =
+        panel_theme_local(ctx);
+    let subtitle = if crate::uses_data_panel(app.perspective) {
+        "Hoja vinculada + tablas. Lo estadístico vive en Prob."
+    } else {
+        "Hoja vinculada + tablas (casa: Análisis de datos). Lo estadístico vive en Prob."
+    }
+    .to_string();
 
-    egui::SidePanel::left("stats_panel")
+    egui::SidePanel::left("data_panel")
         .show_separator_line(false)
-        .default_width(240.0)
-        .min_width(180.0)
+        .default_width(300.0)
+        .min_width(PANEL_LEFT_MIN)
+        .max_width(
+            (ctx.available_rect().width() * PANEL_LEFT_MAX_FRACTION)
+                .clamp(PANEL_LEFT_MIN, PANEL_DATA_MAX_WIDTH),
+        )
         .resizable(true)
         .frame(
             egui::Frame::none()
@@ -2809,78 +2978,167 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
+            if draw_panel_header(ui, "Datos", &subtitle, "Ocultar panel Datos") {
+                app.left_drawer_open = false;
+                app.compact_drawer_open = false;
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("data_panel_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin {
+                            left: SPACE_MD,
+                            right: SPACE_MD,
+                            top: SPACE_SM,
+                            bottom: SPACE_LG,
+                        })
+                        .show(ui, |ui| {
+                            draw_spreadsheet_section(ui, app);
+                        });
+                });
+        });
+}
+
+/// Tab Prob.: probabilidad (distribuciones) + estadística (resumen).
+/// Casa de las perspectivas Probabilidad y Estadística; accesible global
+/// como tab 3. La calculadora de distribuciones abre desplegada cuando se
+/// entra desde Probabilidad.
+pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let (_is_dark, _accent, alg_fill, _sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let subtitle = if crate::uses_statistics_panel(app.perspective) {
+        "Distribuciones + resumen de tus datos. La hoja vinculada vive en Datos."
+    } else {
+        "Distribuciones + resumen (casa: Probabilidad y Estadística). La hoja vive en Datos."
+    }
+    .to_string();
+
+    egui::SidePanel::left("stats_panel")
+        .show_separator_line(false)
+        .default_width(300.0)
+        .min_width(PANEL_LEFT_MIN)
+        .max_width(
+            (ctx.available_rect().width() * PANEL_LEFT_MAX_FRACTION)
+                .clamp(PANEL_LEFT_MIN, PANEL_DATA_MAX_WIDTH),
+        )
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::NONE),
+        )
+        .show(ctx, |ui| {
+            if draw_panel_header(
+                ui,
+                "Probabilidad y estadística",
+                &subtitle,
+                "Ocultar panel Probabilidad",
+            ) {
+                app.left_drawer_open = false;
+                app.compact_drawer_open = false;
+            }
             egui::ScrollArea::vertical()
                 .id_salt("stats_panel_content")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add_space(SPACE_SM);
-                    ui.label(
-                        egui::RichText::new("Estadística")
-                            .color(accent)
-                            .size(grafito_ui::tokens::TYPE_BASE)
-                            .strong(),
-                    );
-                    ui.add_space(SPACE_SM);
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin {
+                            left: SPACE_MD,
+                            right: SPACE_MD,
+                            top: SPACE_SM,
+                            bottom: SPACE_LG,
+                        })
+                        .show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    ui.spacing_mut().item_spacing.y = SPACE_SM;
 
-                    draw_object_cards_where(
+                    // Calculadora de distribuciones: card propia siempre
+                    // visible (sin laberinto de desplegables).
+                    draw_inspector_section(
                         ui,
-                        app,
-                        "Objetos estadísticos",
-                        "Sin gráficos estadísticos.\nProbá Histogram[...] o ScatterPlot[...].",
-                        |obj| {
-                            matches!(
-                                obj,
-                                GeoObject::Histogram(_)
-                                    | GeoObject::BarChart(_)
-                                    | GeoObject::PieChart(_)
-                                    | GeoObject::ScatterPlot(_)
-                                    | GeoObject::BoxPlot(_)
-                                    | GeoObject::RegressionLine(_)
-                                    | GeoObject::Function(_)
-                            )
+                        "Distribución",
+                        "Densidad y acumulada en vivo.",
+                        |ui| {
+                            draw_probability_section(ui, ctx);
                         },
                     );
                     ui.add_space(SPACE_SM);
 
-                    // ── Datos: TextEdit vinculado al buffer persistente ──
+                    // ── Tus datos: TextEdit vinculado al buffer persistente ──
                     // El buffer sólo se parsea al perder foco o al apretar "Aplicar"
                     // — antes, el editor reconstruí el string cada frame desde los
                     // valores parseados y destruía la entrada del usuario por cada
                     // coma en blanco o no-número temporal.
-                    ui.label(
-                        egui::RichText::new("Datos (uno por línea o coma):")
-                            .color(hdr_col)
-                            .size(TYPE_SM),
-                    );
-                    let te_resp = ui.add_sized(
-                        [ui.available_width(), 80.0],
-                        egui::TextEdit::multiline(&mut app.statistics_input_buf).desired_rows(3),
-                    );
+                    draw_inspector_section(
+                        ui,
+                        "Tus datos",
+                        "Un valor por línea o separados por comas.",
+                        |ui| {
+                    let theme = current_theme(ctx);
+                    let te_resp = egui::Frame::none()
+                        .fill(theme.input_bg)
+                        .stroke(theme.hairline_stroke())
+                        .rounding(egui::Rounding::same(RADIUS_SM))
+                        .inner_margin(egui::Margin::same(SPACE_XS))
+                        .show(ui, |ui| {
+                            ui.add_sized(
+                                [ui.available_width(), 80.0],
+                                egui::TextEdit::multiline(&mut app.statistics_input_buf)
+                                    .desired_rows(4)
+                                    .frame(false),
+                            )
+                        })
+                        .inner;
 
                     ui.add_space(SPACE_XS);
-                    ui.horizontal(|ui| {
-                        let apply_clicked = ui.button("Aplicar").clicked();
-                        let lost_focus =
-                            te_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if apply_clicked || lost_focus {
-                            match parse_statistics_input(&app.statistics_input_buf) {
-                                Ok(parsed) => {
-                                    app.statistics_input_error = None;
-                                    if parsed != app.statistics_data {
-                                        app.statistics_data = parsed;
-                                        app.document.bump_version();
+                    {
+                        let theme = current_theme(ctx);
+                        let bw = ((ui.available_width() - SPACE_SM) / 2.0).max(80.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                            let apply_btn = egui::Button::new(
+                                egui::RichText::new("Aplicar")
+                                    .size(TYPE_SM)
+                                    .strong()
+                                    .color(theme.keyboard_enter_text),
+                            )
+                            .fill(theme.keyboard_enter_bg)
+                            .stroke(egui::Stroke::NONE)
+                            .rounding(RADIUS_PILL);
+                            let apply_clicked = ui
+                                .add_sized([bw, PANEL_BUTTON_H], apply_btn)
+                                .clicked();
+                            let lost_focus =
+                                te_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if apply_clicked || lost_focus {
+                                match parse_statistics_input(&app.statistics_input_buf) {
+                                    Ok(parsed) => {
+                                        app.statistics_input_error = None;
+                                        if parsed != app.statistics_data {
+                                            app.statistics_data = parsed;
+                                            app.document.bump_version();
+                                        }
                                     }
+                                    Err(error) => app.statistics_input_error = Some(error),
                                 }
-                                Err(error) => app.statistics_input_error = Some(error),
                             }
-                        }
-                        if ui.button("Limpiar").clicked() {
-                            app.statistics_input_buf.clear();
-                            app.statistics_data.clear();
-                            app.statistics_input_error = None;
-                            app.document.bump_version();
-                        }
-                    });
+                            if ui
+                                .add_sized(
+                                    [bw, PANEL_BUTTON_H],
+                                    egui::Button::new(
+                                        egui::RichText::new("Limpiar").size(TYPE_SM),
+                                    )
+                                    .rounding(RADIUS_PILL),
+                                )
+                                .clicked()
+                            {
+                                app.statistics_input_buf.clear();
+                                app.statistics_data.clear();
+                                app.statistics_input_error = None;
+                                app.document.bump_version();
+                            }
+                        });
+                    }
 
                     if let Some(error) = &app.statistics_input_error {
                         ui.label(
@@ -2892,17 +3150,31 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                     ui.add_space(SPACE_SM);
                     if app.statistics_data.is_empty() {
-                        // Empty-state
-                        ui.label(
-                            egui::RichText::new(
-                                "Ingresá datos arriba (uno por línea o comas)\n\
-                         y pulsá «Aplicar» para ver el resumen y el\n\
-                         histograma.\n\
-                         Ejemplo: 1, 2, 3, 5, 4, 6",
-                            )
-                            .color(txt_dim)
-                            .size(TYPE_XS),
-                        );
+                        // Empty-state en tarjeta quiet (no texto suelto).
+                        let theme = current_theme(ctx);
+                        egui::Frame::none()
+                            .fill(theme.input_bg)
+                            .stroke(egui::Stroke::NONE)
+                            .rounding(egui::Rounding::same(RADIUS_MD))
+                            .inner_margin(egui::Margin::same(SPACE_MD))
+                            .show(ui, |ui| {
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Sin datos todavía")
+                                            .color(theme.text_primary)
+                                            .size(TYPE_SM)
+                                            .strong(),
+                                    );
+                                    ui.add_space(SPACE_XS);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Ingresá valores arriba (uno por línea o comas) y pulsá «Aplicar» para ver el resumen y el histograma. Ejemplo: 1, 2, 3, 5, 4, 6",
+                                        )
+                                        .color(txt_dim)
+                                        .size(TYPE_XS),
+                                    );
+                                });
+                            });
                     } else {
                         let data = &app.statistics_data;
                         let summary = match statistics_summary(data) {
@@ -3006,7 +3278,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     egui::pos2(plot.min.x + i as f32 * bar_w + 2.0, plot_bot - h),
                                     egui::vec2(bar_w - 4.0, h),
                                 );
-                                painter.rect_filled(bar, 2.0, accent);
+                                painter.rect_filled(bar, 2.0, current_theme(ctx).accent);
                                 // count label encima si > 0
                                 if *c > 0 {
                                     painter.text(
@@ -3035,6 +3307,267 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             );
                         }
                     }
+                        },
+                    );
+                    ui.add_space(SPACE_SM);
+
+                    // ── Ordenar y graficar: acciones directas sobre Tus datos ──
+                    // Scandinavian: dos filas de dos botones quiet que usan todo
+                    // el ancho; nada de chips que se envuelven ni botones mudos.
+                    draw_inspector_section(
+                        ui,
+                        "Ordenar y graficar",
+                        "Sort + Histogram/BoxPlot desde tus datos.",
+                        |ui| {
+                            if app.statistics_data.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Pegá datos arriba y pulsá Aplicar para activar Ordenar e Histograma.",
+                                    )
+                                    .color(txt_dim)
+                                    .size(TYPE_XS),
+                                );
+                                return;
+                            }
+                            let bw = ((ui.available_width() - SPACE_SM) / 2.0).max(80.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                if ui
+                                    .add_sized(
+                                        [bw, PANEL_BUTTON_H],
+                                        egui::Button::new(
+                                            egui::RichText::new("Ordenar").size(TYPE_SM),
+                                        )
+                                        .rounding(RADIUS_PILL),
+                                    )
+                                    .on_hover_text("Ordena ascendente (Sort) y actualiza el campo")
+                                    .clicked()
+                                {
+                                    app.statistics_data.sort_by(|a, b| {
+                                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                    });
+                                    app.statistics_input_buf = app
+                                        .statistics_data
+                                        .iter()
+                                        .map(|v| format!("{v}"))
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    app.statistics_input_error = None;
+                                    app.document.bump_version();
+                                    app.cas_result = format!(
+                                        "Datos ordenados (N={})",
+                                        app.statistics_data.len()
+                                    );
+                                    ctx.request_repaint();
+                                }
+                                if ui
+                                    .add_sized(
+                                        [bw, PANEL_BUTTON_H],
+                                        egui::Button::new(
+                                            egui::RichText::new("Histograma").size(TYPE_SM),
+                                        )
+                                        .rounding(RADIUS_PILL),
+                                    )
+                                    .on_hover_text("Crea Histogram[datos, 10] en la entrada")
+                                    .clicked()
+                                {
+                                    match statistics_histogram_command(&app.statistics_data) {
+                                        Some(cmd) => {
+                                            app.input_text = cmd;
+                                            app.command_input_focus_requested = true;
+                                            app.cas_result =
+                                                "Histograma listo en la entrada (Enter para crear)."
+                                                    .to_string();
+                                        }
+                                        None => {
+                                            app.cas_result = "Demasiados datos para la entrada (máx. 200 inline): usá Ordenar con asistente.".to_string();
+                                            app.notify(
+                                                app.cas_result.clone(),
+                                                grafito_ui::toast::ToastKind::Info,
+                                            );
+                                        }
+                                    }
+                                    ctx.request_repaint();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                if ui
+                                    .add_sized(
+                                        [bw, PANEL_BUTTON_H],
+                                        egui::Button::new(
+                                            egui::RichText::new("Caja").size(TYPE_SM),
+                                        )
+                                        .rounding(RADIUS_PILL),
+                                    )
+                                    .on_hover_text("Crea BoxPlot[datos] en la entrada")
+                                    .clicked()
+                                {
+                                    match statistics_boxplot_command(&app.statistics_data) {
+                                        Some(cmd) => {
+                                            app.input_text = cmd;
+                                            app.command_input_focus_requested = true;
+                                            app.cas_result =
+                                                "Diagrama de caja listo en la entrada.".to_string();
+                                        }
+                                        None => {
+                                            app.cas_result = "Demasiados datos para la entrada (máx. 200 inline): usá Ordenar con asistente.".to_string();
+                                            app.notify(
+                                                app.cas_result.clone(),
+                                                grafito_ui::toast::ToastKind::Info,
+                                            );
+                                        }
+                                    }
+                                    ctx.request_repaint();
+                                }
+                                if ui
+                                    .add_sized(
+                                        [bw, PANEL_BUTTON_H],
+                                        egui::Button::new(
+                                            egui::RichText::new("Media").size(TYPE_SM),
+                                        )
+                                        .rounding(RADIUS_PILL),
+                                    )
+                                    .on_hover_text("Crea Mean[datos] en la entrada")
+                                    .clicked()
+                                {
+                                    match statistics_mean_command(&app.statistics_data) {
+                                        Some(cmd) => {
+                                            app.input_text = cmd;
+                                            app.command_input_focus_requested = true;
+                                            app.cas_result =
+                                                "Media lista en la entrada.".to_string();
+                                        }
+                                        None => {
+                                            app.cas_result = "Demasiados datos para la entrada (máx. 200 inline): usá Ordenar con asistente.".to_string();
+                                            app.notify(
+                                                app.cas_result.clone(),
+                                                grafito_ui::toast::ToastKind::Info,
+                                            );
+                                        }
+                                    }
+                                    ctx.request_repaint();
+                                }
+                            });
+                        },
+                    );
+                    ui.add_space(SPACE_SM);
+
+                    // ── Inferencia: lo que el motor ya sabe, expuesto sin laberinto ──
+                    // El panel solo mostraba distribuciones + resumen; los tests
+                    // (TTest/ZTest/ChiSq/ANOVA), Median/StdDev, FrequencyTable y
+                    // StemPlot existían pero sin botón. Chips 2×N que encolan el
+                    // comando real en la entrada (cero fantasma).
+                    draw_inspector_section(
+                        ui,
+                        "Inferencia",
+                        "Tests y conteos con tus datos (comandos listos).",
+                        |ui| {
+                            let inline = statistics_inline_list(&app.statistics_data);
+                            let has_inline = inline.is_some();
+                            let list = inline.unwrap_or_default();
+                            let chips: &[(&str, String, &str)] = &[
+                                ("Mediana", format!("Median[{{{list}}}]"), "Mediana de tus datos"),
+                                ("Desvío", format!("StdDev[{{{list}}}]"), "Desvío estándar"),
+                                ("Frec.", format!("FrequencyTable[{{{list}}}]"), "Tabla de frecuencias"),
+                                ("Tallo", format!("StemPlot[{{{list}}}]"), "Diagrama tallo-hoja"),
+                                ("TTest μ=0", format!("TTest[{{{list}}}, 0]"), "Prueba t contra μ=0"),
+                                ("ZTest", format!("ZTest[{{{list}}}, 0, 1]"), "Prueba z (σ=1 conocido)"),
+                            ];
+                            for pair in chips.chunks(2) {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                    let bw =
+                                        ((ui.available_width() - SPACE_SM) / 2.0).max(80.0);
+                                    for (label, cmd, tip) in pair {
+                                        let btn = ui.add_sized(
+                                            [bw, PANEL_BUTTON_H],
+                                            egui::Button::new(
+                                                egui::RichText::new(*label).size(TYPE_SM),
+                                            )
+                                            .rounding(RADIUS_PILL),
+                                        );
+                                        if btn.on_hover_text(*tip).clicked() {
+                                            if has_inline {
+                                                app.input_text = (*cmd).clone();
+                                                app.command_input_focus_requested = true;
+                                                app.cas_result = format!(
+                                                    "{label} listo en la entrada (Enter para evaluar)."
+                                                );
+                                            } else {
+                                                app.cas_result = "Sin lista inline (vacío o +200 valores): pegá menos datos o usá el asistente.".to_string();
+                                                app.notify(
+                                                    app.cas_result.clone(),
+                                                    grafito_ui::toast::ToastKind::Info,
+                                                );
+                                            }
+                                            ctx.request_repaint();
+                                        }
+                                    }
+                                });
+                            }
+                            if !has_inline {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Sin lista inline (vacío o +200 valores): pegá menos datos o usá el asistente.",
+                                    )
+                                    .color(txt_dim)
+                                    .size(TYPE_XS),
+                                );
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "Dos muestras y tablas: TTest2, TTestPaired, ChiSqTest, ANOVA, Correlation, LinearRegression y Fit* viven en Datos o en la entrada.",
+                                )
+                                .color(txt_dim)
+                                .size(TYPE_XS),
+                            );
+                        },
+                    );
+                    ui.add_space(SPACE_SM);
+
+                    // ── Asistente: archivos grandes → ordenar + graficar ──
+                    draw_inspector_section(
+                        ui,
+                        "Preguntar al asistente",
+                        "Tirá un CSV grande en Datos y pedí orden + análisis.",
+                        |ui| {
+                            if panel_primary_button(ui, "Ordenar con asistente")
+                                .on_hover_text("Arma el prompt con tus datos y abre el asistente")
+                                .clicked()
+                            {
+                                open_statistics_in_assistant(app, ctx);
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "Incluye N + preview y propone Sort, resumen, Histogram/BoxPlot e inferencia con comandos listos.",
+                                )
+                                .color(txt_dim)
+                                .size(TYPE_XS),
+                            );
+                        },
+                    );
+                    ui.add_space(SPACE_SM);
+
+                    draw_object_cards_where(
+                        ui,
+                        app,
+                        "Objetos estadísticos",
+                        "Sin gráficos estadísticos.\nProbá Histogram[...] o ScatterPlot[...].",
+                        |obj| {
+                            matches!(
+                                obj,
+                                GeoObject::Histogram(_)
+                                    | GeoObject::BarChart(_)
+                                    | GeoObject::PieChart(_)
+                                    | GeoObject::ScatterPlot(_)
+                                    | GeoObject::BoxPlot(_)
+                                    | GeoObject::RegressionLine(_)
+                                    | GeoObject::Function(_)
+                            )
+                        },
+                    );
+                        });
                 });
         });
 }
@@ -6038,6 +6571,32 @@ fn draw_probability_plot(
     }
 }
 
+/// Distribuciones de la calculadora de probabilidad: (id, nombre, ayuda).
+/// El ComboBox de la card "Distribución" las muestra en este orden.
+const PROB_DISTS: [(u8, &str, &str); 9] = [
+    (0u8, "Normal", "Gaussiana μ, σ: densidad y acumulada"),
+    (1u8, "Binomial", "n ensayos, p éxito: P(X = k) y P(X ≤ k)"),
+    (2u8, "Poisson", "Tasa λ: P(X = k) y P(X ≤ k)"),
+    (
+        3u8,
+        "t-Student",
+        "gl grados de libertad: densidad y acumulada",
+    ),
+    (4u8, "χ²", "gl grados de libertad: densidad y acumulada"),
+    (5u8, "F", "gl1, gl2: densidad y acumulada"),
+    (
+        6u8,
+        "Geométrica",
+        "p éxito: fallos antes del primer éxito, P(X = k) y P(X ≤ k)",
+    ),
+    (7u8, "Uniforme", "a, b: densidad 1/(b−a) y acumulada"),
+    (
+        8u8,
+        "Exponencial",
+        "λ tasa: densidad λ·exp(-λx) y acumulada",
+    ),
+];
+
 /// Sección Probabilidad: Normal / Binomial / Poisson / t-Student / χ² / F
 /// / Geométrica / Uniforme / Exponencial con PDF/CDF honestos. Llamada desde el panel Vista (alcanzable) — sin
 /// botones mudos: el selector cambia la distribución y cada parámetro
@@ -6049,47 +6608,33 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
         .unwrap_or_default();
     let (_is_dark, accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
+    // Selector único a ancho completo (un ComboBox ordenado en vez de 9
+    // chips que se envolvían y rompían la grilla del panel angosto).
+    let current_name = PROB_DISTS
+        .iter()
+        .find(|(index, _, _)| *index == state.dist)
+        .map(|(_, name, _)| *name)
+        .unwrap_or("Normal");
+    egui::ComboBox::from_id_salt("prob_dist_selector")
+        .width(ui.available_width().max(120.0))
+        .selected_text(current_name)
+        .show_ui(ui, |ui| {
+            for (index, name, tip) in PROB_DISTS {
+                ui.selectable_value(&mut state.dist, index, name)
+                    .on_hover_text(tip);
+            }
+        });
+    if let Some((_, _, tip)) = PROB_DISTS.iter().find(|(index, _, _)| *index == state.dist) {
+        ui.label(egui::RichText::new(*tip).color(txt_dim).size(TYPE_XS));
+    }
+    ui.add_space(SPACE_XS);
+
     ui.label(
-        egui::RichText::new("Probabilidad")
+        egui::RichText::new("Parámetros")
             .color(hdr_col)
             .size(TYPE_SM)
             .strong(),
     );
-    ui.horizontal_wrapped(|ui| {
-        for (index, name, tip) in [
-            (0u8, "Normal", "Gaussiana μ, σ: densidad y acumulada"),
-            (1u8, "Binomial", "n ensayos, p éxito: P(X = k) y P(X ≤ k)"),
-            (2u8, "Poisson", "Tasa λ: P(X = k) y P(X ≤ k)"),
-            (
-                3u8,
-                "t-Student",
-                "gl grados de libertad: densidad y acumulada",
-            ),
-            (4u8, "χ²", "gl grados de libertad: densidad y acumulada"),
-            (5u8, "F", "gl1, gl2: densidad y acumulada"),
-            (
-                6u8,
-                "Geométrica",
-                "p éxito: fallos antes del primer éxito, P(X = k) y P(X ≤ k)",
-            ),
-            (7u8, "Uniforme", "a, b: densidad 1/(b−a) y acumulada"),
-            (
-                8u8,
-                "Exponencial",
-                "λ tasa: densidad λ·exp(-λx) y acumulada",
-            ),
-        ] {
-            let selected = state.dist == index;
-            if ui
-                .selectable_label(selected, name)
-                .on_hover_text(tip)
-                .clicked()
-            {
-                state.dist = index;
-                ctx.request_repaint();
-            }
-        }
-    });
     ui.add_space(SPACE_XS);
 
     // Parámetros por distribución (sliders acotados + lectura honesta).
@@ -6143,6 +6688,13 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
             ui.add(egui::Slider::new(&mut state.x, 0.0..=20.0).text("x punto"));
         }
     }
+    ui.add_space(SPACE_SM);
+    ui.label(
+        egui::RichText::new("Resultado")
+            .color(hdr_col)
+            .size(TYPE_SM)
+            .strong(),
+    );
     ui.add_space(SPACE_XS);
 
     let result: Result<(f64, f64, String), String> = (|| {
@@ -6439,10 +6991,49 @@ pub(crate) fn draw_probability_section(ui: &mut egui::Ui, ctx: &egui::Context) {
 /// Ventana visible de la hoja vinculada (F3b). La hoja real vive en el
 /// documento (`Document::MAX_SPREADSHEET_ROWS/COLS = 400×400`,
 /// `MAX_SPREADSHEET_RECOMPUTE_CELLS = 10_000`): la UI solo muestra esta
-/// ventana por rendimiento; el resto se edita con `FillColumn`/`FillCells`/
-/// `FillRow` o la serie de abajo (`FillSeries`, mismo motor).
+/// ventana navegable de 6×8 por rendimiento (`SheetViewState` guarda el
+/// origen); el resto se alcanza con las flechas, con `Ir a A1` o con
+/// `FillColumn`/`FillCells`/`FillRow` y la serie de abajo (`FillSeries`,
+/// mismo motor). No es infinita como Excel a propósito: el presupuesto
+/// 400×400/10k del core mantiene la recomputación acotada y honesta.
 const SHEET_VIEW_COLS: usize = 6;
 const SHEET_VIEW_ROWS: usize = 8;
+
+/// Origen (esquina superior izquierda) de la ventana navegable de la hoja.
+/// Vive en `ctx.data` como `SheetEditState`: cero campos nuevos en
+/// `GrafitoApp`, cero I/O.
+#[derive(Debug, Clone, Default)]
+struct SheetViewState {
+    origin_row: usize,
+    origin_col: usize,
+}
+
+impl SheetViewState {
+    /// Recorta el origen a la hoja real del documento.
+    fn clamped(&self) -> Self {
+        let max_col = Document::MAX_SPREADSHEET_COLS.saturating_sub(SHEET_VIEW_COLS);
+        let max_row = Document::MAX_SPREADSHEET_ROWS.saturating_sub(SHEET_VIEW_ROWS);
+        Self {
+            origin_row: self.origin_row.min(max_row),
+            origin_col: self.origin_col.min(max_col),
+        }
+    }
+
+    /// Etiqueta del rango visible (`C3:H10`).
+    fn window_label(&self) -> String {
+        let first = format!(
+            "{}{}",
+            sheet_col_label(self.origin_col),
+            self.origin_row + 1
+        );
+        let last = format!(
+            "{}{}",
+            sheet_col_label(self.origin_col + SHEET_VIEW_COLS - 1),
+            self.origin_row + SHEET_VIEW_ROWS
+        );
+        format!("{first}:{last}")
+    }
+}
 
 /// Borradores + errores por celda de la hoja editable. Vive en `ctx.data`
 /// (cero campos nuevos en `GrafitoApp`, cero I/O): la fuente canónica sigue
@@ -6452,6 +7043,9 @@ const SHEET_VIEW_ROWS: usize = 8;
 struct SheetEditState {
     drafts: HashMap<(usize, usize), String>,
     errors: HashMap<(usize, usize), String>,
+    /// Celda en edición (muestra la fórmula). El resto muestra el valor
+    /// calculado, como una planilla real: clic para editar, Enter para confirmar.
+    editing: Option<(usize, usize)>,
 }
 
 fn sheet_col_label(col: usize) -> String {
@@ -6467,11 +7061,12 @@ fn sheet_col_label(col: usize) -> String {
     letters.chars().rev().collect()
 }
 
-/// Grilla editable A1:F8 sobre `Document.spreadsheet` (F3b). Cada celda edita
-/// su fuente (`=A1+B1`, `=x(A)`, `(A1, B1*2)`); el commit es por celda vía
-/// `stage_spreadsheet_cell_edits` (atómico, con undo) y el error queda en esa
-/// celda sin voltear la hoja (una fórmula rota muestra `—`). Ventana acotada
-/// por rendimiento; los presupuestos reales (400×400/10k) los impone el core.
+/// Grilla editable sobre `Document.spreadsheet` (F3b) con ventana navegable
+/// de 6×8. Cada celda edita su fuente (`=A1+B1`, `=x(A)`, `(A1, B1*2)`); el
+/// commit es por celda vía `stage_spreadsheet_cell_edits` (atómico, con undo)
+/// y el error queda en esa celda sin voltear la hoja (una fórmula rota
+/// muestra `—`). Ventana acotada por rendimiento; los presupuestos reales
+/// (400×400/10k) los impone el core.
 fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     let ctx = ui.ctx().clone();
     let (_is_dark, _accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(&ctx);
@@ -6479,85 +7074,265 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     let mut edit: SheetEditState = ctx
         .data_mut(|data| data.get_temp::<SheetEditState>(id))
         .unwrap_or_default();
+    let view_id = egui::Id::new("gc_sheet_view_state");
+    let mut view: SheetViewState = ctx
+        .data_mut(|data| data.get_temp::<SheetViewState>(view_id))
+        .unwrap_or_default()
+        .clamped();
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
     let mut dirty: Vec<(usize, usize, String)> = Vec::new();
 
-    egui::Grid::new("gc_sheet_editable")
-        .num_columns(SHEET_VIEW_COLS + 1)
-        .striped(true)
-        .spacing([4.0, 2.0])
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new("").size(TYPE_XS));
-            for col in 0..SHEET_VIEW_COLS {
-                ui.label(
-                    egui::RichText::new(sheet_col_label(col))
-                        .color(hdr_col)
-                        .size(TYPE_XS)
-                        .strong(),
-                );
-            }
-            ui.end_row();
-            for row in 0..SHEET_VIEW_ROWS {
-                ui.label(
-                    egui::RichText::new(format!("{}", row + 1))
-                        .color(txt_dim)
-                        .size(TYPE_XS),
-                );
-                for col in 0..SHEET_VIEW_COLS {
-                    let source = app.document.get_spreadsheet_cell(row, col);
-                    let draft = edit
-                        .drafts
-                        .entry((row, col))
-                        .or_insert_with(|| source.clone());
-                    if !edit.errors.contains_key(&(row, col)) && *draft != source {
-                        // Fuente cambió por fuera (otra celda/undo): re-sincroniza.
-                        *draft = source.clone();
-                    }
-                    let mut text = draft.clone();
-                    let resp = ui.add_sized(
-                        [64.0, 18.0],
-                        egui::TextEdit::singleline(&mut text)
-                            .hint_text("—")
-                            .font(egui::FontId::proportional(TYPE_XS)),
-                    );
-                    if resp.changed() {
-                        *draft = text.clone();
-                        edit.errors.remove(&(row, col));
-                    }
-                    let enter =
-                        resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    if enter && *draft != source {
-                        dirty.push((row, col, draft.clone()));
-                    }
-                    // Valor computado honesto debajo de la fuente.
-                    let computed = app.document.eval_spreadsheet_cell(row, col);
-                    let value_text = match (computed, source.trim().is_empty()) {
-                        (_, true) => String::new(),
-                        (Some(v), false) => format!("= {}", format_statistic(v)),
-                        (None, false) => "—".to_string(),
-                    };
-                    if !value_text.is_empty() {
-                        ui.label(
-                            egui::RichText::new(value_text)
-                                .color(if computed.is_some() { txt_col } else { txt_dim })
-                                .size(TYPE_XS),
-                        );
-                    }
-                    if let Some(error) = edit.errors.get(&(row, col)) {
-                        ui.label(
-                            egui::RichText::new(error)
-                                .color(current_theme(&ctx).danger)
-                                .size(TYPE_XS),
-                        );
+    // Navegación de la ventana: la hoja es 400×400, la grilla muestra 6×8.
+    // En panel angosto se apila (etiqueta arriba, flechas abajo) para no comprimir.
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+    if panel_is_narrow(ui) {
+        ui.label(
+            egui::RichText::new(view.window_label())
+                .color(hdr_col)
+                .size(TYPE_XS)
+                .strong(),
+        )
+        .on_hover_text("Esquina visible de la hoja de 400×400. Movete con las flechas.");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_XS;
+            for (glyph, tip) in [
+                ("◀", "Retroceder 6 columnas"),
+                ("▶", "Avanzar 6 columnas"),
+                ("▲", "Subir 8 filas"),
+                ("▼", "Bajar 8 filas"),
+                ("A1", "Volver al origen A1"),
+            ] {
+                if ui
+                    .add_sized([32.0, 24.0], egui::Button::new(glyph))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    match glyph {
+                        "◀" => view.origin_col = view.origin_col.saturating_sub(SHEET_VIEW_COLS),
+                        "▶" => {
+                            view.origin_col = view.origin_col.saturating_add(SHEET_VIEW_COLS);
+                            view = view.clamped();
+                        }
+                        "▲" => view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS),
+                        "▼" => {
+                            view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
+                            view = view.clamped();
+                        }
+                        _ => view = SheetViewState::default(),
                     }
                 }
-                ui.end_row();
             }
         });
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(view.window_label())
+                    .color(hdr_col)
+                    .size(TYPE_XS)
+                    .strong(),
+            )
+            .on_hover_text("Esquina visible de la hoja de 400×400. Movete con las flechas.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("A1")
+                    .on_hover_text("Volver al origen A1")
+                    .clicked()
+                {
+                    view = SheetViewState::default();
+                }
+                if ui
+                    .small_button("▼")
+                    .on_hover_text("Bajar 8 filas")
+                    .clicked()
+                {
+                    view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
+                    view = view.clamped();
+                }
+                if ui
+                    .small_button("▲")
+                    .on_hover_text("Subir 8 filas")
+                    .clicked()
+                {
+                    view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS);
+                }
+                if ui
+                    .small_button("▶")
+                    .on_hover_text("Avanzar 6 columnas")
+                    .clicked()
+                {
+                    view.origin_col = view.origin_col.saturating_add(SHEET_VIEW_COLS);
+                    view = view.clamped();
+                }
+                if ui
+                    .small_button("◀")
+                    .on_hover_text("Retroceder 6 columnas")
+                    .clicked()
+                {
+                    view.origin_col = view.origin_col.saturating_sub(SHEET_VIEW_COLS);
+                }
+            });
+        });
+    }
+    ui.add_space(SPACE_SM);
+
+    // Tabla real de una sola línea por celda (estilo planilla, no muro de
+    // pills): sin editar muestra el VALOR; con clic muestra la FÓRMULA.
+    // Enter o salir de la celda confirma; el error queda en esa celda.
+    // Scroll horizontal propio: la grilla nunca ensancha el panel (el panel
+    // queda acotado a 360 px y la hoja hace scroll adentro).
+    let theme = current_theme(&ctx);
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(theme.hairline_stroke())
+        .rounding(egui::Rounding::same(RADIUS_SM))
+        .inner_margin(egui::Margin::same(SPACE_XS))
+        .show(ui, |ui| {
+            let cell_w = sheet_cell_width(ui.available_width());
+            egui::ScrollArea::horizontal()
+                .id_salt("gc_sheet_editable_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Grid::new("gc_sheet_editable")
+                        .num_columns(SHEET_VIEW_COLS + 1)
+                        .striped(true)
+                        .spacing([SPACE_XS, 2.0])
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("").size(TYPE_XS));
+                            for col in 0..SHEET_VIEW_COLS {
+                                ui.label(
+                                    egui::RichText::new(sheet_col_label(view.origin_col + col))
+                                        .color(hdr_col)
+                                        .size(TYPE_XS)
+                                        .strong(),
+                                );
+                            }
+                            ui.end_row();
+                            for view_row in 0..SHEET_VIEW_ROWS {
+                                let row = view.origin_row + view_row;
+                                ui.label(
+                                    egui::RichText::new(format!("{}", row + 1))
+                                        .color(txt_dim)
+                                        .size(TYPE_XS),
+                                );
+                                for view_col in 0..SHEET_VIEW_COLS {
+                                    let col = view.origin_col + view_col;
+                                    let source = app.document.get_spreadsheet_cell(row, col);
+                                    let draft = edit
+                                        .drafts
+                                        .entry((row, col))
+                                        .or_insert_with(|| source.clone());
+                                    if !edit.errors.contains_key(&(row, col)) && *draft != source {
+                                        // Fuente cambió por fuera (otra celda/undo): re-sincroniza.
+                                        *draft = source.clone();
+                                    }
+                                    let computed = app.document.eval_spreadsheet_cell(row, col);
+                                    if edit.editing == Some((row, col)) {
+                                        let mut text = draft.clone();
+                                        let resp = ui.add_sized(
+                                            [cell_w, SHEET_CELL_H],
+                                            egui::TextEdit::singleline(&mut text)
+                                                .hint_text("=A1+B1")
+                                                .font(egui::FontId::monospace(TYPE_XS)),
+                                        );
+                                        if !resp.has_focus() && !resp.lost_focus() {
+                                            resp.request_focus();
+                                        }
+                                        if resp.changed() {
+                                            *draft = text.clone();
+                                            edit.errors.remove(&(row, col));
+                                        }
+                                        let enter = resp.has_focus()
+                                            && ui
+                                                .input(|input| input.key_pressed(egui::Key::Enter));
+                                        if enter && *draft != source {
+                                            dirty.push((row, col, draft.clone()));
+                                            edit.editing = None;
+                                        } else if resp.lost_focus() {
+                                            if *draft != source {
+                                                dirty.push((row, col, draft.clone()));
+                                            }
+                                            edit.editing = None;
+                                        }
+                                    } else {
+                                        // Lectura: valor calculado (o "—" / vacío).
+                                        let (display, color, hover) =
+                                            match (computed, source.trim().is_empty()) {
+                                                (_, true) => {
+                                                    (String::new(), txt_dim, String::new())
+                                                }
+                                                (Some(v), false) => (
+                                                    format_statistic(v),
+                                                    txt_col,
+                                                    if source.trim_start().starts_with('=') {
+                                                        source.clone()
+                                                    } else {
+                                                        String::new()
+                                                    },
+                                                ),
+                                                (None, false) => (
+                                                    "—".to_string(),
+                                                    txt_dim,
+                                                    edit.errors
+                                                        .get(&(row, col))
+                                                        .cloned()
+                                                        .unwrap_or_default(),
+                                                ),
+                                            };
+                                        if edit.errors.contains_key(&(row, col)) {
+                                            let resp = ui.add_sized(
+                                                [cell_w, SHEET_CELL_H],
+                                                egui::Label::new(
+                                                    egui::RichText::new("—")
+                                                        .color(theme.danger)
+                                                        .size(TYPE_XS)
+                                                        .monospace(),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if resp.clicked() {
+                                                edit.editing = Some((row, col));
+                                            }
+                                            resp.on_hover_text(
+                                                edit.errors
+                                                    .get(&(row, col))
+                                                    .cloned()
+                                                    .unwrap_or_default(),
+                                            );
+                                        } else {
+                                            let resp = ui.add_sized(
+                                                [cell_w, SHEET_CELL_H],
+                                                egui::Label::new(
+                                                    egui::RichText::new(&display)
+                                                        .color(color)
+                                                        .size(TYPE_XS)
+                                                        .monospace(),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if resp.clicked() {
+                                                edit.editing = Some((row, col));
+                                            }
+                                            if !hover.is_empty() {
+                                                resp.on_hover_text(hover);
+                                            } else if !display.is_empty() {
+                                                resp.on_hover_text(format!(
+                                                    "{}{} = {display}",
+                                                    sheet_col_label(col),
+                                                    row + 1,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    ui.add_space(SPACE_SM);
     // “Aplicar” compromete todas las celdas sucias (ordenadas, una por vez
     // para error por celda); Enter ya encoló la celda actual arriba.
-    let mut apply_all = ui
-        .small_button("Aplicar hoja")
+    let mut apply_all = panel_primary_button(ui, "Aplicar hoja")
         .on_hover_text("Compromete las celdas editadas (una por vez, con undo)")
         .clicked();
     for ((row, col), draft) in &edit.drafts {
@@ -6613,16 +7388,17 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         );
         ctx.request_repaint();
     }
+    ui.add_space(SPACE_XS);
     ui.label(
         egui::RichText::new(format!(
-            "Ventana A1:{}{} de 400×400 · 10 000 celdas recomputables (core). `—` = fórmula sin resolver, la hoja sigue viva.",
-            sheet_col_label(SHEET_VIEW_COLS - 1),
-            SHEET_VIEW_ROWS
+            "Ventana {} de 400×400 · 10 000 celdas vivas. `—` = fórmula sin resolver.",
+            view.window_label()
         ))
         .color(txt_dim)
         .size(TYPE_XS),
     );
     ctx.data_mut(|data| data.insert_temp(id, edit));
+    ctx.data_mut(|data| data.insert_temp(view_id, view));
 }
 
 /// Fila de la hoja viva: una tabla del documento con sus columnas clonadas
@@ -6674,50 +7450,131 @@ fn parse_series_scalar(text: &str, what: &str) -> Result<f64, String> {
     }
 }
 
-/// Fila de autorrelleno por serie (frente C2): mismo motor que el comando
-/// `FillSeries` (lineal `inicio+paso·i` o geométrica `inicio·pasoⁱ` sobre
-/// un rango 1D). Commit atómico con undo vía `stage_spreadsheet_cell_edits`;
-/// el error queda en la fila sin voltear la hoja.
+/// Vista previa honesta de la serie (cantidad + primeros 3 valores).
+/// Pura: usa el mismo motor que `Aplicar`; `None` si rango/inicio/paso
+/// no validan (el error detallado lo da `Aplicar`, acá no se inventa nada).
+pub(crate) fn series_preview(
+    range: &str,
+    start_text: &str,
+    step_text: &str,
+    geometric: bool,
+) -> Option<(usize, Vec<String>)> {
+    let start = parse_series_scalar(start_text, "inicio").ok()?;
+    let step = parse_series_scalar(step_text, "paso").ok()?;
+    let kind = if geometric {
+        spreadsheet_series::SeriesKind::Geometric
+    } else {
+        spreadsheet_series::SeriesKind::Linear
+    };
+    let edits = spreadsheet_series::build_fill_series(range, start, step, kind).ok()?;
+    if edits.is_empty() {
+        return None;
+    }
+    let first: Vec<String> = edits
+        .iter()
+        .take(3)
+        .map(|(_, _, value)| value.clone())
+        .collect();
+    Some((edits.len(), first))
+}
+
+/// Autorrelleno por serie, rediseño v2 (frente C2): mismo motor que el
+/// comando `FillSeries` (lineal `inicio+paso·i` o geométrica `inicio·pasoⁱ`
+/// sobre un rango 1D). Commit atómico con undo; el error queda en la fila.
+/// Estructura fija de 5 bloques que no depende del ancho —cero píxeles
+/// fijos, todo proporcional— así no hay desborde ni en el drawer compacto:
+/// tipo, rango, inicio+paso, vista previa en vivo y aplicar.
 fn draw_sheet_series_row(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     let ctx = ui.ctx().clone();
-    let (_is_dark, _accent, _fill, _sep, _txt_col, txt_dim, _hdr_col) = panel_theme_local(&ctx);
+    let (_is_dark, accent, _fill, _sep, _txt_col, txt_dim, _hdr_col) = panel_theme_local(&ctx);
     let id = egui::Id::new("gc_sheet_series_state");
     let mut series: SheetSeriesState = ctx
         .data_mut(|data| data.get_temp::<SheetSeriesState>(id))
         .unwrap_or_default();
-    ui.horizontal_wrapped(|ui| {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = SPACE_XS;
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
+        // 1 · Tipo: etiqueta a la izquierda, opción a la derecha.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Tipo")
+                    .color(txt_dim)
+                    .size(TYPE_XS)
+                    .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_XS;
+                ui.radio_value(&mut series.geometric, true, "Geom.")
+                    .on_hover_text("Geométrica: inicio·pasoⁱ");
+                ui.radio_value(&mut series.geometric, false, "Lineal");
+            });
+        });
+        // 2 · Rango a todo el ancho.
         ui.label(
-            egui::RichText::new("Serie:")
+            egui::RichText::new("Rango 1D en la hoja (ej. A1:A8)")
                 .color(txt_dim)
-                .size(TYPE_XS)
-                .strong(),
+                .size(TYPE_XS),
         );
         ui.add_sized(
-            [72.0, 18.0],
+            [ui.available_width(), SHEET_CELL_H],
             egui::TextEdit::singleline(&mut series.range)
                 .hint_text("A1:A8")
                 .font(egui::FontId::proportional(TYPE_XS)),
         );
-        ui.label(egui::RichText::new("inicio").color(txt_dim).size(TYPE_XS));
-        ui.add_sized(
-            [52.0, 18.0],
-            egui::TextEdit::singleline(&mut series.start)
-                .hint_text("1")
-                .font(egui::FontId::proportional(TYPE_XS)),
-        );
-        ui.label(egui::RichText::new("paso").color(txt_dim).size(TYPE_XS));
-        ui.add_sized(
-            [52.0, 18.0],
-            egui::TextEdit::singleline(&mut series.step)
-                .hint_text("1")
-                .font(egui::FontId::proportional(TYPE_XS)),
-        );
-        ui.checkbox(&mut series.geometric, "geom.");
-        let apply = ui
-            .small_button("Aplicar serie")
-            .on_hover_text(
-                "Rellena el rango con serie lineal (inicio+paso·i) o geométrica (inicio·pasoⁱ); mismo motor que FillSeries",
-            )
+        // 3 · Inicio + Paso en una fila (dos números cortos siempre entran).
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
+            let field_w = ((ui.available_width() - SPACE_SM) / 2.0).max(64.0);
+            for (label, value, hint) in [
+                ("Inicio", &mut series.start, "1"),
+                ("Paso", &mut series.step, "1"),
+            ] {
+                ui.vertical(|ui| {
+                    ui.set_min_width(field_w);
+                    ui.label(
+                        egui::RichText::new(label)
+                            .color(txt_dim)
+                            .size(TYPE_XS)
+                            .strong(),
+                    );
+                    ui.add_sized(
+                        [field_w, SHEET_CELL_H],
+                        egui::TextEdit::singleline(value)
+                            .hint_text(hint)
+                            .font(egui::FontId::proportional(TYPE_XS)),
+                    );
+                });
+            }
+        });
+        // 4 · Vista previa en vivo con el motor real (o ayuda si no valida).
+        match series_preview(&series.range, &series.start, &series.step, series.geometric) {
+            Some((count, first)) => {
+                let mut text = format!("{count} celdas: {}", first.join(", "));
+                if count > first.len() {
+                    text.push('…');
+                }
+                ui.label(
+                    egui::RichText::new(text)
+                        .color(accent)
+                        .size(TYPE_XS)
+                        .strong(),
+                );
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(if series.geometric {
+                        "Geométrica: inicio·pasoⁱ sobre el rango."
+                    } else {
+                        "Lineal: inicio+paso·i sobre el rango."
+                    })
+                    .color(txt_dim)
+                    .size(TYPE_XS),
+                );
+            }
+        }
+        // 5 · Aplicar.
+        let apply = panel_primary_button(ui, "Aplicar serie")
+            .on_hover_text("Rellena el rango (mismo motor que FillSeries)")
             .clicked();
         if apply {
             series.error = None;
@@ -6732,8 +7589,7 @@ fn draw_sheet_series_row(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                 let edits =
                     spreadsheet_series::build_fill_series(&series.range, start, step, kind)?;
                 let count = edits.len();
-                let mut snapshot =
-                    crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
+                let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
                 snapshot.capture(&app.document);
                 let staged = app.document.stage_spreadsheet_cell_edits(&edits)?;
                 app.document = staged;
@@ -6746,8 +7602,10 @@ fn draw_sheet_series_row(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             })();
             match outcome {
                 Ok(count) => {
-                    app.cas_result =
-                        format!("Serie: {count} celda(s) rellenadas en {}", series.range.trim());
+                    app.cas_result = format!(
+                        "Serie: {count} celda(s) rellenadas en {}",
+                        series.range.trim()
+                    );
                 }
                 Err(error) => {
                     series.error = Some(error);
@@ -6767,27 +7625,110 @@ fn draw_sheet_series_row(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 }
 
 /// Sección Datos: hoja vinculada editable (celdas) + tablas en lectura.
-/// La hoja edita `Document.spreadsheet` con validación por celda; las tablas
-/// (`DataTable`) siguen en lectura con botón de ejemplo real (nunca mudo).
+/// Vive en el tab Datos (casa de Análisis de datos). La hoja edita
+/// `Document.spreadsheet` con validación por celda; las tablas (`DataTable`)
+/// siguen en lectura con botón de ejemplo real (nunca mudo).
 pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     let ctx = ui.ctx().clone();
-    let (_is_dark, _accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(&ctx);
-    ui.label(
-        egui::RichText::new("Datos · hoja vinculada (editable)")
-            .color(hdr_col)
-            .size(TYPE_SM)
-            .strong(),
+    let (_is_dark, _accent, _fill, _sep, txt_col, txt_dim, _hdr_col) = panel_theme_local(&ctx);
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+    ui.spacing_mut().item_spacing.y = SPACE_SM;
+    // Entrada de archivos grandes: CSV/TSV de 2 columnas → DataTable +
+    // ScatterPlot enlazado, más puente al asistente para ordenar/analizar.
+    // Scandinavian: una card de entrada, dos botones quiet en horizontal
+    // (apilados en angosto), sin muros de texto.
+    draw_inspector_section(
+        ui,
+        "Importar y ordenar",
+        "CSV/TSV de dos columnas (máx. 2 MB) → tabla + dispersión. Lo grande se ordena con el asistente.",
+        |ui| {
+            let narrow = panel_is_narrow(ui);
+            if narrow {
+                if panel_primary_button(ui, "Importar CSV/TSV…")
+                    .on_hover_text("Dos columnas x,y · la ruta nunca se guarda")
+                    .clicked()
+                {
+                    import_local_xy_table(app, &ctx);
+                }
+                if ui
+                    .add_sized(
+                        [ui.available_width(), PANEL_BUTTON_H],
+                        egui::Button::new(egui::RichText::new("Ordenar con asistente").size(TYPE_SM))
+                            .rounding(RADIUS_PILL),
+                    )
+                    .on_hover_text("Arma el prompt con tus tablas y abre el asistente")
+                    .clicked()
+                {
+                    open_data_tables_in_assistant(app, &ctx);
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    let bw = ((ui.available_width() - SPACE_SM) / 2.0).max(80.0);
+                    if ui
+                        .add_sized(
+                            [bw, PANEL_BUTTON_H],
+                            egui::Button::new(
+                                egui::RichText::new("Importar CSV/TSV…").size(TYPE_SM).strong(),
+                            )
+                            .rounding(RADIUS_PILL),
+                        )
+                        .on_hover_text("Dos columnas x,y · la ruta nunca se guarda")
+                        .clicked()
+                    {
+                        import_local_xy_table(app, &ctx);
+                    }
+                    if ui
+                        .add_sized(
+                            [bw, PANEL_BUTTON_H],
+                            egui::Button::new(
+                                egui::RichText::new("Ordenar con asistente").size(TYPE_SM),
+                            )
+                            .rounding(RADIUS_PILL),
+                        )
+                        .on_hover_text("Arma el prompt con tus tablas y abre el asistente")
+                        .clicked()
+                    {
+                        open_data_tables_in_assistant(app, &ctx);
+                    }
+                });
+            }
+            ui.label(
+                egui::RichText::new("Tip: tirá el archivo acá vía Importar y después pedí «ordenalo, resumilo y graficá Histogram/BoxPlot».")
+                    .color(txt_dim)
+                    .size(TYPE_XS),
+            );
+        },
     );
-    ui.label(
-        egui::RichText::new(
-            "Celda con `=A1+B1` o `=x(A)` se recomputa al cambiar la fuente; `(x, y)` con fórmulas crea punto.",
-        )
-        .color(txt_dim)
-        .size(TYPE_XS),
+    ui.add_space(SPACE_SM);
+    draw_inspector_section(
+        ui,
+        "Hoja vinculada",
+        "Números y fórmulas que recomputan el documento.",
+        |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Clic en una celda para editar su fórmula · Enter confirma · ventana navegable de 6×8 sobre la hoja de 400×400.",
+                )
+                .color(txt_dim)
+                .size(TYPE_XS),
+            )
+            .on_hover_text(
+                "Guardá números y fórmulas (`=A1+B1`, `=x(A)`) y todo lo que las usa se recomputa solo: puntos, funciones con `p`, tablas y gráficos. Tope del core: 10 000 celdas vivas, no infinita a propósito.",
+            );
+            ui.add_space(SPACE_XS);
+            draw_sheet_editable_grid(ui, app);
+        },
     );
-    draw_sheet_editable_grid(ui, app);
-    ui.add_space(SPACE_XS);
-    draw_sheet_series_row(ui, app);
+    ui.add_space(SPACE_SM);
+    draw_inspector_section(
+        ui,
+        "Serie",
+        "Autorrelleno lineal o geométrico (mismo motor que FillSeries).",
+        |ui| {
+            draw_sheet_series_row(ui, app);
+        },
+    );
     ui.add_space(SPACE_XS);
 
     let tables: Vec<SheetTable> = app
@@ -6806,122 +7747,126 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
         })
         .collect();
 
-    if tables.is_empty() {
-        ui.label(
-            egui::RichText::new(
-                "No hay tablas. Creá una con DataTable[{1,2,3}, {2,4,6}] en la entrada.",
-            )
-            .color(txt_dim)
-            .size(TYPE_XS),
-        );
-        if ui
-            .small_button("Cargar ejemplo")
-            .on_hover_text("Inserta una tabla de ejemplo (x: 0..4, y: x²) al documento")
-            .clicked()
-        {
-            let example = GeoObject::DataTable(
-                DataTableObj::new(
-                    "x",
-                    "y",
-                    vec![0.0, 1.0, 2.0, 3.0, 4.0],
-                    vec![0.0, 1.0, 4.0, 9.0, 16.0],
-                )
-                .with_label("ejemplo"),
-            );
-            match app.document.try_add_object(example) {
-                Ok(_) => {
-                    app.cas_result = "Tabla «ejemplo» cargada".to_string();
-                    app.notify(
-                        app.cas_result.clone(),
-                        grafito_ui::toast::ToastKind::Success,
+    draw_inspector_section(
+        ui,
+        "Tablas",
+        "Solo lectura; las celdas se editan en la hoja de arriba.",
+        |ui| {
+            if tables.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "No hay tablas. Creá una con DataTable[{1,2,3}, {2,4,6}] en la entrada.",
+                    )
+                    .color(txt_dim)
+                    .size(TYPE_XS),
+                );
+                ui.add_space(SPACE_XS);
+                if panel_primary_button(ui, "Cargar ejemplo")
+                    .on_hover_text("Inserta una tabla de ejemplo (x: 0..4, y: x²)")
+                    .clicked()
+                {
+                    let example = GeoObject::DataTable(
+                        DataTableObj::new(
+                            "x",
+                            "y",
+                            vec![0.0, 1.0, 2.0, 3.0, 4.0],
+                            vec![0.0, 1.0, 4.0, 9.0, 16.0],
+                        )
+                        .with_label("ejemplo"),
                     );
+                    match app.document.try_add_object(example) {
+                        Ok(_) => {
+                            app.cas_result = "Tabla «ejemplo» cargada".to_string();
+                            app.notify(
+                                app.cas_result.clone(),
+                                grafito_ui::toast::ToastKind::Success,
+                            );
+                        }
+                        Err(error) => {
+                            app.cas_result = format!("No se pudo cargar el ejemplo: {error}");
+                            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+                        }
+                    }
                 }
-                Err(error) => {
-                    app.cas_result = format!("No se pudo cargar el ejemplo: {error}");
-                    app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
-                }
+                return;
             }
-        }
-        return;
-    }
 
-    let hidden_tables = tables.len().saturating_sub(MAX_SPREADSHEET_TABLES);
-    for table in tables.into_iter().take(MAX_SPREADSHEET_TABLES) {
-        let SheetTable {
-            id,
-            label,
-            x_name,
-            y_name,
-            xs,
-            ys,
-        } = table;
-        let _ = id;
-        let title = if label.is_empty() {
-            "<sin etiqueta>".to_string()
-        } else {
-            label
-        };
-        ui.label(
-            egui::RichText::new(format!("{title} · {} filas", xs.len().min(ys.len())))
-                .color(txt_col)
-                .size(TYPE_XS)
-                .strong(),
-        );
-        let rows = xs.len().min(ys.len());
-        let shown = rows.min(MAX_SPREADSHEET_ROWS);
-        egui::Grid::new(format!("gc_sheet_{title}"))
-            .num_columns(3)
-            .striped(true)
-            .spacing([8.0, 2.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("#").color(txt_dim).size(TYPE_XS));
-                ui.label(egui::RichText::new(x_name).color(txt_dim).size(TYPE_XS));
-                ui.label(egui::RichText::new(y_name).color(txt_dim).size(TYPE_XS));
-                ui.end_row();
-                for row in 0..shown {
+            let hidden_tables = tables.len().saturating_sub(MAX_SPREADSHEET_TABLES);
+            for table in tables.into_iter().take(MAX_SPREADSHEET_TABLES) {
+                let SheetTable {
+                    id,
+                    label,
+                    x_name,
+                    y_name,
+                    xs,
+                    ys,
+                } = table;
+                let _ = id;
+                let title = if label.is_empty() {
+                    "<sin etiqueta>".to_string()
+                } else {
+                    label
+                };
+                ui.label(
+                    egui::RichText::new(format!("{title} · {} filas", xs.len().min(ys.len())))
+                        .color(txt_col)
+                        .size(TYPE_XS)
+                        .strong(),
+                );
+                let rows = xs.len().min(ys.len());
+                let shown = rows.min(MAX_SPREADSHEET_ROWS);
+                egui::Grid::new(format!("gc_sheet_{title}"))
+                    .num_columns(3)
+                    .striped(true)
+                    .spacing([SPACE_SM, 2.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("#").color(txt_dim).size(TYPE_XS));
+                        ui.label(egui::RichText::new(x_name).color(txt_dim).size(TYPE_XS));
+                        ui.label(egui::RichText::new(y_name).color(txt_dim).size(TYPE_XS));
+                        ui.end_row();
+                        for row in 0..shown {
+                            ui.label(
+                                egui::RichText::new(format!("{}", row + 1))
+                                    .color(txt_dim)
+                                    .size(TYPE_XS),
+                            );
+                            ui.label(
+                                egui::RichText::new(format_statistic(xs[row]))
+                                    .color(txt_col)
+                                    .size(TYPE_XS)
+                                    .monospace(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format_statistic(ys[row]))
+                                    .color(txt_col)
+                                    .size(TYPE_XS)
+                                    .monospace(),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                if rows > shown {
                     ui.label(
-                        egui::RichText::new(format!("{}", row + 1))
-                            .color(txt_dim)
-                            .size(TYPE_XS),
+                        egui::RichText::new(format!(
+                            "…y {} filas más (vista acotada a {MAX_SPREADSHEET_ROWS})",
+                            rows - shown
+                        ))
+                        .color(txt_dim)
+                        .size(TYPE_XS),
                     );
-                    ui.label(
-                        egui::RichText::new(format_statistic(xs[row]))
-                            .color(txt_col)
-                            .size(TYPE_XS),
-                    );
-                    ui.label(
-                        egui::RichText::new(format_statistic(ys[row]))
-                            .color(txt_col)
-                            .size(TYPE_XS),
-                    );
-                    ui.end_row();
                 }
-            });
-        if rows > shown {
-            ui.label(
-                egui::RichText::new(format!(
-                    "…y {} filas más (vista acotada a {MAX_SPREADSHEET_ROWS})",
-                    rows - shown
-                ))
-                .color(txt_dim)
-                .size(TYPE_XS),
-            );
-        }
-        ui.add_space(SPACE_XS);
-    }
-    if hidden_tables > 0 {
-        ui.label(
-            egui::RichText::new(format!(
-                "…y {hidden_tables} tablas más (vista acotada a {MAX_SPREADSHEET_TABLES})"
-            ))
-            .color(txt_dim)
-            .size(TYPE_XS),
-        );
-    }
-    ui.label(
-        egui::RichText::new("Tablas en lectura; las celdas se editan arriba.")
-            .color(txt_dim)
-            .size(TYPE_XS),
+                ui.add_space(SPACE_XS);
+            }
+            if hidden_tables > 0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "…y {hidden_tables} tablas más (vista acotada a {MAX_SPREADSHEET_TABLES})"
+                    ))
+                    .color(txt_dim)
+                    .size(TYPE_XS),
+                );
+            }
+        },
     );
 }
 
@@ -6984,14 +7929,33 @@ mod gc_piel_tests {
         chi_squared_quantile_honest, f_distribution_cdf, f_distribution_pdf, f_quantile_honest,
         geometric_cdf, geometric_pmf, geometric_quantile_honest, normal_cdf, normal_pdf,
         normal_quantile_honest, parse_series_scalar, parse_slider_prompt, plot_df_or_fuera_de_cota,
-        poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_col_label, student_t_cdf,
-        student_t_pdf, student_t_quantile_honest, uniform_cdf, uniform_pdf,
+        poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_cell_width, sheet_col_label,
+        student_t_cdf, student_t_pdf, student_t_quantile_honest, uniform_cdf, uniform_pdf,
         uniform_quantile_honest, wc_exact_integral_command_text, wc_riemann_command_text,
         wc_study_command_text, wc_taylor_command_text, wc_taylor_remainder_line, MAX_BINOMIAL_N,
-        MAX_GEOMETRIC_K, MAX_PANEL_DF, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
+        MAX_GEOMETRIC_K, MAX_PANEL_DF, PANEL_BUTTON_H, PANEL_NARROW_WIDTH, SHEET_CELL_H,
+        SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
+    use grafito_ui::tokens::HIT_TARGET_MIN;
     use std::collections::BTreeMap;
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn panel_helpers_respetan_tokens_y_clamps() {
+        // Botones ≥ WCAG 2.5.8 (24 px) y celdas con alto legible.
+        assert!(PANEL_BUTTON_H >= HIT_TARGET_MIN);
+        assert!(SHEET_CELL_H >= HIT_TARGET_MIN);
+        // Panel angosto: el umbral vive entre el mínimo (180) y el default (260).
+        assert!(PANEL_NARROW_WIDTH > 180.0 && PANEL_NARROW_WIDTH < 340.0);
+        // Celdas: 6 columnas repartidas, clamp 52..=96.
+        assert_eq!(sheet_cell_width(240.0), 52.0);
+        assert_eq!(sheet_cell_width(10_000.0), 96.0);
+        let mid = sheet_cell_width(400.0);
+        assert!(mid > 52.0 && mid < 96.0, "ancho medio = {mid}");
+        // Monótono creciente.
+        assert!(sheet_cell_width(300.0) <= sheet_cell_width(500.0));
+    }
 
     #[test]
     fn normal_standard_values_are_honest() {
@@ -7366,5 +8330,61 @@ mod coverage_sweep_panels_pure {
         assert!(inspector_label_text("MiEtiqueta").is_some());
         assert!(inspector_label_text("   ").is_none());
         assert!(!inspector_identity_tooltip("Título", "f", true).is_empty());
+    }
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn barrido_datos_prob_asistente_y_comandos() {
+        // Preview honesto: 24 valores + conteo, nunca trunca en silencio.
+        assert_eq!(statistics_data_preview(&[]), "");
+        assert!(statistics_data_preview(&[1.0, 2.0]).contains("1.000000"));
+        let big: Vec<f64> = (0..30).map(|v| v as f64).collect();
+        let preview = statistics_data_preview(&big);
+        assert!(preview.contains("…y 6 más (N=30)"), "{preview}");
+        // Prompt asistente: vacío honesto vs N + herramientas.
+        let empty = statistics_assistant_prompt(&[]);
+        assert!(empty.contains("vacía"), "{empty}");
+        let prompt = statistics_assistant_prompt(&[3.0, 1.0, 2.0]);
+        assert!(prompt.contains("3 datos"), "{prompt}");
+        assert!(prompt.contains("Sort"), "{prompt}");
+        assert!(prompt.contains("Histogram"), "{prompt}");
+        assert!(prompt.contains("TTest"), "{prompt}");
+        // Comandos inline: hasta 200 valores, más → None honesto.
+        assert_eq!(
+            statistics_histogram_command(&[1.0, 2.0]).as_deref(),
+            Some("Histogram[{1, 2}, 10]")
+        );
+        assert_eq!(
+            statistics_boxplot_command(&[1.0, 2.0]).as_deref(),
+            Some("BoxPlot[{1, 2}]")
+        );
+        assert_eq!(
+            statistics_mean_command(&[1.0, 2.0]).as_deref(),
+            Some("Mean[{1, 2}]")
+        );
+        assert!(statistics_histogram_command(&[]).is_none());
+        assert!(statistics_inline_list(&[]).is_none());
+        let huge: Vec<f64> = vec![1.0; 201];
+        assert!(statistics_inline_list(&huge).is_none());
+        assert!(statistics_histogram_command(&huge).is_none());
+        // Panel acotado escandinavo: 360 máx, sin muro en 1080p.
+        assert_eq!(PANEL_DATA_MAX_WIDTH, 360.0);
+        assert!(PANEL_DATA_MAX_WIDTH % 4.0 == 0.0);
+        // Vista previa de serie v2: mismo motor que Aplicar.
+        let (count, first) = series_preview("A1:A8", "1", "1", false).expect("lineal válida");
+        assert_eq!(count, 8);
+        assert_eq!(
+            first,
+            vec!["1".to_string(), "2".to_string(), "3".to_string()]
+        );
+        let (count_g, first_g) =
+            series_preview("A1:A4", "2", "3", true).expect("geométrica válida");
+        assert_eq!(count_g, 4);
+        assert_eq!(
+            first_g,
+            vec!["2".to_string(), "6".to_string(), "18".to_string()]
+        );
+        assert!(series_preview("ZZZ", "1", "1", false).is_none());
+        assert!(series_preview("A1:A3", "mal", "1", false).is_none());
+        assert!(series_preview("A1:A3", "1", "inf", false).is_none());
     }
 }

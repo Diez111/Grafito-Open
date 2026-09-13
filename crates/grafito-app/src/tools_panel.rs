@@ -408,6 +408,11 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     );
                     ui.add_space(SPACE_SM);
                 }
+                // ── EXPORTAR / COMPARTIR ──
+                // Vive acá y en Archivo > Exportar (nunca en Vista: Vista es
+                // solo visual). Reutiliza la sección canónica de panels.
+                crate::panels::draw_export_section(ui, app);
+                ui.add_space(SPACE_SM);
             });
         });
 }
