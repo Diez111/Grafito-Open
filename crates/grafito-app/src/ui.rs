@@ -166,33 +166,65 @@ fn draw_theme_toggle_switch(ui: &mut egui::Ui, is_dark: bool) -> bool {
     response.clicked()
 }
 
+/// Ritmo escandinavo de menú: ítems compactos y padding de botón consistente.
+/// El `item_spacing` global (16 px) es para el lienzo; dentro de un menú separa
+/// de más y rompe la lectura vertical.
+fn menu_rhythm(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing.y = SPACE_XS;
+    ui.spacing_mut().item_spacing.x = SPACE_SM;
+    ui.spacing_mut().button_padding = egui::vec2(SPACE_SM, SPACE_XS);
+}
+
+/// `ui.menu_button` con el ritmo de menú ya aplicado: todos los menús de la
+/// barra comparten altura de ítem, padding y separación.
+fn menu_button(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.menu_button(title, |ui| {
+        menu_rhythm(ui);
+        add_contents(ui);
+    });
+}
+
 fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    ui.menu_button("Archivo", |ui| {
-        if ui.button("Nuevo (Ctrl+N)").clicked() {
+    menu_button(ui, "Archivo", |ui| {
+        if ui
+            .add(egui::Button::new("Nuevo").shortcut_text("Ctrl+N"))
+            .clicked()
+        {
             app.handle_file_command(FileCommand::New);
             ui.close_menu();
         }
-        if ui.button("Abrir... (Ctrl+O)").clicked() {
+        if ui
+            .add(egui::Button::new("Abrir…").shortcut_text("Ctrl+O"))
+            .clicked()
+        {
             app.handle_file_command(FileCommand::Open);
             ui.close_menu();
         }
-        if ui.button("Guardar (Ctrl+S)").clicked() {
+        ui.separator();
+        if ui
+            .add(egui::Button::new("Guardar").shortcut_text("Ctrl+S"))
+            .clicked()
+        {
             app.handle_file_command(FileCommand::Save);
             ui.close_menu();
         }
-        if ui.button("Guardar como... (Ctrl+Shift+S)").clicked() {
+        if ui
+            .add(egui::Button::new("Guardar como…").shortcut_text("Ctrl+Shift+S"))
+            .clicked()
+        {
             app.handle_file_command(FileCommand::SaveAs);
             ui.close_menu();
         }
+        ui.separator();
         if ui.button("Importar GeoGebra (.ggb)…").clicked() {
             app.choose_and_import_ggb(ui.ctx());
             ui.close_menu();
         }
-        ui.menu_button("Exportar", |ui| {
+        menu_button(ui, "Exportar", |ui| {
             for (label, format) in [
-                ("SVG...", crate::export::ExportFormat::Svg),
-                ("PNG...", crate::export::ExportFormat::Png),
-                ("TikZ...", crate::export::ExportFormat::Tikz),
+                ("SVG…", crate::export::ExportFormat::Svg),
+                ("PNG…", crate::export::ExportFormat::Png),
+                ("TikZ…", crate::export::ExportFormat::Tikz),
             ] {
                 // W3 — "…" = abre diálogo (elegís carpeta y nombre ahí).
                 if ui
@@ -229,26 +261,37 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 }
 
 fn draw_edit_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    ui.menu_button("Editar", |ui| {
+    menu_button(ui, "Editar", |ui| {
         let undo_len = app.undo_stack.len();
         let redo_len = app.redo_stack.len();
-        let undo_label = format!("Deshacer (Ctrl+Z) {}/{}", undo_len, crate::app::MAX_UNDO);
+        // El paso disponible vive en el hover: el ítem queda limpio.
         if ui
-            .add_enabled(!app.undo_stack.is_empty(), egui::Button::new(undo_label))
+            .add_enabled(
+                !app.undo_stack.is_empty(),
+                egui::Button::new("Deshacer").shortcut_text("Ctrl+Z"),
+            )
+            .on_hover_text(format!("{undo_len}/{} pasos", crate::app::MAX_UNDO))
             .clicked()
         {
             app.undo();
             ui.close_menu();
         }
-        let redo_label = format!("Rehacer (Ctrl+Y) {}/{}", redo_len, crate::app::MAX_UNDO);
         if ui
-            .add_enabled(!app.redo_stack.is_empty(), egui::Button::new(redo_label))
+            .add_enabled(
+                !app.redo_stack.is_empty(),
+                egui::Button::new("Rehacer").shortcut_text("Ctrl+Y"),
+            )
+            .on_hover_text(format!("{redo_len}/{} pasos", crate::app::MAX_UNDO))
             .clicked()
         {
             app.redo();
             ui.close_menu();
         }
-        if ui.button("Eliminar (Supr)").clicked() {
+        ui.separator();
+        if ui
+            .add(egui::Button::new("Eliminar").shortcut_text("Supr"))
+            .clicked()
+        {
             app.delete_selected();
             ui.close_menu();
         }
@@ -256,7 +299,7 @@ fn draw_edit_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 }
 
 fn draw_view_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    ui.menu_button("Vista", |ui| {
+    menu_button(ui, "Vista", |ui| {
         ui.checkbox(&mut app.show_grid, "Mostrar cuadrícula");
         ui.checkbox(&mut app.dark_mode, "Modo oscuro (Ctrl+T)")
             .clicked()
@@ -280,7 +323,7 @@ fn draw_view_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 }
 
 fn draw_perspectives_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    ui.menu_button("Perspectivas", |ui| {
+    menu_button(ui, "Perspectivas", |ui| {
         let theme = current_theme(ui.ctx());
         ui.set_min_width(252.0);
         // Encabezado de sección: misma jerarquía que el inspector
@@ -380,7 +423,7 @@ fn draw_perspectives_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 }
 
 fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    ui.menu_button("Herramientas", |ui| {
+    menu_button(ui, "Herramientas", |ui| {
         if ui
             .checkbox(&mut app.keyboard_visible, "Teclado visible")
             .changed()
@@ -396,23 +439,22 @@ fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             app.open_assistant_workspace();
         }
         ui.separator();
+        let supported = crate::app::trig_animation_supported(app.current_view);
         let mut trig_visible = app.show_trig_animation;
         if ui
             .add_enabled(
-                crate::app::trig_animation_supported(app.current_view),
-                egui::Checkbox::new(&mut trig_visible, "Animación Trigonométrica"),
+                supported,
+                egui::Checkbox::new(&mut trig_visible, "Animación trigonométrica"),
             )
+            .on_hover_text(if supported {
+                "Muestra la animación de la función trigonométrica en el lienzo"
+            } else {
+                "Disponible en vistas 2D"
+            })
             .changed()
         {
             app.set_trig_animation_visible(trig_visible);
             ui.close_menu();
-        }
-        if !crate::app::trig_animation_supported(app.current_view) {
-            ui.label(
-                egui::RichText::new("Disponible en vistas 2D.")
-                    .color(current_theme(ui.ctx()).text_tertiary)
-                    .size(TYPE_XS),
-            );
         }
         ui.separator();
         if ui.button("Guardar herramienta personalizada…").clicked() {
@@ -428,7 +470,7 @@ fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 }
 
 fn draw_panels_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    ui.menu_button("Paneles", |ui| {
+    menu_button(ui, "Paneles", |ui| {
         // 5 tabs de primera clase (regla visible ⇒ botón): cada entrada abre
         // su tab. Datos y Prob. tienen casa propia; las perspectivas
         // Estadística/Probabilidad/Análisis de datos solo eligen el tab
@@ -488,7 +530,7 @@ fn draw_panels_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 }
 
 fn draw_help_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    ui.menu_button("Ayuda", |ui| {
+    menu_button(ui, "Ayuda", |ui| {
         let version = env!("CARGO_PKG_VERSION");
         if ui
             .button(format!("Acerca de Grafito v{}", version))
@@ -498,8 +540,15 @@ fn draw_help_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             ui.close_menu();
         }
         ui.separator();
-        // O2 i18n: selector ES/EN con persistencia (Piel pura: el selector
-        // solo setea el flag local; `set_locale` escribe fuera del closure).
+        // O2 i18n: selector segmentado con persistencia (Piel pura: el
+        // selector solo setea el flag local; `set_locale` escribe afuera).
+        ui.label(
+            egui::RichText::new("Idioma")
+                .color(current_theme(ui.ctx()).text_tertiary)
+                .size(TYPE_XS)
+                .strong(),
+        );
+        ui.add_space(2.0);
         let mut loc = app.config_locale();
         if grafito_ui::toolbar::locale_selector(ui, &mut loc).changed() {
             app.set_locale(loc);
@@ -546,7 +595,7 @@ pub(crate) fn draw_top_bar(
                     if show_compact_panel_menu {
                         draw_panels_menu(ui, app);
                     }
-                    ui.menu_button("Más", |ui| {
+                    menu_button(ui, "Más", |ui| {
                         draw_view_menu(ui, app);
                         draw_perspectives_menu(ui, app);
                         draw_tools_menu(ui, app);

@@ -1345,25 +1345,54 @@ pub fn toolbar_localized(
 /// en `AppConfig::locale` (grafito-app/src/utils.rs): tras el cambio, el caller
 /// guarda la config (ver `save_app_config`). Códigos de idioma, no texto
 /// traducible: no necesita claves del catálogo.
+///
+/// Diseño (Scandinavian): control segmentado de tres celdas iguales, radio
+/// `RADIUS_SM` y 2 px entre segmentos; el activo usa el acento. Antes eran
+/// `selectable_label` sueltos que en menú quedaban como píldoras irregulares.
 pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
-    let resp = ui
+    let mut changed = false;
+    let selection_fill = ui.visuals().selection.bg_fill;
+    let text_secondary = ui.visuals().text_color();
+    let mut resp = ui
         .horizontal(|ui| {
-            let _ = ui
-                .selectable_value(locale, Locale::Es, "ES")
-                .on_hover_text("Idioma · Language · Idioma: Español");
-            let _ = ui
-                .selectable_value(locale, Locale::En, "EN")
-                .on_hover_text("Idioma · Language · Idioma: English");
-            let _ = ui
-                .selectable_value(locale, Locale::Pt, "PT")
-                .on_hover_text(format!(
-                    "Idioma · Language · Idioma: {}",
-                    if crate::i18n::pt_is_partial() {
+            ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+            for (value, short, name) in [
+                (Locale::Es, "ES", "Español"),
+                (Locale::En, "EN", "English"),
+                (Locale::Pt, "PT", "Português"),
+            ] {
+                let selected = *locale == value;
+                let color = if selected {
+                    Color32::WHITE
+                } else {
+                    text_secondary
+                };
+                let button = egui::Button::new(
+                    egui::RichText::new(short)
+                        .size(crate::tokens::TYPE_XS)
+                        .strong()
+                        .color(color),
+                )
+                .rounding(crate::tokens::RADIUS_SM)
+                .min_size(egui::vec2(36.0, 24.0))
+                .fill(if selected {
+                    selection_fill
+                } else {
+                    ui.visuals().widgets.inactive.weak_bg_fill
+                });
+                let hover = if value == Locale::Pt && crate::i18n::pt_is_partial() {
+                    format!(
+                        "Idioma · Language · Idioma: {}",
                         crate::i18n::pt_partial_badge_text()
-                    } else {
-                        "Português".to_string()
-                    }
-                ));
+                    )
+                } else {
+                    format!("Idioma · Language · Idioma: {name}")
+                };
+                if ui.add(button).on_hover_text(hover).clicked() && !selected {
+                    *locale = value;
+                    changed = true;
+                }
+            }
         })
         .response;
     // P1b/R3.4: badge visible solo mientras el PT sea parcial. Al 100% no se
@@ -1374,6 +1403,9 @@ pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
                 .small()
                 .weak(),
         );
+    }
+    if changed {
+        resp.mark_changed();
     }
     resp
 }

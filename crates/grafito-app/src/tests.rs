@@ -4722,10 +4722,14 @@ fn document_lifecycle_file_shortcuts_share_the_file_command_policy() {
 #[test]
 fn document_lifecycle_ui_exposes_save_as_and_native_close_cancellation() {
     let ui = include_str!("ui.rs");
-    assert!(ui.contains("Nuevo (Ctrl+N)"));
-    assert!(ui.contains("Abrir... (Ctrl+O)"));
-    assert!(ui.contains("Guardar (Ctrl+S)"));
-    assert!(ui.contains("Guardar como... (Ctrl+Shift+S)"));
+    // Scandinavian F14: el atajo va alineado a la derecha (`shortcut_text`),
+    // no pegado al label; los ítems usan "…" tipográfico.
+    assert!(ui.contains(".shortcut_text(\"Ctrl+N\")"));
+    assert!(ui.contains(".shortcut_text(\"Ctrl+O\")"));
+    assert!(ui.contains(".shortcut_text(\"Ctrl+S\")"));
+    assert!(ui.contains(".shortcut_text(\"Ctrl+Shift+S\")"));
+    assert!(ui.contains("Abrir…"));
+    assert!(ui.contains("Guardar como…"));
 
     let app = include_str!("app.rs");
     assert!(app.contains("i.viewport().close_requested()"));
