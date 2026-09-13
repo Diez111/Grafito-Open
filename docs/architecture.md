@@ -1,4 +1,4 @@
-# docs/architecture.md — Grafito v1.2.35 (Paridad parcial GeoGebra: subset verificado, resto stub honesto 2026-08-26; sync BUILD 2026-09-04 + F5 2026-09-07)
+# docs/architecture.md — Grafito v1.1.0 (fuente de verdad: `Cargo.toml`/tag/dist; auditoría F14 2026-09-13; paridad GeoGebra: subset verificado, resto stub honesto)
 
 ## 1. Vision
 Grafito es pizarra geometrica con **Cerebro** (Rust puro) y **Piel** (egui/wgpu).
@@ -102,8 +102,8 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 
 - **Tokens** (grafito-ui/src/tokens.rs): TYPE_XS..XXL (11..28, ratio 1.25), SPACE_XS..XXL (4..32, base 4), RADIUS_SM..LG, ICON_SM..XL — unica fuente de verdad.
 - **Assistant panel** (`crates/grafito-ui/src/assistant.rs:99-105`): SidePanel 300..520 (default 400) o TopBottomPanel bottom-sheet cuando el viewport < 740px (`ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH = 440 + 300`, `:103-105`; `assistant_uses_bottom_sheet`, `:1778-1780`), composer con clamp 88..260, sin ScrollArea envolvente (fix overflow), wrapping, clip.
-- **App shell** (grafito-app/src/app.rs 8591L, assistant.rs 11609L, medido F4 con `wc -l`): eframe::App::update dispatch (god function, deuda P1), GrafitoApp ~96 campos (god object), `MAX_UNDO` 50 + `MAX_UNDO_BYTES` 50 MiB con `VecDeque<Document/ChangeSet>` (`pop_front` O(1), `Vec` previo era O(n) shift — corregido), `controllers.rs` reales `DocumentController/ViewController/AssistantController` con `VecDeque` + tests (F4; `GrafitoApp` aún no delega — wiring P2, dueño `app.rs`), `AssistantTurnState` enum real en `assistant.rs` (Idle→Composing→Thinking→AwaitingAuthorization→Animating, terminales Failed|Cancelled; sin `Verifying`; aún sin cablear a `AssistantRuntime` — P2), ViewMode/Perspective/CanvasMode redundancia (deuda P1), repaint intervals 150ms settle, 33ms multidimensional 30Hz, 16ms whiteboard 60Hz. Animación sin Python (`engines/python` eliminado del árbol): 13 plantillas nativas (11 protocolo + `subspace` + `fractal`, sync 13↔13↔13 en `protocol.rs::CANONICAL_TEMPLATES` ↔ `anim_native.rs::NATIVE_TEMPLATES` ↔ `anim_ui.rs::PLANTILLAS_COMBO`) + MP4 vía ffmpeg-sidecar (`anim_native.rs:481`, `FfmpegMissing` honesto sin `ffmpeg` en PATH). CAS experto opt-in: feature `cas-nativo` con `alkahest-cas 3` (`grafito-assistant/Cargo.toml:44`).
-- **Atajos verificados** (handlers en `grafito-app/src/app.rs:4088-4290`; menús en `ui.rs:141-227`; etiquetas toolbar en `grafito-ui/src/toolbar.rs:36-156`): Ctrl+N/O/S + Ctrl+Shift+S archivo (`lifecycle.rs:20-31`), Ctrl+Z/Y deshacer/rehacer (+Shift en Ctrl+Y = herramienta YIntercept, `app.rs:237-248`), Supr eliminar, Esc cancelar, F1-F6 herramientas 2D, F8 Esfera 3D + F9 Cubo 3D (`app.rs:4135-4144`), R/E/I/X/N/S/Y/V/M/G herramientas sin modificadores, Ctrl+A Analizar, Shift+L/K/J toggles log X/Y/ambos, G snap, Ctrl+K paleta, Ctrl+T tema (`app.rs:4259-4267`), Ctrl+P Lápiz + Ctrl+E Borrador (`app.rs:4268-4278`), Ctrl+Shift+1..9,0 perspectivas (10, `app.rs:4236-4242`). Cero fantasmas desde BUILD 2026-09-04 (antes: Ctrl+P, Ctrl+E, F8, F9 documentados sin handler).
+- **App shell** (grafito-app/src/app.rs 9001L, assistant.rs 14228L, panels.rs 9403L, anim_native.rs 15913L, ui/assistant.rs 17649L y command/commands.rs 23578L, medidos F14 2026-09-13 con `wc -l`): eframe::App::update dispatch (god function, deuda P1), GrafitoApp 136 campos (god object), `MAX_UNDO` 50 + `MAX_UNDO_BYTES` 50 MiB con `VecDeque<Document/ChangeSet>` (`pop_front` O(1), `Vec` previo era O(n) shift — corregido), `controllers.rs` reales `DocumentController/ViewController/AssistantController` con `VecDeque` + tests (F14: `GrafitoApp` ya delega por puente `from_parts`/`into_parts` en snapshot/undo/redo/replace/view/examen; wiring fino P2), `AssistantTurnState` en `assistant_jobs.rs` (derivado del runtime con `derive_from`; sin consumidor productivo — P2), ViewMode/Perspective/CanvasMode redundancia (deuda P1), repaint intervals 150ms settle, 33ms multidimensional 30Hz, 16ms whiteboard 60Hz. Animación sin Python (`engines/python` eliminado del árbol): 13 plantillas nativas (11 protocolo + `subspace` + `fractal`, sync 13↔13↔13 en `protocol.rs::CANONICAL_TEMPLATES` ↔ `anim_native.rs::NATIVE_TEMPLATES` ↔ `anim_ui.rs::PLANTILLAS_COMBO`) + MP4 vía ffmpeg-sidecar (`anim_native.rs:481`, `FfmpegMissing` honesto sin `ffmpeg` en PATH). CAS experto opt-in: feature `cas-nativo` con `alkahest-cas 3` (`grafito-assistant/Cargo.toml:44`).
+- **Atajos verificados** (handlers en `grafito-app/src/shortcuts.rs` — F14 los movió de `app.rs`; menús en `ui.rs:141-227`; etiquetas toolbar en `grafito-ui/src/toolbar.rs:36-156`): Ctrl+N/O/S + Ctrl+Shift+S archivo (`lifecycle.rs:20-31`), Ctrl+Z/Y deshacer/rehacer (+Shift en Ctrl+Y = herramienta YIntercept, `shortcuts.rs:25-34`), Supr eliminar, Esc cancelar (overlay-aware con `consume_key` + fallback único, F14), F1-F6 herramientas 2D (`shortcuts.rs:41-65`), F8 Esfera 3D + F9 Cubo 3D (`shortcuts.rs:69-74`), R/E/I/X/N/S/Y/V/M/G herramientas sin modificadores, Ctrl+A Analizar, Shift+L/K/J toggles log X/Y/ambos, G snap, Ctrl+K paleta, Ctrl+T tema (`shortcuts.rs:195`), Ctrl+P Lápiz + Ctrl+E Borrador (`shortcuts.rs:204,209`), Ctrl+Shift+1..9,0 perspectivas (10, `shortcuts.rs:169-183`). Cero fantasmas desde BUILD 2026-09-04.
 - **Responsive shell**: rail 60px (`RAIL_WIDTH`, `tokens.rs:164`; `ui.rs:549-552`) visible sólo en Medium/Wide (≥1360, `lib.rs:417-424,441-442`) — colapsado en Compact, luego también <780px; drawer derecho 292..440 con clamp (`clamp_drawer_right_width`, `tokens.rs:207-210`; dock 3D `ui.rs:727-731`; Inspector `panels.rs:2125-2132`); panel izquierdo min 180 + max 45% viewport (`PANEL_LEFT_MIN`, `PANEL_LEFT_MAX_FRACTION`, `tokens.rs:151-154`; `panels.rs:1201-1206`).
 - **Onboarding** (`app.rs:1763`, `:4922-5033`; `utils.rs:46-48`): gating `show_onboarding = !config.onboarding_completed`; Window 420px, 3 bullets (5/8/18 grupos en codigo; el copy visible aun dice 17 en `grafito-ui/src/i18n.rs:216` y `app.rs:6914` — sucios F1-F4, sync pendiente), botones [Probar ejemplo][Empezar vacío][No mostrar]; Probar ejemplo y No mostrar persisten `onboarding_completed=true`.
 - **Paleta de comandos** (`grafito-ui/src/command_palette.rs`): fuzzy subsecuencia sin tildes (`fuzzy_match`, `:224-251`), bilingüe es/en (`filtered_commands`, `:275-296`), footer en español con conteo "N de M · ↑↓ navegar · Enter abrir · Esc cerrar" (`:394-403`), 15 acciones UI en español con clave inglesa estable (`UI_ACTIONS`; test actualizado).
@@ -165,7 +165,7 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | UI | RAIL_WIDTH | 60 | tokens.rs + ui.rs |
 | UI | TOP_BAR_HEIGHT | 48 | tokens.rs |
 | UI | SPLASH_LOGO_SIZE | 128 | tokens.rs |
-| UI | ASSISTANT_PANEL width | 300..520 (default 400); bottom-sheet si viewport < 740 | assistant.rs:99-105 + `assistant_uses_bottom_sheet` :1778-1780 |
+| UI | ASSISTANT_PANEL width | 300..520 (default 400); bottom-sheet si viewport < 740 | assistant.rs:99-105 + `assistant_uses_bottom_sheet` :4408 |
 | UI | Tessellation egui (rayon) | 1-2 ms/frame, 10K verts (egui/rayon tessellation paralela) | Cargo.toml `egui = { features = ["rayon"] }` + app.rs:6 presupuestos |
 | GPU | domain_coloring_compute | 250k cells/dispatch (500×500, MAX_CELLS 250k) | grafito-render/domain_coloring_compute.rs:13 + lib.rs |
 | App | MAX_UNDO | 50 (VecDeque pop_front O(1)) | app.rs:33 + controllers.rs:19 |
@@ -193,7 +193,7 @@ MSRV 1.92 (`rust-version.workspace = "1.92"`) verificada en matriz `toolchain: [
 | 11 | `cross-platform-smoke` | `cargo test -p grafito-app --test app_smoke --locked` | matrix os: ubuntu/windows/macos, fail-fast false |
 | 12 | `supply-chain` | `cargo audit 0.22.2` + `cargo deny 0.20.2` + `verify_advisory_exceptions.py` | cache cargo-tools |
 | 13 | `workflow-lint` | `actionlint 1.7.7` + `shellcheck` + `bash -n` + `bash packaging/tests/packaging-fixtures.sh` + Debian version mapping (`1.2.20~beta < 1.2.20`) | valida packaging fixtures como gate |
-| 14 | `coverage` | `cargo llvm-cov --workspace --all-targets --all-features --locked` con gate `--fail-under-lines 75`, SIN fallback `cargo test` (F5: duplicaba el job `test`; GPU hace SKIP sin adapter, gate calibrado para esa ruta) | stable + llvm-tools-preview, artefacto lcov 14 días |
+| 14 | `coverage` | `cargo llvm-cov --workspace --all-targets --all-features --locked` con gate `--fail-under-lines 71` (F14: el doc decía 75; el real verificado en `ci.yml:418`), SIN fallback `cargo test` (F5: duplicaba el job `test`; GPU hace SKIP sin adapter, gate calibrado para esa ruta) | stable + llvm-tools-preview, artefacto lcov 14 días |
 | 15 | `bench-regression` | `cargo bench --workspace --benches --locked` (criterion, baseline `main` INFORMATIVO sin gate >10% hasta baseline estable; F5 agrega benches SSE-truncado + frames nativos integral/morph con numero base impreso) | stable, artefacto target/criterion 7 días |
 | 16 | `mutation` | `cargo mutants 24.11.1 --workspace --timeout 60 --in-place` (semanal a proposito: 60min + muta el arbol, no apto como gate de PR) | sólo `schedule` semanal / `workflow_dispatch`, 60 min |
 | 17 | `package-debian` | `desktop-file-validate` + `packaging/build-deb.sh` + `dpkg-deb --info/--ctrl-tarfile` ownership `root:root`, permisos, `lintian --fail-on error`, `dpkg --install` + `/usr/bin/grafito --help` + purge | ubuntu-22.04, Needs `dpkg-dev lintian desktop-file-utils` |
@@ -201,9 +201,9 @@ MSRV 1.92 (`rust-version.workspace = "1.92"`) verificada en matriz `toolchain: [
 Notas:
 - `gpu-compute` ahora **requerido** con `WGPU_BACKEND=vulkan` (antes `gl` headless SKIP); `GRAFITO_REQUIRE_GPU_TESTS=1` hace fail-closed si el adapter no esta disponible.
 - Packaging fixtures (`packaging/tests/packaging-fixtures.sh`) es gate en `workflow-lint`: verifica iconos `16..512` + scalable `hicolor/scalable/apps/grafito.svg`, `grafito-icon.svg`, abort si falta asset, y `desktop Icon=grafito`, mas plugins `usr/share/grafito/plugins` (`j-space`), `postrm` parse, MSRV 1.92 docs, MSVC static CRT, e icon asset existencia; `assets/mora.png/.svg` existen y se embeben via `include_bytes!` (verificado en `app.rs:4870` test `<32 KiB`).
-- Baseline 2026-08-20: 7/8 PASS (gpu_compute SKIP headless, release-build SKIP 45m). Desde 14-job split: gpu-compute ya no SKIP, package-debian y workflow-lint son blocking. BUILD 2026-09-04: 17 jobs (se suman `coverage` 75%, `bench-regression` >10%, `mutation` semanal). F5 2026-09-07: `coverage` sin fallback (el job `test` ya cubre), `bench-regression` degradado a informativo explicito (sin baseline estable no hay comparacion >10% real), `mutation` documentado semanal a proposito.
+- Baseline 2026-08-20: 7/8 PASS (gpu_compute SKIP headless, release-build SKIP 45m). Desde 14-job split: gpu-compute ya no SKIP, package-debian y workflow-lint son blocking. F14 2026-09-13: `ci.yml` real 608 líneas, gate coverage 71% (no 75), `release-build` corre también en PR, `mutation` limitado por `cargo-mutants.toml` a 5 crates (`core/geometry/command/render/app`).
 
-## 10. Novedades v1.2.35 — Paridad parcial GeoGebra: subset verificado, resto stub honesto (2026-08-26)
+## 10. Snapshot histórico v1.2.35-beta — Paridad parcial GeoGebra: subset verificado, resto stub honesto (2026-08-26; la versión vigente es 1.1.0)
 
 **Pedagogía multi-nivel (primaria→ingeniería)**
 - `grafito-pedagogy::Curriculum` 42 LOs: UTN AM1 8, AM2 7, Álgebra 6, Prob 6, Secundaria 10, Primaria 5 (level_min, requires DAG, tags, topological_order Kahn)
@@ -230,7 +230,7 @@ Notas:
 - BTreeMap determinismo total (cerebro-audit 2026-09-10): `objects`, `next_label_number`, `spreadsheet_coordinate_points`, `variables` (`VarMap`), `variable_meta` (`VarMetaMap`), `live_sequences`, `variables_assumptions` + params de constraints (`Constraint.params`, `Document` params fns) + `Exercise.params` son BTreeMap; ~210 firmas `&HashMap<String,f64>` migradas en core/geometry/command/render/complex/pedagogy/app (+ tests/benches/examples). Quedan `HashMap` solo fuera del dominio variables: índice solver `var_index`, mapas tipados `DD`/`Complex64`, intervalos simbólicos, escalares de planilla, cachés UI.
 - `Transformed` Jacobian det pendiente
 - `fill_compute` aún `None` (ahorra 128 MiB, habilitar lazy si `ImplicitCurve != Eq`)
-- App God Object `app.rs 8591L` + `assistant.rs 11609L` (medido F4): `controllers.rs` ya reales con tests pero `GrafitoApp` aún no delega (wiring P2); `AssistantTurnState` enum real sin cablear a `AssistantRuntime` (P2)
+- App God Object `app.rs 9001L` + `assistant.rs 14228L` (medido F14 2026-09-13): `controllers.rs` reales con tests y `GrafitoApp` delega por puente `from_parts`/`into_parts` (wiring fino P2); `AssistantTurnState` vive en `assistant_jobs.rs` y deriva del runtime, aún sin consumidor productivo (P2)
 
 ## 12. Próximos pasos
 
@@ -249,15 +249,15 @@ Notas:
 | 15 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs` |
 | 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
 | 87 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (contado F5: 87 variantes) |
-| 10 perspectivas (Ctrl+Shift+1..9,0) | `crates/grafito-app/src/lib.rs:90-111`, `app.rs:4236-4242` |
+| 10 perspectivas (Ctrl+Shift+1..9,0) | `crates/grafito-app/src/lib.rs:90-111`, `shortcuts.rs:169-183` |
 | 18 crates workspace | `crates/` (ls: +classroom R5, +ggb F9) |
-| 17 jobs CI | `.github/workflows/ci.yml:24-496` |
+| 17 jobs CI | `.github/workflows/ci.yml` (608 líneas; gate coverage 71%) |
 | Spark vía Responses API (`POST {base}/responses`) | `crates/grafito-assistant/src/lib.rs:50-56`, `:905-907`, `:938-951` |
 | Modelo default `deepseek-v4-flash` | `crates/grafito-app/src/utils.rs:59-61` |
 | Fallback sesión spark→deepseek | `crates/grafito-app/src/assistant.rs:2470-2485`, `:2595-2613` |
-| Ctrl+T tema | `crates/grafito-app/src/app.rs:4259-4267` + menú `ui.rs:209` |
-| Ctrl+P/E lápiz/borrador, F8/F9 esfera/cubo | `crates/grafito-app/src/app.rs:4135-4144`, `:4268-4278` |
-| Onboarding 420px, 3 bullets, 3 botones | `crates/grafito-app/src/app.rs:4922-5033`, gating `:1763`, `utils.rs:46-48` |
+| Ctrl+T tema | `crates/grafito-app/src/shortcuts.rs:195` + menú `ui.rs:261` |
+| Ctrl+P/E lápiz/borrador, F8/F9 esfera/cubo | `crates/grafito-app/src/shortcuts.rs:69-74,204,209` |
+| Onboarding 420px, 3 bullets, 3 botones | `crates/grafito-app/src/app.rs:7910`, gating `:2358`, `utils.rs:49` |
 | Rail 60px, drawer 292..440, panel izq 180+45% | `crates/grafito-ui/src/tokens.rs:151-164,207-210`; `app/src/ui.rs:549-552,727-731`; `app/src/panels.rs:1201-1206,2125-2132` |
 | 21 tools assistant (3 base + 8 pedag + 8 math + 2 harness1) / 9 en agent hoja | `crates/grafito-assistant/src/agent.rs:2250-2259` (pedag 8), `:2721-2766` (harness1 2 + base 3), math 8 por conteo `ToolSchema::new`; `crates/grafito-agent/src/tools.rs:3060-3081` (3+6=9) |
 | AnimDuration 0.1..=60s, Resolution 64..=4096 | `crates/grafito-anim/src/protocol.rs:263`, tests `:3321-3371` |
@@ -288,11 +288,11 @@ Sin tocar geometría exacta, A11Y ni perf; sin `unwrap` (gates §9).
 | Tabla viva lectura | `symbolic/exchange.rs` (`datatable_rows`/`cell`/`to_csv` sobre `DataTableObj`) | spreadsheet viva | S cerrado (edición P2) |
 | Volumen/área 3D | `symbolic/solids.rs` (esfera/cubo/cilindro/cono/toro/tetra/pirámide/prisma exactos; cuádrica → `None` + `solid_measure_status`) | Volume/Area 3D | S cerrado |
 | Vistas ortográficas | `symbolic/solids.rs` (`OrthoView` alzado/planta/perfil) + `render_3d.rs` (`OrthoProjection`, píxeles egui) | vistas 3D | S cerrado (cableado cámara P2) |
-| Groebner | `symbolic/mod.rs` (`groebner_gate`: 2×2 lineal exacto, >2×2 `Err` → Eliminate) | CAS Groebner | S cerrado; Buchberger = L (F10.W5) |
+| Groebner | `symbolic/mod.rs` (`groebner_gate`: 2×2 lineal exacto, >2×2 `Err` → Eliminate); Buchberger real acotado (`geometry/cas.rs:2149`) | CAS Groebner | S cerrado |
 | PDF | `app/src/export.rs` (`serialize_pdf_vectorial` vía `printpdf 0.12`: rectas/círculos/polígonos/texto Helvetica, 1 pág.; `document_to_pdf` queda referencia histórica) | export PDF | S cerrado (multipágina falla honesto) |
 | CSV RFC 4180 | `symbolic/csv.rs` (`to_csv` CRLF + `parse_csv` con `""`, cotas 20k filas/10M) | import/export CSV | S cerrado (wiring UI P2) |
 | Clipboard SVG/PNG | `app/src/export.rs` (SVG real punto/círculo/polígono/texto; PNG vía `clipboard_png_bytes` + `arboard` "Copiar PNG", headless honesto) | copiar SVG/PNG | S cerrado |
-| Gruntz / Risch / marching-tetra / Net / iroh / CRDT | `symbolic/exchange.rs` (`l_stub` siempre `Err` + diseño en mensaje) | CAS y P2P | L solo diseño + stub (F10.W5) |
+| Gruntz / Risch / marching-tetra / Net / iroh / CRDT | Reales y cableados: Risch-Norman (`geometry/integral.rs`), Gruntz (`geometry/cas.rs:599`; consumido por `Limit` desde F14), marching-tetra (`implicit_surface_compute.rs`), Net (`commands.rs:15598`), Buchberger (`cas.rs:2149`); stub honesto solo P2P/CRDT (`classroom/stubs.rs`) | CAS y P2P | S cerrado (wiring); P2P real = L fuera del cap |
 
 ### 14.1 Frente C3 — voz, guion corto, trazo, LaTeX, run_command (sync 2026-09-11)
 

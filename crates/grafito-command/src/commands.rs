@@ -13627,6 +13627,25 @@ fn execute_cas_command_typed(
                 Err(error) => return Some(Err(format!("Error en punto de Limit: {error}"))),
             };
 
+            // Gruntz primero (motor simbólico real, F14 lo cablea): L'Hôpital
+            // acotado + jerarquía exp/log/potencia + ln-rewrite resuelve formas
+            // 0/0, ∞/∞, 1^∞, 0·∞ y ∞−∞. Richardson queda de fallback numérico.
+            if let Ok(outcome) = grafito_geometry::cas::gruntz_limit(&expr, var, at) {
+                if outcome.value.is_finite()
+                    && outcome.method != grafito_geometry::cas::GruntzMethod::Richardson
+                {
+                    return Some(Ok(format!("lim({var}→{at}) {expr} = {:.8}", outcome.value)));
+                }
+                if outcome.value.is_infinite() {
+                    let sign = if outcome.value.is_sign_negative() {
+                        "-"
+                    } else {
+                        ""
+                    };
+                    return Some(Ok(format!("lim({var}→{at}) {expr} = {sign}∞")));
+                }
+            }
+
             match symbolic::limit_typed(&expr, var, at) {
                 grafito_geometry::outcome::MathResult::Exact(value) if value.is_finite() => {
                     Some(Ok(format!("lim({var}→{at}) {expr} = {value:.8}")))
@@ -23471,6 +23490,24 @@ mod coverage_sweep_handlers {
                 ),
                 CommandOutcome::Ok => {}
                 CommandOutcome::Error(m) => panic!("{input} debe responder, dio Error: {m}"),
+            }
+            assert_sano(&doc, input);
+        }
+    }
+    #[test]
+    fn limit_wires_the_gruntz_engine_for_indeterminate_forms() {
+        // F14: el motor Gruntz (L'Hôpital acotado + jerarquía) resuelve 0/0
+        // que antes solo pasaba por Richardson numérico.
+        for (input, pista) in [
+            ("Limit[(exp(x)-1-x)/x^2, x, 0]", "0.5"),
+            ("Limit[ln(x+1)/x, x, 0]", "1.0"),
+        ] {
+            let (doc, out) = run_fresh(input);
+            match out {
+                CommandOutcome::Message(m) => {
+                    assert!(m.contains(pista), "{input} debe dar {pista}, fue: {m}")
+                }
+                other => panic!("{input} debe responder, fue: {other:?}"),
             }
             assert_sano(&doc, input);
         }

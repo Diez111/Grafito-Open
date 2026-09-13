@@ -136,13 +136,13 @@
 - [ ] F14.3.3 Gates Ola 3 + commit (parcial)
 
 **Ola 4 — arquitectura + docs + supply**
-- [ ] F14.4.1 docs a la realidad (tamaños, shortcuts.rs, coverage 71, ci.yml 608, versión 1.1.0)
-- [ ] F14.4.2 `AssistantTurnState` cableado o eliminado + TODO controllers obsoleto
-- [ ] F14.4.3 lint `unsafe_code` + `multiple-versions` deny + puffin 0.20
-- [ ] F14.4.4 split `panels.rs` (spreadsheet) sin cambio de comportamiento
-- [ ] F14.4.5 Gates Ola 4 + commit
+- [x] F14.4.1 docs a la realidad: tamaños F14 (app 9001, assistant 14228, panels 9403, anim_native 15913, ui/assistant 17649, commands 23578), `shortcuts.rs` en §7/§13, coverage 71, ci.yml 608, versión 1.1.0 (header, SECURITY, CHANGELOG con nota de linaje), AGENTS.md, §14 Gruntz/Buchberger reales, ggb 1.1.0
+- [ ] F14.4.2 `AssistantTurnState` cableado o eliminado + TODO controllers obsoleto (documentado en §7/§11; código muerto sigue gateado)
+- [ ] F14.4.3 lint `unsafe_code` + `multiple-versions` deny + puffin 0.20 (diferido: requiere allows en 12 bloques unsafe y correr cargo-deny/puffin online)
+- [ ] F14.4.4 split `panels.rs` (spreadsheet) sin cambio de comportamiento (diferido: refactor grande post-instalación)
+- [ ] F14.4.5 Gates Ola 4 + commit (docs/supply parcial)
 
 **Ola 5 — cap GeoGebra**
-- [ ] F14.5.1 Gruntz→comando Limit + selector vistas ortográficas
-- [ ] F14.5.2 export `.ggb` + PDF multipágina
+- [x] F14.5.1 Gruntz cableado en el comando `Limit` (L'Hôpital + jerarquía; Richardson de fallback) + test `limit_wires_the_gruntz_engine_for_indeterminate_forms`
+- [ ] F14.5.2 export `.ggb` + PDF multipágina + selector ortho (diferido: features M, no bugs; wiring ortho existe en canvas con `allow(dead_code)`)
 - [ ] F14.5.3 Gates Ola 5 + commit

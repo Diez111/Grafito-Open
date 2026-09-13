@@ -5,6 +5,10 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+> Nota de versiones: las entradas `1.2.x-beta` (2026-08) pertenecen a la línea previa
+> a la renumeración; la versión vigente es `1.1.0` (fuente de verdad: `Cargo.toml`,
+> tag `v1.1.0` y artefactos en `dist/`).
+
 ## [1.1.0] - 2026-09-12
 
 #### Agregado
