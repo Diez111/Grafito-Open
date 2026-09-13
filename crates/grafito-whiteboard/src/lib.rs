@@ -49,7 +49,10 @@ impl WhiteboardElement {
                 let first = points.first().copied()?;
                 (first, first)
             }
-            Self::Rectangle { min, max, .. } => (*min, *max),
+            Self::Rectangle { min, max, .. } => (
+                (min.0.min(max.0), min.1.min(max.1)),
+                (min.0.max(max.0), min.1.max(max.1)),
+            ),
             Self::Ellipse { center, rx, ry } => (
                 (center.0 - rx, center.1 - ry),
                 (center.0 + rx, center.1 + ry),
@@ -76,8 +79,12 @@ impl WhiteboardElement {
                 .map(|point| ((point.0 - pos.0).powi(2) + (point.1 - pos.1).powi(2)).sqrt())
                 .fold(f64::INFINITY, f64::min),
             Self::Rectangle { min, max, .. } => {
-                let nearest_x = pos.0.clamp(min.0, max.0);
-                let nearest_y = pos.1.clamp(min.1, max.1);
+                // min/max pueden venir invertidos de un JSON deserializado:
+                // `clamp` paniquea si el rango está al revés.
+                let (lo_x, hi_x) = (min.0.min(max.0), min.0.max(max.0));
+                let (lo_y, hi_y) = (min.1.min(max.1), min.1.max(max.1));
+                let nearest_x = pos.0.clamp(lo_x, hi_x);
+                let nearest_y = pos.1.clamp(lo_y, hi_y);
                 ((nearest_x - pos.0).powi(2) + (nearest_y - pos.1).powi(2)).sqrt()
             }
             Self::Ellipse { center, rx, ry } => {
@@ -344,6 +351,21 @@ mod tests {
         let (min, max) = element.bounds().unwrap();
         assert_eq!(min, (-1.0, -2.0));
         assert_eq!(max, (5.0, 3.0));
+    }
+
+    #[test]
+    fn inverted_rectangle_bounds_do_not_panic() {
+        // Un JSON con min > max no debe romper bounds() ni el hit-test.
+        let element = WhiteboardElement::Rectangle {
+            min: (8.0, 9.0),
+            max: (5.0, 5.0),
+            fill: None,
+        };
+        let (min, max) = element.bounds().unwrap();
+        assert_eq!(min, (5.0, 5.0));
+        assert_eq!(max, (8.0, 9.0));
+        let distance = element.distance_to((6.5, 7.0));
+        assert!(distance.is_finite() && distance >= 0.0);
     }
 
     #[test]

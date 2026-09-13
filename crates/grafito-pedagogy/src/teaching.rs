@@ -339,8 +339,10 @@ fn prose_claims_uncovered_numbers(
             || check_expected.is_some_and(|e| norm(e).contains(number))
     }
     // Ocurrencias de keyword con borde de palabra (sin substring: `da` en
-    // `verificada` no cuenta). Los keywords son ASCII puros, así que los
-    // offsets del `lower` valen para el original.
+    // `verificada` no cuenta). Los keywords son ASCII puros, así que se
+    // comparan case-insensitive sobre el ORIGINAL: los offsets de
+    // `to_lowercase()` no valen cuando un char cambia de largo (p. ej.
+    // `İ` → `i̇`) y cortar ahí paniquea por frontera UTF-8.
     const KEYWORDS: &[&str] = &[
         "vale",
         "valen",
@@ -354,34 +356,32 @@ fn prose_claims_uncovered_numbers(
         "equivale",
         "equivalen",
     ];
-    let lower = explanation.to_lowercase();
     let mut claimed: Vec<&str> = Vec::new();
     let orig = explanation;
-    let low_bytes = lower.as_bytes();
     for key in KEYWORDS {
-        let mut from = 0usize;
-        while from + key.len() <= low_bytes.len() {
-            let Some(rel) = lower[from..].find(key) else {
-                break;
+        for (abs, _) in orig.char_indices() {
+            let Some(candidate) = orig.get(abs..abs + key.len()) else {
+                continue;
             };
-            let abs = from + rel;
+            if !candidate.eq_ignore_ascii_case(key) {
+                continue;
+            }
             let before_ok = abs == 0
-                || !lower[..abs]
+                || !orig[..abs]
                     .chars()
                     .next_back()
                     .is_some_and(|c| c.is_alphabetic());
             let after = abs + key.len();
-            let after_ok = lower[after..]
+            let after_ok = orig[after..]
                 .chars()
                 .next()
                 .is_none_or(|c| !c.is_alphabetic());
             if before_ok && after_ok {
-                let tail = &orig[after.min(orig.len())..];
+                let tail = &orig[after..];
                 if is_num_start(tail) {
                     claimed.push(take_number(tail));
                 }
             }
-            from = abs + key.len().max(1);
         }
     }
     // `=` / `≈` seguidos de número (fórmulas con rhs no numérico no cuentan).
@@ -955,6 +955,17 @@ mod tests {
             vec![TeachingStep::new("t", "T", "el cero está en x=-1.5").with_math("2*x+3")],
         );
         assert!(!s5.steps[0].verified);
+    }
+    #[test]
+    fn r6e_prosa_sobrevive_expansion_unicode_del_lowercase() {
+        // Dos `İ` (U+0130) expanden a `i̇` (+2 bytes) y corrían los offsets
+        // del lowercase hasta partir `ñ` por la mitad (panic UTF-8).
+        assert!(prose_claims_uncovered_numbers("İİ vale 7", Some("x"), None));
+        assert!(!prose_claims_uncovered_numbers(
+            "İİ vale ñ",
+            Some("x"),
+            None
+        ));
     }
     #[test]
     fn r6e_frame_range_fuera_de_ventana_da_none() {

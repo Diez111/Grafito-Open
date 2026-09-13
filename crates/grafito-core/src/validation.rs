@@ -384,7 +384,7 @@ pub fn validate_document(doc: &Document) -> Result<(), String> {
 
     let view = doc.view();
     validate_point2(view.offset, "Document.view.offset")?;
-    validate_finite(view.scale, "Document.view.scale")?;
+    validate_positive(view.scale, "Document.view.scale")?;
     validate_finite_f32(view.screen_size.x, "Document.view.screen_size.x")?;
     validate_finite_f32(view.screen_size.y, "Document.view.screen_size.y")?;
 

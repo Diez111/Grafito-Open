@@ -499,10 +499,19 @@ fn replace_standalone_var(expr: &str, var: &str, value: f64) -> String {
         if i + var_chars.len() <= expr_chars.len()
             && expr_chars[i..i + var_chars.len()] == var_chars[..]
         {
-            let prev_is_bound = i == 0 || !expr_chars[i - 1].is_ascii_alphabetic();
-            let next_is_bound = i + var_chars.len() >= expr_chars.len()
-                || !expr_chars[i + var_chars.len()].is_ascii_alphabetic();
+            let prev = i.checked_sub(1).map(|index| expr_chars[index]);
+            // Un dígito antes del nombre no lo bloquea: `2x` es producto
+            // implícito. Un char de identificador después sí bloquea: `x2`
+            // es otra variable, no `x` multiplicada por 2.
+            let prev_is_bound = prev.is_none_or(|c| !c.is_ascii_alphabetic() && c != '_');
+            let next = expr_chars.get(i + var_chars.len()).copied();
+            let next_is_bound = next.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
             if prev_is_bound && next_is_bound {
+                // `2x` con x=1 debe dar `2*1.0`, no `21.0`: sin el `*`
+                // explícito la sustitución fusiona el literal con el dígito.
+                if prev.is_some_and(|c| c.is_ascii_digit() || c == ')' || c == ']') {
+                    result.push('*');
+                }
                 result.push_str(&vs);
                 i += var_chars.len();
                 continue;
@@ -2478,6 +2487,16 @@ mod tests {
         assert!((eval_function("sum(n, n, -2, 2)", 0.0).unwrap() - 0.0).abs() < 0.01);
         // Sum with x: f(x) = sum(n*x, n, 1, 3) = x + 2x + 3x = 6x, at x=2 = 12
         assert!((eval_function("sum(n*x, n, 1, 3)", 2.0).unwrap() - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn implicit_product_substitution_keeps_operator_and_identifier_bounds() {
+        // `2x` con x=1..3 es 2+4+6, nunca `21.0`+`22.0`+`23.0` (=66).
+        assert!((eval_function("sum(2x, x, 1, 3)", 0.0).unwrap() - 12.0).abs() < 1e-9);
+        assert!((eval_function("product(2n, n, 1, 3)", 0.0).unwrap() - 48.0).abs() < 1e-9);
+        // `x2` es un identificador distinto: no se sustituye.
+        assert_eq!(replace_standalone_var("x2", "x", 1.0), "x2");
+        assert_eq!(replace_standalone_var("2x", "x", 2.0), "2*2.0");
     }
 
     #[test]

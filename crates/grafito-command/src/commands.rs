@@ -462,6 +462,17 @@ fn require_finite(value: Result<f64, String>) -> Result<f64, String> {
     }
 }
 
+/// Convierte a `i64` sólo si el redondeo entra en rango: el `as i64`
+/// saturante fusionaba `1e300` con `i64::MAX` y `end_i - start_i` desbordaba.
+fn require_i64_in_range(value: f64, field: &str) -> Result<i64, String> {
+    let rounded = value.round();
+    if rounded >= i64::MIN as f64 && rounded < i64::MAX as f64 {
+        Ok(rounded as i64)
+    } else {
+        Err(format!("{field} fuera del rango entero de 64 bits"))
+    }
+}
+
 macro_rules! command_result {
     ($result:expr) => {
         match $result {
@@ -9083,22 +9094,32 @@ fn handle_remaining_cas_commands(
                 );
             }
             if !xs.is_empty() && xs.len() == ys.len() {
-                if let Some((slope, intercept, r2)) = statistics::linear_regression(&xs, &ys) {
-                    command_result!(require_finite_outputs(
-                        "LinearRegression",
-                        &[slope, intercept, r2],
-                    ));
-                    let obj = GeoObject::RegressionLine(RegressionLineObj::linear(
-                        xs, ys, slope, intercept, r2,
-                    ));
-                    insert_command_object!(document, obj);
-                    input_text.clear();
-                    return CommandOutcome::Message(format!(
-                        "y = {:.4}x + {:.4}, R²={:.4}",
-                        slope, intercept, r2
-                    ));
+                match statistics::linear_regression(&xs, &ys) {
+                    Some((slope, intercept, r2)) => {
+                        command_result!(require_finite_outputs(
+                            "LinearRegression",
+                            &[slope, intercept, r2],
+                        ));
+                        let obj = GeoObject::RegressionLine(RegressionLineObj::linear(
+                            xs, ys, slope, intercept, r2,
+                        ));
+                        insert_command_object!(document, obj);
+                        input_text.clear();
+                        return CommandOutcome::Message(format!(
+                            "y = {:.4}x + {:.4}, R²={:.4}",
+                            slope, intercept, r2
+                        ));
+                    }
+                    None => {
+                        return CommandOutcome::Error(
+                            "LinearRegression: x debe variar para ajustar la recta".into(),
+                        );
+                    }
                 }
             }
+            return CommandOutcome::Error(
+                "LinearRegression: se requieren dos listas del mismo largo y no vacías".into(),
+            );
         }
         "Mean" if !cmd.args.is_empty() => {
             let data = command_result!(parse_data_command_arg(
@@ -17568,9 +17589,18 @@ fn run_sequence_command(args: &[String], document: &Document) -> CommandOutcome 
     if !start_is_int || !end_is_int {
         return CommandOutcome::Error("Sequence: start y end deben ser enteros".into());
     }
-    let start_i = start_val.round() as i64;
-    let end_i = end_val.round() as i64;
-    let len = (end_i - start_i).unsigned_abs() as usize + 1;
+    let start_i = match require_i64_in_range(start_val, "Sequence: start") {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(error),
+    };
+    let end_i = match require_i64_in_range(end_val, "Sequence: end") {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(error),
+    };
+    let Some(span) = end_i.checked_sub(start_i) else {
+        return CommandOutcome::Error("Sequence: rango fuera del rango i64".into());
+    };
+    let len = span.unsigned_abs() as usize + 1;
     if len > MAX_DISCRETE_COUNT as usize {
         return CommandOutcome::Error(format!(
             "Sequence: longitud {len} excede el máximo {MAX_DISCRETE_COUNT}"
@@ -17664,9 +17694,18 @@ fn run_sequence_live_command(args: &[String], document: &mut Document) -> Comman
     if !start_is_int || !end_is_int {
         return CommandOutcome::Error("SequenceLive: start y end deben ser enteros".into());
     }
-    let start_i = start_val.round() as i64;
-    let end_i = end_val.round() as i64;
-    let len = (end_i - start_i).unsigned_abs() as usize + 1;
+    let start_i = match require_i64_in_range(start_val, "SequenceLive: start") {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(error),
+    };
+    let end_i = match require_i64_in_range(end_val, "SequenceLive: end") {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(error),
+    };
+    let Some(span) = end_i.checked_sub(start_i) else {
+        return CommandOutcome::Error("SequenceLive: rango fuera del rango i64".into());
+    };
+    let len = span.unsigned_abs() as usize + 1;
     if len > grafito_core::document::MAX_LIVE_SEQUENCE_LENGTH {
         return CommandOutcome::Error(format!(
             "SequenceLive: longitud {len} excede máximo {}",

@@ -102,3 +102,47 @@
 - [x] F13.4 Pulir diseño Prob: `prob_param_row` (rótulo + DragValue + slider full-width), tiles `stat_tile` (resultado/momentos/p-valores), regla empírica 1σ/2σ/3σ en el plot Normal, tabla de cuantiles compacta
 - [x] F13.5 Gates: fmt 0, clippy -D warnings 0, `cargo test -p grafito-app --lib` 1041 verdes (+4 tests nuevos); release `target/release/grafito` 14:02. Flaky preexistente confirmado ajeno: `grafito-assistant::streaming_timeout_while_receiving_keeps_stage_and_kib` (falla igual en HEAD con stash; pasa aislado)
 - [ ] F13.6 Reinstalar `/usr/bin/grafito` con el release nuevo (requiere sudo; pedir al usuario)
+
+## F14 — Auditoría total implementada por olas 2026-09-13 — EN CURSO
+**Ola 0 — bugs fail-closed + flaky SSE + Esc**
+- [x] F14.0.1 `expr.rs::replace_standalone_var` frontera alnum+`_` (`2x` no se sustituye) + test `sum(2x,x,1,3)=12`
+- [x] F14.0.2 `validation.rs` `validate_positive(view.scale)` + guardas `clamp` (`render_2d.rs:2400`, `render/lib.rs:3295,4632`)
+- [x] F14.0.3 `teaching.rs:379` slice UTF-8 seguro (`get(after..)`) + test con `İ`
+- [x] F14.0.4 `commands.rs` Sequence/Live `checked_sub` + error honesto LinearRegression x=cte
+- [x] F14.0.5 `engine.rs` conservar remanente tras `\n` oversized + guard `command.first()` (validado por `config.validate()`)
+- [x] F14.0.6 `panels.rs` overflow real a panel mínimo (156→0 de chip), DragValue `.range()`, `summarize_range` Welford, `prob_tail_values` honesto
+- [x] F14.0.7 `whiteboard/src/lib.rs` clamp normalizado min/max
+- [x] F14.0.8 SSE deadline único + `ErrorKind::TimedOut` + `sse_timeout_message` pura (mata flaky)
+- [x] F14.0.9 Esc con `consume_key` en dispatcher de overlays + fallback al final del frame
+- [x] F14.0.10 Gates Ola 0 + commit
+
+**Ola 1 — perf P0**
+- [ ] F14.1.1 domain coloring: textura cacheada por (expr,bounds,res), sin `parse()` por frame
+- [ ] F14.1.2 vector field: AST cacheado + streamlines keyed
+- [ ] F14.1.3 function samples sin doble Vec por frame
+- [ ] F14.1.4 pizarra: epoch en `WhiteboardDoc` + swap sin clones
+- [ ] F14.1.5 3D: `Cache3DKey` sin cámara + `Arc<TriangleMesh3D>`
+- [ ] F14.1.6 Gates Ola 1 + commit
+
+**Ola 2 — I/O fuera de UI + fallos honestos**
+- [ ] F14.2.1 plugins/config/profile/keyring a workers
+- [ ] F14.2.2 `Disconnected` ≠ silencio en los 4 polls
+- [ ] F14.2.3 hover throttle temporal + poison `GpuSceneReadiness`
+- [ ] F14.2.4 Gates Ola 2 + commit
+
+**Ola 3 — tests**
+- [ ] F14.3.1 determinismo: mtime inyectado, rate-limit serializado, sin sleeps en bordes
+- [ ] F14.3.2 gaps: 10MB, 2000 chars, LRU 128, diagnostics 64, snap grid, preflight
+- [ ] F14.3.3 Gates Ola 3 + commit
+
+**Ola 4 — arquitectura + docs + supply**
+- [ ] F14.4.1 docs a la realidad (tamaños, shortcuts.rs, coverage 71, ci.yml 608, versión 1.1.0)
+- [ ] F14.4.2 `AssistantTurnState` cableado o eliminado + TODO controllers obsoleto
+- [ ] F14.4.3 lint `unsafe_code` + `multiple-versions` deny + puffin 0.20
+- [ ] F14.4.4 split `panels.rs` (spreadsheet) sin cambio de comportamiento
+- [ ] F14.4.5 Gates Ola 4 + commit
+
+**Ola 5 — cap GeoGebra**
+- [ ] F14.5.1 Gruntz→comando Limit + selector vistas ortográficas
+- [ ] F14.5.2 export `.ggb` + PDF multipágina
+- [ ] F14.5.3 Gates Ola 5 + commit

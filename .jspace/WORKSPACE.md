@@ -1,7 +1,7 @@
 # J-Space Workspace Ledger
 
 ## Goal
-Rediseño escandinavo Datos/Prob F13 cerrado — nav A1 en 2 filas sin desborde (métricas puras testeadas), Datos con resumen de rango real y microcopy a hover, Prob con p-valores/cuantiles rápidos/tiles/bandas σ — gates verdes y release 14:02 listo para instalar
+F14 Auditoría total implementada por olas — bugs fail-closed cerrados (expr `2x`, view.scale, UTF-8, overflow Sequence, wire anim, overflow panels), perf P0 cacheada (domain coloring, vector field, pizarra, 3D), I/O fuera de la UI, suite determinista, docs/supply alineados y cap GeoGebra (Gruntz, ortho, .ggb, PDF) — gates verdes por ola
 
 ## Core
 
@@ -14,9 +14,10 @@ Rediseño escandinavo Datos/Prob F13 cerrado — nav A1 en 2 filas sin desborde 
 - ✓06 RUNTIME 2026-09-05 toolchain + gates en-box: cargo/rustc 1.92.0 MSRV exacta, bun 1.4.2, uv 0.12.10 (todo user-local, sin sudo); MCP 6/6 connected (bunx+uvx paths absolutos, `time` dado de baja sin paquete, `fetch` por uvx); plugin opencode-mem instalado + E2E `opencode run` HARNESS-OK; FileController (save/open/export/import-csv/latex a workers + SaveAttempt::Pending + pending_chained_action), ledger cerrado (record_tool_outcome/is_complete/fingerprint/save-load + reintentos/backoff + max_total_chars + verified real), codemod tokens 130 sitios, clippy fix commands.rs — verified by: fmt CHECK 0 + check --workspace OK + clippy -D warnings OK (app/ui/assistant/agent/command) + tests agent 47 + app 407 + ui 156 + command 77 + assistant 81 (0 failed)
 - ✓07 CONTROL+MEMORIA 2026-09-08: plugin global computer-control (6 tools E2E vía agente: screenshot/record/app/input/notify) + skill versionada + opencode-mem global + MCP memory global + servicio ydotoold usuario; memoria store→recall cross-sesión OK ("Grafito-Open"); terminal nativa E2E (launch→type→shot→kill) con evidencia en /tmp/opencode/proof/ — verified by: 3× opencode run (MEMORIZADO, recall, screenshot/record) + captura visual leída
 - ✓08 F13 Datos/Prob 2026-09-13: nav hoja `sheet_nav_metrics` 2 filas (captura E2E datos-fix-full.png: chip A1:D8 + ◀▶▲▼ + Ir/A1 sin desborde), `summarize_range` + card Resumen, `prob_param_row`/`stat_tile`/p-valores/cuantiles α/copiar/bandas σ, microcopy a hover — verified by: cargo fmt --check OK, clippy --workspace --all-targets -D warnings OK, cargo test -p grafito-app --lib 1041/1041 (+4 tests nuevos), release target/release/grafito 14:02; flaky ajeno confirmado `streaming_timeout_while_receiving_keeps_stage_and_kib` (HEAD también falla con stash)
+- ✓09 F14 Ola 0 bugs 2026-09-13: `2x`→`2*1.0` (frontera alnum+`_`, test 12), `view.scale` positivo (fail-closed + clamp ordenado ×3 sitios), UTF-8 `İ` sin panic (keywords sobre original), Sequence/Live `checked_sub` + rango i64, LinearRegression x=cte error honesto, reader anim conserva remanente del chunk (2 mensajes/read + oversized), panels Welford/`stat_tile_cols`/DragValue range/prob tails `None`, whiteboard clamp normalizado, SSE deadline pre-send + `read_error_is_timeout` (flaky → test `Read` falso determinista) y Esc `consume_key` con fallback único — verified by: fmt --check 0, clippy --workspace --all-targets -D warnings 0, test --workspace OK (app lib 1042, anim 164, core/geometry/pedagogy/command/assistant/whiteboard verdes)
 
 ## Open
 
 ## Next
-Dispersar 10 agentes paralelos por dominio (panic, concurrencia, memoria, geometría, persistencia, UI, supply, tests, perf, docs) con gates cruzados
-Partir God Objects sin romper APIs (commands.rs 18K por dominio, assistant/lib.rs en solve_local/remote_*, DocumentController real en app); paleta semántica de datos P2 + focus-visible/System theme; `ask_user` real vía eventos; BTreeMap total e i18n en P2
+F14: Ola 0 bugs (expr/validation/teaching/commands/engine/panels/SSE/Esc) → Ola 1 perf P0 (render_2d, whiteboard, 3D) → Ola 2 I/O UI + fallos honestos → Ola 3 tests deterministas → Ola 4 docs/supply/splits → Ola 5 cap GeoGebra (Gruntz→Limit, selector ortho, export .ggb, PDF multipágina)
+Partir God Objects sin romper APIs (commands.rs 23.5K por dominio, assistant/lib.rs en solve_local/remote_*, panels.rs → spreadsheet/prob/stats/export); paleta semántica de datos P2 + focus-visible/System theme; `ask_user` real vía eventos; i18n resto en P2

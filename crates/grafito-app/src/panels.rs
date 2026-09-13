@@ -6903,18 +6903,15 @@ fn prob_quantile_command(state: &ProbabilityPanelState) -> Option<String> {
 
 /// Colas honestas del caso: `(P(X ≤ x), P(X > x), 2·cola menor)`. Clampa a
 /// `[0, 1]` porque `1 − cdf` puede subfluir fuera de rango en colas extremas;
-/// nunca se muestra una probabilidad negativa o mayor que uno.
-fn prob_tail_values(cdf: f64) -> (f64, f64, f64) {
-    // NaN (no debería llegar: los wrappers devuelven `Err`) se trata como
-    // cola izquierda vacía, nunca como una probabilidad inventada.
-    let cdf = if cdf.is_nan() {
-        0.0
-    } else {
-        cdf.clamp(0.0, 1.0)
-    };
+/// `None` si el CDF no es finito: jamás se inventa una probabilidad.
+fn prob_tail_values(cdf: f64) -> Option<(f64, f64, f64)> {
+    if !cdf.is_finite() {
+        return None;
+    }
+    let cdf = cdf.clamp(0.0, 1.0);
     let right = (1.0 - cdf).clamp(0.0, 1.0);
     let two = (2.0 * cdf.min(right)).clamp(0.0, 1.0);
-    (cdf, right, two)
+    Some((cdf, right, two))
 }
 
 /// Cuantiles rápidos del panel (α clásicos de tabla). Todos dentro de
@@ -6945,6 +6942,7 @@ fn prob_param_row(
             ui.add_sized(
                 [64.0, 22.0],
                 egui::DragValue::new(value)
+                    .range(range.clone())
                     .speed(speed)
                     .fixed_decimals(decimals)
                     .update_while_editing(true),
@@ -7200,8 +7198,17 @@ pub(crate) fn draw_probability_section(
             } else {
                 "Densidad"
             };
-            // P-valores honestos: colas clampeadas a [0, 1], nunca negativas.
-            let (tail_left, tail_right, two_tails) = prob_tail_values(cdf);
+            // P-valores honestos: colas clampeadas a [0, 1]; `—` si el CDF
+            // no es finito, en vez de inventar una probabilidad.
+            let tails = prob_tail_values(cdf);
+            let tail_text = |pick: fn((f64, f64, f64)) -> f64| {
+                tails
+                    .map(pick)
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "—".to_string())
+            };
+            let (tail_left, tail_right, two_tails) =
+                (tail_text(|t| t.0), tail_text(|t| t.1), tail_text(|t| t.2));
             // Fila del caso: nombre del cálculo a la izquierda, valor y
             // copiar a la derecha; el detalle largo vive en el tooltip.
             ui.horizontal(|ui| {
@@ -7218,7 +7225,7 @@ pub(crate) fn draw_probability_section(
                         .clicked()
                     {
                         ctx.copy_text(format!(
-                            "{detail} · {point_label} = {pdf:.6} · Acumulada = {cdf:.6} · P(X>x) = {tail_right:.6}"
+                            "{detail} · {point_label} = {pdf:.6} · Acumulada = {cdf:.6} · P(X>x) = {tail_right}"
                         ));
                         app.cas_result = "Caso copiado al portapapeles".to_string();
                     }
@@ -7244,9 +7251,9 @@ pub(crate) fn draw_probability_section(
             stat_tile_row(
                 ui,
                 &[
-                    ("P(X ≤ x)".to_string(), format!("{tail_left:.6}")),
-                    ("P(X > x)".to_string(), format!("{tail_right:.6}")),
-                    ("2·cola menor".to_string(), format!("{two_tails:.6}")),
+                    ("P(X ≤ x)".to_string(), tail_left),
+                    ("P(X > x)".to_string(), tail_right),
+                    ("2·cola menor".to_string(), two_tails),
                 ],
                 txt_col,
             );
@@ -7564,8 +7571,9 @@ fn sheet_col_label(col: usize) -> String {
 
 /// Métricas puras de la navegación de la hoja (F13.1): reparte el ancho
 /// disponible entre el chip de rango, las cuatro flechas (fila 1) y
-/// «Ir a» + Ir + A1 (fila 2). La suma de cada fila nunca desborda el panel:
-/// el chip cede primero (44..64), luego las flechas bajan a `HIT_TARGET_MIN`.
+/// «Ir a» + Ir + A1 (fila 2). La suma de cada fila nunca desborda el panel
+/// real (contrato ≥ 112 px): el chip cede primero (0..64), luego las flechas
+/// bajan a `HIT_TARGET_MIN`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SheetNavMetrics {
     chip_w: f32,
@@ -7575,8 +7583,10 @@ struct SheetNavMetrics {
 }
 
 fn sheet_nav_metrics(available: f32) -> SheetNavMetrics {
-    let available = available.max(156.0);
-    let chip_w = (available - 4.0 * HIT_TARGET_MIN - 4.0 * SPACE_XS).clamp(44.0, 64.0);
+    // Nunca se inventa ancho: si el panel es más angosto que 156 px el chip
+    // cede por debajo de 44 (hasta 0) en vez de desbordar el marco.
+    let available = available.max(HIT_TARGET_MIN);
+    let chip_w = (available - 4.0 * HIT_TARGET_MIN - 4.0 * SPACE_XS).clamp(0.0, 64.0);
     let arrow_w = ((available - chip_w - 4.0 * SPACE_XS) / 4.0).max(HIT_TARGET_MIN);
     let action_w =
         ((available - 2.0 * SPACE_XS - HIT_TARGET_MIN) / 3.0).clamp(HIT_TARGET_MIN, 56.0);
@@ -8220,17 +8230,24 @@ fn stat_tile(ui: &mut egui::Ui, width: f32, label: &str, value: &str, accent: eg
 /// Fila de tiles a ancho completo (≤3 por fila, el resto envuelve). Cero
 /// píxeles fijos: el ancho sale del disponible real, nunca desborda.
 fn stat_tile_row(ui: &mut egui::Ui, items: &[(String, String)], accent: egui::Color32) {
-    let cols = 3usize;
+    let cols = stat_tile_cols(ui.available_width());
     for chunk in items.chunks(cols) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_SM;
             let count = chunk.len() as f32;
-            let width = ((ui.available_width() - (count - 1.0) * SPACE_SM) / count).max(64.0);
+            let width = ((ui.available_width() - (count - 1.0) * SPACE_SM) / count).max(0.0);
             for (label, value) in chunk {
                 stat_tile(ui, width, label, value, accent);
             }
         });
     }
+}
+
+/// Columnas de [`stat_tile_row`]: 3 si hay ancho para tres tiles de 64 px,
+/// 2 o 1 si el panel se angosta. Nunca devuelve 0.
+fn stat_tile_cols(available: f32) -> usize {
+    const TILE_MIN_W: f32 = 64.0;
+    (((available + SPACE_SM) / (TILE_MIN_W + SPACE_SM)).floor() as usize).clamp(1, 3)
 }
 
 /// Cota del resumen de rango: más allá el panel lo rechaza con error
@@ -8258,27 +8275,32 @@ fn summarize_range(document: &Document, range: &str) -> Result<RangeSummary, Str
             cells.len()
         ));
     }
-    let values: Vec<f64> = cells
+    let mut count = 0usize;
+    let mut mean = 0.0f64;
+    let mut m2 = 0.0f64;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    // Welford en una pasada: la suma naive desbordaba a `inf` con valores
+    // grandes finitos (A1=A2=1e308) y mostraba media/desvío `inf`/`NaN`.
+    for value in cells
         .iter()
         .filter_map(|(row, col)| document.eval_spreadsheet_cell(*row, *col))
         .filter(|value| value.is_finite())
-        .collect();
-    if values.is_empty() {
+    {
+        count += 1;
+        let delta = value - mean;
+        mean += delta / count as f64;
+        m2 += delta * (value - mean);
+        min = min.min(value);
+        max = max.max(value);
+    }
+    if count == 0 {
         return Err("Resumen: el rango no tiene valores numéricos".to_string());
     }
-    let count = values.len();
-    let sum: f64 = values.iter().sum();
-    let mean = sum / count as f64;
-    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let sample_sd = (count > 1).then(|| {
-        let variance = values
-            .iter()
-            .map(|value| (value - mean).powi(2))
-            .sum::<f64>()
-            / (count - 1) as f64;
-        variance.sqrt()
-    });
+    if !mean.is_finite() || !m2.is_finite() {
+        return Err("Resumen: los valores desbordan la precisión de media/varianza".to_string());
+    }
+    let sample_sd = (count > 1).then(|| (m2 / (count - 1) as f64).sqrt());
     Ok(RangeSummary {
         count,
         mean,
@@ -8706,11 +8728,12 @@ mod gc_piel_tests {
         geometric_cdf, geometric_pmf, geometric_quantile_honest, normal_cdf, normal_pdf,
         normal_quantile_honest, parse_series_scalar, parse_slider_prompt, plot_df_or_fuera_de_cota,
         poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_cell_width_for, sheet_col_label,
-        sheet_nav_metrics, student_t_cdf, student_t_pdf, student_t_quantile_honest, uniform_cdf,
-        uniform_pdf, uniform_quantile_honest, visible_sheet_cols, wc_exact_integral_command_text,
-        wc_riemann_command_text, wc_study_command_text, wc_taylor_command_text,
-        wc_taylor_remainder_line, MAX_BINOMIAL_N, MAX_GEOMETRIC_K, MAX_PANEL_DF, PANEL_BUTTON_H,
-        PANEL_NARROW_WIDTH, SHEET_CELL_H, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
+        sheet_nav_metrics, stat_tile_cols, student_t_cdf, student_t_pdf, student_t_quantile_honest,
+        uniform_cdf, uniform_pdf, uniform_quantile_honest, visible_sheet_cols,
+        wc_exact_integral_command_text, wc_riemann_command_text, wc_study_command_text,
+        wc_taylor_command_text, wc_taylor_remainder_line, MAX_BINOMIAL_N, MAX_GEOMETRIC_K,
+        MAX_PANEL_DF, PANEL_BUTTON_H, PANEL_NARROW_WIDTH, SHEET_CELL_H, SHEET_VIEW_COLS,
+        SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
     use grafito_ui::tokens::{HIT_TARGET_MIN, SPACE_XS};
@@ -8749,9 +8772,11 @@ mod gc_piel_tests {
 
     #[test]
     fn sheet_nav_metrics_no_desbordan() {
-        // F13.1: las dos filas de navegación entran sin desbordar de 160 a
-        // 520 px (panel mínimo real 180, drawer compacto medido 252).
-        for width in [160.0_f32, 180.0, 220.0, 252.0, 300.0, 360.0, 520.0] {
+        // F13.1: las dos filas de navegación entran sin desbordar de 112 a
+        // 520 px (el panel mínimo real da ~132 px de contenido).
+        for width in [
+            112.0_f32, 132.0, 160.0, 180.0, 220.0, 252.0, 300.0, 360.0, 520.0,
+        ] {
             let m = sheet_nav_metrics(width);
             let row1 = m.chip_w + 4.0 * m.arrow_w + 4.0 * SPACE_XS;
             let row2 = m.field_w + 2.0 * m.action_w + 2.0 * SPACE_XS;
@@ -8767,7 +8792,17 @@ mod gc_piel_tests {
         }
         // En un panel angosto el chip cede antes que el hit target.
         assert!(sheet_nav_metrics(164.0).chip_w < sheet_nav_metrics(360.0).chip_w);
+        assert!(sheet_nav_metrics(132.0).chip_w < 44.0);
         assert_eq!(sheet_nav_metrics(10_000.0).chip_w, 64.0);
+    }
+
+    #[test]
+    fn stat_tile_cols_nunca_desborda() {
+        assert_eq!(stat_tile_cols(10_000.0), 3);
+        assert_eq!(stat_tile_cols(300.0), 3);
+        assert_eq!(stat_tile_cols(200.0), 2);
+        assert_eq!(stat_tile_cols(132.0), 1);
+        assert_eq!(stat_tile_cols(1.0), 1);
     }
 
     #[test]
@@ -9303,15 +9338,17 @@ mod coverage_sweep_panels_pure {
 
     #[test]
     fn prob_tail_values_honestos() {
-        assert_eq!(prob_tail_values(0.5), (0.5, 0.5, 1.0));
-        let (left, right, two) = prob_tail_values(0.975);
+        assert_eq!(prob_tail_values(0.5), Some((0.5, 0.5, 1.0)));
+        let (left, right, two) = prob_tail_values(0.975).expect("cdf finito");
         assert!((left - 0.975).abs() < 1e-12);
         assert!((right - 0.025).abs() < 1e-12);
         assert!((two - 0.05).abs() < 1e-12);
         // Clamp: colas subfluidas no producen negativos ni probabilidades > 1.
-        assert_eq!(prob_tail_values(1.2), (1.0, 0.0, 0.0));
-        assert_eq!(prob_tail_values(-0.1), (0.0, 1.0, 0.0));
-        assert_eq!(prob_tail_values(f64::NAN), (0.0, 1.0, 0.0));
+        assert_eq!(prob_tail_values(1.2), Some((1.0, 0.0, 0.0)));
+        assert_eq!(prob_tail_values(-0.1), Some((0.0, 1.0, 0.0)));
+        // No finito → `None` honesto, jamás una probabilidad inventada.
+        assert_eq!(prob_tail_values(f64::NAN), None);
+        assert_eq!(prob_tail_values(f64::INFINITY), None);
     }
 
     #[test]
@@ -9348,6 +9385,16 @@ mod coverage_sweep_panels_pure {
         assert!(summarize_range(&document, "A1:B2").is_err());
         assert!(summarize_range(&document, "C1:C4").is_err());
         assert!(summarize_range(&document, "A1:A401").is_err());
+        // Valores enormes finitos: Welford no desborda a `inf` (la suma naive sí).
+        document
+            .set_spreadsheet_cell(0, 1, "1e308".to_string())
+            .expect("celda válida");
+        document
+            .set_spreadsheet_cell(1, 1, "1e308".to_string())
+            .expect("celda válida");
+        let huge = summarize_range(&document, "B1:B2").expect("finitos válidos");
+        assert!(huge.mean.is_finite(), "media = {}", huge.mean);
+        assert!(huge.sample_sd.is_some_and(f64::is_finite));
         // La cota del panel cubre todo rango 1D válido de la hoja (≤400) y
         // no excede el presupuesto de recomputación del core.
         assert!(MAX_SUMMARY_CELLS >= Document::MAX_SPREADSHEET_ROWS);

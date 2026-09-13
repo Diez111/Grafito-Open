@@ -3292,8 +3292,8 @@ impl Renderer {
         let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
         let world_br = view.screen_to_world(view.screen_size);
 
-        let x_axis_y = 0.0f64.clamp(world_br.y, world_tl.y);
-        let y_axis_x = 0.0f64.clamp(world_tl.x, world_br.x);
+        let x_axis_y = 0.0f64.clamp(world_br.y.min(world_tl.y), world_tl.y.max(world_br.y));
+        let y_axis_x = 0.0f64.clamp(world_tl.x.min(world_br.x), world_br.x.max(world_tl.x));
 
         let axis_color = if dark_mode {
             Color::new(0.7, 0.7, 0.7, 1.0)
@@ -4629,8 +4629,8 @@ impl Renderer {
         let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
         let world_br = view.screen_to_world(view.screen_size);
 
-        let x_axis_y = 0.0f64.clamp(world_br.y, world_tl.y);
-        let y_axis_x = 0.0f64.clamp(world_tl.x, world_br.x);
+        let x_axis_y = 0.0f64.clamp(world_br.y.min(world_tl.y), world_tl.y.max(world_br.y));
+        let y_axis_x = 0.0f64.clamp(world_tl.x.min(world_br.x), world_br.x.max(world_tl.x));
 
         let axis_color = if dark_mode {
             Color::new(0.7, 0.7, 0.7, 1.0)

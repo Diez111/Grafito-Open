@@ -2397,8 +2397,10 @@ impl GrafitoApp {
         let world_br =
             view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
 
-        let x_axis_y = 0.0f64.clamp(world_br.y, world_tl.y);
-        let y_axis_x = 0.0f64.clamp(world_tl.x, world_br.x);
+        // `clamp` paniquea si min > max: ordenamos por si un documento viejo
+        // llegó con scale no positiva y los bordes quedaron invertidos.
+        let x_axis_y = 0.0f64.clamp(world_br.y.min(world_tl.y), world_tl.y.max(world_br.y));
+        let y_axis_x = 0.0f64.clamp(world_tl.x.min(world_br.x), world_br.x.max(world_tl.x));
 
         let stroke = Stroke::new(1.0, current_theme(painter.ctx()).grid_axis);
 

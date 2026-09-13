@@ -617,6 +617,26 @@ fn deleting_a_target_cascades_through_all_object_references() {
 }
 
 #[test]
+fn non_positive_view_scale_is_rejected_by_validation() {
+    let mut doc = Document::new();
+    doc.view_mut().scale = 0.0;
+    let error = grafito_core::validation::validate_document(&doc)
+        .expect_err("zero view.scale must be rejected");
+    assert!(
+        error.contains("Document.view.scale must be positive"),
+        "{error}"
+    );
+
+    doc.view_mut().scale = -3.0;
+    let error = grafito_core::validation::validate_document(&doc)
+        .expect_err("negative view.scale must be rejected");
+    assert!(
+        error.contains("Document.view.scale must be positive"),
+        "{error}"
+    );
+}
+
+#[test]
 fn duplicate_explicit_labels_are_not_inserted_by_the_legacy_wrapper() {
     let mut doc = Document::new();
     let first = doc.add_object(GeoObject::Point(
