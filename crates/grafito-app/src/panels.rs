@@ -138,22 +138,6 @@ fn sheet_cell_width_for(available_width: f32, cols: usize) -> f32 {
     ((available_width - 32.0 - cols * SPACE_XS) / cols).clamp(36.0, 96.0)
 }
 
-/// Botón pill centrado de ancho completo para la sección Exportación
-/// (mismo estilo que el histórico "Exportar SVG").
-fn export_pill_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let theme = current_theme(ui.ctx());
-    let btn = egui::Button::new(
-        egui::RichText::new(label)
-            .size(TYPE_SM)
-            .strong()
-            .color(theme.keyboard_enter_text),
-    )
-    .fill(theme.keyboard_enter_bg)
-    .stroke(egui::Stroke::NONE)
-    .rounding(RADIUS_PILL);
-    ui.add_sized([ui.available_width(), ZOOM_ICON_HIT], btn)
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LocalXYTable {
     pub x_name: String,
@@ -1980,33 +1964,139 @@ pub(crate) fn draw_export_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     draw_inspector_section(
         ui,
         "Exportación",
-        "Generá un archivo del lienzo actual o copialo al portapapeles.",
+        "Exportá a archivo (SVG/PNG/TikZ/PDF) o copiá al portapapeles.",
         |ui| {
-            for format in [
-                crate::export::ExportFormat::Svg,
-                crate::export::ExportFormat::Png,
-                crate::export::ExportFormat::Tikz,
-            ] {
-                if export_pill_button(ui, &format!("Exportar {}", format.display_name())).clicked()
-                {
-                    app.export_with_dialog(format, Some(ui.ctx()));
-                }
-            }
-            if export_pill_button(ui, "Exportar PDF").on_hover_text(
-                "Vectorial de 1 página por ahora: vista + hoja actual (rectas, círculos, polígonos y texto Helvetica). Si el libro tiene varias hojas con contenido, avisa sin escribir.",
-            ).clicked()
-            {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PDF", &["pdf"])
-                    .set_file_name("grafito_export.pdf")
-                    .save_file()
-                {
-                    app.pending_export_job = Some(crate::app::PendingExportJob {
-                        receiver: spawn_pdf_export(app.document.clone(), path, ui.ctx()),
-                    });
-                    app.notify("Exportando PDF…", grafito_ui::toast::ToastKind::Info);
-                }
-            }
+            // Cuadrícula 3×3 escandinava: botones iguales, todo a la misma
+            // altura y sin textos que envuelvan; el detalle va en tooltip.
+            let cell_w = ((ui.available_width() - 2.0 * SPACE_SM) / 3.0).max(64.0);
+            let action = |ui: &mut egui::Ui, label: &str, tip: &str| {
+                ui.add_sized(
+                    [cell_w, PANEL_BUTTON_H],
+                    egui::Button::new(egui::RichText::new(label).size(TYPE_SM)).rounding(RADIUS_SM),
+                )
+                .on_hover_text(tip)
+                .clicked()
+            };
+            egui::Grid::new("gc_export_grid")
+                .num_columns(3)
+                .spacing([SPACE_SM, SPACE_SM])
+                .show(ui, |ui| {
+                    // Fila 1 — archivo vectorial/ráster.
+                    if action(ui, "SVG", "Exportar el lienzo a un archivo SVG vectorial") {
+                        app.export_with_dialog(crate::export::ExportFormat::Svg, Some(ui.ctx()));
+                    }
+                    if action(ui, "PNG", "Exportar el lienzo a PNG (tiny-skia) donde elijas") {
+                        app.export_with_dialog(crate::export::ExportFormat::Png, Some(ui.ctx()));
+                    }
+                    if action(ui, "TikZ", "Exportar el lienzo a código TikZ") {
+                        app.export_with_dialog(crate::export::ExportFormat::Tikz, Some(ui.ctx()));
+                    }
+                    ui.end_row();
+                    // Fila 2 — PDF y portapapeles de imagen.
+                    if action(
+                        ui,
+                        "PDF",
+                        "Vectorial de 1 página por ahora: vista + hoja actual (rectas, círculos, polígonos y texto Helvetica). Si el libro tiene varias hojas con contenido, avisa sin escribir.",
+                    ) {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("PDF", &["pdf"])
+                            .set_file_name("grafito_export.pdf")
+                            .save_file()
+                        {
+                            app.pending_export_job = Some(crate::app::PendingExportJob {
+                                receiver: spawn_pdf_export(app.document.clone(), path, ui.ctx()),
+                            });
+                            app.notify("Exportando PDF…", grafito_ui::toast::ToastKind::Info);
+                        }
+                    }
+                    if action(ui, "Copiar SVG", "Copia el SVG real del lienzo al portapapeles") {
+                        match clipboard_svg(&app.document) {
+                            Ok(svg) => {
+                                let bytes = svg.len();
+                                ui.ctx().output_mut(|out| {
+                                    out.copied_text = svg;
+                                });
+                                app.cas_result =
+                                    format!("SVG copiado al portapapeles ({bytes} bytes)");
+                                app.notify(
+                                    app.cas_result.clone(),
+                                    grafito_ui::toast::ToastKind::Success,
+                                );
+                            }
+                            Err(error) => {
+                                app.cas_result = format!("No se pudo copiar SVG: {error}");
+                                app.notify(
+                                    app.cas_result.clone(),
+                                    grafito_ui::toast::ToastKind::Error,
+                                );
+                            }
+                        }
+                    }
+                    if action(
+                        ui,
+                        "Copiar PNG",
+                        "Copia el PNG real del lienzo al portapapeles del sistema (para Word/Moodle)",
+                    ) {
+                        match copy_png_to_os_clipboard(&app.document) {
+                            Ok(summary) => {
+                                app.cas_result = summary.clone();
+                                app.notify(summary, grafito_ui::toast::ToastKind::Success);
+                            }
+                            Err(error) => {
+                                app.cas_result = error.clone();
+                                app.notify(error, grafito_ui::toast::ToastKind::Error);
+                            }
+                        }
+                    }
+                    ui.end_row();
+                    // Fila 3 — texto puro al portapapeles (G-C).
+                    for (label, tip, build) in [
+                        (
+                            "MathML",
+                            "Copia las funciones y puntos como MathML al portapapeles",
+                            crate::export::document_to_mathml
+                                as fn(&Document) -> Result<String, String>,
+                        ),
+                        (
+                            "TikZ-eje",
+                            "Copia un entorno pgfplots axis con tus funciones al portapapeles",
+                            crate::export::document_to_tikz_axis
+                                as fn(&Document) -> Result<String, String>,
+                        ),
+                        (
+                            "HTML",
+                            "Copia una página autónoma con el SVG del lienzo al portapapeles",
+                            crate::export::document_to_html
+                                as fn(&Document) -> Result<String, String>,
+                        ),
+                    ] {
+                        if action(ui, label, tip) {
+                            match build(&app.document) {
+                                Ok(text) => {
+                                    let bytes = text.len();
+                                    ui.ctx().output_mut(|out| {
+                                        out.copied_text = text;
+                                    });
+                                    app.cas_result =
+                                        format!("{label} copiado al portapapeles ({bytes} bytes)");
+                                    app.notify(
+                                        app.cas_result.clone(),
+                                        grafito_ui::toast::ToastKind::Success,
+                                    );
+                                }
+                                Err(error) => {
+                                    app.cas_result = error;
+                                    app.notify(
+                                        app.cas_result.clone(),
+                                        grafito_ui::toast::ToastKind::Error,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    ui.end_row();
+                });
+            // Tablas del documento (CSV RFC 4180): una fila por tabla.
             let tables: Vec<(ObjectId, String, usize)> = app
                 .document
                 .objects_iter_sorted()
@@ -2016,7 +2106,7 @@ pub(crate) fn draw_export_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                 })
                 .collect();
             if !tables.is_empty() {
-                ui.add_space(SPACE_XS);
+                ui.add_space(SPACE_SM);
                 ui.label(
                     egui::RichText::new("Tablas (CSV RFC 4180)")
                         .size(TYPE_XS)
@@ -2024,6 +2114,7 @@ pub(crate) fn draw_export_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                 );
             }
             for (id, label, rows) in tables {
+                ui.add_space(SPACE_XS);
                 ui.horizontal(|ui| {
                     let name = if label.is_empty() {
                         "<sin etiqueta>"
@@ -2071,120 +2162,21 @@ pub(crate) fn draw_export_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                     });
                 });
             }
-            ui.add_space(SPACE_XS);
-            ui.horizontal(|ui| {
-                if ui
-                    .small_button("Copiar SVG")
-                    .on_hover_text("Copia el SVG real del lienzo al portapapeles")
-                    .clicked()
-                {
-                    match clipboard_svg(&app.document) {
-                        Ok(svg) => {
-                            let bytes = svg.len();
-                            ui.ctx().output_mut(|out| {
-                                out.copied_text = svg;
-                            });
-                            app.cas_result =
-                                format!("SVG copiado al portapapeles ({bytes} bytes)");
-                            app.notify(
-                                app.cas_result.clone(),
-                                grafito_ui::toast::ToastKind::Success,
-                            );
-                        }
-                        Err(error) => {
-                            app.cas_result = format!("No se pudo copiar SVG: {error}");
-                            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
-                        }
-                    }
-                }
-                if ui
-                    .small_button("Guardar PNG…")
-                    .on_hover_text("Rasteriza el lienzo a PNG real (tiny-skia) y lo guarda donde elijas")
-                    .clicked()
-                {
-                    app.export_with_dialog(crate::export::ExportFormat::Png, Some(ui.ctx()));
-                }
-                if ui
-                    .small_button("Copiar PNG")
-                    .on_hover_text(
-                        "Copia el PNG real del lienzo al portapapeles del sistema (para Word/Moodle)",
-                    )
-                    .clicked()
-                {
-                    match copy_png_to_os_clipboard(&app.document) {
-                        Ok(summary) => {
-                            app.cas_result = summary.clone();
-                            app.notify(summary, grafito_ui::toast::ToastKind::Success);
-                        }
-                        Err(error) => {
-                            app.cas_result = error.clone();
-                            app.notify(error, grafito_ui::toast::ToastKind::Error);
-                        }
-                    }
-                }
-            });
-            // Texto (G-C): MathML / TikZ-eje / HTML puros al portapapeles.
-            // Piel pura: builders sin I/O + egui output (igual que Copiar SVG);
-            // el guardado a archivo queda para P2 (cableado menú en app.rs/ui.rs).
-            ui.add_space(SPACE_XS);
-            ui.horizontal(|ui| {
-                for (label, tip, build) in [
-                    (
-                        "MathML",
-                        "Copia las funciones y puntos como MathML al portapapeles",
-                        crate::export::document_to_mathml
-                            as fn(&Document) -> Result<String, String>,
-                    ),
-                    (
-                        "TikZ-eje",
-                        "Copia un entorno pgfplots axis con tus funciones al portapapeles",
-                        crate::export::document_to_tikz_axis
-                            as fn(&Document) -> Result<String, String>,
-                    ),
-                    (
-                        "HTML",
-                        "Copia una página autónoma con el SVG del lienzo al portapapeles",
-                        crate::export::document_to_html as fn(&Document) -> Result<String, String>,
-                    ),
-                ] {
-                    if ui.small_button(label).on_hover_text(tip).clicked() {
-                        match build(&app.document) {
-                            Ok(text) => {
-                                let bytes = text.len();
-                                ui.ctx().output_mut(|out| {
-                                    out.copied_text = text;
-                                });
-                                app.cas_result =
-                                    format!("{label} copiado al portapapeles ({bytes} bytes)");
-                                app.notify(
-                                    app.cas_result.clone(),
-                                    grafito_ui::toast::ToastKind::Success,
-                                );
-                            }
-                            Err(error) => {
-                                app.cas_result = error;
-                                app.notify(
-                                    app.cas_result.clone(),
-                                    grafito_ui::toast::ToastKind::Error,
-                                );
-                            }
-                        }
-                    }
-                }
-            });
             // W3 — la exportación deja de ser muda: revela la carpeta de la
             // última exportación exitosa (igual que Archivo > Exportar).
             if app.last_export_dir.is_some() {
-                ui.add_space(SPACE_XS);
-                ui.horizontal(|ui| {
-                    if ui
-                        .small_button("Mostrar en carpeta")
-                        .on_hover_text("Abre la carpeta de tu última exportación.")
-                        .clicked()
-                    {
-                        app.reveal_last_export();
-                    }
-                });
+                ui.add_space(SPACE_SM);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), PANEL_BUTTON_H],
+                        egui::Button::new(egui::RichText::new("Mostrar en carpeta").size(TYPE_SM))
+                            .rounding(RADIUS_SM),
+                    )
+                    .on_hover_text("Abre la carpeta de tu última exportación.")
+                    .clicked()
+                {
+                    app.reveal_last_export();
+                }
             }
         },
     );
@@ -7303,86 +7295,98 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     // envuelvan. La fila "Ir a" salta directo a una celda con el parser
     // del cerebro (`parse_cell_reference`).
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+    // ── Barra de navegación de la hoja ──
+    // Fila 1: badge del rango visible + salto "Ir a" (todo a 26 px de alto,
+    // misma línea base). Filas 2-3: cuadrícula 3×2 de botones iguales.
+    // Nada de texto suelto ni botones que pisan: misma altura y sin wrap.
+    let control_h = SHEET_CELL_H + 2.0;
+    let mut goto_requested = false;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        ui.label(
-            egui::RichText::new(view.window_label(cols))
-                .color(hdr_col)
-                .size(TYPE_XS)
-                .strong()
-                .monospace(),
-        )
-        .on_hover_text("Esquina visible de la hoja de 400×400. Movete con las flechas o «Ir a».");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = SPACE_XS;
+        let chip_w = 62.0;
+        let (chip_rect, chip_resp) =
+            ui.allocate_exact_size(egui::vec2(chip_w, control_h), egui::Sense::hover());
+        if ui.is_rect_visible(chip_rect) {
+            let theme = current_theme(&ctx);
+            ui.painter()
+                .rect_filled(chip_rect, RADIUS_SM, theme.input_bg);
+            ui.painter()
+                .rect_stroke(chip_rect, RADIUS_SM, theme.hairline_stroke());
+            ui.painter().text(
+                chip_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                view.window_label(cols),
+                egui::FontId::monospace(TYPE_XS),
+                hdr_col,
+            );
+        }
+        chip_resp.on_hover_text(
+            "Esquina visible de la hoja de 400×400. Movete con las flechas o «Ir a».",
+        );
+        let field_w = ui.available_width().max(64.0);
+        let resp = ui.add_sized(
+            [field_w, control_h],
+            egui::TextEdit::singleline(&mut edit.goto)
+                .hint_text("Ir a C3")
+                .font(egui::FontId::monospace(TYPE_XS)),
+        );
+        if resp.changed() {
+            edit.goto_error = None;
+        }
+        if resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            goto_requested = true;
+        }
+    });
+    let nav_cell_w = ((ui.available_width() - 2.0 * SPACE_XS) / 3.0).max(40.0);
+    egui::Grid::new("gc_sheet_nav")
+        .num_columns(3)
+        .spacing([SPACE_XS, SPACE_XS])
+        .show(ui, |ui| {
             let nav = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
                 ui.add_sized(
-                    [26.0, SHEET_CELL_H],
+                    [nav_cell_w, control_h],
                     egui::Button::new(egui::RichText::new(glyph).size(TYPE_XS)),
                 )
                 .on_hover_text(tip)
                 .clicked()
             };
-            if nav(ui, "A1", "Volver al origen A1") {
-                view = SheetViewState::default();
-            }
-            if nav(ui, "▼", "Bajar 8 filas") {
-                view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
-                view = view.clamped();
+            let step = cols.max(1);
+            if nav(ui, "◀", "Retroceder columnas") {
+                view.origin_col = view.origin_col.saturating_sub(step);
             }
             if nav(ui, "▲", "Subir 8 filas") {
                 view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS);
             }
-            let step = cols.max(1);
             if nav(ui, "▶", "Avanzar columnas") {
                 view.origin_col = view.origin_col.saturating_add(step);
                 view = view.clamped();
             }
-            if nav(ui, "◀", "Retroceder columnas") {
-                view.origin_col = view.origin_col.saturating_sub(step);
+            ui.end_row();
+            if nav(ui, "▼", "Bajar 8 filas") {
+                view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
+                view = view.clamped();
             }
+            if nav(ui, "A1", "Volver al origen A1") {
+                view = SheetViewState::default();
+            }
+            if nav(ui, "Ir", "Ir a la celda escrita arriba") {
+                goto_requested = true;
+            }
+            ui.end_row();
         });
-    });
-    // Ir a celda: "C3" mueve la ventana para que la celda quede visible.
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = SPACE_XS;
-        ui.label(
-            egui::RichText::new("Ir a")
-                .color(txt_dim)
-                .size(TYPE_XS)
-                .strong(),
-        );
-        let field_w = (ui.available_width() - 60.0).max(64.0);
-        let resp = ui.add_sized(
-            [field_w, SHEET_CELL_H],
-            egui::TextEdit::singleline(&mut edit.goto)
-                .hint_text("C3")
-                .font(egui::FontId::monospace(TYPE_XS)),
-        );
-        let pressed = ui
-            .add_sized(
-                [52.0, SHEET_CELL_H],
-                egui::Button::new(egui::RichText::new("Ir").size(TYPE_XS)).rounding(RADIUS_PILL),
-            )
-            .clicked()
-            || (resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-        if resp.changed() {
-            edit.goto_error = None;
-        }
-        if pressed && !edit.goto.trim().is_empty() {
-            match spreadsheet_series::parse_cell_reference(&edit.goto) {
-                Some((row, col)) => {
-                    view.focus_cell(row, col, cols);
-                    edit.goto.clear();
-                    edit.goto_error = None;
-                }
-                None => {
-                    edit.goto_error = Some(format!("«{}» no es una celda válida", edit.goto.trim()))
-                }
+    if goto_requested && !edit.goto.trim().is_empty() {
+        match spreadsheet_series::parse_cell_reference(&edit.goto) {
+            Some((row, col)) => {
+                view.focus_cell(row, col, cols);
+                edit.goto.clear();
+                edit.goto_error = None;
+            }
+            None => {
+                edit.goto_error = Some(format!("«{}» no es una celda válida", edit.goto.trim()))
             }
         }
-    });
+    }
     if let Some(error) = &edit.goto_error {
         ui.label(
             egui::RichText::new(error)
@@ -8617,6 +8621,32 @@ mod coverage_sweep_panels_pure {
         assert!(series_preview("ZZZ", "1", "1", false).is_none());
         assert!(series_preview("A1:A3", "mal", "1", false).is_none());
         assert!(series_preview("A1:A3", "1", "inf", false).is_none());
+    }
+    #[test]
+    fn grilla_exportacion_cabe_en_3_columnas() {
+        // Cuadrícula 3×3 del panel Herramientas (celda medida en captura:
+        // 73 px en el panel por defecto). Los labels cortos deben entrar sin
+        // truncarse ni envolver; el detalle vive en el tooltip.
+        let labels = [
+            "SVG",
+            "PNG",
+            "TikZ",
+            "PDF",
+            "Copiar SVG",
+            "Copiar PNG",
+            "MathML",
+            "TikZ-eje",
+            "HTML",
+        ];
+        assert_eq!(labels.len(), 9, "la grilla es 3×3");
+        let cell_w = 73.0_f32;
+        for label in labels {
+            let width = label.chars().count() as f32 * 6.4;
+            assert!(
+                width <= cell_w - 8.0,
+                "«{label}» ({width:.0} px) no cabe en la celda de {cell_w} px"
+            );
+        }
     }
     #[test]
     fn barrido_prob_momentos_y_puente_motor() {

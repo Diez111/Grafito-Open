@@ -147,7 +147,7 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         app,
                         "Cónicas y Compás",
                         &[
-                            (Tool::Circle, "Círculo centro-radio", "Circle[centro, radio] — centro y punto del borde"),
+                            (Tool::Circle, "Círculo", "Circle[centro, radio] — centro y punto del borde"),
                             (
                                 Tool::EllipseByFoci,
                                 "Elipse",
@@ -170,17 +170,17 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             ),
                             (
                                 Tool::Circle,
-                                "Incírculo [A,B,C]",
+                                "Incírculo",
                                 "Incircle[A,B,C] — círculo inscrito en el triángulo",
                             ),
                             (
                                 Tool::Circle,
-                                "Circuncírculo [A,B,C]",
+                                "Circuncírculo",
                                 "Circumcircle[A,B,C] — círculo circunscrito al triángulo",
                             ),
                             (
                                 Tool::Circle,
-                                "Compás [centro+punto]",
+                                "Compás",
                                 "Compasses[centro, punto] — traza círculo con compás",
                             ),
                         ],
@@ -198,7 +198,7 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         &[
                             (
                                 Tool::Circle,
-                                "Arco [C,r,a,b]",
+                                "Arco",
                                 "Arc[centro, radio, inicio, fin] o Arc[P1,P2,P3]",
                             ),
                             (
@@ -208,7 +208,7 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             ),
                             (
                                 Tool::Circle,
-                                "Semicírculo 3 ptos",
+                                "Semicírculo",
                                 "Semicircle[centro, radio] o Semicircle[P1,P2,P3]",
                             ),
                             (
@@ -417,6 +417,19 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         });
 }
 
+/// Recorta la etiqueta al ancho disponible (≈6.4 px por carácter a
+/// `TYPE_SM`) para que nunca pise la celda vecina; el nombre completo y la
+/// explicación quedan en el tooltip y en accessibility.
+fn fit_tool_label(name: &str, max_width: f32) -> String {
+    let max_chars = ((max_width / 6.4).floor() as i64).max(3) as usize;
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    let mut out: String = name.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Tool, &str, &str)]) {
     let theme = current_theme(ui.ctx());
     ui.label(
@@ -427,8 +440,10 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
     );
     ui.add_space(SPACE_SM);
 
-    // We will use a grid to lay them out in 2 columns
+    // Dos columnas iguales: el ancho se calcula antes de la grilla para que
+    // ambas celdas midan lo mismo y nada desborde el panel en ningún ancho.
     let num_cols = 2;
+    let cell_w = ((ui.available_width() - SPACE_SM) / num_cols as f32).max(96.0);
     egui::Grid::new(title)
         .num_columns(num_cols)
         .spacing(egui::vec2(SPACE_SM, SPACE_SM))
@@ -448,10 +463,8 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                     egui::Stroke::NONE
                 };
 
-                let (rect, resp) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width().max(140.0), ZOOM_ICON_HIT),
-                    egui::Sense::click(),
-                );
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(cell_w, ZOOM_ICON_HIT), egui::Sense::click());
 
                 if ui.is_rect_visible(rect) {
                     let painter = ui.painter();
@@ -483,11 +496,16 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                         },
                     );
 
-                    // Texto de la herramienta
-                    painter.text(
-                        rect.left_center() + egui::vec2(44.0, 0.0),
+                    // Texto de la herramienta, recortado y con clip al botón:
+                    // jamás pisa la celda vecina ni el borde del panel.
+                    let text_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + 40.0, rect.top()),
+                        egui::pos2(rect.right() - 6.0, rect.bottom()),
+                    );
+                    painter.with_clip_rect(rect).text(
+                        egui::pos2(text_rect.left(), rect.center().y),
                         egui::Align2::LEFT_CENTER,
-                        *name,
+                        fit_tool_label(name, text_rect.width()),
                         egui::FontId::proportional(TYPE_SM),
                         theme.text_primary,
                     );
@@ -515,4 +533,21 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
             }
         });
     ui.add_space(CARD_SPACING);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_tool_label;
+
+    #[test]
+    fn fit_tool_label_recorta_sin_pisar_al_vecino() {
+        assert_eq!(fit_tool_label("Punto", 100.0), "Punto");
+        let largo = fit_tool_label("Circuncírculo con nombre largo", 96.0);
+        assert!(largo.ends_with('…'), "{largo}");
+        assert!(largo.chars().count() <= 15, "{largo}");
+        // Piso: nunca devuelve vacío ni sin puntos suspensivos.
+        let minimo = fit_tool_label("Cualquier cosa", 10.0);
+        assert!(minimo.ends_with('…'));
+        assert!(minimo.chars().count() >= 3);
+    }
 }
