@@ -1578,6 +1578,7 @@ pub fn collect_responses_sse_text(sse_body: &str) -> (String, bool) {
 }
 
 /// Resultado interno del lector SSE de la Responses API.
+#[derive(Debug)]
 enum SseStreamOutcome {
     /// El servidor habló SSE: texto acumulado de deltas + flag de truncado.
     Done { text: String, truncated: bool },
@@ -1639,17 +1640,14 @@ pub fn request_responses_completion_streaming(
         call = call.bearer_auth(sanitize_api_key(key)?);
     }
     let response = call.send().map_err(|error| {
-        let base = transport_error("remote assistant stream", &error, Some(timeout));
         // `send()` sin respuesta = aún no hubo deltas: etapa `esperando primer
-        // token`. `transport_error` ya distingue `could not connect`
-        // (conectando, con `connect_timeout` 10s); sólo se precisa el timeout.
-        if base.contains("timed out") {
-            format!(
-                "remote assistant stream timed out waiting for first token after {}s",
-                timeout.as_secs().max(1)
-            )
+        // token`. El timeout de reqwest arranca acá, igual que el deadline
+        // local (ver `deadline` abajo): la clasificación no depende de relojes
+        // distintos.
+        if error.is_timeout() {
+            sse_timeout_message(0, 0, timeout)
         } else {
-            base
+            transport_error("remote assistant stream", &error, Some(timeout))
         }
     })?;
     if cancellation.is_cancelled() {
@@ -1671,7 +1669,9 @@ pub fn request_responses_completion_streaming(
         let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
         return Err(http_status_error(status, &body, retry_after));
     }
-    match read_responses_sse_stream(response, timeout, cancellation, progress)? {
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    let reader = response.take((RESPONSES_MAX_BODY_BYTES as u64).saturating_add(1));
+    match read_responses_sse_stream(reader, deadline, timeout, cancellation, progress)? {
         SseStreamOutcome::Done { text, truncated } => {
             completion_from_text(&text, max_output_chars, truncated)
         }
@@ -1714,6 +1714,33 @@ pub fn request_responses_completion_streaming(
     Err(NO_NETWORK_MESSAGE.into())
 }
 
+/// Mensaje de timeout honesto por etapa (nunca silencio + error crudo): la
+/// app mapea cada marcador a criollo con qué colgó + sugerencia.
+#[cfg(feature = "assistant-net")]
+fn sse_timeout_message(events_seen: u32, received_bytes: usize, timeout: Duration) -> String {
+    let secs = timeout.as_secs().max(1);
+    if events_seen == 0 {
+        format!("remote assistant stream timed out waiting for first token after {secs}s")
+    } else {
+        let kib = received_bytes / 1024;
+        format!(
+            "remote assistant stream timed out while receiving after {secs}s ({kib} KiB received)"
+        )
+    }
+}
+
+/// ¿El error de lectura es el timeout de reqwest? Su reloj arranca en
+/// `send()`, antes que la lectura del cuerpo: sin esto, un abort de reqwest
+/// observado antes del deadline local caía al error genérico.
+#[cfg(feature = "assistant-net")]
+fn read_error_is_timeout(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::TimedOut
+        || error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout)
+}
+
 /// Lee un cuerpo `text/event-stream` con deadline absoluta y cancelación.
 ///
 /// Drena por chunks (sin `chunk()`: el cliente bloqueante expone `Read`),
@@ -1722,19 +1749,13 @@ pub fn request_responses_completion_streaming(
 /// EOF sin ningún evento → `FallbackToNonStreaming` (el servidor no habla
 /// SSE y el llamante reintenta sin `stream`).
 #[cfg(feature = "assistant-net")]
-fn read_responses_sse_stream(
-    response: reqwest::blocking::Response,
+fn read_responses_sse_stream<R: std::io::Read>(
+    mut reader: R,
+    deadline: Instant,
     timeout: Duration,
     cancellation: &CancellationToken,
     mut progress: Option<&mut ResponsesProgressCallback<'_>>,
 ) -> Result<SseStreamOutcome, String> {
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(Instant::now);
-    let maximum = RESPONSES_MAX_BODY_BYTES
-        .checked_add(1)
-        .ok_or_else(|| "remote assistant response limit is invalid".to_string())?;
-    let mut reader = response.take(maximum as u64);
     let mut total_bytes = 0_usize;
     let mut pending: Vec<u8> = Vec::new();
     let mut text = String::new();
@@ -1747,20 +1768,7 @@ fn read_responses_sse_stream(
             return Err("remote assistant request was cancelled".into());
         }
         if Instant::now() > deadline {
-            // Timeout honesto por etapa (nunca silencio + error crudo): la app
-            // mapea cada marcador a criollo con qué colgó + sugerencia.
-            // - Sin ningún delta: colgó esperando el primer token.
-            // - Con deltas: se cortó recibiendo (se informa KiB ya visibles).
-            let secs = timeout.as_secs().max(1);
-            if events_seen == 0 {
-                return Err(format!(
-                    "remote assistant stream timed out waiting for first token after {secs}s"
-                ));
-            }
-            let kib = text.len() / 1024;
-            return Err(format!(
-                "remote assistant stream timed out while receiving after {secs}s ({kib} KiB received)"
-            ));
+            return Err(sse_timeout_message(events_seen, text.len(), timeout));
         }
         match reader.read(&mut chunk) {
             Ok(0) => break,
@@ -1800,23 +1808,14 @@ fn read_responses_sse_stream(
                     }
                 }
             }
-            Err(_) => {
-                // Lectura cortada a mitad de stream: si ya venció el deadline
-                // (stall del servidor bajo `timeout` total de reqwest) se
-                // reporta como timeout por etapa, no como error genérico, para
-                // que la app diga qué colgó + sugerencia. Sin deltas =
-                // esperando primer token; con deltas = recibiendo (KiB).
-                if Instant::now() >= deadline {
-                    let secs = timeout.as_secs().max(1);
-                    if events_seen == 0 {
-                        return Err(format!(
-                            "remote assistant stream timed out waiting for first token after {secs}s"
-                        ));
-                    }
-                    let kib = text.len() / 1024;
-                    return Err(format!(
-                        "remote assistant stream timed out while receiving after {secs}s ({kib} KiB received)"
-                    ));
+            Err(error) => {
+                // Lectura cortada a mitad de stream: si venció el deadline
+                // local O el timeout propio de reqwest, se reporta como
+                // timeout por etapa (nunca error genérico silencioso).
+                // Sin deltas = esperando primer token; con deltas =
+                // recibiendo (KiB).
+                if Instant::now() >= deadline || read_error_is_timeout(&error) {
+                    return Err(sse_timeout_message(events_seen, text.len(), timeout));
                 }
                 return Err("remote assistant response body could not be read".to_string());
             }
@@ -5724,41 +5723,47 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_timeout_while_receiving_keeps_stage_and_kib() {
-        // Mock lento a mitad de stream: manda un delta, flushea y se cuelga.
-        // El timeout debe decir `while receiving` + KiB, no error genérico.
-        use std::io::{Read, Write};
+        // Determinista: un `Read` falso devuelve un delta válido y después un
+        // error de timeout (sin socket ni sleeps). El mensaje debe ser
+        // `while receiving` + KiB, aunque el deadline local no haya vencido.
+        use std::io::Read;
         clear_rate_limit_for_tests();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = vec![0u8; 32_768];
-            let _ = stream.read(&mut buffer);
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
-            );
-            let _ = stream.write_all(
-                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola parcial\"}\n",
-            );
-            let _ = stream.flush();
-            thread::sleep(Duration::from_millis(800));
-        });
-        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        struct DeltaThenTimeout {
+            payload: Vec<u8>,
+            offset: usize,
+        }
+        impl Read for DeltaThenTimeout {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.offset < self.payload.len() {
+                    let remaining = &self.payload[self.offset..];
+                    let count = remaining.len().min(buf.len());
+                    buf[..count].copy_from_slice(&remaining[..count]);
+                    self.offset += count;
+                    return Ok(count);
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "mock stream timeout",
+                ))
+            }
+        }
+        let reader = DeltaThenTimeout {
+            payload:
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola parcial\"}\n"
+                    .to_vec(),
+            offset: 0,
+        };
         let mut snapshots = Vec::new();
-        let error = request_responses_completion_streaming(
-            endpoint,
-            json!({"model": "muse-spark-1.3-contributor"}),
-            Some("test-key"),
+        let error = read_responses_sse_stream(
+            reader,
+            Instant::now() + Duration::from_secs(60),
+            Duration::from_secs(60),
             &CancellationToken::default(),
-            Duration::from_millis(200),
-            64,
             Some(&mut |accumulated: &str| {
                 snapshots.push(accumulated.to_owned());
             }),
-            None,
         )
         .unwrap_err();
-        let _ = server.join();
         assert!(
             error.contains("while receiving"),
             "etapa honesta, era: {error}"
@@ -5769,6 +5774,17 @@ mod tests {
             snapshots.iter().any(|snap| snap.contains("Hola parcial")),
             "{snapshots:?}"
         );
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn sse_timeout_message_is_stage_aware_and_pure() {
+        let waiting = sse_timeout_message(0, 0, Duration::from_secs(5));
+        assert!(waiting.contains("waiting for first token"), "{waiting}");
+        assert!(waiting.contains("5s"), "{waiting}");
+        let receiving = sse_timeout_message(3, 2_500, Duration::from_secs(5));
+        assert!(receiving.contains("while receiving"), "{receiving}");
+        assert!(receiving.contains("2 KiB received"), "{receiving}");
     }
 
     #[test]

@@ -966,70 +966,77 @@ fn nearest_existing_ancestor_inside(path: &Path, cwd: &Path) -> bool {
 fn spawn_reader(stdout: ChildStdout, sender: SyncSender<WireMessage>, line_cap: usize) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
+        let mut line: Vec<u8> = Vec::new();
+        let mut oversized = false;
+        let mut chunk = [0_u8; 512];
         loop {
-            let mut line: Vec<u8> = Vec::new();
-            let mut oversized = false;
-            let mut done = false;
-            while !done {
-                let mut chunk = [0_u8; 512];
-                match reader.read(&mut chunk) {
-                    Ok(0) => return,
-                    Ok(count) => {
-                        // Si ya es oversized, drenamos sin acumular hasta \n (LC1 fix)
-                        if oversized {
-                            if let Some(_nl) = chunk[..count].iter().position(|b| *b == b'\n') {
-                                done = true;
-                                // descartamos resto de linea
-                            }
-                            continue;
-                        }
-                        if let Some(newline) = chunk[..count].iter().position(|byte| *byte == b'\n')
-                        {
-                            // check cap incluyendo lo que viene antes de \n
-                            if line.len() + newline > line_cap {
-                                oversized = true;
-                                // drenar resto de este chunk hasta \n ya hecho
-                                done = true;
-                                // limpiar lo acumulado para no retener OOM
-                                line.clear();
-                            } else {
-                                line.extend_from_slice(&chunk[..newline]);
-                                done = true;
-                            }
-                        } else {
-                            // sin newline en este chunk
-                            if line.len() + count > line_cap {
-                                oversized = true;
-                                line.clear();
-                                // seguir drenando sin acumular
-                            } else {
-                                line.extend_from_slice(&chunk[..count]);
-                            }
-                        }
-                    }
-                    Err(_) => return,
-                }
-            }
-            if oversized {
-                let _ = sender.send(WireMessage::Error {
-                    code: "protocol".into(),
-                    message: "línea del motor excede el límite de 64 KiB".into(),
-                });
-                continue;
-            }
-            if line.is_empty() {
-                continue;
-            }
-            let parsed: Result<Value, _> = serde_json::from_slice(&line);
-            let Ok(value) = parsed else {
-                continue;
+            let count = match reader.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(count) => count,
+                Err(_) => return,
             };
-            if let Some(message) = downcast(&value) {
-                // sync_channel puede bloquear: si esta llena, este thread frena al motor (backpressure)
-                let _ = sender.send(message);
+            // Un `read` puede traer varias líneas (o el final de una línea
+            // oversized y el inicio de la siguiente): se procesa el chunk
+            // entero y sólo se descarta lo que pertenece a la línea grande.
+            let mut start = 0usize;
+            while start < count {
+                match chunk[start..count].iter().position(|byte| *byte == b'\n') {
+                    Some(offset) => {
+                        let end = start + offset;
+                        if oversized {
+                            // terminó la línea descartada: se reporta UNA vez
+                            oversized = false;
+                            line.clear();
+                            send_oversized_line_error(&sender);
+                        } else if line.len() + (end - start) > line_cap {
+                            send_oversized_line_error(&sender);
+                            line.clear();
+                        } else {
+                            line.extend_from_slice(&chunk[start..end]);
+                            send_parsed_line(&sender, &line);
+                            // La misma `line` se reusa para la próxima línea
+                            // del chunk: sin clear se concatenarían.
+                            line.clear();
+                        }
+                        start = end + 1;
+                    }
+                    None => {
+                        let remaining = count - start;
+                        if !oversized {
+                            if line.len() + remaining > line_cap {
+                                oversized = true;
+                                line.clear();
+                            } else {
+                                line.extend_from_slice(&chunk[start..count]);
+                            }
+                        }
+                        start = count;
+                    }
+                }
             }
         }
     });
+}
+
+fn send_oversized_line_error(sender: &SyncSender<WireMessage>) {
+    let _ = sender.send(WireMessage::Error {
+        code: "protocol".into(),
+        message: "línea del motor excede el límite de 64 KiB".into(),
+    });
+}
+
+fn send_parsed_line(sender: &SyncSender<WireMessage>, line: &[u8]) {
+    if line.is_empty() {
+        return;
+    }
+    let parsed: Result<Value, _> = serde_json::from_slice(line);
+    let Ok(value) = parsed else {
+        return;
+    };
+    if let Some(message) = downcast(&value) {
+        // sync_channel puede bloquear: si esta llena, este thread frena al motor (backpressure)
+        let _ = sender.send(message);
+    }
 }
 
 fn spawn_stderr_drainer(
@@ -1621,6 +1628,56 @@ done
         assert!(
             saw_protocol_error,
             "línea de 100 KiB debe producir Error{{code: protocol}} con line_cap 64 KiB"
+        );
+        let _ = engine.shutdown();
+    }
+
+    // Stub que emite dos `progress` en un solo `printf` (un solo write):
+    // si el reader descarta el remanente del chunk, el segundo se pierde.
+    const MULTI_MESSAGE_STUB: &str = r#"
+printf '%s\n' '{"type":"hello","protocol_version":1,"capabilities":[]}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"ping"'*)
+      printf '%s\n' '{"type":"pong"}'
+      ;;
+    *'"type":"shutdown"'*)
+      break
+      ;;
+    *'"type":"render_request"'*)
+      jid=$(printf '%s' "$line" | sed -n 's/.*"job_id"[ ]*:[ ]*"\([^"]*\)".*/\1/p')
+      printf '%s\n%s\n' "{\"type\":\"progress\",\"job_id\":\"$jid\",\"step\":\"a\",\"percent\":10}" "{\"type\":\"progress\",\"job_id\":\"$jid\",\"step\":\"b\",\"percent\":20}"
+      out="$(pwd)/$jid.png"
+      printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d > "$out"
+      printf '%s\n' "{\"type\":\"render_result\",\"job_id\":\"$jid\",\"media_path\":\"$out\",\"frames\":1,\"duration_ms\":10}"
+      ;;
+  esac
+done
+"#;
+
+    #[test]
+    fn two_messages_in_one_write_are_both_delivered() {
+        if !shell_available() {
+            eprintln!("skipping: sh not available");
+            return;
+        }
+        let (_guard, config) = stub_engine_with(MULTI_MESSAGE_STUB);
+        let mut engine = AnimEngine::spawn(config).unwrap();
+        engine.wait_ready().unwrap();
+        let _job = engine.submit(derivada_request("dos lineas")).unwrap();
+        let mut percents = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match engine.recv_event(Some(Duration::from_millis(300))).unwrap() {
+                Some(JobEvent::Progress(progress)) => percents.push(progress.percent),
+                Some(JobEvent::Result(_)) => break,
+                Some(JobEvent::Error { .. }) => break,
+                None => {}
+            }
+        }
+        assert!(
+            percents.contains(&10) && percents.contains(&20),
+            "ambos progress deben llegar, llegaron: {percents:?}"
         );
         let _ = engine.shutdown();
     }
