@@ -5434,6 +5434,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
     if !app.show_construction_protocol {
         return;
     }
+    let theme = current_theme(ctx);
     let (_is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::right("construction_protocol").show_separator_line(false)
@@ -5454,113 +5455,191 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
             ui.add_space(2.0);
             ui.separator();
 
-            // Toolbar: exportar LaTeX + limpiar
-            egui::Frame::none()
-                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.button("Exportar LaTeX").clicked() {
-                            // FileController: el diálogo rfd queda en UI thread (modal
-                            // nativo); el write va a worker y se notifica en el poll.
-                            let latex = construction_log_to_latex(&app.construction_log);
-                            if let Some(path) =
-                                rfd::FileDialog::new().add_filter("TeX", &["tex"]).save_file()
-                            {
-                                app.pending_text_job = Some(crate::app::PendingTextWriteJob {
-                                    receiver: crate::app::spawn_text_write(
-                                        path,
-                                        latex,
-                                        ctx,
-                                    ),
-                                });
-                                app.cas_result = "Exportando protocolo a LaTeX…".to_string();
-                            }
-                        }
-                        if ui.button("Limpiar").clicked() {
-                            app.construction_log.clear();
-                        }
-                    });
-                });
-            ui.separator();
-
-            // El protocolo es una vista fiel del historial. Reordenar o
-            // desactivar sólo su texto no modifica restricciones reales, por
-            // eso esos controles no se presentan como acciones disponibles.
+            // Cuerpo en tarjetas escandinavas: acciones arriba, pasos en
+            // tarjetas con número; nada de botones sueltos ni texto flotando.
             egui::ScrollArea::vertical()
-                .max_height(ui.available_height() - 8.0)
+                .id_salt("construction_protocol_scroll")
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if app.construction_log.is_empty() {
-                        ui.label(
-                            egui::RichText::new(
-                                "Sin pasos de construcción.\nCrea objetos o restricciones para verlos aquí.",
-                            )
-                            .size(TYPE_SM)
-                            .color(txt_dim),
-                        );
-                    } else {
-                        let total = app.construction_log.len();
-                        for i in 0..total {
-                            let (n, action, inputs, output, disabled) = {
-                                let step = &app.construction_log[i];
-                                (
-                                    step.n,
-                                    step.action.clone(),
-                                    step.inputs.clone(),
-                                    step.output.clone(),
-                                    step.disabled,
-                                )
-                            };
-                            let inputs_str =
-                                if inputs.is_empty() { "—".to_string() } else { inputs.join(", ") };
-                            let output_str =
-                                if output.is_empty() { "—".to_string() } else { output };
-                            let bg = if disabled {
-                                _sep_col.gamma_multiply(0.10)
-                            } else {
-                                Color32::TRANSPARENT
-                            };
-                            egui::Frame::none()
-                                .fill(bg)
-                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin {
+                            left: SPACE_MD,
+                            right: SPACE_MD,
+                            top: SPACE_SM,
+                            bottom: SPACE_LG,
+                        })
+                        .show(ui, |ui| {
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                            ui.spacing_mut().item_spacing.y = SPACE_SM;
+
+                            // Acciones: mismas celdas, mismo alto y radio que
+                            // el resto de la app; deshabilitadas sin pasos.
+                            let has_steps = !app.construction_log.is_empty();
+                            let button_w = ((ui.available_width() - SPACE_SM) / 2.0).max(80.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                let export = ui.add_enabled(
+                                    has_steps,
+                                    egui::Button::new(
+                                        egui::RichText::new("Exportar LaTeX").size(TYPE_XS),
+                                    )
+                                    .min_size(egui::vec2(button_w, PANEL_BUTTON_H))
+                                    .rounding(RADIUS_SM),
+                                );
+                                if export
+                                    .on_hover_text(if has_steps {
+                                        "Guarda el protocolo como archivo .tex"
+                                    } else {
+                                        "Sin pasos todavía"
+                                    })
+                                    .clicked()
+                                {
+                                    // FileController: el diálogo rfd queda en UI thread
+                                    // (modal nativo); el write va a worker y se notifica
+                                    // en el poll.
+                                    let latex = construction_log_to_latex(&app.construction_log);
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("TeX", &["tex"])
+                                        .save_file()
+                                    {
+                                        app.pending_text_job =
+                                            Some(crate::app::PendingTextWriteJob {
+                                                receiver: crate::app::spawn_text_write(
+                                                    path, latex, ctx,
+                                                ),
+                                            });
+                                        app.cas_result =
+                                            "Exportando protocolo a LaTeX…".to_string();
+                                    }
+                                }
+                                let clear = ui.add_enabled(
+                                    has_steps,
+                                    egui::Button::new(
+                                        egui::RichText::new("Limpiar").size(TYPE_XS),
+                                    )
+                                    .min_size(egui::vec2(button_w, PANEL_BUTTON_H))
+                                    .rounding(RADIUS_SM),
+                                );
+                                if clear
+                                    .on_hover_text("Vacía el historial de pasos")
+                                    .clicked()
+                                {
+                                    app.construction_log.clear();
+                                }
+                            });
+
+                            // El protocolo es una vista fiel del historial.
+                            // Reordenar o desactivar sólo su texto no modifica
+                            // restricciones reales: esos controles no existen.
+                            if !has_steps {
+                                egui::Frame::none()
+                                    .fill(theme.input_bg)
+                                    .stroke(theme.hairline_stroke())
+                                    .rounding(egui::Rounding::same(RADIUS_SM))
+                                    .inner_margin(egui::Margin::same(SPACE_MD))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
                                         ui.label(
-                                            egui::RichText::new(format!("{}", n))
-                                                .color(accent)
+                                            egui::RichText::new("Sin pasos todavía")
+                                                .color(theme.text_primary)
+                                                .size(TYPE_SM)
                                                 .strong(),
                                         );
-                                        ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new(&action)
-                                                        .color(txt_col)
-                                                        .strong()
-                                                        .size(TYPE_SM),
-                                                );
-                                                if disabled {
-                                                    ui.label(
-                                                        egui::RichText::new("(deshabilitado)")
-                                                            .color(txt_dim)
-                                                            .size(grafito_ui::tokens::TYPE_XS),
-                                                    );
-                                                }
-                                            });
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "{} -> {}",
-                                                    inputs_str, output_str
-                                                ))
-                                                .size(TYPE_XS)
-                                                .color(txt_dim),
-                                            );
-                                        });
+                                        ui.add_space(SPACE_XS);
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Creá objetos o restricciones para verlos acá.",
+                                            )
+                                            .color(theme.text_tertiary)
+                                            .size(TYPE_XS),
+                                        );
                                     });
-                                });
-                            ui.add_space(2.0);
-                        }
-                    }
+                            } else {
+                                let total = app.construction_log.len();
+                                draw_inspector_section(
+                                    ui,
+                                    &format!("Pasos ({total})"),
+                                    "Vista fiel del historial; no reordena ni desactiva restricciones reales.",
+                                    |ui| {
+                                        for i in 0..total {
+                                            let (n, action, inputs, output, disabled) = {
+                                                let step = &app.construction_log[i];
+                                                (
+                                                    step.n,
+                                                    step.action.clone(),
+                                                    step.inputs.clone(),
+                                                    step.output.clone(),
+                                                    step.disabled,
+                                                )
+                                            };
+                                            let inputs_str = if inputs.is_empty() {
+                                                "—".to_string()
+                                            } else {
+                                                inputs.join(", ")
+                                            };
+                                            let output_str = if output.is_empty() {
+                                                "—".to_string()
+                                            } else {
+                                                output
+                                            };
+                                            egui::Frame::none()
+                                                .fill(theme.input_bg)
+                                                .stroke(theme.hairline_stroke())
+                                                .rounding(egui::Rounding::same(RADIUS_SM))
+                                                .inner_margin(egui::Margin::symmetric(
+                                                    SPACE_SM,
+                                                    SPACE_XS + 2.0,
+                                                ))
+                                                .show(ui, |ui| {
+                                                    ui.set_min_width(ui.available_width());
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(format!(
+                                                                "{n:02}"
+                                                            ))
+                                                            .color(accent)
+                                                            .size(TYPE_XS)
+                                                            .strong()
+                                                            .monospace(),
+                                                        );
+                                                        ui.add_space(SPACE_XS);
+                                                        ui.vertical(|ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label(
+                                                                    egui::RichText::new(&action)
+                                                                        .color(txt_col)
+                                                                        .strong()
+                                                                        .size(TYPE_SM),
+                                                                );
+                                                                if disabled {
+                                                                    ui.label(
+                                                                        egui::RichText::new(
+                                                                            "deshabilitado",
+                                                                        )
+                                                                        .color(txt_dim)
+                                                                        .size(TYPE_XS)
+                                                                        .italics(),
+                                                                    );
+                                                                }
+                                                            });
+                                                            ui.label(
+                                                                egui::RichText::new(format!(
+                                                                    "{inputs_str} → {output_str}"
+                                                                ))
+                                                                .size(TYPE_XS)
+                                                                .color(txt_dim)
+                                                                .monospace(),
+                                                            );
+                                                        });
+                                                    });
+                                                });
+                                            ui.add_space(SPACE_XS);
+                                        }
+                                    },
+                                );
+                            }
+                        });
                 });
-
         });
 }
 
