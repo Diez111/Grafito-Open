@@ -374,30 +374,34 @@ struct GpuSceneReadinessState {
 
 impl GpuSceneReadiness {
     pub fn clear(&self) {
-        if let Ok(mut state) = self.state.write() {
-            state.two_d = None;
-            state.three_d = None;
-        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.two_d = None;
+        state.three_d = None;
     }
 
     pub fn has_2d(&self, key: &Cache2DKey) -> bool {
         self.status_2d(key) == Scene2DReadiness::GpuReady
     }
 
+    /// Poison recuperado: un panic bajo lock no debe dejar el splash mintiendo
+    /// `Pending` para siempre.
     pub(crate) fn status_2d(&self, key: &Cache2DKey) -> Scene2DReadiness {
-        self.state
+        let state = self
+            .state
             .read()
-            .map_or(Scene2DReadiness::Pending, |state| {
-                state
-                    .two_d
-                    .as_ref()
-                    .map_or(Scene2DReadiness::Pending, |(stored, status)| {
-                        if stored == key {
-                            *status
-                        } else {
-                            Scene2DReadiness::Pending
-                        }
-                    })
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .two_d
+            .as_ref()
+            .map_or(Scene2DReadiness::Pending, |(stored, status)| {
+                if stored == key {
+                    *status
+                } else {
+                    Scene2DReadiness::Pending
+                }
             })
     }
 
@@ -406,56 +410,68 @@ impl GpuSceneReadiness {
     }
 
     pub(crate) fn status_3d(&self, key: &Cache3DKey) -> Scene3DReadiness {
-        self.state
+        let state = self
+            .state
             .read()
-            .map_or(Scene3DReadiness::Pending, |state| {
-                state
-                    .three_d
-                    .as_ref()
-                    .map_or(Scene3DReadiness::Pending, |(stored, status)| {
-                        if stored == key {
-                            *status
-                        } else {
-                            Scene3DReadiness::Pending
-                        }
-                    })
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .three_d
+            .as_ref()
+            .map_or(Scene3DReadiness::Pending, |(stored, status)| {
+                if stored == key {
+                    *status
+                } else {
+                    Scene3DReadiness::Pending
+                }
             })
     }
 
     fn clear_2d(&self) {
-        if let Ok(mut state) = self.state.write() {
-            state.two_d = None;
-        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.two_d = None;
     }
 
     fn clear_3d(&self) {
-        if let Ok(mut state) = self.state.write() {
-            state.three_d = None;
-        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.three_d = None;
     }
 
     fn mark_2d(&self, key: Cache2DKey) {
-        if let Ok(mut state) = self.state.write() {
-            state.two_d = Some((key, Scene2DReadiness::GpuReady));
-        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.two_d = Some((key, Scene2DReadiness::GpuReady));
     }
 
     fn mark_2d_cpu_only(&self, key: Cache2DKey) {
-        if let Ok(mut state) = self.state.write() {
-            state.two_d = Some((key, Scene2DReadiness::CpuOnly));
-        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.two_d = Some((key, Scene2DReadiness::CpuOnly));
     }
 
     fn mark_3d(&self, key: Cache3DKey) {
-        if let Ok(mut state) = self.state.write() {
-            state.three_d = Some((key, Scene3DReadiness::GpuReady));
-        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.three_d = Some((key, Scene3DReadiness::GpuReady));
     }
 
     fn mark_3d_cpu_only(&self, key: Cache3DKey) {
-        if let Ok(mut state) = self.state.write() {
-            state.three_d = Some((key, Scene3DReadiness::CpuOnly));
-        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.three_d = Some((key, Scene3DReadiness::CpuOnly));
     }
 }
 

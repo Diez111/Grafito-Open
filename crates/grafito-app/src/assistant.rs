@@ -67,6 +67,51 @@ fn spawn_profile_save(profile: grafito_profile::StudentProfile, path: PathBuf) {
         });
 }
 
+/// Carga el registry de plugins desde los 3 directorios y aplica las
+/// preferencias persistidas. I/O pura, apta para worker (sin estado de UI).
+fn load_plugin_registry() -> grafito_plugins::PluginRegistry {
+    let context = plugin_validation_context();
+    let config = crate::utils::load_config();
+    let mut registry = grafito_plugins::PluginRegistry::load_many(
+        &[
+            &crate::utils::plugins_dir(),
+            &crate::utils::user_data_plugins_dir(),
+            &crate::utils::system_plugins_dir(),
+        ],
+        &context,
+    );
+    for plugin in &mut registry.plugins {
+        let id = plugin.manifest.plugin.id.clone();
+        let automatic = plugin.manifest.plugin.activation != "manual";
+        plugin.enabled = if config.enabled_plugins.contains(&id) {
+            true
+        } else if config.disabled_plugins.contains(&id) {
+            false
+        } else {
+            automatic
+        };
+    }
+    registry
+}
+
+/// Worker de carga de plugins: `None` si el OS rechaza el thread (el caller
+/// cae a la carga sincrónica una única vez).
+fn spawn_plugin_load(
+    ctx: &egui::Context,
+) -> Option<std::sync::mpsc::Receiver<grafito_plugins::PluginRegistry>> {
+    let ctx = egui::Context::clone(ctx);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("plugin-load".into())
+        .spawn(move || {
+            let registry = load_plugin_registry();
+            let _ = tx.send(registry);
+            ctx.request_repaint();
+        })
+        .ok()?;
+    Some(rx)
+}
+
 /// B7 — ¿El texto pide ejercitar? (botón «Andamiar» o pedido en el chat).
 /// Puro y testeable. No pisa preguntas («qué es una derivada» → false:
 /// sólo dispara con verbo de ejercitación explícito).
@@ -4199,8 +4244,33 @@ impl GrafitoApp {
         // B5: drena el export a GIF de la card (sin bloquear; solo join si terminó).
         self.poll_gif_export_job(ctx);
         if !self.plugins_loaded {
-            self.plugins_loaded = true;
-            self.load_assistant_plugins();
+            // Carga en worker: read_dir recursivo de 3 dirs + manifiestos
+            // fuera del primer frame (antes bloqueaba la UI al arrancar).
+            if let Some(job) = self.pending_plugins_job.take() {
+                match job.try_recv() {
+                    Ok(registry) => {
+                        self.plugin_registry = Some(registry);
+                        self.refresh_plugin_snapshot();
+                        self.plugins_loaded = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        self.pending_plugins_job = Some(job);
+                        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        log::warn!(
+                            "la carga de plugins en background se canceló; sigo sin plugins"
+                        );
+                        self.plugins_loaded = true;
+                    }
+                }
+            } else if let Some(job) = spawn_plugin_load(ctx) {
+                self.pending_plugins_job = Some(job);
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            } else {
+                // Sin worker disponible: carga sincrónica (una sola vez).
+                self.load_assistant_plugins();
+            }
         }
         // S2: drena aclaraciones del canal lateral sin bloquear (try_recv).
         self.drain_pending_clarifications();
@@ -4211,30 +4281,11 @@ impl GrafitoApp {
     }
 
     /// Carga una sola vez el registry de plugins y aplica las preferencias del usuario.
+    /// Fallback sin worker: la ruta normal es [`spawn_plugin_load`].
     fn load_assistant_plugins(&mut self) {
-        let context = plugin_validation_context();
-        let config = crate::utils::load_config();
-        let mut registry = grafito_plugins::PluginRegistry::load_many(
-            &[
-                &crate::utils::plugins_dir(),
-                &crate::utils::user_data_plugins_dir(),
-                &crate::utils::system_plugins_dir(),
-            ],
-            &context,
-        );
-        for plugin in &mut registry.plugins {
-            let id = plugin.manifest.plugin.id.clone();
-            let automatic = plugin.manifest.plugin.activation != "manual";
-            plugin.enabled = if config.enabled_plugins.contains(&id) {
-                true
-            } else if config.disabled_plugins.contains(&id) {
-                false
-            } else {
-                automatic
-            };
-        }
-        self.plugin_registry = Some(registry);
+        self.plugin_registry = Some(load_plugin_registry());
         self.refresh_plugin_snapshot();
+        self.plugins_loaded = true;
     }
 
     /// Refresca el snapshot mostrado en la ventana de ajustes del asistente.

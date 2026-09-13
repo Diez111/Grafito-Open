@@ -125,10 +125,10 @@
 - [x] F14.1.6 Gates Ola 1 + commit
 
 **Ola 2 — I/O fuera de UI + fallos honestos**
-- [ ] F14.2.1 plugins/config/profile/keyring a workers
-- [ ] F14.2.2 `Disconnected` ≠ silencio en los 4 polls
-- [ ] F14.2.3 hover throttle temporal + poison `GpuSceneReadiness`
-- [ ] F14.2.4 Gates Ola 2 + commit
+- [x] F14.2.1 plugins a worker (`spawn_plugin_load`, fallback sync una vez) + `save_app_config` a worker con merge y write atómico (`write_text_atomic`); keyring diferido con rationale (requiere refactor del path de requests)
+- [x] F14.2.2 `Disconnected` ≠ silencio en open/export/import CSV/text/recovery con toast honesto
+- [x] F14.2.3 hover throttle temporal 50ms (`hover_candidate_time` estaba muerto) + poison recuperado en `GpuSceneReadiness`
+- [x] F14.2.4 Gates Ola 2 + commit
 
 **Ola 3 — tests**
 - [ ] F14.3.1 determinismo: mtime inyectado, rate-limit serializado, sin sleeps en bordes

@@ -369,6 +369,17 @@ mod autosave_recovery_tests {
     }
 }
 
+/// Persiste la config con los campos que se editan en otra ruta (plugins y
+/// onboarding) leídos del archivo: lo usa el worker de `save_app_config`.
+/// I/O pura, sin estado de UI.
+fn save_config_merging(mut requested: AppConfig) {
+    let existing = load_config();
+    requested.onboarding_completed = existing.onboarding_completed;
+    requested.enabled_plugins = existing.enabled_plugins;
+    requested.disabled_plugins = existing.disabled_plugins;
+    save_config(&requested);
+}
+
 /// Spawns document save in background — evita bloquear UI thread (60fps).
 /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
 /// Devuelve `None` si el OS rechaza el thread (el caller degrada a `SaveAttempt::Failed`).
@@ -1601,6 +1612,10 @@ pub struct GrafitoApp {
     pub(crate) mora_texture_load_attempted: bool,
     /// Registry de plugins del asistente, cargado una sola vez.
     pub(crate) plugin_registry: Option<grafito_plugins::PluginRegistry>,
+    /// Worker de carga de plugins: el `read_dir` recursivo + manifiestos salen
+    /// del primer frame (antes bloqueaban la UI en el arranque).
+    pub(crate) pending_plugins_job:
+        Option<std::sync::mpsc::Receiver<grafito_plugins::PluginRegistry>>,
     /// Guarda si ya se intentó cargar los plugins una vez.
     pub(crate) plugins_loaded: bool,
     /// Cache de bloques del transcript del asistente (persistente entre frames).
@@ -2335,6 +2350,7 @@ impl GrafitoApp {
             mora_texture: None,
             mora_texture_load_attempted: false,
             plugin_registry: None,
+            pending_plugins_job: None,
             plugins_loaded: false,
             assistant_blocks_cache: grafito_ui::assistant::AssistantBlocksCache::default(),
             whiteboard_open: false,
@@ -2709,7 +2725,12 @@ impl GrafitoApp {
                 self.pending_recovery_job = Some(job);
             }
             Err(TryRecvError::Disconnected) => {
+                // Worker caído: avisar en vez de fingir "no hay autosave".
                 self.recovery_checked_path = Some(job.main_path);
+                self.notify(
+                    "No se pudo revisar el autosave del arranque",
+                    grafito_ui::toast::ToastKind::Error,
+                );
             }
         }
     }
@@ -3033,10 +3054,10 @@ impl GrafitoApp {
     }
 
     pub(crate) fn save_app_config(&self) {
-        // Se conservan los toggles de plugins ya persistidos; los cambios de
-        // plugins se guardan en su propia ruta en assistant.rs.
-        let existing = load_config();
-        save_config(&AppConfig {
+        // Snapshot de lo que la UI cambió; el merge con lo persistido (toggles
+        // de plugins que se guardan en su propia ruta) y el write van a un
+        // worker: cada toggle bloqueaba el hilo de UI con read + write.
+        let requested = AppConfig {
             dark_mode: self.dark_mode,
             show_grid: self.show_grid,
             snap_to_grid: self.snap_to_grid,
@@ -3046,13 +3067,22 @@ impl GrafitoApp {
             allow_fusion_fallback: self.assistant.allow_fusion_fallback,
             assistant_full_permission: self.assistant.full_permission,
             assistant_agent_mode: self.assistant.agent_mode,
-            onboarding_completed: existing.onboarding_completed,
-            enabled_plugins: existing.enabled_plugins,
-            disabled_plugins: existing.disabled_plugins,
+            onboarding_completed: false,
+            enabled_plugins: Vec::new(),
+            disabled_plugins: Vec::new(),
             advanced_red_opt_in: self.advanced_red_opt_in,
             // O2 i18n: el idioma se edita en vivo y persiste aquí.
             locale: self.locale,
-        });
+        };
+        let payload = requested.clone();
+        let spawned = std::thread::Builder::new()
+            .name("config-save".into())
+            .spawn(move || save_config_merging(requested));
+        if let Err(error) = spawned {
+            // Sin worker disponible: guardar igual (no perder la preferencia).
+            log::warn!("no se pudo lanzar el worker de config ({error}); guardando en UI");
+            save_config_merging(payload);
+        }
     }
 
     pub(crate) fn re_evaluate_constraints(&mut self, order: &[usize]) {
@@ -4300,7 +4330,15 @@ impl GrafitoApp {
                 Err(TryRecvError::Empty) => {
                     self.pending_open_job = Some(job);
                 }
-                Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Disconnected) => {
+                    // Worker caído: jamás dejar "Abriendo…" eterno en silencio.
+                    self.cas_result = "No se pudo abrir el documento".to_string();
+                    self.notify(
+                        "No se pudo abrir el documento (el proceso de lectura terminó)",
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    ctx.request_repaint();
+                }
             }
         }
         // Export
@@ -4330,7 +4368,14 @@ impl GrafitoApp {
                 Err(TryRecvError::Empty) => {
                     self.pending_export_job = Some(job);
                 }
-                Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.cas_result = "No se pudo exportar: el proceso terminó".to_string();
+                    self.notify(
+                        "No se pudo exportar (el proceso terminó sin resultado)",
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    ctx.request_repaint();
+                }
             }
         }
         // Import .ggb (F1-1): Piel pura — I/O + parse ya ocurrieron en background.
@@ -4403,7 +4448,15 @@ impl GrafitoApp {
                 Err(TryRecvError::Empty) => {
                     self.pending_import_job = Some(job);
                 }
-                Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.cas_result =
+                        "No se pudo importar la tabla: el proceso terminó".to_string();
+                    self.notify(
+                        "No se pudo importar la tabla (el proceso terminó sin resultado)",
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    ctx.request_repaint();
+                }
             }
         }
         // Escritura genérica de texto (export LaTeX del protocolo).
@@ -4425,7 +4478,15 @@ impl GrafitoApp {
                 Err(TryRecvError::Empty) => {
                     self.pending_text_job = Some(job);
                 }
-                Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.cas_result =
+                        "No se pudo exportar el protocolo: el proceso terminó".to_string();
+                    self.notify(
+                        "No se pudo exportar el protocolo (el proceso terminó sin resultado)",
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    ctx.request_repaint();
+                }
             }
         }
         self.poll_implicit_surface_slot(ctx);
@@ -8684,6 +8745,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         mora_texture: None,
         mora_texture_load_attempted: false,
         plugin_registry: None,
+        pending_plugins_job: None,
         plugins_loaded: false,
         assistant_blocks_cache: grafito_ui::assistant::AssistantBlocksCache::default(),
         whiteboard_open: false,

@@ -1045,10 +1045,17 @@ impl GrafitoApp {
 
                 if dist_moved > 5.0 {
                     self.hover_candidate_pos = Some(world);
+                    self.hover_candidate_time = 0.0;
                     // Reset hovered_analysis so we don't show old ghosts while moving fast
                     self.hovered_analysis = None;
                 } else {
-                    self.update_hover_analysis(world, pixel_tolerance);
+                    // Debounce temporal (~30fps): el cursor quieto no debe
+                    // re-correr el análisis (snap + picks) en cada frame.
+                    let now = ui.ctx().input(|input| input.time);
+                    if now - self.hover_candidate_time >= HOVER_ANALYSIS_INTERVAL_SECS {
+                        self.hover_candidate_time = now;
+                        self.update_hover_analysis(world, pixel_tolerance);
+                    }
                 }
             }
         } else {
@@ -1386,6 +1393,9 @@ impl GrafitoApp {
 
 /// Ancho de la pista del slider (4 × SPACE_XXL = 160 px, sin literales).
 const CANVAS_SLIDER_TRACK_WIDTH: f32 = SPACE_XXL + SPACE_XXL + SPACE_XXL + SPACE_XXL;
+
+/// Intervalo mínimo entre análisis de hover con el cursor quieto (~30fps).
+const HOVER_ANALYSIS_INTERVAL_SECS: f64 = 0.05;
 /// Clave temporal (memoria egui) con el flag de hover para el cursor Grab.
 const CANVAS_SLIDER_HOVER_KEY: &str = "canvas_slider_hover";
 /// Clave temporal (memoria egui) con el nombre del slider en arrastre.

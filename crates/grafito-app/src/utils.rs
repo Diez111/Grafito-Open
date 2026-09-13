@@ -19,7 +19,7 @@ pub(crate) fn to_color32(c: Color) -> Color32 {
     )
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AppConfig {
     pub(crate) dark_mode: bool,
     pub(crate) show_grid: bool,
@@ -419,7 +419,9 @@ pub(crate) fn save_config(config: &AppConfig) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(err) = std::fs::write(&path, json) {
+        // Escritura atómica (tmp + rename): un cierre a mitad de write no
+        // debe truncar las preferencias (antes: `fs::write` no atómico).
+        if let Err(err) = crate::export::write_text_atomic(&path, &json) {
             log::warn!("No se pudo guardar {}: {err}", path.display());
         }
     }
