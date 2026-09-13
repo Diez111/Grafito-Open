@@ -52,6 +52,9 @@ const PANEL_DATA_MAX_WIDTH: f32 = 360.0;
 const PANEL_BUTTON_H: f32 = 28.0;
 /// Alto de celdas editables de la hoja.
 const SHEET_CELL_H: f32 = 24.0;
+/// Alto ÚNICO de los controles de la hoja (chip de rango, flechas, «Ir a» y
+/// sus botones): un solo token para que todos midan exactamente lo mismo.
+const SHEET_CONTROL_H: f32 = 26.0;
 
 /// `true` si el panel está angosto y conviene apilar en vertical.
 fn panel_is_narrow(ui: &egui::Ui) -> bool {
@@ -7632,17 +7635,22 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
     // ── Navegación de la hoja ──
     // Dos filas de ancho seguro: rango (o celda en edición) + cuatro flechas
-    // iguales; abajo «Ir a» + Ir + A1. Los anchos se reparten con
-    // `sheet_nav_metrics` (pura, testeada de 160 a 520 px): la suma nunca
-    // desborda el panel ni envuelve. Cero `Grid`: los botones no se escalonan.
-    let control_h = SHEET_CELL_H + 2.0;
+    // iguales; abajo «Ir a» + Ir + A1. Todos los controles comparten
+    // `SHEET_CONTROL_H` (misma altura exacta) y `sheet_nav_metrics` reparte el
+    // ancho sin desbordar. Cero `Grid`: los botones no se escalonan.
     let metrics = sheet_nav_metrics(ui.available_width());
     let mut goto_requested = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_XS;
+        ui.spacing_mut().interact_size.y = SHEET_CONTROL_H;
+        // Padding local: el theme usa 16×8 para botones "calmos"; acá el set
+        // de navegación debe medir EXACTO `SHEET_CONTROL_H`.
+        ui.spacing_mut().button_padding = egui::vec2(SPACE_SM, SPACE_XS);
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        let (chip_rect, chip_resp) =
-            ui.allocate_exact_size(egui::vec2(metrics.chip_w, control_h), egui::Sense::hover());
+        let (chip_rect, chip_resp) = ui.allocate_exact_size(
+            egui::vec2(metrics.chip_w, SHEET_CONTROL_H),
+            egui::Sense::hover(),
+        );
         if ui.is_rect_visible(chip_rect) {
             let theme = current_theme(&ctx);
             let chip_text = edit
@@ -7666,10 +7674,15 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                 chip_color,
             );
         }
-        chip_resp.on_hover_text("Celda en edición (accent) o esquina visible de la hoja 400×400.");
+        chip_resp.on_hover_text(format!(
+            "Celda en edición (accent) o esquina visible de la hoja 400×400. Ventana {} · 10 000 celdas vivas.",
+            view.window_label(cols)
+        ));
         let arrow = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
+            // `add_sized` + padding local reducido: el frame llena el alto
+            // exacto del token (chip, flechas y botones quedan a ras).
             ui.add_sized(
-                [metrics.arrow_w, control_h],
+                [metrics.arrow_w, SHEET_CONTROL_H],
                 egui::Button::new(egui::RichText::new(glyph).size(TYPE_XS))
                     .wrap_mode(egui::TextWrapMode::Extend)
                     .rounding(RADIUS_SM),
@@ -7695,9 +7708,11 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     });
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_XS;
+        ui.spacing_mut().interact_size.y = SHEET_CONTROL_H;
+        ui.spacing_mut().button_padding = egui::vec2(SPACE_SM, SPACE_XS);
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         let resp = ui.add_sized(
-            [metrics.field_w, control_h],
+            [metrics.field_w, SHEET_CONTROL_H],
             egui::TextEdit::singleline(&mut edit.goto)
                 .hint_text("Ir a celda (C3)")
                 .font(egui::FontId::monospace(TYPE_XS)),
@@ -7710,7 +7725,7 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         }
         if ui
             .add_sized(
-                [metrics.action_w, control_h],
+                [metrics.action_w, SHEET_CONTROL_H],
                 egui::Button::new(egui::RichText::new("Ir").size(TYPE_XS)).rounding(RADIUS_SM),
             )
             .on_hover_text("Ir a la celda escrita")
@@ -7720,7 +7735,7 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         }
         if ui
             .add_sized(
-                [metrics.action_w, control_h],
+                [metrics.action_w, SHEET_CONTROL_H],
                 egui::Button::new(egui::RichText::new("A1").size(TYPE_XS)).rounding(RADIUS_SM),
             )
             .on_hover_text("Volver al origen A1")
@@ -7765,12 +7780,17 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             let cell_w = sheet_cell_width_for(ui.available_width(), cols);
             egui::ScrollArea::horizontal()
                 .id_salt("gc_sheet_editable_scroll")
-                .auto_shrink([false, false])
+                // Solo crece a lo ancho: `false` vertical estiraba el marco
+                // con aire de más (la tabla se veía más alta de lo que es).
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    // El `interact_size` global (38×26) imponía filas de 26:
+                    // la hoja fija el suyo para medir lo que dice la celda.
+                    ui.spacing_mut().interact_size.y = SHEET_CELL_H;
                     egui::Grid::new("gc_sheet_editable")
                         .num_columns(cols + 1)
                         .striped(true)
-                        .spacing([SPACE_XS, 2.0])
+                        .spacing([SPACE_XS, 0.0])
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new("").size(TYPE_XS));
                             for col in 0..cols {
@@ -7963,15 +7983,6 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         );
         ctx.request_repaint();
     }
-    ui.add_space(SPACE_XS);
-    ui.label(
-        egui::RichText::new(format!(
-            "Ventana {} · hoja 400×400 · 10 000 celdas vivas.",
-            view.window_label(cols)
-        ))
-        .color(txt_dim)
-        .size(TYPE_XS),
-    );
     ctx.data_mut(|data| data.insert_temp(id, edit));
     ctx.data_mut(|data| data.insert_temp(view_id, view));
 }
@@ -8498,14 +8509,13 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
         "Números y fórmulas que recomputan el documento.",
         |ui| {
             ui.label(
-                egui::RichText::new("Clic edita · Enter confirma · `—` = fórmula sin resolver.")
+                egui::RichText::new("Clic edita · Enter confirma · `—` = sin resolver")
                     .color(txt_dim)
                     .size(TYPE_XS),
             )
             .on_hover_text(
                 "Guardá números y fórmulas (`=A1+B1`, `=x(A)`) y todo lo que las usa se recomputa solo: puntos, funciones con `p`, tablas y gráficos. Tope del core: 10 000 celdas vivas, no infinita a propósito.",
             );
-            ui.add_space(SPACE_XS);
             draw_sheet_editable_grid(ui, app);
         },
     );
@@ -8732,8 +8742,8 @@ mod gc_piel_tests {
         uniform_cdf, uniform_pdf, uniform_quantile_honest, visible_sheet_cols,
         wc_exact_integral_command_text, wc_riemann_command_text, wc_study_command_text,
         wc_taylor_command_text, wc_taylor_remainder_line, MAX_BINOMIAL_N, MAX_GEOMETRIC_K,
-        MAX_PANEL_DF, PANEL_BUTTON_H, PANEL_NARROW_WIDTH, SHEET_CELL_H, SHEET_VIEW_COLS,
-        SHEET_VIEW_ROWS,
+        MAX_PANEL_DF, PANEL_BUTTON_H, PANEL_NARROW_WIDTH, SHEET_CELL_H, SHEET_CONTROL_H,
+        SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
     use grafito_ui::tokens::{HIT_TARGET_MIN, SPACE_XS};
@@ -8745,6 +8755,8 @@ mod gc_piel_tests {
         // Botones ≥ WCAG 2.5.8 (24 px) y celdas con alto legible.
         assert!(PANEL_BUTTON_H >= HIT_TARGET_MIN);
         assert!(SHEET_CELL_H >= HIT_TARGET_MIN);
+        // Controles de la hoja (chip/flechas/Ir): mismo alto, ≥ hit target.
+        assert!(SHEET_CONTROL_H >= HIT_TARGET_MIN);
         // Panel angosto: el umbral vive entre el mínimo (180) y el default (260).
         assert!(PANEL_NARROW_WIDTH > 180.0 && PANEL_NARROW_WIDTH < 340.0);
         // Celdas: 6 columnas repartidas, clamp 36..=96. A 300-360 px de panel
