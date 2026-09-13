@@ -8158,10 +8158,10 @@ impl GrafitoApp {
                             .strong()
                             .color(theme.accent),
                     );
-                    ui.add_space(2.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
                     ui.label(
                         egui::RichText::new(format!("Versión {}", env!("CARGO_PKG_VERSION")))
-                            .size(13.0)
+                            .size(grafito_ui::tokens::TYPE_SM)
                             .color(theme.text_secondary),
                     );
                     ui.label(
@@ -8184,9 +8184,9 @@ impl GrafitoApp {
                         .size(grafito_ui::tokens::TYPE_SM)
                         .color(theme.text_primary),
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_SM);
                     ui.separator();
-                    ui.add_space(10.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_SM);
                     ui.label(
                         egui::RichText::new("Creado por Lautaro Agustin Diez")
                             .size(grafito_ui::tokens::TYPE_SM)
@@ -8205,14 +8205,16 @@ impl GrafitoApp {
                             .color(theme.text_tertiary),
                     );
                 });
-                ui.add_space(14.0);
+                ui.add_space(grafito_ui::tokens::SPACE_LG);
                 ui.separator();
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.vertical_centered(|ui| {
                     if ui
                         .add(
-                            egui::Button::new(egui::RichText::new("Cerrar").size(13.0))
-                                .min_size(egui::vec2(96.0, 28.0)),
+                            egui::Button::new(
+                                egui::RichText::new("Cerrar").size(grafito_ui::tokens::TYPE_SM),
+                            )
+                            .min_size(egui::vec2(96.0, 30.0)),
                         )
                         .clicked()
                     {
