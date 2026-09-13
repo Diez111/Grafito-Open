@@ -131,9 +131,9 @@
 - [x] F14.2.4 Gates Ola 2 + commit
 
 **Ola 3 — tests**
-- [ ] F14.3.1 determinismo: mtime inyectado, rate-limit serializado, sin sleeps en bordes
-- [ ] F14.3.2 gaps: 10MB, 2000 chars, LRU 128, diagnostics 64, snap grid, preflight
-- [ ] F14.3.3 Gates Ola 3 + commit
+- [x] F14.3.1 determinismo: mtime inyectado con `File::set_modified` en recovery (app) y persistence (core), sin `sleep` reales
+- [ ] F14.3.2 gaps: 10MB, 2000 chars, LRU 128, diagnostics 64, snap grid, preflight (pendiente)
+- [ ] F14.3.3 Gates Ola 3 + commit (parcial)
 
 **Ola 4 — arquitectura + docs + supply**
 - [ ] F14.4.1 docs a la realidad (tamaños, shortcuts.rs, coverage 71, ci.yml 608, versión 1.1.0)

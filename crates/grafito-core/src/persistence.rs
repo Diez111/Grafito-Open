@@ -840,6 +840,18 @@ mod tests {
         serde_json::from_value(raw).expect("deserialize unchecked test document")
     }
 
+    /// Fija el mtime sin reloj real (determinista en FS de granularidad gruesa).
+    fn set_test_mtime(path: &std::path::Path, epoch_secs: u64) {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("abrir para fijar mtime");
+        file.set_modified(
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(epoch_secs),
+        )
+        .expect("fijar mtime");
+    }
+
     fn temporary_path(name: &str) -> std::path::PathBuf {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
@@ -1861,9 +1873,11 @@ mod tests {
         let main = temporary_path("recovery_order.json");
         // Documento principal guardado primero...
         write_document_atomic(&sample_document(), &main).expect("write main document");
+        set_test_mtime(&main, 1_000);
         // ...sidecar escrito después ⇒ más nuevo ⇒ se ofrece.
         let sidecar =
             write_autosave_sidecar(&sample_document(), &main).expect("write newer sidecar");
+        set_test_mtime(&sidecar, 2_000);
         let newer = load_autosave_candidate(&main).expect("newer sidecar loads");
         assert!(newer.is_some(), "sidecar más nuevo debe ofrecerse");
         assert_eq!(newer.expect("candidato").document.object_count(), 2);

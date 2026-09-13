@@ -237,6 +237,19 @@ mod autosave_recovery_tests {
         doc
     }
 
+    /// Fija el mtime sin sleeps: determinista aunque el FS tenga granularidad
+    /// gruesa (el orden "sidecar más nuevo" ya no depende del reloj real).
+    fn set_recovery_mtime(path: &Path, epoch_secs: u64) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("abrir para fijar mtime");
+        file.set_modified(
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(epoch_secs),
+        )
+        .expect("fijar mtime");
+    }
+
     fn cleanup_recovery_path(main: &Path) {
         if let Some(sidecar) = grafito_core::persistence::autosave_sidecar_path(main) {
             let _ = std::fs::remove_file(sidecar);
@@ -273,10 +286,11 @@ mod autosave_recovery_tests {
         cleanup_recovery_path(&main);
         let main_doc = recovery_doc_with_points(2);
         grafito_core::persistence::write_document_atomic(&main_doc, &main).expect("write main");
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        set_recovery_mtime(&main, 1_000);
         let sidecar_doc = recovery_doc_with_points(3);
         let sidecar = grafito_core::persistence::write_autosave_sidecar(&sidecar_doc, &main)
             .expect("write sidecar");
+        set_recovery_mtime(&sidecar, 2_000);
         assert!(sidecar.exists());
 
         let candidate =
@@ -309,12 +323,13 @@ mod autosave_recovery_tests {
         cleanup_recovery_path(&main);
         let doc = recovery_doc_with_points(2);
         grafito_core::persistence::write_document_atomic(&doc, &main).expect("write main");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        grafito_core::persistence::write_autosave_sidecar(&doc, &main).expect("write sidecar");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        // Reescribir el main lo deja más nuevo (o igual) que el sidecar:
-        // `should_offer` estricto (`>`) ya no ofrece.
+        set_recovery_mtime(&main, 1_000);
+        let sidecar =
+            grafito_core::persistence::write_autosave_sidecar(&doc, &main).expect("write sidecar");
+        set_recovery_mtime(&sidecar, 2_000);
+        // Reescribir el main lo deja más nuevo que el sidecar: `>` ya no ofrece.
         grafito_core::persistence::write_document_atomic(&doc, &main).expect("rewrite main");
+        set_recovery_mtime(&main, 3_000);
 
         let stale = grafito_core::persistence::load_autosave_candidate(&main).expect("stale loads");
         assert!(
@@ -331,10 +346,11 @@ mod autosave_recovery_tests {
         cleanup_recovery_path(&main);
         let main_doc = recovery_doc_with_points(2);
         grafito_core::persistence::write_document_atomic(&main_doc, &main).expect("write main");
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        set_recovery_mtime(&main, 1_000);
         let sidecar_doc = recovery_doc_with_points(5);
         let sidecar = grafito_core::persistence::write_autosave_sidecar(&sidecar_doc, &main)
             .expect("write sidecar");
+        set_recovery_mtime(&sidecar, 2_000);
 
         let candidate = grafito_core::persistence::load_autosave_candidate(&main)
             .expect("load")
