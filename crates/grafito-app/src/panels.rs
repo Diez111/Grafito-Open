@@ -7299,15 +7299,14 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     // envuelvan. La fila "Ir a" salta directo a una celda con el parser
     // del cerebro (`parse_cell_reference`).
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-    // ── Navegación de la hoja (grupo único, estilo escandinavo) ──
-    // Fila 1: badge del rango visible + salto «Ir a» con el botón Ir pegado
-    // al campo (grupo de entrada, todo a 26 px de alto). Fila 2: pad
-    // direccional 3×3 con A1 al centro (las esquinas quedan libres para que
-    // la cruz se lea de un vistazo). Sin superposiciones ni wrap.
+    // ── Navegación de la hoja ──
+    // Fila 1: badge del rango visible + campo «Ir a» con etiqueta propia.
+    // Filas 2-3: cuadrícula 3×2 de botones iguales (◀▲▶ / ▼ A1 Ir).
+    // Todo a 26 px de alto, misma línea base y sin wrap.
     let control_h = SHEET_CELL_H + 2.0;
     let mut goto_requested = false;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         let chip_w = 62.0;
         let (chip_rect, chip_resp) =
@@ -7329,14 +7328,17 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         chip_resp.on_hover_text(
             "Esquina visible de la hoja de 400×400. Movete con las flechas o «Ir a».",
         );
-        ui.add_space(SPACE_XS);
-        // Campo + botón pegado: un solo grupo de entrada.
-        let ir_w = 36.0;
-        let field_w = (ui.available_width() - ir_w - 2.0).max(72.0);
+        ui.label(
+            egui::RichText::new("Ir a")
+                .color(txt_dim)
+                .size(TYPE_XS)
+                .strong(),
+        );
+        let field_w = ui.available_width().max(56.0);
         let resp = ui.add_sized(
             [field_w, control_h],
             egui::TextEdit::singleline(&mut edit.goto)
-                .hint_text("Ir a C3")
+                .hint_text("C3")
                 .font(egui::FontId::monospace(TYPE_XS)),
         );
         if resp.changed() {
@@ -7345,19 +7347,6 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         if resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
             goto_requested = true;
         }
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if ui
-                .add_sized(
-                    [ir_w, control_h],
-                    egui::Button::new(egui::RichText::new("Ir").size(TYPE_XS)),
-                )
-                .on_hover_text("Ir a la celda escrita (o Enter)")
-                .clicked()
-            {
-                goto_requested = true;
-            }
-        });
     });
     let nav_cell_w = ((ui.available_width() - 2.0 * SPACE_XS) / 3.0).max(40.0);
     egui::Grid::new("gc_sheet_nav")
@@ -7373,32 +7362,27 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                 .clicked()
             };
             let step = cols.max(1);
-            let empty = |ui: &mut egui::Ui| {
-                ui.allocate_space(egui::vec2(nav_cell_w, control_h));
-            };
-            empty(ui);
-            if nav(ui, "▲", "Subir 8 filas") {
-                view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS);
-            }
-            empty(ui);
-            ui.end_row();
             if nav(ui, "◀", "Retroceder columnas") {
                 view.origin_col = view.origin_col.saturating_sub(step);
             }
-            if nav(ui, "A1", "Volver al origen A1") {
-                view = SheetViewState::default();
+            if nav(ui, "▲", "Subir 8 filas") {
+                view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS);
             }
             if nav(ui, "▶", "Avanzar columnas") {
                 view.origin_col = view.origin_col.saturating_add(step);
                 view = view.clamped();
             }
             ui.end_row();
-            empty(ui);
             if nav(ui, "▼", "Bajar 8 filas") {
                 view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
                 view = view.clamped();
             }
-            empty(ui);
+            if nav(ui, "A1", "Volver al origen A1") {
+                view = SheetViewState::default();
+            }
+            if nav(ui, "Ir", "Ir a la celda escrita arriba") {
+                goto_requested = true;
+            }
             ui.end_row();
         });
     if goto_requested && !edit.goto.trim().is_empty() {
