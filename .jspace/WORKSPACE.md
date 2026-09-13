@@ -1,7 +1,7 @@
 # J-Space Workspace Ledger
 
 ## Goal
-Auditoría v2 lista — 0 unwraps prod, canales acotados, TOCTOU cerrado, matemática exacta, memoria presupuestada, tokens 100% — sync docs 14→17 jobs / 92 caps / fuzz 6 targets listo para push
+Rediseño escandinavo Datos/Prob F13 cerrado — nav A1 en 2 filas sin desborde (métricas puras testeadas), Datos con resumen de rango real y microcopy a hover, Prob con p-valores/cuantiles rápidos/tiles/bandas σ — gates verdes y release 14:02 listo para instalar
 
 ## Core
 
@@ -13,6 +13,7 @@ Auditoría v2 lista — 0 unwraps prod, canales acotados, TOCTOU cerrado, matem�
 - ✓05 HARNESS 2026-09-05 skills 528/528 + config: 8 skills curadas + 520 importadas (46 repos depth-1, 67MB), frontmatter name==dirname + regex + desc 1-1024 validados por script, 8 agents (5 json + 3 md merge), 7 MCP, 5 instructions, formatter/lsp/subagent_depth 2 — verified by: python validator OK=528 FAIL=0 + opencode debug config EXIT 0 (AGENTS 8, MCP 7)
 - ✓06 RUNTIME 2026-09-05 toolchain + gates en-box: cargo/rustc 1.92.0 MSRV exacta, bun 1.4.2, uv 0.12.10 (todo user-local, sin sudo); MCP 6/6 connected (bunx+uvx paths absolutos, `time` dado de baja sin paquete, `fetch` por uvx); plugin opencode-mem instalado + E2E `opencode run` HARNESS-OK; FileController (save/open/export/import-csv/latex a workers + SaveAttempt::Pending + pending_chained_action), ledger cerrado (record_tool_outcome/is_complete/fingerprint/save-load + reintentos/backoff + max_total_chars + verified real), codemod tokens 130 sitios, clippy fix commands.rs — verified by: fmt CHECK 0 + check --workspace OK + clippy -D warnings OK (app/ui/assistant/agent/command) + tests agent 47 + app 407 + ui 156 + command 77 + assistant 81 (0 failed)
 - ✓07 CONTROL+MEMORIA 2026-09-08: plugin global computer-control (6 tools E2E vía agente: screenshot/record/app/input/notify) + skill versionada + opencode-mem global + MCP memory global + servicio ydotoold usuario; memoria store→recall cross-sesión OK ("Grafito-Open"); terminal nativa E2E (launch→type→shot→kill) con evidencia en /tmp/opencode/proof/ — verified by: 3× opencode run (MEMORIZADO, recall, screenshot/record) + captura visual leída
+- ✓08 F13 Datos/Prob 2026-09-13: nav hoja `sheet_nav_metrics` 2 filas (captura E2E datos-fix-full.png: chip A1:D8 + ◀▶▲▼ + Ir/A1 sin desborde), `summarize_range` + card Resumen, `prob_param_row`/`stat_tile`/p-valores/cuantiles α/copiar/bandas σ, microcopy a hover — verified by: cargo fmt --check OK, clippy --workspace --all-targets -D warnings OK, cargo test -p grafito-app --lib 1041/1041 (+4 tests nuevos), release target/release/grafito 14:02; flaky ajeno confirmado `streaming_timeout_while_receiving_keeps_stage_and_kib` (HEAD también falla con stash)
 
 ## Open
 

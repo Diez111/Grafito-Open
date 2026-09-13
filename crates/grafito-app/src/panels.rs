@@ -6449,6 +6449,24 @@ fn draw_probability_plot(
                 return;
             }
             let (mu, sigma) = (state.mu, state.sigma);
+            // Regla empírica: bandas μ±1σ/2σ/3σ detrás de la curva (detalle
+            // pedagógico del caso Normal: 68.3% / 95.5% / 99.7%).
+            for (k, alpha) in [(3.0_f64, 0.05_f32), (2.0, 0.07), (1.0, 0.10)] {
+                let band_lo = ((mu - k * sigma - lo) / (hi - lo)) as f32;
+                let band_hi = ((mu + k * sigma - lo) / (hi - lo)) as f32;
+                let x0 = plot.min.x + band_lo.clamp(0.0, 1.0) * plot_w;
+                let x1 = plot.min.x + band_hi.clamp(0.0, 1.0) * plot_w;
+                if x1 > x0 {
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(x0, plot.min.y),
+                            egui::pos2(x1, plot_bot),
+                        ),
+                        0.0,
+                        accent.gamma_multiply(alpha),
+                    );
+                }
+            }
             paint_continuous_density(
                 &painter,
                 plot,
@@ -6460,7 +6478,7 @@ fn draw_probability_plot(
                 state.x,
                 accent,
                 txt_dim,
-                "P(X≤x) sombreada · μ±4σ".to_string(),
+                "P(X≤x) sombreada · bandas 1σ/2σ/3σ".to_string(),
             );
         }
         1 => {
@@ -6883,6 +6901,64 @@ fn prob_quantile_command(state: &ProbabilityPanelState) -> Option<String> {
     })
 }
 
+/// Colas honestas del caso: `(P(X ≤ x), P(X > x), 2·cola menor)`. Clampa a
+/// `[0, 1]` porque `1 − cdf` puede subfluir fuera de rango en colas extremas;
+/// nunca se muestra una probabilidad negativa o mayor que uno.
+fn prob_tail_values(cdf: f64) -> (f64, f64, f64) {
+    // NaN (no debería llegar: los wrappers devuelven `Err`) se trata como
+    // cola izquierda vacía, nunca como una probabilidad inventada.
+    let cdf = if cdf.is_nan() {
+        0.0
+    } else {
+        cdf.clamp(0.0, 1.0)
+    };
+    let right = (1.0 - cdf).clamp(0.0, 1.0);
+    let two = (2.0 * cdf.min(right)).clamp(0.0, 1.0);
+    (cdf, right, two)
+}
+
+/// Cuantiles rápidos del panel (α clásicos de tabla). Todos dentro de
+/// `(0.001, 0.999)`, el rango válido del slider de `p_inv`.
+const PROB_QUANTILE_ALPHAS: [f64; 6] = [0.01, 0.05, 0.10, 0.90, 0.95, 0.99];
+
+/// Fila de parámetro escandinava: rótulo + valor editable a la derecha y
+/// slider a ancho completo debajo, sin número duplicado en el medio.
+/// `logarithmic` para tasas (λ); el DragValue permite tipear el valor exacto.
+fn prob_param_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    decimals: usize,
+    logarithmic: bool,
+) {
+    let theme = current_theme(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(label)
+                .color(theme.text_tertiary)
+                .size(TYPE_XS)
+                .strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let speed = ((*range.end() - *range.start()).abs() / 200.0).max(0.001);
+            ui.add_sized(
+                [64.0, 22.0],
+                egui::DragValue::new(value)
+                    .speed(speed)
+                    .fixed_decimals(decimals)
+                    .update_while_editing(true),
+            );
+            let mut slider = egui::Slider::new(value, range).show_value(false);
+            if logarithmic {
+                slider = slider.logarithmic(true);
+            }
+            ui.add_sized([ui.available_width(), 18.0], slider);
+        });
+    });
+    ui.add_space(SPACE_XS);
+}
+
 /// Sección Probabilidad: Normal / Binomial / Poisson / t-Student / χ² / F
 /// / Geométrica / Uniforme / Exponencial con PDF/CDF honestos. Llamada desde el panel Vista (alcanzable) — sin
 /// botones mudos: el selector cambia la distribución y cada parámetro
@@ -6936,55 +7012,62 @@ pub(crate) fn draw_probability_section(
     );
     ui.add_space(SPACE_XS);
 
-    // Parámetros por distribución (sliders acotados + lectura honesta).
+    // Parámetros por distribución: rótulo + valor editable arriba, slider
+    // a ancho completo abajo (F13.4, sin número duplicado en el medio).
     match state.dist {
         0 => {
-            ui.add(egui::Slider::new(&mut state.mu, -10.0..=10.0).text("μ media"));
-            ui.add(egui::Slider::new(&mut state.sigma, 0.1..=5.0).text("σ desvío"));
-            ui.add(egui::Slider::new(&mut state.x, -10.0..=10.0).text("x punto"));
+            prob_param_row(ui, "μ media", &mut state.mu, -10.0..=10.0, 2, false);
+            prob_param_row(ui, "σ desvío", &mut state.sigma, 0.1..=5.0, 2, false);
+            prob_param_row(ui, "x punto", &mut state.x, -10.0..=10.0, 2, false);
         }
         1 => {
-            ui.add(egui::Slider::new(&mut state.n, 1.0..=MAX_BINOMIAL_N as f64).text("n ensayos"));
-            ui.add(egui::Slider::new(&mut state.p, 0.0..=1.0).text("p éxito"));
-            ui.add(egui::Slider::new(&mut state.k, 0.0..=MAX_BINOMIAL_N as f64).text("k éxitos"));
+            prob_param_row(
+                ui,
+                "n ensayos",
+                &mut state.n,
+                1.0..=MAX_BINOMIAL_N as f64,
+                0,
+                false,
+            );
+            prob_param_row(ui, "p éxito", &mut state.p, 0.0..=1.0, 3, false);
+            prob_param_row(
+                ui,
+                "k éxitos",
+                &mut state.k,
+                0.0..=MAX_BINOMIAL_N as f64,
+                0,
+                false,
+            );
         }
         2 => {
-            ui.add(
-                egui::Slider::new(&mut state.lambda, 0.1..=20.0)
-                    .logarithmic(true)
-                    .text("λ tasa"),
-            );
-            ui.add(egui::Slider::new(&mut state.k, 0.0..=50.0).text("k eventos"));
+            prob_param_row(ui, "λ tasa", &mut state.lambda, 0.1..=20.0, 2, true);
+            prob_param_row(ui, "k eventos", &mut state.k, 0.0..=50.0, 0, false);
         }
         3 => {
-            ui.add(egui::Slider::new(&mut state.df, 1.0..=30.0).text("gl libertad"));
-            ui.add(egui::Slider::new(&mut state.x, -6.0..=6.0).text("x punto"));
+            prob_param_row(ui, "gl libertad", &mut state.df, 1.0..=30.0, 0, false);
+            prob_param_row(ui, "x punto", &mut state.x, -6.0..=6.0, 2, false);
         }
         4 => {
-            ui.add(egui::Slider::new(&mut state.df, 1.0..=30.0).text("gl libertad"));
-            ui.add(egui::Slider::new(&mut state.x, 0.0..=20.0).text("x punto"));
+            prob_param_row(ui, "gl libertad", &mut state.df, 1.0..=30.0, 0, false);
+            prob_param_row(ui, "x punto", &mut state.x, 0.0..=20.0, 2, false);
         }
         5 => {
-            ui.add(egui::Slider::new(&mut state.df1, 1.0..=30.0).text("gl1"));
-            ui.add(egui::Slider::new(&mut state.df2, 1.0..=30.0).text("gl2"));
-            ui.add(egui::Slider::new(&mut state.x, 0.0..=10.0).text("x punto"));
+            prob_param_row(ui, "gl1", &mut state.df1, 1.0..=30.0, 0, false);
+            prob_param_row(ui, "gl2", &mut state.df2, 1.0..=30.0, 0, false);
+            prob_param_row(ui, "x punto", &mut state.x, 0.0..=10.0, 2, false);
         }
         6 => {
-            ui.add(egui::Slider::new(&mut state.p, 0.01..=1.0).text("p éxito"));
-            ui.add(egui::Slider::new(&mut state.k, 0.0..=50.0).text("k fallos"));
+            prob_param_row(ui, "p éxito", &mut state.p, 0.01..=1.0, 3, false);
+            prob_param_row(ui, "k fallos", &mut state.k, 0.0..=50.0, 0, false);
         }
         7 => {
-            ui.add(egui::Slider::new(&mut state.ua, -10.0..=10.0).text("a mínimo"));
-            ui.add(egui::Slider::new(&mut state.ub, -10.0..=10.0).text("b máximo"));
-            ui.add(egui::Slider::new(&mut state.x, -10.0..=10.0).text("x punto"));
+            prob_param_row(ui, "a mínimo", &mut state.ua, -10.0..=10.0, 2, false);
+            prob_param_row(ui, "b máximo", &mut state.ub, -10.0..=10.0, 2, false);
+            prob_param_row(ui, "x punto", &mut state.x, -10.0..=10.0, 2, false);
         }
         _ => {
-            ui.add(
-                egui::Slider::new(&mut state.lambda, 0.1..=10.0)
-                    .logarithmic(true)
-                    .text("λ tasa"),
-            );
-            ui.add(egui::Slider::new(&mut state.x, 0.0..=20.0).text("x punto"));
+            prob_param_row(ui, "λ tasa", &mut state.lambda, 0.1..=10.0, 2, true);
+            prob_param_row(ui, "x punto", &mut state.x, 0.0..=20.0, 2, false);
         }
     }
     ui.add_space(SPACE_SM);
@@ -7112,58 +7195,69 @@ pub(crate) fn draw_probability_section(
     })();
     match result {
         Ok((pdf, cdf, detail)) => {
-            egui::Grid::new("gc_prob_grid")
-                .num_columns(2)
-                .striped(true)
-                .spacing([10.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Caso").color(txt_dim).size(TYPE_SM));
+            let point_label = if prob_distribution_is_discrete(state.dist) {
+                "Puntual"
+            } else {
+                "Densidad"
+            };
+            // P-valores honestos: colas clampeadas a [0, 1], nunca negativas.
+            let (tail_left, tail_right, two_tails) = prob_tail_values(cdf);
+            // Fila del caso: nombre del cálculo a la izquierda, valor y
+            // copiar a la derecha; el detalle largo vive en el tooltip.
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Caso")
+                        .color(txt_dim)
+                        .size(TYPE_XS)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("Copiar")
+                        .on_hover_text("Copia el caso y sus probabilidades")
+                        .clicked()
+                    {
+                        ctx.copy_text(format!(
+                            "{detail} · {point_label} = {pdf:.6} · Acumulada = {cdf:.6} · P(X>x) = {tail_right:.6}"
+                        ));
+                        app.cas_result = "Caso copiado al portapapeles".to_string();
+                    }
                     ui.label(
-                        egui::RichText::new(detail)
+                        egui::RichText::new(&detail)
                             .color(txt_col)
                             .size(TYPE_SM)
                             .strong(),
-                    );
-                    ui.end_row();
-                    ui.label(
-                        egui::RichText::new(
-                            if state.dist == 1 || state.dist == 2 || state.dist == 6 {
-                                "Puntual"
-                            } else {
-                                "Densidad"
-                            },
-                        )
-                        .color(txt_dim)
-                        .size(TYPE_SM),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("{pdf:.6}"))
-                            .color(accent)
-                            .size(TYPE_SM)
-                            .strong(),
-                    );
-                    ui.end_row();
-                    ui.label(
-                        egui::RichText::new("Acumulada")
-                            .color(txt_dim)
-                            .size(TYPE_SM),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("{cdf:.6}"))
-                            .color(accent)
-                            .size(TYPE_SM)
-                            .strong(),
-                    );
-                    ui.end_row();
+                    )
+                    .on_hover_text("Caso evaluado en vivo con este motor");
                 });
+            });
+            ui.add_space(SPACE_XS);
+            stat_tile_row(
+                ui,
+                &[
+                    (point_label.to_string(), format!("{pdf:.6}")),
+                    ("Acumulada".to_string(), format!("{cdf:.6}")),
+                ],
+                accent,
+            );
+            ui.add_space(SPACE_XS);
+            stat_tile_row(
+                ui,
+                &[
+                    ("P(X ≤ x)".to_string(), format!("{tail_left:.6}")),
+                    ("P(X > x)".to_string(), format!("{tail_right:.6}")),
+                    ("2·cola menor".to_string(), format!("{two_tails:.6}")),
+                ],
+                txt_col,
+            );
             ui.label(
                 egui::RichText::new("f64 exacto; colas extremas pueden subfluir a 0.")
                     .color(txt_dim)
                     .size(TYPE_XS),
             );
             ui.add_space(SPACE_XS);
-            // Momentos analíticos (media/varianza) con `—` honesto si no
-            // están definidos para estos parámetros.
+            // Momentos analíticos (media/varianza/desvío) con `—` honesto si
+            // no están definidos para estos parámetros.
             ui.label(
                 egui::RichText::new("Momentos")
                     .color(hdr_col)
@@ -7172,37 +7266,21 @@ pub(crate) fn draw_probability_section(
             );
             ui.add_space(SPACE_XS);
             let (mean, variance) = distribution_moments(&state);
-            egui::Grid::new("gc_prob_moments")
-                .num_columns(2)
-                .striped(true)
-                .spacing([10.0, 4.0])
-                .show(ui, |ui| {
-                    let mut row = |key: &str, value: Option<f64>| {
-                        ui.label(egui::RichText::new(key).color(txt_dim).size(TYPE_SM));
-                        match value {
-                            Some(v) => {
-                                ui.label(
-                                    egui::RichText::new(format!("{v:.6}"))
-                                        .color(txt_col)
-                                        .size(TYPE_SM)
-                                        .strong(),
-                                );
-                            }
-                            None => {
-                                ui.label(
-                                    egui::RichText::new("—")
-                                        .color(txt_dim)
-                                        .size(TYPE_SM)
-                                        .strong(),
-                                )
-                                .on_hover_text("No definido con estos parámetros");
-                            }
-                        }
-                        ui.end_row();
-                    };
-                    row("Media", mean);
-                    row("Varianza", variance);
-                });
+            let deviation = variance.map(f64::sqrt);
+            let moment_text = |value: Option<f64>| {
+                value
+                    .map(format_statistic)
+                    .unwrap_or_else(|| "—".to_string())
+            };
+            stat_tile_row(
+                ui,
+                &[
+                    ("Media".to_string(), moment_text(mean)),
+                    ("Varianza".to_string(), moment_text(variance)),
+                    ("Desvío".to_string(), moment_text(deviation)),
+                ],
+                accent,
+            );
             ui.add_space(SPACE_XS);
             draw_probability_plot(ui, &state, accent, txt_dim);
             // Puente al motor: solo donde existe comando real (cero fantasma).
@@ -7243,11 +7321,22 @@ pub(crate) fn draw_probability_section(
             .size(TYPE_SM)
             .strong(),
     );
-    ui.add(
-        egui::Slider::new(&mut state.p_inv, 0.001..=0.999)
-            .text("p cuantil")
-            .fixed_decimals(3),
-    );
+    // α clásicos de tabla: un clic fija el cuantil (F13.3).
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
+        for alpha in PROB_QUANTILE_ALPHAS {
+            let selected = (state.p_inv - alpha).abs() < 1e-9;
+            if ui
+                .selectable_label(selected, format!("{alpha:.3}"))
+                .on_hover_text(format!("Cuantil {:.1}%", alpha * 100.0))
+                .clicked()
+            {
+                state.p_inv = alpha;
+            }
+        }
+    });
+    ui.add_space(SPACE_XS);
+    prob_param_row(ui, "p cuantil", &mut state.p_inv, 0.001..=0.999, 3, false);
     let quantile: Result<String, String> = (|| {
         Ok(match state.dist {
             0 => {
@@ -7326,18 +7415,31 @@ pub(crate) fn draw_probability_section(
     })();
     match quantile {
         Ok(text) => {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(text.as_str())
+                        .color(txt_col)
+                        .size(TYPE_SM)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("Copiar")
+                        .on_hover_text("Copia el cuantil calculado")
+                        .clicked()
+                    {
+                        ctx.copy_text(text.clone());
+                        app.cas_result = "Cuantil copiado al portapapeles".to_string();
+                    }
+                });
+            });
             ui.label(
-                egui::RichText::new(text)
-                    .color(txt_col)
-                    .size(TYPE_SM)
-                    .strong(),
-            );
-            ui.label(
-                egui::RichText::new(
-                    "Misma inversa que InverseNormal/InverseT/InverseChiSquared/InverseF/InverseExponential/InverseUniform (motor único); Geométrica acumula pmf y Uniforme/Exponencial usan forma cerrada.",
-                )
-                .color(txt_dim)
-                .size(TYPE_XS),
+                egui::RichText::new("Inversa numérica del motor único (Geométrica acumula pmf).")
+                    .color(txt_dim)
+                    .size(TYPE_XS),
+            )
+            .on_hover_text(
+                "Misma inversa que InverseNormal/InverseT/InverseChiSquared/InverseF/InverseExponential/InverseUniform; Geométrica acumula pmf y Uniforme/Exponencial usan forma cerrada.",
             );
             if let Some(command) = prob_quantile_command(&state) {
                 ui.add_space(SPACE_XS);
@@ -7460,6 +7562,33 @@ fn sheet_col_label(col: usize) -> String {
     letters.chars().rev().collect()
 }
 
+/// Métricas puras de la navegación de la hoja (F13.1): reparte el ancho
+/// disponible entre el chip de rango, las cuatro flechas (fila 1) y
+/// «Ir a» + Ir + A1 (fila 2). La suma de cada fila nunca desborda el panel:
+/// el chip cede primero (44..64), luego las flechas bajan a `HIT_TARGET_MIN`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SheetNavMetrics {
+    chip_w: f32,
+    arrow_w: f32,
+    field_w: f32,
+    action_w: f32,
+}
+
+fn sheet_nav_metrics(available: f32) -> SheetNavMetrics {
+    let available = available.max(156.0);
+    let chip_w = (available - 4.0 * HIT_TARGET_MIN - 4.0 * SPACE_XS).clamp(44.0, 64.0);
+    let arrow_w = ((available - chip_w - 4.0 * SPACE_XS) / 4.0).max(HIT_TARGET_MIN);
+    let action_w =
+        ((available - 2.0 * SPACE_XS - HIT_TARGET_MIN) / 3.0).clamp(HIT_TARGET_MIN, 56.0);
+    let field_w = (available - 2.0 * SPACE_XS - 2.0 * action_w).max(HIT_TARGET_MIN);
+    SheetNavMetrics {
+        chip_w,
+        arrow_w,
+        field_w,
+        action_w,
+    }
+}
+
 /// Grilla editable sobre `Document.spreadsheet` (F3b) con ventana navegable
 /// de 6×8. Cada celda edita su fuente (`=A1+B1`, `=x(A)`, `(A1, B1*2)`); el
 /// commit es por celda vía `stage_spreadsheet_cell_edits` (atómico, con undo)
@@ -7468,7 +7597,7 @@ fn sheet_col_label(col: usize) -> String {
 /// (400×400/10k) los impone el core.
 fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     let ctx = ui.ctx().clone();
-    let (_is_dark, _accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(&ctx);
+    let (_is_dark, accent, _fill, _sep, txt_col, txt_dim, hdr_col) = panel_theme_local(&ctx);
     let id = egui::Id::new("gc_sheet_edit_state");
     let mut edit: SheetEditState = ctx
         .data_mut(|data| data.get_temp::<SheetEditState>(id))
@@ -7492,19 +7621,29 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     // del cerebro (`parse_cell_reference`).
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
     // ── Navegación de la hoja ──
-    // Fila 1: badge del rango visible + campo «Ir a» con etiqueta propia.
-    // Filas 2-3: cuadrícula 3×2 de botones iguales (◀▲▶ / ▼ A1 Ir).
-    // Todo a 26 px de alto, misma línea base y sin wrap.
+    // Dos filas de ancho seguro: rango (o celda en edición) + cuatro flechas
+    // iguales; abajo «Ir a» + Ir + A1. Los anchos se reparten con
+    // `sheet_nav_metrics` (pura, testeada de 160 a 520 px): la suma nunca
+    // desborda el panel ni envuelve. Cero `Grid`: los botones no se escalonan.
     let control_h = SHEET_CELL_H + 2.0;
+    let metrics = sheet_nav_metrics(ui.available_width());
     let mut goto_requested = false;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = SPACE_SM;
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        let chip_w = 62.0;
         let (chip_rect, chip_resp) =
-            ui.allocate_exact_size(egui::vec2(chip_w, control_h), egui::Sense::hover());
+            ui.allocate_exact_size(egui::vec2(metrics.chip_w, control_h), egui::Sense::hover());
         if ui.is_rect_visible(chip_rect) {
             let theme = current_theme(&ctx);
+            let chip_text = edit
+                .editing
+                .map(|(row, col)| format!("{}{}", sheet_col_label(col), row + 1))
+                .unwrap_or_else(|| view.window_label(cols));
+            let chip_color = if edit.editing.is_some() {
+                accent
+            } else {
+                hdr_col
+            };
             ui.painter()
                 .rect_filled(chip_rect, RADIUS_SM, theme.input_bg);
             ui.painter()
@@ -7512,17 +7651,43 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             ui.painter().text(
                 chip_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                view.window_label(cols),
+                chip_text,
                 egui::FontId::monospace(TYPE_XS),
-                hdr_col,
+                chip_color,
             );
         }
-        chip_resp.on_hover_text(
-            "Esquina visible de la hoja de 400×400. Movete con las flechas o «Ir a».",
-        );
-        let field_w = ui.available_width().max(56.0);
+        chip_resp.on_hover_text("Celda en edición (accent) o esquina visible de la hoja 400×400.");
+        let arrow = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
+            ui.add_sized(
+                [metrics.arrow_w, control_h],
+                egui::Button::new(egui::RichText::new(glyph).size(TYPE_XS))
+                    .wrap_mode(egui::TextWrapMode::Extend)
+                    .rounding(RADIUS_SM),
+            )
+            .on_hover_text(tip)
+            .clicked()
+        };
+        let step = cols.max(1);
+        if arrow(ui, "◀", "Retroceder columnas") {
+            view.origin_col = view.origin_col.saturating_sub(step);
+        }
+        if arrow(ui, "▶", "Avanzar columnas") {
+            view.origin_col = view.origin_col.saturating_add(step);
+            view = view.clamped();
+        }
+        if arrow(ui, "▲", "Subir 8 filas") {
+            view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS);
+        }
+        if arrow(ui, "▼", "Bajar 8 filas") {
+            view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
+            view = view.clamped();
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         let resp = ui.add_sized(
-            [field_w, control_h],
+            [metrics.field_w, control_h],
             egui::TextEdit::singleline(&mut edit.goto)
                 .hint_text("Ir a celda (C3)")
                 .font(egui::FontId::monospace(TYPE_XS)),
@@ -7533,44 +7698,27 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         if resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
             goto_requested = true;
         }
+        if ui
+            .add_sized(
+                [metrics.action_w, control_h],
+                egui::Button::new(egui::RichText::new("Ir").size(TYPE_XS)).rounding(RADIUS_SM),
+            )
+            .on_hover_text("Ir a la celda escrita")
+            .clicked()
+        {
+            goto_requested = true;
+        }
+        if ui
+            .add_sized(
+                [metrics.action_w, control_h],
+                egui::Button::new(egui::RichText::new("A1").size(TYPE_XS)).rounding(RADIUS_SM),
+            )
+            .on_hover_text("Volver al origen A1")
+            .clicked()
+        {
+            view = SheetViewState::default();
+        }
     });
-    let nav_cell_w = ((ui.available_width() - 2.0 * SPACE_XS) / 3.0).max(40.0);
-    egui::Grid::new("gc_sheet_nav")
-        .num_columns(3)
-        .spacing([SPACE_XS, SPACE_XS])
-        .show(ui, |ui| {
-            let nav = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
-                ui.add_sized(
-                    [nav_cell_w, control_h],
-                    egui::Button::new(egui::RichText::new(glyph).size(TYPE_XS)),
-                )
-                .on_hover_text(tip)
-                .clicked()
-            };
-            let step = cols.max(1);
-            if nav(ui, "◀", "Retroceder columnas") {
-                view.origin_col = view.origin_col.saturating_sub(step);
-            }
-            if nav(ui, "▲", "Subir 8 filas") {
-                view.origin_row = view.origin_row.saturating_sub(SHEET_VIEW_ROWS);
-            }
-            if nav(ui, "▶", "Avanzar columnas") {
-                view.origin_col = view.origin_col.saturating_add(step);
-                view = view.clamped();
-            }
-            ui.end_row();
-            if nav(ui, "▼", "Bajar 8 filas") {
-                view.origin_row = view.origin_row.saturating_add(SHEET_VIEW_ROWS);
-                view = view.clamped();
-            }
-            if nav(ui, "A1", "Volver al origen A1") {
-                view = SheetViewState::default();
-            }
-            if nav(ui, "Ir", "Ir a la celda escrita arriba") {
-                goto_requested = true;
-            }
-            ui.end_row();
-        });
     if goto_requested && !edit.goto.trim().is_empty() {
         match spreadsheet_series::parse_cell_reference(&edit.goto) {
             Some((row, col)) => {
@@ -7808,7 +7956,7 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.add_space(SPACE_XS);
     ui.label(
         egui::RichText::new(format!(
-            "Ventana {} de 400×400 · 10 000 celdas vivas. `—` = fórmula sin resolver.",
+            "Ventana {} · hoja 400×400 · 10 000 celdas vivas.",
             view.window_label(cols)
         ))
         .color(txt_dim)
@@ -8041,6 +8189,207 @@ fn draw_sheet_series_row(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ctx.data_mut(|data| data.insert_temp(id, series));
 }
 
+/// Tile escandinavo de dato: rótulo micro arriba, valor mono abajo, marco
+/// hairline sobre `input_bg`. El ancho lo reparte [`stat_tile_row`].
+fn stat_tile(ui: &mut egui::Ui, width: f32, label: &str, value: &str, accent: egui::Color32) {
+    let theme = current_theme(ui.ctx());
+    let height = 44.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect_filled(rect, RADIUS_SM, theme.input_bg);
+        painter.rect_stroke(rect, RADIUS_SM, theme.hairline_stroke());
+        painter.text(
+            egui::pos2(rect.left() + SPACE_SM, rect.top() + SPACE_SM),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::proportional(TYPE_XS),
+            theme.text_tertiary,
+        );
+        painter.text(
+            egui::pos2(rect.left() + SPACE_SM, rect.bottom() - SPACE_SM),
+            egui::Align2::LEFT_BOTTOM,
+            value,
+            egui::FontId::monospace(TYPE_SM),
+            accent,
+        );
+    }
+    let _ = resp.on_hover_text(format!("{label}: {value}"));
+}
+
+/// Fila de tiles a ancho completo (≤3 por fila, el resto envuelve). Cero
+/// píxeles fijos: el ancho sale del disponible real, nunca desborda.
+fn stat_tile_row(ui: &mut egui::Ui, items: &[(String, String)], accent: egui::Color32) {
+    let cols = 3usize;
+    for chunk in items.chunks(cols) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
+            let count = chunk.len() as f32;
+            let width = ((ui.available_width() - (count - 1.0) * SPACE_SM) / count).max(64.0);
+            for (label, value) in chunk {
+                stat_tile(ui, width, label, value, accent);
+            }
+        });
+    }
+}
+
+/// Cota del resumen de rango: más allá el panel lo rechaza con error
+/// honesto en vez de reconstruir miles de celdas por frame.
+const MAX_SUMMARY_CELLS: usize = 2000;
+
+/// Resumen estadístico 1D de un rango de la hoja (n, media, s muestral,
+/// mín, máx). Pura sobre `Document`; `Err` honesto si el rango es inválido,
+/// 2D, excede [`MAX_SUMMARY_CELLS`] o no tiene valores numéricos.
+#[derive(Debug, Clone, PartialEq)]
+struct RangeSummary {
+    count: usize,
+    mean: f64,
+    sample_sd: Option<f64>,
+    min: f64,
+    max: f64,
+}
+
+fn summarize_range(document: &Document, range: &str) -> Result<RangeSummary, String> {
+    let cells = spreadsheet_series::parse_series_range(range)
+        .map_err(|error| error.replace("FillSeries:", "Resumen:"))?;
+    if cells.len() > MAX_SUMMARY_CELLS {
+        return Err(format!(
+            "Resumen: {} celdas excede el máximo {MAX_SUMMARY_CELLS}",
+            cells.len()
+        ));
+    }
+    let values: Vec<f64> = cells
+        .iter()
+        .filter_map(|(row, col)| document.eval_spreadsheet_cell(*row, *col))
+        .filter(|value| value.is_finite())
+        .collect();
+    if values.is_empty() {
+        return Err("Resumen: el rango no tiene valores numéricos".to_string());
+    }
+    let count = values.len();
+    let sum: f64 = values.iter().sum();
+    let mean = sum / count as f64;
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let sample_sd = (count > 1).then(|| {
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / (count - 1) as f64;
+        variance.sqrt()
+    });
+    Ok(RangeSummary {
+        count,
+        mean,
+        sample_sd,
+        min,
+        max,
+    })
+}
+
+/// Estado efímero del resumen de rango (rango escrito + último resultado).
+#[derive(Debug, Clone)]
+struct SheetSummaryState {
+    range: String,
+    summary: Option<RangeSummary>,
+    error: Option<String>,
+}
+
+impl Default for SheetSummaryState {
+    fn default() -> Self {
+        Self {
+            range: "A1:A8".to_string(),
+            summary: None,
+            error: None,
+        }
+    }
+}
+
+/// Card «Resumen de rango»: corre [`summarize_range`] al pedir y muestra los
+/// cinco estadísticos en tiles. Sin cálculo por frame: solo al confirmar.
+fn draw_sheet_summary_card(ui: &mut egui::Ui, app: &mut GrafitoApp) {
+    let ctx = ui.ctx().clone();
+    let (_is_dark, accent, _fill, _sep, _txt_col, txt_dim, _hdr_col) = panel_theme_local(&ctx);
+    let id = egui::Id::new("gc_sheet_summary_state");
+    let mut state: SheetSummaryState = ctx
+        .data_mut(|data| data.get_temp::<SheetSummaryState>(id))
+        .unwrap_or_default();
+    let mut requested = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
+        let btn_w = 84.0;
+        let field_w = (ui.available_width() - btn_w - SPACE_SM).max(HIT_TARGET_MIN);
+        let resp = ui.add_sized(
+            [field_w, SHEET_CELL_H + 2.0],
+            egui::TextEdit::singleline(&mut state.range)
+                .hint_text("A1:A8")
+                .font(egui::FontId::monospace(TYPE_XS)),
+        );
+        if resp.changed() {
+            state.error = None;
+        }
+        if resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            requested = true;
+        }
+        if ui
+            .add_sized(
+                [btn_w, SHEET_CELL_H + 2.0],
+                egui::Button::new(egui::RichText::new("Resumir").size(TYPE_XS)).rounding(RADIUS_SM),
+            )
+            .on_hover_text("n, media, desvío muestral, mínimo y máximo del rango 1D")
+            .clicked()
+        {
+            requested = true;
+        }
+    });
+    if requested {
+        match summarize_range(&app.document, &state.range) {
+            Ok(summary) => {
+                state.summary = Some(summary);
+                state.error = None;
+            }
+            Err(error) => {
+                state.summary = None;
+                state.error = Some(error);
+            }
+        }
+        ctx.request_repaint();
+    }
+    if let Some(summary) = &state.summary {
+        ui.add_space(SPACE_SM);
+        let sd = summary
+            .sample_sd
+            .map(format_statistic)
+            .unwrap_or_else(|| "—".to_string());
+        stat_tile_row(
+            ui,
+            &[
+                ("N".to_string(), format!("{}", summary.count)),
+                ("Media".to_string(), format_statistic(summary.mean)),
+                ("Desvío s".to_string(), sd),
+                ("Mín".to_string(), format_statistic(summary.min)),
+                ("Máx".to_string(), format_statistic(summary.max)),
+            ],
+            accent,
+        );
+    }
+    if let Some(error) = &state.error {
+        ui.label(
+            egui::RichText::new(error)
+                .color(current_theme(&ctx).danger)
+                .size(TYPE_XS),
+        );
+    } else if state.summary.is_none() {
+        ui.label(
+            egui::RichText::new("Un rango 1D por vez (A1:A8 o B3:F3).")
+                .color(txt_dim)
+                .size(TYPE_XS),
+        );
+    }
+    ctx.data_mut(|data| data.insert_temp(id, state));
+}
+
 /// Sección Datos: hoja vinculada editable (celdas) + tablas en lectura.
 /// Vive en el tab Datos (casa de Análisis de datos). La hoja edita
 /// `Document.spreadsheet` con validación por celda; las tablas (`DataTable`)
@@ -8057,7 +8406,7 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
     draw_inspector_section(
         ui,
         "Importar y ordenar",
-        "CSV/TSV de dos columnas (máx. 2 MB) → tabla + dispersión. Lo grande se ordena con el asistente.",
+        "CSV/TSV de dos columnas (máx. 2 MB): tabla + dispersión.",
         |ui| {
             let narrow = panel_is_narrow(ui);
             if narrow {
@@ -8070,10 +8419,14 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
                 if ui
                     .add_sized(
                         [ui.available_width(), PANEL_BUTTON_H],
-                        egui::Button::new(egui::RichText::new("Ordenar con asistente").size(TYPE_SM))
-                            .rounding(RADIUS_PILL),
+                        egui::Button::new(
+                            egui::RichText::new("Ordenar con asistente").size(TYPE_SM),
+                        )
+                        .rounding(RADIUS_PILL),
                     )
-                    .on_hover_text("Arma el prompt con tus tablas y abre el asistente")
+                    .on_hover_text(
+                        "Abre el asistente con tus tablas: «ordenalo, resumilo y graficá»",
+                    )
                     .clicked()
                 {
                     open_data_tables_in_assistant(app, &ctx);
@@ -8086,7 +8439,9 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
                         .add_sized(
                             [bw, PANEL_BUTTON_H],
                             egui::Button::new(
-                                egui::RichText::new("Importar CSV/TSV…").size(TYPE_SM).strong(),
+                                egui::RichText::new("Importar CSV/TSV…")
+                                    .size(TYPE_SM)
+                                    .strong(),
                             )
                             .rounding(RADIUS_PILL),
                         )
@@ -8103,18 +8458,15 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
                             )
                             .rounding(RADIUS_PILL),
                         )
-                        .on_hover_text("Arma el prompt con tus tablas y abre el asistente")
+                        .on_hover_text(
+                            "Abre el asistente con tus tablas: «ordenalo, resumilo y graficá»",
+                        )
                         .clicked()
                     {
                         open_data_tables_in_assistant(app, &ctx);
                     }
                 });
             }
-            ui.label(
-                egui::RichText::new("Tip: tirá el archivo acá vía Importar y después pedí «ordenalo, resumilo y graficá Histogram/BoxPlot».")
-                    .color(txt_dim)
-                    .size(TYPE_XS),
-            );
         },
     );
     ui.add_space(SPACE_SM);
@@ -8124,11 +8476,9 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
         "Números y fórmulas que recomputan el documento.",
         |ui| {
             ui.label(
-                egui::RichText::new(
-                    "Clic en una celda para editar su fórmula · Enter confirma · ventana navegable de hasta 6×8 sobre la hoja de 400×400 (las columnas visibles se adaptan al ancho).",
-                )
-                .color(txt_dim)
-                .size(TYPE_XS),
+                egui::RichText::new("Clic edita · Enter confirma · `—` = fórmula sin resolver.")
+                    .color(txt_dim)
+                    .size(TYPE_XS),
             )
             .on_hover_text(
                 "Guardá números y fórmulas (`=A1+B1`, `=x(A)`) y todo lo que las usa se recomputa solo: puntos, funciones con `p`, tablas y gráficos. Tope del core: 10 000 celdas vivas, no infinita a propósito.",
@@ -8144,6 +8494,15 @@ pub(crate) fn draw_spreadsheet_section(ui: &mut egui::Ui, app: &mut GrafitoApp) 
         "Autorrelleno lineal o geométrico (mismo motor que FillSeries).",
         |ui| {
             draw_sheet_series_row(ui, app);
+        },
+    );
+    ui.add_space(SPACE_SM);
+    draw_inspector_section(
+        ui,
+        "Resumen de rango",
+        "Estadísticas 1D de la hoja con el motor del documento.",
+        |ui| {
+            draw_sheet_summary_card(ui, app);
         },
     );
     ui.add_space(SPACE_XS);
@@ -8347,14 +8706,14 @@ mod gc_piel_tests {
         geometric_cdf, geometric_pmf, geometric_quantile_honest, normal_cdf, normal_pdf,
         normal_quantile_honest, parse_series_scalar, parse_slider_prompt, plot_df_or_fuera_de_cota,
         poisson_cdf, poisson_pmf, poisson_quantile_honest, sheet_cell_width_for, sheet_col_label,
-        student_t_cdf, student_t_pdf, student_t_quantile_honest, uniform_cdf, uniform_pdf,
-        uniform_quantile_honest, visible_sheet_cols, wc_exact_integral_command_text,
+        sheet_nav_metrics, student_t_cdf, student_t_pdf, student_t_quantile_honest, uniform_cdf,
+        uniform_pdf, uniform_quantile_honest, visible_sheet_cols, wc_exact_integral_command_text,
         wc_riemann_command_text, wc_study_command_text, wc_taylor_command_text,
         wc_taylor_remainder_line, MAX_BINOMIAL_N, MAX_GEOMETRIC_K, MAX_PANEL_DF, PANEL_BUTTON_H,
         PANEL_NARROW_WIDTH, SHEET_CELL_H, SHEET_VIEW_COLS, SHEET_VIEW_ROWS,
     };
     use grafito_core::Document;
-    use grafito_ui::tokens::HIT_TARGET_MIN;
+    use grafito_ui::tokens::{HIT_TARGET_MIN, SPACE_XS};
     use std::collections::BTreeMap;
 
     #[test]
@@ -8386,6 +8745,29 @@ mod gc_piel_tests {
                 "ancho {width}: grilla {total} desborda con {cols} columnas"
             );
         }
+    }
+
+    #[test]
+    fn sheet_nav_metrics_no_desbordan() {
+        // F13.1: las dos filas de navegación entran sin desbordar de 160 a
+        // 520 px (panel mínimo real 180, drawer compacto medido 252).
+        for width in [160.0_f32, 180.0, 220.0, 252.0, 300.0, 360.0, 520.0] {
+            let m = sheet_nav_metrics(width);
+            let row1 = m.chip_w + 4.0 * m.arrow_w + 4.0 * SPACE_XS;
+            let row2 = m.field_w + 2.0 * m.action_w + 2.0 * SPACE_XS;
+            assert!(row1 <= width + 0.5, "fila 1 {row1} desborda {width}");
+            assert!(row2 <= width + 0.5, "fila 2 {row2} desborda {width}");
+            assert!(m.arrow_w >= HIT_TARGET_MIN, "flecha {width}: {}", m.arrow_w);
+            assert!(m.field_w >= HIT_TARGET_MIN, "campo {width}: {}", m.field_w);
+            assert!(
+                m.action_w >= HIT_TARGET_MIN,
+                "acción {width}: {}",
+                m.action_w
+            );
+        }
+        // En un panel angosto el chip cede antes que el hit target.
+        assert!(sheet_nav_metrics(164.0).chip_w < sheet_nav_metrics(360.0).chip_w);
+        assert_eq!(sheet_nav_metrics(10_000.0).chip_w, 64.0);
     }
 
     #[test]
@@ -8917,5 +9299,58 @@ mod coverage_sweep_panels_pure {
             view.window_label(4),
             format!("{}393:{}400", sheet_col_label(394), sheet_col_label(397))
         );
+    }
+
+    #[test]
+    fn prob_tail_values_honestos() {
+        assert_eq!(prob_tail_values(0.5), (0.5, 0.5, 1.0));
+        let (left, right, two) = prob_tail_values(0.975);
+        assert!((left - 0.975).abs() < 1e-12);
+        assert!((right - 0.025).abs() < 1e-12);
+        assert!((two - 0.05).abs() < 1e-12);
+        // Clamp: colas subfluidas no producen negativos ni probabilidades > 1.
+        assert_eq!(prob_tail_values(1.2), (1.0, 0.0, 0.0));
+        assert_eq!(prob_tail_values(-0.1), (0.0, 1.0, 0.0));
+        assert_eq!(prob_tail_values(f64::NAN), (0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn prob_alphas_rapidos_en_rango() {
+        for alpha in PROB_QUANTILE_ALPHAS {
+            assert!(alpha > 0.001 && alpha < 0.999, "α fuera de rango: {alpha}");
+        }
+        // Ascendente: los chips se leen como tabla de cuantiles.
+        assert!(PROB_QUANTILE_ALPHAS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn resumen_de_rango_honesto() {
+        let mut document = Document::default();
+        for (row, value) in ["1", "2", "3", "4"].iter().enumerate() {
+            document
+                .set_spreadsheet_cell(row, 0, (*value).to_string())
+                .expect("celda válida");
+        }
+        let summary = summarize_range(&document, "A1:A4").expect("rango válido");
+        assert_eq!(summary.count, 4);
+        assert!((summary.mean - 2.5).abs() < 1e-12);
+        assert!((summary.min - 1.0).abs() < 1e-12);
+        assert!((summary.max - 4.0).abs() < 1e-12);
+        let sd = summary.sample_sd.expect("n > 1");
+        assert!((sd - 1.290_994_448_735_865_7).abs() < 1e-9, "s = {sd}");
+        // Una sola celda: sin desvío muestral (— honesto), no 0 inventado.
+        let single = summarize_range(&document, "A1").expect("celda sola");
+        assert_eq!(single.count, 1);
+        assert!(single.sample_sd.is_none());
+        // Rango 2D, columna vacía y fuera de la hoja 400×400: error honesto.
+        assert!(summarize_range(&document, "A1:B2").is_err());
+        assert!(summarize_range(&document, "C1:C4").is_err());
+        assert!(summarize_range(&document, "A1:A401").is_err());
+        // La cota del panel cubre todo rango 1D válido de la hoja (≤400) y
+        // no excede el presupuesto de recomputación del core.
+        assert!(MAX_SUMMARY_CELLS >= Document::MAX_SPREADSHEET_ROWS);
+        assert!(MAX_SUMMARY_CELLS <= Document::MAX_SPREADSHEET_RECOMPUTE_CELLS);
     }
 }

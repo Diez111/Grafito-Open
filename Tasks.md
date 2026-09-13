@@ -94,3 +94,11 @@
 - [x] F12.3 Gate anti-vacío: `t()` jamás vacío (fallback clave visible) + `pt_coverage_media` exige PT por cada `media.*`/`anim.*` + `helper_prefixes_resolve_all_keys` pineea 14 sufijos ES/EN no vacíos
 - [x] F12.4 Schemas 13↔13↔13: `protocol.rs::CANONICAL_TEMPLATES` ↔ `anim_native.rs::NATIVE_TEMPLATES` ↔ `anim_ui.rs::PLANTILLAS_COMBO` (verificado, sin cambios); docs `architecture.md` §7 11→13 + fila §13; bench `native_rgba` 11→13 (`subspace`/`fractal`); `native_frames` no pinea plantillas (nada)
 - [x] F12.5 Gates: `cargo fmt -p`, clippy `-D warnings` 0 en crates tocados, tests verdes
+
+## F13 — Rediseño escandinavo Datos/Prob 2026-09-13 — DONE (falta reinstalar /usr/bin)
+- [x] F13.1 Fix overflow pill A1: nav de hoja en 2 filas (`sheet_nav_metrics` pura, chip cede 44..64, suma testeada 160..520, hit target ≥24) — verificado por captura E2E y test `sheet_nav_metrics_no_desbordan`
+- [x] F13.2 Estructura Datos: microcopy a hover («Clic edita · Enter confirma · `—` = fórmula sin resolver»), nota de ventana en una línea, tip de importar movido al hover de los botones
+- [x] F13.3 Más funciones reales: Datos card «Resumen de rango» (`summarize_range`: n/media/s muestral/min/máx, cota 2000, errores honestos) + Prob p-valores (P(X≤x), P(X>x), 2·cola menor, clamp), 6 cuantiles α rápidos, Desvío y «Copiar» al portapapeles
+- [x] F13.4 Pulir diseño Prob: `prob_param_row` (rótulo + DragValue + slider full-width), tiles `stat_tile` (resultado/momentos/p-valores), regla empírica 1σ/2σ/3σ en el plot Normal, tabla de cuantiles compacta
+- [x] F13.5 Gates: fmt 0, clippy -D warnings 0, `cargo test -p grafito-app --lib` 1041 verdes (+4 tests nuevos); release `target/release/grafito` 14:02. Flaky preexistente confirmado ajeno: `grafito-assistant::streaming_timeout_while_receiving_keeps_stage_and_kib` (falla igual en HEAD con stash; pasa aislado)
+- [ ] F13.6 Reinstalar `/usr/bin/grafito` con el release nuevo (requiere sudo; pedir al usuario)
