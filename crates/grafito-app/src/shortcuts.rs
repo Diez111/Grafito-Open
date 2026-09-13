@@ -126,12 +126,9 @@ impl GrafitoApp {
                 self.tool_ghost = None;
                 self.reset_tool_input();
             }
-            if ctx.input(|i| i.key_pressed(Key::Escape)) {
-                self.current_tool = Tool::Select;
-                self.tool_ghost = None;
-                self.reset_tool_input();
-                self.clear_pending_action();
-            }
+            // Esc NO se maneja acá: la cadena de overlays/modales lo consume
+            // con `consume_key` y sólo si nadie lo usó cae en
+            // [`Self::handle_escape_fallback`] al final del frame.
             // Log axis toggles: Shift+L = X, Shift+K = Y, Shift+J = both
             if ctx.input(|i| i.key_pressed(Key::L) && i.modifiers.shift) {
                 self.document.view_mut().x_log = !self.document.view().x_log;
@@ -211,6 +208,18 @@ impl GrafitoApp {
                 self.tool_ghost = None;
                 self.reset_tool_input();
             }
+        }
+    }
+
+    /// Fallback de Esc del frame: modales y overlays ya tuvieron su chance de
+    /// consumirlo (`consume_key`). Si nadie lo usó, vuelve la herramienta a
+    /// Select y limpia la acción pendiente.
+    pub(crate) fn handle_escape_fallback(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+            self.current_tool = Tool::Select;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+            self.clear_pending_action();
         }
     }
 }

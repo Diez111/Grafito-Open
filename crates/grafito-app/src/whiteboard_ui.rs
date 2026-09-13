@@ -1646,7 +1646,7 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
         }
     }
 
-    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         if app.whiteboard.show_palette {
             app.whiteboard.show_palette = false;
         } else if app.whiteboard_open {

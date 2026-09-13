@@ -2909,7 +2909,7 @@ impl GrafitoApp {
         // ── Acciones FUERA del closure de Ui (aquí sí se permite I/O breve) ──
         // A11Y (D1): Esc pospone (opción segura: conserva el sidecar para el
         // próximo arranque, igual que la X). No borra nada.
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             do_postpone = true;
         }
         if do_toggle_diff {
@@ -3009,7 +3009,10 @@ impl GrafitoApp {
             });
         if do_discard {
             self.dismiss_recovery_offer(true);
-        } else if do_keep || !open || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        } else if do_keep
+            || !open
+            || ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
             // `!open` (X) o Esc = posponer esta sesión: se mantiene el archivo.
             // Esc nunca borra (opción segura).
             self.dismiss_recovery_offer(false);
@@ -4043,7 +4046,7 @@ impl GrafitoApp {
                 });
             });
         // A11Y (D1): Esc cierra el persistente sin guardar (igual que la X).
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             open = false;
         }
         if !open {
@@ -7011,7 +7014,7 @@ impl eframe::App for GrafitoApp {
         if !self.show_onboarding
             && !self.show_about
             && !self.show_custom_tool_dialog
-            && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             match Self::exam_escape_next(self.exam_mode, self.exam_exit_confirm) {
                 ExamEscapeAction::RequestConfirm => self.set_exam_mode(false),
@@ -7057,6 +7060,9 @@ impl eframe::App for GrafitoApp {
         // (orb, pulso, media, teaching, whiteboard). El mínimo del frame gana;
         // egui lo coalesce con el pedido del scheduler unificado de arriba.
         self.apply_repaint_budget(ctx);
+        // Esc recién acá: si ningún modal/overlay lo consumió, vuelve la
+        // herramienta a Select (antes competían 4 handlers por el mismo key).
+        self.handle_escape_fallback(ctx);
     }
 }
 
@@ -8027,7 +8033,7 @@ impl GrafitoApp {
             self.apply_onboarding_choice(OnboardingChoice::DismissX);
         }
         // A11Y (D1) + W-A: Esc solo oculta la vista (pospone, no persiste).
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             self.apply_onboarding_choice(OnboardingChoice::Escape);
         }
     }
@@ -8138,7 +8144,7 @@ impl GrafitoApp {
                 });
             });
         // A11Y (D1): Esc cierra el persistente (igual que [Cerrar]).
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             self.show_about = false;
         }
     }
