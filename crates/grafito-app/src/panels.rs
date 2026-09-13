@@ -1972,7 +1972,11 @@ pub(crate) fn draw_export_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             let action = |ui: &mut egui::Ui, label: &str, tip: &str| {
                 ui.add_sized(
                     [cell_w, PANEL_BUTTON_H],
-                    egui::Button::new(egui::RichText::new(label).size(TYPE_SM)).rounding(RADIUS_SM),
+                    // `Extend`: una sola línea siempre (nunca envuelve a dos y
+                    // rompe la altura de la fila). Labels cortos + tooltip.
+                    egui::Button::new(egui::RichText::new(label).size(TYPE_XS))
+                        .wrap_mode(egui::TextWrapMode::Extend)
+                        .rounding(RADIUS_SM),
                 )
                 .on_hover_text(tip)
                 .clicked()
