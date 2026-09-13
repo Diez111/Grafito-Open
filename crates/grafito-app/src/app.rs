@@ -4845,9 +4845,10 @@ impl GrafitoApp {
 
     /// Banner de examen SIEMPRE visible con salida explícita (W-A).
     ///
-    /// Piel pura salvo el clic en "Salir examen", que llama
+    /// Piel pura salvo el clic en "Salir", que llama
     /// [`Self::set_exam_mode`] (abre el modal de confirmación, jamás sale
     /// directo). Llamar al inicio del `CentralPanel` tanto en 2D como en 3D.
+    /// Estilo escandinavo: barra quiet con punto de estado, no un muro rojo.
     pub(crate) fn draw_exam_banner(&mut self, ui: &mut egui::Ui) {
         if !Self::exam_banner_should_show(self.exam_mode) {
             return;
@@ -4855,19 +4856,48 @@ impl GrafitoApp {
         let theme = grafito_ui::theme::current_theme(ui.ctx());
         egui::TopBottomPanel::top("exam_banner")
             .show_separator_line(false)
-            .frame(egui::Frame::none().fill(theme.danger).inner_margin(8.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(theme.panel_bg)
+                    .stroke(theme.hairline_stroke())
+                    .inner_margin(egui::Margin {
+                        left: grafito_ui::tokens::SPACE_MD,
+                        right: grafito_ui::tokens::SPACE_MD,
+                        top: grafito_ui::tokens::SPACE_SM,
+                        bottom: grafito_ui::tokens::SPACE_SM,
+                    }),
+            )
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            egui::RichText::new("MODO EXAMEN ACTIVO")
-                                .color(theme.toast_text)
-                                .size(18.0)
-                                .strong(),
-                        );
-                    });
+                    // Punto de estado (4 px) + título + alcance del lockdown.
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot_rect.center(), 4.0, theme.danger);
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                    ui.label(
+                        egui::RichText::new("Modo examen")
+                            .color(theme.text_primary)
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new("asistente, internet y export bloqueados")
+                            .color(theme.text_tertiary)
+                            .size(grafito_ui::tokens::TYPE_XS),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Salir examen").clicked() {
+                        if ui
+                            .add_sized(
+                                [92.0, grafito_ui::tokens::HIT_TARGET_MIN + 4.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Salir").size(grafito_ui::tokens::TYPE_XS),
+                                )
+                                .rounding(grafito_ui::tokens::RADIUS_SM),
+                            )
+                            .on_hover_text("Salir del modo examen (pide confirmación)")
+                            .clicked()
+                        {
                             self.set_exam_mode(false);
                         }
                     });
@@ -4923,21 +4953,45 @@ impl GrafitoApp {
             .show(ctx, |ui| {
                 ui.set_min_width(320.0);
                 ui.set_max_width(420.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new(
-                            "¿Seguro que querés salir? Se habilitan el asistente, internet y el export.",
-                        )
-                        .size(grafito_ui::tokens::TYPE_SM)
+                ui.label(
+                    egui::RichText::new("Salir del examen")
+                        .size(grafito_ui::tokens::TYPE_BASE)
+                        .strong()
                         .color(theme.text_primary),
-                    );
-                });
-                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                );
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+                ui.label(
+                    egui::RichText::new("Se habilitan el asistente, internet y el export.")
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .color(theme.text_tertiary),
+                );
+                ui.add_space(grafito_ui::tokens::SPACE_MD);
+                let button_w = (ui.available_width() - grafito_ui::tokens::SPACE_SM) / 2.0;
                 ui.horizontal(|ui| {
-                    if ui.button("Sí, salir").clicked() {
+                    ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+                    if ui
+                        .add_sized(
+                            [button_w, grafito_ui::tokens::HIT_TARGET_MIN + 4.0],
+                            egui::Button::new(
+                                egui::RichText::new("Sí, salir").size(grafito_ui::tokens::TYPE_XS),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_SM),
+                        )
+                        .clicked()
+                    {
                         confirmar = true;
                     }
-                    if ui.button("Seguir en examen").clicked() {
+                    if ui
+                        .add_sized(
+                            [button_w, grafito_ui::tokens::HIT_TARGET_MIN + 4.0],
+                            egui::Button::new(
+                                egui::RichText::new("Seguir en examen")
+                                    .size(grafito_ui::tokens::TYPE_XS),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_SM),
+                        )
+                        .clicked()
+                    {
                         cancelar = true;
                     }
                 });

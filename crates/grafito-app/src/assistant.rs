@@ -4290,48 +4290,50 @@ impl GrafitoApp {
         self.refresh_plugin_snapshot();
     }
 
+    /// Tarjeta quiet del bloqueo de examen (misma en panel y dock):
+    /// tarjeta con borde fino, título y motivo — sin texto centrado suelto.
+    fn draw_exam_locked_card(ui: &mut egui::Ui) {
+        let theme = grafito_ui::theme::current_theme(ui.ctx());
+        egui::Frame::none()
+            .fill(theme.input_bg)
+            .stroke(theme.hairline_stroke())
+            .rounding(egui::Rounding::same(grafito_ui::tokens::RADIUS_SM))
+            .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(
+                    egui::RichText::new("Asistente bloqueado")
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+                ui.label(
+                    egui::RichText::new(
+                        "Modo examen activo: salí del examen para volver a usarlo.",
+                    )
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(theme.text_tertiary),
+                );
+            });
+    }
+
     /// Panel del asistente bloqueado por examen (D2): ocupa el mismo lugar,
     /// muestra el motivo y no ofrece ninguna acción (fail-closed visual).
     fn draw_exam_locked_assistant(&mut self, ctx: &egui::Context, _reserved_bottom_height: f32) {
-        let theme = grafito_ui::theme::current_theme(ctx);
         egui::SidePanel::right("assistant_exam_locked")
             .default_width(400.0)
             .min_width(300.0)
             .max_width(520.0)
             .show(ctx, |ui| {
                 ui.add_space(grafito_ui::tokens::SPACE_MD);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Asistente bloqueado en modo examen")
-                            .size(grafito_ui::tokens::TYPE_SM)
-                            .strong()
-                            .color(theme.text_primary),
-                    );
-                    ui.label(
-                        egui::RichText::new("Salí del examen para volver a usarlo, che.")
-                            .size(grafito_ui::tokens::TYPE_XS)
-                            .color(theme.text_secondary),
-                    );
-                });
+                Self::draw_exam_locked_card(ui);
             });
     }
 
     /// Contenido bloqueado para el dock (misma honestidad, sin panel propio).
     fn draw_exam_locked_contents(&mut self, ui: &mut egui::Ui) {
-        let theme = grafito_ui::theme::current_theme(ui.ctx());
-        ui.vertical_centered(|ui| {
-            ui.label(
-                egui::RichText::new("Asistente bloqueado en modo examen")
-                    .size(grafito_ui::tokens::TYPE_SM)
-                    .strong()
-                    .color(theme.text_primary),
-            );
-            ui.label(
-                egui::RichText::new("Salí del examen para volver a usarlo, che.")
-                    .size(grafito_ui::tokens::TYPE_XS)
-                    .color(theme.text_secondary),
-            );
-        });
+        Self::draw_exam_locked_card(ui);
     }
 
     /// Dibuja el asistente como panel independiente fuera del workspace 3D.

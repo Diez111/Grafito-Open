@@ -12,9 +12,9 @@ use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
     BREAKPOINT_COMPACT, DRAWER_RIGHT_DEFAULT, DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, ICON_MD,
-    PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM,
-    SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS,
-    TYPE_SM, TYPE_XS,
+    PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM, RAIL_WIDTH, SPACE_LG, SPACE_MD,
+    SPACE_SM, SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y,
+    TYPE_2XS, TYPE_SM, TYPE_XS,
 };
 use grafito_ui::Tool;
 use std::collections::VecDeque;
@@ -33,6 +33,10 @@ pub(crate) const COMPACT_TOP_CHROME_MAX_WIDTH: f32 = BREAKPOINT_COMPACT;
 /// deja slivers (fragmentos en zigzag) en el borde del panel. Puro y
 /// testeable headless.
 pub(crate) const RAIL_LABEL_MIN_WIDTH: f32 = 40.0;
+
+/// Alto de botones de acción dentro de menús (28 px = mismo lenguaje que
+/// el inspector; ≥ `HIT_TARGET_MIN` 24, WCAG 2.5.8).
+const MENU_ACTION_H: f32 = 28.0;
 
 pub(crate) fn rail_labels_visible(rect_width: f32) -> bool {
     rect_width >= RAIL_LABEL_MIN_WIDTH
@@ -277,6 +281,18 @@ fn draw_view_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 
 fn draw_perspectives_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.menu_button("Perspectivas", |ui| {
+        let theme = current_theme(ui.ctx());
+        ui.set_min_width(252.0);
+        // Encabezado de sección: misma jerarquía que el inspector
+        // (etiqueta quiet + lista), en vez de un muro de radios sueltos.
+        ui.add_space(SPACE_XS);
+        ui.label(
+            egui::RichText::new("Perspectiva")
+                .color(theme.text_tertiary)
+                .size(TYPE_XS)
+                .strong(),
+        );
+        ui.add_space(SPACE_XS);
         // P1a-1 VIBLE: en examen el selector se deshabilita (lockdown sin bypass).
         ui.add_enabled_ui(!app.exam_mode, |ui| {
             let mut selected = app.perspective;
@@ -302,10 +318,44 @@ fn draw_perspectives_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             }
         });
         if app.exam_mode {
-            ui.label("Bloqueado en modo examen: salí del examen para cambiar de vista.");
+            // Aviso del lockdown como tarjeta quiet (antes: párrafo suelto
+            // de tres líneas sin jerarquía dentro del menú).
+            ui.add_space(SPACE_SM);
+            egui::Frame::none()
+                .fill(theme.input_bg)
+                .stroke(theme.hairline_stroke())
+                .rounding(egui::Rounding::same(RADIUS_SM))
+                .inner_margin(egui::Margin::same(SPACE_SM))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new("Modo examen")
+                            .color(theme.text_primary)
+                            .size(TYPE_XS)
+                            .strong(),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("Salí del examen para cambiar de vista.")
+                            .color(theme.text_tertiary)
+                            .size(TYPE_XS),
+                    );
+                });
         }
+        ui.add_space(SPACE_SM);
         ui.separator();
-        if ui.button("Cargar ejemplo de esta perspectiva").clicked() {
+        ui.add_space(SPACE_SM);
+        if ui
+            .add_sized(
+                [ui.available_width(), MENU_ACTION_H],
+                egui::Button::new(
+                    egui::RichText::new("Cargar ejemplo de esta perspectiva").size(TYPE_XS),
+                )
+                .rounding(RADIUS_SM),
+            )
+            .on_hover_text("Carga objetos de ejemplo solo si el documento está vacío")
+            .clicked()
+        {
             if app.document.object_count() == 0 {
                 match app.load_perspective_examples(app.perspective) {
                     Ok(()) => app.notify(
