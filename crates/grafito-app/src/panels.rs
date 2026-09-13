@@ -138,6 +138,63 @@ fn sheet_cell_width_for(available_width: f32, cols: usize) -> f32 {
     ((available_width - 32.0 - cols * SPACE_XS) / cols).clamp(36.0, 96.0)
 }
 
+/// Grilla escandinava de botones: celdas iguales, rectangulares con bordes
+/// apenas redondeados (`RADIUS_SM`), una sola línea de texto (nunca
+/// envuelve ni desborda la fila) y detalle en el tooltip.
+///
+/// Devuelve el índice 0-based del botón clickeado, o `None`.
+fn panel_button_grid(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    cols: usize,
+    items: &[(&str, &str)],
+) -> Option<usize> {
+    let cols = cols.max(1);
+    let cell_w = ((ui.available_width() - (cols - 1) as f32 * SPACE_SM) / cols as f32).max(64.0);
+    let mut clicked = None;
+    egui::Grid::new(id_salt)
+        .num_columns(cols)
+        .spacing([SPACE_SM, SPACE_XS])
+        .show(ui, |ui| {
+            for (index, (label, tip)) in items.iter().enumerate() {
+                let resp = ui
+                    .add_sized(
+                        [cell_w, PANEL_BUTTON_H],
+                        egui::Button::new(egui::RichText::new(*label).size(TYPE_XS))
+                            .wrap_mode(egui::TextWrapMode::Extend)
+                            .rounding(RADIUS_SM),
+                    )
+                    .on_hover_text(*tip);
+                if resp.clicked() {
+                    clicked = Some(index);
+                }
+                if (index + 1) % cols == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    clicked
+}
+
+/// Botón primario de ancho completo, rectangular con bordes apenas
+/// redondeados (mismo lenguaje que la grilla escandinava).
+fn panel_wide_action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let theme = current_theme(ui.ctx());
+    let btn = egui::Button::new(
+        egui::RichText::new(label)
+            .size(TYPE_XS)
+            .strong()
+            .color(theme.keyboard_enter_text),
+    )
+    .fill(theme.keyboard_enter_bg)
+    .stroke(egui::Stroke::NONE)
+    .rounding(RADIUS_SM);
+    ui.add_sized(
+        [ui.available_width().max(HIT_TARGET_MIN), PANEL_BUTTON_H],
+        btn,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LocalXYTable {
     pub x_name: String,
@@ -5110,160 +5167,216 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                 .id_salt("regression_panel_content")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    draw_object_cards_where(
-                        ui,
-                        app,
-                        "Ajustes del documento",
-                        "Sin ajustes todavía.",
-                        |object| {
-                            matches!(
-                                object,
-                                GeoObject::DataTable(_)
-                                    | GeoObject::ScatterPlot(_)
-                                    | GeoObject::RegressionLine(_)
-                            ) || matches!(object, GeoObject::Function(function) if function.fit.is_some())
-                        },
-                    );
-                    let fits: Vec<_> = app
-                        .document
-                        .objects_iter()
-                        .filter_map(|(_, object)| match object {
-                            GeoObject::Function(function) => function
-                                .fit
-                                .as_ref()
-                                .map(|fit| (function.label.clone(), fit.clone())),
-                            _ => None,
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin {
+                            left: SPACE_MD,
+                            right: SPACE_MD,
+                            top: SPACE_SM,
+                            bottom: SPACE_LG,
                         })
-                        .collect();
-                    if !fits.is_empty() {
-                        ui.add_space(SPACE_SM);
-                        ui.label(
-                            egui::RichText::new("Diagnósticos locales")
-                                .color(theme.text_secondary)
-                                .size(TYPE_SM)
-                                .strong(),
-                        );
-                        for (label, fit) in fits {
-                            let source_label = app
-                                .document
-                                .get_object(fit.source)
-                                .map(|object| object.label().to_string())
-                                .unwrap_or_else(|| "tabla eliminada".to_string());
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{label}: {} sobre {source_label} · RMSE={:.6} · R²={:.6}",
-                                    fit.kind.display_name(),
-                                    fit.diagnostics.rmse,
-                                    fit.diagnostics.r_squared
-                                ))
-                                .color(theme.text_primary)
-                                .size(TYPE_XS),
+                        .show(ui, |ui| {
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                            ui.spacing_mut().item_spacing.y = SPACE_SM;
+
+                            // 1 · Ajustes vivos del documento (tarjetas con objeto).
+                            draw_object_cards_where(
+                                ui,
+                                app,
+                                "Ajustes del documento",
+                                "Sin ajustes todavía.",
+                                |object| {
+                                    matches!(
+                                        object,
+                                        GeoObject::DataTable(_)
+                                            | GeoObject::ScatterPlot(_)
+                                            | GeoObject::RegressionLine(_)
+                                    ) || matches!(object, GeoObject::Function(function) if function.fit.is_some())
+                                },
                             );
-                            ui.collapsing(
-                                format!("Residuales ({})", fit.diagnostics.residuals.len()),
-                                |ui| {
-                                    let shown = fit.diagnostics.residuals.len().min(24);
-                                    for (index, residual) in
-                                        fit.diagnostics.residuals.iter().take(shown).enumerate()
-                                    {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "r{} = {:.6}",
-                                                index + 1,
-                                                residual
-                                            ))
-                                            .color(theme.text_tertiary)
-                                            .size(TYPE_XS),
-                                        );
-                                    }
-                                    if fit.diagnostics.residuals.len() > shown {
-                                        ui.label(
-                                            egui::RichText::new("Se muestran los primeros 24 valores.")
+                            ui.add_space(SPACE_SM);
+
+                            // 2 · Diagnósticos por ajuste (RMSE/R² + residuales).
+                            let fits: Vec<(String, _)> = app
+                                .document
+                                .objects_iter()
+                                .filter_map(|(_, object)| match object {
+                                    GeoObject::Function(function) => function
+                                        .fit
+                                        .as_ref()
+                                        .map(|fit| (function.label.clone(), fit.clone())),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !fits.is_empty() {
+                                draw_inspector_section(
+                                    ui,
+                                    "Diagnósticos",
+                                    "RMSE y R² por ajuste; residuales recortados a 24.",
+                                    |ui| {
+                                        for (label, fit) in &fits {
+                                            let source_label = app
+                                                .document
+                                                .get_object(fit.source)
+                                                .map(|object| object.label().to_string())
+                                                .unwrap_or_else(|| "tabla eliminada".to_string());
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{label} · {}",
+                                                    fit.kind.display_name()
+                                                ))
+                                                .color(theme.text_primary)
+                                                .size(TYPE_SM)
+                                                .strong(),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "sobre {source_label} · RMSE {:.6} · R² {:.6}",
+                                                    fit.diagnostics.rmse,
+                                                    fit.diagnostics.r_squared
+                                                ))
                                                 .color(theme.text_tertiary)
-                                                .size(grafito_ui::tokens::TYPE_XS),
+                                                .size(TYPE_XS)
+                                                .monospace(),
+                                            );
+                                            ui.collapsing(
+                                                format!(
+                                                    "Residuales ({})",
+                                                    fit.diagnostics.residuals.len()
+                                                ),
+                                                |ui| {
+                                                    let shown =
+                                                        fit.diagnostics.residuals.len().min(24);
+                                                    for (index, residual) in fit
+                                                        .diagnostics
+                                                        .residuals
+                                                        .iter()
+                                                        .take(shown)
+                                                        .enumerate()
+                                                    {
+                                                        ui.label(
+                                                            egui::RichText::new(format!(
+                                                                "r{} = {:.6}",
+                                                                index + 1,
+                                                                residual
+                                                            ))
+                                                            .color(theme.text_tertiary)
+                                                            .size(TYPE_XS)
+                                                            .monospace(),
+                                                        );
+                                                    }
+                                                    if fit.diagnostics.residuals.len() > shown {
+                                                        ui.label(
+                                                            egui::RichText::new(
+                                                                "Se muestran los primeros 24 valores.",
+                                                            )
+                                                            .color(theme.text_tertiary)
+                                                            .size(TYPE_XS),
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        }
+                                    },
+                                );
+                                ui.add_space(SPACE_SM);
+                            }
+
+                            // 3 · Crear análisis: importar + plantillas al portapapeles.
+                            draw_inspector_section(
+                                ui,
+                                "Crear análisis",
+                                "CSV/TSV de dos columnas o tabla local desde listas. La ruta nunca se guarda.",
+                                |ui| {
+                                    if panel_wide_action_button(ui, "Importar CSV/TSV…")
+                                        .on_hover_text("Dos columnas x,y · la ruta nunca se guarda")
+                                        .clicked()
+                                    {
+                                        import_local_xy_table(app, ctx);
+                                    }
+                                    const TEMPLATES: [(&str, &str); 3] = [
+                                        ("Dispersión", "ScatterPlot[{1, 2, 3}, {1, 4, 9}]"),
+                                        (
+                                            "Regresión",
+                                            "LinearRegression[{1, 2, 3}, {1, 4, 9}]",
+                                        ),
+                                        ("Tabla local", "DataTable[{0, 1, 2}, {1, 3, 5}]"),
+                                    ];
+                                    let items: Vec<(&str, &str)> =
+                                        TEMPLATES.iter().map(|(l, t)| (*l, *t)).collect();
+                                    if let Some(index) =
+                                        panel_button_grid(ui, "gc_regression_templates", 2, &items)
+                                    {
+                                        app.input_text = TEMPLATES[index].1.to_string();
+                                        app.command_input_focus_requested = true;
+                                        app.cas_result = format!(
+                                            "{} listo en la entrada (Enter para crear).",
+                                            TEMPLATES[index].0
                                         );
                                     }
                                 },
                             );
-                        }
-                    }
-                    ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new("Crear análisis")
-                            .color(theme.text_secondary)
-                            .size(TYPE_SM)
-                            .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new(
-                            "Importá un CSV/TSV de dos columnas o creá una tabla local desde dos listas. La ruta nunca se guarda.",
-                        )
-                        .color(theme.text_tertiary)
-                        .size(TYPE_XS),
-                    );
-                    ui.add_space(6.0);
+                            ui.add_space(SPACE_SM);
 
-                    if ui.button("Importar CSV/TSV...").clicked() {
-                        import_local_xy_table(app, ctx);
-                    }
-
-                    for (label, template) in [
-                        (
-                            "Diagrama de dispersión",
-                            "ScatterPlot[{1, 2, 3}, {1, 4, 9}]",
-                        ),
-                        (
-                            "Regresión lineal",
-                            "LinearRegression[{1, 2, 3}, {1, 4, 9}]",
-                        ),
-                        (
-                            "Tabla local",
-                            "DataTable[{0, 1, 2}, {1, 3, 5}]",
-                        ),
-                    ] {
-                        if ui.button(label).clicked() {
-                            app.input_text = template.to_string();
-                            app.command_input_focus_requested = true;
-                        }
-                    }
-
-                    let selected_table_label = app.selected_object.and_then(|id| {
-                        match app.document.get_object(id) {
-                            Some(GeoObject::DataTable(table)) => Some(table.label.clone()),
-                            _ => None,
-                        }
-                    });
-                    if let Some(table_label) = selected_table_label {
-                        ui.add_space(SPACE_SM);
-                        ui.label(
-                            egui::RichText::new(format!("Ajustar tabla '{table_label}'"))
-                                .color(theme.text_secondary)
-                                .size(TYPE_SM)
-                                .strong(),
-                        );
-                        for (label, template) in [
-                            ("Lineal", format!("FitLinear[{table_label}]")),
-                            ("Polinómico grado 2", format!("FitPoly[{table_label}, 2]")),
-                            ("Exponencial", format!("FitExp[{table_label}]")),
-                            ("Logarítmico", format!("FitLog[{table_label}]")),
-                            ("Potencia", format!("FitPow[{table_label}]")),
-                            ("Sinusoidal", format!("FitSin[{table_label}]")),
-                        ] {
-                            if ui.button(label).clicked() {
-                                app.input_text = template;
-                                app.command_input_focus_requested = true;
+                            // 4 · Modelos de ajuste para la tabla seleccionada.
+                            let selected_table_label = app.selected_object.and_then(|id| {
+                                match app.document.get_object(id) {
+                                    Some(GeoObject::DataTable(table)) => Some(table.label.clone()),
+                                    _ => None,
+                                }
+                            });
+                            if let Some(table_label) = selected_table_label {
+                                draw_inspector_section(
+                                    ui,
+                                    &format!("Ajustar «{table_label}»"),
+                                    "El comando del modelo va a la entrada.",
+                                    |ui| {
+                                        let models: [(&str, String); 6] = [
+                                            ("Lineal", format!("FitLinear[{table_label}]")),
+                                            (
+                                                "Polinómico 2",
+                                                format!("FitPoly[{table_label}, 2]"),
+                                            ),
+                                            ("Exponencial", format!("FitExp[{table_label}]")),
+                                            ("Logarítmico", format!("FitLog[{table_label}]")),
+                                            ("Potencia", format!("FitPow[{table_label}]")),
+                                            ("Sinusoidal", format!("FitSin[{table_label}]")),
+                                        ];
+                                        let items: Vec<(&str, &str)> = models
+                                            .iter()
+                                            .map(|(label, command)| (*label, command.as_str()))
+                                            .collect();
+                                        if let Some(index) = panel_button_grid(
+                                            ui,
+                                            "gc_regression_models",
+                                            2,
+                                            &items,
+                                        ) {
+                                            app.input_text = models[index].1.clone();
+                                            app.command_input_focus_requested = true;
+                                            app.cas_result = format!(
+                                                "Ajuste {} listo en la entrada (Enter para crear).",
+                                                models[index].0
+                                            );
+                                        }
+                                    },
+                                );
+                            } else {
+                                egui::Frame::none()
+                                    .fill(theme.input_bg)
+                                    .stroke(theme.hairline_stroke())
+                                    .rounding(egui::Rounding::same(RADIUS_SM))
+                                    .inner_margin(egui::Margin::same(SPACE_MD))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Seleccioná una tabla local en el lienzo para elegir un modelo de ajuste.",
+                                            )
+                                            .color(theme.text_tertiary)
+                                            .size(TYPE_XS),
+                                        );
+                                    });
                             }
-                        }
-                    } else {
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new(
-                                "Seleccioná una tabla local para elegir un modelo de ajuste.",
-                            )
-                            .color(theme.text_tertiary)
-                            .size(TYPE_XS),
-                        );
-                    }
+                        });
                 });
         });
 }
