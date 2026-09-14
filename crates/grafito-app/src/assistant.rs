@@ -2938,7 +2938,29 @@ pub(crate) fn pop_provisional_stream_turn(panel: &mut AssistantPanelState) {
         .last()
         .is_some_and(|turn| turn.role == ConversationRole::Assistant)
     {
-        panel.conversation.pop();
+        if let Some(turn) = panel.conversation.pop() {
+            // El preview llega como "Pensando…\n<razonamiento>[\n\n<parcial>]".
+            // Se conserva el razonamiento para mostrarlo plegado junto a la
+            // respuesta final (estilo DeepSeek); el parcial se descarta porque
+            // la respuesta completa llega aparte.
+            panel.last_reasoning = reasoning_from_stream_preview(&turn.content);
+        }
+    }
+}
+
+/// Extrae el bloque de razonamiento de un preview de streaming
+/// ("Pensando…\n<razonamiento>[\n\n<parcial>]"). Puro y sin `unwrap`.
+pub(crate) fn reasoning_from_stream_preview(preview: &str) -> Option<String> {
+    let rest = preview.strip_prefix("Pensando…\n")?;
+    let reasoning = match rest.split_once("\n\n") {
+        Some((reasoning, _answer)) => reasoning,
+        None => rest,
+    }
+    .trim();
+    if reasoning.is_empty() {
+        None
+    } else {
+        Some(reasoning.to_string())
     }
 }
 
@@ -4466,11 +4488,10 @@ impl GrafitoApp {
                 }
             }
         }
-        // D2 "Mi plan": próximos 3 del scheduler + racha, siempre visible en
-        // el host del tutor (el `recommend_next` ya llegaba a la tarjeta;
-        // esto lo vuelve plan visible sin romper la UI).
-        let plan = crate::teaching_ui::plan_resumen(&self.profile);
-        crate::teaching_ui::draw_mi_plan(ui, &plan);
+        // El plan de estudio se dibuja SOLO dentro del host pedagógico
+        // (Tarjeta/Plan). Acá se superponía sobre el transcript/composer
+        // porque el panel del asistente consume todo el alto disponible
+        // (F14: texto "Mi plan · racha…" encima de la respuesta).
         self.cancel_stale_model_request();
     }
 
@@ -9180,16 +9201,17 @@ mod tests {
         prosa_para_spec_anim_ia, prosa_subspace_canonica, prosa_tangente_explicita,
         prosa_taylor_canonica, prosa_taylor_explicita, prosa_turno_generica,
         prosa_turno_para_guion, prosa_turno_para_playlist, prosa_y_aviso_canonicos_para_pedido,
-        prosa_y_aviso_offline_para_pedido, read_bounded_attachment, remote_error_message,
-        remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
-        should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
-        socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
-        stage_assistant_parameter, titulo_curado, titulo_curado_localized,
-        transporte_si_contenido_vacio, validar_pedido_narrado, validar_spec_anim_ia,
-        validate_assistant_command, verificar_prosa_de_turno, verificar_prosa_vs_spec,
-        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AnimIaRender,
-        AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation,
-        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        prosa_y_aviso_offline_para_pedido, read_bounded_attachment, reasoning_from_stream_preview,
+        remote_error_message, remote_stage_for_job, render_media_desde_spec_ia,
+        resolver_turno_anim_ia, should_fallback_agent_spark_to_deepseek,
+        should_fallback_remote_spark_to_deepseek, socratic_guard_context,
+        spec_canonico_para_fallback, split_playlist_request, stage_assistant_parameter,
+        titulo_curado, titulo_curado_localized, transporte_si_contenido_vacio,
+        validar_pedido_narrado, validar_spec_anim_ia, validate_assistant_command,
+        verificar_prosa_de_turno, verificar_prosa_vs_spec, verified_remote_proposals,
+        wants_exercise_request, AgentChannelMsg, AnimIaRender, AssistantAgentJob,
+        AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation, AssistantModelJob,
+        AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
         AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
         IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
         RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido,
@@ -12844,6 +12866,24 @@ mod tests {
         assert_eq!(
             panel.conversation.last().unwrap().role,
             ConversationRole::User
+        );
+    }
+
+    #[test]
+    fn reasoning_preview_extracts_thinking_and_ignores_plain_answers() {
+        assert_eq!(
+            reasoning_from_stream_preview("Pensando…\nAnalizo z = 1+i\n\nEjemplo"),
+            Some("Analizo z = 1+i".to_string())
+        );
+        assert_eq!(
+            reasoning_from_stream_preview("Pensando…\nsolo razonamiento"),
+            Some("solo razonamiento".to_string())
+        );
+        // Sin header (respuesta sin razonamiento) o vacío: None.
+        assert_eq!(reasoning_from_stream_preview("respuesta directa"), None);
+        assert_eq!(
+            reasoning_from_stream_preview("Pensando…\n   \n\nresp"),
+            None
         );
     }
 

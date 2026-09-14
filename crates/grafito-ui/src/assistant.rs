@@ -1606,6 +1606,10 @@ pub struct AssistantPanelState {
     pub remote_stage: RemoteStage,
     /// Segundos en la etapa actual (para el aviso lento de 10s).
     pub remote_stage_elapsed_secs: u64,
+    /// Razonamiento del último turno remoto (preview de streaming), mostrado
+    /// plegado junto a la respuesta final (estilo DeepSeek). Transitorio:
+    /// no viaja al proveedor ni se serializa.
+    pub last_reasoning: Option<String>,
     /// Perfil de proveedor seleccionado por el usuario.
     pub provider: ProviderProfile,
     /// Identificador del modelo configurado para el proveedor actual.
@@ -1886,6 +1890,7 @@ impl Default for AssistantPanelState {
             proposal_correction_context: None,
             remote_stage: RemoteStage::Autorizada,
             remote_stage_elapsed_secs: 0,
+            last_reasoning: None,
             is_pending: false,
             pending_remote_authorization: None,
             pending_clarification: None,
@@ -1992,6 +1997,7 @@ impl AssistantPanelState {
         self.cancel_remote_authorization();
         self.clear_proposed_plan();
         self.clear_pending_clarification();
+        self.last_reasoning = None;
         self.error = None;
         // M2-5: Limpiar es el ÚNICO reset de las prefs de
         // export (`set_media` las conserva entre animaciones).
@@ -3136,6 +3142,7 @@ impl AssistantPanelState {
         self.clear_proposal_correction();
         self.clear_remote_authorization();
         self.clear_proposed_plan();
+        self.last_reasoning = None;
         self.error = None;
     }
 
@@ -3179,6 +3186,7 @@ impl AssistantPanelState {
         self.is_fusion_review = false;
         self.reset_remote_stage();
         self.image_upload_consent = false;
+        self.last_reasoning = None;
         self.error = None;
     }
 
@@ -6261,6 +6269,16 @@ fn draw_panel_contents(
                         ),
                     };
                     let is_last = turn_index + 1 == state.conversation.len();
+                    // Razonamiento del último turno remoto: se muestra plegado
+                    // arriba de la respuesta final (estilo DeepSeek).
+                    if is_last
+                        && matches!(turn.role, ConversationRole::Assistant)
+                        && !state.is_pending
+                    {
+                        if let Some(reasoning) = state.last_reasoning.as_deref() {
+                            draw_reasoning_disclosure(ui, reasoning);
+                        }
+                    }
                     let reveal_here = if is_last && matches!(turn.role, ConversationRole::Assistant)
                     {
                         reveal_clip
@@ -9477,6 +9495,34 @@ pub fn last_user_question(conversation: &[ConversationTurn]) -> Option<String> {
 /// deje de ser críptico. Testeable.
 pub fn over_budget_hint(budget: usize) -> String {
     format!("Acortá un poco para enviar (límite {budget}).")
+}
+
+/// Bloque plegable con el razonamiento del último turno remoto (estilo
+/// DeepSeek): cerrado por defecto y con el texto en un frame quiet.
+fn draw_reasoning_disclosure(ui: &mut egui::Ui, reasoning: &str) {
+    let theme = crate::theme::current_theme(ui.ctx());
+    egui::CollapsingHeader::new(
+        egui::RichText::new("Razonamiento")
+            .size(crate::tokens::TYPE_XS)
+            .strong()
+            .color(theme.text_tertiary),
+    )
+    .id_salt("assistant_reasoning_disclosure")
+    .default_open(false)
+    .show(ui, |ui| {
+        egui::Frame::none()
+            .fill(theme.input_bg)
+            .stroke(theme.hairline_stroke())
+            .rounding(crate::tokens::RADIUS_SM)
+            .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(reasoning)
+                        .size(crate::tokens::TYPE_XS)
+                        .color(theme.text_secondary),
+                );
+            });
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
