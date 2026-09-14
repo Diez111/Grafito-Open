@@ -1698,6 +1698,109 @@ pub fn request_responses_completion_streaming(
     }
 }
 
+/// POST a `{base}/chat/completions` con `stream:true` y drenado progresivo.
+///
+/// Mismo contrato que el streaming de Responses (deadline único, cancelación,
+/// body cap 256 KiB, fallback único a no-streaming si el servidor no habla
+/// SSE). Cada delta de contenido y cada `reasoning_content` se reportan por
+/// `progress` como preview ("Pensando…" + razonamiento + respuesta parcial).
+#[cfg(feature = "assistant-net")]
+#[allow(clippy::too_many_arguments)]
+pub fn request_chat_completion_streaming(
+    endpoint: Url,
+    base_payload: Value,
+    api_key: Option<&str>,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+    max_output_chars: usize,
+    progress: Option<&mut ResponsesProgressCallback<'_>>,
+    go_session_id: Option<&str>,
+) -> Result<RemoteCompletion, String> {
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
+    let started = Instant::now();
+    let mut streaming_payload = base_payload.clone();
+    streaming_payload["stream"] = json!(true);
+    let client = shared_http_client()?;
+    let mut call = client
+        .post(endpoint.clone())
+        .header("Accept", "text/event-stream")
+        .json(&streaming_payload)
+        .timeout(timeout);
+    call = apply_go_transport_headers(call, &endpoint, go_session_id);
+    if let Some(key) = api_key {
+        call = call.bearer_auth(sanitize_api_key(key)?);
+    }
+    let response = call.send().map_err(|error| {
+        if error.is_timeout() {
+            sse_timeout_message(0, 0, timeout)
+        } else {
+            transport_error("remote assistant stream", &error, Some(timeout))
+        }
+    })?;
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let retry_after = if status == 429 {
+            retry_after_secs_from_headers(response.headers())
+        } else {
+            None
+        };
+        if status == 429 {
+            record_rate_limited(retry_after);
+        }
+        let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
+        return Err(http_status_error(status, &body, retry_after));
+    }
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    let reader = response.take((RESPONSES_MAX_BODY_BYTES as u64).saturating_add(1));
+    match read_responses_sse_stream(reader, deadline, timeout, cancellation, progress)? {
+        SseStreamOutcome::Done { text, truncated } => {
+            completion_from_text(&text, max_output_chars, truncated)
+        }
+        SseStreamOutcome::FallbackToNonStreaming => {
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .filter(|remaining| *remaining >= Duration::from_secs(1));
+            let Some(remaining) = remaining else {
+                return Err(response_schema_error(
+                    "chat response did not stream any displayable events",
+                ));
+            };
+            request_openai_completion(
+                endpoint,
+                base_payload,
+                api_key,
+                cancellation,
+                remaining,
+                max_output_chars,
+                go_session_id,
+            )
+        }
+    }
+}
+
+/// Stub sin red: el transporte SSE no existe sin `assistant-net`.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_chat_completion_streaming(
+    _endpoint: Url,
+    _base_payload: Value,
+    _api_key: Option<&str>,
+    _cancellation: &CancellationToken,
+    _timeout: Duration,
+    _max_output_chars: usize,
+    _progress: Option<&mut ResponsesProgressCallback<'_>>,
+    _go_session_id: Option<&str>,
+) -> Result<RemoteCompletion, String> {
+    Err(NO_NETWORK_MESSAGE.into())
+}
+
 /// Stub sin red: el transporte SSE no existe sin `assistant-net`.
 #[cfg(not(feature = "assistant-net"))]
 pub fn request_responses_completion_streaming(
@@ -1726,6 +1829,38 @@ fn sse_timeout_message(events_seen: u32, received_bytes: usize, timeout: Duratio
             "remote assistant stream timed out while receiving after {secs}s ({kib} KiB received)"
         )
     }
+}
+
+/// Cap del razonamiento que se muestra como "pensando" (la respuesta final
+/// nunca lo incluye; sólo alimenta el preview en vivo de la UI).
+#[cfg(feature = "assistant-net")]
+const REASONING_PREVIEW_MAX_CHARS: usize = 4_000;
+
+/// Añade `delta` a `dst` sin pasarse de `cap` y sin partir un char multibyte.
+#[cfg(feature = "assistant-net")]
+fn append_capped(dst: &mut String, delta: &str, cap: usize) {
+    if dst.len() >= cap {
+        return;
+    }
+    let mut end = delta.len().min(cap - dst.len());
+    while end > 0 && !delta.is_char_boundary(end) {
+        end -= 1;
+    }
+    dst.push_str(&delta[..end]);
+}
+
+/// Preview monotónico que viaja a la UI: "Pensando…" + razonamiento (si lo
+/// hay) y luego la respuesta parcial. El prefijo sólo crece por el final, así
+/// que el emisor de sufijos (`stream_progress_sender`) no se desincroniza.
+#[cfg(feature = "assistant-net")]
+fn sse_progress_preview(reasoning: &str, text: &str) -> String {
+    if reasoning.is_empty() {
+        return text.to_string();
+    }
+    if text.is_empty() {
+        return format!("Pensando…\n{reasoning}");
+    }
+    format!("Pensando…\n{reasoning}\n\n{text}")
 }
 
 /// ¿El error de lectura es el timeout de reqwest? Su reloj arranca en
@@ -1758,6 +1893,7 @@ fn read_responses_sse_stream<R: std::io::Read>(
     let mut total_bytes = 0_usize;
     let mut pending: Vec<u8> = Vec::new();
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut truncated = false;
     let mut events_seen = 0_u32;
     let mut done = false;
@@ -1767,7 +1903,8 @@ fn read_responses_sse_stream<R: std::io::Read>(
             return Err("remote assistant request was cancelled".into());
         }
         if Instant::now() > deadline {
-            return Err(sse_timeout_message(events_seen, text.len(), timeout));
+            let viewed = text.len() + reasoning.len();
+            return Err(sse_timeout_message(events_seen, viewed, timeout));
         }
         match reader.read(&mut chunk) {
             Ok(0) => break,
@@ -1797,6 +1934,7 @@ fn read_responses_sse_stream<R: std::io::Read>(
                         if ingest_sse_line(
                             line,
                             &mut text,
+                            &mut reasoning,
                             &mut truncated,
                             &mut events_seen,
                             &mut progress,
@@ -1814,7 +1952,8 @@ fn read_responses_sse_stream<R: std::io::Read>(
                 // Sin deltas = esperando primer token; con deltas =
                 // recibiendo (KiB).
                 if Instant::now() >= deadline || read_error_is_timeout(&error) {
-                    return Err(sse_timeout_message(events_seen, text.len(), timeout));
+                    let viewed = text.len() + reasoning.len();
+                    return Err(sse_timeout_message(events_seen, viewed, timeout));
                 }
                 return Err("remote assistant response body could not be read".to_string());
             }
@@ -1828,6 +1967,7 @@ fn read_responses_sse_stream<R: std::io::Read>(
             if ingest_sse_line(
                 line,
                 &mut text,
+                &mut reasoning,
                 &mut truncated,
                 &mut events_seen,
                 &mut progress,
@@ -1837,7 +1977,9 @@ fn read_responses_sse_stream<R: std::io::Read>(
             }
         }
     }
-    if events_seen == 0 {
+    if events_seen == 0 || (text.is_empty() && !reasoning.is_empty()) {
+        // Sin eventos o sólo razonamiento (sin respuesta visible): el
+        // llamante reintenta UNA vez sin `stream` para no publicar vacío.
         return Ok(SseStreamOutcome::FallbackToNonStreaming);
     }
     if !done {
@@ -1855,6 +1997,7 @@ fn read_responses_sse_stream<R: std::io::Read>(
 fn ingest_sse_line(
     line: &str,
     text: &mut String,
+    reasoning: &mut String,
     truncated: &mut bool,
     events_seen: &mut u32,
     progress: &mut Option<&mut ResponsesProgressCallback<'_>>,
@@ -1884,7 +2027,22 @@ fn ingest_sse_line(
                 *events_seen = events_seen.saturating_add(1);
                 text.push_str(delta);
                 if let Some(callback) = progress.as_mut() {
-                    (*callback)(text);
+                    (*callback)(&sse_progress_preview(reasoning, text));
+                }
+            }
+            Ok(false)
+        }
+        // Razonamiento del modelo (Responses): se muestra en vivo como
+        // "Pensando…" pero JAMÁS entra al texto final. Sólo mientras no
+        // empezó la respuesta (así el preview se mantiene monotónico).
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                *events_seen = events_seen.saturating_add(1);
+                append_capped(reasoning, delta, REASONING_PREVIEW_MAX_CHARS);
+                if text.is_empty() {
+                    if let Some(callback) = progress.as_mut() {
+                        (*callback)(&sse_progress_preview(reasoning, text));
+                    }
                 }
             }
             Ok(false)
@@ -1910,7 +2068,59 @@ fn ingest_sse_line(
                 "responses stream reported a failure: {detail}"
             )))
         }
-        _ => Ok(false),
+        _ => {
+            // Chat Completions (chunk SSE): sin `type`, con `choices[0].delta`.
+            // Incluye `reasoning_content` de modelos con razonamiento: se
+            // muestra en vivo pero JAMÁS entra al texto final.
+            if let Some(error) = value.get("error") {
+                let detail = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown provider error");
+                let detail: String = detail.chars().take(200).collect();
+                return Err(response_schema_error(&format!(
+                    "chat stream reported a failure: {detail}"
+                )));
+            }
+            let Some(choice) = value
+                .get("choices")
+                .and_then(Value::as_array)
+                .and_then(|choices| choices.first())
+            else {
+                return Ok(false);
+            };
+            let delta = choice.get("delta");
+            let mut changed = false;
+            if let Some(content) = delta
+                .and_then(|delta| delta.get("content"))
+                .and_then(Value::as_str)
+            {
+                *events_seen = events_seen.saturating_add(1);
+                text.push_str(content);
+                changed = true;
+            }
+            if let Some(reasoning_delta) = delta
+                .and_then(|delta| {
+                    delta
+                        .get("reasoning_content")
+                        .or_else(|| delta.get("reasoning"))
+                })
+                .and_then(Value::as_str)
+            {
+                *events_seen = events_seen.saturating_add(1);
+                append_capped(reasoning, reasoning_delta, REASONING_PREVIEW_MAX_CHARS);
+                changed |= text.is_empty();
+            }
+            if choice.get("finish_reason").and_then(Value::as_str) == Some("length") {
+                *truncated = true;
+            }
+            if changed {
+                if let Some(callback) = progress.as_mut() {
+                    (*callback)(&sse_progress_preview(reasoning, text));
+                }
+            }
+            Ok(false)
+        }
     }
 }
 
@@ -2727,23 +2937,89 @@ pub fn request_remote_streaming_with_api_key_on_worker(
                 let prepared = responses_endpoint(&settings).and_then(|endpoint| {
                     build_responses_payload(&settings, &request).map(|payload| (endpoint, payload))
                 });
+                // Con guard activo no se emite preview: la respuesta no debe
+                // filtrarse al estudiante antes de la verificación socrática.
+                let stream_preview = guard.is_none();
                 let result = match prepared {
                     Ok((endpoint, payload)) => {
-                        let mut on_progress = stream_progress_sender(delta_tx);
-                        request_responses_completion_streaming(
-                            endpoint,
-                            payload,
-                            api_key.as_deref(),
-                            &cancellation,
-                            timeout,
-                            max_output_chars,
-                            Some(&mut on_progress),
-                            go_session.as_deref(),
-                        )
+                        if stream_preview {
+                            let mut on_progress = stream_progress_sender(delta_tx);
+                            request_responses_completion_streaming(
+                                endpoint,
+                                payload,
+                                api_key.as_deref(),
+                                &cancellation,
+                                timeout,
+                                max_output_chars,
+                                Some(&mut on_progress),
+                                go_session.as_deref(),
+                            )
+                        } else {
+                            request_responses_completion_streaming(
+                                endpoint,
+                                payload,
+                                api_key.as_deref(),
+                                &cancellation,
+                                timeout,
+                                max_output_chars,
+                                None,
+                                go_session.as_deref(),
+                            )
+                        }
                     }
                     Err(error) => Err(error),
                 };
                 // Guard socrático también en el path streaming.
+                let guarded = match (result, guard) {
+                    (Ok(completion), Some(context)) => {
+                        guard_remote_completion(&context.fsm, completion, &context.scaffold)
+                    }
+                    (result, _) => result,
+                };
+                log_remote_completion_event(&model, protocol, started.elapsed(), &guarded);
+                guarded
+            }
+            // Chat Completions también streamea: sin esto la espera era muda
+            // (un solo POST con `stream:false`). El preview incluye
+            // "Pensando…" + `reasoning_content` cuando el modelo lo expone.
+            RemoteProtocol::OpenAiChatCompletions => {
+                let model = settings.model.clone();
+                let go_session = settings.go_session_id.clone();
+                let prepared = chat_completion_endpoint(&settings).and_then(|endpoint| {
+                    build_chat_completion_payload(&settings, &request)
+                        .map(|payload| (endpoint, payload))
+                });
+                // Mismo criterio que Responses: con guard, cero preview.
+                let stream_preview = guard.is_none();
+                let result = match prepared {
+                    Ok((endpoint, payload)) => {
+                        if stream_preview {
+                            let mut on_progress = stream_progress_sender(delta_tx);
+                            request_chat_completion_streaming(
+                                endpoint,
+                                payload,
+                                api_key.as_deref(),
+                                &cancellation,
+                                timeout,
+                                max_output_chars,
+                                Some(&mut on_progress),
+                                go_session.as_deref(),
+                            )
+                        } else {
+                            request_chat_completion_streaming(
+                                endpoint,
+                                payload,
+                                api_key.as_deref(),
+                                &cancellation,
+                                timeout,
+                                max_output_chars,
+                                None,
+                                go_session.as_deref(),
+                            )
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
                 let guarded = match (result, guard) {
                     (Ok(completion), Some(context)) => {
                         guard_remote_completion(&context.fsm, completion, &context.scaffold)
@@ -5786,6 +6062,111 @@ mod tests {
         assert!(receiving.contains("2 KiB received"), "{receiving}");
     }
 
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn reasoning_deltas_feed_the_preview_but_never_the_answer() {
+        // F14: el pensamiento se muestra en vivo ("Pensando…") durante la
+        // espera, pero el texto final contiene SOLO la respuesta.
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut truncated = false;
+        let mut events = 0_u32;
+        let mut seen: Vec<String> = Vec::new();
+        {
+            let mut callback = |preview: &str| seen.push(preview.to_owned());
+            let mut progress: Option<&mut ResponsesProgressCallback<'_>> = Some(&mut callback);
+            assert!(!ingest_sse_line(
+                r#"data: {"type":"response.reasoning_summary_text.delta","delta":"Pienso que "}"#,
+                &mut text,
+                &mut reasoning,
+                &mut truncated,
+                &mut events,
+                &mut progress
+            )
+            .unwrap());
+            assert!(!ingest_sse_line(
+                r#"data: {"type":"response.reasoning_summary_text.delta","delta":"z es complejo"}"#,
+                &mut text,
+                &mut reasoning,
+                &mut truncated,
+                &mut events,
+                &mut progress
+            )
+            .unwrap());
+            assert!(!ingest_sse_line(
+                r#"data: {"type":"response.output_text.delta","delta":"Ejemplo: z=1+i"}"#,
+                &mut text,
+                &mut reasoning,
+                &mut truncated,
+                &mut events,
+                &mut progress
+            )
+            .unwrap());
+            assert!(ingest_sse_line(
+                "data: [DONE]",
+                &mut text,
+                &mut reasoning,
+                &mut truncated,
+                &mut events,
+                &mut progress
+            )
+            .unwrap());
+        }
+        assert!(reasoning.contains("z es complejo"));
+        assert_eq!(text, "Ejemplo: z=1+i");
+        assert!(seen.iter().any(|preview| preview.starts_with("Pensando…")));
+        assert!(seen
+            .last()
+            .expect("hubo previews")
+            .contains("Ejemplo: z=1+i"));
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn chat_completion_chunks_stream_reasoning_and_content() {
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut truncated = false;
+        let mut events = 0_u32;
+        let mut progress: Option<&mut ResponsesProgressCallback<'_>> = None;
+        for line in [
+            r#"data: {"choices":[{"delta":{"reasoning_content":"analizo "}}]}"#,
+            r#"data: {"choices":[{"delta":{"reasoning_content":"el caso"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"Hola"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":" mundo"},"finish_reason":"stop"}]}"#,
+        ] {
+            assert!(!ingest_sse_line(
+                line,
+                &mut text,
+                &mut reasoning,
+                &mut truncated,
+                &mut events,
+                &mut progress
+            )
+            .unwrap());
+        }
+        assert_eq!(text, "Hola mundo");
+        assert!(reasoning.contains("analizo el caso"));
+        assert!(events >= 4);
+        assert!(!truncated);
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn reasoning_only_stream_falls_back_to_non_streaming() {
+        // Sin respuesta visible no se publica vacío: se reintenta sin stream.
+        let body: &[u8] = b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"solo pienso\"}\n\ndata: [DONE]\n\n";
+        let outcome = read_responses_sse_stream(
+            std::io::Cursor::new(body.to_vec()),
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(5),
+            &CancellationToken::default(),
+            None,
+        )
+        .expect("lectura sin error");
+        assert!(matches!(outcome, SseStreamOutcome::FallbackToNonStreaming));
+    }
+
     #[test]
     fn remote_slow_stage_threshold_is_documented_ten_seconds() {
         // La UI avisa "tardando más de lo normal" cuando una etapa supera N
@@ -5941,13 +6322,14 @@ mod tests {
 
     #[cfg(feature = "assistant-net")]
     #[test]
-    fn guarded_chat_worker_blocks_telling_on_the_non_streaming_path() {
+    fn guarded_chat_worker_blocks_telling_on_the_streaming_path() {
         clear_rate_limit_for_tests();
-        let chat_body = br#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"La respuesta es x = 2"}}]}"#
+        // F14: el chat ahora streamea; el stub responde SSE de Chat Completions.
+        let chat_body = b"data: {\"choices\":[{\"delta\":{\"content\":\"La respuesta es x = 2\"}}]}\n\ndata: [DONE]\n\n"
             .to_vec();
         let (address, server) = serve_stub_replies(vec![
-            (chat_body.clone(), "application/json", false),
-            (chat_body, "application/json", false),
+            (chat_body.clone(), "text/event-stream", false),
+            (chat_body, "text/event-stream", false),
         ]);
         let settings = ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "test-model")
             .with_endpoint(format!("http://{address}/v1"))
@@ -5981,11 +6363,12 @@ mod tests {
         );
         assert!(
             delta_rx.try_recv().is_err(),
-            "el path no-streaming no emite deltas de preview"
+            "con guard activo no se filtra el preview de la respuesta"
         );
 
-        // Sin guard, el mismo completado pasa (el guard es lo que bloquea).
-        let (delta_tx, _delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
+        // Sin guard, el mismo completado pasa (el guard es lo que bloquea) y
+        // el preview en vivo sí llega.
+        let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
         let unguarded = request_remote_streaming_with_api_key_on_worker(
             settings,
             remote_wire_request("resolvé 2*x = 4"),
@@ -5998,6 +6381,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(unguarded.text, "La respuesta es x = 2");
+        assert!(
+            delta_rx.try_recv().is_ok(),
+            "sin guard el preview de streaming llega"
+        );
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
@@ -6007,8 +6394,8 @@ mod tests {
             requests[0]
         );
         let lowered = requests[0].to_ascii_lowercase();
-        assert!(!lowered.contains("text/event-stream"), "{lowered}");
-        assert!(!requests[0].contains("\"stream\":true"), "{}", requests[0]);
+        assert!(lowered.contains("text/event-stream"), "{lowered}");
+        assert!(requests[0].contains("\"stream\":true"), "{}", requests[0]);
     }
 
     /// Sin `assistant-net` los workers remotos existen por firma pero fallan
