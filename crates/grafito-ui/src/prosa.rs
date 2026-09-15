@@ -69,7 +69,10 @@ pub fn humanize_control_name(id: &str) -> Option<&'static str> {
 /// Además absorbe el sufijo GeoGebra `Id[param]` (ej. `Button[a]`): el
 /// modelo a veces filtra `Button` dejando `[a]` suelto ("sin botón\[a]");
 /// la prosa final jamás tiene corchetes (D2): queda "sin botón".
-pub fn humanize_prose_text(text: &str) -> String {
+///
+/// Devuelve `Cow`: sin identificadores conocidos no copia el texto (el
+/// transcript pasa por acá en cada frame).
+pub fn humanize_prose_text(text: &str) -> std::borrow::Cow<'_, str> {
     const KNOWN_IDS: &[&str] = &[
         "PlayPause",
         "Perpendicular",
@@ -95,6 +98,15 @@ pub fn humanize_prose_text(text: &str) -> String {
         "Play",
         "Ray",
     ];
+    let has_known_id = KNOWN_IDS.iter().any(|id| text.contains(id));
+    let has_button_stem = contains_ascii_case_insensitive(text, "button")
+        || contains_ascii_case_insensitive(text, "boton")
+        || text.contains("botón")
+        || text.contains("Botón")
+        || text.contains("BOTÓN");
+    if !has_known_id && !has_button_stem {
+        return std::borrow::Cow::Borrowed(text);
+    }
     let mut out = text.to_owned();
     for id in KNOWN_IDS {
         if out.contains(id) {
@@ -108,7 +120,25 @@ pub fn humanize_prose_text(text: &str) -> String {
     // ve porque busca `Button` exacto. Este barre la variante humana en
     // cualquier caja, con/sin tilde, y absorbe `[param]`.
     out = replace_human_button_params(&out);
-    out
+    std::borrow::Cow::Owned(out)
+}
+
+/// ¿`haystack` contiene `needle` (ASCII, en minúsculas) ignorando caja?
+///
+/// Barato y sin alocar: recorre ventanas de bytes comparando en minúscula.
+/// Puro; `needle` no-ASCII cae a `false` (esos casos usan `contains` directo).
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let hay = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    hay.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(byte, expected)| byte.to_ascii_lowercase() == *expected)
+    })
 }
 
 /// N2: reemplaza `botón`/`boton`/`button` en cualquier caja seguidos de un

@@ -11,10 +11,11 @@ use crate::{
 };
 use grafito_anim::protocol::Timeline;
 use grafito_assistant_types::{
-    AssistantExecutionOrigin, AssistantFocus, AssistantRepairFeedback, AttachmentLimits,
-    ConversationRole, ConversationTurn, ImageAttachment, ImmutableDocumentContext, ProposedPlan,
-    ProviderProfile, RequestBudget, TurnFrameSet, TurnMediaRef, MAX_CONVERSATION_TURNS,
-    MAX_CONVERSATION_TURN_CHARS, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES, TURN_MEDIA_THUMB_SIDE_PX,
+    AssistantExecutionOrigin, AssistantFocus, AssistantRepairFeedback, AssistantTokenUsage,
+    AttachmentLimits, ConversationRole, ConversationTurn, ImageAttachment,
+    ImmutableDocumentContext, ProposedPlan, ProviderProfile, RequestBudget, TurnFrameSet,
+    TurnMediaRef, MAX_CONVERSATION_TURNS, MAX_CONVERSATION_TURN_CHARS,
+    REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES, TURN_MEDIA_THUMB_SIDE_PX,
 };
 pub use grafito_command::assistant_proposals::{AssistantParameterAssignment, AssistantProposal};
 
@@ -105,12 +106,40 @@ const ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH: f32 =
 const ASSISTANT_COMPACT_MIN_CANVAS_HEIGHT: f32 = 160.0;
 // The nested panel keeps its height in egui memory. Keep it deterministic so
 // an old expanded state cannot strand the composer halfway up the assistant.
-// F5 Scandinavian quiet 2026-08-21: composer heights 116+44+32 — clamp 88..260, sin ScrollArea envolvente.
+// F5 Scandinavian quiet 2026-08-21: composer heights 158+44+32 — clamp 88..260, sin ScrollArea envolvente.
 // El editor es TextEdit::multiline con wrap (desired_rows=2, 44px) y el TopBottomPanel
 // externo limita a max_composer = (available*0.38).clamp(88,260). No envolver en
 // ScrollArea para que input+botones queden siempre visibles; la barra solo aparece
 // para attachments si exceden el máximo.
-const ASSISTANT_COMPOSER_BASE_HEIGHT: f32 = 116.0;
+// BASE cubre el contenido DENTRO del panel anidado: tarjeta 94 (marco 16 +
+// editor 44 + espacio 4 + botones 30) + fila de estado 24 (espacio 4 + línea
+// ~20: "Escribí algo…"/"Estoy pensando…"/límite) + caption 18 (espacio 4 +
+// línea ~14 "Enter envía…") + 16 del marco propio del panel + 6 de aire
+// (respiro del anillo de foco 2px + crecimiento HiDPI) = 158. La fila de
+// estado se reserva SIEMPRE (aunque esté vacía con texto válido escrito)
+// para que el layout no salte al tipear; el caption siempre se dibuja.
+// Si la estimación queda corta, el panel de altura exacta recorta las filas
+// de abajo (caption) y el anillo de foco queda oculto contra el borde
+// inferior — en pantalla completa (panel alto, no colapsado) es donde más
+// se nota porque la tarjeta ocupa todo el alto reservado.
+const ASSISTANT_COMPOSER_BASE_HEIGHT: f32 = 16.0
+    + ASSISTANT_COMPOSER_EDITOR_HEIGHT
+    + 4.0
+    + 30.0
+    + 16.0
+    + ASSISTANT_COMPOSER_STATUS_HEIGHT
+    + ASSISTANT_COMPOSER_CAPTION_HEIGHT
+    + 6.0; // = 158.0: tarjeta + estado + caption + marcos + aire foco/HiDPI
+           // Piso del composer colapsado (editor 1 línea): tarjeta 78 (16 + 28 + 4 +
+           // 30) + estado 24 + caption 18 + marco 16 = 136. Por debajo se recortan
+           // caption y anillo de foco.
+const ASSISTANT_COMPOSER_COLLAPSED_FLOOR: f32 = 16.0
+    + ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT
+    + 4.0
+    + 30.0
+    + 16.0
+    + ASSISTANT_COMPOSER_STATUS_HEIGHT
+    + ASSISTANT_COMPOSER_CAPTION_HEIGHT; // = 136.0
 const ASSISTANT_COMPOSER_EDITOR_HEIGHT: f32 = 44.0;
 const ASSISTANT_COMPOSER_FOCUS_HEIGHT: f32 = 32.0;
 const ASSISTANT_COMPOSER_BUDGET_HEIGHT: f32 = 20.0;
@@ -118,6 +147,16 @@ const ASSISTANT_COMPOSER_ATTACHMENT_HEIGHT: f32 = 112.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_ROW_HEIGHT: f32 = 30.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_MESSAGE_HEIGHT: f32 = 20.0;
 const ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT: f32 = 20.0;
+/// Fila de estado bajo la tarjeta (espacio 4 + línea TYPE_XS ~20):
+/// "Escribí algo…", "Estoy pensando…" o aviso de límite. Siempre reservada
+/// dentro del BASE para un layout estable sin saltos al tipear.
+const ASSISTANT_COMPOSER_STATUS_HEIGHT: f32 = 24.0;
+/// Caption de atajos bajo el estado (espacio 4 + línea TYPE_2XS ~14).
+/// Siempre dibujado, siempre reservado dentro del BASE.
+const ASSISTANT_COMPOSER_CAPTION_HEIGHT: f32 = 18.0;
+/// Alto mínimo reservado al transcript para que el chat nunca quede oculto
+/// detrás del composer en viewports chicos (bottom-sheet + teclado).
+const ASSISTANT_TRANSCRIPT_MIN_HEIGHT: f32 = 56.0;
 /// Ancho bajo el cual el composer colapsa a 1 línea + botón (responsive 300..520).
 const ASSISTANT_PANEL_NARROW_WIDTH: f32 = 360.0;
 /// Alto de viewport bajo el cual el composer colapsa y el historial acota su scroll.
@@ -137,27 +176,50 @@ const MORA_ACCESSIBLE_LABEL: &str = "Mili, asistente matemático";
 // visión, video y multimodal que DeepSeek no cubre.
 const OPENCODE_DEFAULT_MODEL: &str = "deepseek-v4-flash";
 const OLLAMA_DEFAULT_MODEL: &str = "llama3.2";
+/// Catálogo OpenCode Go vigente (docs Go 2026-09-13, `GET /models`).
+///
+/// Familias y endpoint real: deepseek-*/glm-*/kimi-*/mimo-v2.5*/hy*/longcat-*
+/// van por `chat/completions`; `muse-spark-*`/`gpt-*`/`grok-*` por `/responses`;
+/// `minimax-*`/`qwen3.6*`/`qwen3.7*`/`qwen3.8*` por `/messages` (ver
+/// `go_model_protocol` en `grafito-assistant`). `mimo-2.5-vl` es legacy
+/// (ya no lo publica Go).
+/// Los IDs del discovery se agregan aparte (`set_available_models`); el texto
+/// libre (`model_draft`) acepta cualquier ID nuevo sin esperar esta lista.
 const OPENCODE_MODELS: &[&str] = &[
+    "deepseek-v4.1-flash",
     "deepseek-v4-flash",
     "deepseek-v4-pro",
-    "mimo-2.5-vl",
-    "fusion",
-    "glm-5.2",
-    // Verificados 2026-09-03/04 contra el endpoint real (200 en ~1-4s):
-    "qwen3.8-max",
-    "kimi-k3",
-    // Muse Spark viaja por la Responses API (verificado 2026-09-04: 200 en ~2s).
-    // El modo agente con herramientas aún no está soportado para Spark:
-    // el fallback de sesión reintenta con deepseek sin tocar tu preferencia.
-    // Go (suscripción, docs Go 2026-09-08): `-contributor`; Zen (custom):
-    // `1.3`/`1.2` pagos y `-contributor-free` gratis (exige sesión válida).
-    // Los `-contributor` viejos se conservan por compatibilidad (rutean por
-    // `contains("muse-spark")`).
+    "deepseek-v4-flash-vision-exp",
     "muse-spark-1.3",
     "muse-spark-1.2",
-    "muse-spark-1.3-contributor-free",
     "muse-spark-1.3-contributor",
+    "muse-spark-1.3-contributor-free",
     "muse-spark-1.2-contributor",
+    "mimo-v2.5",
+    "mimo-v2.5-pro",
+    "mimo-2.5-vl",
+    "fusion",
+    "minimax-m3",
+    "minimax-m2.7",
+    "minimax-m2.5",
+    "qwen3.8-max",
+    "qwen3.8-flash",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-plus",
+    // Verificados 2026-09-03/04 contra el endpoint real (200 en ~1-4s):
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "kimi-k2.6",
+    "grok-4.6",
+    "gpt-5.6-luna",
+    "longcat-2.0",
+    "hy3",
+    "hy4-preview",
 ];
 const OLLAMA_MODELS: &[&str] = &["llama3.2", "llama3.1", "qwen2.5", "qwen2.5-vl", "llava"];
 
@@ -283,7 +345,9 @@ pub struct AssistantBlocksCache {
 #[derive(Clone)]
 struct CachedBlocks {
     content: String,
-    blocks: Vec<AssistantMessageBlock>,
+    /// Bloques compartidos (`Arc`): un hit del cache no clona el contenido,
+    /// sólo el contador de referencias.
+    blocks: std::sync::Arc<Vec<AssistantMessageBlock>>,
     starts: Vec<usize>,
 }
 
@@ -294,14 +358,15 @@ impl AssistantBlocksCache {
     ///
     /// P3 (H5): es el punto de medición del bench `assistant_blocks` — el
     /// transcript por frame pasa por acá, así que un hit evita re-parsear.
-    pub fn blocks(&mut self, content: &str) -> Vec<AssistantMessageBlock> {
+    /// El retorno es `Arc`: hit sin clonar bloques (F18 perf).
+    pub fn blocks(&mut self, content: &str) -> std::sync::Arc<Vec<AssistantMessageBlock>> {
         if let Some(entry) = self
             .entries
             .iter()
             .find(|entry| self.same_content(&entry.content, content))
         {
             self.last_reused_blocks = entry.blocks.len();
-            return entry.blocks.clone();
+            return std::sync::Arc::clone(&entry.blocks);
         }
         // Reúso de prefijo: el stream agrega al final, los bloques cerrados
         // (todos menos el último, que puede seguir abierto) se congelan.
@@ -352,9 +417,10 @@ impl AssistantBlocksCache {
                 blocks.push(spanned.block);
             }
             self.last_reused_blocks = frozen;
+            let blocks = std::sync::Arc::new(blocks);
             let entry = CachedBlocks {
                 content: content.to_owned(),
-                blocks: blocks.clone(),
+                blocks: std::sync::Arc::clone(&blocks),
                 starts,
             };
             self.entries.push_front(entry);
@@ -369,9 +435,10 @@ impl AssistantBlocksCache {
         let starts = spanned.iter().map(|entry| entry.start_line).collect();
         let blocks: Vec<AssistantMessageBlock> =
             spanned.into_iter().map(|entry| entry.block).collect();
+        let blocks = std::sync::Arc::new(blocks);
         self.entries.push_front(CachedBlocks {
             content: content.to_owned(),
-            blocks: blocks.clone(),
+            blocks: std::sync::Arc::clone(&blocks),
             starts,
         });
         while self.entries.len() > Self::MAX_ENTRIES {
@@ -1569,9 +1636,10 @@ pub const REMOTE_SLOW_STAGE_SECS: u64 = 10;
 /// Etapa visible del turno remoto (sub-estado de `Thinking`, con timestamp
 /// que pone la app cada frame). Piel pura: sólo textos/estados, sin I/O.
 ///
-/// Cadena: `Autorizada → Conectando → EsperandoPrimerToken → Recibiendo(KiB)`.
+/// Cadena: `Autorizada → Conectando → EsperandoPrimerToken → Recibiendo`.
 /// La app la deriva de tiempo+deltas (heurística documentada, no señal del
-/// wire); `Recibiendo` sólo existe con deltas SSE (Spark/Responses).
+/// wire); `Recibiendo` sólo existe con deltas SSE (Spark/Responses). Los
+/// textos visibles son profesionales (`Pensando…`, sin jerga de tokens).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RemoteStage {
     /// Consentimiento recién dado, arrancando el worker.
@@ -1587,14 +1655,29 @@ pub enum RemoteStage {
 
 impl RemoteStage {
     /// Texto rioplatense corto de la etapa (puro, sin I/O).
+    ///
+    /// Profesional y sin jerga de red: nunca se nombra el "token" ni se
+    /// muestran KiB (el texto en vivo ya es el feedback).
     pub fn label(self) -> String {
         match self {
-            Self::Autorizada => "Autorizada, conectando…".into(),
-            Self::Conectando => "Conectando al proveedor…".into(),
-            Self::EsperandoPrimerToken => "Esperando el primer token…".into(),
-            Self::Recibiendo { kib } => format!("Recibiendo ({kib} KiB)…"),
+            Self::Autorizada => "Conectando…".into(),
+            Self::Conectando => "Conectando…".into(),
+            Self::EsperandoPrimerToken => "Pensando…".into(),
+            Self::Recibiendo { .. } => "Escribiendo respuesta…".into(),
         }
     }
+}
+
+/// Traza transitoria de un turno con streaming: razonamiento plegable,
+/// duración y tokens. La app la cosecha del job y la pega al turno final.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AssistantStreamTrace {
+    /// Razonamiento acumulado del stream (bloque plegable).
+    pub reasoning: Option<String>,
+    /// Duración del razonamiento en milisegundos.
+    pub reasoning_ms: Option<u32>,
+    /// Consumo de tokens reportado por el proveedor.
+    pub usage: Option<AssistantTokenUsage>,
 }
 
 /// Estado de UI del asistente. Las claves sólo son borradores efímeros y nunca
@@ -1606,16 +1689,35 @@ pub struct AssistantPanelState {
     pub remote_stage: RemoteStage,
     /// Segundos en la etapa actual (para el aviso lento de 10s).
     pub remote_stage_elapsed_secs: u64,
-    /// Razonamiento del último turno remoto (preview de streaming), mostrado
-    /// plegado junto a la respuesta final (estilo DeepSeek). Transitorio:
-    /// no viaja al proveedor ni se serializa.
-    pub last_reasoning: Option<String>,
+    /// Nota de fase previa del turno remoto (p. ej. "Buscando en internet…");
+    /// si está, reemplaza al label de etapa.
+    pub remote_stage_note: Option<String>,
+    /// Traza del streaming en curso o recién terminada, lista para pegarse al
+    /// turno final (`complete_request`). Transitoria: no viaja al proveedor.
+    pub pending_stream_trace: Option<AssistantStreamTrace>,
+    /// Apertura manual del bloque de razonamiento por turno (`id → abierto`).
+    /// `RefCell` porque la Piel dibuja con `&Estado` y el toggle muta al click.
+    pub reasoning_open: std::cell::RefCell<std::collections::BTreeMap<u64, bool>>,
+    /// Consumo de tokens acumulado de la sesión (suma de turnos con `usage`).
+    pub session_usage: AssistantTokenUsage,
+    /// Contador monótono de ids de turno (para el disclosure estable).
+    next_turn_id: u64,
+    /// Modo razonador: pide esfuerzo de razonamiento al proveedor cuando el
+    /// modelo lo soporta (fallback honesto si lo rechaza).
+    pub reasoning_enabled: bool,
+    /// Buscar en internet: habilita la tool `web_search` y el pre-flight de
+    /// contexto web en las consultas.
+    pub web_search_enabled: bool,
     /// Perfil de proveedor seleccionado por el usuario.
     pub provider: ProviderProfile,
     /// Identificador del modelo configurado para el proveedor actual.
     pub model: String,
     /// Modelos cargados desde el proveedor, reducidos sólo a identificadores.
     pub available_models: Vec<String>,
+    /// Borrador de ID de modelo escrito a mano (texto libre): acepta IDs que
+    /// el catálogo aún no lista (p. ej. un modelo nuevo publicado por Go).
+    /// Se valida igual que el combo: no vacío y sin controles/espacios.
+    pub model_draft: String,
     /// Borrador temporal de la clave que la aplicación consume y borra al guardar.
     pub api_key_draft: String,
     /// Indica si la aplicación tiene una clave guardada o de sesión disponible.
@@ -1756,6 +1858,12 @@ pub struct AssistantPanelState {
     pub allow_fusion_fallback: bool,
     /// Problema pegado o escrito por el usuario.
     pub problem: String,
+    /// El editor del composer tiene el foco de teclado este frame.
+    ///
+    /// Lo usa el teclado matemático en pantalla para decidir dónde insertar:
+    /// con foco va al borrador de la pregunta, sin foco a la barra de
+    /// comandos. Piel pura (se actualiza al dibujar, sin I/O).
+    pub composer_focused: bool,
     /// Adjuntos ya validados, sin rutas ni nombres de archivo.
     pub attachments: Vec<ImageAttachment>,
     /// Consentimiento separado para enviar los bytes de imagen en esta consulta.
@@ -1834,6 +1942,7 @@ impl Default for AssistantPanelState {
             provider: ProviderProfile::OpenCodeGo,
             model: OPENCODE_DEFAULT_MODEL.into(),
             available_models: Vec::new(),
+            model_draft: String::new(),
             api_key_draft: String::new(),
             key_available: false,
             settings_open: false,
@@ -1874,6 +1983,7 @@ impl Default for AssistantPanelState {
             vision_enabled: false,
             allow_fusion_fallback: false,
             problem: String::new(),
+            composer_focused: false,
             attachments: Vec::new(),
             image_upload_consent: false,
             focus: None,
@@ -1890,7 +2000,13 @@ impl Default for AssistantPanelState {
             proposal_correction_context: None,
             remote_stage: RemoteStage::Autorizada,
             remote_stage_elapsed_secs: 0,
-            last_reasoning: None,
+            remote_stage_note: None,
+            pending_stream_trace: None,
+            reasoning_open: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            session_usage: AssistantTokenUsage::default(),
+            next_turn_id: 0,
+            reasoning_enabled: false,
+            web_search_enabled: false,
             is_pending: false,
             pending_remote_authorization: None,
             pending_clarification: None,
@@ -1949,12 +2065,16 @@ impl AssistantPanelState {
 
     /// Texto visible del turno remoto en curso (etapas con timestamp).
     ///
-    /// Piel pura (`&Estado`, sin I/O): `Autorizada → Conectando → Esperando
-    /// primer token → Recibiendo (N KiB)`. Si la etapa supera
+    /// Piel pura (`&Estado`, sin I/O): `Autorizada → Conectando → Pensando →
+    /// Escribiendo respuesta`. Si hay una nota de fase (p. ej.
+    /// "Buscando en internet…") se muestra esa. Si la etapa supera
     /// `REMOTE_SLOW_STAGE_SECS` (10s) agrega
     /// "tardando más de lo normal, podés cancelar". La app actualiza
     /// `remote_stage` + `remote_stage_elapsed_secs` cada frame.
     pub fn remote_stage_text(&self) -> String {
+        if let Some(note) = self.remote_stage_note.as_deref() {
+            return note.to_string();
+        }
         let base = self.remote_stage.label();
         if self.remote_stage_elapsed_secs >= REMOTE_SLOW_STAGE_SECS {
             format!("{base} tardando más de lo normal, podés cancelar.")
@@ -1973,6 +2093,7 @@ impl AssistantPanelState {
     fn reset_remote_stage(&mut self) {
         self.remote_stage = RemoteStage::Autorizada;
         self.remote_stage_elapsed_secs = 0;
+        self.remote_stage_note = None;
     }
 
     /// Borra el error recuperable y descarta su corrección pendiente, manteniendo conversación y adjuntos.
@@ -1997,7 +2118,8 @@ impl AssistantPanelState {
         self.cancel_remote_authorization();
         self.clear_proposed_plan();
         self.clear_pending_clarification();
-        self.last_reasoning = None;
+        self.pending_stream_trace = None;
+        self.reasoning_open.borrow_mut().clear();
         self.error = None;
         // M2-5: Limpiar es el ÚNICO reset de las prefs de
         // export (`set_media` las conserva entre animaciones).
@@ -2249,11 +2371,12 @@ impl AssistantPanelState {
         if let Some(target_turn) = target_turn {
             let _ = self.complete_proposal_correction_at(target_turn, answer);
         } else {
-            self.conversation
-                .push(ConversationTurn::assistant_with_origin(
-                    trim_turn(answer),
-                    AssistantExecutionOrigin::AuthorizedRemote,
-                ));
+            let mut turn = ConversationTurn::assistant_with_origin(
+                trim_turn(answer),
+                AssistantExecutionOrigin::AuthorizedRemote,
+            );
+            self.apply_pending_stream_trace(&mut turn);
+            self.push_turn(turn);
             self.trim_conversation();
             self.reveal_pending = true;
             self.reveal_started_at = None;
@@ -2431,13 +2554,15 @@ pub fn verified_models_summary_text() -> &'static str {
 
 /// Detalle de modelos verificados (dentro del plegable, no crudo en ayuda).
 ///
-/// Pura, sin I/O ni `unwrap`. Go vs Zen (docs Go 2026-09-08 + catálogo Zen):
+/// Pura, sin I/O ni `unwrap`. Go vs Zen (docs Go 2026-09-13 + catálogo Zen):
 /// Go (suscripción) = `muse-spark-1.3-contributor` / `1.2-contributor`;
 /// Zen (custom endpoints) = `muse-spark-1.3` / `1.2` (pagos) y
 /// `muse-spark-1.3-contributor-free` (gratis, pide sesión válida).
 /// Los `-contributor` viejos siguen funcionando por compatibilidad.
+/// `mimo-2.5-vl` es legacy (Go publica `mimo-v2.5`/`mimo-v2.5-pro`).
+/// La lista completa vive en "Actualizar modelos" (`GET /models`).
 pub fn verified_models_detail_text() -> &'static str {
-    "deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor (Go), muse-spark-1.2-contributor (Go), muse-spark-1.3 (Zen pago), muse-spark-1.2 (Zen pago), muse-spark-1.3-contributor-free (Zen gratis, pide sesión válida), fusion (+ 17 más por descubrimiento)."
+    "deepseek-v4.1-flash, deepseek-v4-flash, deepseek-v4-pro, deepseek-v4-flash-vision-exp, mimo-v2.5, mimo-v2.5-pro, glm-5.3, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor (Go), muse-spark-1.2-contributor (Go), muse-spark-1.3 (Zen pago), muse-spark-1.2 (Zen pago), muse-spark-1.3-contributor-free (Zen gratis, pide sesión válida), fusion."
 }
 
 impl AssistantPanelState {
@@ -3128,8 +3253,9 @@ impl AssistantPanelState {
 
     /// Muestra el turno enviado antes de que el proveedor responda.
     pub fn begin_request(&mut self, question: String) {
-        self.conversation
-            .push(ConversationTurn::user(trim_turn(question)));
+        self.push_turn(ConversationTurn::user(trim_turn(question)));
+        // Tu propio mensaje entra en vista aunque estuvieras leyendo arriba.
+        self.transcript_at_bottom = true;
         self.trim_conversation();
         self.clear_agent_progress();
         self.reveal_pending = false;
@@ -3142,8 +3268,65 @@ impl AssistantPanelState {
         self.clear_proposal_correction();
         self.clear_remote_authorization();
         self.clear_proposed_plan();
-        self.last_reasoning = None;
+        self.pending_stream_trace = None;
         self.error = None;
+    }
+
+    /// Asigna un id estable de sesión y agrega el turno a la conversación.
+    ///
+    /// El id alimenta el disclosure de razonamiento (estado abierto/cerrado
+    /// por turno); no se serializa y nunca colisiona dentro de la sesión.
+    pub fn push_turn(&mut self, mut turn: ConversationTurn) {
+        self.next_turn_id = self.next_turn_id.wrapping_add(1);
+        if self.next_turn_id == 0 {
+            self.next_turn_id = 1;
+        }
+        turn.id = self.next_turn_id;
+        self.conversation.push(turn);
+    }
+
+    /// Registra razonamiento y duración cosechados del streaming para el
+    /// próximo turno del asistente (lo consume `complete_request`).
+    pub fn attach_stream_trace(&mut self, reasoning: Option<String>, reasoning_ms: Option<u32>) {
+        if reasoning.is_none() && reasoning_ms.is_none() {
+            return;
+        }
+        let trace = self
+            .pending_stream_trace
+            .get_or_insert_with(AssistantStreamTrace::default);
+        if reasoning.is_some() {
+            trace.reasoning = reasoning;
+        }
+        if reasoning_ms.is_some() {
+            trace.reasoning_ms = reasoning_ms;
+        }
+    }
+
+    /// Registra el `usage` reportado por el proveedor para el próximo turno.
+    pub fn attach_pending_usage(&mut self, usage: Option<AssistantTokenUsage>) {
+        if let Some(usage) = usage {
+            self.pending_stream_trace
+                .get_or_insert_with(AssistantStreamTrace::default)
+                .usage = Some(usage);
+        }
+    }
+
+    /// Aplica la traza pendiente al turno y acumula el total de la sesión.
+    fn apply_pending_stream_trace(&mut self, turn: &mut ConversationTurn) {
+        let Some(trace) = self.pending_stream_trace.take() else {
+            return;
+        };
+        turn.reasoning = trace.reasoning;
+        turn.reasoning_ms = trace.reasoning_ms;
+        turn.usage = trace.usage;
+        if let Some(usage) = turn.usage {
+            self.session_usage.accumulate(usage);
+        }
+    }
+
+    /// Total de tokens de la sesión (0 = el proveedor no reportó usage).
+    pub const fn session_token_total(&self) -> u64 {
+        self.session_usage.display_total()
     }
 
     /// Muestra que la cancelación es cooperativa sin habilitar otro envío aún.
@@ -3153,11 +3336,12 @@ impl AssistantPanelState {
 
     /// Guarda una respuesta y conserva sólo el historial más reciente de sesión.
     pub fn complete_request(&mut self, answer: String) {
-        self.conversation
-            .push(ConversationTurn::assistant_with_origin(
-                trim_turn(answer),
-                AssistantExecutionOrigin::AuthorizedRemote,
-            ));
+        let mut turn = ConversationTurn::assistant_with_origin(
+            trim_turn(answer),
+            AssistantExecutionOrigin::AuthorizedRemote,
+        );
+        self.apply_pending_stream_trace(&mut turn);
+        self.push_turn(turn);
         self.trim_conversation();
         self.reveal_pending = true;
         self.reveal_started_at = None;
@@ -3173,11 +3357,12 @@ impl AssistantPanelState {
 
     /// Finaliza una consulta resuelta en el proceso local.
     pub fn complete_local_request(&mut self, answer: String) {
-        self.conversation
-            .push(ConversationTurn::assistant_with_origin(
-                trim_turn(answer),
-                AssistantExecutionOrigin::Local,
-            ));
+        let mut turn = ConversationTurn::assistant_with_origin(
+            trim_turn(answer),
+            AssistantExecutionOrigin::Local,
+        );
+        self.apply_pending_stream_trace(&mut turn);
+        self.push_turn(turn);
         self.trim_conversation();
         self.reveal_pending = true;
         self.reveal_started_at = None;
@@ -3186,7 +3371,7 @@ impl AssistantPanelState {
         self.is_fusion_review = false;
         self.reset_remote_stage();
         self.image_upload_consent = false;
-        self.last_reasoning = None;
+        self.pending_stream_trace = None;
         self.error = None;
     }
 
@@ -3200,6 +3385,7 @@ impl AssistantPanelState {
         self.is_fusion_review = false;
         self.reset_remote_stage();
         self.image_upload_consent = false;
+        self.pending_stream_trace = None;
         self.error = Some(error.into());
     }
 
@@ -3497,6 +3683,20 @@ fn push_unique_model(models: &mut Vec<String>, model: &str) {
     }
 }
 
+/// Sanea un ID de modelo escrito a mano (texto libre): trim, no vacío y solo
+/// ASCII imprimible (sin espacios ni controles). `None` = nada que aplicar.
+/// Pura y sin `unwrap`: el mismo gate del ComboBox para el botón "Usar".
+pub fn sanitize_custom_model_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || !trimmed.bytes().all(|byte| byte.is_ascii_graphic())
+        || trimmed.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
 fn model_is_selectable(_provider: ProviderProfile, _model: &str) -> bool {
     // OpenCode Go ahora es compatible con todos los modelos visibles (deepseek, mimo, muse-spark, glm, etc.)
     // No filtrar por nombre; la validación real la hace el servidor y se reporta via remote_error_message.
@@ -3555,8 +3755,10 @@ fn stable_transcript_width(available_width: f32) -> f32 {
 }
 
 /// Tolerancia para considerar que el transcript está abajo del todo (px).
-/// Base 4 × 2: menos que una línea, más que el jitter de layout.
-const TRANSCRIPT_BOTTOM_TOLERANCE: f32 = 8.0;
+/// Base 4 × 0.5: menos que una línea y casi exacta (egui sólo fija cuando su
+/// flag interno está clavado; el forzado con `scroll_to_cursor` cubre la
+/// franja restante cuando la app decide que sigue el fondo).
+const TRANSCRIPT_BOTTOM_TOLERANCE: f32 = 2.0;
 
 /// Decide si el transcript está pegado abajo desde la geometría del scroll.
 ///
@@ -3578,6 +3780,34 @@ fn transcript_is_at_bottom(offset_y: f32, viewport_h: f32, content_h: f32) -> bo
 /// panel) y el stick de egui ya re-engancha al volver abajo. Puro.
 fn transcript_stick_to_bottom(user_at_bottom: bool) -> bool {
     user_at_bottom
+}
+
+/// ¿El último turno ya muestra contenido en vivo (burbuja provisional)?
+///
+/// Cuando hay razonamiento o texto visible, la burbuja ES el feedback y la
+/// tarjeta de espera (orb + etapa) se oculta para no duplicar: estilo
+/// DeepSeek/ChatGPT, un solo foco visual. Puro (el modo agente se evalúa en
+/// `pending_card_visible`, porque ahí no hay provisional por diseño).
+fn provisional_turn_has_visible_content(state: &AssistantPanelState) -> bool {
+    state
+        .conversation
+        .last()
+        .filter(|turn| turn.role == ConversationRole::Assistant)
+        .is_some_and(|turn| {
+            !turn.content.trim().is_empty()
+                || turn
+                    .reasoning
+                    .as_deref()
+                    .is_some_and(|reasoning| !reasoning.trim().is_empty())
+        })
+}
+
+/// ¿Se muestra la tarjeta de espera (orb + etapa)?
+///
+/// Visible mientras está pendiente Y (modo agente, sin provisional por
+/// diseño, O sin contenido visible en la burbuja). Puro y testeable.
+fn pending_card_visible(state: &AssistantPanelState) -> bool {
+    state.is_pending && (state.agent_mode || !provisional_turn_has_visible_content(state))
 }
 
 /// Tamaño mínimo legible de la card de animación (bug tiny).
@@ -4252,6 +4482,10 @@ pub enum AssistantUiAction {
     FullPermissionChanged(bool),
     /// Activar o desactivar el modo agente (loop con herramientas).
     AgentModeChanged(bool),
+    /// Modo razonador: pedir esfuerzo de razonamiento al proveedor.
+    ReasoningModeChanged(bool),
+    /// Buscar en internet: pre-flight web + tool `web_search` en el agente.
+    WebSearchChanged(bool),
     /// Generar una animación del objeto/expresión y reproducirla en el chat.
     RunAnimation,
     /// Abrir el diálogo Exportar de la animación visible en la card.
@@ -4365,7 +4599,7 @@ pub fn draw_assistant_panel(
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
-                action = draw_panel_contents(ui, state, true, visuals, cache);
+                action = draw_panel_contents(ui, state, visuals, cache);
             });
     } else {
         let (min_width, max_width, default_width) = assistant_panel_widths(available_rect.width());
@@ -4401,7 +4635,7 @@ pub fn draw_assistant_contents(
     visuals: AssistantVisuals,
     cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
-    draw_panel_contents(ui, state, false, visuals, cache)
+    draw_panel_contents(ui, state, visuals, cache)
 }
 
 fn assistant_panel_widths(available_width: f32) -> (f32, f32, f32) {
@@ -4413,8 +4647,39 @@ fn assistant_panel_widths(available_width: f32) -> (f32, f32, f32) {
     (minimum, maximum, default)
 }
 
-fn assistant_uses_bottom_sheet(available_width: f32) -> bool {
+/// ¿El asistente va como bottom-sheet en vez de panel lateral?
+///
+/// Pública porque la app la necesita para ordenar los paneles: en modo
+/// side-panel la barra inferior se dibuja después (limitada al centro).
+pub fn assistant_uses_bottom_sheet(available_width: f32) -> bool {
     available_width < ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH
+}
+
+/// Altura visible del composer anidado (pura y testeable).
+///
+/// `composer_height` es la estimación (`assistant_composer_height`),
+/// `max_composer` el tope 38% y `composer_cap` reserva el transcript mínimo.
+/// Garantía: nunca por debajo del contenido real (`content_floor`: 158px
+/// normal con tarjeta+estado+caption+marcos, 136px colapsado) cuando hay
+/// espacio; si el espacio no alcanza, vale `available` (el transcript cede
+/// a 0 pero el composer sigue alcanzable, jamás recortado contra la barra
+/// inferior).
+fn visible_composer_height_for(
+    available: f32,
+    composer_height: f32,
+    max_composer: f32,
+    composer_cap: f32,
+    collapsed: bool,
+) -> f32 {
+    let content_floor = if collapsed {
+        ASSISTANT_COMPOSER_COLLAPSED_FLOOR
+    } else {
+        ASSISTANT_COMPOSER_BASE_HEIGHT
+    };
+    composer_height
+        .min(max_composer)
+        .min(composer_cap)
+        .max(content_floor.min(available.max(0.0)))
 }
 
 fn assistant_compact_panel_heights(
@@ -4422,21 +4687,28 @@ fn assistant_compact_panel_heights(
     reserved_bottom_height: f32,
     state: &AssistantPanelState,
 ) -> (f32, f32, f32) {
-    // Preserve the complete composer plus the header and a minimal transcript
-    // strip when possible. Shorter windows scroll the composer rather than
-    // extending the panel outside the viewport.
     let available_height = available_height.max(0.0);
     let assistant_budget =
         (available_height - reserved_bottom_height.max(0.0) - ASSISTANT_COMPACT_MIN_CANVAS_HEIGHT)
             .max(0.0);
     let desired_minimum = assistant_composer_height(state) + 96.0;
-    let minimum = desired_minimum.min(assistant_budget);
-    let maximum = assistant_budget;
+    // Piso usable: si el presupuesto no alcanza para header+composer+tira
+    // mínima, el sheet crece sobre el canvas (comportamiento normal de un
+    // bottom-sheet) en vez de recortar el composer contra la barra inferior.
+    // Nunca excede el viewport y siempre minimum ≤ maximum.
+    let floor = desired_minimum.min(available_height);
+    let maximum = assistant_budget.max(floor);
+    let minimum = desired_minimum.min(maximum);
     let default = 360.0_f32.clamp(minimum, maximum);
     (minimum, maximum, default)
 }
 
 fn assistant_composer_height(state: &AssistantPanelState) -> f32 {
+    // BASE ya incluye tarjeta + fila de estado + caption + marcos: el texto
+    // "Estoy pensando…" de `is_pending` ocupa la fila de estado reservada,
+    // sin sumar nada extra. Solo crecen foco, cercanía al límite y
+    // attachments (el mensaje de attachment pendiente vive dentro de su
+    // propio bloque, fila aparte).
     let mut height = ASSISTANT_COMPOSER_BASE_HEIGHT;
     if state.focus.is_some() {
         height += ASSISTANT_COMPOSER_FOCUS_HEIGHT;
@@ -4454,9 +4726,6 @@ fn assistant_composer_height(state: &AssistantPanelState) -> f32 {
         if state.is_pending {
             height += ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT;
         }
-    }
-    if state.is_pending && state.attachments.is_empty() {
-        height += ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT;
     }
     height
 }
@@ -5828,6 +6097,59 @@ fn draw_assistant_settings_contents(
         action = Some(AssistantUiAction::ModelChanged);
     }
 
+    // Discovery (`GET /models`, tope 16 KiB/256 IDs en el crate): antes la
+    // acción `RefreshModels` existía pero ningún widget la emitía y el usuario
+    // sólo veía el catálogo hardcodeado. Ahora hay botón + refresh al cambiar
+    // de proveedor (handler `ProviderChanged` en la app).
+    ui.add_space(SPACE_XS);
+    ui.horizontal(|ui| {
+        let can_refresh = !state.is_pending;
+        if ui
+            .add_enabled(can_refresh, egui::Button::new("Actualizar modelos"))
+            .on_hover_text("Lee la lista publicada por el proveedor (GET /models).")
+            .clicked()
+        {
+            action = Some(AssistantUiAction::RefreshModels);
+        }
+        ui.label(
+            egui::RichText::new("o escribí el ID exacto")
+                .color(theme.text_tertiary)
+                .size(TYPE_XS),
+        );
+    });
+    if state.model_draft.is_empty() && !state.model.is_empty() {
+        state.model_draft = state.model.clone();
+    }
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(!state.is_pending, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.model_draft)
+                    .hint_text("p. ej. deepseek-v4.1-flash")
+                    .desired_width(ui.available_width() - 64.0),
+            )
+            .on_hover_text(
+                "ID exacto del proveedor (sin espacios). Útil para modelos nuevos que el catálogo aún no lista.",
+            );
+            if ui.button("Usar").clicked() {
+                let custom = state.model_draft.clone();
+                match sanitize_custom_model_id(&custom) {
+                    Some(id) if id != state.model => {
+                        state.select_model(id);
+                        action = Some(AssistantUiAction::ModelChanged);
+                    }
+                    Some(_) => {
+                        // Mismo ID que el actual: nada que aplicar.
+                    }
+                    None => {
+                        // Sin ID válido no hay nada que aplicar; el borrador
+                        // vuelve al modelo actual.
+                        state.model_draft = state.model.clone();
+                    }
+                }
+            }
+        });
+    });
+
     if state.provider == ProviderProfile::OpenCodeGo && state.model == OPENCODE_DEFAULT_MODEL {
         ui.add_space(SPACE_SM);
         let changed = ui
@@ -5880,6 +6202,35 @@ fn draw_assistant_settings_contents(
     if agent_changed && agent_mode != state.agent_mode {
         state.agent_mode = agent_mode;
         action = Some(AssistantUiAction::AgentModeChanged(agent_mode));
+    }
+
+    ui.add_space(SPACE_XS);
+    let mut reasoning_enabled = state.reasoning_enabled;
+    let reasoning_changed = ui
+        .checkbox(
+            &mut reasoning_enabled,
+            "Modo razonador (pensar antes de responder)",
+        )
+        .on_hover_text(
+            "Pide esfuerzo de razonamiento al proveedor; el proceso se muestra plegable. Si el modelo no lo acepta, se responde sin él (aviso honesto).",
+        )
+        .changed();
+    if reasoning_changed {
+        state.reasoning_enabled = reasoning_enabled;
+        action = Some(AssistantUiAction::ReasoningModeChanged(reasoning_enabled));
+    }
+
+    ui.add_space(SPACE_XS);
+    let mut web_search_enabled = state.web_search_enabled;
+    let web_search_changed = ui
+        .checkbox(&mut web_search_enabled, "Buscar en internet")
+        .on_hover_text(
+            "Antes de responder, busca en la web (DuckDuckGo) y agrega los resultados al contexto. En modo examen y sin red queda bloqueado honestamente.",
+        )
+        .changed();
+    if web_search_changed {
+        state.web_search_enabled = web_search_enabled;
+        action = Some(AssistantUiAction::WebSearchChanged(web_search_enabled));
     }
 
     if state.use_api_key() {
@@ -6086,7 +6437,6 @@ fn draw_assistant_settings_contents(
 fn draw_panel_contents(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
-    compact: bool,
     visuals: AssistantVisuals,
     cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
@@ -6100,18 +6450,29 @@ fn draw_panel_contents(
     // F5 Scandinavian quiet (fix 2026-08-21): clamp 88..260, sin ScrollArea envolvente,
     // wrap via TextEdit::multiline (desired_rows 2) — el TopBottomPanel ya limita altura.
     // La barra sólo aparece si las attachments exceden el máximo.
-    let available = ui.available_height().max(120.0);
+    // Fix "chat oculto": el piso de 120 falseaba el espacio en paneles chicos
+    // (bottom-sheet con teclado) y el composer se comía el transcript; ahora
+    // el alto real manda y el composer nunca reserva menos que
+    // `ASSISTANT_TRANSCRIPT_MIN_HEIGHT` para el chat.
+    let available = {
+        let height = ui.available_height();
+        if height.is_finite() {
+            height.max(0.0)
+        } else {
+            120.0
+        }
+    };
     let collapsed_composer = ui.available_width() < ASSISTANT_PANEL_NARROW_WIDTH
         || available < ASSISTANT_SHORT_VIEWPORT_HEIGHT;
     let max_composer = (available * 0.38).clamp(88.0, 260.0);
-    let visible_composer_height = if compact {
-        (available - 64.0)
-            .max(88.0)
-            .min(composer_height)
-            .min(max_composer)
-    } else {
-        composer_height.min(max_composer).max(88.0)
-    };
+    let composer_cap = (available - ASSISTANT_TRANSCRIPT_MIN_HEIGHT).max(56.0);
+    let visible_composer_height = visible_composer_height_for(
+        available,
+        composer_height,
+        max_composer,
+        composer_cap,
+        collapsed_composer,
+    );
     // Scandinavian composer — flat, hairline top, sin tarjeta oscura ni sombra
     egui::TopBottomPanel::bottom("grafito_assistant_composer")
         .exact_height(visible_composer_height)
@@ -6237,17 +6598,19 @@ fn draw_panel_contents(
                 );
             } else {
                 let reveal_clip = {
+                    // Préstamo directo del contenido: el cache con `Arc` ya no
+                    // clona bloques, así que tampoco hace falta clonar el texto.
                     let last_content = state
                         .conversation
                         .iter()
                         .rev()
                         .find(|turn| matches!(turn.role, ConversationRole::Assistant))
-                        .map(|turn| turn.content.clone())
+                        .map(|turn| turn.content.as_str())
                         .unwrap_or_default();
                     let total_last_blocks = if last_content.is_empty() {
                         0
                     } else {
-                        cache.blocks(&last_content).len()
+                        cache.blocks(last_content).len()
                     };
                     assistant_reveal_clip(ui, state, total_last_blocks)
                 };
@@ -6269,16 +6632,6 @@ fn draw_panel_contents(
                         ),
                     };
                     let is_last = turn_index + 1 == state.conversation.len();
-                    // Razonamiento del último turno remoto: se muestra plegado
-                    // arriba de la respuesta final (estilo DeepSeek).
-                    if is_last
-                        && matches!(turn.role, ConversationRole::Assistant)
-                        && !state.is_pending
-                    {
-                        if let Some(reasoning) = state.last_reasoning.as_deref() {
-                            draw_reasoning_disclosure(ui, reasoning);
-                        }
-                    }
                     let reveal_here = if is_last && matches!(turn.role, ConversationRole::Assistant)
                     {
                         reveal_clip
@@ -6319,8 +6672,19 @@ fn draw_panel_contents(
             if !state.is_pending {
                 retain_first_assistant_action(&mut action, draw_proposed_plan_card(ui, state));
             }
-            if state.is_pending {
+            // La tarjeta de espera sólo aparece sin contenido visible: cuando
+            // la burbuja provisional ya muestra razonamiento o texto, ella es
+            // el feedback (no se duplica). En modo agente no hay provisional.
+            if pending_card_visible(state) {
                 draw_pending_indicator(ui, state, visuals);
+            }
+            // Fix dead-zone del stick-to-bottom: la app cree "abajo" con
+            // tolerancia, pero egui sólo fija si su flag interno es exacto.
+            // Cuando el transcript debe seguir el fondo, forzamos el scroll
+            // al final del contenido (redundante si egui ya está clavado,
+            // correctivo en la franja 1..8px y cuando el composer crece).
+            if transcript_stick_to_bottom(state.transcript_at_bottom) {
+                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
             }
             // Animación y media ya integradas dentro del último turno (draw_conversation_turn)
             // Se mantiene fallback global solo si no hay conversación (empty state con animación previa)
@@ -9039,6 +9403,21 @@ fn draw_assistant_header(
                             .size(crate::tokens::TYPE_XS),
                     );
                 });
+                // Consumo acumulado de la sesión (sólo si el proveedor
+                // reportó usage: sin datos no se inventa nada).
+                let session_tokens = state.session_token_total();
+                if session_tokens > 0 {
+                    ui.add_space(crate::tokens::SPACE_SM);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "· {} tokens",
+                            format_token_count(session_tokens)
+                        ))
+                        .color(theme.text_tertiary)
+                        .size(crate::tokens::TYPE_XS),
+                    )
+                    .on_hover_text("Tokens reportados por el proveedor en esta sesión");
+                }
                 // Centro flexible para empujar controles a la derecha
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if action_icon_button(
@@ -9075,6 +9454,59 @@ fn draw_assistant_header(
         .rect_filled(sep_rect, 0.0, theme.separator.gamma_multiply(0.08));
     ui.add_space(crate::tokens::SPACE_SM);
     action
+}
+
+/// Botón fantasma con icono para la fila del composer (Adjuntar/Razonar/Buscar).
+///
+/// Pill quiet 30x28 con hairline; activo = fondo `accent_muted` + icono
+/// `accent`. Tooltip + `widget_info` conservan el significado (a11y): el
+/// texto visible se reemplaza por icono sin perder accesibilidad.
+fn composer_icon_toggle(
+    ui: &mut egui::Ui,
+    icon: crate::icons::Icon,
+    active: bool,
+    theme: &crate::theme::Theme,
+    tooltip: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(30.0, crate::tokens::hit_target_size(24.0)),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            crate::tokens::RADIUS_PILL,
+            if active {
+                theme.accent_muted
+            } else {
+                egui::Color32::TRANSPARENT
+            },
+            egui::Stroke::new(
+                1.0,
+                if active {
+                    theme.accent.gamma_multiply(0.35)
+                } else {
+                    theme.separator.gamma_multiply(0.10)
+                },
+            ),
+        );
+        crate::icons::draw_icon(
+            painter,
+            rect.shrink(7.0),
+            icon,
+            if active {
+                theme.accent
+            } else {
+                theme.text_secondary
+            },
+        );
+    }
+    let response = response.on_hover_text(tooltip.to_owned());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tooltip.to_owned())
+    });
+    response
 }
 
 fn draw_assistant_composer(
@@ -9159,6 +9591,7 @@ fn draw_assistant_composer(
                     state.can_submit(),
                 );
                 editor_had_focus = editor.has_focus();
+                state.composer_focused = editor_had_focus;
                 // A11Y: Esc descarta lo persistente — turno en curso → Cancelar
                 // (acción pura, el app decide); si no, suelta el foco y
                 // conserva el borrador.
@@ -9174,19 +9607,19 @@ fn draw_assistant_composer(
                 }
                 ui.add_space(crate::tokens::SPACE_XS);
                 ui.horizontal(|ui| {
-                    // Adjuntar con estilo ghost macOS
+                    // Adjuntar con icono (clip): la fila del composer es sólo
+                    // iconos + contador; el texto vive en el tooltip (a11y).
                     let can_attach = !state.is_pending
                         && !state.is_importing_image
                         && state.attachments.len() < attachment_limits.max_attachments;
                     let attach_response = ui
                         .add_enabled_ui(can_attach, |ui| {
-                            let btn = egui::Button::new(
-                                egui::RichText::new("Adjuntar imagen").size(crate::tokens::TYPE_XS),
+                            action_icon_button(
+                                ui,
+                                Icon::Paperclip,
+                                theme.text_secondary,
+                                "Adjuntar imagen",
                             )
-                            .rounding(crate::tokens::RADIUS_PILL)
-                            .fill(theme.button_bg.gamma_multiply(0.0))
-                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
-                            ui.add(btn)
                         })
                         .inner;
                     if attach_response.clicked() {
@@ -9205,22 +9638,29 @@ fn draw_assistant_composer(
                             .size(crate::tokens::TYPE_XS),
                         );
                     }
-                    let counter_color = if over_budget {
-                        theme.danger
-                    } else if near_budget {
-                        theme.warning
-                    } else {
-                        theme.text_tertiary
-                    };
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("{used}/{budget}"))
-                                .color(counter_color)
-                                .size(crate::tokens::TYPE_XS),
+                    // Contador con progressive disclosure: en panel angosto
+                    // sólo aparece cuando importa (cerca/por encima del límite
+                    // o con adjuntos); así los chips y Enviar nunca se pisan.
+                    let show_counter =
+                        !collapsed || over_budget || near_budget || !state.attachments.is_empty();
+                    if show_counter {
+                        let counter_color = if over_budget {
+                            theme.danger
+                        } else if near_budget {
+                            theme.warning
+                        } else {
+                            theme.text_tertiary
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{used}/{budget}"))
+                                    .color(counter_color)
+                                    .size(crate::tokens::TYPE_XS),
+                            )
+                            .truncate(),
                         )
-                        .truncate(),
-                    )
-                    .on_hover_text("Caracteres usados del límite de entrada");
+                        .on_hover_text("Caracteres usados del límite de entrada");
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if state.is_pending {
                             if state.is_cancelling {
@@ -9243,82 +9683,129 @@ fn draw_assistant_composer(
                                 action = Some(AssistantUiAction::Cancel);
                             }
                         } else {
-                            // Botón Enviar: acento sage, 500, radio 12
-                            // Button::new("Enviar") // compatibility: test expects this exact substring
+                            // Botón Enviar: pill de acento con icono de avión;
+                            // el texto vive en tooltip + a11y ("Enviar").
                             let can_submit = state.can_submit();
-                            let btn = egui::Button::new(
-                                egui::RichText::new("Enviar")
-                                    .size(crate::tokens::TYPE_SM)
-                                    .strong()
-                                    .color(if can_submit {
+                            let send_response = ui
+                                .add_enabled(
+                                    can_submit,
+                                    egui::Button::new("")
+                                        .min_size(egui::vec2(44.0, 30.0))
+                                        .rounding(crate::tokens::RADIUS_MD)
+                                        .fill(if can_submit {
+                                            theme.accent
+                                        } else {
+                                            theme.button_bg.gamma_multiply(0.6)
+                                        })
+                                        .stroke(egui::Stroke::NONE),
+                                )
+                                .on_hover_text("Enviar")
+                                .on_disabled_hover_text(
+                                    "Escribí una pregunta dentro del límite para enviar.",
+                                );
+                            if ui.is_rect_visible(send_response.rect) {
+                                crate::icons::draw_icon(
+                                    ui.painter(),
+                                    send_response.rect.shrink(7.0),
+                                    Icon::Send,
+                                    if can_submit {
                                         egui::Color32::WHITE
                                     } else {
                                         theme.text_tertiary
-                                    }),
-                            )
-                            .rounding(crate::tokens::RADIUS_MD)
-                            .fill(if can_submit {
-                                theme.accent
-                            } else {
-                                theme.button_bg.gamma_multiply(0.6)
-                            })
-                            .stroke(egui::Stroke::NONE);
-                            let send_response =
-                                ui.add_enabled(can_submit, btn).on_disabled_hover_text(
-                                    "Escribí una pregunta dentro del límite para enviar.",
+                                    },
                                 );
+                            }
+                            send_response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    can_submit,
+                                    "Enviar".to_owned(),
+                                )
+                            });
                             if send_response.clicked() || submit_on_enter {
                                 action = Some(AssistantUiAction::Submit);
                             }
                         }
+                        // Iconos rápidos dentro del layout derecho: Enviar manda,
+                        // quedan a su izquierda y nunca se superponen en panel
+                        // angosto. Tooltips conservan el significado (a11y).
+                        ui.add_space(crate::tokens::SPACE_XS);
+                        let web_chip = composer_icon_toggle(
+                            ui,
+                            Icon::Search,
+                            state.web_search_enabled,
+                            theme,
+                            "Buscar en internet antes de responder",
+                        );
+                        if web_chip.clicked() {
+                            state.web_search_enabled = !state.web_search_enabled;
+                            action = Some(AssistantUiAction::WebSearchChanged(
+                                state.web_search_enabled,
+                            ));
+                        }
+                        let reasoning_chip = composer_icon_toggle(
+                            ui,
+                            Icon::Sparkles,
+                            state.reasoning_enabled,
+                            theme,
+                            "Modo razonador: pensar antes de responder (plegable)",
+                        );
+                        if reasoning_chip.clicked() {
+                            state.reasoning_enabled = !state.reasoning_enabled;
+                            action = Some(AssistantUiAction::ReasoningModeChanged(
+                                state.reasoning_enabled,
+                            ));
+                        }
                     });
                 });
-                // Estado del composer a ancho completo bajo la fila: en la
-                // fila quedaba aplastado a ~6px y envolvía en vertical.
-                if state.is_pending {
-                    ui.add_space(crate::tokens::SPACE_XS);
-                    let pending_resp = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(
-                                "Estoy pensando… esperá que termine para mandar otra pregunta.",
-                            )
-                            .color(theme.text_secondary)
-                            .size(crate::tokens::TYPE_XS),
-                        )
-                        .wrap(),
-                    );
-                    // A11Y live-region sobre la respuesta existente.
-                    if let Some(live) = assistant_live_text(state) {
-                        crate::toolbar::tag_live_region(&pending_resp, live);
-                    }
-                } else if over_budget {
-                    ui.add_space(crate::tokens::SPACE_XS);
-                    let budget_resp = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(over_budget_hint(budget))
-                                .color(theme.danger)
-                                .size(crate::tokens::TYPE_XS),
-                        )
-                        .wrap(),
-                    );
-                    // A11Y live-region (D1): el límite excedido es error y anuncia.
-                    crate::toolbar::tag_live_region(
-                        &budget_resp,
-                        format!("Asistente: error. {}", over_budget_hint(budget)),
-                    );
-                } else if state.problem.trim().is_empty() {
-                    ui.add_space(crate::tokens::SPACE_XS);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new("Escribí algo para activar Enviar.")
-                                .color(theme.text_tertiary)
-                                .size(crate::tokens::TYPE_XS),
-                        )
-                        .wrap(),
-                    );
-                }
             });
         });
+    // Estado del composer en flujo, DENTRO del panel de altura exacta: su
+    // alto (fila de estado 24 + caption 18) ya está reservado en el BASE,
+    // así la fila de botones y el anillo de foco nunca se recortan contra
+    // la barra inferior.
+    if state.is_pending {
+        ui.add_space(crate::tokens::SPACE_XS);
+        let pending_resp = ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "Estoy pensando… esperá que termine para mandar otra pregunta.",
+                )
+                .color(theme.text_secondary)
+                .size(crate::tokens::TYPE_XS),
+            )
+            .wrap(),
+        );
+        // A11Y live-region sobre la respuesta existente.
+        if let Some(live) = assistant_live_text(state) {
+            crate::toolbar::tag_live_region(&pending_resp, live);
+        }
+    } else if over_budget {
+        ui.add_space(crate::tokens::SPACE_XS);
+        let budget_resp = ui.add(
+            egui::Label::new(
+                egui::RichText::new(over_budget_hint(budget))
+                    .color(theme.danger)
+                    .size(crate::tokens::TYPE_XS),
+            )
+            .wrap(),
+        );
+        // A11Y live-region (D1): el límite excedido es error y anuncia.
+        crate::toolbar::tag_live_region(
+            &budget_resp,
+            format!("Asistente: error. {}", over_budget_hint(budget)),
+        );
+    } else if state.problem.trim().is_empty() {
+        ui.add_space(crate::tokens::SPACE_XS);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Escribí algo para activar Enviar.")
+                    .color(theme.text_tertiary)
+                    .size(crate::tokens::TYPE_XS),
+            )
+            .wrap(),
+        );
+    }
     // A11Y: foco visible en el composer (anillo 2px del tema) cuando el
     // editor tiene el foco. El orden Tab lo da egui por orden de creación.
     if editor_had_focus {
@@ -9497,18 +9984,62 @@ pub fn over_budget_hint(budget: usize) -> String {
     format!("Acortá un poco para enviar (límite {budget}).")
 }
 
-/// Bloque plegable con el razonamiento del último turno remoto (estilo
-/// DeepSeek): cerrado por defecto y con el texto en un frame quiet.
-fn draw_reasoning_disclosure(ui: &mut egui::Ui, reasoning: &str) {
+/// Formatea un conteo de tokens para la UI: `832`, `1.2k`, `1.3M`.
+///
+/// Puro y sin locale: los separadores se mantienen estables entre idiomas.
+pub fn format_token_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else if tokens < 1_000_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    }
+}
+
+/// Bloque plegable con el razonamiento del turno (estilo DeepSeek).
+///
+/// - Mientras el modelo piensa sin respuesta (`pending=true`) se auto-expande
+///   para ver el proceso en vivo.
+/// - Al llegar el texto (o terminar) se auto-colapsa: sólo queda la respuesta.
+/// - Si el usuario lo abre/cierra, su elección manda (`reasoning_open` por id).
+fn draw_reasoning_disclosure(
+    ui: &mut egui::Ui,
+    turn_id: u64,
+    reasoning: &str,
+    reasoning_ms: Option<u32>,
+    pending: bool,
+    state: &AssistantPanelState,
+) {
     let theme = crate::theme::current_theme(ui.ctx());
-    egui::CollapsingHeader::new(
-        egui::RichText::new("Razonamiento")
+    let open = state
+        .reasoning_open
+        .borrow()
+        .get(&turn_id)
+        .copied()
+        .unwrap_or(pending);
+    let header = match (pending, reasoning_ms) {
+        (true, _) => "Pensando…".to_owned(),
+        (false, Some(ms)) if ms >= 1_000 => {
+            format!("Razonamiento · Pensó {:.0}s", ms as f32 / 1_000.0)
+        }
+        _ => "Razonamiento".to_owned(),
+    };
+    // Mientras piensa, el header respira más (secondary); al terminar queda
+    // quieto (tertiary). El cuerpo siempre en un frame input_bg con hairline.
+    let header_color = if pending {
+        theme.text_secondary
+    } else {
+        theme.text_tertiary
+    };
+    let response = egui::CollapsingHeader::new(
+        egui::RichText::new(header)
             .size(crate::tokens::TYPE_XS)
             .strong()
-            .color(theme.text_tertiary),
+            .color(header_color),
     )
-    .id_salt("assistant_reasoning_disclosure")
-    .default_open(false)
+    .id_salt(("assistant_reasoning_disclosure", turn_id))
+    .open(Some(open))
     .show(ui, |ui| {
         egui::Frame::none()
             .fill(theme.input_bg)
@@ -9516,13 +10047,40 @@ fn draw_reasoning_disclosure(ui: &mut egui::Ui, reasoning: &str) {
             .rounding(crate::tokens::RADIUS_SM)
             .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
             .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(reasoning)
-                        .size(crate::tokens::TYPE_XS)
-                        .color(theme.text_secondary),
-                );
+                egui::ScrollArea::vertical()
+                    .id_salt(("assistant_reasoning_body", turn_id))
+                    .max_height(220.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(reasoning)
+                                .size(crate::tokens::TYPE_XS)
+                                .color(theme.text_secondary),
+                        );
+                    });
             });
     });
+    if response.header_response.clicked() {
+        state.reasoning_open.borrow_mut().insert(turn_id, !open);
+    }
+}
+
+/// Banda de métricas del turno: "Pensó Ns · N tokens" con detalle en hover.
+fn draw_turn_metrics(ui: &mut egui::Ui, turn: &ConversationTurn, theme: &crate::theme::Theme) {
+    let Some(usage) = turn.usage else {
+        return;
+    };
+    ui.add_space(crate::tokens::SPACE_XS);
+    let text = egui::RichText::new(format!(
+        "{} tokens",
+        format_token_count(usage.display_total())
+    ))
+    .color(theme.text_tertiary)
+    .size(crate::tokens::TYPE_XS);
+    ui.label(text).on_hover_text(format!(
+        "Entrada {} · Salida {} · Razonamiento {} · Caché {}",
+        usage.input_tokens, usage.output_tokens, usage.reasoning_tokens, usage.cached_input_tokens
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9587,6 +10145,7 @@ fn draw_conversation_turn(
             let origin = turn
                 .origin
                 .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
+            let mut copy_action = None;
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("{assistant_name} · {}", origin.public_label()))
@@ -9594,8 +10153,43 @@ fn draw_conversation_turn(
                         .size(TYPE_XS)
                         .strong(),
                 );
+                // Copiar respuesta (estilo DeepSeek): sólo en turnos cerrados
+                // con texto; en el provisional de streaming no aplica.
+                let pending_turn = is_last && state.is_pending;
+                let can_copy = !pending_turn && !turn.content.trim().is_empty();
+                if can_copy {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if action_icon_button(
+                            ui,
+                            Icon::Copy,
+                            theme.text_secondary,
+                            "Copiar la respuesta al portapapeles",
+                        )
+                        .clicked()
+                        {
+                            copy_action =
+                                Some(AssistantUiAction::CopyMessage(turn.content.clone()));
+                        }
+                    });
+                }
             });
             ui.add_space(SPACE_XS);
+            // Razonamiento plegable del turno (estilo DeepSeek): auto-abierto
+            // mientras piensa sin respuesta; se colapsa al llegar el texto
+            // (o al terminar) salvo que el usuario lo haya tocado.
+            if let Some(reasoning) = turn.reasoning.as_deref() {
+                let reasoning_pending =
+                    is_last && state.is_pending && turn.content.trim().is_empty();
+                draw_reasoning_disclosure(
+                    ui,
+                    turn.id,
+                    reasoning,
+                    turn.reasoning_ms,
+                    reasoning_pending,
+                    state,
+                );
+                ui.add_space(SPACE_XS);
+            }
             action = draw_assistant_response(
                 ui,
                 &turn.content,
@@ -9604,6 +10198,9 @@ fn draw_conversation_turn(
                 turn_index,
                 cache,
             );
+            // El "Copiar" del header no pisa la acción de la respuesta.
+            retain_first_assistant_action(&mut action, copy_action);
+            draw_turn_metrics(ui, turn, theme);
             // Integración de animación dentro del mensaje, por turno y por
             // dueño: el turno dueño del slot dibuja el player global
             // (`draw_media_card` con toolbar/slider); el resto con `media`
@@ -11994,23 +12591,20 @@ mod tests {
 
     #[test]
     fn remote_stages_have_rioplatense_texts_in_order() {
-        // autorizada → conectando → esperando primer token → recibiendo (KiB).
-        assert_eq!(RemoteStage::Autorizada.label(), "Autorizada, conectando…");
-        assert_eq!(RemoteStage::Conectando.label(), "Conectando al proveedor…");
-        assert_eq!(
-            RemoteStage::EsperandoPrimerToken.label(),
-            "Esperando el primer token…"
-        );
+        // autorizada → conectando → pensando → escribiendo (sin jerga de red).
+        assert_eq!(RemoteStage::Autorizada.label(), "Conectando…");
+        assert_eq!(RemoteStage::Conectando.label(), "Conectando…");
+        assert_eq!(RemoteStage::EsperandoPrimerToken.label(), "Pensando…");
         assert_eq!(
             RemoteStage::Recibiendo { kib: 3 }.label(),
-            "Recibiendo (3 KiB)…"
+            "Escribiendo respuesta…"
         );
         // El panel expone el mismo texto (Piel pura, sin I/O).
         let mut estado = AssistantPanelState::default();
         estado.set_remote_stage(RemoteStage::Conectando, 0);
-        assert_eq!(estado.remote_stage_text(), "Conectando al proveedor…");
+        assert_eq!(estado.remote_stage_text(), "Conectando…");
         estado.set_remote_stage(RemoteStage::Recibiendo { kib: 2 }, 0);
-        assert_eq!(estado.remote_stage_text(), "Recibiendo (2 KiB)…");
+        assert_eq!(estado.remote_stage_text(), "Escribiendo respuesta…");
     }
 
     #[test]
@@ -12021,13 +12615,13 @@ mod tests {
         assert!(!estado.remote_stage_text().contains("tardando"));
         estado.set_remote_stage(RemoteStage::EsperandoPrimerToken, 10);
         let lento = estado.remote_stage_text();
-        assert!(lento.contains("Esperando el primer token"), "{lento}");
+        assert!(lento.contains("Pensando"), "{lento}");
         assert!(lento.contains("tardando más de lo normal"), "{lento}");
         assert!(lento.contains("podés cancelar"), "{lento}");
         // La live-region anuncia la misma etapa (sin silencio prolongado).
         estado.is_pending = true;
         let live = assistant_live_text(&estado).unwrap();
-        assert!(live.contains("Esperando el primer token"), "{live}");
+        assert!(live.contains("Pensando"), "{live}");
     }
 
     fn correction_context() -> AssistantCorrectionContext {
@@ -12573,8 +13167,8 @@ mod tests {
             ..Default::default()
         };
         let announced = assistant_live_text(&pending).expect("pending anuncia");
-        // Etapa visible por defecto (`Autorizada`), no el genérico anterior.
-        assert!(announced.contains("Autorizada"), "{announced}");
+        // Etapa visible por defecto (`Autorizada` → "Conectando…"), no el genérico anterior.
+        assert!(announced.contains("Conectando"), "{announced}");
         let mut failed = AssistantPanelState {
             is_pending: true,
             ..Default::default()
@@ -12620,12 +13214,20 @@ mod tests {
                     content: "graficá y=x²".to_owned(),
                     origin: None,
                     media: None,
+                    reasoning: None,
+                    reasoning_ms: None,
+                    usage: None,
+                    id: 0,
                 },
                 ConversationTurn {
                     role: ConversationRole::Assistant,
                     content: "Listo: parábola con vértice en el origen.".to_owned(),
                     origin: None,
                     media: None,
+                    reasoning: None,
+                    reasoning_ms: None,
+                    usage: None,
+                    id: 0,
                 },
             ],
             ..Default::default()
@@ -12640,10 +13242,46 @@ mod tests {
                 content: "hola".to_owned(),
                 origin: None,
                 media: None,
+                reasoning: None,
+                reasoning_ms: None,
+                usage: None,
+                id: 0,
             }],
             ..Default::default()
         };
         assert!(assistant_live_text(&user_only).is_none());
+    }
+
+    #[test]
+    fn token_count_format_and_session_totals() {
+        use grafito_assistant_types::AssistantTokenUsage;
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(832), "832");
+        assert_eq!(format_token_count(1_200), "1.2k");
+        assert_eq!(format_token_count(1_250_000), "1.2M");
+        let mut panel = AssistantPanelState::default();
+        assert_eq!(panel.session_token_total(), 0);
+        panel.session_usage = AssistantTokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            cached_input_tokens: 0,
+            total_tokens: 0,
+        };
+        assert_eq!(panel.session_token_total(), 0);
+    }
+
+    #[test]
+    fn push_turn_assigns_stable_unique_ids() {
+        let mut panel = AssistantPanelState::default();
+        panel.push_turn(ConversationTurn::user("a"));
+        panel.push_turn(ConversationTurn::assistant("b"));
+        let ids: Vec<u64> = panel.conversation.iter().map(|turn| turn.id).collect();
+        assert!(ids[0] != ids[1], "{ids:?}");
+        assert!(ids.iter().all(|id| *id > 0), "{ids:?}");
+        // La apertura manual del razonamiento se guarda por id.
+        panel.reasoning_open.borrow_mut().insert(ids[1], true);
+        assert_eq!(panel.reasoning_open.borrow().get(&ids[1]), Some(&true));
     }
 
     #[test]
@@ -12656,6 +13294,10 @@ mod tests {
                     content: content.to_owned(),
                     origin: None,
                     media: None,
+                    reasoning: None,
+                    reasoning_ms: None,
+                    usage: None,
+                    id: 0,
                 }],
                 ..Default::default()
             }
@@ -12736,6 +13378,11 @@ mod tests {
         assert!(choices.contains(&"muse-spark-1.3-contributor-free".to_string()));
         assert!(choices.contains(&"qwen3.8-max".to_string()));
         assert!(choices.contains(&"kimi-k3".to_string()));
+        // Go 2026-09-13: el usuario puede elegir deepseek-v4.1-flash y los
+        // nuevos IDs sin editar configuración a mano.
+        assert!(choices.contains(&"deepseek-v4.1-flash".to_string()));
+        assert!(choices.contains(&"minimax-m3".to_string()));
+        assert!(choices.contains(&"grok-4.6".to_string()));
         // Help documenta Go (suscripción) vs Zen (custom) en el plegable.
         let detail = verified_models_detail_text();
         assert!(detail.contains("muse-spark-1.3-contributor-free"));
@@ -12748,6 +13395,19 @@ mod tests {
             choices.iter().filter(|model| *model == "glm-5.2").count(),
             1
         );
+    }
+
+    #[test]
+    fn custom_model_id_sanitizes_free_text_without_panicking() {
+        assert_eq!(
+            sanitize_custom_model_id("  deepseek-v4.1-flash  "),
+            Some("deepseek-v4.1-flash".to_string())
+        );
+        assert_eq!(sanitize_custom_model_id(""), None);
+        assert_eq!(sanitize_custom_model_id("   "), None);
+        assert_eq!(sanitize_custom_model_id("modelo con espacios"), None);
+        assert_eq!(sanitize_custom_model_id("modelo\ncon\nsaltos"), None);
+        assert_eq!(sanitize_custom_model_id("modelo\tcon-tab"), None);
     }
 
     #[test]
@@ -13145,6 +13805,79 @@ mod tests {
                 .map_or(0, |caché| caché.entradas.len())
         });
         assert_eq!(entradas, 1);
+    }
+
+    #[test]
+    fn reasoning_disclosure_renders_and_respects_the_user_toggle() {
+        use grafito_assistant_types::AssistantTokenUsage;
+        let context = egui::Context::default();
+        let state = AssistantPanelState::default();
+        let reasoning = "Analizo el producto: 17*23 = 391.\nVerifico: 23*17 = 391.";
+        // Auto-abierto mientras piensa (pending) y auto-colapsado al responder:
+        // ninguno de los dos escribe un override del usuario.
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_reasoning_disclosure(ui, 7, reasoning, None, true, &state);
+            });
+        });
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_reasoning_disclosure(ui, 7, reasoning, Some(2_400), false, &state);
+            });
+        });
+        assert!(state.reasoning_open.borrow().is_empty());
+        // El toggle manual se conserva por id.
+        state.reasoning_open.borrow_mut().insert(7, true);
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_reasoning_disclosure(ui, 7, reasoning, Some(2_400), false, &state);
+                let mut turn = ConversationTurn::assistant("listo");
+                turn.usage = Some(AssistantTokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 30,
+                    reasoning_tokens: 18,
+                    cached_input_tokens: 0,
+                    total_tokens: 42,
+                });
+                draw_turn_metrics(ui, &turn, crate::theme::current_theme(ctx));
+            });
+        });
+        assert_eq!(state.reasoning_open.borrow().get(&7), Some(&true));
+    }
+
+    #[test]
+    fn pending_card_hides_once_the_provisional_bubble_shows_content() {
+        let mut state = AssistantPanelState {
+            is_pending: true,
+            // Camino de chat simple (sin agente): la tarjeta depende del contenido.
+            agent_mode: false,
+            ..Default::default()
+        };
+        // Sin turnos: la tarjeta de espera se muestra.
+        assert!(pending_card_visible(&state));
+        state.push_turn(ConversationTurn::user("hola"));
+        assert!(pending_card_visible(&state));
+        // Provisional vacío (recién creado): sigue mostrándose.
+        state.push_turn(ConversationTurn::assistant(""));
+        assert!(pending_card_visible(&state));
+        // Con razonamiento en vivo: la burbuja es el feedback.
+        state
+            .conversation
+            .last_mut()
+            .expect("provisional")
+            .reasoning = Some("pensando…".to_string());
+        assert!(!pending_card_visible(&state));
+        // Con texto también (aunque el razonamiento se limpie).
+        let last = state.conversation.last_mut().expect("provisional");
+        last.reasoning = None;
+        last.content = "hola".to_string();
+        assert!(!pending_card_visible(&state));
+        // En modo agente no hay provisional: la tarjeta siempre se muestra.
+        state.agent_mode = true;
+        assert!(pending_card_visible(&state));
+        // Sin pendiente no hay tarjeta en ningún caso.
+        state.is_pending = false;
+        assert!(!pending_card_visible(&state));
     }
 
     #[test]
@@ -15076,7 +15809,7 @@ mod tests {
     #[test]
     fn composer_height_returns_to_its_compact_baseline_without_optional_content() {
         let mut state = AssistantPanelState::default();
-        assert_eq!(ASSISTANT_COMPOSER_BASE_HEIGHT, 116.0);
+        assert_eq!(ASSISTANT_COMPOSER_BASE_HEIGHT, 158.0);
         assert_eq!(
             assistant_composer_height(&state),
             ASSISTANT_COMPOSER_BASE_HEIGHT
@@ -15104,7 +15837,7 @@ mod tests {
                 .unwrap();
         }
 
-        // max_attachments=2 → (2-1)/2 =0 filas extra → 116+112=228
+        // max_attachments=2 → (2-1)/2 =0 filas extra → 158+112=270
         let expected = ASSISTANT_COMPOSER_BASE_HEIGHT
             + ASSISTANT_COMPOSER_ATTACHMENT_HEIGHT
             + ((state.attachments.len().saturating_sub(1) / 2) as f32
@@ -15186,6 +15919,119 @@ mod tests {
         assert!(minimum <= maximum);
         assert!(maximum <= 480.0);
         assert!(default <= maximum);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn composer_base_covers_all_fixed_rows_without_clipping() {
+        // Contenido fijo DENTRO del panel anidado: tarjeta 94 (marco 16 +
+        // editor 44 + espacio 4 + botones 30) + estado 24 + caption 18 +
+        // 16 del marco propio del panel = 152. BASE 158 deja 6px de aire
+        // (anillo de foco 2px + crecimiento HiDPI).
+        assert_eq!(ASSISTANT_COMPOSER_BASE_HEIGHT, 158.0);
+        assert!(
+            ASSISTANT_COMPOSER_BASE_HEIGHT
+                >= 44.0
+                    + 30.0
+                    + 16.0
+                    + 4.0
+                    + 16.0
+                    + ASSISTANT_COMPOSER_STATUS_HEIGHT
+                    + ASSISTANT_COMPOSER_CAPTION_HEIGHT
+        );
+        // Colapsado: tarjeta 78 (16 + 28 + 4 + 30) + estado 24 + caption
+        // 18 + marco 16 = 136, igual al piso (por debajo se recortan
+        // caption y anillo de foco).
+        assert_eq!(ASSISTANT_COMPOSER_COLLAPSED_FLOOR, 136.0);
+        assert!(
+            16.0 + ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT
+                + 4.0
+                + 30.0
+                + 16.0
+                + ASSISTANT_COMPOSER_STATUS_HEIGHT
+                + ASSISTANT_COMPOSER_CAPTION_HEIGHT
+                <= ASSISTANT_COMPOSER_COLLAPSED_FLOOR
+        );
+    }
+
+    #[test]
+    fn idle_empty_composer_reserves_status_and_caption_without_clipping() {
+        // Regresión pantalla completa: el estado idle vacío dibuja tarjeta +
+        // fila de estado ("Escribí algo…") + caption dentro del panel de
+        // altura exacta. Si el BASE no los cubre, el caption y el anillo de
+        // foco se recortan contra el borde inferior.
+        let state = AssistantPanelState::default();
+        assert!(state.problem.trim().is_empty());
+        assert_eq!(
+            assistant_composer_height(&state),
+            16.0 + ASSISTANT_COMPOSER_EDITOR_HEIGHT
+                + 4.0
+                + 30.0
+                + 16.0
+                + ASSISTANT_COMPOSER_STATUS_HEIGHT
+                + ASSISTANT_COMPOSER_CAPTION_HEIGHT
+                + 6.0
+        );
+        // "Estoy pensando…" reutiliza la fila de estado ya reservada: el
+        // pending sin attachments no crece (antes sumaba 20px de más).
+        let pending = AssistantPanelState {
+            problem: "2+2".to_owned(),
+            is_pending: true,
+            ..AssistantPanelState::default()
+        };
+        assert_eq!(
+            assistant_composer_height(&pending),
+            ASSISTANT_COMPOSER_BASE_HEIGHT
+        );
+    }
+
+    #[test]
+    fn visible_composer_height_never_clips_content_when_space_allows() {
+        // Panel sano: la estimación manda (con foco suma por estimación).
+        assert_eq!(
+            visible_composer_height_for(500.0, 158.0, 232.0, 444.0, false),
+            158.0
+        );
+        assert_eq!(
+            visible_composer_height_for(500.0, 190.0, 232.0, 444.0, false),
+            190.0
+        );
+        // Tope 38% y reserva de transcript siguen mandando hacia abajo, pero
+        // nunca por debajo del contenido cuando hay espacio.
+        assert_eq!(
+            visible_composer_height_for(242.0, 158.0, 88.0, 186.0, false),
+            158.0
+        );
+        // Colapsado: piso 136 aunque el tope pida menos.
+        assert_eq!(
+            visible_composer_height_for(242.0, 158.0, 88.0, 186.0, true),
+            136.0
+        );
+        // Espacio imposible: vale `available` (el transcript cede a 0, el
+        // composer sigue alcanzable en vez de recortado).
+        assert_eq!(
+            visible_composer_height_for(80.0, 116.0, 88.0, 56.0, false),
+            80.0
+        );
+        // Degenerado (0px): manda el piso del cap; el panel recorta igual.
+        assert_eq!(
+            visible_composer_height_for(0.0, 116.0, 88.0, 56.0, false),
+            56.0
+        );
+    }
+
+    #[test]
+    fn compact_sheet_never_hides_the_composer_in_cramped_viewports() {
+        // Ventana corta + teclado: el sheet crece sobre el canvas (piso
+        // usable) en vez de colapsar a 0 y esconder el composer.
+        let state = AssistantPanelState::default();
+        let composer_and_header = assistant_composer_height(&state) + 96.0;
+        let (minimum, maximum, default) = assistant_compact_panel_heights(300.0, 200.0, &state);
+        assert!(minimum <= maximum);
+        assert!(maximum <= 300.0);
+        assert_eq!(minimum, composer_and_header.min(300.0));
+        assert_eq!(maximum, composer_and_header.min(300.0));
+        assert_eq!(default, composer_and_header.min(300.0));
     }
 
     #[test]

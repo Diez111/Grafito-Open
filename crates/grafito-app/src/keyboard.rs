@@ -9,7 +9,8 @@ use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, KeyboardKeyRole};
 
 pub(crate) const MATH_KEYBOARD_HEIGHT: f32 = 208.0;
-pub(crate) const MATH_KEYBOARD_COMPACT_HEIGHT: f32 = 36.0;
+// Compacta a 44 px: tecla 28 + aire 8+8 (piso táctil 24, Scandinavian quiet).
+pub(crate) const MATH_KEYBOARD_COMPACT_HEIGHT: f32 = 44.0;
 const MATH_KEYBOARD_EDGE_MARGIN: f32 = 12.0;
 const MATH_KEYBOARD_KEY_GAP: f32 = 4.0;
 const MATH_KEYBOARD_COLUMNS: f32 = 8.0;
@@ -55,6 +56,27 @@ pub(crate) fn keyboard_insertion(tab: usize, label: &str) -> Option<&'static str
         .iter()
         .flat_map(|row| row.iter())
         .find_map(|(key_label, insertion)| (*key_label == label).then_some(*insertion))
+}
+
+/// Inserta texto del teclado en pantalla en el campo con foco: borrador de
+/// la pregunta del asistente si su editor lo tiene, si no a la barra de
+/// comandos. Antes todo iba a la barra aunque el usuario estuviera
+/// escribiendo su pregunta (el teclado "no servía" en el chat).
+fn insert_keyboard_text(app: &mut GrafitoApp, text: &str) {
+    if app.assistant.composer_focused {
+        app.assistant.problem.push_str(text);
+    } else {
+        app.input_text.push_str(text);
+    }
+}
+
+/// Borra un char del mismo campo donde insertaría (simetría honesta).
+fn erase_keyboard_char(app: &mut GrafitoApp) {
+    if app.assistant.composer_focused {
+        app.assistant.problem.pop();
+    } else {
+        app.input_text.pop();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,21 +126,30 @@ fn keyboard_grid_padding(available_width: f32, button_width: f32) -> f32 {
 
 fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
+    // Hairline superior del sistema (nunca Frame con borde total: los bordes
+    // laterales/inferiores quedaban medio clipados al borde de la ventana).
     egui::TopBottomPanel::bottom("math_keyboard")
-        .show_separator_line(false)
+        .show_separator_line(true)
         .exact_height(MATH_KEYBOARD_COMPACT_HEIGHT)
-        .frame(
-            egui::Frame::none()
-                .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator)),
-        )
+        .frame(egui::Frame::none().fill(theme.panel_bg))
         .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+            // Chips de 32 px en panel de 44: 6 px de aire arriba y abajo,
+            // fila ópticamente centrada (nada pegado al hairline).
+            let chip_h = 32.0;
+            ui.add_space((MATH_KEYBOARD_COMPACT_HEIGHT - chip_h) / 2.0);
             ui.horizontal_centered(|ui| {
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.label(
                     egui::RichText::new("Teclado")
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_secondary),
                 );
+                // Ancho adaptativo: reserva etiqueta+iconos y reparte el resto
+                // entre las 6 teclas (32..40 px: casi cuadradas con 32 de alto,
+                // nunca pastillas achatadas).
+                let reserve = 70.0 + 3.0 * 32.0 + 9.0 * grafito_ui::tokens::SPACE_SM;
+                let chip_w = ((ui.available_width() - reserve) / 6.0).clamp(32.0, 40.0);
                 for (label, insertion) in [
                     ("x", "x"),
                     ("y", "y"),
@@ -127,28 +158,80 @@ fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                     (")", ")"),
                     ("+", "+"),
                 ] {
-                    if ui.small_button(label).clicked() {
-                        app.input_text.push_str(insertion);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(chip_w, chip_h), egui::Sense::click());
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            format!("Insertar {label}"),
+                        )
+                    });
+                    if ui.is_rect_visible(rect) {
+                        let visuals =
+                            theme.keyboard_key_visuals(KeyboardKeyRole::Standard, resp.hovered());
+                        ui.painter().rect(
+                            rect,
+                            grafito_ui::tokens::RADIUS_SM,
+                            visuals.background,
+                            visuals.border,
+                        );
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            egui::FontId::proportional(15.0),
+                            visuals.text,
+                        );
+                    }
+                    if resp.clicked() {
+                        insert_keyboard_text(app, insertion);
                     }
                 }
-                if action_icon_button(ui, Icon::Delete, theme.text_secondary, "Borrar entrada")
-                    .clicked()
-                {
-                    app.input_text.pop();
+                // Acciones con el mismo lenguaje de chips: borrar (Delete),
+                // ejecutar (Enter sage) y expandir (Standard con chevron).
+                let actions: &[(Icon, KeyboardKeyRole, &str)] = &[
+                    (Icon::Delete, KeyboardKeyRole::Delete, "Borrar entrada"),
+                    (Icon::Play, KeyboardKeyRole::Enter, "Ejecutar entrada"),
+                    (
+                        Icon::ChevronUp,
+                        KeyboardKeyRole::Standard,
+                        "Expandir teclado completo",
+                    ),
+                ];
+                for (icon, role, tip) in actions {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(32.0, chip_h), egui::Sense::click());
+                    let resp = resp.on_hover_text(*tip);
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, *tip)
+                    });
+                    if ui.is_rect_visible(rect) {
+                        let visuals = theme.keyboard_key_visuals(*role, resp.hovered());
+                        ui.painter().rect(
+                            rect,
+                            grafito_ui::tokens::RADIUS_SM,
+                            visuals.background,
+                            visuals.border,
+                        );
+                        // Icono en recuadro cuadrado centrado: nunca estirado
+                        // por el aspect del chip.
+                        let side = rect.width().min(rect.height()) - grafito_ui::tokens::SPACE_SM;
+                        let icon_rect =
+                            egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
+                        grafito_ui::icons::draw_icon(ui.painter(), icon_rect, *icon, visuals.text);
+                    }
+                    if resp.clicked() {
+                        match *tip {
+                            "Borrar entrada" => erase_keyboard_char(app),
+                            "Ejecutar entrada" => {
+                                app.submit_input_text(ui.ctx().input(|input| input.time));
+                            }
+                            _ => app.keyboard_expanded = true,
+                        }
+                    }
                 }
-                if action_icon_button(ui, Icon::Play, theme.accent, "Ejecutar entrada").clicked() {
-                    app.submit_input_text(ui.ctx().input(|input| input.time));
-                }
-                if action_icon_button(
-                    ui,
-                    Icon::ChevronUp,
-                    theme.accent,
-                    "Expandir teclado completo",
-                )
-                .clicked()
-                {
-                    app.keyboard_expanded = true;
-                }
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
             });
         });
 }
@@ -167,18 +250,13 @@ pub(crate) fn draw_math_keyboard(
     }
 
     let theme = current_theme(ctx);
-    let sep_col = theme.separator;
     let panel_bg = theme.panel_bg;
 
     // ─── 4. MATH KEYBOARD — docked bottom panel (central area only) ──────────────
     egui::TopBottomPanel::bottom("math_keyboard")
-        .show_separator_line(false)
+        .show_separator_line(true)
         .exact_height(MATH_KEYBOARD_HEIGHT)
-        .frame(
-            egui::Frame::none()
-                .fill(panel_bg)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
-        )
+        .frame(egui::Frame::none().fill(panel_bg))
         .show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal_centered(|ui| {
@@ -263,7 +341,8 @@ pub(crate) fn draw_math_keyboard(
                                 );
                             }
                             if resp.clicked() {
-                                app.input_text.push_str(
+                                insert_keyboard_text(
+                                    app,
                                     keyboard_insertion(app.keyboard_tab, $t).unwrap_or($i),
                                 );
                             }
@@ -418,7 +497,7 @@ pub(crate) fn draw_math_keyboard(
                                 visuals.text,
                             );
                             if resp.clicked() {
-                                app.input_text.pop();
+                                erase_keyboard_char(app);
                             }
                         }
                         ui.add_space(sp);
@@ -459,9 +538,9 @@ pub(crate) fn draw_math_keyboard(
 #[cfg(test)]
 mod tests {
     use super::{
-        keyboard_button_width, keyboard_grid_padding, keyboard_insertion, math_keyboard_layout,
-        MathKeyboardLayout, MATH_KEYBOARD_COMPACT_HEIGHT, MATH_KEYBOARD_EDGE_MARGIN,
-        MATH_KEYBOARD_HEIGHT,
+        erase_keyboard_char, insert_keyboard_text, keyboard_button_width, keyboard_grid_padding,
+        keyboard_insertion, math_keyboard_layout, MathKeyboardLayout, MATH_KEYBOARD_COMPACT_HEIGHT,
+        MATH_KEYBOARD_EDGE_MARGIN, MATH_KEYBOARD_HEIGHT,
     };
 
     #[test]
@@ -494,8 +573,39 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_inserts_into_the_focused_field() {
+        let mut app = crate::app::dummy_grafito_app();
+        app.input_text.clear();
+        app.assistant.problem.clear();
+        // Sin foco en el composer: va a la barra de comandos.
+        app.assistant.composer_focused = false;
+        insert_keyboard_text(&mut app, "x^2");
+        assert_eq!(app.input_text, "x^2");
+        assert!(app.assistant.problem.is_empty());
+        erase_keyboard_char(&mut app);
+        erase_keyboard_char(&mut app);
+        erase_keyboard_char(&mut app);
+        assert!(app.input_text.is_empty());
+        // Con foco en el composer: va al borrador de la pregunta.
+        app.assistant.composer_focused = true;
+        insert_keyboard_text(&mut app, "derivá");
+        assert_eq!(app.assistant.problem, "derivá");
+        assert!(app.input_text.is_empty());
+        for _ in 0.."derivá".chars().count() {
+            erase_keyboard_char(&mut app);
+        }
+        assert!(app.assistant.problem.is_empty());
+    }
+
+    #[test]
     fn keyboard_full_layout_uses_only_its_required_control_height() {
         assert_eq!(MATH_KEYBOARD_HEIGHT, 208.0);
+    }
+
+    #[test]
+    fn keyboard_compact_leaves_room_for_chips_and_air() {
+        // 44 = tecla 28 + aire 8+8 (piso táctil 24, Scandinavian quiet).
+        assert_eq!(MATH_KEYBOARD_COMPACT_HEIGHT, 44.0);
     }
 
     #[test]

@@ -28,6 +28,7 @@
 //!    crear la función `icon_nuevo(painter, rect, color)` siguiendo el
 //!    estilo outlined.
 
+use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Response, Shape, Stroke, Ui, WidgetText};
 
 /// Enum de todos los iconos soportados por la app.
@@ -46,6 +47,10 @@ pub enum Icon {
     Settings,
     Play,
     Pause,
+    Send,
+    Sparkles,
+    Copy,
+    Paperclip,
 
     // Herramientas (matching con Tool)
     Move,
@@ -171,6 +176,10 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Settings => icon_settings(painter, inner, color, stroke),
         Icon::Play => icon_play(painter, inner, color, stroke_thick),
         Icon::Pause => icon_pause(painter, inner, color, stroke_thick),
+        Icon::Send => icon_send(painter, inner, color, stroke_thick),
+        Icon::Sparkles => icon_sparkles(painter, inner, color, stroke),
+        Icon::Copy => icon_copy(painter, inner, color, stroke),
+        Icon::Paperclip => icon_paperclip(painter, inner, color, stroke),
 
         Icon::Move => icon_move(painter, inner, color, stroke_thick),
         Icon::Point => icon_point(painter, inner, color, stroke_thick),
@@ -1639,6 +1648,142 @@ fn icon_check(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
     );
 }
 
+/// Mapea un punto de grilla 24×24 (estilo Lucide) al rect del icono.
+///
+/// Permite portar geometría verificada de packs open-source (Lucide, ISC)
+/// sin decimales mágicos: cada icono se lee como coordenadas de grilla.
+fn grid24(rect: Rect, x: f32, y: f32) -> Pos2 {
+    pos2(
+        rect.min.x + x / 24.0 * rect.width(),
+        rect.min.y + y / 24.0 * rect.height(),
+    )
+}
+
+/// Traza una polilínea sobre la grilla 24, cerrada o abierta.
+fn stroke_polyline_24(
+    painter: &Painter,
+    rect: Rect,
+    points: &[(f32, f32)],
+    close: bool,
+    stroke: Stroke,
+) {
+    let mut iter = points.iter().map(|(x, y)| grid24(rect, *x, *y));
+    let Some(first) = iter.next() else {
+        return;
+    };
+    let mut prev = first;
+    for next in iter {
+        painter.line_segment([prev, next], stroke);
+        prev = next;
+    }
+    if close {
+        painter.line_segment([prev, first], stroke);
+    }
+}
+
+/// Avión de papel (enviar): geometría Lucide `send` — triángulo + pliegue.
+/// Mucho más legible que un cuadrilátero genérico a tamaño pequeño.
+fn icon_send(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    stroke_polyline_24(
+        painter,
+        r,
+        &[(22.0, 2.0), (15.0, 22.0), (11.0, 13.0), (2.0, 9.0)],
+        true,
+        stroke,
+    );
+    stroke_polyline_24(painter, r, &[(22.0, 2.0), (11.0, 13.0)], false, stroke);
+}
+
+/// Destello IA (modo Razonar): estrella de 4 puntas RELLENA.
+///
+/// Geometría inspirada en Lucide `sparkle` pero con cintura ancha
+/// (interior/exterior ≈ 0.46 en vez de 0.25): medido en hoja de iconos, la
+/// estrella fina a 12-16px colapsa en una cruz ilegible, mientras la gorda
+/// se lee ✦ a cualquier tamaño. Se triangula en abanico desde el centro.
+fn icon_sparkles(painter: &Painter, r: Rect, color: Color32, _stroke: Stroke) {
+    let center = grid24(r, 12.0, 12.0);
+    // Anillo alternado punta/interior.
+    let ring = [
+        (12.0, 2.8),
+        (15.0, 9.0),
+        (21.2, 12.0),
+        (15.0, 15.0),
+        (12.0, 21.2),
+        (9.0, 15.0),
+        (2.8, 12.0),
+        (9.0, 9.0),
+    ];
+    let mut mesh = Mesh::default();
+    mesh.vertices.push(Vertex {
+        pos: center,
+        uv: WHITE_UV,
+        color,
+    });
+    for (x, y) in ring {
+        mesh.vertices.push(Vertex {
+            pos: grid24(r, x, y),
+            uv: WHITE_UV,
+            color,
+        });
+    }
+    for i in 1..=8u32 {
+        mesh.indices
+            .extend_from_slice(&[0, i, if i == 8 { 1 } else { i + 1 }]);
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// Copiar: geometría Lucide `copy` — frontal con esquinas + trasero abierto.
+fn icon_copy(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    painter.rect_stroke(
+        Rect::from_min_max(grid24(r, 8.0, 8.0), grid24(r, 22.0, 22.0)),
+        2.0,
+        stroke,
+    );
+    stroke_polyline_24(
+        painter,
+        r,
+        &[
+            (4.0, 16.0),
+            (2.0, 14.0),
+            (2.0, 4.0),
+            (4.0, 2.0),
+            (14.0, 2.0),
+            (16.0, 4.0),
+        ],
+        false,
+        stroke,
+    );
+}
+
+/// Clip (adjuntar): geometría Lucide `paperclip` — espina diagonal con las
+/// tres vueltas muestreadas (cada arco de 180° lleva 2 puntos intermedios
+/// calculados sobre la circunferencia exacta).
+fn icon_paperclip(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    stroke_polyline_24(
+        painter,
+        r,
+        &[
+            (16.0, 6.0),
+            (7.586, 14.586),
+            (7.0, 16.0),
+            (9.0, 18.0),
+            (10.415, 17.415),
+            (18.829, 8.829),
+            (20.0, 6.0),
+            (16.0, 2.0),
+            (13.172, 3.172),
+            (4.793, 11.723),
+            (3.04, 15.97),
+            (9.04, 21.97),
+            (13.278, 20.208),
+            (21.657, 11.657),
+        ],
+        false,
+        stroke,
+    );
+}
+
 /// Pizarra minimalista (rectángulo + base).
 fn icon_whiteboard(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
     let tl = pos2(r.min.x + 0.12 * r.width(), r.min.y + 0.18 * r.height());
@@ -1797,6 +1942,10 @@ mod tests {
                     Icon::Shapes,
                     Icon::Notebook,
                     Icon::DrawCompass,
+                    Icon::Send,
+                    Icon::Sparkles,
+                    Icon::Copy,
+                    Icon::Paperclip,
                 ] {
                     draw_icon(painter, rect, icon, egui::Color32::WHITE);
                 }

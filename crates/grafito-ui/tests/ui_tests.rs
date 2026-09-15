@@ -504,8 +504,8 @@ fn compact_chrome_keeps_panel_navigation_and_theme_owned_slider_colors() {
     let ui_source = include_str!("../../grafito-app/src/ui.rs");
     let algebra_source = include_str!("../../grafito-app/src/algebra.rs");
 
-    assert!(ui_source.contains("ui.menu_button(\"Paneles\""));
-    assert!(ui_source.contains("ui.menu_button(\"Más\""));
+    assert!(ui_source.contains("menu_button(ui, \"Paneles\""));
+    assert!(ui_source.contains("menu_button(ui, \"Más\""));
     assert!(ui_source.contains("top_chrome_uses_overflow"));
     assert!(algebra_source.contains("visuals.selection.bg_fill = theme.accent"));
     assert!(!algebra_source.contains("Color32::from_rgb(48, 52, 62)"));
@@ -585,7 +585,15 @@ fn assistant_is_a_permanent_docked_panel_without_a_launcher() {
         .map(|offset| composer_start + offset)
         .expect("assistant conversation renderer");
     let composer_source = &assistant_source[composer_start..composer_end];
-    assert!(composer_source.contains("Button::new(\"Enviar\")"));
+    // El composer es sólo-iconos (profesional): Enviar viaja como icono Send
+    // con tooltip + a11y "Enviar", sin texto visible. Razonar = Sparkles
+    // (relleno, legible a 16px), Buscar = lupa Search (el globo a 16px se
+    // confunde con un ojo), Adjuntar = Paperclip (geometría Lucide verificada).
+    assert!(composer_source.contains("Icon::Send"));
+    assert!(composer_source.contains("Icon::Sparkles"));
+    assert!(composer_source.contains("Icon::Search"));
+    assert!(composer_source.contains("Icon::Paperclip"));
+    assert!(!composer_source.contains("RichText::new(\"Enviar\")"));
     assert!(!composer_source.contains("Icon::Play"));
     assert!(!assistant_source.contains("pub open: bool"));
     assert!(!app_source.contains("draw_canvas_assistant_affordance"));

@@ -160,8 +160,14 @@ pub const DRAWER_RIGHT_MIN: f32 = 292.0;
 /// Drawer derecho — ancho máximo 440 px.
 pub const DRAWER_RIGHT_MAX: f32 = 440.0;
 
-/// Ancho rail lateral izquierdo (icon bar 60 px) — Scandinavian single rail.
-pub const RAIL_WIDTH: f32 = 60.0;
+/// Ancho rail lateral izquierdo (icon bar 68 px) — Scandinavian single rail.
+/// 68 = múltiplo de base 4; deja 4 px de respiro por lado para que el borde
+/// de la burbuja activa nunca quede clipado por el panel.
+pub const RAIL_WIDTH: f32 = 68.0;
+/// Alto de cada tab del rail — 60 px (icono 20 + etiqueta 11 + aire).
+pub const RAIL_ITEM_HEIGHT: f32 = 60.0;
+/// Respiro horizontal del item dentro del rail — 4 px por lado.
+pub const RAIL_ITEM_PAD_X: f32 = SPACE_XS;
 
 // ═══════════════════════════════════════════════════════════
 // Cards — Scandinavian quiet surfaces
@@ -425,7 +431,11 @@ mod tests {
 
     #[test]
     fn rail_and_splash_use_scandinavian_tokens() {
-        assert_eq!(RAIL_WIDTH, 60.0);
+        assert_eq!(RAIL_WIDTH, 68.0);
+        assert_eq!(RAIL_ITEM_HEIGHT, 60.0);
+        assert_eq!(RAIL_ITEM_PAD_X, SPACE_XS);
+        // El item respira 4 px por lado: el borde nunca toca el panel.
+        assert_eq!(RAIL_WIDTH - 2.0 * RAIL_ITEM_PAD_X, 60.0);
         assert_eq!(SPLASH_LOGO_SIZE, 128.0);
         // Splash es múltiplo de base 4 y cuadrado
         assert_eq!(SPLASH_LOGO_SIZE % 4.0, 0.0);

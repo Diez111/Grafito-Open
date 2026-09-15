@@ -23,6 +23,11 @@ pub const ASSISTANT_PLAN_RECEIPT_POLICY_VERSION: u32 = 1;
 pub const MAX_CONVERSATION_TURNS: usize = 6;
 /// Máximo de caracteres de un turno conservado en memoria.
 pub const MAX_CONVERSATION_TURN_CHARS: usize = 4_096;
+/// Máximo de caracteres del razonamiento plegable de un turno.
+///
+/// Espeja el cap del motor de streaming (`REASONING_MAX_CHARS`): nunca debe
+/// ser menor o el turno se rechazaría al validar.
+pub const MAX_CONVERSATION_REASONING_CHARS: usize = 8_192;
 /// Máximo de caracteres del resumen del objeto enfocado.
 pub const MAX_FOCUS_SUMMARY_CHARS: usize = 4_096;
 /// Encabezado conservador que el transporte añade antes de un objeto enfocado.
@@ -32,6 +37,13 @@ pub const REMOTE_FOCUS_PROMPT_PREFIX: &str =
 pub const REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES: usize = REMOTE_FOCUS_PROMPT_PREFIX.len();
 /// Tope del texto de instrucciones de plugins inyectado al system prompt.
 pub const MAX_SYSTEM_INSTRUCTIONS_BYTES: usize = 4 * 1024;
+/// Tope del contexto de búsqueda web inyectado al prompt remoto.
+pub const MAX_WEB_CONTEXT_CHARS: usize = 4 * 1024;
+/// Encabezado conservador del bloque de resultados de búsqueda web.
+pub const REMOTE_WEB_CONTEXT_PROMPT_PREFIX: &str =
+    "\n\nResultados de búsqueda web (citables, pueden estar desactualizados):\n";
+/// Bytes reservados para el encabezado remoto del bloque de búsqueda web.
+pub const REMOTE_WEB_CONTEXT_PROMPT_OVERHEAD_BYTES: usize = REMOTE_WEB_CONTEXT_PROMPT_PREFIX.len();
 pub const REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES: usize = 32;
 /// Encabezado que el transporte añade antes del catálogo de herramientas relevante.
 pub const REMOTE_TOOL_CATALOG_PROMPT_PREFIX: &str =
@@ -226,6 +238,56 @@ impl RequestBudget {
             return Err("assistant timeout is outside the allowed range".into());
         }
         Ok(())
+    }
+}
+
+/// Consumo real de tokens reportado por el proveedor (wire `usage`).
+///
+/// Todos los campos son 0 cuando el proveedor no los informa; `is_empty()`
+/// permite ocultar la métrica sin inventar números. No viaja al proveedor ni
+/// afecta presupuestos: es telemetría de lectura para la interfaz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AssistantTokenUsage {
+    /// Tokens de entrada (prompt).
+    pub input_tokens: u64,
+    /// Tokens de salida (respuesta).
+    pub output_tokens: u64,
+    /// Tokens de salida dedicados a razonamiento.
+    pub reasoning_tokens: u64,
+    /// Tokens de entrada servidos desde caché del proveedor.
+    pub cached_input_tokens: u64,
+    /// Total informado por el proveedor (0 si no lo trae).
+    pub total_tokens: u64,
+}
+
+impl AssistantTokenUsage {
+    /// ¿El proveedor no reportó ningún token?
+    pub const fn is_empty(&self) -> bool {
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.reasoning_tokens == 0
+            && self.cached_input_tokens == 0
+            && self.total_tokens == 0
+    }
+
+    /// Total a mostrar: el del proveedor o la suma de entrada+salida.
+    pub const fn display_total(&self) -> u64 {
+        if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.input_tokens.saturating_add(self.output_tokens)
+        }
+    }
+
+    /// Suma acumulativa de un turno al total de la sesión.
+    pub fn accumulate(&mut self, other: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
     }
 }
 
@@ -519,6 +581,21 @@ pub struct ConversationTurn {
     /// `content` (ver [`AssistantRequest::validate`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<TurnMediaRef>,
+    /// Razonamiento plegable del turno (estilo DeepSeek). Se conserva en
+    /// sesión para poder desplegarlo, pero **nunca** viaja al proveedor: los
+    /// payloads remotos sólo envían `content`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Duración del razonamiento en milisegundos (para "Pensó Ns").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_ms: Option<u32>,
+    /// Consumo real de tokens del turno reportado por el proveedor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AssistantTokenUsage>,
+    /// Identificador estable de sesión para el disclosure plegable. No se
+    /// serializa (es transitorio de UI).
+    #[serde(skip)]
+    pub id: u64,
 }
 
 impl ConversationTurn {
@@ -529,6 +606,10 @@ impl ConversationTurn {
             content: content.into(),
             origin: None,
             media: None,
+            reasoning: None,
+            reasoning_ms: None,
+            usage: None,
+            id: 0,
         }
     }
 
@@ -539,6 +620,10 @@ impl ConversationTurn {
             content: content.into(),
             origin: None,
             media: None,
+            reasoning: None,
+            reasoning_ms: None,
+            usage: None,
+            id: 0,
         }
     }
 
@@ -552,6 +637,10 @@ impl ConversationTurn {
             content: content.into(),
             origin: Some(origin),
             media: None,
+            reasoning: None,
+            reasoning_ms: None,
+            usage: None,
+            id: 0,
         }
     }
 
@@ -582,6 +671,13 @@ impl ConversationTurn {
             || self.content.chars().count() > MAX_CONVERSATION_TURN_CHARS
         {
             return Err("assistant conversation turn is outside the allowed size".into());
+        }
+        if let Some(reasoning) = &self.reasoning {
+            if reasoning.trim().is_empty()
+                || reasoning.chars().count() > MAX_CONVERSATION_REASONING_CHARS
+            {
+                return Err("assistant conversation reasoning is outside the allowed size".into());
+            }
         }
         if let Some(media) = &self.media {
             media.validate()?;
@@ -1388,6 +1484,48 @@ pub struct AssistantRequest {
     pub transcription: EditableTranscription,
     /// Consentimiento separado para transmitir bytes de imagen a un proveedor remoto.
     pub image_upload_consent: bool,
+    /// Modo razonador: esfuerzo de razonamiento pedido al proveedor.
+    ///
+    /// `None` = no se envía ningún parámetro (comportamiento previo). Si el
+    /// proveedor lo rechaza (400/422), el transporte reintenta una vez sin el
+    /// campo para no romper el turno.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Buscar en internet antes de responder (modo "Buscar en internet").
+    ///
+    /// Cuando es `true`, el worker de transporte hace una búsqueda web del
+    /// problema, la acota a [`MAX_WEB_CONTEXT_CHARS`] y la inyecta en el
+    /// prompt como contexto citable; el modo agente además expone la tool
+    /// `web_search`. Nunca incluye URLs locales ni credenciales.
+    #[serde(default)]
+    pub web_search: bool,
+    /// Resultados de búsqueda web ya formateados (los llena el worker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_context: Option<String>,
+}
+
+/// Esfuerzo de razonamiento solicitado al proveedor (modo razonador).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// Razonamiento mínimo (respuestas rápidas).
+    Low,
+    /// Razonamiento balanceado.
+    Medium,
+    /// Razonamiento profundo (más tokens de pensamiento).
+    High,
+}
+
+impl ReasoningEffort {
+    /// Valor wire para Chat Completions (`reasoning_effort`) y Responses
+    /// (`reasoning.effort`).
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 impl AssistantRequest {
@@ -1408,6 +1546,9 @@ impl AssistantRequest {
             attachments: Vec::new(),
             transcription: EditableTranscription::default(),
             image_upload_consent: false,
+            reasoning_effort: None,
+            web_search: false,
+            web_context: None,
         }
     }
 
@@ -1425,6 +1566,13 @@ impl AssistantRequest {
         }
         if self.system_instructions.len() > MAX_SYSTEM_INSTRUCTIONS_BYTES {
             return Err("assistant system instructions exceed the configured limit".into());
+        }
+        if self
+            .web_context
+            .as_ref()
+            .is_some_and(|context| context.chars().count() > MAX_WEB_CONTEXT_CHARS)
+        {
+            return Err("assistant web context exceeds the configured limit".into());
         }
         if self.language.len() > 8
             || !self
@@ -1516,6 +1664,16 @@ impl AssistantRequest {
                     .iter()
                     .map(|attachment| attachment.transcription.text.len())
                     .sum::<usize>(),
+            )
+            .saturating_add(
+                self.web_context
+                    .as_ref()
+                    .map(|context| {
+                        context
+                            .len()
+                            .saturating_add(REMOTE_WEB_CONTEXT_PROMPT_OVERHEAD_BYTES)
+                    })
+                    .unwrap_or_default(),
             );
         if text_bytes > self.budget.max_input_chars {
             return Err("assistant input text exceeds the configured input budget".into());

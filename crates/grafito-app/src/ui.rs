@@ -12,9 +12,9 @@ use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
     BREAKPOINT_COMPACT, DRAWER_RIGHT_DEFAULT, DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, ICON_MD,
-    PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM, RAIL_WIDTH, SPACE_LG, SPACE_MD,
-    SPACE_SM, SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y,
-    TYPE_2XS, TYPE_SM, TYPE_XS,
+    PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM, RAIL_ITEM_HEIGHT,
+    RAIL_ITEM_PAD_X, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACING_BUTTON_X,
+    SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS, TYPE_SM, TYPE_XS,
 };
 use grafito_ui::Tool;
 use std::collections::VecDeque;
@@ -427,9 +427,12 @@ fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         if ui
             .checkbox(&mut app.keyboard_visible, "Teclado visible")
             .changed()
-            && !app.keyboard_visible
         {
-            app.keyboard_expanded = false;
+            // Elección explícita: las perspectivas dejan de imponer su default.
+            app.keyboard_visible_explicit = true;
+            if !app.keyboard_visible {
+                app.keyboard_expanded = false;
+            }
         }
         if ui
             .checkbox(&mut app.assistant_visible, "Asistente visible")
@@ -721,7 +724,7 @@ pub(crate) fn draw_top_bar(
             });
         });
     let _ = top_bar_response;
-    // ── LEFT SIDEBAR (60px icon rail) ──
+    // ── LEFT SIDEBAR (68px icon rail) ──
     // 5 tabs armonizados: un icono representativo por panel + etiqueta corta
     // legible. Las perspectivas se cambian únicamente desde la barra superior.
     let tabs: &[(&str, Icon, &str)] = &[
@@ -776,8 +779,11 @@ pub(crate) fn draw_top_bar(
                                     theme.sidebar_tab_inactive
                                 };
 
+                                // Item insetado: el borde de la burbuja respira 4 px
+                                // por lado y nunca lo clipa el borde del panel.
+                                let item_w = RAIL_WIDTH - RAIL_ITEM_PAD_X * 2.0;
                                 let (rect, resp) = ui.allocate_exact_size(
-                                    egui::vec2(RAIL_WIDTH, 52.0),
+                                    egui::vec2(item_w, RAIL_ITEM_HEIGHT),
                                     egui::Sense::click(),
                                 );
                                 let resp = resp.on_hover_text(*tip);
@@ -817,7 +823,7 @@ pub(crate) fn draw_top_bar(
                                         ui.painter().rect_filled(marker, 1.0, theme.accent);
                                     }
                                     let icon_rect = egui::Rect::from_center_size(
-                                        rect.center() - egui::vec2(0.0, 7.0),
+                                        rect.center() - egui::vec2(0.0, 9.0),
                                         egui::vec2(ICON_MD, ICON_MD),
                                     );
                                     draw_icon(ui.painter(), icon_rect, *icon, ic_color);
@@ -826,7 +832,7 @@ pub(crate) fn draw_top_bar(
                                     // pinta slivers de 1-2px en el borde.
                                     if rail_labels_visible(rect.width()) {
                                         ui.painter().with_clip_rect(rect).text(
-                                            rect.center() + egui::vec2(0.0, 14.0),
+                                            rect.center() + egui::vec2(0.0, 15.0),
                                             Align2::CENTER_CENTER,
                                             *label,
                                             egui::FontId::proportional(TYPE_2XS),
@@ -848,7 +854,8 @@ pub(crate) fn draw_top_bar(
                                         app.compact_drawer_open = true;
                                     }
                                 }
-                                ui.add_space(SPACE_XS);
+                                // Aire Scandinavian entre tabs: 8 px.
+                                ui.add_space(SPACE_SM);
                             }
 
                             ui.add_space(SPACE_SM);

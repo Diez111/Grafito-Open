@@ -44,6 +44,12 @@ pub(crate) struct AppConfig {
     /// Modo agente (loop con herramientas) para el asistente.
     #[serde(default)]
     pub(crate) assistant_agent_mode: bool,
+    /// Modo razonador: pide esfuerzo de razonamiento al proveedor.
+    #[serde(default)]
+    pub(crate) assistant_reasoning_enabled: bool,
+    /// Buscar en internet: pre-flight web + tool `web_search` del agente.
+    #[serde(default)]
+    pub(crate) assistant_web_search_enabled: bool,
     /// Onboarding 30s ya visto (Scandinavian, sin laberinto).
     #[serde(default)]
     pub(crate) onboarding_completed: bool,
@@ -188,6 +194,8 @@ impl Default for AppConfig {
             disabled_plugins: Vec::new(),
             assistant_full_permission: default_full_permission(),
             assistant_agent_mode: false,
+            assistant_reasoning_enabled: false,
+            assistant_web_search_enabled: false,
             onboarding_completed: false,
             advanced_red_opt_in: false,
             locale: AppLocale::resolve(),

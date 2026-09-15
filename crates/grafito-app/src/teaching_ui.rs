@@ -1472,7 +1472,7 @@ pub fn estado_pizarra(hint: &str, doc_vacia: bool) -> EstadoPizarra {
 pub fn draw_bloques_markdown(ui: &mut egui::Ui, texto: &str, cache: &mut AssistantBlocksCache) {
     let tema = grafito_ui::theme::current_theme(ui.ctx());
     let bloques = cache.blocks(texto);
-    for bloque in &bloques {
+    for bloque in bloques.iter() {
         match bloque {
             AssistantMessageBlock::Heading { level, text } => {
                 let size = match level {

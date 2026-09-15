@@ -261,6 +261,9 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
         // Harness-1 — puras, sin Document, sin I/O, sin red
         "run_command" => run_command_tool(call),
         "solid_measure_3d" => solid_measure_3d_tool(call),
+        // Búsqueda web opt-in (modo "Buscar en internet"): red acotada con
+        // timeout propio; sólo llega si la app la habilitó en el catálogo.
+        "web_search" => web_search_tool(call),
         // Pedagogy tools (F3.2) — puras, sin Document, sin I/O
         "scaffold" => scaffold_tool(call),
         "generate_exercise" => generate_exercise_tool(call),
@@ -2436,6 +2439,62 @@ fn run_command_tool(call: &ToolCall) -> ToolResult {
     ToolResult::text(&call.id, true, payload.to_string())
 }
 
+/// Schema de la tool `web_search` (modo "Buscar en internet", opt-in).
+///
+/// No forma parte de `all_safe_tool_schemas` a propósito: la app la agrega al
+/// catálogo sólo cuando el usuario activó la búsqueda (y el lockdown de examen
+/// la excluye). Sin `assistant-net` la ejecución devuelve un error honesto.
+pub fn web_search_tool_schema() -> ToolSchema {
+    ToolSchema::new(
+        "web_search",
+        "Busca en internet (DuckDuckGo) y devuelve hasta 5 resultados citables con título, URL y resumen. Usala cuando la respuesta dependa de información actual o externa al documento.",
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Consulta de búsqueda (máximo 256 caracteres)."
+                }
+            },
+            "required": ["query"]
+        }),
+    )
+}
+
+/// Ejecuta `web_search`: devuelve resultados formateados y acotados.
+///
+/// Bloqueante y acotada (timeout interno del módulo web); corre en el worker
+/// del agente, nunca en la UI. Sin resultados no es error; fallo de red sí.
+fn web_search_tool(call: &ToolCall) -> ToolResult {
+    let query = string_arg(call, "query").unwrap_or_default();
+    let query = query.trim();
+    if query.is_empty() {
+        return ToolResult::text(&call.id, false, "web_search requires a non-empty query");
+    }
+    match crate::web::web_search(query) {
+        Ok(results) if results.is_empty() => ToolResult::text(
+            &call.id,
+            true,
+            format!("Sin resultados web para \"{query}\"."),
+        ),
+        Ok(results) => {
+            let mut text = crate::web::format_web_context(query, &results);
+            // Cap del resultado de tool (schema: 2048 chars) char-safe.
+            if text.chars().count() > 2_048 {
+                text = text
+                    .chars()
+                    .take(2_047)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+                    + "…";
+            }
+            ToolResult::text(&call.id, true, text)
+        }
+        Err(error) => ToolResult::text(&call.id, false, error),
+    }
+}
+
 /// Nombres canónicos de `solid_measure_3d` (los alias es/en se normalizan en
 /// `solid_tipo_canonico`).
 pub const SOLID_MEASURE_TIPOS: [&str; 9] = [
@@ -2822,7 +2881,10 @@ fn build_agent_payload(
 /// archivo) fallen honesto sin red en vez de martillar la cuota. El formato
 /// conserva el prefijo `assistant agent returned HTTP {status}` + sufijo de
 /// espera sólo con header legible (sin header queda byte-idéntico al
-/// anterior, y los tests de detección siguen pasando).
+/// anterior, y los tests de detección siguen pasando). En el resto de estados
+/// se adjunta el cuerpo capado a 200 chars para que la app detecte errores de
+/// sesión/cuenta del gateway Go (`MissingSessionID`, ...); antes el cuerpo se
+/// descartaba y el fallback de sesión nunca veía nada.
 #[cfg(feature = "assistant-net")]
 fn agent_http_status_error(response: reqwest::blocking::Response) -> String {
     let status = response.status().as_u16();
@@ -2833,7 +2895,17 @@ fn agent_http_status_error(response: reqwest::blocking::Response) -> String {
             return format!("assistant agent returned HTTP 429 (reintentá en {secs}s)");
         }
     }
-    format!("assistant agent returned HTTP {status}")
+    let body: String = response
+        .text()
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect();
+    if body.trim().is_empty() {
+        format!("assistant agent returned HTTP {status}")
+    } else {
+        format!("assistant agent returned HTTP {status}: {body}")
+    }
 }
 
 /// Envía una petición agéntica y devuelve texto final o llamadas de herramienta.
@@ -2869,7 +2941,7 @@ fn request_agent_completion(
         );
     }
     if crate::remote_protocol(settings) != crate::RemoteProtocol::OpenAiChatCompletions {
-        return Err("assistant agent requires an OpenAI-compatible chat endpoint (Muse Spark usa Responses API: el modo agente con herramientas aún no está soportado, usá el chat simple o deepseek)".into());
+        return Err("assistant agent requires an OpenAI-compatible chat or responses endpoint (qwen/minimax/fusion van por Messages y aún no están soportados en modo agente, usá el chat simple o deepseek)".into());
     }
     let payload = build_agent_payload(settings, messages, tools, max_output_tokens)?;
     // Freno 429 compartido: en pausa se falla honesto sin red (cubre también
@@ -3044,11 +3116,12 @@ fn responses_input_chars(input: &[Value]) -> usize {
 
 /// ¿Este modelo viaja por Responses API en vez de Chat Completions?
 ///
-/// Duplica la lógica mínima de `uses_responses_api` de `crate::` (privado en
-/// la raíz: `model.contains("muse-spark")`, que cubre futuras 1.x). No se toca
-/// `lib.rs`; el router Chat queda intacto para el resto de modelos.
+/// Delega en la tabla única de ruteo Go (`crate::go_model_protocol`): cubre
+/// `muse-spark*` y las familias Responses de Go (`gpt-*`, `grok-*`). Mantiene
+/// su nombre para no romper los call sites; el router Chat queda intacto para
+/// el resto de modelos.
 fn uses_responses_agent_transport(settings: &ProviderSettings) -> bool {
-    settings.model.contains("muse-spark")
+    crate::go_model_protocol(&settings.model) == crate::RemoteProtocol::OpenAiResponses
 }
 
 /// Convierte los schemas al formato de tools de Responses API.
@@ -4582,6 +4655,45 @@ mod tests {
             "respeta Retry-After: {remaining}"
         );
         crate::clear_rate_limit_for_tests();
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn agent_http_error_keeps_capped_body_for_session_detection() {
+        // El 400 de sesión del gateway Go debe sobrevivir en el mensaje para
+        // que la app detecte `MissingSessionID` y dispare el fallback.
+        // Cliente plano (sin rate-limiter global): el test no depende del
+        // estado de otros tests en paralelo ni puede colgar el `join` (el
+        // cliente siempre conecta; el stub acepta una sola vez y cierra).
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds");
+        let port = listener.local_addr().expect("stub addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("stub accepts");
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = r#"{"type":"error","error":{"type":"MissingSessionID","message":"session required"}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("stub writes");
+        });
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("test client");
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/v1"))
+            .body("{}")
+            .send()
+            .expect("stub responds");
+        server.join().expect("stub joins");
+        let error = agent_http_status_error(response);
+        assert!(error.contains("400"), "{error}");
+        assert!(error.contains("MissingSessionID"), "{error}");
     }
 
     #[test]
@@ -6444,15 +6556,20 @@ mod tests {
     }
 
     #[test]
-    fn responses_router_matches_spark_only() {
+    fn responses_router_matches_responses_families() {
         let spark = ProviderSettings::for_profile(
             crate::ProviderProfile::OllamaLocal,
             "muse-spark-1.3-contributor",
         );
         assert!(uses_responses_agent_transport(&spark));
+        let grok = ProviderSettings::for_profile(crate::ProviderProfile::OpenCodeGo, "grok-4.6");
+        assert!(uses_responses_agent_transport(&grok));
         let deepseek =
             ProviderSettings::for_profile(crate::ProviderProfile::OllamaLocal, "deepseek-v4-flash");
         assert!(!uses_responses_agent_transport(&deepseek));
+        let minimax =
+            ProviderSettings::for_profile(crate::ProviderProfile::OpenCodeGo, "minimax-m3");
+        assert!(!uses_responses_agent_transport(&minimax));
     }
 
     #[test]

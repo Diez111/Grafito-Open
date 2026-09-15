@@ -349,7 +349,9 @@ fn message_chars(message: &Value) -> usize {
 }
 
 fn completion_token_budget(max_output_chars: usize) -> usize {
-    (max_output_chars / 4).clamp(1, 8_192)
+    // Paridad con `completion_token_limit_for_chars` del motor: headroom ×2
+    // para el razonamiento de los modelos v4.x.
+    max_output_chars.saturating_mul(2).clamp(1_024, 8_192)
 }
 
 #[cfg(test)]

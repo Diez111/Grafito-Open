@@ -635,6 +635,16 @@ mod tests {
     }
 
     #[test]
+    fn grid_lines_differ_from_canvas_in_both_themes() {
+        // Regresión: la grilla 3D/2D usa estos tokens — si igualan al canvas
+        // se vuelven invisibles (bug modo claro).
+        for theme in [&*DARK, &*LIGHT] {
+            assert_ne!(theme.grid_line, theme.canvas_bg);
+            assert_ne!(theme.grid_minor, theme.canvas_bg);
+        }
+    }
+
+    #[test]
     fn keyboard_rendered_states_have_accessible_contrast() {
         // Scandinavian: umbral relajado para border (1.5) — calm restraint, no drama.
         assert_keyboard_state_contrast(&DARK);

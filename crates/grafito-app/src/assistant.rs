@@ -8,12 +8,13 @@ use crate::manim_orchestrator::{
 use crate::{assistant_credentials, GrafitoApp};
 use grafito_assistant::{
     harness, rate_limit_cooldown_remaining_secs, rate_limit_paused_message, CancellationToken,
-    ProviderSettings, SocraticGuardContext, RATE_LIMIT_DEFAULT_COOLDOWN_SECS,
+    ProviderSettings, SocraticGuardContext, StreamDelta, RATE_LIMIT_DEFAULT_COOLDOWN_SECS,
 };
 use grafito_assistant_types::{
     AssistantFocus, AssistantRepairFeedback, AssistantRequest, AssistantResponse, ConversationRole,
     ConversationTurn, ImmutableDocumentContext, LocalAssistantStatus, ProposedPlan,
-    ProviderCapabilities, ProviderProfile, MAX_CONVERSATION_TURNS, MAX_CONVERSATION_TURN_CHARS,
+    ProviderCapabilities, ProviderProfile, MAX_CONVERSATION_REASONING_CHARS,
+    MAX_CONVERSATION_TURNS, MAX_CONVERSATION_TURN_CHARS,
 };
 use grafito_command::assistant_proposals::{
     AssistantCommandInvocation, AssistantParameterAssignment, AssistantProposal,
@@ -2478,6 +2479,19 @@ impl AssistantRuntime {
             }
         };
         let job = self.remote_job.take()?;
+        // Duración del razonamiento: del primer delta de razonamiento al primer
+        // texto (o al cierre si nunca hubo texto).
+        let reasoning_ms = job.first_reasoning_at.map(|first| {
+            let end = job.first_delta_at.unwrap_or_else(std::time::Instant::now);
+            end.saturating_duration_since(first)
+                .as_millis()
+                .min(u32::MAX as u128) as u32
+        });
+        let stream_reasoning = if job.stream_reasoning.trim().is_empty() {
+            None
+        } else {
+            Some(job.stream_reasoning)
+        };
         Some(FinishedRemoteJob {
             id: job.id,
             provider: job.provider,
@@ -2493,6 +2507,8 @@ impl AssistantRuntime {
             cancelled: job.cancellation.is_cancelled(),
             result,
             stream_preview_active: job.preview_active,
+            stream_reasoning,
+            reasoning_ms,
         })
     }
 
@@ -2513,7 +2529,7 @@ impl AssistantRuntime {
         panel: &mut AssistantPanelState,
         ctx: &egui::Context,
     ) -> bool {
-        let deltas: Vec<String> = {
+        let deltas: Vec<StreamDelta> = {
             let Some(job) = self.remote_job.as_ref() else {
                 return false;
             };
@@ -2533,30 +2549,58 @@ impl AssistantRuntime {
             return false;
         };
         for delta in deltas {
-            job.stream_text.push_str(&delta);
-        }
-        if job.first_delta_at.is_none() {
-            job.first_delta_at = Some(std::time::Instant::now());
+            match delta {
+                StreamDelta::Reasoning(suffix) => {
+                    job.stream_reasoning.push_str(&suffix);
+                    if job.first_reasoning_at.is_none() {
+                        job.first_reasoning_at = Some(std::time::Instant::now());
+                    }
+                }
+                StreamDelta::Text(suffix) => {
+                    job.stream_text.push_str(&suffix);
+                    if job.first_delta_at.is_none() {
+                        job.first_delta_at = Some(std::time::Instant::now());
+                    }
+                }
+                StreamDelta::Status(status) => {
+                    job.stream_status = Some(status);
+                }
+            }
         }
         let display: String = job
             .stream_text
             .chars()
             .take(MAX_CONVERSATION_TURN_CHARS)
             .collect();
+        // Razonamiento plegable del turno provisional (cap propio): viaja al
+        // chat para verse en vivo, nunca al texto final ni al proveedor.
+        let reasoning: Option<String> = if job.stream_reasoning.trim().is_empty() {
+            None
+        } else {
+            Some(
+                job.stream_reasoning
+                    .chars()
+                    .take(MAX_CONVERSATION_REASONING_CHARS)
+                    .collect(),
+            )
+        };
         if !job.preview_active {
             if panel.conversation.len() >= MAX_CONVERSATION_TURNS {
                 self.sync_remote_stage_to_panel(panel);
                 return false;
             }
-            panel
-                .conversation
-                .push(ConversationTurn::assistant(display));
+            let mut turn = ConversationTurn::assistant(display);
+            turn.reasoning = reasoning;
+            panel.push_turn(turn);
             job.preview_active = true;
         } else if let Some(last) = panel.conversation.last_mut() {
             // Invariante: con el slot remoto ocupado nada más empuja turnos,
             // así que el último sigue siendo nuestro provisional.
             if last.role == ConversationRole::Assistant {
                 last.content = display;
+                if reasoning.is_some() {
+                    last.reasoning = reasoning;
+                }
             }
         }
         self.sync_remote_stage_to_panel(panel);
@@ -2581,7 +2625,7 @@ impl AssistantRuntime {
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or(0);
         let has_first_delta = job.first_delta_at.is_some();
-        let kib = job.stream_text.len() / 1024;
+        let kib = (job.stream_text.len() + job.stream_reasoning.len()) / 1024;
         let stage = remote_stage_for_job(elapsed_secs, has_first_delta, kib);
         // El aviso lento mide el tiempo EN la etapa actual, no desde el arranque:
         // `Recibiendo` cuenta desde el primer delta, el resto desde el arranque.
@@ -2603,6 +2647,7 @@ impl AssistantRuntime {
                 grafito_ui::assistant::RemoteStage::Recibiendo { kib }
             }
         };
+        panel.remote_stage_note = job.stream_status.clone();
         panel.set_remote_stage(ui_stage, stage_elapsed_secs);
     }
 
@@ -2930,37 +2975,16 @@ pub(crate) fn anim_replace_message(was_animating: bool) -> Option<&'static str> 
 ///
 /// Sólo retira el último turno si es del asistente: con el slot remoto
 /// ocupado nada más empuja turnos, así que ese es el provisional creado por
-/// `drain_remote_stream_preview`. Si nunca hubo preview, no toca nada y la
-/// conversación queda como en el path no-streaming.
+/// `drain_remote_stream_preview`. El razonamiento y la duración viajan por
+/// `FinishedRemoteJob` y los pega `panel.attach_stream_trace`; acá sólo se
+/// quita la burbuja para que el resultado final la reemplace.
 pub(crate) fn pop_provisional_stream_turn(panel: &mut AssistantPanelState) {
     if panel
         .conversation
         .last()
         .is_some_and(|turn| turn.role == ConversationRole::Assistant)
     {
-        if let Some(turn) = panel.conversation.pop() {
-            // El preview llega como "Pensando…\n<razonamiento>[\n\n<parcial>]".
-            // Se conserva el razonamiento para mostrarlo plegado junto a la
-            // respuesta final (estilo DeepSeek); el parcial se descarta porque
-            // la respuesta completa llega aparte.
-            panel.last_reasoning = reasoning_from_stream_preview(&turn.content);
-        }
-    }
-}
-
-/// Extrae el bloque de razonamiento de un preview de streaming
-/// ("Pensando…\n<razonamiento>[\n\n<parcial>]"). Puro y sin `unwrap`.
-pub(crate) fn reasoning_from_stream_preview(preview: &str) -> Option<String> {
-    let rest = preview.strip_prefix("Pensando…\n")?;
-    let reasoning = match rest.split_once("\n\n") {
-        Some((reasoning, _answer)) => reasoning,
-        None => rest,
-    }
-    .trim();
-    if reasoning.is_empty() {
-        None
-    } else {
-        Some(reasoning.to_string())
+        let _ = panel.conversation.pop();
     }
 }
 
@@ -4140,7 +4164,7 @@ impl GrafitoApp {
                             prosa_turno_generica(&render.template, &render.concept)
                         };
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa_final);
-                        self.assistant.complete_local_request(humano);
+                        self.assistant.complete_local_request(humano.into_owned());
                         // Si el complete movió el índice (trim) o hubo
                         // reemplazo, el render es rancio: se descarta.
                         if !es_dueno_vivo(&self.assistant.conversation, owner) {
@@ -4528,7 +4552,7 @@ impl GrafitoApp {
                     self.assistant.begin_request(pregunta);
                     self.assistant.problem.clear();
                     let humano = grafito_ui::assistant::humanize_prose_text(&respuesta);
-                    self.assistant.complete_local_request(humano.clone());
+                    self.assistant.complete_local_request(humano.to_string());
                     self.assistant.set_media(None, ctx);
                     self.notify(humano, ToastKind::Info);
                     ctx.request_repaint();
@@ -4549,7 +4573,7 @@ impl GrafitoApp {
                     // bare reference sin claims (la puerta final lo vetaría).
                     let prosa = prosa_turno_para_guion(&guion_texto);
                     let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
-                    self.assistant.complete_local_request(humano);
+                    self.assistant.complete_local_request(humano.into_owned());
                     self.assistant.set_media(None, ctx);
                     self.run_assistant_guion_with_history(ctx, &guion_texto, true);
                     ctx.request_repaint();
@@ -4592,7 +4616,7 @@ impl GrafitoApp {
                     self.assistant.begin_request(question);
                     self.assistant.problem.clear();
                     let honesto = grafito_ui::assistant::humanize_prose_text(guia);
-                    self.assistant.complete_local_request(honesto.clone());
+                    self.assistant.complete_local_request(honesto.to_string());
                     self.assistant.set_media(None, ctx);
                     self.notify(honesto, ToastKind::Info);
                     ctx.request_repaint();
@@ -4619,7 +4643,7 @@ impl GrafitoApp {
                         // (jamás bare reference sin claims).
                         let prosa = prosa_turno_para_playlist(&playlist);
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
-                        self.assistant.complete_local_request(humano);
+                        self.assistant.complete_local_request(humano.into_owned());
                         self.assistant.set_media(None, ctx);
                         self.run_assistant_playlist_with(ctx, playlist);
                         ctx.request_repaint();
@@ -4714,7 +4738,7 @@ impl GrafitoApp {
                             prosa_canonica_para_plantilla(plantilla)
                         };
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
-                        self.assistant.complete_local_request(humano);
+                        self.assistant.complete_local_request(humano.into_owned());
                         self.assistant.set_media(None, ctx);
                         self.run_assistant_animation_with(ctx, plantilla, concepto);
                         ctx.request_repaint();
@@ -4739,7 +4763,7 @@ impl GrafitoApp {
                             prosa_integral_explicita(expr, &problem_clone)
                         };
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
-                        self.assistant.complete_local_request(humano);
+                        self.assistant.complete_local_request(humano.into_owned());
                         self.assistant.set_media(None, ctx);
                         self.run_assistant_animation_with(ctx, plantilla, concepto);
                         ctx.request_repaint();
@@ -4756,7 +4780,7 @@ impl GrafitoApp {
                         // bare reference sin claims lo veta la puerta final).
                         let prosa = prosa_turno_generica(plantilla, concepto);
                         let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
-                        self.assistant.complete_local_request(humano);
+                        self.assistant.complete_local_request(humano.into_owned());
                         self.assistant.set_media(None, ctx);
                         self.run_assistant_animation_with(ctx, plantilla, concepto);
                         ctx.request_repaint();
@@ -4798,6 +4822,9 @@ impl GrafitoApp {
                 self.cancel_stale_remote_request();
                 self.cancel_stale_model_request();
                 self.save_app_config();
+                // El catálogo cambia por proveedor: pedir la lista publicada
+                // (`GET /models`) para que los IDs nuevos aparezcan sin espera.
+                self.start_model_request(ctx);
             }
             AssistantUiAction::ModelChanged => {
                 self.assistant_runtime.fallback_model = None;
@@ -5025,6 +5052,9 @@ impl GrafitoApp {
                 self.save_app_config();
             }
             AssistantUiAction::AgentModeChanged(_) => {
+                self.save_app_config();
+            }
+            AssistantUiAction::ReasoningModeChanged(_) | AssistantUiAction::WebSearchChanged(_) => {
                 self.save_app_config();
             }
             AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
@@ -6856,7 +6886,7 @@ impl GrafitoApp {
                 let (prosa, _) =
                     prosa_y_aviso_offline_para_pedido(&plantilla_fallback, &pedido_original);
                 let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
-                self.assistant.complete_local_request(humano);
+                self.assistant.complete_local_request(humano.into_owned());
                 self.run_assistant_animation_with(ctx, &plantilla_fallback, &pedido_original);
                 ctx.request_repaint();
                 return;
@@ -6869,7 +6899,7 @@ impl GrafitoApp {
                 let (prosa, aviso) =
                     prosa_y_aviso_offline_para_pedido(&plantilla_fallback, &pedido_original);
                 let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
-                self.assistant.complete_local_request(humano);
+                self.assistant.complete_local_request(humano.into_owned());
                 self.notify(aviso, ToastKind::Info);
                 self.run_assistant_animation_with(ctx, &plantilla_fallback, &pedido_original);
                 ctx.request_repaint();
@@ -8159,7 +8189,7 @@ impl GrafitoApp {
                 // Prosa con nombres humanos (mapa `humanize_control_name` de
                 // ui, solo lectura): jamás IDs literales en el turno.
                 let human = grafito_ui::assistant::humanize_prose_text(&answer);
-                self.assistant.complete_local_request(human);
+                self.assistant.complete_local_request(human.into_owned());
                 if let Some(plan) = plan {
                     if let Some(changes) = staged_changes {
                         self.assistant.stage_proposed_plan(plan, changes);
@@ -8528,24 +8558,25 @@ impl GrafitoApp {
 
 /// Wiring B1 — loop Spark por Responses en paralelo (agente externo).
 ///
-/// El modo agente con Spark hoy falla porque las tools aún no viajan por la
-/// Responses API. B1 implementará ese loop en paralelo; cuando su `Done(Ok)`
-/// llegue con Spark, el `poll_assistant_agent` lo acepta directo (nunca
-/// fallback). Este helper distingue ese éxito del `Err` "Responses API", que
-/// sí dispara el fallback sólo-sesión a deepseek sin tocar la preferencia.
+/// El modo agente con Spark viaja por la Responses API (`run_responses_agent_loop`).
+/// El fallback sólo-sesión a deepseek dispara en la rama `Err` ante dos casos:
+/// el error legacy "Responses API" (transporte viejo, hoy inalcanzable con Spark)
+/// y los 400 de sesión/cuenta del gateway Go (`MissingSessionID`, ...), que el
+/// transporte agente conserva en el cuerpo del error (cap 200 chars).
 fn is_agent_spark_responses_unsupported_error(error: &str) -> bool {
     error.contains("Responses API")
 }
 
-/// Fallback agente sólo-sesión: Spark + Responses API no soportado → deepseek.
-/// Nunca dispara en `Ok` (sólo se llama en la rama `Err`) y nunca ante 429:
-/// la cuota en pausa no se quema probando con otro modelo.
+/// Fallback agente sólo-sesión: Spark + error legacy Responses o 400 de
+/// sesión/cuenta → deepseek. Nunca dispara en `Ok` (sólo se llama en la rama
+/// `Err`) y nunca ante 429: la cuota en pausa no se quema probando con otro
+/// modelo.
 pub(crate) fn should_fallback_agent_spark_to_deepseek(
     error: &str,
     provider: ProviderProfile,
     model: &str,
 ) -> bool {
-    is_agent_spark_responses_unsupported_error(error)
+    (is_agent_spark_responses_unsupported_error(error) || is_session_or_account_error(error))
         && provider == ProviderProfile::OpenCodeGo
         && model.contains("muse-spark")
         && !error.contains("429")
@@ -9201,24 +9232,25 @@ mod tests {
         prosa_para_spec_anim_ia, prosa_subspace_canonica, prosa_tangente_explicita,
         prosa_taylor_canonica, prosa_taylor_explicita, prosa_turno_generica,
         prosa_turno_para_guion, prosa_turno_para_playlist, prosa_y_aviso_canonicos_para_pedido,
-        prosa_y_aviso_offline_para_pedido, read_bounded_attachment, reasoning_from_stream_preview,
-        remote_error_message, remote_stage_for_job, render_media_desde_spec_ia,
-        resolver_turno_anim_ia, should_fallback_agent_spark_to_deepseek,
-        should_fallback_remote_spark_to_deepseek, socratic_guard_context,
-        spec_canonico_para_fallback, split_playlist_request, stage_assistant_parameter,
-        titulo_curado, titulo_curado_localized, transporte_si_contenido_vacio,
-        validar_pedido_narrado, validar_spec_anim_ia, validate_assistant_command,
-        verificar_prosa_de_turno, verificar_prosa_vs_spec, verified_remote_proposals,
-        wants_exercise_request, AgentChannelMsg, AnimIaRender, AssistantAgentJob,
-        AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation, AssistantModelJob,
-        AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        prosa_y_aviso_offline_para_pedido, read_bounded_attachment, remote_error_message,
+        remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
+        should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
+        socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
+        stage_assistant_parameter, titulo_curado, titulo_curado_localized,
+        transporte_si_contenido_vacio, validar_pedido_narrado, validar_spec_anim_ia,
+        validate_assistant_command, verificar_prosa_de_turno, verificar_prosa_vs_spec,
+        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AnimIaRender,
+        AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation,
+        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
         AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
         IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
         RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido,
         ANIM_IA_SPEC_TIMEOUT_MS, ANIM_MOTOR_IDLE_TIMEOUT_SECS, ANIM_MOTOR_JOB_TIMEOUT_SECS,
         ANIM_SIN_IA_AVISO,
     };
-    use grafito_assistant::{solve_local, CancellationToken, ProviderSettings, RemoteCompletion};
+    use grafito_assistant::{
+        solve_local, CancellationToken, ProviderSettings, RemoteCompletion, StreamDelta,
+    };
     use grafito_assistant_types::{
         AssistantFocus, AssistantOperation, AssistantRepairFailure, AssistantRepairFailureKind,
         AssistantRepairFeedback, AssistantRequest, ConversationRole, ConversationTurn,
@@ -9790,7 +9822,8 @@ mod tests {
     #[test]
     fn agent_spark_success_never_falls_back_only_responses_error_does() {
         // Wiring B1: `Done(Ok)` con Spark se acepta directo — el fallback sólo
-        // vive en la rama `Err` ("Responses API") y lo decide este helper.
+        // vive en la rama `Err` (error legacy "Responses API" o 400 de
+        // sesión/cuenta) y lo decide este helper.
         assert!(!is_agent_spark_responses_unsupported_error("ok"));
         assert!(!is_agent_spark_responses_unsupported_error("HTTP 500"));
         assert!(is_agent_spark_responses_unsupported_error(
@@ -9801,6 +9834,13 @@ mod tests {
             ProviderProfile::OpenCodeGo,
             "muse-spark-1.3-contributor",
         ));
+        // El 400 de sesión del gateway Go también dispara (el transporte
+        // agente conserva el cuerpo capado para que este lector lo vea).
+        assert!(should_fallback_agent_spark_to_deepseek(
+            "assistant agent returned HTTP 400: {\"type\":\"error\",\"error\":{\"type\":\"MissingSessionID\"}}",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor-free",
+        ));
         // No dispara con otro modelo, otro proveedor u otro error.
         assert!(!should_fallback_agent_spark_to_deepseek(
             "agent tools are not supported via Responses API",
@@ -9808,12 +9848,17 @@ mod tests {
             "deepseek-v4-flash",
         ));
         assert!(!should_fallback_agent_spark_to_deepseek(
-            "agent tools are not supported via Responses API",
+            "assistant agent returned HTTP 400: {\"type\":\"error\",\"error\":{\"type\":\"MissingSessionID\"}}",
             ProviderProfile::DeepSeek,
             "muse-spark-1.3-contributor",
         ));
         assert!(!should_fallback_agent_spark_to_deepseek(
             "HTTP 500 internal error",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+        ));
+        assert!(!should_fallback_agent_spark_to_deepseek(
+            "assistant agent returned HTTP 429 (reintentá en 3s)",
             ProviderProfile::OpenCodeGo,
             "muse-spark-1.3-contributor",
         ));
@@ -10110,9 +10155,12 @@ mod tests {
             receiver: remote_rx,
             stream_rx: None,
             stream_text: String::new(),
+            stream_reasoning: String::new(),
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
+            first_reasoning_at: None,
+            stream_status: None,
         });
         let proposal_cancel = CancellationToken::default();
         let (proposal_tx, proposal_rx) =
@@ -10139,6 +10187,7 @@ mod tests {
         runtime.agent_job = Some(AssistantAgentJob {
             provider: ProviderProfile::OpenCodeGo,
             model: "muse-spark-1.3-contributor".into(),
+            question: "q".into(),
             cancellation: agent_cancel.clone(),
             receiver: agent_rx,
             clarification_receiver: clarification_rx,
@@ -10478,14 +10527,14 @@ mod tests {
         let mut panel = AssistantPanelState::default();
         panel.begin_request(pedido.to_string());
         let base = grafito_ui::assistant::humanize_prose_text("La derivada es la pendiente.");
-        let mut prosa = base;
+        let mut prosa = base.into_owned();
         prosa.push_str(
             "
 
 ",
         );
         prosa.push_str(crate::anim_ui::animation_reference_sentence());
-        panel.complete_local_request(prosa.clone());
+        panel.complete_local_request(prosa);
         let media = grafito_ui::assistant::AssistantMedia {
             title: format!("{concepto} (nativa)"),
             frames,
@@ -10701,7 +10750,7 @@ mod tests {
             let mut panel = AssistantPanelState::default();
             panel.begin_request(ambiguo.to_string());
             let honesto = grafito_ui::assistant::humanize_prose_text(&err);
-            panel.complete_local_request(honesto.clone());
+            panel.complete_local_request(honesto.into_owned());
             panel.set_media(None, &ctx);
             assert!(panel.media.is_none(), "sin media rancia en {ambiguo:?}");
             let ultimo = panel.conversation.last().expect("turno guía");
@@ -11657,9 +11706,12 @@ mod tests {
             receiver: rrx,
             stream_rx: None,
             stream_text: String::new(),
+            stream_reasoning: String::new(),
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
+            first_reasoning_at: None,
+            stream_status: None,
         });
         let agent_cancel = grafito_agent::loop_engine::Cancellation::default();
         let (_atx, arx) = sync_channel::<AgentChannelMsg>(1);
@@ -11667,6 +11719,7 @@ mod tests {
         runtime.agent_job = Some(AssistantAgentJob {
             provider: ProviderProfile::OpenCodeGo,
             model: "deepseek-v4-flash".into(),
+            question: "q".into(),
             cancellation: agent_cancel.clone(),
             receiver: arx,
             clarification_receiver: crx,
@@ -12782,9 +12835,12 @@ mod tests {
             receiver,
             stream_rx: None,
             stream_text: String::new(),
+            stream_reasoning: String::new(),
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
+            first_reasoning_at: None,
+            stream_status: None,
         });
 
         assert!(runtime.cancel_stale_remote_job(ProviderProfile::DeepSeek, "deepseek-chat"));
@@ -12806,7 +12862,7 @@ mod tests {
     fn stream_preview_drains_to_provisional_bubble_and_pops_on_finish() {
         let mut runtime = AssistantRuntime::default();
         let (result_tx, result_rx) = sync_channel::<Result<RemoteCompletion, String>>(1);
-        let (delta_tx, delta_rx) = sync_channel::<String>(128);
+        let (delta_tx, delta_rx) = sync_channel::<StreamDelta>(128);
         let cancel = CancellationToken::default();
         runtime.remote_job = Some(AssistantRemoteJob {
             id: 1,
@@ -12824,9 +12880,12 @@ mod tests {
             receiver: result_rx,
             stream_rx: Some(delta_rx),
             stream_text: String::new(),
+            stream_reasoning: String::new(),
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
+            first_reasoning_at: None,
+            stream_status: None,
         });
         let mut panel = AssistantPanelState::default();
         panel
@@ -12838,8 +12897,8 @@ mod tests {
         assert!(!runtime.drain_remote_stream_preview(&mut panel, &ctx));
         assert_eq!(panel.conversation.len(), 1);
 
-        delta_tx.send("Hola ".into()).unwrap();
-        delta_tx.send("mundo".into()).unwrap();
+        delta_tx.send(StreamDelta::Text("Hola ".into())).unwrap();
+        delta_tx.send(StreamDelta::Text("mundo".into())).unwrap();
         assert!(runtime.drain_remote_stream_preview(&mut panel, &ctx));
         assert_eq!(panel.conversation.len(), 2);
         let provisional = panel.conversation.last().unwrap();
@@ -12847,7 +12906,7 @@ mod tests {
         assert_eq!(provisional.content, "Hola mundo");
 
         // Más deltas actualizan el mismo turno (no duplican burbujas).
-        delta_tx.send("!".into()).unwrap();
+        delta_tx.send(StreamDelta::Text("!".into())).unwrap();
         assert!(runtime.drain_remote_stream_preview(&mut panel, &ctx));
         assert_eq!(panel.conversation.len(), 2);
         assert_eq!(panel.conversation.last().unwrap().content, "Hola mundo!");
@@ -12870,21 +12929,31 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_preview_extracts_thinking_and_ignores_plain_answers() {
-        assert_eq!(
-            reasoning_from_stream_preview("Pensando…\nAnalizo z = 1+i\n\nEjemplo"),
-            Some("Analizo z = 1+i".to_string())
-        );
-        assert_eq!(
-            reasoning_from_stream_preview("Pensando…\nsolo razonamiento"),
-            Some("solo razonamiento".to_string())
-        );
-        // Sin header (respuesta sin razonamiento) o vacío: None.
-        assert_eq!(reasoning_from_stream_preview("respuesta directa"), None);
-        assert_eq!(
-            reasoning_from_stream_preview("Pensando…\n   \n\nresp"),
-            None
-        );
+    fn stream_trace_lands_on_the_completed_turn_with_session_totals() {
+        use grafito_assistant_types::AssistantTokenUsage;
+        let mut panel = AssistantPanelState::default();
+        panel.begin_request("¿derivada de x²?".to_string());
+        panel.attach_stream_trace(Some("pienso la regla".to_string()), Some(1_500));
+        panel.attach_pending_usage(Some(AssistantTokenUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            reasoning_tokens: 5,
+            cached_input_tokens: 0,
+            total_tokens: 30,
+        }));
+        panel.complete_request("2x".to_string());
+        let turn = panel.conversation.last().expect("turno final");
+        assert_eq!(turn.reasoning.as_deref(), Some("pienso la regla"));
+        assert_eq!(turn.reasoning_ms, Some(1_500));
+        assert_eq!(turn.usage.map(|usage| usage.display_total()), Some(30));
+        assert_eq!(panel.session_token_total(), 30);
+        // El trace es de un sólo turno: no se filtra al siguiente.
+        panel.begin_request("otra".to_string());
+        panel.complete_request("listo".to_string());
+        let ultimo = panel.conversation.last().expect("turno final");
+        assert!(ultimo.reasoning.is_none());
+        assert!(ultimo.usage.is_none());
+        assert_eq!(panel.session_token_total(), 30);
     }
 
     #[test]
@@ -12931,17 +13000,14 @@ mod tests {
                 grafito_ui::assistant::RemoteStage::Recibiendo { kib }
             }
         };
-        assert_eq!(
-            ui_for(RemoteStage::Autorizada).label(),
-            "Autorizada, conectando…"
-        );
+        assert_eq!(ui_for(RemoteStage::Autorizada).label(), "Conectando…");
         assert_eq!(
             ui_for(RemoteStage::EsperandoPrimerToken).label(),
-            "Esperando el primer token…"
+            "Pensando…"
         );
         assert_eq!(
             ui_for(RemoteStage::Recibiendo { kib: 3 }).label(),
-            "Recibiendo (3 KiB)…"
+            "Escribiendo respuesta…"
         );
         // Umbral lento unico (10s) en transporte y Piel: sin agrandar timeouts.
         assert_eq!(grafito_assistant::REMOTE_SLOW_STAGE_SECS, 10);
@@ -12953,7 +13019,7 @@ mod tests {
     fn remote_stage_sync_updates_panel_and_first_delta_marks_receiving() {
         let mut runtime = AssistantRuntime::default();
         let (_result_tx, result_rx) = sync_channel::<Result<RemoteCompletion, String>>(1);
-        let (delta_tx, delta_rx) = sync_channel::<String>(128);
+        let (delta_tx, delta_rx) = sync_channel::<StreamDelta>(128);
         runtime.remote_job = Some(AssistantRemoteJob {
             id: 1,
             provider: ProviderProfile::OpenCodeGo,
@@ -12970,9 +13036,12 @@ mod tests {
             receiver: result_rx,
             stream_rx: Some(delta_rx),
             stream_text: String::new(),
+            stream_reasoning: String::new(),
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
+            first_reasoning_at: None,
+            stream_status: None,
         });
         let mut panel = AssistantPanelState::default();
         let ctx = egui::Context::default();
@@ -12984,7 +13053,7 @@ mod tests {
                 | grafito_ui::assistant::RemoteStage::Conectando
         ));
         // Primer delta: marca `first_delta_at` y pasa a `Recibiendo`.
-        delta_tx.send("hola ".into()).unwrap();
+        delta_tx.send(StreamDelta::Text("hola ".into())).unwrap();
         assert!(runtime.drain_remote_stream_preview(&mut panel, &ctx));
         let job = runtime.remote_job.as_ref().unwrap();
         assert!(job.first_delta_at.is_some());
@@ -12992,7 +13061,7 @@ mod tests {
             panel.remote_stage,
             grafito_ui::assistant::RemoteStage::Recibiendo { .. }
         ));
-        assert_eq!(panel.remote_stage_text(), "Recibiendo (0 KiB)…");
+        assert_eq!(panel.remote_stage_text(), "Escribiendo respuesta…");
     }
 
     #[test]
@@ -14143,7 +14212,7 @@ mod tests {
         sin_controles("prosa1", &prosa1);
         let humano1 = grafito_ui::assistant::humanize_prose_text(&prosa1);
         sin_controles("humano1", &humano1);
-        panel.complete_local_request(humano1);
+        panel.complete_local_request(humano1.to_string());
         panel.set_media(
             Some(grafito_ui::assistant::AssistantMedia {
                 title: "Integral — área bajo la curva (nativa)".to_string(),
@@ -14169,7 +14238,7 @@ mod tests {
         sin_controles("prosa2", &prosa2);
         let humano2 = grafito_ui::assistant::humanize_prose_text(&prosa2);
         sin_controles("humano2", &humano2);
-        panel.complete_local_request(humano2);
+        panel.complete_local_request(humano2.to_string());
         for turno in &panel.conversation {
             sin_controles("historial", &turno.content);
         }

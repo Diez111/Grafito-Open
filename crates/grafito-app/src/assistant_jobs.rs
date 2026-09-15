@@ -58,11 +58,11 @@ use crate::{assistant_credentials, Perspective, ViewMode};
 use grafito_assistant::{
     rate_limit_cooldown_remaining_secs, rate_limit_paused_message,
     request_remote_models_with_api_key_on_worker, request_remote_streaming_with_api_key_on_worker,
-    CancellationToken, ProviderSettings, RemoteCompletion, SocraticGuardContext,
+    CancellationToken, ProviderSettings, RemoteCompletion, SocraticGuardContext, StreamDelta,
 };
 use grafito_assistant_types::{
     AssistantFocus, AssistantRepairFeedback, AssistantRequest, AttachmentLimits, ConversationRole,
-    ImmutableDocumentContext, ProviderCapabilities, ProviderProfile,
+    ImmutableDocumentContext, ProviderCapabilities, ProviderProfile, ReasoningEffort,
     REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES,
     REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES, REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES,
     REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
@@ -270,19 +270,27 @@ pub(crate) struct AssistantRemoteJob {
     pub(crate) focus: Option<AssistantFocus>,
     pub(crate) cancellation: CancellationToken,
     pub(crate) receiver: Receiver<Result<RemoteCompletion, String>>,
-    /// Deltas de streaming SSE (sólo protocolo Responses; el resto lo deja
-    /// desconectado y nunca hay preview). Acotado a 128 (best-effort).
-    pub(crate) stream_rx: Option<Receiver<String>>,
+    /// Deltas de streaming SSE tipados (razonamiento / texto; protocolos
+    /// Responses y Chat). El resto lo deja desconectado y nunca hay preview.
+    /// Acotado a 128 (best-effort).
+    pub(crate) stream_rx: Option<Receiver<StreamDelta>>,
     /// Texto acumulado del stream para la burbuja provisional.
     pub(crate) stream_text: String,
+    /// Razonamiento acumulado del stream (bloque plegable; nunca la respuesta).
+    pub(crate) stream_reasoning: String,
     /// Hay un turno provisional al final de `conversation` que debe limpiarse
     /// al terminar/cancelar (ver `pop_provisional_stream_turn`).
     pub(crate) preview_active: bool,
     /// Instante de arranque del worker (para etapas con timestamp).
     pub(crate) started_at: std::time::Instant,
-    /// Instante del primer delta SSE (para `Recibiendo` + aviso lento).
+    /// Instante del primer delta SSE de texto (para `Recibiendo` + aviso lento).
     /// `None` = aún esperando primer token (p.ej. deepseek no-streaming).
     pub(crate) first_delta_at: Option<std::time::Instant>,
+    /// Instante del primer delta de razonamiento (para medir "Pensó Ns").
+    pub(crate) first_reasoning_at: Option<std::time::Instant>,
+    /// Nota de fase previa (p. ej. "Buscando en internet…"): se muestra en la
+    /// línea de etapa mientras no haya respuesta.
+    pub(crate) stream_status: Option<String>,
 }
 
 /// Job de verificación de propuesta (movido verbatim).
@@ -368,6 +376,9 @@ pub(crate) enum AgentChannelMsg {
 pub(crate) struct AssistantAgentJob {
     pub(crate) provider: ProviderProfile,
     pub(crate) model: String,
+    /// Pregunta original del turno: el fallback agente reintenta con ella
+    /// (`panel.problem` ya se limpió al enviar y no se puede reutilizar).
+    pub(crate) question: String,
     pub(crate) cancellation: grafito_agent::loop_engine::Cancellation,
     pub(crate) receiver: Receiver<AgentChannelMsg>,
     /// Canal lateral S2 (`ask_user` real vía evento): el forwarder de
@@ -395,6 +406,10 @@ pub(crate) struct FinishedRemoteJob {
     /// El job dejó una burbuja provisional que el poll debe limpiar antes de
     /// procesar el resultado (éxito, error o cancelación).
     pub(crate) stream_preview_active: bool,
+    /// Razonamiento acumulado del stream (se pega al turno final).
+    pub(crate) stream_reasoning: Option<String>,
+    /// Duración del razonamiento en milisegundos (para "Pensó Ns").
+    pub(crate) reasoning_ms: Option<u32>,
 }
 
 /// Resultado drenado del job de propuesta (movido verbatim).
@@ -720,6 +735,14 @@ impl AssistantJobsController {
             None => (None, None),
         };
         let mut request = AssistantRequest::remote(question.clone(), document_context);
+        // Preferencias del panel (persistidas): modo razonador y búsqueda web.
+        // El transporte degrada honesto si el proveedor rechaza el esfuerzo.
+        request.reasoning_effort = if panel.reasoning_enabled {
+            Some(ReasoningEffort::High)
+        } else {
+            None
+        };
+        request.web_search = panel.web_search_enabled;
         // Idioma del selector del panel (auto/es/en) → directiva en el system prompt.
         request.language = panel.avatar.language.clone();
         request.focus = focus;
@@ -878,10 +901,10 @@ impl AssistantJobsController {
         ctx.runtime.next_request_id = ctx.runtime.next_request_id.wrapping_add(1);
         let id = ctx.runtime.next_request_id;
         let cancellation = CancellationToken::default();
-        // Canal acotado de deltas SSE (128, best-effort): el worker de
+        // Canal acotado de deltas SSE tipados (128, best-effort): el worker de
         // streaming lo alimenta y `poll_assistant_jobs` lo drena a la burbuja
         // provisional. Protocolos no-streaming lo dejan desconectado.
-        let (delta_tx, stream_rx) = sync_channel::<String>(128);
+        let (delta_tx, stream_rx) = sync_channel::<StreamDelta>(128);
         let worker = request_remote_streaming_with_api_key_on_worker(
             settings,
             request,
@@ -926,9 +949,12 @@ impl AssistantJobsController {
             receiver,
             stream_rx: Some(stream_rx),
             stream_text: String::new(),
+            stream_reasoning: String::new(),
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
+            first_reasoning_at: None,
+            stream_status: None,
         });
         // Etapa inicial visible de inmediato (sin esperar al primer poll):
         // `Autorizada` con 0s, la Piel sólo renderiza el texto.
@@ -975,7 +1001,12 @@ impl AssistantJobsController {
             user_messages.push(serde_json::json!({"role": role, "content": turn.content}));
         }
         user_messages.push(serde_json::json!({"role": "user", "content": prompt}));
-        let tools = grafito_assistant::default_agent_tools();
+        let mut tools = grafito_assistant::default_agent_tools();
+        // Búsqueda web opt-in: sólo se expone cuando el usuario la activó
+        // (el lockdown de examen ya bloqueó el envío remoto entero).
+        if request.web_search {
+            tools.push(grafito_assistant::agent::web_search_tool_schema());
+        }
         let budget = grafito_agent::loop_engine::AgentBudget::default();
         let goal = question
             .chars()
@@ -1081,6 +1112,7 @@ impl AssistantJobsController {
         ctx.runtime.agent_job = Some(AssistantAgentJob {
             provider,
             model,
+            question,
             cancellation,
             receiver,
             clarification_receiver,
@@ -1560,13 +1592,22 @@ impl AssistantJobsController {
                                     // dispara el fallback a deepseek. El fallback sólo
                                     // vive en la rama `Err` vía
                                     // `should_fallback_agent_spark_to_deepseek`.
+                                    // Paridad con el chat simple: si el loop cortó por
+                                    // presupuesto, se avisa con el mismo toast (el
+                                    // parcial igual se publica).
+                                    if outcome.truncated {
+                                        (ctx.notify)(
+                                            "La respuesta alcanzó el límite de la consulta; pedí que continúe desde el último punto.".to_string(),
+                                            ToastKind::Info,
+                                        );
+                                    }
                                     ctx.panel.complete_request(outcome.final_text);
                                 }
                                 Err(error) => {
-                                    // Modo agente + Spark: las tools aún no viajan por Responses API.
-                                    // Fallback sólo-sesión a deepseek (chat-compatible), preferencia intacta.
-                                    // Si B1 ya cerró el loop por Responses, este error deja
-                                    // de ocurrir y el `Ok` de arriba gana sin fallback.
+                                    // Modo agente + Spark por Responses (B1): el error
+                                    // legacy "Responses API" ya no ocurre; queda el
+                                    // fallback sólo-sesión a deepseek ante 400 de
+                                    // sesión/cuenta, preferencia intacta.
                                     if should_fallback_agent_spark_to_deepseek(
                                         &error,
                                         job.provider,
@@ -1574,14 +1615,13 @@ impl AssistantJobsController {
                                     ) {
                                         eprintln!("grafito: session-fallback agent spark -> deepseek-v4-flash (preferencia intacta)");
                                         (ctx.notify)(
-                                            "Modo agente con Spark aún no soporta herramientas; reintentando con DeepSeek Flash…".to_string(),
+                                            "Modo agente con Spark rechazó la sesión Go; reintentando con DeepSeek Flash…".to_string(),
                                             ToastKind::Info,
                                         );
-                                        let question = ctx.panel.problem.trim().to_owned();
                                         Self::start_remote_for(
                                             ctx,
                                             egui_ctx,
-                                            question,
+                                            job.question.clone(),
                                             Some("deepseek-v4-flash"),
                                         );
                                     } else {
@@ -1635,11 +1675,16 @@ impl AssistantJobsController {
                 cancelled,
                 result,
                 stream_preview_active,
-                ..
+                stream_reasoning,
+                reasoning_ms,
             } = completion;
             if stream_preview_active {
                 pop_provisional_stream_turn(ctx.panel);
             }
+            // Traza del streaming (razonamiento + duración) para el turno
+            // final que publique complete_request/complete_local_request.
+            ctx.panel
+                .attach_stream_trace(stream_reasoning, reasoning_ms);
             if cancelled
                 || !accepts_remote_result(
                     ctx.panel.provider,
@@ -1687,6 +1732,8 @@ impl AssistantJobsController {
                                     ToastKind::Info,
                                 );
                             }
+                            // Tokens reales de la wire (se ocultan si no vinieron).
+                            ctx.panel.attach_pending_usage(completion.usage);
                             let text = completion.text;
                             // Guard socrático post-respuesta: un pedido
                             // exploratorio ("mostrame un ejemplo…") cuya
@@ -1796,7 +1843,12 @@ impl AssistantJobsController {
                                         ToastKind::Info,
                                     );
                                 }
-                                // Reintentar la misma pregunta con el fallback, sin mostrar error
+                                // Reintentar la misma pregunta con el fallback, sin mostrar error.
+                                // El razonamiento parcial del intento fallido NO se
+                                // hereda: si se pegara al turno de deepseek, el
+                                // usuario vería el "pensamiento" de Spark junto a
+                                // una respuesta ajena.
+                                ctx.panel.pending_stream_trace = None;
                                 Self::start_remote_for(
                                     ctx,
                                     egui_ctx,
@@ -2023,7 +2075,7 @@ mod tests {
 
     fn dummy_remote_job() -> AssistantRemoteJob {
         let (_, receiver) = sync_channel(1);
-        let (_, stream_rx) = sync_channel::<String>(128);
+        let (_, stream_rx) = sync_channel::<StreamDelta>(128);
         AssistantRemoteJob {
             id: 1,
             provider: ProviderProfile::OpenCodeGo,
@@ -2040,9 +2092,12 @@ mod tests {
             receiver,
             stream_rx: Some(stream_rx),
             stream_text: String::new(),
+            stream_reasoning: String::new(),
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
+            first_reasoning_at: None,
+            stream_status: None,
         }
     }
 
@@ -2260,6 +2315,7 @@ mod tests {
         AssistantAgentJob {
             provider: ProviderProfile::OpenCodeGo,
             model: "deepseek-v4-flash".to_string(),
+            question: "derivá x^2".to_string(),
             cancellation: grafito_agent::loop_engine::Cancellation::default(),
             receiver,
             clarification_receiver,

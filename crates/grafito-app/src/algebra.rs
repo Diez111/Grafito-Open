@@ -541,12 +541,14 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         },
                     )
                     .clicked()
-                    {
+                {
                         app.keyboard_visible = !app.keyboard_visible;
+                        // Elección explícita: sobrevive a cambios de perspectiva.
+                        app.keyboard_visible_explicit = true;
                         if !app.keyboard_visible {
                             app.keyboard_expanded = false;
                         }
-                    }
+                }
                     if response.changed {
                         app.preview_object = commands::parse_preview(&app.input_text);
                     }

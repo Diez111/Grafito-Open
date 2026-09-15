@@ -1628,13 +1628,12 @@ impl GrafitoApp {
             return;
         }
 
-        // Grid colors (soft grey, adapting to dark mode)
-        let major_color = if self.dark_mode {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 28)
-        } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 35)
-        };
-        let major_stroke = Stroke::new(0.5, major_color);
+        // Grilla desde el Theme vigente (nunca de un bool local que pueda
+        // desyncarse del modo real): en claro usa `grid_line` opaco a 1px
+        // como el 2D — el rgba fijo anterior quedaba subpíxel/invisible.
+        let theme = grafito_ui::theme::current_theme(painter.ctx());
+        let major_stroke = Stroke::new(1.0, theme.grid_line);
+        let minor_stroke = Stroke::new(0.5, theme.grid_minor);
 
         // Grid range: center around camera target projection on XZ plane
         let center_x = self.camera.target.x as f64;
@@ -1679,6 +1678,42 @@ impl GrafitoApp {
                             [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
                             stroke,
                         );
+                    }
+                }
+            }
+            // Menores a 0.5px: solo si no saturan (≤2000 líneas por dirección).
+            // Estructuran el plano sin ruido cuando el zoom abre el paso.
+            if line_count_x <= 400 && line_count_z <= 400 {
+                for xi in 0..=line_count_x * 5 {
+                    if xi % 5 == 0 {
+                        continue;
+                    }
+                    let x = start_x + xi as f64 * minor_step;
+                    let p1 = Point3D::new(x, 0.0, start_z);
+                    let p2 = Point3D::new(x, 0.0, end_z);
+                    if let Some((a, b)) = projector.project_segment(&p1, &p2) {
+                        if !overlay_only {
+                            painter.line_segment(
+                                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                                minor_stroke,
+                            );
+                        }
+                    }
+                }
+                for zi in 0..=line_count_z * 5 {
+                    if zi % 5 == 0 {
+                        continue;
+                    }
+                    let z = start_z + zi as f64 * minor_step;
+                    let p1 = Point3D::new(start_x, 0.0, z);
+                    let p2 = Point3D::new(end_x, 0.0, z);
+                    if let Some((a, b)) = projector.project_segment(&p1, &p2) {
+                        if !overlay_only {
+                            painter.line_segment(
+                                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                                minor_stroke,
+                            );
+                        }
                     }
                 }
             }
@@ -1788,11 +1823,8 @@ impl GrafitoApp {
             }
         };
 
-        let text_color = if self.dark_mode {
-            Color32::from_gray(180)
-        } else {
-            Color32::from_gray(80)
-        };
+        // Etiquetas con el color de eje del Theme vigente (sync claro/oscuro).
+        let text_color = theme.axis_label;
         let font = egui::FontId::proportional(grafito_ui::tokens::TYPE_XS);
         let tick_stroke = Stroke::new(1.0, text_color);
 

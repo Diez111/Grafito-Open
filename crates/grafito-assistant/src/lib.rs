@@ -17,15 +17,16 @@
 pub mod agent;
 pub mod cas_nativo;
 pub mod harness;
+pub mod web;
 
 use base64::Engine;
 use grafito_agent::schema::ToolSchema;
 use grafito_assistant_types::{
-    AssistantOperation, AssistantRequest, AssistantResponse, AttachmentLimits, ConversationRole,
-    DerivationStep, ImageAttachment, LocalAssistantStatus, PrivacyMode, ProposedPlan,
-    ProviderCapabilities, ProviderProfile, REMOTE_CONTEXT_PROMPT_PREFIX,
+    AssistantOperation, AssistantRequest, AssistantResponse, AssistantTokenUsage, AttachmentLimits,
+    ConversationRole, DerivationStep, ImageAttachment, LocalAssistantStatus, PrivacyMode,
+    ProposedPlan, ProviderCapabilities, ProviderProfile, REMOTE_CONTEXT_PROMPT_PREFIX,
     REMOTE_FOCUS_PROMPT_PREFIX, REMOTE_REPAIR_FEEDBACK_PROMPT_PREFIX,
-    REMOTE_TOOL_CATALOG_PROMPT_PREFIX,
+    REMOTE_TOOL_CATALOG_PROMPT_PREFIX, REMOTE_WEB_CONTEXT_PROMPT_PREFIX,
 };
 use grafito_geometry::{
     ast::{parse_ast, Expr},
@@ -65,13 +66,14 @@ const OPENCODE_FUSION_MODEL: &str = "fusion";
 /// Muse Spark sólo responde por la Responses API (`POST {base}/responses`);
 /// por Chat Completions el proveedor devuelve 500 instantáneo con cualquier
 /// payload (verificado 2026-09-04 contra el endpoint real, 8 payloads).
-/// Go (suscripción, docs Go 2026-09-08): `-contributor`; Zen (custom):
+/// Go (suscripción, docs Go 2026-09-13): `-contributor`; Zen (custom):
 /// `muse-spark-1.3`/`1.2` pagos y `muse-spark-1.3-contributor-free` gratis
 /// (exige sesión válida; sin ella el gateway devuelve 400 `MissingSessionID`).
 /// Los `-contributor` viejos se conservan por compatibilidad.
-/// Se matchea por `contains` para cubrir futuras 1.x sin tocar el router.
+/// Tabla de ruteo por familia (`go_model_protocol`): cubre futuras 1.x y
+/// nuevos IDs (gpt/grok/minimax/qwen) sin tocar el router.
 fn uses_responses_api(model: &str) -> bool {
-    model.contains("muse-spark")
+    model.contains("muse-spark") || model.starts_with("gpt-") || model.starts_with("grok-")
 }
 /// Header de sesión que EXIGE el gateway OpenCode Go (opencode.ai/docs/go,
 /// 2026-09-08): estable por conversación, para routing y prompt caching.
@@ -233,7 +235,7 @@ const NO_NETWORK_MESSAGE: &str =
     "assistant network support is disabled in this build (feature assistant-net is off)";
 const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. When the user asks for Taylor/Integral/Derivative without specifying a function, reuse the most recent Function from the document context instead of defaulting to sin(x). Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
 const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
-const REMOTE_RESPONSE_GUIDANCE: &str = "Begin with `## Enfoque` and three to five concise, checkable steps. Do not reveal private chain-of-thought or hidden reasoning. Only catalog items marked [EJECUTABLE] may appear in grafito or grafito-scene fences; [REFERENCIA] items are explanatory only. A grafito fence must copy catalogued syntax exactly: use Function[expr] only, with no domain/sample arguments, and never use if or frac expressions. For a Fourier request, emit an executable Function only for a finite numeric partial sum. When the user gives no signal or order, a clearly labelled square-wave example may use `Function[(4/pi)*(sin(x)+sin(3*x)/3+sin(5*x)/5)]`; otherwise use the supplied finite values. Never emit a general Fourier transform, symbolic a_n or b_n coefficients, unknown N, or sum(...) as an executable proposal. A grafito-scene contains two to eight one-line executable commands and is for an atomic construction such as multiple Segment3D edges; never use Script, Polyhedron, or NumericArray. If Grafito cannot represent it with catalogued syntax, explain it in Markdown instead of emitting a fence.";
+const REMOTE_RESPONSE_GUIDANCE: &str = "Begin with `## Enfoque` and three to five concise, checkable steps. Do not reveal private chain-of-thought or hidden reasoning. Only catalog items marked [EJECUTABLE] may appear in grafito or grafito-scene fences; [REFERENCIA] items are explanatory only. A grafito fence must copy catalogued syntax exactly: use Function[expr] only, with no domain/sample arguments, and never use if or frac expressions. For a Fourier request, emit an executable Function only for a finite numeric partial sum. When the user gives no signal or order, a clearly labelled square-wave example may use `Function[(4/pi)*(sin(x)+sin(3*x)/3+sin(5*x)/5)]`; otherwise use the supplied finite values. Never emit a general Fourier transform, symbolic a_n or b_n coefficients, unknown N, or sum(...) as an executable proposal. A grafito-scene contains two to eight one-line executable commands and is for an atomic construction such as multiple Segment3D edges; never use Script, Polyhedron, or NumericArray. If Grafito cannot represent it with catalogued syntax, explain it in Markdown instead of emitting a fence. Trivial questions (a single arithmetic computation, a single fact, an unambiguous direct order such as asking for 2+43): answer directly FIRST in one line (e.g. `2+43 = 45`), then at most one short line of context. Never open with `## Enfoque`, never scaffold steps, never ask a clarification question for a trivial question.";
 const REMOTE_TETRAHEDRON_GUIDANCE: &str = "For a tetrahedron, emit exactly one one-line grafito block with Tetrahedron[x, y, z, edge] and finite literal values. Do not emit Polyhedron, NumericArray, or a grafito-scene block.";
 const REMOTE_4D_POLYTOPE_GUIDANCE: &str = "For a regular 4D polytope, emit exactly one one-line grafito block with the appropriate named command: Pentachoron4D[scale, {xy, xz, xw, yz, yw, zw}], Tesseract4D[scale, {xy, xz, xw, yz, yw, zw}], SixteenCell4D[scale, {xy, xz, xw, yz, yw, zw}], TwentyFourCell4D[scale, {xy, xz, xw, yz, yw, zw}], OneTwentyCell4D[scale, {xy, xz, xw, yz, yw, zw}], or SixHundredCell4D[scale, {xy, xz, xw, yz, yw, zw}]. For higher-dimensional regular families use SimplexND[n, scale, {lexicographic-plane angles}], HypercubeND[n, scale, {lexicographic-plane angles}], or CrossPolytopeND[n, scale, {lexicographic-plane angles}]. Never substitute 3D Tetrahedron, bare Hypercube or tesseract, or many Segment3D edge lines.";
 const FUSION_AUDIT_SYSTEM_PROMPT: &str = "Audit the candidate response for mathematical correctness, completeness, and safe explanatory behavior. Return only the corrected final answer for the user. Do not mention this audit, the candidate, internal models, API keys, tools, files, shell commands, or network actions. If the problem is ambiguous, ask one concise clarifying question instead of guessing.";
@@ -244,6 +246,12 @@ const FUSION_AUDIT_USER_PREFIX: &str = "Original user request and selected Grafi
 /// `can_reveal==false` y cualquier intento de `telling` (solución directa) debe
 /// ser bloqueado por el guard remoto. Telling_rate <5% es invariante medible.
 const SOCRATIC_BINDING_DIRECTIVE: &str = "MODO SOCRÁTICO VINCULANTE — ORDEN, NO SUGERENCIA:\n- Seguí estrictamente el FSM socrático Review→HeuristicQ→AwaitStudent→Rectify→Summarize (can_reveal = attempts>=2).\n- Si attempts<2 (can_reveal=false), NO reveles la solución directa (telling). Re-preguntá con la pregunta heurística exacta del scaffold y su pista.\n- Si el guard remoto detecta telling con attempts<2, tu respuesta será descartada y se forzará re-pregunta o repair_feedback.\n- Usá EXACTAMENTE la pregunta BKT actual (current_question) y la pista del scaffold inyectadas abajo; no inventes otra. Adaptá sólo el nivel de detalle según el historial.\n- Telling_rate debe mantenerse <5% (máx 1 telling cada 20 turnos). Si dudas, preguntá en vez de afirmar.\n- El system prompt es vinculante: desobedecerlo invalida la respuesta.";
+
+/// Directiva del modo razonador: se agrega al system prompt cuando el usuario
+/// activa "Razonar". Refuerza el pensamiento paso a paso sin exponer la
+/// cadena de pensamiento privada en la respuesta final (el stream nativo del
+/// proveedor alimenta el bloque plegable).
+const REASONING_BINDING_DIRECTIVE: &str = "MODO RAZONADOR ACTIVO:\n- Pensá el problema paso a paso antes de la respuesta final; usá ese espacio para verificar el plan y los cálculos.\n- La respuesta final debe ir directo al resultado: no repitas la cadena de pensamiento ni la narres.\n- Si el problema es ambiguo, resolvé la interpretación más razonable y decí en una línea el supuesto usado.";
 
 /// Resuelve el subconjunto local, determinista y sin red del MVP.
 pub fn solve_local(request: &AssistantRequest) -> AssistantResponse {
@@ -1234,14 +1242,15 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
     endpoint_with_path(settings, "messages")
 }
 
-/// Matriz de fallback por familia OpenCodeGo (router `remote_protocol`).
+/// Matriz de fallback por familia OpenCodeGo (router `remote_protocol` +
+/// tabla `go_model_protocol`, docs Go 2026-09-13).
 ///
 /// | Familia / modelo | Protocolo (`RemoteProtocol`) | Endpoint `POST` | Auth |
 /// |---|---|---|---|
-/// | `muse-spark-*` (1.2/1.3, futuras 1.x por `contains`) | `OpenAiResponses` | `{base}/responses` | Bearer (`sanitize_api_key`) |
-/// | `mimo-2.5-vl` (visión) | `AnthropicMessages` | `{base}/messages` | `x-api-key` + `anthropic-version: 2023-06-01` |
+/// | `muse-spark-*` (1.2/1.3, futuras 1.x por `contains`), `gpt-*`, `grok-*` | `OpenAiResponses` | `{base}/responses` | Bearer (`sanitize_api_key`) |
+/// | `minimax-*`, `qwen3.6*`/`qwen3.7*`/`qwen3.8*` y legacy `mimo-2.5-vl` (visión) | `AnthropicMessages` | `{base}/messages` | `x-api-key` + `anthropic-version: 2023-06-01` |
 /// | `fusion` | `Fusion` | draft `{base}/messages` (shape mimo, sin historial) + audit `{base}/chat/completions` (`deepseek-v4-pro`) | draft `x-api-key`, audit Bearer |
-/// | resto OpenCodeGo (`deepseek-*`, `glm-*`, …) + `DeepSeek`/`OllamaLocal`/`Custom` | `OpenAiChatCompletions` | `{base}/chat/completions` (`stream:false`) | Bearer u omitida (Ollama local) |
+/// | resto OpenCodeGo (`deepseek-*` incl. `deepseek-v4.1-flash`, `glm-*`, `kimi-*`, `mimo-v2.5*`, `hy*`, `longcat-*`, …) + `DeepSeek`/`OllamaLocal`/`Custom` | `OpenAiChatCompletions` | `{base}/chat/completions` (`stream:false`) | Bearer u omitida (Ollama local) |
 ///
 /// Comportamiento ante fallos (sin reintento automático en este crate; el
 /// worker es cancelable y dormir bloquearía la cancelación):
@@ -1258,10 +1267,11 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
 /// reintenta una vez `muse-spark --500/timeout/400-sesión--> deepseek-v4-flash`
 /// sin tocar la preferencia guardada (400-sesión = `MissingSessionID`/
 /// `InvalidApiKey`/`ModelDisabled`/`AccountBlocked` del gateway Go, docs Go
-/// 2026-09-08; `MissingSessionID` con header también cae acá por región). Modo agente con tools (`agent.rs`): sólo soporta
-/// `OpenAiChatCompletions`; Spark/Fusion devuelven error explícito que sugiere
-/// chat simple o deepseek; su `HTTP {status}` aún no incluye `Retry-After`
-/// (deuda documentada).
+/// 2026-09-13; `MissingSessionID` con header también cae acá por región). Modo
+/// agente con tools (`agent.rs`): Chat y Responses (familias
+/// `OpenAiChatCompletions`/`OpenAiResponses`); Messages/Fusion devuelven error
+/// explícito que sugiere chat simple o deepseek; su `HTTP {status}` aún no
+/// incluye `Retry-After` (deuda documentada).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RemoteProtocol {
     OpenAiChatCompletions,
@@ -1285,15 +1295,34 @@ fn remote_protocol(settings: &ProviderSettings) -> RemoteProtocol {
     if settings.profile != ProviderProfile::OpenCodeGo {
         return RemoteProtocol::OpenAiChatCompletions;
     }
-    if uses_responses_api(&settings.model) {
+    go_model_protocol(&settings.model)
+}
+
+/// Tabla de ruteo por modelo para OpenCode Go (docs Go 2026-09-13).
+///
+/// Familias: `muse-spark*`, `gpt-*`, `grok-*` → Responses API; `minimax-*`,
+/// `qwen3.6*`/`qwen3.7*`/`qwen3.8*` y el legacy `mimo-2.5-vl` → Anthropic
+/// Messages; `fusion` → Fusion (draft Anthropic + audit deepseek); resto
+/// (deepseek-*, glm-*, kimi-*, mimo-v2.5*, hy*, longcat-*, ...) → Chat
+/// Completions. Familia por prefijo para cubrir IDs nuevos sin tocar el
+/// router; la lista ofrecida en la UI sale del catálogo + discovery
+/// (`/models`).
+pub(crate) fn go_model_protocol(model: &str) -> RemoteProtocol {
+    if model == OPENCODE_FUSION_MODEL {
+        return RemoteProtocol::Fusion;
+    }
+    if uses_responses_api(model) {
         return RemoteProtocol::OpenAiResponses;
     }
-    match settings.model.as_str() {
-        // MiMo 2.5-VL viaja con el protocolo Anthropic Messages del proveedor.
-        OPENCODE_VISION_MODEL => RemoteProtocol::AnthropicMessages,
-        OPENCODE_FUSION_MODEL => RemoteProtocol::Fusion,
-        _ => RemoteProtocol::OpenAiChatCompletions,
+    if model == OPENCODE_VISION_MODEL
+        || model.starts_with("minimax-")
+        || model.starts_with("qwen3.6")
+        || model.starts_with("qwen3.7")
+        || model.starts_with("qwen3.8")
+    {
+        return RemoteProtocol::AnthropicMessages;
     }
+    RemoteProtocol::OpenAiChatCompletions
 }
 
 /// Timeout efectivo para un turno simple: clamp `100ms..=120s`.
@@ -1521,9 +1550,11 @@ fn parse_http_date_to_system_time(value: &str) -> Option<std::time::SystemTime> 
 // Progreso: `Option<&mut dyn FnMut(&str)>` invocada sólo con el texto
 // acumulado acotado (`RESPONSES_MAX_BODY_BYTES`); nunca bloquea ni duerme:
 // si el callback pisa cancelación, el loop aborta en el próximo poll.
-/// Callback de progreso del streaming SSE (ADR-001, cableado al transporte
-/// Responses). Recibe el texto acumulado acotado; nunca duerme ni bloquea.
-pub type ResponsesProgressCallback<'a> = dyn FnMut(&str) + Send + 'a;
+/// Callback de progreso del streaming SSE (ADR-001, cableado a los
+/// transportes Responses y Chat). Recibe los acumulados de razonamiento y de
+/// respuesta **por separado** (cada flujo es monotónico); nunca duerme ni
+/// bloquea.
+pub type ResponsesProgressCallback<'a> = dyn FnMut(&str, &str) + Send + 'a;
 
 /// Extrae el delta de texto de un evento SSE de Responses.
 ///
@@ -1579,8 +1610,13 @@ pub fn collect_responses_sse_text(sse_body: &str) -> (String, bool) {
 /// Resultado interno del lector SSE de la Responses API.
 #[derive(Debug)]
 enum SseStreamOutcome {
-    /// El servidor habló SSE: texto acumulado de deltas + flag de truncado.
-    Done { text: String, truncated: bool },
+    /// El servidor habló SSE: texto acumulado de deltas + flag de truncado y
+    /// el `usage` del cierre si el proveedor lo informó.
+    Done {
+        text: String,
+        truncated: bool,
+        usage: Option<AssistantTokenUsage>,
+    },
     /// El servidor no emitió ningún evento SSE (JSON plano, cuerpo vacío o
     /// forma desconocida): el llamante reintenta UNA vez sin `stream`.
     FallbackToNonStreaming,
@@ -1628,52 +1664,26 @@ pub fn request_responses_completion_streaming(
     let started = Instant::now();
     let mut streaming_payload = base_payload.clone();
     streaming_payload["stream"] = json!(true);
-    let client = shared_http_client()?;
-    let mut call = client
-        .post(endpoint.clone())
-        .header("Accept", "text/event-stream")
-        .json(&streaming_payload)
-        .timeout(timeout);
-    call = apply_go_transport_headers(call, &endpoint, go_session_id);
-    if let Some(key) = api_key {
-        call = call.bearer_auth(sanitize_api_key(key)?);
-    }
-    let response = call.send().map_err(|error| {
-        // `send()` sin respuesta = aún no hubo deltas: etapa `esperando primer
-        // token`. El timeout de reqwest arranca acá, igual que el deadline
-        // local (ver `deadline` abajo): la clasificación no depende de relojes
-        // distintos.
-        if error.is_timeout() {
-            sse_timeout_message(0, 0, timeout)
-        } else {
-            transport_error("remote assistant stream", &error, Some(timeout))
-        }
-    })?;
+    let response = post_json_with_reasoning_fallback(
+        &endpoint,
+        &streaming_payload,
+        api_key,
+        go_session_id,
+        timeout,
+        started,
+        true,
+    )?;
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
-    }
-    if !response.status().is_success() {
-        // Idéntico al path no-streaming: 429 con Retry-After, cuerpo acotado
-        // sin secretos. Además arma la pausa global para que el fallback
-        // no-streaming (abajo) y los reintentos del usuario no martillen.
-        let status = response.status().as_u16();
-        let retry_after = if status == 429 {
-            retry_after_secs_from_headers(response.headers())
-        } else {
-            None
-        };
-        if status == 429 {
-            record_rate_limited(retry_after);
-        }
-        let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
-        return Err(http_status_error(status, &body, retry_after));
     }
     let deadline = started.checked_add(timeout).unwrap_or(started);
     let reader = response.take((RESPONSES_MAX_BODY_BYTES as u64).saturating_add(1));
     match read_responses_sse_stream(reader, deadline, timeout, cancellation, progress)? {
-        SseStreamOutcome::Done { text, truncated } => {
-            completion_from_text(&text, max_output_chars, truncated)
-        }
+        SseStreamOutcome::Done {
+            text,
+            truncated,
+            usage,
+        } => completion_from_text(&text, max_output_chars, truncated, usage),
         SseStreamOutcome::FallbackToNonStreaming => {
             // El servidor no habló SSE: UN reintento no-streaming con el
             // MISMO presupuesto. El total nunca supera `effective_remote_timeout`.
@@ -1725,27 +1735,109 @@ pub fn request_chat_completion_streaming(
     let started = Instant::now();
     let mut streaming_payload = base_payload.clone();
     streaming_payload["stream"] = json!(true);
+    // OpenAI-compat: pedir el chunk final de `usage` (los que no lo soportan
+    // lo ignoran y la UI simplemente oculta la métrica).
+    streaming_payload["stream_options"] = json!({"include_usage": true});
+    let response = post_json_with_reasoning_fallback(
+        &endpoint,
+        &streaming_payload,
+        api_key,
+        go_session_id,
+        timeout,
+        started,
+        true,
+    )?;
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    let reader = response.take((RESPONSES_MAX_BODY_BYTES as u64).saturating_add(1));
+    match read_responses_sse_stream(reader, deadline, timeout, cancellation, progress)? {
+        SseStreamOutcome::Done {
+            text,
+            truncated,
+            usage,
+        } => completion_from_text(&text, max_output_chars, truncated, usage),
+        SseStreamOutcome::FallbackToNonStreaming => {
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .filter(|remaining| *remaining >= Duration::from_secs(1));
+            let Some(remaining) = remaining else {
+                return Err(response_schema_error(
+                    "chat response did not stream any displayable events",
+                ));
+            };
+            request_openai_completion(
+                endpoint,
+                base_payload,
+                api_key,
+                cancellation,
+                remaining,
+                max_output_chars,
+                go_session_id,
+            )
+        }
+    }
+}
+
+/// POST a `{base}/messages` (Anthropic Messages) con `stream:true` y drenado
+/// progresivo de deltas (`mimo-2.5-vl`).
+///
+/// Mismo contrato que el streaming de Chat/Responses (deadline único,
+/// cancelación, body cap 256 KiB, fallback único a no-streaming si el servidor
+/// no habla SSE). El payload Anthropic no lleva knobs de razonamiento, así que
+/// no aplica `post_json_with_reasoning_fallback`: headers `x-api-key` +
+/// `anthropic-version: 2023-06-01` y el manejo de 429/`Retry-After` del path
+/// no-streaming (`request_anthropic_completion`).
+#[cfg(feature = "assistant-net")]
+#[allow(clippy::too_many_arguments)]
+fn request_anthropic_completion_streaming(
+    endpoint: Url,
+    base_payload: Value,
+    api_key: Option<&str>,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+    max_output_chars: usize,
+    progress: Option<&mut ResponsesProgressCallback<'_>>,
+    go_session_id: Option<&str>,
+) -> Result<RemoteCompletion, String> {
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    if check_rate_limit_cooldown().is_err() {
+        return Err(rate_limit_paused_error());
+    }
+    // La clave es obligatoria en Anthropic Messages (igual que el path
+    // no-streaming): sin ella se falla honesto sin tocar la red.
+    let key = api_key
+        .map(sanitize_api_key)
+        .transpose()?
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| "remote assistant API key is unavailable".to_string())?;
+    let started = Instant::now();
+    let mut streaming_payload = base_payload.clone();
+    streaming_payload["stream"] = json!(true);
     let client = shared_http_client()?;
     let mut call = client
         .post(endpoint.clone())
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
         .header("Accept", "text/event-stream")
         .json(&streaming_payload)
         .timeout(timeout);
     call = apply_go_transport_headers(call, &endpoint, go_session_id);
-    if let Some(key) = api_key {
-        call = call.bearer_auth(sanitize_api_key(key)?);
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
     }
-    let response = call.send().map_err(|error| {
-        if error.is_timeout() {
-            sse_timeout_message(0, 0, timeout)
-        } else {
-            transport_error("remote assistant stream", &error, Some(timeout))
-        }
-    })?;
+    let response = call
+        .send()
+        .map_err(|error| transport_error("remote assistant", &error, Some(timeout)))?;
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
     if !response.status().is_success() {
+        // Estándar Anthropic no-streaming: 429 con `Retry-After` parseado
+        // (clamp 1..120s) arma la pausa global; el cuerpo nunca ecoa la clave.
         let status = response.status().as_u16();
         let retry_after = if status == 429 {
             retry_after_secs_from_headers(response.headers())
@@ -1761,19 +1853,23 @@ pub fn request_chat_completion_streaming(
     let deadline = started.checked_add(timeout).unwrap_or(started);
     let reader = response.take((RESPONSES_MAX_BODY_BYTES as u64).saturating_add(1));
     match read_responses_sse_stream(reader, deadline, timeout, cancellation, progress)? {
-        SseStreamOutcome::Done { text, truncated } => {
-            completion_from_text(&text, max_output_chars, truncated)
-        }
+        SseStreamOutcome::Done {
+            text,
+            truncated,
+            usage,
+        } => completion_from_text(&text, max_output_chars, truncated, usage),
         SseStreamOutcome::FallbackToNonStreaming => {
+            // El servidor no habló SSE: UN reintento no-streaming con el
+            // MISMO presupuesto y el timeout remanente (>=1s).
             let remaining = timeout
                 .checked_sub(started.elapsed())
                 .filter(|remaining| *remaining >= Duration::from_secs(1));
             let Some(remaining) = remaining else {
                 return Err(response_schema_error(
-                    "chat response did not stream any displayable events",
+                    "anthropic response did not stream any displayable events",
                 ));
             };
-            request_openai_completion(
+            request_anthropic_completion(
                 endpoint,
                 base_payload,
                 api_key,
@@ -1831,10 +1927,10 @@ fn sse_timeout_message(events_seen: u32, received_bytes: usize, timeout: Duratio
     }
 }
 
-/// Cap del razonamiento que se muestra como "pensando" (la respuesta final
-/// nunca lo incluye; sólo alimenta el preview en vivo de la UI).
+/// Cap del razonamiento que viaja a la UI como deltas `StreamDelta::Reasoning`
+/// (la respuesta final nunca lo incluye; sólo alimenta el bloque plegable).
 #[cfg(feature = "assistant-net")]
-const REASONING_PREVIEW_MAX_CHARS: usize = 4_000;
+const REASONING_MAX_CHARS: usize = 8_000;
 
 /// Añade `delta` a `dst` sin pasarse de `cap` y sin partir un char multibyte.
 #[cfg(feature = "assistant-net")]
@@ -1849,18 +1945,65 @@ fn append_capped(dst: &mut String, delta: &str, cap: usize) {
     dst.push_str(&delta[..end]);
 }
 
-/// Preview monotónico que viaja a la UI: "Pensando…" + razonamiento (si lo
-/// hay) y luego la respuesta parcial. El prefijo sólo crece por el final, así
-/// que el emisor de sufijos (`stream_progress_sender`) no se desincroniza.
-#[cfg(feature = "assistant-net")]
-fn sse_progress_preview(reasoning: &str, text: &str) -> String {
-    if reasoning.is_empty() {
-        return text.to_string();
+/// Extrae el `usage` de un cuerpo JSON de proveedor (Chat, Responses o
+/// Anthropic) a [`AssistantTokenUsage`]. Acepta ambos nombres de campo
+/// (`input_tokens`/`prompt_tokens`, `output_tokens`/`completion_tokens`) y los
+/// detalles anidados de razonamiento y caché. `None` si no hay `usage` útil.
+fn parse_token_usage(value: &Value) -> Option<AssistantTokenUsage> {
+    let usage = value.get("usage")?;
+    if usage.is_null() {
+        return None;
     }
-    if text.is_empty() {
-        return format!("Pensando…\n{reasoning}");
+    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let input = count("input_tokens").max(count("prompt_tokens"));
+    let output = count("output_tokens").max(count("completion_tokens"));
+    let reasoning = usage
+        .get("output_tokens_details")
+        .or_else(|| usage.get("completion_tokens_details"))
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cached = usage
+        .get("input_tokens_details")
+        .or_else(|| usage.get("prompt_tokens_details"))
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let parsed = AssistantTokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+        reasoning_tokens: reasoning,
+        cached_input_tokens: cached,
+        total_tokens: count("total_tokens"),
+    };
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
     }
-    format!("Pensando…\n{reasoning}\n\n{text}")
+}
+
+/// Completa en `dst` sólo los campos todavía en 0 con los del `incoming`.
+///
+/// El streaming Anthropic reporta el uso partido (`message_start` trae
+/// `input_tokens`; `message_delta` trae `output_tokens`) y algunos eventos
+/// repiten lo ya visto: nunca se pisa un campo distinto de 0. Puro, sin I/O.
+fn merge_token_usage(dst: &mut AssistantTokenUsage, incoming: AssistantTokenUsage) {
+    if dst.input_tokens == 0 {
+        dst.input_tokens = incoming.input_tokens;
+    }
+    if dst.output_tokens == 0 {
+        dst.output_tokens = incoming.output_tokens;
+    }
+    if dst.reasoning_tokens == 0 {
+        dst.reasoning_tokens = incoming.reasoning_tokens;
+    }
+    if dst.cached_input_tokens == 0 {
+        dst.cached_input_tokens = incoming.cached_input_tokens;
+    }
+    if dst.total_tokens == 0 {
+        dst.total_tokens = incoming.total_tokens;
+    }
 }
 
 /// ¿El error de lectura es el timeout de reqwest? Su reloj arranca en
@@ -1894,6 +2037,7 @@ fn read_responses_sse_stream<R: std::io::Read>(
     let mut pending: Vec<u8> = Vec::new();
     let mut text = String::new();
     let mut reasoning = String::new();
+    let mut usage: Option<AssistantTokenUsage> = None;
     let mut truncated = false;
     let mut events_seen = 0_u32;
     let mut done = false;
@@ -1922,6 +2066,7 @@ fn read_responses_sse_stream<R: std::io::Read>(
                     return Ok(SseStreamOutcome::Done {
                         text,
                         truncated: true,
+                        usage,
                     });
                 }
                 pending.extend_from_slice(&chunk[..consumed]);
@@ -1935,6 +2080,7 @@ fn read_responses_sse_stream<R: std::io::Read>(
                             line,
                             &mut text,
                             &mut reasoning,
+                            &mut usage,
                             &mut truncated,
                             &mut events_seen,
                             &mut progress,
@@ -1968,6 +2114,7 @@ fn read_responses_sse_stream<R: std::io::Read>(
                 line,
                 &mut text,
                 &mut reasoning,
+                &mut usage,
                 &mut truncated,
                 &mut events_seen,
                 &mut progress,
@@ -1985,7 +2132,11 @@ fn read_responses_sse_stream<R: std::io::Read>(
     if !done {
         truncated = true;
     }
-    Ok(SseStreamOutcome::Done { text, truncated })
+    Ok(SseStreamOutcome::Done {
+        text,
+        truncated,
+        usage,
+    })
 }
 
 /// Ingiere una línea de un bloque SSE. Retorna `true` al alcanzar el estado
@@ -1994,10 +2145,13 @@ fn read_responses_sse_stream<R: std::io::Read>(
 /// Indulgente con líneas sueltas (se ignoran `event:`/`:ping`/JSON ilegible):
 /// sólo cuentan los eventos parseables. `response.failed` es error directo
 /// del proveedor (NO dispara fallback: reintentar sin `stream` no lo arregla).
+/// `usage` acumula el consumo reportado (cierre de Responses o chunk final de
+/// Chat) para la telemetría de tokens.
 fn ingest_sse_line(
     line: &str,
     text: &mut String,
     reasoning: &mut String,
+    usage: &mut Option<AssistantTokenUsage>,
     truncated: &mut bool,
     events_seen: &mut u32,
     progress: &mut Option<&mut ResponsesProgressCallback<'_>>,
@@ -2027,21 +2181,21 @@ fn ingest_sse_line(
                 *events_seen = events_seen.saturating_add(1);
                 text.push_str(delta);
                 if let Some(callback) = progress.as_mut() {
-                    (*callback)(&sse_progress_preview(reasoning, text));
+                    (*callback)(reasoning, text);
                 }
             }
             Ok(false)
         }
-        // Razonamiento del modelo (Responses): se muestra en vivo como
-        // "Pensando…" pero JAMÁS entra al texto final. Sólo mientras no
-        // empezó la respuesta (así el preview se mantiene monotónico).
+        // Razonamiento del modelo (Responses): se reporta como deltas
+        // `Reasoning` (bloque plegable en la UI) pero JAMÁS entra al texto
+        // final. Sólo se emite mientras no empezó la respuesta.
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
             if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                 *events_seen = events_seen.saturating_add(1);
-                append_capped(reasoning, delta, REASONING_PREVIEW_MAX_CHARS);
+                append_capped(reasoning, delta, REASONING_MAX_CHARS);
                 if text.is_empty() {
                     if let Some(callback) = progress.as_mut() {
-                        (*callback)(&sse_progress_preview(reasoning, text));
+                        (*callback)(reasoning, text);
                     }
                 }
             }
@@ -2049,11 +2203,20 @@ fn ingest_sse_line(
         }
         "response.completed" => {
             *events_seen = events_seen.saturating_add(1);
+            // El cierre trae `response.usage`; se conserva el último válido.
+            let response = value.get("response").unwrap_or(&value);
+            if let Some(parsed) = parse_token_usage(response) {
+                *usage = Some(parsed);
+            }
             Ok(true)
         }
         "response.incomplete" => {
             *events_seen = events_seen.saturating_add(1);
             *truncated = true;
+            let response = value.get("response").unwrap_or(&value);
+            if let Some(parsed) = parse_token_usage(response) {
+                *usage = Some(parsed);
+            }
             Ok(true)
         }
         "response.failed" => {
@@ -2068,10 +2231,79 @@ fn ingest_sse_line(
                 "responses stream reported a failure: {detail}"
             )))
         }
+        // Anthropic Messages (`mimo-2.5-vl`): bloque de contenido. `text_delta`
+        // alimenta la respuesta visible; `thinking_delta` el bloque plegable
+        // (cap `REASONING_MAX_CHARS`), JAMÁS el texto final.
+        "content_block_delta" => {
+            let delta = value.get("delta").unwrap_or(&Value::Null);
+            match delta.get("type").and_then(Value::as_str) {
+                Some("text_delta") => {
+                    if let Some(delta) = delta.get("text").and_then(Value::as_str) {
+                        *events_seen = events_seen.saturating_add(1);
+                        text.push_str(delta);
+                        if let Some(callback) = progress.as_mut() {
+                            (*callback)(reasoning, text);
+                        }
+                    }
+                }
+                Some("thinking_delta") => {
+                    if let Some(delta) = delta.get("thinking").and_then(Value::as_str) {
+                        *events_seen = events_seen.saturating_add(1);
+                        append_capped(reasoning, delta, REASONING_MAX_CHARS);
+                        if text.is_empty() {
+                            if let Some(callback) = progress.as_mut() {
+                                (*callback)(reasoning, text);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(false)
+        }
+        // Anthropic: `message_start` trae el `usage` de entrada; se combina
+        // con lo ya visto (nunca pisa campos ya completos).
+        "message_start" => {
+            let message = value.get("message").unwrap_or(&value);
+            if let Some(parsed) = parse_token_usage(message) {
+                match usage.as_mut() {
+                    Some(acc) => merge_token_usage(acc, parsed),
+                    None => *usage = Some(parsed),
+                }
+            }
+            Ok(false)
+        }
+        // Anthropic: `message_delta` trae `output_tokens` y el `stop_reason`
+        // del cierre; NO es terminal (el terminal es `message_stop`).
+        "message_delta" => {
+            if let Some(parsed) = parse_token_usage(&value) {
+                match usage.as_mut() {
+                    Some(acc) => merge_token_usage(acc, parsed),
+                    None => *usage = Some(parsed),
+                }
+            }
+            // Paridad con el path no-streaming (`anthropic_completion_text`):
+            // `max_tokens` marca el parcial como truncado.
+            if value
+                .get("delta")
+                .and_then(|delta| delta.get("stop_reason"))
+                .and_then(Value::as_str)
+                == Some("max_tokens")
+            {
+                *truncated = true;
+            }
+            Ok(false)
+        }
+        "message_stop" => {
+            *events_seen = events_seen.saturating_add(1);
+            Ok(true)
+        }
+        // Anthropic: eventos de control sin carga útil para el acumulador.
+        "content_block_start" | "content_block_stop" | "ping" => Ok(false),
         _ => {
             // Chat Completions (chunk SSE): sin `type`, con `choices[0].delta`.
             // Incluye `reasoning_content` de modelos con razonamiento: se
-            // muestra en vivo pero JAMÁS entra al texto final.
+            // reporta plegable pero JAMÁS entra al texto final.
             if let Some(error) = value.get("error") {
                 let detail = error
                     .get("message")
@@ -2081,6 +2313,11 @@ fn ingest_sse_line(
                 return Err(response_schema_error(&format!(
                     "chat stream reported a failure: {detail}"
                 )));
+            }
+            // El chunk final de usage (OpenAI con `stream_options.include_usage`)
+            // trae `choices: []` y `usage`: se guarda antes de exigir choice.
+            if let Some(parsed) = parse_token_usage(&value) {
+                *usage = Some(parsed);
             }
             let Some(choice) = value
                 .get("choices")
@@ -2108,7 +2345,7 @@ fn ingest_sse_line(
                 .and_then(Value::as_str)
             {
                 *events_seen = events_seen.saturating_add(1);
-                append_capped(reasoning, reasoning_delta, REASONING_PREVIEW_MAX_CHARS);
+                append_capped(reasoning, reasoning_delta, REASONING_MAX_CHARS);
                 changed |= text.is_empty();
             }
             if choice.get("finish_reason").and_then(Value::as_str) == Some("length") {
@@ -2116,7 +2353,7 @@ fn ingest_sse_line(
             }
             if changed {
                 if let Some(callback) = progress.as_mut() {
-                    (*callback)(&sse_progress_preview(reasoning, text));
+                    (*callback)(reasoning, text);
                 }
             }
             Ok(false)
@@ -2361,12 +2598,18 @@ pub fn build_chat_completion_payload(
     }));
     messages.push(json!({"role": "user", "content": content}));
 
-    Ok(json!({
+    let mut payload = json!({
         "model": settings.model,
         "stream": false,
         "max_tokens": completion_token_limit(&request.budget),
         "messages": messages,
-    }))
+    });
+    // Modo razonador (opt-in): `reasoning_effort` es el campo estándar
+    // OpenAI-compat; si el proveedor lo rechaza, el transporte reintenta sin él.
+    if let Some(effort) = request.reasoning_effort {
+        payload["reasoning_effort"] = json!(effort.as_wire());
+    }
+    Ok(payload)
 }
 
 /// Construye el cuerpo OpenAI Responses API para Muse Spark sin incluir claves.
@@ -2423,12 +2666,24 @@ pub fn build_responses_payload(
         .collect();
     input.push(json!({"role": "user", "content": final_content}));
 
-    Ok(json!({
+    let mut payload = json!({
         "model": settings.model,
         "instructions": remote_system_prompt(request),
         "max_output_tokens": responses_token_limit_for_chars(request.budget.max_output_chars),
         "input": input,
-    }))
+    });
+    // Razonamiento visible siempre (verificado contra el endpoint real):
+    // sin `reasoning.summary` el proveedor no emite `reasoning_summary_text`
+    // deltas (el item `reasoning` llega con `summary: []` vacío) y el bloque
+    // "Razonamiento" del chat jamás aparece. `summary: "auto"` lo habilita;
+    // el esfuerzo sólo viaja con el modo razonador. Si el proveedor rechaza
+    // la clave (400/422), `strip_reasoning_knobs` la quita y reintenta.
+    let mut reasoning = json!({"summary": "auto"});
+    if let Some(effort) = request.reasoning_effort {
+        reasoning["effort"] = json!(effort.as_wire());
+    }
+    payload["reasoning"] = reasoning;
+    Ok(payload)
 }
 
 /// Construye un payload Anthropic Messages para `mimo-2.5-vl` sin incluir claves.
@@ -2603,8 +2858,13 @@ fn response_language_directive(language: &str) -> &'static str {
 }
 
 fn remote_system_prompt(request: &AssistantRequest) -> String {
+    let reasoning_directive = if request.reasoning_effort.is_some() {
+        format!("\n\n{REASONING_BINDING_DIRECTIVE}")
+    } else {
+        String::new()
+    };
     let base = format!(
-        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}\n\n{SOCRATIC_BINDING_DIRECTIVE}\n\n{}",
+        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}\n\n{SOCRATIC_BINDING_DIRECTIVE}{reasoning_directive}\n\n{}",
         response_language_directive(&request.language)
     );
     let instructions = request.system_instructions.trim();
@@ -2744,6 +3004,19 @@ fn remote_prompt(request: &AssistantRequest) -> Result<String, String> {
         prompt.push_str(REMOTE_REPAIR_FEEDBACK_PROMPT_PREFIX);
         prompt.push_str(&feedback.prompt_text());
     }
+    // Contexto de búsqueda web (opt-in): resultados citables ya formateados y
+    // acotados por `MAX_WEB_CONTEXT_CHARS` (validado en la request). Se
+    // insertan antes del problema no; van al final para que el modelo los
+    // trate como material de apoyo, no como la consulta.
+    if let Some(web_context) = request
+        .web_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|context| !context.is_empty())
+    {
+        prompt.push_str(REMOTE_WEB_CONTEXT_PROMPT_PREFIX);
+        prompt.push_str(web_context);
+    }
     if prompt.len() > request.budget.max_input_chars {
         return Err("remote assistant input exceeds the configured input budget".into());
     }
@@ -2755,16 +3028,23 @@ fn completion_token_limit(budget: &grafito_assistant_types::RequestBudget) -> us
 }
 
 fn completion_token_limit_for_chars(max_output_chars: usize) -> usize {
-    (max_output_chars / 4).clamp(1, 8_192)
+    // Espejo de Responses (×2): los tokens de razonamiento de deepseek/v4.x
+    // consumen el mismo `max_tokens` (docs Go: ~310 output típicos + el
+    // pensamiento). El check de chars en `completion_from_text` sigue siendo
+    // el corte final; esto solo evita que el stream se corte a la mitad.
+    max_output_chars.saturating_mul(2).clamp(1_024, 8_192)
 }
 
 /// Límite `max_output_tokens` para la Responses API: incluye los tokens de
-/// razonamiento (verificado: un "ok" consume 61 reasoning + 0 output), así que
-/// se duplica el presupuesto de texto con piso 2048 y techo 16384.
-/// El servidor rechaza valores < 16.
+/// razonamiento (verificado contra el endpoint real: un "cuánto es 2+2"
+/// consume ~2045 reasoning + 0 output, y sin presupuesto el stream termina
+/// `incomplete` sin respuesta). Se cuadruplica el presupuesto de texto con
+/// piso 2048 y techo 16384; el corte final por chars lo hace
+/// `completion_from_text`, esto sólo evita que el pensamiento se coma la
+/// respuesta. El servidor rechaza valores < 16.
 fn responses_token_limit_for_chars(max_output_chars: usize) -> usize {
     // Piso 2048 >> mínimo 16 del servidor; el techo evita facturas sorpresa.
-    let limit = max_output_chars.saturating_mul(2).clamp(2_048, 16_384);
+    let limit = max_output_chars.saturating_mul(4).clamp(2_048, 16_384);
     debug_assert!(limit >= RESPONSES_MIN_OUTPUT_TOKENS);
     limit
 }
@@ -2795,6 +3075,9 @@ pub struct RemoteCompletion {
     pub text: String,
     /// El proveedor agotó el límite antes de cerrar la respuesta.
     pub truncated: bool,
+    /// Consumo de tokens reportado en la wire (`None` si el proveedor no lo
+    /// informa: la UI lo oculta en vez de inventar).
+    pub usage: Option<AssistantTokenUsage>,
 }
 
 /// Inicia un único POST OpenAI-compatible en un hilo de trabajo.
@@ -2876,26 +3159,60 @@ pub struct SocraticGuardContext {
     pub scaffold: Scaffold,
 }
 
-/// Adapta el callback de progreso (texto acumulado) a envíos de sufijos.
+/// Sufijo de streaming por flujo: razonamiento plegable o respuesta visible.
 ///
-/// Retorna un `FnMut(&str)` que envía por `delta_tx` sólo el sufijo aún no
-/// confirmado, con `try_send` best-effort: si el canal está lleno no bloquea
-/// al worker; el próximo progreso reintenta desde el punto no confirmado (la
-/// UI reemplaza el preview por el último acumulado, así que nada se pierde).
-pub fn stream_progress_sender(delta_tx: SyncSender<String>) -> impl FnMut(&str) + Send {
-    let mut last_sent = 0_usize;
-    move |accumulated: &str| {
-        // `last_sent` es índice por bytes: se usa vía `get` para no paniquear
-        // si un llamante futuro pasa un acumulado no-monotónico o si el corte
-        // cae a mitad de un scalar multibyte (el acumulado real sólo crece
-        // por `push_str`, así que en el path SSE siempre es boundary válido;
-        // este `get` es defensa en profundidad, sin `unwrap`).
-        let Some(suffix) = accumulated.get(last_sent..) else {
-            return;
-        };
-        if !suffix.is_empty() && delta_tx.try_send(suffix.to_owned()).is_ok() {
-            last_sent = accumulated.len();
-        }
+/// Viaja por el canal acotado del worker hacia la UI, que acumula cada flujo
+/// por separado (ver `AssistantRemoteJob.stream_reasoning`/`stream_text`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDelta {
+    /// Sufijo de razonamiento (bloque plegable; nunca la respuesta final).
+    Reasoning(String),
+    /// Sufijo de respuesta visible.
+    Text(String),
+    /// Estado de una fase previa (p. ej. "Buscando en internet…"): la UI lo
+    /// muestra en la línea de etapa, no en la respuesta.
+    Status(String),
+}
+
+/// Adapta el callback de progreso (acumulados por flujo) a sufijos tipados.
+///
+/// Retorna un `FnMut(&str, &str)` (`reasoning`, `text`) que envía por
+/// `delta_tx` sólo el sufijo aún no confirmado de cada flujo, con `try_send`
+/// best-effort: si el canal está lleno no bloquea al worker; el próximo
+/// progreso reintenta desde el punto no confirmado (la UI acumula deltas, así
+/// que nada se pierde). Cada flujo es monotónico por separado.
+pub fn stream_progress_sender(delta_tx: SyncSender<StreamDelta>) -> impl FnMut(&str, &str) + Send {
+    let mut last_reasoning = 0_usize;
+    let mut last_text = 0_usize;
+    move |reasoning: &str, text: &str| {
+        emit_stream_suffix(
+            &delta_tx,
+            reasoning,
+            &mut last_reasoning,
+            StreamDelta::Reasoning,
+        );
+        emit_stream_suffix(&delta_tx, text, &mut last_text, StreamDelta::Text);
+    }
+}
+
+/// Envía a `delta_tx` el sufijo de `accumulated` posterior a `last_sent`.
+///
+/// `last_sent` es índice por bytes: se usa vía `get` para no paniquear si un
+/// llamante futuro pasa un acumulado no-monotónico o si el corte cae a mitad
+/// de un scalar multibyte (los acumulados reales sólo crecen por `push_str`,
+/// así que en el path SSE siempre es boundary válido; este `get` es defensa
+/// en profundidad, sin `unwrap`).
+fn emit_stream_suffix(
+    delta_tx: &SyncSender<StreamDelta>,
+    accumulated: &str,
+    last_sent: &mut usize,
+    wrap: fn(String) -> StreamDelta,
+) {
+    let Some(suffix) = accumulated.get(*last_sent..) else {
+        return;
+    };
+    if !suffix.is_empty() && delta_tx.try_send(wrap(suffix.to_owned())).is_ok() {
+        *last_sent = accumulated.len();
     }
 }
 
@@ -2905,6 +3222,9 @@ pub fn stream_progress_sender(delta_tx: SyncSender<String>) -> impl FnMut(&str) 
 ///   con `progress` adaptado por `stream_progress_sender` hacia `delta_tx`
 ///   (`sync_channel(128)` best-effort: si la UI no drena, se descarta preview
 ///   pero el resultado final sigue intacto).
+/// - `OpenAiChatCompletions` (DeepSeek y resto): streaming SSE con el mismo
+///   contrato; el razonamiento (`reasoning_content`) viaja como
+///   `StreamDelta::Reasoning` y nunca contamina la respuesta.
 /// - Resto de protocolos: `request_remote` clásico (no-streaming, con su
 ///   propio log; este wrapper sólo loguea el brazo streaming+guard).
 ///   Tras el transporte (cualquiera de los dos paths) se aplica el guard
@@ -2922,12 +3242,35 @@ pub fn request_remote_streaming_with_api_key_on_worker(
     request: AssistantRequest,
     api_key: Option<String>,
     cancellation: CancellationToken,
-    delta_tx: SyncSender<String>,
+    delta_tx: SyncSender<StreamDelta>,
     guard: Option<SocraticGuardContext>,
 ) -> JoinHandle<Result<RemoteCompletion, String>> {
     std::thread::spawn(move || {
         let started = Instant::now();
         let protocol = remote_protocol(&settings);
+        let mut request = request;
+        // Pre-flight web (opt-in): busca antes del POST y agrega el contexto
+        // citable al prompt. Falla honesto en la línea de etapa sin abortar el
+        // turno (la respuesta sigue sin búsqueda).
+        if request.web_search && request.web_context.is_none() {
+            let _ = delta_tx.try_send(StreamDelta::Status("Buscando en internet…".to_string()));
+            match crate::web::web_search(&request.problem) {
+                Ok(results) if !results.is_empty() => {
+                    request.web_context =
+                        Some(crate::web::format_web_context(&request.problem, &results));
+                }
+                Ok(_) => {
+                    let _ = delta_tx.try_send(StreamDelta::Status(
+                        "Sin resultados web; respondo con lo que sé.".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    let _ = delta_tx.try_send(StreamDelta::Status(
+                        "Búsqueda web no disponible; respondo sin ella.".to_string(),
+                    ));
+                }
+            }
+        }
         let timeout = effective_remote_timeout(request.budget.timeout_ms);
         let max_output_chars = request.budget.max_output_chars;
         match protocol {
@@ -3029,6 +3372,55 @@ pub fn request_remote_streaming_with_api_key_on_worker(
                 log_remote_completion_event(&model, protocol, started.elapsed(), &guarded);
                 guarded
             }
+            // Anthropic Messages (`mimo-2.5-vl`) también streamea: mismo
+            // contrato de preview que Chat/Responses (con guard, cero preview).
+            RemoteProtocol::AnthropicMessages => {
+                let model = settings.model.clone();
+                let go_session = settings.go_session_id.clone();
+                let prepared = messages_endpoint(&settings).and_then(|endpoint| {
+                    build_anthropic_messages_payload(&settings, &request)
+                        .map(|payload| (endpoint, payload))
+                });
+                // Mismo criterio: con guard activo la respuesta no se filtra.
+                let stream_preview = guard.is_none();
+                let result = match prepared {
+                    Ok((endpoint, payload)) => {
+                        if stream_preview {
+                            let mut on_progress = stream_progress_sender(delta_tx);
+                            request_anthropic_completion_streaming(
+                                endpoint,
+                                payload,
+                                api_key.as_deref(),
+                                &cancellation,
+                                timeout,
+                                max_output_chars,
+                                Some(&mut on_progress),
+                                go_session.as_deref(),
+                            )
+                        } else {
+                            request_anthropic_completion_streaming(
+                                endpoint,
+                                payload,
+                                api_key.as_deref(),
+                                &cancellation,
+                                timeout,
+                                max_output_chars,
+                                None,
+                                go_session.as_deref(),
+                            )
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                let guarded = match (result, guard) {
+                    (Ok(completion), Some(context)) => {
+                        guard_remote_completion(&context.fsm, completion, &context.scaffold)
+                    }
+                    (result, _) => result,
+                };
+                log_remote_completion_event(&model, protocol, started.elapsed(), &guarded);
+                guarded
+            }
             // El path no-streaming loguea dentro de `request_remote`; acá
             // sólo se agrega el guard sobre su resultado.
             _ => {
@@ -3051,7 +3443,7 @@ pub fn request_remote_streaming_with_api_key_on_worker(
     _request: AssistantRequest,
     _api_key: Option<String>,
     _cancellation: CancellationToken,
-    _delta_tx: SyncSender<String>,
+    _delta_tx: SyncSender<StreamDelta>,
     _guard: Option<SocraticGuardContext>,
 ) -> JoinHandle<Result<RemoteCompletion, String>> {
     std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
@@ -3436,7 +3828,7 @@ fn request_responses_completion(
     let body: Value = serde_json::from_slice(&response_bytes)
         .map_err(|_| "remote assistant response JSON is invalid".to_string())?;
     let (text, truncated) = responses_completion_text(&body)?;
-    completion_from_text(&text, max_output_chars, truncated)
+    completion_from_text(&text, max_output_chars, truncated, parse_token_usage(&body))
 }
 
 /// Extrae el texto de una respuesta OpenAI Responses API.
@@ -3552,7 +3944,7 @@ fn request_anthropic_completion(
     let body: Value = serde_json::from_slice(&response_bytes)
         .map_err(|_| "remote assistant response JSON is invalid".to_string())?;
     let (text, truncated) = anthropic_completion_text(&body)?;
-    completion_from_text(&text, max_output_chars, truncated)
+    completion_from_text(&text, max_output_chars, truncated, parse_token_usage(&body))
 }
 
 /// Clasifica un error de transporte sin exponer detalles sensibles (sin URL ni
@@ -3665,7 +4057,7 @@ fn send_openai_request(
     let body: Value = serde_json::from_slice(&response_bytes)
         .map_err(|_| "remote assistant response JSON is invalid".to_string())?;
     let (text, truncated) = chat_completion_text(&body)?;
-    completion_from_text(&text, max_output_chars, truncated)
+    completion_from_text(&text, max_output_chars, truncated, parse_token_usage(&body))
 }
 
 fn chat_completion_text(body: &Value) -> Result<(String, bool), String> {
@@ -3919,10 +4311,115 @@ fn shared_http_client() -> Result<&'static reqwest::blocking::Client, String> {
         .map_err(|error| error.clone())
 }
 
+/// Payload sin las claves de razonamiento cuando el proveedor las rechaza.
+///
+/// Sólo aplica a 400/422 con `reasoning` mencionado en el cuerpo (no se
+/// reintenta por errores ajenos). Devuelve el payload degradado si había
+/// alguna clave que quitar.
+#[cfg(feature = "assistant-net")]
+fn strip_reasoning_knobs(payload: &Value, status: u16, body: &str) -> Option<Value> {
+    if status != 400 && status != 422 {
+        return None;
+    }
+    if !body.to_ascii_lowercase().contains("reasoning") {
+        return None;
+    }
+    let mut without = payload.clone();
+    let object = without.as_object_mut()?;
+    let removed =
+        object.remove("reasoning_effort").is_some() || object.remove("reasoning").is_some();
+    removed.then_some(without)
+}
+
+/// POST JSON con degradación honesta del modo razonador.
+///
+/// Manda el payload tal cual; si el proveedor responde 400/422 nombrando
+/// `reasoning`, reintenta UNA vez sin esas claves (mismo deadline remanente)
+/// para que el chat no se rompa por una preferencia opt-in. Devuelve la
+/// respuesta exitosa o el error HTTP honesto (`http_status_error`).
+#[cfg(feature = "assistant-net")]
+#[allow(clippy::too_many_arguments)]
+fn post_json_with_reasoning_fallback(
+    endpoint: &Url,
+    payload: &Value,
+    api_key: Option<&str>,
+    go_session_id: Option<&str>,
+    timeout: Duration,
+    started: Instant,
+    accept_sse: bool,
+) -> Result<reqwest::blocking::Response, String> {
+    let client = shared_http_client()?;
+    let send =
+        |payload: &Value, timeout: Duration| -> Result<reqwest::blocking::Response, String> {
+            let mut call = client.post(endpoint.clone());
+            if accept_sse {
+                call = call.header("Accept", "text/event-stream");
+            }
+            call = call.json(payload).timeout(timeout);
+            call = apply_go_transport_headers(call, endpoint, go_session_id);
+            if let Some(key) = api_key {
+                call = call.bearer_auth(sanitize_api_key(key)?);
+            }
+            call.send().map_err(|error| {
+                if accept_sse && error.is_timeout() {
+                    sse_timeout_message(0, 0, timeout)
+                } else {
+                    transport_error(
+                        if accept_sse {
+                            "remote assistant stream"
+                        } else {
+                            "remote assistant"
+                        },
+                        &error,
+                        Some(timeout),
+                    )
+                }
+            })
+        };
+    let response = send(payload, timeout)?;
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status().as_u16();
+    let retry_after = if status == 429 {
+        retry_after_secs_from_headers(response.headers())
+    } else {
+        None
+    };
+    if status == 429 {
+        record_rate_limited(retry_after);
+    }
+    let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
+    if let Some(without) = strip_reasoning_knobs(payload, status, &body) {
+        let remaining = timeout
+            .checked_sub(started.elapsed())
+            .filter(|remaining| *remaining >= Duration::from_secs(1));
+        if let Some(remaining) = remaining {
+            let retried = send(&without, remaining)?;
+            if retried.status().is_success() {
+                return Ok(retried);
+            }
+            let status = retried.status().as_u16();
+            let retry_after = if status == 429 {
+                retry_after_secs_from_headers(retried.headers())
+            } else {
+                None
+            };
+            if status == 429 {
+                record_rate_limited(retry_after);
+            }
+            let body = retried.text().unwrap_or_else(|_| "<no body>".to_string());
+            return Err(http_status_error(status, &body, retry_after));
+        }
+    }
+    Err(http_status_error(status, &body, retry_after))
+}
+
 fn completion_from_text(
     text: &str,
     max_output_chars: usize,
     truncated: bool,
+    usage: Option<AssistantTokenUsage>,
 ) -> Result<RemoteCompletion, String> {
     // Higiene Bug A (2do turno post-animación): el proveedor a veces devuelve
     // controles sueltos (NUL/BEL/ESC/DEL/C1) que antes volteaban todo el turno
@@ -3943,6 +4440,7 @@ fn completion_from_text(
     Ok(RemoteCompletion {
         text: limpio,
         truncated,
+        usage,
     })
 }
 
@@ -4468,6 +4966,9 @@ mod tests {
         assert!(uses_responses_api("muse-spark-1.3-contributor"));
         assert!(uses_responses_api("muse-spark-1.2-contributor"));
         assert!(!uses_responses_api("deepseek-v4-flash"));
+        // Familias Responses de Go 2026-09-13.
+        assert!(uses_responses_api("gpt-5.6-luna"));
+        assert!(uses_responses_api("grok-4.6"));
         let spark = spark_settings();
         assert_eq!(remote_protocol(&spark), RemoteProtocol::OpenAiResponses);
         // Los IDs vigentes también rutean a Responses (sin tocar el router).
@@ -4496,6 +4997,83 @@ mod tests {
     }
 
     #[test]
+    fn go_model_routing_table_matches_go_docs_endpoints() {
+        // Paridad catálogo↔ruteo con la tabla Endpoints de docs Go 2026-09-13:
+        // `/responses` (muse-spark, gpt, grok), `/messages` (minimax, qwen3.x,
+        // legacy mimo-2.5-vl), `/chat/completions` (resto: deepseek incl.
+        // deepseek-v4.1-flash, glm, kimi, mimo-v2.5, hy, longcat).
+        let responses = [
+            "muse-spark-1.3",
+            "muse-spark-1.2",
+            "muse-spark-1.3-contributor-free",
+            "muse-spark-1.3-contributor",
+            "gpt-5.6-luna",
+            "grok-4.6",
+        ];
+        for model in responses {
+            let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, model);
+            assert_eq!(
+                remote_protocol(&settings),
+                RemoteProtocol::OpenAiResponses,
+                "{model} debe rutear a Responses"
+            );
+            assert_eq!(go_model_protocol(model), RemoteProtocol::OpenAiResponses);
+        }
+        let messages = [
+            "mimo-2.5-vl",
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "qwen3.8-max",
+            "qwen3.8-flash",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+        ];
+        for model in messages {
+            let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, model);
+            assert_eq!(
+                remote_protocol(&settings),
+                RemoteProtocol::AnthropicMessages,
+                "{model} debe rutear a Messages"
+            );
+        }
+        let chat = [
+            "deepseek-v4-flash",
+            "deepseek-v4.1-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash-vision-exp",
+            "glm-5.3-flash",
+            "glm-5.3",
+            "glm-5.2",
+            "glm-5.1",
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "mimo-v2.5",
+            "mimo-v2.5-pro",
+            "longcat-2.0",
+            "hy3",
+            "hy4-preview",
+        ];
+        for model in chat {
+            assert_eq!(
+                go_model_protocol(model),
+                RemoteProtocol::OpenAiChatCompletions,
+                "{model} debe rutear a Chat"
+            );
+        }
+        assert_eq!(go_model_protocol("fusion"), RemoteProtocol::Fusion);
+        // Perfiles no-Go siempre van por Chat, aunque el ID sea de Go.
+        let spark_ollama =
+            ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "muse-spark-1.3");
+        assert_eq!(
+            remote_protocol(&spark_ollama),
+            RemoteProtocol::OpenAiChatCompletions
+        );
+    }
+
+    #[test]
     fn responses_payload_shape_matches_verified_wire_format() {
         let mut req = request("Graficá y = x^2");
         req.privacy_mode = PrivacyMode::RemoteAllowed;
@@ -4509,6 +5087,11 @@ mod tests {
         assert!(payload.get("max_tokens").is_none());
         let max_out = payload["max_output_tokens"].as_u64().unwrap();
         assert!((2_048..=16_384).contains(&max_out));
+        // Razonamiento visible siempre: `summary: "auto"` viaja aunque el
+        // modo razonador esté apagado (sin esto el proveedor no emite
+        // `reasoning_summary_text` deltas y el bloque no aparece jamás).
+        assert_eq!(payload["reasoning"]["summary"], "auto");
+        assert!(payload["reasoning"].get("effort").is_none());
         let input = payload["input"].as_array().unwrap();
         assert!(!input.is_empty());
         assert_eq!(input.last().unwrap()["role"], "user");
@@ -5510,6 +6093,7 @@ mod tests {
         let completion = RemoteCompletion {
             text: "La respuesta es x = 2".into(),
             truncated: false,
+            usage: None,
         };
         let guarded = guard_remote_completion(&fsm, completion.clone(), &scaffold);
         assert!(guarded.is_err(), "debe bloquear telling con attempts=0");
@@ -5628,7 +6212,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(5),
             64,
-            Some(&mut |accumulated: &str| {
+            Some(&mut |_reasoning: &str, accumulated: &str| {
                 snapshots.push(accumulated.to_owned());
             }),
             None,
@@ -5649,6 +6233,41 @@ mod tests {
         for pair in snapshots.windows(2) {
             assert!(pair[1].starts_with(&pair[0]), "{pair:?}");
         }
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_sse_sends_go_session_header_and_user_agent() {
+        // El header `x-opencode-session` y el UA propio viajan también en el
+        // POST de streaming (Responses y Chat), no solo en no-streaming.
+        clear_rate_limit_for_tests();
+        let body = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
+            .to_vec();
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            64,
+            None,
+            Some("abc123-SESSION"),
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(completion.text, "ok");
+        assert_eq!(requests.len(), 1);
+        let lowered = requests[0].to_ascii_lowercase();
+        assert!(
+            lowered.contains("x-opencode-session: abc123-session"),
+            "sesión Go en SSE: {lowered}"
+        );
+        assert!(
+            lowered.contains(&format!("user-agent: {}", go_user_agent()).to_ascii_lowercase()),
+            "UA propio en SSE: {lowered}"
+        );
     }
 
     #[cfg(feature = "assistant-net")]
@@ -5685,6 +6304,263 @@ mod tests {
             "el fallback reenvía el payload base sin stream: {}",
             requests[1]
         );
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_anthropic_reassembles_text_thinking_and_usage() {
+        clear_rate_limit_for_tests();
+        // Wire real de Anthropic Messages: usage partido (input en
+        // `message_start`, output en `message_delta`), thinking + texto en
+        // `content_block_delta` y cierre en `message_stop`.
+        let events = [
+            json!({"type":"message_start","message":{"usage":{"input_tokens":12}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"pienso "}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"y respondo"}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hola"}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" mundo"}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":34}}),
+            json!({"type":"message_stop"}),
+        ];
+        let mut sse = String::new();
+        for event in events {
+            sse.push_str("event: ");
+            sse.push_str(event["type"].as_str().unwrap());
+            sse.push_str("\ndata: ");
+            sse.push_str(&event.to_string());
+            sse.push_str("\n\n");
+        }
+        let (address, server) =
+            serve_stub_replies(vec![(sse.into_bytes(), "text/event-stream", true)]);
+        let endpoint = Url::parse(&format!("http://{address}/messages")).unwrap();
+        let mut snapshots: Vec<(String, String)> = Vec::new();
+        let completion = request_anthropic_completion_streaming(
+            endpoint,
+            json!({"model": OPENCODE_VISION_MODEL, "messages": []}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            64,
+            Some(&mut |reasoning: &str, text: &str| {
+                snapshots.push((reasoning.to_owned(), text.to_owned()));
+            }),
+            None,
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+
+        // El thinking JAMÁS entra al texto final; el usage se combina.
+        assert_eq!(completion.text, "Hola mundo");
+        assert!(!completion.text.contains("pienso"), "{}", completion.text);
+        assert!(!completion.truncated);
+        let usage = completion.usage.expect("usage combinado");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 34);
+        // El callback vio razonamiento y texto por separado.
+        assert!(
+            snapshots
+                .iter()
+                .any(|(reasoning, text)| reasoning.contains("y respondo") && text.is_empty()),
+            "{snapshots:?}"
+        );
+        assert!(
+            snapshots
+                .iter()
+                .any(|(reasoning, text)| text == "Hola mundo" && reasoning.contains("y respondo")),
+            "{snapshots:?}"
+        );
+        // Wire Anthropic: endpoint, clave, versión y stream.
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].starts_with("POST /messages HTTP/1.1"),
+            "{}",
+            requests[0]
+        );
+        let lowered = requests[0].to_ascii_lowercase();
+        assert!(lowered.contains("x-api-key: test-key"), "{lowered}");
+        assert!(
+            lowered.contains("anthropic-version: 2023-06-01"),
+            "{lowered}"
+        );
+        assert!(lowered.contains("accept: text/event-stream"), "{lowered}");
+        assert!(requests[0].contains("\"stream\":true"), "{}", requests[0]);
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_anthropic_falls_back_when_server_never_speaks_sse() {
+        clear_rate_limit_for_tests();
+        // Respuesta JSON plana (la que espera `anthropic_completion_text`):
+        // sin eventos SSE hay UN reintento no-streaming con el payload base.
+        let json_body =
+            br#"{"stop_reason":"end_turn","content":[{"type":"text","text":"listo"}]}"#.to_vec();
+        let (address, server) = serve_stub_replies(vec![
+            (json_body.clone(), "application/json", false),
+            (json_body, "application/json", false),
+        ]);
+        let endpoint = Url::parse(&format!("http://{address}/messages")).unwrap();
+        let completion = request_anthropic_completion_streaming(
+            endpoint,
+            json!({"model": OPENCODE_VISION_MODEL, "messages": []}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            64,
+            None,
+            None,
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+
+        assert_eq!(completion.text, "listo");
+        assert!(!completion.truncated);
+        assert_eq!(requests.len(), 2, "un reintento no-streaming");
+        assert!(requests[0].contains("\"stream\":true"), "{}", requests[0]);
+        assert!(
+            !requests[1].contains("\"stream\":true"),
+            "el fallback reenvía el payload base sin stream: {}",
+            requests[1]
+        );
+    }
+
+    #[test]
+    fn merge_token_usage_completes_missing_fields_without_overwriting() {
+        let mut acc = AssistantTokenUsage {
+            input_tokens: 12,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            cached_input_tokens: 0,
+            total_tokens: 0,
+        };
+        let incoming = AssistantTokenUsage {
+            input_tokens: 999,
+            output_tokens: 34,
+            reasoning_tokens: 7,
+            cached_input_tokens: 5,
+            total_tokens: 46,
+        };
+        merge_token_usage(&mut acc, incoming);
+        assert_eq!(acc.input_tokens, 12, "el input ya visto no se pisa");
+        assert_eq!(acc.output_tokens, 34);
+        assert_eq!(acc.reasoning_tokens, 7);
+        assert_eq!(acc.cached_input_tokens, 5);
+        assert_eq!(acc.total_tokens, 46);
+        // Idempotente: repetir el merge no cambia nada.
+        merge_token_usage(&mut acc, incoming);
+        assert_eq!(acc.input_tokens, 12);
+        assert_eq!(acc.output_tokens, 34);
+        assert_eq!(acc.total_tokens, 46);
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn anthropic_stream_error_event_reports_failure() {
+        // `{"type":"error","error":{...}}` del proveedor Anthropic: cae en el
+        // brazo Chat de `ingest_sse_line` (por `value.get("error")`) y produce
+        // Err explícito (nunca silencio ni fallback).
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut usage: Option<AssistantTokenUsage> = None;
+        let mut truncated = false;
+        let mut events = 0_u32;
+        let mut progress: Option<&mut ResponsesProgressCallback<'_>> = None;
+        let error = ingest_sse_line(
+            r#"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            &mut text,
+            &mut reasoning,
+            &mut usage,
+            &mut truncated,
+            &mut events,
+            &mut progress,
+        )
+        .unwrap_err();
+        assert!(error.contains("Overloaded"), "{error}");
+    }
+
+    #[test]
+    fn reasoning_mode_adds_wire_fields_and_degrades_on_rejection() {
+        // Chat: `reasoning_effort` sólo con modo razonador activo.
+        let settings =
+            ProviderSettings::for_profile(ProviderProfile::DeepSeek, "deepseek-v4-flash");
+        let mut request = remote_wire_request("resolvé 2*x = 4");
+        let payload = build_chat_completion_payload(&settings, &request).unwrap();
+        assert!(payload.get("reasoning_effort").is_none());
+        request.reasoning_effort = Some(grafito_assistant_types::ReasoningEffort::High);
+        let payload = build_chat_completion_payload(&settings, &request).unwrap();
+        assert_eq!(payload["reasoning_effort"], "high");
+        // La degradación sólo quita la clave en 400/422 que la nombra.
+        let stripped =
+            strip_reasoning_knobs(&payload, 400, "unknown parameter reasoning_effort").unwrap();
+        assert!(stripped.get("reasoning_effort").is_none());
+        assert!(strip_reasoning_knobs(&payload, 500, "reasoning boom").is_none());
+        assert!(strip_reasoning_knobs(&payload, 400, "invalid model").is_none());
+        // Sin claves de razonamiento no hay nada que degradar.
+        let plain = json!({"model": "x"});
+        assert!(strip_reasoning_knobs(&plain, 400, "reasoning invalid").is_none());
+    }
+
+    #[test]
+    fn responses_reasoning_summary_always_requested_with_quadrupled_budget() {
+        // Verificado contra el endpoint real: sin `reasoning.summary` el item
+        // `reasoning` llega con `summary: []` y no hay deltas de pensamiento;
+        // además un "2+2" consume ~2045 reasoning tokens, así que el
+        // presupuesto se cuadruplica (default 2048 chars → 8192 tokens).
+        assert_eq!(responses_token_limit_for_chars(2_048), 8_192);
+        assert_eq!(responses_token_limit_for_chars(512), 2_048);
+        assert_eq!(responses_token_limit_for_chars(100_000), 16_384);
+        let mut req = request("cuánto es 2+2");
+        req.privacy_mode = PrivacyMode::RemoteAllowed;
+        let payload = build_responses_payload(&spark_settings(), &req).unwrap();
+        assert_eq!(payload["reasoning"]["summary"], "auto");
+        assert!(payload["reasoning"].get("effort").is_none());
+        assert_eq!(payload["max_output_tokens"], 8_192);
+        // Con modo razonador se suma el esfuerzo sin perder el summary.
+        req.reasoning_effort = Some(grafito_assistant_types::ReasoningEffort::High);
+        let payload = build_responses_payload(&spark_settings(), &req).unwrap();
+        assert_eq!(payload["reasoning"]["summary"], "auto");
+        assert_eq!(payload["reasoning"]["effort"], "high");
+        // Y la degradación ante rechazo sigue quitando toda la clave.
+        let stripped = strip_reasoning_knobs(&payload, 400, "unknown parameter reasoning").unwrap();
+        assert!(stripped.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn trivial_questions_get_direct_answers_without_scaffold() {
+        // Una cuenta directa ("2+43") debe responderse de una, sin ritual
+        // Enfoque ni repreguntas: la guía del sistema lo exige explícito.
+        let req = request("decime cuánto es 2+43");
+        let prompt = remote_system_prompt(&req);
+        assert!(
+            prompt.contains("Trivial questions"),
+            "guía de respuesta directa ausente"
+        );
+        assert!(
+            prompt.contains("answer directly FIRST"),
+            "la respuesta directa debe ir primera"
+        );
+    }
+
+    #[test]
+    fn reasoning_mode_adds_system_directive_and_web_context_reaches_prompt() {
+        let mut request = request("¿capital de Francia?");
+        request.privacy_mode = PrivacyMode::RemoteAllowed;
+        let base = remote_system_prompt(&request);
+        assert!(!base.contains("MODO RAZONADOR"), "{base}");
+        request.reasoning_effort = Some(grafito_assistant_types::ReasoningEffort::High);
+        let with_reasoning = remote_system_prompt(&request);
+        assert!(
+            with_reasoning.contains("MODO RAZONADOR"),
+            "{with_reasoning}"
+        );
+        // El contexto web viaja al prompt de usuario sólo si está.
+        assert!(!remote_prompt(&request).unwrap().contains("búsqueda web"));
+        request.web_search = true;
+        request.web_context = Some(
+            "Resultados de búsqueda web para \"capital de Francia\":\n1. París — https://example.com\n   Es la capital.".to_string(),
+        );
+        let prompt = remote_prompt(&request).unwrap();
+        assert!(prompt.contains("París"), "{prompt}");
+        assert!(prompt.contains("Resultados de búsqueda web"), "{prompt}");
     }
 
     #[test]
@@ -5822,7 +6698,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(15),
             1_000_000,
-            Some(&mut |accumulated: &str| {
+            Some(&mut |_reasoning: &str, accumulated: &str| {
                 snapshots.push(accumulated.len());
             }),
             None,
@@ -5839,11 +6715,11 @@ mod tests {
         assert!(!snapshots.is_empty());
         // El parcial pasa por `completion_from_text` sin panic (budget amplio).
         let via_completion =
-            completion_from_text(&completion.text, 1_000_000, completion.truncated).unwrap();
+            completion_from_text(&completion.text, 1_000_000, completion.truncated, None).unwrap();
         assert_eq!(via_completion.text, completion.text);
         assert!(via_completion.truncated);
         // Con budget chico falla honesto (output budget), no panic.
-        assert!(completion_from_text(&completion.text, 64, true).is_err());
+        assert!(completion_from_text(&completion.text, 64, true, None).is_err());
     }
 
     #[cfg(feature = "assistant-net")]
@@ -5880,17 +6756,44 @@ mod tests {
 
     #[test]
     fn stream_progress_sender_forwards_only_unsent_suffixes_without_blocking() {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StreamDelta>(2);
         let mut send = stream_progress_sender(tx);
-        send("Hola");
-        // Canal lleno (cap 1): este progreso se descarta sin bloquear.
-        send("Hola mundo");
-        assert_eq!(rx.try_recv().unwrap(), "Hola");
-        // Reintenta desde lo no confirmado (" mundo!").
-        send("Hola mundo!");
-        assert_eq!(rx.try_recv().unwrap(), " mundo!");
+        send("pensando", "Hola");
+        // Canal lleno (cap 2): este progreso se descarta sin bloquear.
+        send("pensando más", "Hola mundo");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            StreamDelta::Reasoning("pensando".into())
+        );
+        assert_eq!(rx.try_recv().unwrap(), StreamDelta::Text("Hola".into()));
+        // Reintenta desde lo no confirmado, por flujo (" más" / " mundo!").
+        send("pensando más", "Hola mundo!");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            StreamDelta::Reasoning(" más".into())
+        );
+        assert_eq!(rx.try_recv().unwrap(), StreamDelta::Text(" mundo!".into()));
         // Sin crecimiento no hay envío.
-        send("Hola mundo!");
+        send("pensando más", "Hola mundo!");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stream_progress_sender_keeps_reasoning_and_text_channels_separate() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StreamDelta>(8);
+        let mut send = stream_progress_sender(tx);
+        send("pienso", "");
+        send("pienso", "Hola");
+        send("pienso más", "Hola");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            StreamDelta::Reasoning("pienso".into())
+        );
+        assert_eq!(rx.try_recv().unwrap(), StreamDelta::Text("Hola".into()));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            StreamDelta::Reasoning(" más".into())
+        );
         assert!(rx.try_recv().is_err());
     }
 
@@ -5899,28 +6802,31 @@ mod tests {
         // Defensa en profundidad para el único slicing por bytes del path SSE
         // (`accumulated[last_sent..]`): ni multibyte ni acumulados
         // no-monotónicos (reemplazo/achique) pueden paniquear el worker.
-        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(8);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StreamDelta>(8);
         let mut send = stream_progress_sender(tx);
-        send("áéí → ñ «» ✓");
-        assert_eq!(rx.try_recv().unwrap(), "áéí → ñ «» ✓");
+        send("áéí → ñ «» ✓", "");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            StreamDelta::Reasoning("áéí → ñ «» ✓".into())
+        );
         // Crecimiento multibyte: el sufijo debe cortarse en boundary válido.
-        send("áéí → ñ «» ✓ 🦀");
-        assert_eq!(rx.try_recv().unwrap(), " 🦀");
+        send("áéí → ñ «» ✓ 🦀", "");
+        assert_eq!(rx.try_recv().unwrap(), StreamDelta::Reasoning(" 🦀".into()));
         // Achique / reemplazo no-monotónico: no hay envío y NO hay panic.
-        send("á");
+        send("á", "");
         assert!(rx.try_recv().is_err());
         // Corte que caería a mitad de scalar si se indexara sin `get`:
         // "aé" = [61, C3, A9]; un `last_sent=2` sería mid-scalar.
-        let (tx2, rx2) = std::sync::mpsc::sync_channel::<String>(8);
+        let (tx2, rx2) = std::sync::mpsc::sync_channel::<StreamDelta>(8);
         let mut send2 = stream_progress_sender(tx2);
-        send2("ab");
-        assert_eq!(rx2.try_recv().unwrap(), "ab");
+        send2("ab", "");
+        assert_eq!(rx2.try_recv().unwrap(), StreamDelta::Reasoning("ab".into()));
         // Reemplazo no-extensión con `len > last_sent` pero boundary inválido.
-        send2("aé");
+        send2("aé", "");
         assert!(rx2.try_recv().is_err());
         // El acumulado válido posterior sigue funcionando.
-        send2("ab🦀");
-        assert_eq!(rx2.try_recv().unwrap(), "🦀");
+        send2("ab🦀", "");
+        assert_eq!(rx2.try_recv().unwrap(), StreamDelta::Reasoning("🦀".into()));
     }
 
     #[cfg(feature = "assistant-net")]
@@ -5941,7 +6847,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(5),
             64,
-            Some(&mut |accumulated: &str| {
+            Some(&mut |_reasoning: &str, accumulated: &str| {
                 snapshots.push(accumulated.to_owned());
             }),
             None,
@@ -6034,7 +6940,7 @@ mod tests {
             Instant::now() + Duration::from_secs(60),
             Duration::from_secs(60),
             &CancellationToken::default(),
-            Some(&mut |accumulated: &str| {
+            Some(&mut |_reasoning: &str, accumulated: &str| {
                 snapshots.push(accumulated.to_owned());
             }),
         )
@@ -6065,20 +6971,24 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn reasoning_deltas_feed_the_preview_but_never_the_answer() {
-        // F14: el pensamiento se muestra en vivo ("Pensando…") durante la
-        // espera, pero el texto final contiene SOLO la respuesta.
+        // F18: el pensamiento viaja como acumulado de razonamiento separado
+        // (bloque plegable) y JAMÁS entra al texto final de la respuesta.
         let mut text = String::new();
         let mut reasoning = String::new();
+        let mut usage: Option<AssistantTokenUsage> = None;
         let mut truncated = false;
         let mut events = 0_u32;
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen: Vec<(String, String)> = Vec::new();
         {
-            let mut callback = |preview: &str| seen.push(preview.to_owned());
+            let mut callback = |reasoning: &str, text: &str| {
+                seen.push((reasoning.to_owned(), text.to_owned()));
+            };
             let mut progress: Option<&mut ResponsesProgressCallback<'_>> = Some(&mut callback);
             assert!(!ingest_sse_line(
                 r#"data: {"type":"response.reasoning_summary_text.delta","delta":"Pienso que "}"#,
                 &mut text,
                 &mut reasoning,
+                &mut usage,
                 &mut truncated,
                 &mut events,
                 &mut progress
@@ -6088,6 +6998,7 @@ mod tests {
                 r#"data: {"type":"response.reasoning_summary_text.delta","delta":"z es complejo"}"#,
                 &mut text,
                 &mut reasoning,
+                &mut usage,
                 &mut truncated,
                 &mut events,
                 &mut progress
@@ -6097,6 +7008,7 @@ mod tests {
                 r#"data: {"type":"response.output_text.delta","delta":"Ejemplo: z=1+i"}"#,
                 &mut text,
                 &mut reasoning,
+                &mut usage,
                 &mut truncated,
                 &mut events,
                 &mut progress
@@ -6106,6 +7018,7 @@ mod tests {
                 "data: [DONE]",
                 &mut text,
                 &mut reasoning,
+                &mut usage,
                 &mut truncated,
                 &mut events,
                 &mut progress
@@ -6114,11 +7027,15 @@ mod tests {
         }
         assert!(reasoning.contains("z es complejo"));
         assert_eq!(text, "Ejemplo: z=1+i");
-        assert!(seen.iter().any(|preview| preview.starts_with("Pensando…")));
+        assert!(!text.contains("Pienso que"), "{text}");
+        // El callback recibió razonamiento y respuesta por separado.
         assert!(seen
-            .last()
-            .expect("hubo previews")
-            .contains("Ejemplo: z=1+i"));
+            .iter()
+            .any(|(reasoning, _)| reasoning.contains("z es complejo")));
+        assert_eq!(
+            seen.last().map(|(_, text)| text.as_str()),
+            Some("Ejemplo: z=1+i")
+        );
     }
 
     #[cfg(feature = "assistant-net")]
@@ -6126,6 +7043,7 @@ mod tests {
     fn chat_completion_chunks_stream_reasoning_and_content() {
         let mut text = String::new();
         let mut reasoning = String::new();
+        let mut usage: Option<AssistantTokenUsage> = None;
         let mut truncated = false;
         let mut events = 0_u32;
         let mut progress: Option<&mut ResponsesProgressCallback<'_>> = None;
@@ -6139,6 +7057,7 @@ mod tests {
                 line,
                 &mut text,
                 &mut reasoning,
+                &mut usage,
                 &mut truncated,
                 &mut events,
                 &mut progress
@@ -6149,6 +7068,74 @@ mod tests {
         assert!(reasoning.contains("analizo el caso"));
         assert!(events >= 4);
         assert!(!truncated);
+        assert!(usage.is_none());
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn chat_token_limit_doubles_chars_with_reasoning_headroom() {
+        // Espejo de Responses: los tokens de razonamiento de deepseek/v4.x
+        // salen del mismo `max_tokens`, así que el techo duplica los chars
+        // (el check de chars en `completion_from_text` sigue siendo el corte).
+        assert_eq!(completion_token_limit_for_chars(32), 1_024);
+        assert_eq!(completion_token_limit_for_chars(512), 1_024);
+        assert_eq!(completion_token_limit_for_chars(2_048), 4_096);
+        assert_eq!(completion_token_limit_for_chars(8_192), 8_192);
+        assert_eq!(completion_token_limit_for_chars(100_000), 8_192);
+    }
+
+    #[test]
+    fn chat_usage_chunk_parses_tokens_without_choices() {
+        // OpenAI-compat con `stream_options.include_usage`: el chunk final
+        // trae `choices: []` + `usage`; debe parsearse sin exigir choice.
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut usage: Option<AssistantTokenUsage> = None;
+        let mut truncated = false;
+        let mut events = 0_u32;
+        let mut progress: Option<&mut ResponsesProgressCallback<'_>> = None;
+        assert!(!ingest_sse_line(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46,"completion_tokens_details":{"reasoning_tokens":20}}}"#,
+            &mut text,
+            &mut reasoning,
+            &mut usage,
+            &mut truncated,
+            &mut events,
+            &mut progress
+        )
+        .unwrap());
+        let parsed = usage.expect("usage parseado");
+        assert_eq!(parsed.input_tokens, 12);
+        assert_eq!(parsed.output_tokens, 34);
+        assert_eq!(parsed.reasoning_tokens, 20);
+        assert_eq!(parsed.display_total(), 46);
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn responses_completed_event_parses_usage() {
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut usage: Option<AssistantTokenUsage> = None;
+        let mut truncated = false;
+        let mut events = 0_u32;
+        let mut progress: Option<&mut ResponsesProgressCallback<'_>> = None;
+        assert!(ingest_sse_line(
+            r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"output_tokens_details":{"reasoning_tokens":42},"input_tokens_details":{"cached_tokens":64}}}}"#,
+            &mut text,
+            &mut reasoning,
+            &mut usage,
+            &mut truncated,
+            &mut events,
+            &mut progress
+        )
+        .unwrap());
+        let parsed = usage.expect("usage parseado");
+        assert_eq!(parsed.input_tokens, 100);
+        assert_eq!(parsed.output_tokens, 50);
+        assert_eq!(parsed.reasoning_tokens, 42);
+        assert_eq!(parsed.cached_input_tokens, 64);
+        assert_eq!(parsed.display_total(), 150);
     }
 
     #[cfg(feature = "assistant-net")]
@@ -6181,20 +7168,20 @@ mod tests {
         // `completion_from_text` cuenta por chars (no bytes): un parcial
         // multibyte que supera el budget falla honesto, nunca paniquea.
         let big = "áéí→".repeat(2_000);
-        let over = completion_from_text(&big, 64, true);
+        let over = completion_from_text(&big, 64, true, None);
         assert!(
             matches!(over, Err(ref error) if error.contains("output budget")),
             "{over:?}"
         );
         // Markdown a medio cerrar + multibyte dentro del budget pasa intacto.
         let partial = "## Enfoque\n**negrita sin cerrar áé →\n```grafito\nFunction[x^2]\n";
-        let ok = completion_from_text(partial, 10_000, true).unwrap();
+        let ok = completion_from_text(partial, 10_000, true, None).unwrap();
         assert_eq!(ok.text, partial);
         assert!(ok.truncated);
         // Vacío se rechaza sin panic; los controles sueltos del proveedor
         // (Bug A, 2do turno) se filtran y el turno igual se muestra.
-        assert!(completion_from_text("   ", 64, false).is_err());
-        let sanitizado = completion_from_text("hola\x07mundo", 64, false).unwrap();
+        assert!(completion_from_text("   ", 64, false, None).is_err());
+        let sanitizado = completion_from_text("hola\x07mundo", 64, false, None).unwrap();
         assert_eq!(sanitizado.text, "holamundo");
     }
 
@@ -6204,7 +7191,7 @@ mod tests {
         // proveedor (NUL/BEL/ESC/DEL/C1). Se filtran; solo se loguean los
         // codepoints, jamás el contenido.
         let sucio = "derivada\x00 explicada\x07 con\x1b escape\x7f y\u{80}c1\u{9f}\n\t\rñ";
-        let ok = completion_from_text(sucio, 10_000, false).unwrap();
+        let ok = completion_from_text(sucio, 10_000, false, None).unwrap();
         assert_eq!(ok.text, "derivada explicada con escape yc1\n\t\rñ");
         assert!(!ok.truncated);
         for quitado in sucio
@@ -6214,11 +7201,14 @@ mod tests {
             eprintln!("control filtrado: U+{:04X}", quitado as u32);
         }
         // Solo-controles o solo-blancos siguen siendo error honesto.
-        assert!(completion_from_text("\x07\x1b\x7f", 64, false).is_err());
-        assert!(completion_from_text("  \n\t ", 64, false).is_err());
+        assert!(completion_from_text("\x07\x1b\x7f", 64, false, None).is_err());
+        assert!(completion_from_text("  \n\t ", 64, false, None).is_err());
         // `\n` `\r` `\t` legítimos se conservan tal cual.
         let prosa = "línea uno\nlínea dos\r\ncon\ttab";
-        assert_eq!(completion_from_text(prosa, 64, false).unwrap().text, prosa);
+        assert_eq!(
+            completion_from_text(prosa, 64, false, None).unwrap().text,
+            prosa
+        );
     }
 
     #[test]
@@ -6236,7 +7226,7 @@ mod tests {
         let (text, truncated) = responses_completion_text(&body).unwrap();
         assert_eq!(text, partial);
         assert!(!truncated);
-        let completion = completion_from_text(&text, 10_000, true).unwrap();
+        let completion = completion_from_text(&text, 10_000, true, None).unwrap();
         assert_eq!(completion.text, partial);
         assert!(completion.truncated);
         // `incomplete` del no-streaming también marca truncado sin panic.
@@ -6282,7 +7272,7 @@ mod tests {
             &CancellationToken::default(),
             Duration::from_secs(5),
             256,
-            Some(&mut |accumulated: &str| {
+            Some(&mut |_reasoning: &str, accumulated: &str| {
                 snapshots.push(accumulated.to_owned());
             }),
             None,
@@ -6336,7 +7326,7 @@ mod tests {
             .unwrap();
 
         // Path no-streaming (chat): sin deltas, pero el guard bloquea igual (interno, jerga solo logs).
-        let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
+        let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel::<StreamDelta>(128);
         let blocked = request_remote_streaming_with_api_key_on_worker(
             settings.clone(),
             remote_wire_request("resolvé 2*x = 4"),
@@ -6368,7 +7358,7 @@ mod tests {
 
         // Sin guard, el mismo completado pasa (el guard es lo que bloquea) y
         // el preview en vivo sí llega.
-        let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
+        let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel::<StreamDelta>(128);
         let unguarded = request_remote_streaming_with_api_key_on_worker(
             settings,
             remote_wire_request("resolvé 2*x = 4"),

@@ -197,7 +197,8 @@ fn openai_payload_contains_budgeted_messages_without_a_secret() {
         .as_str()
         .is_some_and(|system| system.contains("Tetrahedron[x, y, z, edge]")));
     assert!(!rendered.contains("api_key"));
-    assert_eq!(payload["max_tokens"], 8);
+    // Headroom ×2 para razonamiento con piso 1024: 32 chars → 1024 tokens.
+    assert_eq!(payload["max_tokens"], 1024);
 }
 
 #[test]

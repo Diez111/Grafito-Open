@@ -799,6 +799,21 @@ fn every_perspective_keeps_the_math_keyboard_available() {
 }
 
 #[test]
+fn keyboard_explicit_choice_survives_perspective_switch() {
+    // El toggle explícito del usuario no se pierde al cambiar de vista (antes
+    // `set_perspective` lo pisaba y el teclado "nunca aparecía").
+    let mut app = crate::app::dummy_grafito_app();
+    app.set_perspective(crate::Perspective::Geometry2D);
+    assert!(!app.keyboard_visible);
+    assert!(!app.keyboard_visible_explicit);
+    app.keyboard_visible = true;
+    app.keyboard_visible_explicit = true;
+    app.set_perspective(crate::Perspective::Geometry3D);
+    assert!(app.keyboard_visible);
+    assert!(app.keyboard_visible_explicit);
+}
+
+#[test]
 fn complex_perspective_uses_panel_input_instead_of_bottom_bar() {
     use crate::Perspective;
 
@@ -3923,6 +3938,37 @@ fn side_drawers_reserve_height_before_the_math_keyboard() {
     assert!(assistant < keyboard);
     assert!(right_drawer < keyboard);
     assert!(utility_dock < keyboard);
+}
+
+#[test]
+fn status_bar_stays_in_the_middle_column_in_side_panel_mode() {
+    // La barra «0 objetos» se dibuja después del asistente en modo
+    // side-panel (limitada a la columna central, como el drawer izquierdo)
+    // y antes en modo bottom-sheet (al borde inferior). Con asistente oculto
+    // no se limita (evita un hueco vacío abajo a la derecha).
+    let app_source = include_str!("app.rs");
+    let assistant = app_source
+        .find("self.draw_assistant(ctx, keyboard_height);")
+        .expect("assistant draw call");
+    let first_bar = app_source
+        .find("crate::ui::draw_bottom_bar(self, ctx, false);")
+        .expect("bottom bar compact branch");
+    let last_bar = app_source
+        .rfind("crate::ui::draw_bottom_bar(self, ctx, false);")
+        .expect("bottom bar side branch");
+    assert!(first_bar < assistant, "compact: barra antes que el sheet");
+    assert!(
+        last_bar > assistant,
+        "side-panel: barra después del asistente"
+    );
+    let keyboard = app_source
+        .rfind("crate::keyboard::draw_math_keyboard(self, ctx, keyboard_layout);")
+        .expect("keyboard draw call");
+    assert!(last_bar < keyboard, "la barra sigue debajo del teclado");
+    assert!(
+        app_source.contains("assistant_limits_status_bar"),
+        "el límite depende de visibilidad + modo"
+    );
 }
 
 #[test]

@@ -1603,6 +1603,10 @@ pub struct GrafitoApp {
 
     pub keyboard_tab: usize,
     pub keyboard_visible: bool,
+    /// El usuario tocó el toggle explícito (menú Herramientas o botón del
+    /// panel): la perspectiva deja de imponer su default y se respeta la
+    /// elección hasta que la cambie de nuevo.
+    pub keyboard_visible_explicit: bool,
     /// Fuerza temporalmente el teclado completo en una ventana corta.
     pub keyboard_expanded: bool,
     pub table_func_idx: usize,
@@ -2304,6 +2308,8 @@ impl GrafitoApp {
         assistant.allow_fusion_fallback = config.allow_fusion_fallback;
         assistant.full_permission = config.assistant_full_permission;
         assistant.agent_mode = config.assistant_agent_mode;
+        assistant.reasoning_enabled = config.assistant_reasoning_enabled;
+        assistant.web_search_enabled = config.assistant_web_search_enabled;
 
         let snapshot_version = document.version;
         let snapshot_render_quality = document.render_quality;
@@ -2353,6 +2359,7 @@ impl GrafitoApp {
             cas_result: String::new(),
             keyboard_tab: 0,
             keyboard_visible: DEFAULT_KEYBOARD_VISIBLE,
+            keyboard_visible_explicit: false,
             keyboard_expanded: false,
             table_func_idx: 0,
             table_x_min: "-5".to_string(),
@@ -3083,6 +3090,8 @@ impl GrafitoApp {
             allow_fusion_fallback: self.assistant.allow_fusion_fallback,
             assistant_full_permission: self.assistant.full_permission,
             assistant_agent_mode: self.assistant.agent_mode,
+            assistant_reasoning_enabled: self.assistant.reasoning_enabled,
+            assistant_web_search_enabled: self.assistant.web_search_enabled,
             onboarding_completed: false,
             enabled_plugins: Vec::new(),
             disabled_plugins: Vec::new(),
@@ -5159,8 +5168,13 @@ impl GrafitoApp {
         self.previous_tool = layout.default_tool;
         self.reset_tool_input();
         self.clear_pending_action();
-        // Visibilidad del teclado matemático según la perspectiva.
-        self.keyboard_visible = layout.show_math_keyboard;
+        // Visibilidad del teclado matemático según la perspectiva, salvo
+        // elección explícita del usuario (el toggle no se pierde al cambiar
+        // de vista: antes cada `set_perspective` lo pisaba y el teclado
+        // "nunca aparecía").
+        if !self.keyboard_visible_explicit {
+            self.keyboard_visible = layout.show_math_keyboard;
+        }
         self.keyboard_expanded = false;
         // Ajuste del panel izquierdo: mapea el contenido declarado al tab
         // existente más cercano del sidebar.
@@ -6481,9 +6495,19 @@ impl eframe::App for GrafitoApp {
                     });
             }
 
-            // La barra «Entrada…» inferior se quitó del layout: los comandos
-            // matemáticos se cargan por la sección algebraica.
-            crate::ui::draw_bottom_bar(self, ctx, false);
+            // La barra inferior («0 objetos» + hint) se dibuja DESPUÉS del
+            // asistente en modo side-panel: así queda limitada a la columna
+            // central (igual que ya hace el drawer izquierdo) y nunca pisa
+            // la tarjeta del composer. En modo bottom-sheet (o asistente
+            // oculto) se mantiene el orden viejo (barra al borde inferior).
+            let assistant_bottom_sheet =
+                grafito_ui::assistant::assistant_uses_bottom_sheet(ctx.available_rect().width());
+            let assistant_limits_status_bar = self.assistant_visible && !assistant_bottom_sheet;
+            if !assistant_limits_status_bar {
+                // La barra «Entrada…» inferior se quitó del layout: los comandos
+                // matemáticos se cargan por la sección algebraica.
+                crate::ui::draw_bottom_bar(self, ctx, false);
+            }
 
             // Los drawers laterales reservan toda la altura antes del teclado.
             // Así el teclado queda limitado a la columna central y no recorta
@@ -6537,6 +6561,12 @@ impl eframe::App for GrafitoApp {
                 }
             }
 
+            if assistant_limits_status_bar {
+                // Modo side-panel visible: la barra inferior va acá (después
+                // del asistente y los drawers) para quedar limitada a la
+                // columna central, sin pisar el composer.
+                crate::ui::draw_bottom_bar(self, ctx, false);
+            }
             if keyboard_layout != crate::keyboard::MathKeyboardLayout::Hidden {
                 crate::keyboard::draw_math_keyboard(self, ctx, keyboard_layout);
             }
@@ -8747,6 +8777,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         cas_result: String::new(),
         keyboard_tab: 0,
         keyboard_visible: false,
+        keyboard_visible_explicit: false,
         keyboard_expanded: false,
         table_func_idx: 0,
         table_x_min: "-5".to_string(),
