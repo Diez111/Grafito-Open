@@ -140,15 +140,12 @@ fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.add_space((MATH_KEYBOARD_COMPACT_HEIGHT - chip_h) / 2.0);
             ui.horizontal_centered(|ui| {
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
-                ui.label(
-                    egui::RichText::new("Teclado")
-                        .size(grafito_ui::tokens::TYPE_XS)
-                        .color(theme.text_secondary),
-                );
-                // Ancho adaptativo: reserva etiqueta+iconos y reparte el resto
+                // Sin etiqueta "Teclado": los chips se explican solos y el
+                // texto competía con la barra sin aportar nada.
+                // Ancho adaptativo: reserva iconos y reparte el resto
                 // entre las 6 teclas (32..40 px: casi cuadradas con 32 de alto,
                 // nunca pastillas achatadas).
-                let reserve = 70.0 + 3.0 * 32.0 + 9.0 * grafito_ui::tokens::SPACE_SM;
+                let reserve = 3.0 * 32.0 + 9.0 * grafito_ui::tokens::SPACE_SM;
                 let chip_w = ((ui.available_width() - reserve) / 6.0).clamp(32.0, 40.0);
                 for (label, insertion) in [
                     ("x", "x"),

@@ -398,8 +398,10 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
 pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Theme {
     canvas_bg: Color32::from_rgb(0xFA, 0xFA, 0xF9),
     canvas_grid_minor: Color32::from_rgb(0xF0, 0xF0, 0xEE),
-    grid_line: Color32::from_rgb(0xE8, 0xE8, 0xE6),
-    grid_minor: Color32::from_rgb(0xF0, 0xF0, 0xEE),
+    // Grilla visible en claro: #E8 daba contraste 1.17 (invisible como
+    // hairline). #D8DAD6 → 1.35 mayor, #E4E6E3 → 1.20 menor; eje 2.6.
+    grid_line: Color32::from_rgb(0xD8, 0xDA, 0xD6),
+    grid_minor: Color32::from_rgb(0xE4, 0xE6, 0xE3),
 
     panel_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     toolbar_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
@@ -642,6 +644,10 @@ mod tests {
             assert_ne!(theme.grid_line, theme.canvas_bg);
             assert_ne!(theme.grid_minor, theme.canvas_bg);
         }
+        // En claro el hairline necesita contraste real: mayor ≥1.3,
+        // menor ≥1.15 (medidos contra #FAFAF9: 1.35 / 1.20).
+        assert!(contrast_ratio(LIGHT.grid_line, LIGHT.canvas_bg) >= 1.3);
+        assert!(contrast_ratio(LIGHT.grid_minor, LIGHT.canvas_bg) >= 1.15);
     }
 
     #[test]
