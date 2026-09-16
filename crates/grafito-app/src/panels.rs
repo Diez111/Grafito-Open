@@ -1883,6 +1883,9 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                 .strong(),
                                         );
                                         ui.add_space(SPACE_XS);
+                                        // El popup ocupa el ancho de la tarjeta.
+                                        let cas_span =
+                                            (ui.next_widget_position().x, ui.available_width());
                                         ui.horizontal(|ui| {
                                             let mut execute_cas = false;
                                             // Input centered, max 200, height 32
@@ -1893,6 +1896,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                 [200.0, 32.0],
                                                 "x^2, x",
                                                 true,
+                                                Some(cas_span),
                                             );
                                             ui.add_space(SPACE_XS);
                                             if action_icon_button(
@@ -3671,6 +3675,8 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.add_space(SPACE_SM);
 
             // ── Barra de entrada in-panel (igual que Álgebra) ──
+            // El popup de sugerencias ocupa toda la columna (no solo el campo).
+            let complex_span = (ui.next_widget_position().x, ui.available_width());
             egui::Frame::none()
                 .fill(current_theme(ctx).input_bg)
                 .inner_margin(egui::Margin {
@@ -3690,6 +3696,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             [ui.available_width(), 22.0],
                             "DomainColoring[1/z, -2, 2, -2, 2, 160]",
                             false,
+                            Some(complex_span),
                         );
                         if response.submitted && !app.input_text.is_empty() {
                             let time = ui.ctx().input(|i| i.time);

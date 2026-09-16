@@ -99,12 +99,12 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 190;
+pub const MSG_COUNT: usize = 193;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
-/// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (19) +
+/// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (22) +
 /// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (15) +
-/// `anim` (2) + `media.title` (14) + `panel.conformal` (3) = 190.
+/// `anim` (2) + `media.title` (14) + `panel.conformal` (3) = 193.
 pub static MESSAGES: &[Msg] = &[
     // ── toolbar.group (18) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
@@ -235,6 +235,9 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "palette.empty", es: "No se encontraron comandos", en: "No commands found" },
     Msg { key: "palette.custom_tools", es: "Herramientas personalizadas", en: "Custom tools" },
     Msg { key: "palette.footer_nav", es: "↑↓ navegar · Enter abrir · Esc cerrar", en: "↑↓ navigate · Enter open · Esc close" },
+    Msg { key: "palette.search_hint", es: "Buscar comandos…", en: "Search commands…" },
+    Msg { key: "palette.recent", es: "Recientes", en: "Recent" },
+    Msg { key: "palette.clear", es: "Limpiar", en: "Clear" },
     // ── onboarding (11) — ES idéntico a `draw_onboarding_window` (app.rs) ──
     Msg { key: "onboarding.title", es: "Bienvenido a Grafito", en: "Welcome to Grafito" },
     Msg { key: "onboarding.subtitle", es: "Grafito — pizarra geométrica interactiva", en: "Grafito — interactive geometry board" },
@@ -546,6 +549,18 @@ pub fn palette_footer(filtered: usize, total: usize, locale: Locale) -> String {
     }
 }
 
+/// Conteo vivo de la paleta (`"{filtrados} de {total}"`): lo muestra la
+/// fila de estado junto a la búsqueda, sin la guía de teclas del pie.
+pub fn palette_count(filtered: usize, total: usize, locale: Locale) -> String {
+    match locale {
+        Locale::Es | Locale::Pt => format!("{filtered} de {total}"),
+        Locale::It => format!("{filtered} di {total}"),
+        Locale::Fr => format!("{filtered} sur {total}"),
+        Locale::De => format!("{filtered} von {total}"),
+        Locale::En => format!("{filtered} of {total}"),
+    }
+}
+
 // ── Helpers por dominio (Oleada 3 los usa para migrar call-sites) ──
 
 /// Sufijos válidos de `onboarding.*` (11).
@@ -707,13 +722,13 @@ pub fn anim_msg(suffix: &'static str, locale: Locale) -> &'static str {
 // call-site porque añadir la variante rompía matches exhaustivos fuera del
 // frente. W2 levanta esa restricción: `Locale::Pt` existe y `t(key, Pt)`
 // resuelve PT→ES→EN solo (ver `t`). R3.4 completa el overlay al 100%:
-// 190 claves (18 grupos + 19 paleta + 12 onboarding + 10 cheat + 10 toast +
+// 193 claves (18 grupos + 22 paleta + 12 onboarding + 10 cheat + 10 toast +
 // 12 app/misc + 2 anim + 14 media.title + 87 `toolbar.tool` + 3
 // `panel.conformal`).
 // El lint `unwrap_used` sigue prohibido en prod: el fallback se escribe con
 // `match` o `if let`.
 //
-// Cobertura: 190/190 (100%). Medida real en el test `pt_covers_main_ui_keys`
+// Cobertura: 193/193 (100%). Medida real en el test `pt_covers_main_ui_keys`
 // (imprime el % por `--nocapture`).
 
 /// Una entrada del overlay portugués: clave del catálogo + texto PT.
@@ -726,8 +741,8 @@ pub struct PtMsg {
     pub pt: &'static str,
 }
 
-/// Claves principales de UI con traducción PT (190). Ordenado por dominio como
-/// [`MESSAGES`]: grupos (18) + paleta (19) + onboarding (12) + cheat (10) +
+/// Claves principales de UI con traducción PT (193). Ordenado por dominio como
+/// [`MESSAGES`]: grupos (18) + paleta (22) + onboarding (12) + cheat (10) +
 /// toast (10) + app/misc (12) + anim (2) + media.title (14) + tools (87) +
 /// panel.conformal (3).
 pub static PT_MESSAGES: &[PtMsg] = &[
@@ -770,6 +785,9 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "palette.empty", pt: "Nenhum comando encontrado" },
     PtMsg { key: "palette.custom_tools", pt: "Ferramentas personalizadas" },
     PtMsg { key: "palette.footer_nav", pt: "↑↓ navegar · Enter abrir · Esc fechar" },
+    PtMsg { key: "palette.search_hint", pt: "Buscar comandos…" },
+    PtMsg { key: "palette.recent", pt: "Recentes" },
+    PtMsg { key: "palette.clear", pt: "Limpar" },
     // ── onboarding (11) ──
     PtMsg { key: "onboarding.title", pt: "Bem-vindo ao Grafito" },
     PtMsg { key: "onboarding.subtitle", pt: "Grafito — lousa geométrica interativa" },
@@ -934,7 +952,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
 ];
 
 /// Texto PT de `key`, o `None` si la clave no está en el catálogo.
-/// Desde R3.4 el overlay es total (190/190): `None` solo para claves
+/// Desde R3.4 el overlay es total (193/193): `None` solo para claves
 /// inexistentes. Lookup lineal como [`t`]: el overlay es chico (<200 claves).
 pub fn pt(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
@@ -948,7 +966,7 @@ pub fn pt(key: &'static str) -> Option<&'static str> {
 }
 
 /// Cobertura del overlay PT: `(cubiertas, total del catálogo)`.
-/// El numerador lo fija el test `pt_covers_main_ui_keys` en 190.
+/// El numerador lo fija el test `pt_covers_main_ui_keys` en 193.
 pub fn pt_coverage() -> (usize, usize) {
     (PT_MESSAGES.len(), MESSAGES.len())
 }
@@ -960,20 +978,20 @@ pub fn pt_coverage() -> (usize, usize) {
 /// con conteo para el hover histórico y el test que pinnea el 100%.
 pub const PT_PARTIAL_BADGE: &str = "Português parcial";
 
-/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 190/190 = falso).
+/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 193/193 = falso).
 pub fn pt_is_partial() -> bool {
     let (cubiertas, total) = pt_coverage();
     cubiertas < total
 }
 
-/// Texto del badge con conteo real, p. ej. `"Português parcial · 190/190"`.
+/// Texto del badge con conteo real, p. ej. `"Português parcial · 193/193"`.
 /// Puro, sin I/O: el selector lo muestra solo si `pt_is_partial()`.
 pub fn pt_partial_badge_text() -> String {
     let (cubiertas, total) = pt_coverage();
     format!("{PT_PARTIAL_BADGE} · {cubiertas}/{total}")
 }
 
-// ── Italiano / Français / Deutsch: overlays completos (190/190 c/u) ──
+// ── Italiano / Français / Deutsch: overlays completos (193/193 c/u) ──
 //
 // Generados desde `/tmp/opencode/i18n_table.txt` (190 líneas `clave|it|fr|de`,
 // mismo orden que `MESSAGES`, texto tal cual sin re-traducir). Patrón idéntico
@@ -993,7 +1011,7 @@ pub struct OverlayMsg {
     pub text: &'static str,
 }
 
-/// Claves principales de UI con traducción al Italiano (190). Ordenado por dominio
+/// Claves principales de UI con traducción al Italiano (193). Ordenado por dominio
 /// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
@@ -1497,6 +1515,18 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
         key: "palette.footer_nav",
         text: "↑↓ naviga · Invio apri · Esc chiudi",
     },
+    OverlayMsg {
+        key: "palette.search_hint",
+        text: "Cerca comandi…",
+    },
+    OverlayMsg {
+        key: "palette.recent",
+        text: "Recenti",
+    },
+    OverlayMsg {
+        key: "palette.clear",
+        text: "Cancella",
+    },
     // ── onboarding (12) ──
     OverlayMsg {
         key: "onboarding.title",
@@ -1772,7 +1802,7 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
 ];
 
 /// Texto Italiano de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (190/190): `None` solo para claves inexistentes.
+/// El overlay es total (193/193): `None` solo para claves inexistentes.
 pub fn it(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < IT_MESSAGES.len() {
@@ -1789,7 +1819,7 @@ pub fn it_coverage() -> (usize, usize) {
     (IT_MESSAGES.len(), MESSAGES.len())
 }
 
-/// Claves principales de UI con traducción al Français (190). Ordenado por dominio
+/// Claves principales de UI con traducción al Français (193). Ordenado por dominio
 /// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
@@ -1921,6 +1951,9 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "palette.empty", text: "Aucune commande trouvée" },
     OverlayMsg { key: "palette.custom_tools", text: "Outils personnalisés" },
     OverlayMsg { key: "palette.footer_nav", text: "↑↓ naviguer · Entrée ouvrir · Échap fermer" },
+    OverlayMsg { key: "palette.search_hint", text: "Rechercher des commandes…" },
+    OverlayMsg { key: "palette.recent", text: "Récents" },
+    OverlayMsg { key: "palette.clear", text: "Effacer" },
     // ── onboarding (12) ──
     OverlayMsg { key: "onboarding.title", text: "Bienvenue dans Grafito" },
     OverlayMsg { key: "onboarding.subtitle", text: "Grafito — tableau géométrique interactif" },
@@ -1997,7 +2030,7 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
 ];
 
 /// Texto Français de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (190/190): `None` solo para claves inexistentes.
+/// El overlay es total (193/193): `None` solo para claves inexistentes.
 pub fn fr(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < FR_MESSAGES.len() {
@@ -2014,7 +2047,7 @@ pub fn fr_coverage() -> (usize, usize) {
     (FR_MESSAGES.len(), MESSAGES.len())
 }
 
-/// Claves principales de UI con traducción al Deutsch (190). Ordenado por dominio
+/// Claves principales de UI con traducción al Deutsch (193). Ordenado por dominio
 /// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
@@ -2146,6 +2179,9 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "palette.empty", text: "Keine Befehle gefunden" },
     OverlayMsg { key: "palette.custom_tools", text: "Benutzerdefinierte Werkzeuge" },
     OverlayMsg { key: "palette.footer_nav", text: "↑↓ navigieren · Enter öffnen · Esc schließen" },
+    OverlayMsg { key: "palette.search_hint", text: "Befehle suchen…" },
+    OverlayMsg { key: "palette.recent", text: "Zuletzt verwendet" },
+    OverlayMsg { key: "palette.clear", text: "Löschen" },
     // ── onboarding (12) ──
     OverlayMsg { key: "onboarding.title", text: "Willkommen bei Grafito" },
     OverlayMsg { key: "onboarding.subtitle", text: "Grafito — interaktives Geometrie-Board" },
@@ -2222,7 +2258,7 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
 ];
 
 /// Texto Deutsch de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (190/190): `None` solo para claves inexistentes.
+/// El overlay es total (193/193): `None` solo para claves inexistentes.
 pub fn de(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < DE_MESSAGES.len() {
@@ -2311,7 +2347,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 190);
+        assert_eq!(MSG_COUNT, 193);
     }
 
     #[test]
@@ -2525,10 +2561,10 @@ mod tests {
 
     #[test]
     fn pt_covers_main_ui_keys() {
-        // R3.4: overlay total PT — 190 claves, sin duplicados ni vacíos,
+        // R3.4: overlay total PT — 193 claves, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 190);
-        assert_eq!(pt_coverage(), (190, 190));
+        assert_eq!(PT_MESSAGES.len(), 193);
+        assert_eq!(pt_coverage(), (193, 193));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -2578,6 +2614,9 @@ mod tests {
             "palette.title",
             "palette.empty",
             "palette.footer_nav",
+            "palette.search_hint",
+            "palette.recent",
+            "palette.clear",
         ] {
             assert!(pt(key).is_some(), "paleta sin PT: {key}");
         }
@@ -2758,11 +2797,11 @@ mod tests {
 
     #[test]
     fn pt_coverage_prints_real_percentage() {
-        // Cobertura PT medida: 190/190 = 100%. Se imprime el % real con
+        // Cobertura PT medida: 193/193 = 100%. Se imprime el % real con
         // `--nocapture`; el assert fija el numerador para que cualquier
         // agregado (o faltante) de PT rompa el test a propósito.
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (190, 190));
+        assert_eq!((covered, total), (193, 193));
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (overlay total R3.4)");
         assert!((pct - 100.0).abs() < 0.1, "pct real: {pct}");
@@ -2773,16 +2812,16 @@ mod tests {
         // R3.4: cobertura 100% — el badge parcial ya no se muestra (ver
         // `toolbar.rs`: solo dibuja si `pt_is_partial()`). Se pinnea el 100%
         // y el texto con conteo para el hover histórico.
-        assert!(!pt_is_partial(), "R3.4 190/190 = 100%: sin badge parcial");
+        assert!(!pt_is_partial(), "R3.4 193/193 = 100%: sin badge parcial");
         assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
-        assert_eq!(pt_partial_badge_text(), "Português parcial · 190/190");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 193/193");
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (190, 190));
+        assert_eq!((covered, total), (193, 193));
     }
 
-    // ── Overlays IT/FR/DE (190/190 c/u, texto tal cual de la tabla) ──
+    // ── Overlays IT/FR/DE (193/193 c/u, texto tal cual de la tabla) ──
 
-    /// Aserciones comunes de overlay total: 190 entradas, cobertura 190/190,
+    /// Aserciones comunes de overlay total: 193 entradas, cobertura 193/193,
     /// sin duplicados ni vacíos, claves dentro del catálogo y en su mismo orden.
     fn assert_overlay_total(
         table: &[OverlayMsg],
@@ -2790,8 +2829,8 @@ mod tests {
         coverage: fn() -> (usize, usize),
         tag: &str,
     ) {
-        assert_eq!(table.len(), 190, "{tag}: overlay total");
-        assert_eq!(coverage(), (190, 190), "{tag}: cobertura total");
+        assert_eq!(table.len(), 193, "{tag}: overlay total");
+        assert_eq!(coverage(), (193, 193), "{tag}: cobertura total");
         let mut keys: Vec<&str> = table.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;

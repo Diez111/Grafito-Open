@@ -6,12 +6,12 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 
 ## Crear
 
-- `Point[(x, y)]`: Crea un punto libre. Mutacion: crea objetos. Riesgo: bajo.
+- `Point[(x, y)]`: Crea un punto libre. Mutacion: crea objetos. Riesgo: bajo. Alias: `punto`.
 - `ToPoint[complejo]`: Crea el punto (a, b) desde un complejo: ToPoint["a+bi"]. Mutacion: crea objetos. Riesgo: bajo. Alias: `to_punto`, `a_punto`.
-- `Circle[centro, radio]`: Crea una circunferencia. Mutacion: crea objetos. Riesgo: bajo.
-- `Polygon[(x1, y1), ...]`: Crea un poligono cerrado. Mutacion: crea objetos. Riesgo: bajo.
+- `Circle[centro, radio]`: Crea una circunferencia. Mutacion: crea objetos. Riesgo: bajo. Alias: `circulo`.
+- `Polygon[(x1, y1), ...]`: Crea un poligono cerrado. Mutacion: crea objetos. Riesgo: bajo. Alias: `poligono`.
 - `Polyline[P1, P2, ...]`: Crea una polilinea abierta: cadena de segmentos sin cierre ni relleno (minimo 2 puntos, maximo 8192). Mutacion: crea objetos. Riesgo: bajo. Alias: `polilinea`.
-- `Function[expr]`: Grafica una funcion explicita. Mutacion: crea objetos. Riesgo: bajo. Alias: `func`.
+- `Function[expr]`: Grafica una funcion explicita. Mutacion: crea objetos. Riesgo: bajo. Alias: `func`, `funcion`.
 ## Dinámica
 
 - `Animate[]`: Anima un parametro local; sin argumentos crea una fase ciclica. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `Animate[variable]`, `Animate[variable, minimo, maximo, velocidad]`. Alias: `animar`.
@@ -55,15 +55,15 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Construir
 
 - `Perpendicular[punto, recta]`: Crea una recta perpendicular. Mutacion: crea objetos. Riesgo: bajo.
-- `Parallel[punto, recta]`: Crea una recta paralela. Mutacion: crea objetos. Riesgo: bajo.
-- `Tangent[obj1, obj2]`: Construye o restringe una tangencia segun los argumentos. Mutacion: agrega restricciones. Riesgo: medio. Formas alternativas: `Tangent[centro, radio, punto]`.
+- `Parallel[punto, recta]`: Crea una recta paralela. Mutacion: crea objetos. Riesgo: bajo. Alias: `paralela`, `paralelo`.
+- `Tangent[obj1, obj2]`: Construye o restringe una tangencia segun los argumentos. Mutacion: agrega restricciones. Riesgo: medio. Formas alternativas: `Tangent[centro, radio, punto]`. Alias: `tangente`.
 - `PerpendicularBisector[(x1, y1), (x2, y2)]`: Crea la mediatriz de dos puntos. Mutacion: crea objetos. Riesgo: bajo.
 - `AngleBisector[p1, vertice, p2]`: Crea la bisectriz de un angulo. Mutacion: crea objetos. Riesgo: bajo.
-- `Midpoint[A, B]`: Crea el punto medio. Mutacion: crea objetos. Riesgo: bajo.
-- `Line[(x1, y1), (x2, y2)]`: Crea una recta por dos puntos. Mutacion: crea objetos. Riesgo: bajo.
-- `Segment[(x1, y1), (x2, y2)]`: Crea un segmento por dos puntos. Mutacion: crea objetos. Riesgo: bajo.
+- `Midpoint[A, B]`: Crea el punto medio. Mutacion: crea objetos. Riesgo: bajo. Alias: `punto_medio`, `puntomedio`.
+- `Line[(x1, y1), (x2, y2)]`: Crea una recta por dos puntos. Mutacion: crea objetos. Riesgo: bajo. Alias: `linea`.
+- `Segment[(x1, y1), (x2, y2)]`: Crea un segmento por dos puntos. Mutacion: crea objetos. Riesgo: bajo. Alias: `segmento`.
 - `Vector[(x1, y1), (x2, y2)]`: Crea un vector por dos puntos. Mutacion: crea objetos. Riesgo: bajo.
-- `Ray[(x1, y1), (x2, y2)]`: Crea una semirrecta por dos puntos. Mutacion: crea objetos. Riesgo: bajo.
+- `Ray[(x1, y1), (x2, y2)]`: Crea una semirrecta por dos puntos. Mutacion: crea objetos. Riesgo: bajo. Alias: `semirrecta`, `rayo`.
 - `MeasureDistance[A, B]`: Crea un texto vivo con la distancia entre dos puntos. Mutacion: crea objetos. Riesgo: bajo. Alias: `medirdistancia`, `distancia`.
 ## Transformar
 
@@ -87,7 +87,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Restricciones
 
 - `Distance[A, B, valor]`: Impone una distancia entre objetos. Mutacion: agrega restricciones. Riesgo: medio. Alias: `dist`.
-- `Angle[l1, l2, grados]`: Impone un angulo entre objetos. Mutacion: agrega restricciones. Riesgo: medio.
+- `Angle[l1, l2, grados]`: Impone un angulo entre objetos. Mutacion: agrega restricciones. Riesgo: medio. Alias: `angulo`.
 - `Coincident[A, B]`: Hace coincidir dos puntos. Mutacion: agrega restricciones. Riesgo: medio.
 - `Horizontal[obj]`: Fuerza una orientacion horizontal. Mutacion: agrega restricciones. Riesgo: medio.
 - `Vertical[obj]`: Fuerza una orientacion vertical. Mutacion: agrega restricciones. Riesgo: medio.

@@ -232,6 +232,17 @@ pub const ONBOARDING_BUTTON_GAP: f32 = SPACE_SM;
 /// Padding horizontal interno de la ventana de onboarding — 20 px.
 pub const ONBOARDING_INNER_PAD_X: f32 = 20.0;
 
+/// Campos del editor de rango del deslizador — 64×20: columna alineada,
+/// compacta, múltiplos de base 4.
+pub const RANGE_FIELD_W: f32 = 64.0;
+/// Alto del campo de rango — 20 px.
+pub const RANGE_FIELD_H: f32 = 20.0;
+/// Alto de la acción al pie del popup (Borrar) — 28 px: táctil, base 4.
+pub const POPUP_ACTION_H: f32 = 28.0;
+/// Ancho mínimo del contenido del popup de rango — 140 px: dos campos de
+/// ~66 + gap, múltiplo de base 4 (la tarjeta se ciñe, no flota vacía).
+pub const POPUP_MIN_W: f32 = 140.0;
+
 /// Margen de las cards overlay del canvas 2D (círculo unitario, etc.) — 14 px.
 pub const OVERLAY_CARD_MARGIN: f32 = 14.0;
 /// Radio del marcador de hover con snap — 6 px.
@@ -240,6 +251,32 @@ pub const HOVER_MARKER_R_SNAP: f32 = 6.0;
 pub const HOVER_MARKER_R: f32 = SPACE_XS;
 /// Anillo extra del marcador de hover — 1 px.
 pub const HOVER_MARKER_RING: f32 = 1.0;
+
+// ═══════════════════════════════════════════════════════════
+// Paleta de comandos — Scandinavian quiet overlay
+// ═══════════════════════════════════════════════════════════
+
+/// Ancho máximo de la paleta — 640 px (lectura cómoda, no tapa el lienzo).
+pub const PALETTE_MAX_WIDTH: f32 = 640.0;
+/// Margen lateral que la paleta deja al viewport — 16 px = SPACE_LG.
+pub const PALETTE_VIEWPORT_MARGIN: f32 = SPACE_LG;
+/// Ancho mínimo de ventana (evita colapso en viewports angostos) — 1 px.
+pub const PALETTE_MIN_WIDTH: f32 = 1.0;
+/// Posición por defecto de la paleta: 8 px desde la izquierda…
+pub const PALETTE_POS_X: f32 = SPACE_SM;
+/// …y 48 px desde arriba (= TOP_BAR_HEIGHT, respira bajo la barra).
+pub const PALETTE_POS_Y: f32 = TOP_BAR_HEIGHT;
+/// Caja del icono de búsqueda — 20 px = ICON_MD (piso táctil visual).
+pub const PALETTE_SEARCH_ICON: f32 = ICON_MD;
+/// Altura reservada a cromo (búsqueda + estado + pie): la lista usa el
+/// resto del viewport. 168 px = 42 × base 4 (antes 170, fuera de escala).
+pub const PALETTE_LIST_RESERVED: f32 = 168.0;
+/// Altura mínima de la lista — 120 px (muestra ~4 filas + aire).
+pub const PALETTE_LIST_MIN_HEIGHT: f32 = 120.0;
+/// Sangría del detalle de la fila seleccionada — 16 px = SPACE_LG.
+pub const PALETTE_DETAIL_INDENT: f32 = SPACE_LG;
+/// Paso de página en la paleta (PageUp/PageDown) — 10 filas.
+pub const PALETTE_PAGE_STEP: usize = 10;
 
 // ═══════════════════════════════════════════════════════════
 // Helpers — layout functions (Scandinavian, sin hardcodes)
@@ -533,6 +570,10 @@ mod tests {
             CARD_SPACING,
             RAIL_WIDTH,
             SPLASH_LOGO_SIZE,
+            RANGE_FIELD_W,
+            RANGE_FIELD_H,
+            POPUP_ACTION_H,
+            POPUP_MIN_W,
         ] {
             assert_eq!(v % 4.0, 0.0, "spacing value {v} must be multiple of base 4");
         }
@@ -591,5 +632,30 @@ mod tests {
         assert!(TOAST_DURATION_DEFAULT < TOAST_DURATION_ERROR);
         assert!(TOAST_MIN_HEIGHT >= HIT_TARGET_MIN);
         assert_eq!(TOAST_TOP_OFFSET, TOP_BAR_HEIGHT + SPACE_SM);
+    }
+
+    #[test]
+    fn palette_tokens_use_base_4_and_fit_viewport() {
+        assert_eq!(PALETTE_MAX_WIDTH, 640.0);
+        assert_eq!(PALETTE_VIEWPORT_MARGIN, SPACE_LG);
+        assert_eq!(PALETTE_POS_X, SPACE_SM);
+        assert_eq!(PALETTE_POS_Y, TOP_BAR_HEIGHT);
+        assert_eq!(PALETTE_SEARCH_ICON, ICON_MD);
+        assert_eq!(PALETTE_DETAIL_INDENT, SPACE_LG);
+        assert_eq!(PALETTE_PAGE_STEP, 10);
+        for v in [
+            PALETTE_MAX_WIDTH,
+            PALETTE_VIEWPORT_MARGIN,
+            PALETTE_POS_X,
+            PALETTE_POS_Y,
+            PALETTE_SEARCH_ICON,
+            PALETTE_LIST_RESERVED,
+            PALETTE_LIST_MIN_HEIGHT,
+            PALETTE_DETAIL_INDENT,
+        ] {
+            assert_eq!(v % 4.0, 0.0, "palette value {v} must be multiple of base 4");
+        }
+        // La lista siempre deja aire: reservado > mínimo.
+        assert!(PALETTE_LIST_RESERVED > PALETTE_LIST_MIN_HEIGHT);
     }
 }

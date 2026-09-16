@@ -205,3 +205,57 @@ fn cpu_sampling_caps_adaptive_work_for_unresolvable_frequencies() {
 
     assert!(values.len() <= function_sampling::MAX_SAMPLES_PER_FUNCTION);
 }
+
+#[test]
+fn slider_amplitude_updates_samples_live() {
+    // `f(x) = a*sen(x)`: al mover `a` de 1 a 2 la amplitud muestreada se
+    // duplica. Si la caché ignorara las variables, la curva quedaría
+    // congelada al arrastrar el deslizador.
+    fn peak(expr: &str, a: f64) -> f64 {
+        let mut variables = BTreeMap::new();
+        variables.insert("a".to_string(), a);
+        // Solo el dominio pedido: el sampler paddea por fuera.
+        samples_in_domain(expr, (-1.0, 1.0), 200, &variables)
+            .into_iter()
+            .filter(|(x, _)| (-1.0..=1.0).contains(x))
+            .filter_map(|(_, y)| y)
+            .fold(0.0_f64, |best, y| best.max(y.abs()))
+    }
+    let at_1 = peak("a*sin(x)", 1.0);
+    let at_2 = peak("a*sin(x)", 2.0);
+    assert!(
+        (at_1 - 0.8415).abs() < 0.01,
+        "amplitud con a=1 ≈ sin(1): {at_1}"
+    );
+    assert!(
+        (at_2 - 2.0 * at_1).abs() < 0.02,
+        "amplitud con a=2 duplica a a=1: {at_1} vs {at_2}"
+    );
+}
+
+#[test]
+fn sen_spanish_alias_samples_like_sin() {
+    // El AST no conocía `sen`: el sampler devolvía gaps y la curva era
+    // invisible aunque el despacho la aceptaba. Regresión del reporte real.
+    let mut variables = BTreeMap::new();
+    variables.insert("a".to_string(), 2.0);
+    let sen = samples_in_domain("a*sen(x)", (-1.0, 1.0), 200, &variables);
+    let sin = samples_in_domain("a*sin(x)", (-1.0, 1.0), 200, &variables);
+    let peak_of = |values: &[(f64, Option<f64>)]| {
+        values
+            .iter()
+            .filter(|(x, _)| (-1.0..=1.0).contains(x))
+            .filter_map(|(_, y)| *y)
+            .fold(0.0_f64, |best, y| best.max(y.abs()))
+    };
+    let sen_peak = peak_of(&sen);
+    let sin_peak = peak_of(&sin);
+    assert!(
+        (sen_peak - 2.0 * 0.8415).abs() < 0.02,
+        "sen debe ondular con amplitud 2·sin(1): {sen_peak}"
+    );
+    assert!(
+        (sen_peak - sin_peak).abs() < 1e-9,
+        "sen y sin idénticos: {sen_peak} vs {sin_peak}"
+    );
+}

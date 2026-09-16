@@ -7,8 +7,9 @@ use grafito_core::{GeoObject, ObjectId};
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::current_theme;
 use grafito_ui::tokens::{
-    ICON_SM, ICON_XL, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_SM,
-    SPACE_LG, SPACE_SM, SPACE_XL, SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
+    ICON_SM, ICON_XL, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, POPUP_ACTION_H,
+    POPUP_MIN_W, RADIUS_SM, SPACE_LG, SPACE_SM, SPACE_XL, SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS,
+    ZOOM_ICON_HIT,
 };
 
 pub(crate) const OBJECT_COLOR_TARGET_SIZE: egui::Vec2 =
@@ -502,6 +503,8 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         );
         ui.add_space(SPACE_SM);
         // Input row — cuadrado RADIUS_SM 8 (no pill), aire 8, gap 8 entre +/input/botón, sin espacio vacío a la derecha
+        // El popup de sugerencias ocupa toda la columna (no solo el campo).
+        let input_span = (ui.next_widget_position().x, ui.available_width());
         egui::Frame::none()
             .fill(theme.input_bg)
             .stroke(theme.hairline_stroke())
@@ -525,6 +528,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         [input_width, ZOOM_ICON_HIT],
                         "Añadir…",
                         false,
+                        Some(input_span),
                     );
                     if action_icon_button(
                         ui,
@@ -1001,9 +1005,9 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     egui::Frame::none()
                         .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
                         .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                // Top row: name = value and options
-                                ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    // Top row: name = value and options
+                                    ui.horizontal(|ui| {
                                     let val_str = if v.fract() == 0.0 { format!("{v:.0}") } else { format!("{v:.2}") };
                                     ui.label(egui::RichText::new(format!("{}    {}", name, val_str)).size(TYPE_SM).color(txt_col));
 
@@ -1024,43 +1028,64 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             &settings_button,
                                             egui::popup::PopupCloseBehavior::CloseOnClickOutside,
                                             |ui| {
-                                            ui.set_min_width(180.0);
-                                            ui.horizontal(|ui| {
-                                                ui.label("Min:");
-                                                let max_limit = if max.is_finite() {
-                                                    max
-                                                } else {
+                                            // Tres tarjetas a sangre (mín, máx,
+                                            // Borrar): mismo alto, mismo radio y
+                                            // ancho completo; pila uniforme sin
+                                            // etiquetas sueltas ni aire muerto.
+                                            ui.set_min_width(POPUP_MIN_W);
+                                            ui.spacing_mut().item_spacing.y = SPACE_XS;
+                                            let width = ui.available_width().max(POPUP_MIN_W);
+                                            let (min_copy, max_copy) = (min, max);
+                                            for (value, limit, is_min) in [
+                                                (&mut min, max_copy, true),
+                                                (&mut max, min_copy, false),
+                                            ] {
+                                                let bound = if limit.is_finite() {
+                                                    limit
+                                                } else if is_min {
                                                     f64::INFINITY
-                                                };
-                                                ui.add(
-                                                    egui::DragValue::new(&mut min)
-                                                        .speed(0.1)
-                                                        .range(f64::NEG_INFINITY..=max_limit)
-                                                        .clamp_existing_to_range(false),
-                                                );
-                                            });
-                                            ui.horizontal(|ui| {
-                                                ui.label("Max:");
-                                                let min_limit = if min.is_finite() {
-                                                    min
                                                 } else {
                                                     f64::NEG_INFINITY
                                                 };
-                                                ui.add(
-                                                    egui::DragValue::new(&mut max)
+                                                let range = if is_min {
+                                                    f64::NEG_INFINITY..=bound
+                                                } else {
+                                                    bound..=f64::INFINITY
+                                                };
+                                                ui.add_sized(
+                                                    [width, POPUP_ACTION_H],
+                                                    egui::DragValue::new(value)
                                                         .speed(0.1)
-                                                        .range(min_limit..=f64::INFINITY)
+                                                        .range(range)
                                                         .clamp_existing_to_range(false),
                                                 );
-                                            });
+                                            }
                                             if !min.is_finite() || !max.is_finite() || min >= max {
-                                                ui.colored_label(
-                                                    theme.danger,
-                                                    "El mínimo debe ser finito y menor que el máximo.",
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        "Mínimo < máximo, ambos finitos.",
+                                                    )
+                                                    .size(TYPE_XS)
+                                                    .color(theme.danger),
                                                 );
                                             }
-                                            ui.separator();
-                                            if ui.button("Borrar").clicked() {
+                                            // Acción destructiva con el mismo
+                                            // molde de tarjeta: tinta danger
+                                            // sobre fondo tenue, sin borde.
+                                            let borrar = egui::Button::new(
+                                                egui::RichText::new("Borrar")
+                                                    .size(TYPE_SM)
+                                                    .strong()
+                                                    .color(theme.danger),
+                                            )
+                                            .fill(theme.danger.gamma_multiply(0.14))
+                                            .stroke(egui::Stroke::NONE)
+                                            .rounding(RADIUS_SM)
+                                            .frame(true);
+                                            if ui
+                                                .add_sized([width, POPUP_ACTION_H], borrar)
+                                                .clicked()
+                                            {
                                                 var_to_delete = Some(name.clone());
                                                 ui.close_menu();
                                             }

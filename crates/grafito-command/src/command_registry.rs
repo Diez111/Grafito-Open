@@ -232,7 +232,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.point",
         "Point",
-        [],
+        ["punto"],
         "Crear",
         "Crea un punto libre.",
         CreatesObject,
@@ -256,7 +256,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.circle",
         "Circle",
-        [],
+        ["circulo"],
         "Crear",
         "Crea una circunferencia.",
         CreatesObject,
@@ -268,7 +268,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.polygon",
         "Polygon",
-        [],
+        ["poligono"],
         "Crear",
         "Crea un poligono cerrado.",
         CreatesObject,
@@ -292,7 +292,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.function",
         "Function",
-        ["func"],
+        ["func", "funcion"],
         "Crear",
         "Grafica una funcion explicita.",
         CreatesObject,
@@ -599,7 +599,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "construction.parallel",
         "Parallel",
-        [],
+        ["paralela", "paralelo"],
         "Construir",
         "Crea una recta paralela.",
         CreatesObject,
@@ -611,7 +611,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "construction.tangent",
         "Tangent",
-        [],
+        ["tangente"],
         "Construir",
         "Construye o restringe una tangencia segun los argumentos.",
         AddsConstraint,
@@ -654,7 +654,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "construction.midpoint",
         "Midpoint",
-        [],
+        ["punto_medio", "puntomedio"],
         "Construir",
         "Crea el punto medio.",
         CreatesObject,
@@ -666,7 +666,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "construction.line",
         "Line",
-        [],
+        ["linea"],
         "Construir",
         "Crea una recta por dos puntos.",
         CreatesObject,
@@ -678,7 +678,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "construction.segment",
         "Segment",
-        [],
+        ["segmento"],
         "Construir",
         "Crea un segmento por dos puntos.",
         CreatesObject,
@@ -704,7 +704,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "construction.ray",
         "Ray",
-        [],
+        ["semirrecta", "rayo"],
         "Construir",
         "Crea una semirrecta por dos puntos.",
         CreatesObject,
@@ -939,7 +939,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "constraint.angle",
         "Angle",
-        [],
+        ["angulo"],
         "Restricciones",
         "Impone un angulo entre objetos.",
         AddsConstraint,

@@ -3552,10 +3552,10 @@ fn parse_pow(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
 fn exact_function_arity(name: &str) -> Option<usize> {
     match name {
         "sin" | "cos" | "tan" | "asin" | "arcsin" | "acos" | "arccos" | "atan" | "arctan"
-        | "sinh" | "cosh" | "tanh" | "asinh" | "arcsinh" | "acosh" | "arccosh" | "atanh"
-        | "arctanh" | "sec" | "csc" | "cosec" | "cot" | "cotan" | "asec" | "arcsec" | "acsc"
-        | "arccsc" | "acot" | "arccot" | "exp" | "ln" | "log" | "log10" | "log2" | "sqrt"
-        | "cbrt" | "abs" | "sign" | "signum" | "heaviside" | "step" | "floor" | "ceil"
+        | "sen" | "sinh" | "cosh" | "tanh" | "asinh" | "arcsinh" | "acosh" | "arccosh"
+        | "atanh" | "arctanh" | "sec" | "csc" | "cosec" | "cot" | "cotan" | "asec" | "arcsec"
+        | "acsc" | "arccsc" | "acot" | "arccot" | "exp" | "ln" | "log" | "log10" | "log2"
+        | "sqrt" | "cbrt" | "abs" | "sign" | "signum" | "heaviside" | "step" | "floor" | "ceil"
         | "ceiling" | "round" | "re" | "real" | "im" | "imag" | "imaginary" | "arg"
         | "argument" | "phase" | "conj" | "conjugate" | "erf" | "erfc" | "gamma" | "lngamma"
         | "lgamma" | "digamma" | "trigamma" => Some(1),
@@ -3620,8 +3620,8 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
                 }
             }
             return Ok(match function_name.as_str() {
-                // Trig
-                "sin" => Expr::Sin(Box::new(args.remove(0))),
+                // Trig (sen = alias español de sin, GeoGebra ES)
+                "sin" | "sen" => Expr::Sin(Box::new(args.remove(0))),
                 "cos" => Expr::Cos(Box::new(args.remove(0))),
                 "tan" => Expr::Tan(Box::new(args.remove(0))),
                 "asin" | "arcsin" => Expr::Asin(Box::new(args.remove(0))),

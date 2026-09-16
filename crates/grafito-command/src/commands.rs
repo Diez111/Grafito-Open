@@ -207,6 +207,19 @@ pub(crate) struct ScriptBudget {
     pub(crate) ggb_steps: usize,
 }
 
+/// Eco corto y acotado para mensajes de error (nunca vuelca inputs gigantes).
+fn short_input_echo(input: &str) -> String {
+    const MAX_ECHO_CHARS: usize = 64;
+    if input.chars().count() <= MAX_ECHO_CHARS {
+        input.to_string()
+    } else {
+        format!(
+            "{}…",
+            input.chars().take(MAX_ECHO_CHARS).collect::<String>()
+        )
+    }
+}
+
 fn validate_command_input(input: &str) -> Result<(), String> {
     if input.len() > MAX_COMMAND_INPUT_BYTES {
         return Err(format!(
@@ -247,11 +260,17 @@ fn validate_command_input(input: &str) -> Result<(), String> {
                     ']' => '[',
                     '}' => '{',
                     _ => {
-                        return Err("Command input contains unbalanced delimiters".into());
+                        return Err(format!(
+                            "Delimitadores sin cerrar o mal anidados en `{}`",
+                            short_input_echo(input)
+                        ));
                     }
                 };
                 if delimiters.pop() != Some(expected_open) {
-                    return Err("Command input contains unbalanced delimiters".into());
+                    return Err(format!(
+                        "Delimitadores sin cerrar o mal anidados en `{}`",
+                        short_input_echo(input)
+                    ));
                 }
             }
             ',' if found_outer_arguments && delimiters.len() == 1 => {
@@ -267,7 +286,22 @@ fn validate_command_input(input: &str) -> Result<(), String> {
     }
 
     if !delimiters.is_empty() {
-        return Err("Command input contains unbalanced delimiters".into());
+        // Caso típico: falta cerrar (`sen(a`). Se sugiere el texto exacto
+        // con los cierres que faltan para un arreglo de una tecla.
+        let closers: String = delimiters
+            .iter()
+            .rev()
+            .map(|open| match open {
+                '(' => ')',
+                '[' => ']',
+                '{' => '}',
+                _ => '?',
+            })
+            .collect();
+        let echo = short_input_echo(input);
+        return Err(format!(
+            "Faltan cierres en `{echo}` — ¿quisiste decir `{echo}{closers}`?"
+        ));
     }
 
     Ok(())
@@ -2109,9 +2143,9 @@ fn auto_define_variables(text: &str, document: &mut Document) -> HashSet<String>
     }
 
     let reserved = [
-        "x", "y", "z", "t", "r", "theta", "pi", "tau", "e", "sin", "cos", "tan", "asin", "acos",
-        "atan", "sinh", "cosh", "tanh", "sqrt", "log", "ln", "exp", "abs", "mod", "sgn", "step",
-        "floor", "ceil", "f", "g", "h",
+        "x", "y", "z", "t", "r", "theta", "pi", "tau", "e", "sin", "sen", "cos", "tan", "asin",
+        "acos", "atan", "sinh", "cosh", "tanh", "sqrt", "log", "ln", "exp", "abs", "mod", "sgn",
+        "step", "floor", "ceil", "f", "g", "h",
     ];
 
     for word in words {
@@ -9748,8 +9782,8 @@ fn handle_remaining_cas_commands(
             let mut param_names: Vec<String> = Vec::new();
             let mut seen = std::collections::HashSet::new();
             let reserved: std::collections::HashSet<&str> = [
-                "x", "y", "z", "t", "pi", "tau", "e", "sin", "cos", "tan", "asin", "acos", "atan",
-                "sinh", "cosh", "tanh", "exp", "ln", "log", "sqrt", "abs", "pow", "exp",
+                "x", "y", "z", "t", "pi", "tau", "e", "sin", "sen", "cos", "tan", "asin", "acos",
+                "atan", "sinh", "cosh", "tanh", "exp", "ln", "log", "sqrt", "abs", "pow", "exp",
             ]
             .iter()
             .copied()
@@ -14381,6 +14415,33 @@ fn handle_expression_input(
             let obj = GeoObject::Function(FunctionObj::new(&final_expr).with_label(label));
             insert_command_object!(document, obj);
             input_text.clear();
+            // Si no depende de la variable (p. ej. `f(x) = sen(a)` con `a`
+            // número), la "curva" es una recta plana: se dice en voz alta
+            // con el camino a la onda en vez de dibujar en silencio.
+            let arg = name
+                .split_once('(')
+                .and_then(|(_, args)| args.trim_end_matches(')').trim().chars().next())
+                .unwrap_or('x');
+            if !contains_var(&final_expr, arg) {
+                let vars_now: Vec<(String, f64)> = document
+                    .variables
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                if let Ok(val) = evaluate(&final_expr, &vars_now) {
+                    let shown = if val.fract() == 0.0 {
+                        format!("{val:.0}")
+                    } else {
+                        format!("{val:.2}")
+                    };
+                    return CommandOutcome::Message(format!(
+                        "{label} es constante (= {shown}) · para la onda usá {arg}: {label}({arg}) = sen({arg})"
+                    ));
+                }
+                return CommandOutcome::Message(format!(
+                    "{label} es constante · para la onda incluí {arg} en la expresión"
+                ));
+            }
             return CommandOutcome::Ok;
         }
         if rest.starts_with('(') && rest.ends_with(')') {
@@ -14552,13 +14613,19 @@ fn handle_expression_input(
                 }
             }
             if !name.is_empty() {
+                // Escalonado anti-apilado (antes de insertar: len cuenta las
+                // previas): cada variable nueva nace 2 unidades bajo la
+                // anterior en vez de todas en el origen.
+                let stagger_y = -2.0 * (document.variables.len() as f64 + 1.0);
                 if let Err(error) = document.try_set_variable(name.clone(), val) {
                     return CommandOutcome::Error(format!("Variable: {error}"));
                 }
                 if let Err(error) = document.try_replace_variable_meta_with_previous(
                     &name,
                     grafito_core::VariableMeta {
-                        position: grafito_geometry::Point2::new(0.0, 0.0),
+                        // Determinista por conteo (los sliders de canvas se
+                        // tapaban entre sí y a las etiquetas en el origen).
+                        position: grafito_geometry::Point2::new(0.0, stagger_y),
                         min: -5.0,
                         max: 5.0,
                         step: 0.1,
@@ -14571,7 +14638,32 @@ fn handle_expression_input(
                     return CommandOutcome::Error(format!("Variable: {error}"));
                 }
                 input_text.clear();
-                return CommandOutcome::Ok;
+                // El número pelado crea una variable invisible en el lienzo
+                // (`sen(a)` → `b`): se anuncia para que el éxito no parezca
+                // que "no hizo nada" (misma convención de display que Álgebra).
+                // Si era una llamada a función conocida, se enseña el camino
+                // a la curva de una (didáctica, sin magia en el documento).
+                let shown = if val.fract() == 0.0 {
+                    format!("{val:.0}")
+                } else {
+                    format!("{val:.2}")
+                };
+                let ident: String = text
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                let rest = text.trim_start()[ident.len()..].trim_start();
+                const GRAPHABLE: &[&str] = &[
+                    "sin", "sen", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
+                    "exp", "ln", "log", "sqrt", "abs",
+                ];
+                if rest.starts_with('(') && GRAPHABLE.contains(&ident.as_str()) {
+                    return CommandOutcome::Message(format!(
+                        "{name} = {shown} · probá f(x) = {ident}(x) para la curva"
+                    ));
+                }
+                return CommandOutcome::Message(format!("{name} = {shown}"));
             }
         }
         if text.starts_with('(') && text.ends_with(')') {

@@ -193,6 +193,27 @@ impl Theme {
         );
     }
 
+    /// Rótulo de canvas con halo opaco (`canvas_bg`): legible sobre curvas,
+    /// grilla y widgets que lo crucen (etiqueta de función sobre slider).
+    /// Sin halo los textos se funden con lo que pisan. Retorna el rect.
+    pub fn paint_canvas_text(
+        &self,
+        painter: &egui::Painter,
+        pos: egui::Pos2,
+        anchor: egui::Align2,
+        text: &str,
+        font_id: egui::FontId,
+        color: egui::Color32,
+    ) -> egui::Rect {
+        let galley = painter.layout_no_wrap(text.to_owned(), font_id, color);
+        let rect = anchor
+            .anchor_rect(egui::Rect::from_min_size(pos, galley.size()))
+            .expand(2.0);
+        painter.rect_filled(rect, 2.0, self.canvas_bg);
+        painter.galley(rect.min, galley, color);
+        rect
+    }
+
     /// Clamp de atenuación gamma para texto al piso 0.85 (WCAG 1.4.3 AA).
     /// Todo `gamma_multiply` sobre texto debe pasar por aquí.
     pub fn clamp_text_gamma(gamma: f32) -> f32 {

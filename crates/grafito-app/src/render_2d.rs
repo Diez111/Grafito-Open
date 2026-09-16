@@ -53,6 +53,11 @@ thread_local! {
     /// por frame; ahora solo se proyectan a pantalla.
     static VECTOR_FIELD_STREAMLINE_CACHE: RefCell<lru::LruCache<u64, VectorFieldStreamlines>> =
         RefCell::new(lru::LruCache::new(VECTOR_FIELD_STREAMLINE_CACHE_SIZE));
+    /// Texturas de rótulos TeX keyed por texto: antes cada rótulo teselaba
+    /// cientos de `rect_filled` (uno por píxel de tinta) POR FRAME; ahora una
+    /// subida por texto y un solo `painter.image` (tinte = color del rótulo).
+    static TEX_LABEL_TEXTURES: RefCell<lru::LruCache<String, egui::TextureHandle>> =
+        RefCell::new(lru::LruCache::new(TEX_LABEL_TEXTURE_CACHE_SIZE));
     /// Última `document.version` en la que se ejecutó `prune_fill_texture_cache`.
     /// Permite saltar el write lock + barrido LRU cuando el documento no cambió.
     static LAST_FILL_PRUNE_DOC_VERSION: RefCell<Option<u64>> = const { RefCell::new(None) };
@@ -62,6 +67,7 @@ const PHASE_RENDER_CACHE_CAP: usize = 32;
 const COMPLEX_EXPR_CACHE_CAP: usize = 16;
 const COMPLEX_GRID_TEXTURE_CAP: usize = 16;
 const VECTOR_FIELD_STREAMLINE_CACHE_CAP: usize = 16;
+const TEX_LABEL_TEXTURE_CACHE_CAP: usize = 64;
 // Tamaños `NonZeroUsize` para `lru::LruCache::new` (misma API que
 // `grafito-render/src/lib.rs:TRANSFORMED_CACHE_SIZE`).
 #[allow(clippy::useless_nonzero_new_unchecked)]
@@ -79,6 +85,9 @@ const COMPLEX_GRID_TEXTURE_SIZE: std::num::NonZeroUsize =
 #[allow(clippy::useless_nonzero_new_unchecked)]
 const VECTOR_FIELD_STREAMLINE_CACHE_SIZE: std::num::NonZeroUsize =
     unsafe { std::num::NonZeroUsize::new_unchecked(VECTOR_FIELD_STREAMLINE_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const TEX_LABEL_TEXTURE_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(TEX_LABEL_TEXTURE_CACHE_CAP) };
 
 /// Segmentos de retrato de fase cacheados (Arc para cache hits baratos).
 type PhasePortraitSegments = Arc<Vec<(Point2, Point2)>>;
@@ -2482,7 +2491,7 @@ pub(crate) fn decide_function_label(label: &str, expr: &str) -> FunctionLabelDra
     if text.chars().count() > MAX_TEX_LINE_CHARS {
         return FunctionLabelDraw::Ascii;
     }
-    let outcome = match grafito_core::tex_raster::render_plain_math_to_bitmap(&text) {
+    let outcome = match grafito_core::tex_raster::render_plain_math_to_bitmap_cached(&text) {
         Ok(outcome) => outcome,
         Err(_) => return FunctionLabelDraw::Ascii,
     };
@@ -2500,18 +2509,21 @@ pub(crate) fn decide_function_label(label: &str, expr: &str) -> FunctionLabelDra
     }
     FunctionLabelDraw::TexRaster {
         text,
-        bitmap: outcome.bitmap,
+        bitmap: outcome.bitmap.clone(),
     }
 }
 
-/// Dibuja un bitmap TeX como rects de `TEX_LABEL_SCALE_PX` desde `origin`
-/// (esquina superior-izquierda). No-op con bitmap vacío, origen no finito o
-/// sobre la cota (defensa en profundidad: `decide_function_label` ya filtra).
-/// Sin `panic`: índices con `checked_*`, píxeles por `.get`.
-pub(crate) fn draw_tex_bitmap(
+/// Dibuja un rótulo TeX como UNA imagen con halo (no cientos de rects):
+/// el bitmap ya viene cacheado por texto y la textura vive en LRU
+/// thread-local (una subida por texto). `key` debe identificar el texto
+/// (normalmente el mismo `"label = expr"`). Con halo `canvas_bg` para que
+/// no se funda con curvas/grilla/widgets. Fallback honesto a rects si la
+/// textura no se puede subir.
+pub(crate) fn draw_tex_label(
     painter: &egui::Painter,
     origin: Pos2,
-    bitmap: &TexBitmap,
+    key: &str,
+    bitmap: &grafito_core::tex_raster::TexBitmap,
     color: Color32,
 ) {
     if bitmap.is_empty() || !origin.is_finite() {
@@ -2522,29 +2534,44 @@ pub(crate) fn draw_tex_bitmap(
     {
         return;
     }
-    for y in 0..bitmap.height {
-        for x in 0..bitmap.width {
-            let index = (y as usize)
-                .checked_mul(bitmap.width as usize)
-                .and_then(|base| base.checked_add(x as usize));
-            let Some(index) = index else { continue };
-            if bitmap.pixels.get(index).is_none_or(|ink| *ink == 0) {
-                continue;
-            }
-            let pos = Pos2::new(
-                origin.x + x as f32 * TEX_LABEL_SCALE_PX,
-                origin.y + y as f32 * TEX_LABEL_SCALE_PX,
-            );
-            if !pos.is_finite() {
-                continue;
-            }
-            painter.rect_filled(
-                Rect::from_min_size(pos, Vec2::splat(TEX_LABEL_SCALE_PX)),
-                0.0,
-                color,
-            );
-        }
+    let draw_size = Vec2::new(
+        bitmap.width as f32 * TEX_LABEL_SCALE_PX,
+        bitmap.height as f32 * TEX_LABEL_SCALE_PX,
+    );
+    if !draw_size.x.is_finite() || !draw_size.y.is_finite() {
+        return;
     }
+    let rect = Rect::from_min_size(origin, draw_size);
+    let bg = current_theme(painter.ctx()).canvas_bg;
+    painter.rect_filled(rect.expand(2.0), 2.0, bg);
+    let tex_id = TEX_LABEL_TEXTURES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(handle) = cache.get(key) {
+            return handle.id();
+        }
+        let pixels: Vec<Color32> = bitmap
+            .pixels
+            .iter()
+            .map(|&ink| Color32::from_white_alpha(ink))
+            .collect();
+        let image = egui::ColorImage {
+            size: [bitmap.width as usize, bitmap.height as usize],
+            pixels,
+        };
+        let handle =
+            painter
+                .ctx()
+                .load_texture(key.to_owned(), image, egui::TextureOptions::NEAREST);
+        let id = handle.id();
+        cache.put(key.to_owned(), handle);
+        id
+    });
+    painter.image(
+        tex_id,
+        rect,
+        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+        color,
+    );
 }
 
 /// HSL to RGB conversion for domain coloring
@@ -4774,14 +4801,21 @@ impl GrafitoApp {
                             if draw_bounds.contains(label_position) {
                                 // W2 TeX: raster si cubre, ASCII idéntico si no.
                                 match decide_function_label(label, &fun.expr) {
-                                    FunctionLabelDraw::TexRaster { bitmap, .. } => {
+                                    FunctionLabelDraw::TexRaster { text, bitmap } => {
                                         let half = bitmap.width as f32 * TEX_LABEL_SCALE_PX * 0.5;
                                         let origin =
                                             Pos2::new(label_position.x - half, label_position.y);
                                         if origin.is_finite() {
-                                            draw_tex_bitmap(&painter, origin, &bitmap, label_color);
+                                            draw_tex_label(
+                                                &painter,
+                                                origin,
+                                                &text,
+                                                &bitmap,
+                                                label_color,
+                                            );
                                         } else {
-                                            painter.text(
+                                            current_theme(painter.ctx()).paint_canvas_text(
+                                                &painter,
                                                 label_position,
                                                 egui::Align2::CENTER_TOP,
                                                 label,
@@ -4793,7 +4827,8 @@ impl GrafitoApp {
                                         }
                                     }
                                     FunctionLabelDraw::Ascii => {
-                                        painter.text(
+                                        current_theme(painter.ctx()).paint_canvas_text(
+                                            &painter,
                                             label_position,
                                             egui::Align2::CENTER_TOP,
                                             label,
@@ -6670,7 +6705,7 @@ mod number_plane_tests {
 #[cfg(test)]
 mod tex_label_tests {
     use super::{
-        decide_function_label, draw_tex_bitmap, FunctionLabelDraw, TEX_LABEL_MAX_WIDTH_PX,
+        decide_function_label, draw_tex_label, FunctionLabelDraw, TEX_LABEL_MAX_WIDTH_PX,
         TEX_LABEL_SCALE_PX,
     };
     use egui::{Pos2, Rect, Vec2};
@@ -6718,14 +6753,16 @@ mod tex_label_tests {
     }
 
     #[test]
-    fn draw_tex_bitmap_never_panics_headless() {
+    fn draw_tex_label_never_panics_headless() {
         let ctx = egui::Context::default();
         let canvas = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(800.0, 600.0));
         let painter = ctx.layer_painter(egui::LayerId::background());
         let color = egui::Color32::WHITE;
-        // Bitmap real dibuja sin pánico.
-        if let FunctionLabelDraw::TexRaster { bitmap, .. } = decide_function_label("f", "x^2") {
-            draw_tex_bitmap(&painter, Pos2::new(10.0, 10.0), &bitmap, color);
+        // Bitmap real dibuja sin pánico (una imagen, no cientos de rects).
+        if let FunctionLabelDraw::TexRaster { text, bitmap } = decide_function_label("f", "x^2") {
+            draw_tex_label(&painter, Pos2::new(10.0, 10.0), &text, &bitmap, color);
+            // Segunda vez: hit de caché de textura, mismo resultado.
+            draw_tex_label(&painter, Pos2::new(10.0, 10.0), &text, &bitmap, color);
             // Centrado del call-site: ancho conocido, origen finito.
             let half = bitmap.width as f32 * TEX_LABEL_SCALE_PX * 0.5;
             assert!(half.is_finite() && half > 0.0);
@@ -6734,15 +6771,22 @@ mod tex_label_tests {
             panic!("'f = x^2' debería rasterizar");
         }
         // Bordes: vacío y origen no finito son no-op, no pánico.
-        draw_tex_bitmap(
+        draw_tex_label(
             &painter,
             Pos2::new(10.0, 10.0),
+            "empty",
             &grafito_core::tex_raster::TexBitmap::empty(),
             color,
         );
-        if let FunctionLabelDraw::TexRaster { bitmap, .. } = decide_function_label("f", "x^2") {
-            draw_tex_bitmap(&painter, Pos2::new(f32::NAN, 0.0), &bitmap, color);
-            draw_tex_bitmap(&painter, Pos2::new(f32::INFINITY, 0.0), &bitmap, color);
+        if let FunctionLabelDraw::TexRaster { text, bitmap } = decide_function_label("f", "x^2") {
+            draw_tex_label(&painter, Pos2::new(f32::NAN, 0.0), &text, &bitmap, color);
+            draw_tex_label(
+                &painter,
+                Pos2::new(f32::INFINITY, 0.0),
+                &text,
+                &bitmap,
+                color,
+            );
         }
         let _ = canvas;
     }

@@ -194,7 +194,7 @@ fn command_rejects_unbalanced_delimiters_without_mutation() {
     let outcome = process_input(&mut document, &mut input);
 
     assert!(
-        matches!(outcome, CommandOutcome::Error(ref message) if message.contains("unbalanced delimiters")),
+        matches!(outcome, CommandOutcome::Error(ref message) if message.contains("mal anidados")),
         "unexpected outcome: {outcome:?}"
     );
     assert_eq!(document_snapshot(&document), before);

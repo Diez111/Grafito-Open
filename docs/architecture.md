@@ -294,7 +294,7 @@ Notas:
 ## 14. Paridad GeoGebra 2026 — frente F10-C (BUILD 2026-09-05, rama f10-plan-total)
 
 > Plan de cierre ejecutado 2026-09-16 (P0–P4, ver ADR-0003): 338 → **639 comandos**
-> (599 visibles + 15 UI = 614 en paleta), i18n ES/EN/PT/IT/FR/DE (187 claves),
+> (599 visibles + 15 UI = 614 en paleta), i18n ES/EN/PT/IT/FR/DE (193 claves),
 > export `.ggb` + PDF multipágina + P2P iroh tras flag. GeoGebra lista ~502:
 > cobertura nominal ≈100% con el resto declarado abajo como stub honesto.
 

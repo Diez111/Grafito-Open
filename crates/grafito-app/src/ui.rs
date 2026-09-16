@@ -1176,6 +1176,8 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
             )
             .show(ctx, |ui| {
+                // El popup de sugerencias ocupa toda la barra (integra columna).
+                let span = (ui.next_widget_position().x, ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
                     let response = draw_command_input(
@@ -1185,6 +1187,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
                         [command_input_width(ui.available_width(), 40.0), 26.0],
                         "Entrada... (ej: sin(x), A=(1,2), Derivative[x^2,x])",
                         true,
+                        Some(span),
                     );
                     if response.submitted && !app.input_text.is_empty() {
                         should_exec = true;
@@ -1266,6 +1269,10 @@ pub(crate) fn draw_command_input(
     size: [f32; 2],
     hint: &str,
     frame: bool,
+    // Ancho de columna `(x, ancho)` para el popup de sugerencias: el menú
+    // ocupa toda la columna (uniforme con el panel) en vez del input solo.
+    // `None` conserva el ancho del campo.
+    popup_span: Option<(f32, f32)>,
 ) -> CommandInputResponse {
     let theme = current_theme(ui.ctx());
     let response = ui.add_sized(
@@ -1289,20 +1296,35 @@ pub(crate) fn draw_command_input(
     };
 
     let mut completed = false;
-    // Tab is reserved for completion; Enter keeps the usual command-submission behavior.
-    let completion_key = (!suggestions.is_empty()
-        && (response.has_focus() || response.lost_focus()))
-    .then(|| {
-        ui.input_mut(|input| {
-            [egui::Key::Tab].into_iter().find(|key| {
-                is_autocomplete_completion_key(*key)
-                    && input.consume_key(egui::Modifiers::NONE, *key)
-            })
+    // Tab completa solo con relación honesta (o elección explícita); si el
+    // popup está abierto igual se consume para no saltar de foco.
+    let tab_pressed = if !suggestions.is_empty() && (response.has_focus() || response.lost_focus())
+    {
+        ui.input(|i| {
+            is_autocomplete_completion_key(egui::Key::Tab) && i.key_pressed(egui::Key::Tab)
         })
-    })
-    .flatten();
+    } else {
+        false
+    };
+    let completion_key = if tab_pressed {
+        ui.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+        });
+        Some(egui::Key::Tab)
+    } else {
+        None
+    };
     let mut show_popup =
         !suggestions.is_empty() && (response.has_focus() || completion_key.is_some());
+    // Token actual para la regla de aceptación (prefijo real o nada).
+    // Propio (String): vive en el frame sin prestar `input_text`.
+    let accept_token = autocomplete_token(&app.input_text)
+        .unwrap_or("")
+        .to_string();
+    if changed {
+        // El usuario siguió escribiendo: la selección anterior ya no vale.
+        app.autocomplete.navigated = false;
+    }
     if show_popup {
         if app.autocomplete.selected >= suggestions.len() {
             app.autocomplete.selected = 0;
@@ -1310,34 +1332,71 @@ pub(crate) fn draw_command_input(
         let len = suggestions.len();
         if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
             app.autocomplete.selected = (app.autocomplete.selected + 1) % len;
+            app.autocomplete.navigated = true;
         }
         if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
             app.autocomplete.selected = (app.autocomplete.selected + len - 1) % len;
+            app.autocomplete.navigated = true;
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             show_popup = false;
             app.autocomplete.open = false;
             app.autocomplete.selected = 0;
+            app.autocomplete.navigated = false;
         }
         if show_popup && completion_key.is_some() {
-            completed = complete_autocomplete_selection(
-                &mut app.input_text,
-                &suggestions,
-                &mut app.autocomplete,
-            );
-            if completed {
-                show_popup = false;
-                response.request_focus();
+            // Tab: acepta si el usuario eligió o si lo escrito es prefijo
+            // real de la sugerencia; si no, se ignora (nunca corrompe).
+            let take = app.autocomplete.navigated
+                || suggestions
+                    .get(app.autocomplete.selected)
+                    .is_some_and(|item| autocomplete_accepts(&accept_token, &item.text));
+            if take {
+                completed = complete_autocomplete_selection(
+                    &mut app.input_text,
+                    &suggestions,
+                    &mut app.autocomplete,
+                );
+                if completed {
+                    show_popup = false;
+                    response.request_focus();
+                }
             }
         }
     }
+    if !show_popup {
+        app.autocomplete.navigated = false;
+    }
     app.autocomplete.open = show_popup;
 
-    if show_popup && draw_autocomplete_popup(ui, app, id_salt, response.rect, &suggestions) {
+    if show_popup
+        && draw_autocomplete_popup(ui, app, id_salt, response.rect, popup_span, &suggestions)
+    {
         response.request_focus();
     }
 
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    // Profesional y predecible: Enter acepta la sugerencia si el usuario la
+    // eligió o si es continuación honesta de lo escrito; si el texto no
+    // cambió con la inserción (p. ej. variable ya exacta), se envía igual.
+    if enter && show_popup {
+        let take = app.autocomplete.navigated
+            || suggestions
+                .get(app.autocomplete.selected)
+                .is_some_and(|item| autocomplete_accepts(&accept_token, &item.text));
+        if take {
+            let before = app.input_text.clone();
+            let applied = complete_autocomplete_selection(
+                &mut app.input_text,
+                &suggestions,
+                &mut app.autocomplete,
+            );
+            if applied && app.input_text != before {
+                completed = true;
+                response.request_focus();
+            }
+        }
+    }
     CommandInputResponse {
         submitted: !completed && enter && (response.has_focus() || response.lost_focus()),
         changed,
@@ -1484,10 +1543,21 @@ fn draw_autocomplete_popup(
     app: &mut GrafitoApp,
     id_salt: &'static str,
     input_rect: egui::Rect,
+    popup_span: Option<(f32, f32)>,
     suggestions: &[AutocompleteItem],
 ) -> bool {
-    let popup_pos = egui::pos2(input_rect.min.x, input_rect.max.y);
+    // Integrado, no tarjeta flotante: misma superficie que el input
+    // (`input_bg`), sin borde ni sombra, pegado al borde inferior y a lo
+    // ancho de la columna — se lee como continuación del panel, no como
+    // ventana. Sin `popup_span` cae al ancho del campo.
+    let (span_x, span_w) = popup_span.unwrap_or((input_rect.min.x, input_rect.width()));
+    let popup_pos = egui::pos2(span_x, input_rect.max.y);
     let selected = app.autocomplete.selected;
+    // Honestidad visual: solo hay fila destacada si el usuario la eligió
+    // con ↑↓ (navigated). Sin navegar, Enter envía el texto tal cual — pintar
+    // la fila 0 como seleccionada mentía y el Enter "rompía".
+    let highlight = app.autocomplete.navigated;
+    let theme = current_theme(ui.ctx());
     let display: Vec<(String, String)> = suggestions
         .iter()
         .take(8)
@@ -1499,18 +1569,78 @@ fn draw_autocomplete_popup(
         .fixed_pos(popup_pos)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                for (i, (text, detail)) in display.iter().enumerate() {
-                    let is_sel = i == selected;
-                    let resp = ui.add(egui::SelectableLabel::new(
-                        is_sel,
-                        format!("{}  - {}", text, detail),
-                    ));
-                    if resp.clicked() {
-                        clicked = Some(i);
-                    }
-                }
-            });
+            egui::Frame::none()
+                .fill(theme.input_bg)
+                .rounding(egui::Rounding {
+                    nw: 0.0,
+                    ne: 0.0,
+                    sw: RADIUS_SM,
+                    se: RADIUS_SM,
+                })
+                .inner_margin(egui::Margin {
+                    left: SPACE_SM,
+                    right: SPACE_SM,
+                    top: SPACE_XS,
+                    bottom: SPACE_XS,
+                })
+                .show(ui, |ui| {
+                    ui.set_min_width((span_w - 2.0 * SPACE_SM).max(0.0));
+                    ui.set_max_width((span_w - 2.0 * SPACE_SM).max(0.0));
+                    // Selección serena (tinta sage, texto primario) en vez de
+                    // píldora de acento: guía sin gritar.
+                    ui.scope(|ui| {
+                        let visuals = ui.visuals_mut();
+                        visuals.selection.bg_fill = theme.selection_bg;
+                        visuals.selection.stroke = egui::Stroke::new(1.0, theme.text_primary);
+                        ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                            for (i, (text, detail)) in display.iter().enumerate() {
+                                let mut job = egui::text::LayoutJob::single_section(
+                                    text.clone(),
+                                    egui::TextFormat {
+                                        font_id: egui::FontId::proportional(TYPE_SM),
+                                        color: theme.text_primary,
+                                        ..Default::default()
+                                    },
+                                );
+                                job.append(
+                                    "   ",
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: egui::FontId::proportional(TYPE_XS),
+                                        color: theme.text_tertiary,
+                                        ..Default::default()
+                                    },
+                                );
+                                job.append(
+                                    detail,
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: egui::FontId::proportional(TYPE_XS),
+                                        color: theme.text_tertiary,
+                                        ..Default::default()
+                                    },
+                                );
+                                if ui
+                                    .add(egui::SelectableLabel::new(
+                                        highlight && i == selected,
+                                        job,
+                                    ))
+                                    .clicked()
+                                {
+                                    clicked = Some(i);
+                                }
+                            }
+                        });
+                    });
+                    ui.add_space(SPACE_XS);
+                    ui.label(
+                        egui::RichText::new(
+                            "↑↓ elegir · Enter aceptar · Tab completar · Esc cerrar",
+                        )
+                        .size(TYPE_XS)
+                        .color(theme.text_tertiary),
+                    );
+                });
         });
     if let Some(i) = clicked {
         app.autocomplete.selected = i;
@@ -1796,7 +1926,18 @@ const MAX_AUTOCOMPLETE_TOKEN_CHARS: usize = 256;
 const MAX_AUTOCOMPLETE_SUGGESTIONS: usize = 8;
 const MAX_DOCUMENT_AUTOCOMPLETE_CANDIDATES: usize = 64;
 const MIN_AUTOCOMPLETE_SCORE: f64 = 0.35;
-const AUTOCOMPLETE_SEPARATORS: &[char] = &['[', '(', ',', ' ', '\t', '=', '+', '-', '*', '/'];
+/// Los cierres `)]} ` también cortan el token: en `sin(a)` el token es `""`
+/// (nada que completar) en vez de `"a)"` — Tab ya no se come el paréntesis.
+const AUTOCOMPLETE_SEPARATORS: &[char] = &[
+    '[', '(', ',', ' ', '\t', '=', '+', '-', '*', '/', ')', ']', '}',
+];
+/// La ayuda solo participa con 3+ caracteres: evita que "a"/"de" igualen todo.
+const AUTOCOMPLETE_HELP_MIN_CHARS: usize = 3;
+/// Puntaje fijo de coincidencia en ayuda/categoría en español: por debajo de
+/// cualquier coincidencia en nombre o alias (≥0.9) pero por encima del ruido
+/// difuso típico (<0.7). Así "circulo" prefiere Circumcircle (alias) antes
+/// que la docena de ayudas que mencionan círculos.
+const AUTOCOMPLETE_ES_MATCH_SCORE: f64 = 0.8;
 
 fn autocomplete_token(input: &str) -> Option<&str> {
     let mut token_chars = 0;
@@ -1825,8 +1966,8 @@ pub(crate) fn similarity_score(query: &str, candidate: &str) -> f64 {
         return 0.0;
     }
 
-    let q = query.to_lowercase();
-    let c = candidate.to_lowercase();
+    let q = grafito_ui::command_palette::fold_spanish(&query.to_lowercase());
+    let c = grafito_ui::command_palette::fold_spanish(&candidate.to_lowercase());
 
     if q.is_empty() {
         return 0.0;
@@ -1872,6 +2013,7 @@ const MATH_FUNCTIONS: &[(&str, &str)] = &[
     ("deriv_z", "derivada complejos df/dz"),
     ("deriv_z_conj", "derivada complejos df/d(conj z)"),
     ("sin", "seno complejo/real"),
+    ("sen", "seno (alias español de sin)"),
     ("cos", "coseno complejo/real"),
     ("tan", "tangente complejo/real"),
     ("sinh", "seno hiperbólico"),
@@ -1965,23 +2107,72 @@ pub(crate) fn compute_autocomplete_suggestions(
         return Vec::new();
     }
 
-    // 1. Agregar comandos de la paleta
+    // 1. Agregar comandos de la paleta (búsqueda en español incluida:
+    // nombre canónico + aliases ES/EN + categoría + ayuda). Lo que se
+    // inserta sigue siendo el nombre canónico (despacho seguro).
     for cmd in grafito_ui::command_palette::all_commands() {
         if !cmd.syntax_hint.contains('[') {
             continue;
         }
-        add_autocomplete_candidate(
-            &mut scored_items,
-            current_token,
-            cmd.name,
-            cmd.category,
-            true,
-        );
+        let mut best = similarity_score(current_token, cmd.name);
+        if let Some(spec) = cmd.registered_spec() {
+            for alias in spec.aliases {
+                let score = similarity_score(current_token, alias);
+                if score > best {
+                    best = score;
+                }
+            }
+        }
+        let category_score = similarity_score(current_token, cmd.category);
+        if category_score > best {
+            best = category_score;
+        }
+        if current_token.chars().count() >= AUTOCOMPLETE_HELP_MIN_CHARS {
+            let help = grafito_ui::command_palette::fold_spanish(&cmd.help.to_lowercase());
+            let folded_token =
+                grafito_ui::command_palette::fold_spanish(&current_token.to_lowercase());
+            if help.contains(&folded_token) && AUTOCOMPLETE_ES_MATCH_SCORE > best {
+                best = AUTOCOMPLETE_ES_MATCH_SCORE;
+            }
+        }
+        let Some(slot) = autocomplete_candidate_slot(&scored_items, cmd.name, best) else {
+            continue;
+        };
+        let item = AutocompleteItem {
+            text: cmd.name.to_string(),
+            detail: cmd.category.to_string(),
+            bracket: true,
+        };
+        if slot == scored_items.len() {
+            scored_items.push((item, best));
+        } else {
+            scored_items[slot] = (item, best);
+        }
     }
-
-    // 2. Agregar funciones matemáticas
+    // 2. Agregar funciones matemáticas (nombre + descripción en español).
     for (name, desc) in MATH_FUNCTIONS {
-        add_autocomplete_candidate(&mut scored_items, current_token, name, desc, false);
+        let mut best = similarity_score(current_token, name);
+        if current_token.chars().count() >= AUTOCOMPLETE_HELP_MIN_CHARS {
+            let folded_desc = grafito_ui::command_palette::fold_spanish(&desc.to_lowercase());
+            let folded_token =
+                grafito_ui::command_palette::fold_spanish(&current_token.to_lowercase());
+            if folded_desc.contains(&folded_token) && AUTOCOMPLETE_ES_MATCH_SCORE > best {
+                best = AUTOCOMPLETE_ES_MATCH_SCORE;
+            }
+        }
+        let Some(slot) = autocomplete_candidate_slot(&scored_items, name, best) else {
+            continue;
+        };
+        let item = AutocompleteItem {
+            text: name.to_string(),
+            detail: desc.to_string(),
+            bracket: false,
+        };
+        if slot == scored_items.len() {
+            scored_items.push((item, best));
+        } else {
+            scored_items[slot] = (item, best);
+        }
     }
 
     // 3. Agregar objetos del documento
@@ -2042,6 +2233,19 @@ pub(crate) fn is_autocomplete_completion_key(key: egui::Key) -> bool {
     matches!(key, egui::Key::Tab)
 }
 
+/// Regla de aceptación honesta: Tab/Enter solo toman la sugerencia si el
+/// usuario la eligió (↑↓/clic) o si lo escrito es prefijo de la sugerencia
+/// (o al revés, corrección por recorte). Sin esto, Enter con el popup
+/// abierto "generaba otro parámetro" al aceptar ruido difuso.
+pub(crate) fn autocomplete_accepts(token: &str, selected_text: &str) -> bool {
+    if token.is_empty() || selected_text.is_empty() {
+        return false;
+    }
+    let folded_token = grafito_ui::command_palette::fold_spanish(&token.to_lowercase());
+    let folded_selected = grafito_ui::command_palette::fold_spanish(&selected_text.to_lowercase());
+    folded_selected.starts_with(&folded_token) || folded_token.starts_with(&folded_selected)
+}
+
 pub(crate) fn complete_autocomplete_selection(
     input: &mut String,
     suggestions: &[AutocompleteItem],
@@ -2054,6 +2258,7 @@ pub(crate) fn complete_autocomplete_selection(
     apply_autocomplete_item(input, item);
     autocomplete.open = false;
     autocomplete.selected = 0;
+    autocomplete.navigated = false;
     true
 }
 
@@ -2102,6 +2307,96 @@ mod autocomplete_budget_tests {
         assert_eq!(MAX_AUTOCOMPLETE_TOKEN_CHARS, 256);
         assert_eq!(MAX_AUTOCOMPLETE_SUGGESTIONS, 8);
         assert_eq!(MAX_DOCUMENT_AUTOCOMPLETE_CANDIDATES, 64);
+    }
+}
+
+#[cfg(test)]
+mod autocomplete_ux_tests {
+    use super::{
+        apply_autocomplete_item, autocomplete_token, compute_autocomplete_suggestions,
+        similarity_score,
+    };
+
+    #[test]
+    fn closers_end_token_so_tab_never_eats_parens() {
+        // `sin(a)` completo: token vacío → sin popup, Tab inerte.
+        assert_eq!(autocomplete_token("sin(a)"), Some(""));
+        assert_eq!(autocomplete_token("Circle[A, B]"), Some(""));
+        // A medio escribir el token sigue vivo.
+        assert_eq!(autocomplete_token("sin(a"), Some("a"));
+        assert_eq!(autocomplete_token("comp"), Some("comp"));
+    }
+
+    #[test]
+    fn apply_keeps_completed_expression_intact() {
+        // Con token `a)` (cliente viejo) el reemplazo cubría el cierre;
+        // con el tokenizador nuevo el caso no llega, pero el reemplazo
+        // parcial nunca debe romper lo ya escrito.
+        let mut input = "sin(".to_string();
+        let item = crate::app::AutocompleteItem {
+            text: "a".to_string(),
+            detail: "variable".to_string(),
+            bracket: false,
+        };
+        apply_autocomplete_item(&mut input, &item);
+        assert_eq!(input, "sin(a");
+    }
+
+    #[test]
+    fn similarity_ignores_accents() {
+        assert_eq!(similarity_score("circulo", "círculo"), 2.0);
+        assert_eq!(similarity_score("lapiz", "Lápiz"), 2.0);
+        assert_eq!(similarity_score("seno", "seno"), 2.0);
+    }
+
+    #[test]
+    fn spanish_queries_find_english_canonical_commands() {
+        let doc = grafito_core::Document::new();
+        // Ojo: Point/Circle/Polygon/Function no están en paleta
+        // (`palette_visible=false`, se crean con herramientas); el español
+        // debe encontrar sus equivalentes visibles.
+        for (query, expected) in [
+            ("circulo", "Circumcircle"),
+            ("tangente", "Tangent"),
+            ("punto", "Midpoint"),
+            ("recta", "Line"),
+            ("segmento", "Segment"),
+            ("compas", "Compasses"),
+            ("sen", "sin"),
+            ("seno", "sin"),
+            ("construir", "Ray"),
+        ] {
+            let texts: Vec<String> = compute_autocomplete_suggestions(query, &doc)
+                .into_iter()
+                .map(|item| item.text)
+                .collect();
+            assert!(
+                texts.contains(&expected.to_string()),
+                "{query:?} debería sugerir {expected:?}, encontró {texts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn navigated_defaults_to_submit_mode() {
+        // Sin ↑↓ previo, Enter envía: el flag arranca apagado.
+        assert!(!crate::app::InputAutocomplete::default().navigated);
+    }
+
+    #[test]
+    fn accept_rule_requires_honest_prefix_or_choice() {
+        use super::autocomplete_accepts;
+        // Continuación honesta: Tab/Enter pueden tomarla.
+        assert!(autocomplete_accepts("sin", "sin"));
+        assert!(autocomplete_accepts("cir", "Circle"));
+        assert!(autocomplete_accepts("a", "a"));
+        assert!(autocomplete_accepts("circlex", "Circle"));
+        // Sin relación: aceptar sería "generar otro parámetro".
+        assert!(!autocomplete_accepts("recta", "Line"));
+        assert!(!autocomplete_accepts("circulo", "Circumcircle"));
+        assert!(!autocomplete_accepts("2", "Sec"));
+        assert!(!autocomplete_accepts("", "Circle"));
+        assert!(!autocomplete_accepts("a", ""));
     }
 }
 #[cfg(test)]

@@ -1388,6 +1388,7 @@ fn autocomplete_selection_inserts_structure_and_closes_popup() {
     let mut autocomplete = crate::app::InputAutocomplete {
         open: true,
         selected: 0,
+        navigated: false,
     };
     let suggestions = vec![crate::app::AutocompleteItem {
         text: "ComplexGrid".to_string(),

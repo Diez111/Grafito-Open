@@ -84,8 +84,8 @@ fn p3b_turtle_square() {
     let out = ok_in(&mut document, "Turtle[REPEAT 4 [FD 10 LT 90]]");
     assert!(out.contains("1 trazado"), "cuadrado: {out}");
     assert!(err_in(&mut document, "Turtle[FLIP 10]").contains("desconocida"));
-    // Corchete sin cerrar lo rechaza el parser del comando (honesto).
-    assert!(err_in(&mut document, "Turtle[REPEAT 2 [FD 1]").contains("unbalanced"));
+    // Corchete sin cerrar lo rechaza el parser del comando (honesto, con sugerencia).
+    assert!(err_in(&mut document, "Turtle[REPEAT 2 [FD 1]").contains("Faltan cierres"));
     // PU/PD parte en dos trazados.
     let two = ok_in(&mut document, "Turtle[FD 5 PU FD 5 PD FD 5]");
     assert!(two.contains("2 trazado"), "partido: {two}");

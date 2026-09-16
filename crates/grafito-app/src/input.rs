@@ -1673,10 +1673,12 @@ impl GrafitoApp {
                 let theme = grafito_ui::theme::current_theme(ui.ctx());
                 theme.paint_focus_ring(&painter, track.expand(SPACE_XS));
             }
-            painter.text(
+            // Halo en la etiqueta: el widget vive sobre curvas y grilla.
+            grafito_ui::theme::current_theme(ui.ctx()).paint_canvas_text(
+                &painter,
                 anchor,
                 egui::Align2::LEFT_TOP,
-                label,
+                &label,
                 egui::FontId::proportional(TYPE_XS),
                 label_color,
             );

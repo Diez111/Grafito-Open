@@ -56,6 +56,11 @@ fn setup_math_context() -> HashMapContext {
         "sin".into(),
         evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.sin()))),
     );
+    // Alias español de `sin` (GeoGebra ES usa `sen`): misma semántica.
+    let _ = ctx.set_function(
+        "sen".into(),
+        evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.sin()))),
+    );
     let _ = ctx.set_function(
         "cos".into(),
         evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.cos()))),
@@ -782,6 +787,7 @@ pub fn preprocess_expr(expr: &str) -> String {
         .replace("π", "pi")
         .replace("\\pi", "pi")
         .replace("\\sin", "sin")
+        .replace("\\sen", "sen")
         .replace("\\cos", "cos")
         .replace("\\tan", "tan")
         .replace("\\ln", "ln")
@@ -958,6 +964,7 @@ fn is_known_math_function(name: &str) -> bool {
             | "piecewise"
             | "round"
             | "sec"
+            | "sen"
             | "sign"
             | "sin"
             | "sinh"

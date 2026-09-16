@@ -1914,6 +1914,9 @@ pub struct ConstructionStep {
 pub struct InputAutocomplete {
     pub open: bool,
     pub selected: usize,
+    /// El usuario movió la selección con ↑↓: Enter confirma la sugerencia
+    /// en vez de enviar el texto (si solo escribió, Enter envía).
+    pub navigated: bool,
 }
 
 /// Item sugerido por el autocompletado.

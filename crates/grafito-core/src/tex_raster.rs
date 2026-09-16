@@ -38,6 +38,19 @@ pub const MAX_TEX_LINES: usize = 64;
 pub const MAX_TEX_LINE_CHARS: usize = 256;
 /// Píxeles máximos del bitmap (1 MiP, igual que `AttachmentLimits`).
 pub const MAX_TEX_BITMAP_PIXELS: usize = 1_048_576;
+/// Entradas máximas de la caché de rótulos: los rótulos del canvas se
+/// re-piden cada frame y rasterizar de cero por frame lageaba el arrastre
+/// de deslizadores. 64 cubren de sobra un documento típico.
+pub const MAX_TEX_LABEL_CACHE: usize = 64;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Caché acotada por texto del raster de rótulos (proceso, sin I/O).
+fn label_cache() -> &'static Mutex<HashMap<String, Arc<TexRasterOutcome>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<TexRasterOutcome>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Bitmap monocromo liviano: 0 = fondo, 255 = tinta. Row-major.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,6 +406,31 @@ pub fn render_mathml_subset_to_bitmap(mathml: &str) -> Result<TexRasterOutcome, 
     })
 }
 
+/// Versión con caché acotada de [`render_plain_math_to_bitmap`]: mismo
+/// resultado compartido por `Arc` mientras el texto no cambie. Los rótulos
+/// del canvas se re-piden cada frame con el mismo texto (las variables
+/// cambian, el texto no), así el arrastre de deslizadores no rasteriza de
+/// cero a 60 Hz. Los fallos NO se cachean. Lock envenenado → se recupera
+/// el interior (fail-open acotado, igual que el resto del archivo).
+pub fn render_plain_math_to_bitmap_cached(text: &str) -> Result<Arc<TexRasterOutcome>, String> {
+    if let Some(hit) = label_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(text)
+    {
+        return Ok(Arc::clone(hit));
+    }
+    let outcome = Arc::new(render_plain_math_to_bitmap(text)?);
+    let mut cache = label_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= MAX_TEX_LABEL_CACHE {
+        cache.clear();
+    }
+    cache.insert(text.to_owned(), Arc::clone(&outcome));
+    Ok(outcome)
+}
+
 /// Atajo honesto para texto plano matemático (una o varias líneas `\n`).
 /// Misma fuente y misma política de omisión con aviso que el subset MathML.
 pub fn render_plain_math_to_bitmap(text: &str) -> Result<TexRasterOutcome, String> {
@@ -514,5 +552,33 @@ mod tests {
         assert!(outcome.bitmap.is_empty());
         assert!(outcome.lines.is_empty());
         assert_eq!(outcome.omitted_glyphs, 0);
+    }
+}
+
+#[cfg(test)]
+mod label_cache_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn cached_raster_hits_same_arc_and_matches_uncached() {
+        let first = render_plain_math_to_bitmap_cached("f = sen(a*x)").expect("raster válido");
+        let second = render_plain_math_to_bitmap_cached("f = sen(a*x)").expect("raster válido");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "el segundo pedido debe ser hit de caché, no re-raster"
+        );
+        let fresh = render_plain_math_to_bitmap("f = sen(a*x)").expect("raster válido");
+        assert_eq!(first.bitmap, fresh.bitmap);
+        assert_eq!(first.omitted_glyphs, fresh.omitted_glyphs);
+    }
+
+    #[test]
+    fn cache_errors_are_not_poisoned() {
+        let big = "x".repeat(MAX_TEX_MTEXT_BYTES + 1);
+        assert!(render_plain_math_to_bitmap_cached(&big).is_err());
+        assert!(render_plain_math_to_bitmap_cached(&big).is_err());
+        // Y un texto válido posterior sigue funcionando.
+        assert!(render_plain_math_to_bitmap_cached("ok = 1").is_ok());
     }
 }

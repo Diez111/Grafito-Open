@@ -973,13 +973,20 @@ fn scalar_command_creates_validated_variable_metadata() {
 
     let outcome = run(&mut document, "2 + 2");
 
-    assert!(matches!(outcome, CommandOutcome::Ok), "{outcome:?}");
+    // El número pelado se anuncia (`a = 4`) en vez de éxito mudo: si no,
+    // parece que "no hizo nada".
+    assert!(
+        matches!(outcome, CommandOutcome::Message(ref message) if message == "a = 4"),
+        "{outcome:?}"
+    );
     assert_eq!(document.get_variable("a"), Some(4.0));
     let metadata = document
         .variable_meta("a")
         .expect("scalar commands create slider metadata through the core API");
     assert_eq!(metadata.min, -5.0);
     assert_eq!(metadata.max, 5.0);
+    // Anti-apilado: la primera variable nace en (0,-2), no en el origen.
+    assert_eq!(metadata.position, grafito_geometry::Point2::new(0.0, -2.0));
     grafito_core::validation::validate_document(&document)
         .expect("command-created metadata keeps the document valid");
 }
@@ -1877,4 +1884,65 @@ fn boolean_result_over_budget_fails_atomically_before_inserting() {
         "{outcome:?}"
     );
     assert_eq!(snapshot(&document), before, "debe ser atómico");
+}
+
+#[test]
+fn sen_spanish_alias_behaves_like_sin() {
+    // GeoGebra ES usa `sen`: bare call + asignación, igual que `sin`.
+    let mut document = Document::new();
+    document
+        .try_set_variable("a".to_string(), 0.5)
+        .expect("fixture a");
+    // Cada llamada crea la siguiente letra libre (b, luego c) y lo anuncia.
+    for input in ["sen(a)", "sen(a)"] {
+        let outcome = run(&mut document, input);
+        assert!(
+            matches!(outcome, CommandOutcome::Message(ref message) if message.contains(" = ")),
+            "{input:?} debería crear variable como sin: {outcome:?}"
+        );
+    }
+    let outcome = run(&mut document, "b = sen(a)");
+    assert!(
+        matches!(outcome, CommandOutcome::Ok),
+        "asignación con sen: {outcome:?}"
+    );
+    // Aliases ES del registro despachan al canónico inglés.
+    let mut doc2 = Document::new();
+    let _ = run(&mut doc2, "A = (0, 0)");
+    let _ = run(&mut doc2, "B = (1, 0)");
+    let outcome = run(&mut doc2, "linea[A, B]");
+    assert!(
+        matches!(outcome, CommandOutcome::Ok),
+        "alias ES linea debería despachar a Line: {outcome:?}"
+    );
+    let outcome = run(&mut doc2, "circulo[A, 2]");
+    assert!(
+        matches!(outcome, CommandOutcome::Ok),
+        "alias ES circulo debería despachar a Circle: {outcome:?}"
+    );
+}
+
+#[test]
+fn constant_function_announces_itself_with_wave_hint() {
+    // `f(x) = sen(a)` con `a` número es una recta plana: la app lo dice
+    // en vez de dibujar en silencio.
+    let mut document = Document::new();
+    document
+        .try_set_variable("a".to_string(), 1.0)
+        .expect("fixture a");
+    let outcome = run(&mut document, "f(x) = sen(a)");
+    assert!(
+        matches!(outcome, CommandOutcome::Message(ref message) if message.contains("constante") && message.contains("sen(x)")),
+        "debería avisar constante + tip: {outcome:?}"
+    );
+    assert!(
+        find_object_by_label(&document, "f").is_some(),
+        "igual crea la función"
+    );
+    // Con x de verdad no hay aviso: éxito mudo como siempre.
+    let outcome = run(&mut document, "g(x) = sen(x)");
+    assert!(
+        matches!(outcome, CommandOutcome::Ok),
+        "sen(x) no es constante: {outcome:?}"
+    );
 }
