@@ -1,5 +1,6 @@
 pub use crate::cas_parse::{
-    expand_all_cas, extract_cas_command, parse_cas_command, split_args, CasCmd,
+    assumption_suffix, expand_all_cas, extract_cas_command, parse_cas_command,
+    refine_with_assumptions, split_args, CasCmd,
 };
 use crate::cas_parse::{looks_like_bracketed_command, sanitize_unicode_input};
 use geo::BooleanOps;
@@ -13,14 +14,14 @@ use grafito_core::{
     Cone3DObj, Cube3DObj, Cylinder3DObj, DataTableObj, Document, EllipseObj, FitMetadata,
     Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj,
     ImplicitCurveObj, ImplicitSurface3DObj, InfiniteCone3DObj, InfiniteCylinder3DObj, Line3DObj,
-    LineKind, LineObj, LineStyle, LiveSequenceBinding, MoebiusStripObj, ObjectId, ParabolaObj,
-    ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj, PieChartObj,
-    Plane3DObj, Platonic3DObj, PlatonicKind, Point3DObj, PointObj, PointStyle, PolarCurveObj,
-    PolygonObj, PolylineObj, Prism3DObj, Pyramid3DObj, Quadric3DObj, RegressionLineObj,
-    RegularPolychoron4DObj, RegularPolytopeNDObj, RelationOperator, ScatterPlotObj, SectorObj,
-    Segment3DObj, Sphere3DObj, SplineObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta,
-    VectorField2DObj, VectorField3DObj, IMPLICIT_SURFACE_DEFAULT_CELLS, IMPLICIT_SURFACE_MAX_CELLS,
-    IMPLICIT_SURFACE_MIN_CELLS,
+    LineKind, LineObj, LineStyle, ListItem, ListObj, LiveSequenceBinding, MoebiusStripObj,
+    ObjectId, ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj,
+    PieChartObj, Plane3DObj, Platonic3DObj, PlatonicKind, Point3DObj, PointObj, PointStyle,
+    PolarCurveObj, PolygonObj, PolylineObj, Prism3DObj, Pyramid3DObj, Quadric3DObj,
+    RegressionLineObj, RegularPolychoron4DObj, RegularPolytopeNDObj, RelationOperator,
+    ScatterPlotObj, ScatterStyle, SectorObj, Segment3DObj, Sphere3DObj, SplineObj, Surface3DObj,
+    Tetrahedron3DObj, Torus3DObj, VariableMeta, VectorField2DObj, VectorField3DObj,
+    IMPLICIT_SURFACE_DEFAULT_CELLS, IMPLICIT_SURFACE_MAX_CELLS, IMPLICIT_SURFACE_MIN_CELLS,
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
@@ -2597,12 +2598,10 @@ fn handle_simple_analysis_commands(
             &[AnalysisFeature::XIntercept, AnalysisFeature::Root],
             "Intersección X",
         )),
-        "Centroid" if cmd.args.len() == 1 => Some(run_analysis_command(
+        "Centroid" if cmd.args.len() == 1 => Some(run_centroid_dispatch(
             document,
             input_text,
             cmd.args[0].trim(),
-            &[AnalysisFeature::Centroid],
-            "Centroide",
         )),
         "Analyze" | "Analizar" if cmd.args.len() == 1 => Some(run_analysis_command(
             document,
@@ -3745,6 +3744,275 @@ fn handle_remaining_cas_commands(
     // Fallback: dispatch remaining commands via original giant match
     let mut result: CommandOutcome = CommandOutcome::Ok;
     match cmd.command.as_str() {
+        "CenterView" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error("CenterView requiere CenterView[x, y]".into());
+            }
+            let x = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("CenterView: en x: {e}")),
+            };
+            let y = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("CenterView: en y: {e}")),
+            };
+            let view = document.view_mut();
+            view.offset = Point2::new(-x * view.scale, -y * view.scale);
+            input_text.clear();
+            return CommandOutcome::Message(format!("CenterView = ({x}, {y})"));
+        }
+        "Pan" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error("Pan requiere Pan[dx, dy] (píxeles)".into());
+            }
+            let dx = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("Pan: en dx: {e}")),
+            };
+            let dy = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("Pan: en dy: {e}")),
+            };
+            if dx.abs() > 100000.0 || dy.abs() > 100000.0 {
+                return CommandOutcome::Error("Pan: desplazamiento absurdo (>100000px)".into());
+            }
+            let view = document.view_mut();
+            view.offset = Point2::new(view.offset.x + dx, view.offset.y + dy);
+            input_text.clear();
+            return CommandOutcome::Message(format!("Pan = ({dx}, {dy})px"));
+        }
+        "OnClick" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error("OnClick requiere OnClick[etiqueta, guion]".into());
+            }
+            if let Err(e) = crate::ggbscript::store_object_script(
+                document,
+                cmd.args[0].trim(),
+                "click",
+                cmd.args[1].trim(),
+            ) {
+                return CommandOutcome::Error(format!("OnClick: {e}"));
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "OnClick[{}] guardado (se ejecuta al hacer click)",
+                cmd.args[0].trim()
+            ));
+        }
+        "OnUpdate" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error("OnUpdate requiere OnUpdate[etiqueta, guion]".into());
+            }
+            if let Err(e) = crate::ggbscript::store_object_script(
+                document,
+                cmd.args[0].trim(),
+                "update",
+                cmd.args[1].trim(),
+            ) {
+                return CommandOutcome::Error(format!("OnUpdate: {e}"));
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "OnUpdate[{}] guardado (ejecución en P3c: requiere tracking de cambios)",
+                cmd.args[0].trim()
+            ));
+        }
+        "OnLoad" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error("OnLoad requiere OnLoad[guion]".into());
+            }
+            let script = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            if script.len() > MAX_COMMAND_INPUT_BYTES {
+                return CommandOutcome::Error("OnLoad: guion excede el tamaño máximo".into());
+            }
+            if let Err(e) = crate::ggbscript::check_script_allowlist(script) {
+                return CommandOutcome::Error(format!("OnLoad: {e}"));
+            }
+            document.on_load_script = Some(script.to_string());
+            input_text.clear();
+            return CommandOutcome::Message(
+                "OnLoad guardado (ejecución al abrir en P3c)".to_string(),
+            );
+        }
+        "Turtle" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error(
+                    "Turtle requiere Turtle[programa] (FD/BK/LT/RT/PU/PD/REPEAT)".into(),
+                );
+            }
+            let program = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            if program.len() > MAX_COMMAND_INPUT_BYTES {
+                return CommandOutcome::Error("Turtle: programa excede el tamaño máximo".into());
+            }
+            let paths = match crate::ggbscript::turtle_subpaths(program) {
+                Ok(paths) => paths,
+                Err(e) => return CommandOutcome::Error(format!("Turtle: {e}")),
+            };
+            if document.object_count() + paths.len() > grafito_core::validation::MAX_OBJECT_COUNT {
+                return CommandOutcome::Error(format!(
+                    "Turtle: {} trazados exceden el máximo {}",
+                    paths.len(),
+                    grafito_core::validation::MAX_OBJECT_COUNT
+                ));
+            }
+            let mut made = 0usize;
+            for path in paths {
+                let points: Vec<Point2> =
+                    path.into_iter().map(|(x, y)| Point2::new(x, y)).collect();
+                match try_insert_command_object(
+                    document,
+                    GeoObject::Polyline(PolylineObj::new(points)),
+                ) {
+                    Ok(_) => made += 1,
+                    Err(e) => return CommandOutcome::Error(format!("Turtle: {e}")),
+                }
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("Turtle: {made} trazado(s)"));
+        }
+        "UpdateConstruction" => {
+            if !cmd.args.is_empty() {
+                return CommandOutcome::Error("UpdateConstruction no lleva argumentos".into());
+            }
+            match document.recompute_live_sequences() {
+                Ok(()) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(
+                        "UpdateConstruction: secuencias vivas recalculadas".to_string(),
+                    );
+                }
+                Err(e) => return CommandOutcome::Error(format!("UpdateConstruction: {e}")),
+            }
+        }
+        "SetFilling" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error(
+                    "SetFilling requiere SetFilling[objeto, alfa 0..=1]".into(),
+                );
+            }
+            let alpha = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("SetFilling: en alfa: {e}")),
+            };
+            if !(0.0..=1.0).contains(&alpha) {
+                return CommandOutcome::Error("SetFilling: alfa debe estar entre 0 y 1".into());
+            }
+            let id = match find_object_by_label(document, cmd.args[0].trim()) {
+                Some(id) => id,
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "SetFilling: objeto '{}' no encontrado",
+                        cmd.args[0].trim()
+                    ))
+                }
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            let alpha_f = alpha as f32;
+            let applied = match document.get_object_mut(id) {
+                Some(GeoObject::Polygon(p)) => {
+                    let base = p.fill_color.unwrap_or(Color::new(0.2, 0.5, 0.9, 0.2));
+                    p.fill_color = Some(Color::new(base.r, base.g, base.b, alpha_f));
+                    true
+                }
+                _ => false,
+            };
+            if !applied {
+                return CommandOutcome::Error(format!(
+                    "SetFilling: '{}' no tiene relleno configurable (polígonos)",
+                    cmd.args[0].trim()
+                ));
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("SetFilling = {alpha}"));
+        }
+        "SetLineThickness" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error(
+                    "SetLineThickness requiere SetLineThickness[objeto, grosor 0.5..=20]".into(),
+                );
+            }
+            let width = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => {
+                    return CommandOutcome::Error(format!("SetLineThickness: en grosor: {e}"))
+                }
+            };
+            if !(0.5..=20.0).contains(&width) {
+                return CommandOutcome::Error(
+                    "SetLineThickness: grosor debe estar entre 0.5 y 20".into(),
+                );
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let width_f = width as f32;
+            let id = match find_object_by_label(document, cmd.args[0].trim()) {
+                Some(id) => id,
+                None => {
+                    return CommandOutcome::Error(format!(
+                        "SetLineThickness: objeto '{}' no encontrado",
+                        cmd.args[0].trim()
+                    ))
+                }
+            };
+            let applied = match document.get_object_mut(id) {
+                Some(GeoObject::Line(o)) => {
+                    o.width = width_f;
+                    true
+                }
+                Some(GeoObject::Circle(o)) => {
+                    o.width = width_f;
+                    true
+                }
+                Some(GeoObject::Polygon(o)) => {
+                    o.width = width_f;
+                    true
+                }
+                Some(GeoObject::Polyline(o)) => {
+                    o.width = width_f;
+                    true
+                }
+                Some(GeoObject::Ellipse(o)) => {
+                    o.width = width_f;
+                    true
+                }
+                _ => false,
+            };
+            if !applied {
+                return CommandOutcome::Error(format!(
+                    "SetLineThickness: '{}' no tiene grosor configurable",
+                    cmd.args[0].trim()
+                ));
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!("SetLineThickness = {width}"));
+        }
+        "ShowLayer" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error("ShowLayer requiere ShowLayer[n]".into());
+            }
+            let layer = match parse_layer_number(&cmd.args[0], &document.variables) {
+                Ok(n) => n,
+                Err(e) => return CommandOutcome::Error(format!("ShowLayer: {e}")),
+            };
+            let count = set_layer_visibility(document, layer, true);
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "ShowLayer[{layer}]: {count} objeto(s) visibles"
+            ));
+        }
+        "HideLayer" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error("HideLayer requiere HideLayer[n]".into());
+            }
+            let layer = match parse_layer_number(&cmd.args[0], &document.variables) {
+                Ok(n) => n,
+                Err(e) => return CommandOutcome::Error(format!("HideLayer: {e}")),
+            };
+            let count = set_layer_visibility(document, layer, false);
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "HideLayer[{layer}]: {count} objeto(s) ocultos"
+            ));
+        }
         "Point" if cmd.args.len() == 1 => {
             let point = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
                 Ok(point) => point,
@@ -3755,8 +4023,7 @@ fn handle_remaining_cas_commands(
             return CommandOutcome::Ok;
         }
         "Circle" if cmd.args.len() == 2 => {
-            // W-B: espejo del fast-path primitivo (normalmente inalcanzable,
-            // pero se mantiene sincronizado): etiquetas → paramétrico.
+            // W-B: espejo del fast-path primitivo (normalmente inalcanzable,            // pero se mantiene sincronizado): etiquetas → paramétrico.
             let (center_pos, center_id) = match resolve_point_arg(document, &cmd.args[0]) {
                 Ok(resolved) => resolved,
                 Err(error) => return CommandOutcome::Error(format!("Circle: {error}")),
@@ -3999,13 +4266,7 @@ fn handle_remaining_cas_commands(
             );
         }
         "Centroid" if cmd.args.len() == 1 => {
-            return run_analysis_command(
-                document,
-                input_text,
-                cmd.args[0].trim(),
-                &[AnalysisFeature::Centroid],
-                "Centroide",
-            );
+            return run_centroid_dispatch(document, input_text, cmd.args[0].trim());
         }
         "Analyze" | "Analizar" if cmd.args.len() == 1 => {
             return run_analysis_command(
@@ -4887,7 +5148,9 @@ fn handle_remaining_cas_commands(
         "PolygonUnion" if cmd.args.len() == 2 => {
             match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
                 Ok((a, b)) => {
-                    if let Err(error) = add_boolean_result(document, &a.union(&b), "U") {
+                    if let Err(error) =
+                        add_boolean_result(document, &a.union(&b), "U", "PolygonUnion")
+                    {
                         result = CommandOutcome::Error(error);
                     }
                 }
@@ -4899,7 +5162,12 @@ fn handle_remaining_cas_commands(
         "PolygonIntersection" if cmd.args.len() == 2 => {
             match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
                 Ok((a, b)) => {
-                    if let Err(error) = add_boolean_result(document, &a.intersection(&b), "I") {
+                    if let Err(error) = add_boolean_result(
+                        document,
+                        &a.intersection(&b),
+                        "I",
+                        "PolygonIntersection",
+                    ) {
                         result = CommandOutcome::Error(error);
                     }
                 }
@@ -4911,7 +5179,9 @@ fn handle_remaining_cas_commands(
         "PolygonDifference" if cmd.args.len() == 2 => {
             match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
                 Ok((a, b)) => {
-                    if let Err(error) = add_boolean_result(document, &a.difference(&b), "D") {
+                    if let Err(error) =
+                        add_boolean_result(document, &a.difference(&b), "D", "PolygonDifference")
+                    {
                         result = CommandOutcome::Error(error);
                     }
                 }
@@ -4923,7 +5193,8 @@ fn handle_remaining_cas_commands(
         "PolygonXor" if cmd.args.len() == 2 => {
             match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
                 Ok((a, b)) => {
-                    if let Err(error) = add_boolean_result(document, &a.xor(&b), "X") {
+                    if let Err(error) = add_boolean_result(document, &a.xor(&b), "X", "PolygonXor")
+                    {
                         result = CommandOutcome::Error(error);
                     }
                 }
@@ -9195,6 +9466,32 @@ fn handle_remaining_cas_commands(
                 }
             }
         }
+        "List" if cmd.args.len() == 1 => {
+            // Lista persistible de primera clase (P1): `List[{1,2,{3}}]`.
+            let elems = match parse_generic_list_literal(cmd.args[0].trim(), &document.variables) {
+                Ok(elems) => elems,
+                Err(error) => return CommandOutcome::Error(format!("List: {error}")),
+            };
+            let items = match list_elems_to_items(&elems) {
+                Ok(items) => items,
+                Err(error) => return CommandOutcome::Error(format!("List: {error}")),
+            };
+            let list = ListObj::new(items);
+            if let Err(error) = list.validate() {
+                return CommandOutcome::Error(format!("List: {error}"));
+            }
+            let shown = format_list(&elems);
+            let id = match try_insert_command_object(document, GeoObject::List(list)) {
+                Ok(id) => id,
+                Err(error) => return CommandOutcome::Error(format!("List: {error}")),
+            };
+            let label = document
+                .get_object(id)
+                .map(|object| object.label().to_string())
+                .unwrap_or_default();
+            input_text.clear();
+            return CommandOutcome::Message(format!("List {label} = {shown}"));
+        }
         "Zip" => {
             let outcome = run_zip_command(&cmd.args, document);
             match &outcome {
@@ -9297,6 +9594,826 @@ fn handle_remaining_cas_commands(
         }
         "CountIf" => {
             let outcome = run_count_if_command(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Element" => {
+            let outcome = run_p1_element(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Unique" => {
+            let outcome = run_p1_unique(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "IterationList" => {
+            let outcome = run_p1_iteration_list(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Union" => {
+            let outcome = run_p1_union(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Intersection" => {
+            let outcome = run_p1_intersection(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Insert" => {
+            let outcome = run_p1_insert(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Remove" => {
+            let outcome = run_p1_remove(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "IndexOf" => {
+            let outcome = run_p1_index_of(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Map" => {
+            let outcome = run_p1_map(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Shuffle" => {
+            let outcome = run_p1_shuffle(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Sample" => {
+            let outcome = run_p1_sample(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "RandomElement" => {
+            let outcome = run_p1_random_element(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "RandomDiscrete" => {
+            let outcome = run_p1_random_discrete(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ListMin" => {
+            let outcome = run_p1_list_min(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ListMax" => {
+            let outcome = run_p1_list_max(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Sum" => {
+            let outcome = run_p1_sum(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Product" => {
+            let outcome = run_p1_product(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Covariance" => {
+            let outcome = run_p1_covariance(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "RSquare" => {
+            let outcome = run_p1_rsquare(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Spearman" => {
+            let outcome = run_p1_spearman(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "TiedRank" => {
+            let outcome = run_p1_tied_rank(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "OrdinalRank" => {
+            let outcome = run_p1_ordinal_rank(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "MAD" => {
+            let outcome = run_p1_mad(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Quartile1" => {
+            let outcome = run_p1_quartile1(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Quartile3" => {
+            let outcome = run_p1_quartile3(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Percentile" => {
+            let outcome = run_p1_percentile(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SDX" => {
+            let outcome = run_p1_sdx(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SDY" => {
+            let outcome = run_p1_sdy(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SampleSDX" => {
+            let outcome = run_p1_sample_sdx(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SampleSDY" => {
+            let outcome = run_p1_sample_sdy(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "MeanX" => {
+            let outcome = run_p1_meanx(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "MeanY" => {
+            let outcome = run_p1_meany(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SigmaXX" => {
+            let outcome = run_p1_sigma_xx(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SigmaXY" => {
+            let outcome = run_p1_sigma_xy(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SigmaYY" => {
+            let outcome = run_p1_sigma_yy(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Sxx" => {
+            let outcome = run_p1_sxx(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Sxy" => {
+            let outcome = run_p1_sxy(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Syy" => {
+            let outcome = run_p1_syy(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "GeometricMean" => {
+            let outcome = run_p1_geometric_mean(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "HarmonicMean" => {
+            let outcome = run_p1_harmonic_mean(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Mode" => {
+            let outcome = run_p1_mode(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "RootMeanSquare" => {
+            let outcome = run_p1_rms(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SumSquaredErrors" => {
+            let outcome = run_p1_sse(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ZMeanEstimate" => {
+            let outcome = run_p1_zmean_estimate(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ZMean2Estimate" => {
+            let outcome = run_p1_zmean2_estimate(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ZMeanTest" => {
+            let outcome = run_p1_zmean_test(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ZMean2Test" => {
+            let outcome = run_p1_zmean2_test(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ZProportionEstimate" => {
+            let outcome = run_p1_zprop_estimate(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ZProportion2Estimate" => {
+            let outcome = run_p1_zprop2_estimate(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ZProportionTest" => {
+            let outcome = run_p1_zprop_test(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ZProportion2Test" => {
+            let outcome = run_p1_zprop2_test(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "TMeanEstimate" => {
+            let outcome = run_p1_tmean_estimate(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "TMean2Estimate" => {
+            let outcome = run_p1_tmean2_estimate(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "ContingencyTable" => {
+            let outcome = run_p1_contingency(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Class" => {
+            let outcome = run_p1_class(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Classes" => {
+            let outcome = run_p1_classes(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "DotPlot" => {
+            let outcome = run_p1_dotplot(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "FrequencyPolygon" => {
+            let outcome = run_p1_freq_polygon(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Erlang" => {
+            let outcome = run_p1_erlang(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "FDistribution" => {
+            let outcome = run_p1_fdistribution(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Gamma" if matches!(cmd.args.len(), 2 | 3) => {
+            let outcome = run_p1_gamma(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "HyperGeometric" => {
+            let outcome = run_p1_hypergeometric(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "LogNormal" => {
+            let outcome = run_p1_lognormal(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Logistic" => {
+            let outcome = run_p1_logistic(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Pascal" => {
+            let outcome = run_p1_pascal(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Triangular" => {
+            let outcome = run_p1_triangular(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Weibull" => {
+            let outcome = run_p1_weibull(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Zipf" => {
+            let outcome = run_p1_zipf(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "Bernoulli" => {
+            let outcome = run_p1_bernoulli(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "TDistribution" => {
+            let outcome = run_p1_tdistribution(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseBeta" => {
+            let outcome = run_p1_inverse_beta(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseBinomial" => {
+            let outcome = run_p1_inverse_binomial(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseBinomialMinimumTrials" => {
+            let outcome = run_p1_inverse_binomial_trials(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseCauchy" => {
+            let outcome = run_p1_inverse_cauchy(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseGamma" => {
+            let outcome = run_p1_inverse_gamma(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseHyperGeometric" => {
+            let outcome = run_p1_inverse_hypergeometric(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseLogNormal" => {
+            let outcome = run_p1_inverse_lognormal(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseLogistic" => {
+            let outcome = run_p1_inverse_logistic(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InversePascal" => {
+            let outcome = run_p1_inverse_pascal(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InversePoisson" => {
+            let outcome = run_p1_inverse_poisson(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseWeibull" => {
+            let outcome = run_p1_inverse_weibull(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "InverseZipf" => {
+            let outcome = run_p1_inverse_zipf(&cmd.args, document);
             match &outcome {
                 CommandOutcome::Error(_) => return outcome,
                 _ => {
@@ -13109,6 +14226,9 @@ fn execute_cas_command_typed(
         }
         "Integral" => {
             let expr = expand_all_cas(cmd.args.first()?, document);
+            // Refina con hipótesis (Assume) antes de integrar y graficar.
+            let (expr, conds) = refine_with_assumptions(&expr, document);
+            let suffix = assumption_suffix(&conds);
             let mut var = "x".to_string();
             let mut a_str = None;
             let mut b_str = None;
@@ -13204,14 +14324,13 @@ fn execute_cas_command_typed(
                 }
 
                 match symbolic::integrate_definite(&expr, &var, a, b) {
-                    Ok(result) => Some(Ok(format!("{} → Graficado como {}", result, label))),
-                    Err(e) => Some(Err(format!("Error calculando integral: {}", e))),
+                    Ok(result) => Some(Ok(format!("{result} → Graficado como {label}{suffix}"))),
+                    Err(e) => Some(Err(format!("Error calculando integral: {e}"))),
                 }
             } else {
                 match symbolic::integrate(&expr, &var) {
                     Ok(result) => Some(Ok(format!(
-                        "{} → Graficado original como {}",
-                        result, label
+                        "{result} → Graficado original como {label}{suffix}"
                     ))),
                     Err(e) => Some(Err(format!("Error calculando integral: {}", e))),
                 }
@@ -13618,6 +14737,10 @@ fn execute_cas_command_typed(
             if expr.trim().is_empty() {
                 return Some(Err("Error: Limit requiere una expresión no vacía".into()));
             }
+            // Refina con hipótesis del documento (Assume) antes del motor:
+            // p. ej. `x/x` con `x≠0` llega como `1` a Gruntz.
+            let (expr, conds) = refine_with_assumptions(&expr, document);
+            let suffix = assumption_suffix(&conds);
             let var = cmd.args[1].trim();
             if !is_math_identifier(var) {
                 return Some(Err("Error: Limit requiere una variable válida".into()));
@@ -13634,7 +14757,10 @@ fn execute_cas_command_typed(
                 if outcome.value.is_finite()
                     && outcome.method != grafito_geometry::cas::GruntzMethod::Richardson
                 {
-                    return Some(Ok(format!("lim({var}→{at}) {expr} = {:.8}", outcome.value)));
+                    return Some(Ok(format!(
+                        "lim({var}→{at}) {expr} = {:.8}{suffix}",
+                        outcome.value
+                    )));
                 }
                 if outcome.value.is_infinite() {
                     let sign = if outcome.value.is_sign_negative() {
@@ -13642,19 +14768,19 @@ fn execute_cas_command_typed(
                     } else {
                         ""
                     };
-                    return Some(Ok(format!("lim({var}→{at}) {expr} = {sign}∞")));
+                    return Some(Ok(format!("lim({var}→{at}) {expr} = {sign}∞{suffix}")));
                 }
             }
 
             match symbolic::limit_typed(&expr, var, at) {
                 grafito_geometry::outcome::MathResult::Exact(value) if value.is_finite() => {
-                    Some(Ok(format!("lim({var}→{at}) {expr} = {value:.8}")))
+                    Some(Ok(format!("lim({var}→{at}) {expr} = {value:.8}{suffix}")))
                 }
                 grafito_geometry::outcome::MathResult::Approximate {
                     value,
                     error_estimate,
                 } if value.is_finite() && error_estimate.is_finite() => Some(Ok(format!(
-                    "lim({var}→{at}) {expr} ≈ {value:.8} (error estimado {error_estimate:.3e})"
+                    "lim({var}→{at}) {expr} ≈ {value:.8} (error estimado {error_estimate:.3e}){suffix}"
                 ))),
                 _ => Some(Err(
                     "Error: Limit no produjo un valor bilateral finito y confiable".into(),
@@ -13673,6 +14799,8 @@ fn execute_cas_command_typed(
                     "Error: LimitAbove requiere una expresión no vacía".into()
                 ));
             }
+            let (expr, conds) = refine_with_assumptions(&expr, document);
+            let suffix = assumption_suffix(&conds);
             let var = cmd.args[1].trim();
             if !is_math_identifier(var) {
                 return Some(Err("Error: LimitAbove requiere una variable válida".into()));
@@ -13683,13 +14811,13 @@ fn execute_cas_command_typed(
             };
             match symbolic::limit_above_typed(&expr, var, at) {
                 grafito_geometry::outcome::MathResult::Exact(value) if value.is_finite() => {
-                    Some(Ok(format!("lim({var}→{at}⁺) {expr} = {value:.8}")))
+                    Some(Ok(format!("lim({var}→{at}⁺) {expr} = {value:.8}{suffix}")))
                 }
                 grafito_geometry::outcome::MathResult::Approximate {
                     value,
                     error_estimate,
                 } if value.is_finite() && error_estimate.is_finite() => Some(Ok(format!(
-                    "lim({var}→{at}⁺) {expr} ≈ {value:.8} (error estimado {error_estimate:.3e})"
+                    "lim({var}→{at}⁺) {expr} ≈ {value:.8} (error estimado {error_estimate:.3e}){suffix}"
                 ))),
                 _ => Some(Err(
                     "Error: LimitAbove no produjo un valor lateral finito y confiable".into(),
@@ -13708,6 +14836,8 @@ fn execute_cas_command_typed(
                     "Error: LimitBelow requiere una expresión no vacía".into()
                 ));
             }
+            let (expr, conds) = refine_with_assumptions(&expr, document);
+            let suffix = assumption_suffix(&conds);
             let var = cmd.args[1].trim();
             if !is_math_identifier(var) {
                 return Some(Err("Error: LimitBelow requiere una variable válida".into()));
@@ -13718,13 +14848,13 @@ fn execute_cas_command_typed(
             };
             match symbolic::limit_below_typed(&expr, var, at) {
                 grafito_geometry::outcome::MathResult::Exact(value) if value.is_finite() => {
-                    Some(Ok(format!("lim({var}→{at}⁻) {expr} = {value:.8}")))
+                    Some(Ok(format!("lim({var}→{at}⁻) {expr} = {value:.8}{suffix}")))
                 }
                 grafito_geometry::outcome::MathResult::Approximate {
                     value,
                     error_estimate,
                 } if value.is_finite() && error_estimate.is_finite() => Some(Ok(format!(
-                    "lim({var}→{at}⁻) {expr} ≈ {value:.8} (error estimado {error_estimate:.3e})"
+                    "lim({var}→{at}⁻) {expr} ≈ {value:.8} (error estimado {error_estimate:.3e}){suffix}"
                 ))),
                 _ => Some(Err(
                     "Error: LimitBelow no produjo un valor lateral finito y confiable".into(),
@@ -14079,6 +15209,1360 @@ fn execute_cas_command_typed(
                 Ok(out) => Some(Ok(out)),
                 Err(error) => Some(Err(format!("GroebnerBasis: {error}"))),
             }
+        }
+        "CSolve" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: CSolve requiere CSolve[expr] o CSolve[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("CSolve", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = match csolve_default_var(&expr, cmd.args.get(1)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("CSolve: {e}"))),
+            };
+            match grafito_geometry::complex_solve::csolve(&expr, &var) {
+                Ok(roots) => Some(Ok(format!(
+                    "CSolve[{expr}] = {}",
+                    grafito_geometry::complex_solve::format_complex_roots(&roots)
+                ))),
+                Err(e) => Some(Err(format!("CSolve: {e}"))),
+            }
+        }
+        "CSolutions" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: CSolutions requiere CSolutions[expr] o CSolutions[expr, variable]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("CSolutions", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = match csolve_default_var(&expr, cmd.args.get(1)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("CSolutions: {e}"))),
+            };
+            let roots = match grafito_geometry::complex_solve::csolve(&expr, &var) {
+                Ok(roots) => roots,
+                Err(e) => return Some(Err(format!("CSolutions: {e}"))),
+            };
+            // CSolutions verifica por sustitución: residuo máximo |p(z)|.
+            let residual = csolutions_max_residual(&expr, &var, &roots);
+            Some(Ok(format!(
+                "CSolutions[{expr}] = {} (residuo ≤ {residual:.2e})",
+                grafito_geometry::complex_solve::format_complex_roots(&roots)
+            )))
+        }
+        "NSolutions" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: NSolutions requiere NSolutions[expr] o NSolutions[expr, variable]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("NSolutions", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = match csolve_default_var(&expr, cmd.args.get(1)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("NSolutions: {e}"))),
+            };
+            match grafito_geometry::solve::solve_all_real(&expr, &var) {
+                Ok(found) => {
+                    let list = found
+                        .roots
+                        .iter()
+                        .map(|r| format!("{r}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!(
+                        "NSolutions[{expr}] = {{{list}}} ({})",
+                        found.method
+                    )))
+                }
+                Err(e) => Some(Err(format!("NSolutions: {e}"))),
+            }
+        }
+        "Solutions" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: Solutions requiere Solutions[ecuación] o Solutions[ecuación, variable]"
+                        .into(),
+                ));
+            }
+            let mut expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Solutions", "ecuación", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            // Ecuación `lhs = rhs` → `lhs - rhs` (igual que Solve).
+            if let Some((lhs, rhs)) = split_on_standalone_eq(&expr) {
+                expr = format!("({lhs}) - ({rhs})");
+            }
+            let var = match csolve_default_var(&expr, cmd.args.get(1)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Solutions: {e}"))),
+            };
+            match grafito_geometry::solve::solve_all_real(&expr, &var) {
+                Ok(found) => {
+                    let list = found
+                        .roots
+                        .iter()
+                        .map(|r| format!("{r}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("Solutions = {{{list}}}")))
+                }
+                Err(e) => Some(Err(format!("Solutions: {e}"))),
+            }
+        }
+        "ToComplex" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: ToComplex requiere ToComplex[a, b] o ToComplex[\"a+bi\"]".into(),
+                ));
+            }
+            let z = if cmd.args.len() == 2 {
+                let a = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("ToComplex: {e}"))),
+                };
+                let b = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("ToComplex: {e}"))),
+                };
+                num_complex::Complex64::new(a, b)
+            } else {
+                match grafito_geometry::complex_solve::parse_complex_arg(cmd.args[0].trim()) {
+                    Ok(z) => z,
+                    Err(e) => return Some(Err(format!("ToComplex: {e}"))),
+                }
+            };
+            Some(Ok(format!(
+                "ToComplex = {}",
+                grafito_geometry::complex_solve::format_complex(z)
+            )))
+        }
+        "ToPolar" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: ToPolar requiere ToPolar[a, b] o ToPolar[\"a+bi\"]".into(),
+                ));
+            }
+            let z = if cmd.args.len() == 2 {
+                let a = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("ToPolar: {e}"))),
+                };
+                let b = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("ToPolar: {e}"))),
+                };
+                num_complex::Complex64::new(a, b)
+            } else {
+                match grafito_geometry::complex_solve::parse_complex_arg(cmd.args[0].trim()) {
+                    Ok(z) => z,
+                    Err(e) => return Some(Err(format!("ToPolar: {e}"))),
+                }
+            };
+            let (r, theta) = grafito_geometry::complex_solve::to_polar(z);
+            Some(Ok(format!("ToPolar = ({r}; {theta})")))
+        }
+        "ToPoint" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: ToPoint requiere ToPoint[\"a+bi\"]".into()));
+            }
+            let z = match grafito_geometry::complex_solve::parse_complex_arg(cmd.args[0].trim()) {
+                Ok(z) => z,
+                Err(e) => return Some(Err(format!("ToPoint: {e}"))),
+            };
+            if !z.re.is_finite() || !z.im.is_finite() {
+                return Some(Err("ToPoint: el complejo debe ser finito".into()));
+            }
+            let id = try_insert_command_object(
+                document,
+                GeoObject::Point(PointObj::new(Point2::new(z.re, z.im))),
+            );
+            match id {
+                Ok(_) => Some(Ok(format!(
+                    "ToPoint[{}] = ({}, {})",
+                    cmd.args[0].trim(),
+                    z.re,
+                    z.im
+                ))),
+                Err(e) => Some(Err(format!("ToPoint: {e}"))),
+            }
+        }
+        "Area" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Area requiere Area[objeto]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Area: objeto '{label}' no encontrado"))),
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Polygon(p)) => {
+                    match grafito_geometry::measure::polygon_area(&p.vertices) {
+                        Ok(a) => Some(Ok(format!("Area[{label}] = {a}"))),
+                        Err(e) => Some(Err(format!("Area: {e}"))),
+                    }
+                }
+                Some(GeoObject::Circle(c)) => {
+                    match grafito_geometry::measure::circle_area(c.radius) {
+                        Ok(a) => Some(Ok(format!("Area[{label}] = {a}"))),
+                        Err(e) => Some(Err(format!("Area: {e}"))),
+                    }
+                }
+                Some(GeoObject::Ellipse(e)) => {
+                    match grafito_geometry::measure::ellipse_area(e.rx, e.ry) {
+                        Ok(a) => Some(Ok(format!("Area[{label}] = {a}"))),
+                        Err(e) => Some(Err(format!("Area: {e}"))),
+                    }
+                }
+                _ => Some(Err(format!(
+                    "Area: '{label}' debe ser polígono, círculo o elipse"
+                ))),
+            }
+        }
+        "Perimeter" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Perimeter requiere Perimeter[objeto]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Perimeter: objeto '{label}' no encontrado"))),
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Polygon(p)) => {
+                    match grafito_geometry::measure::polygon_perimeter(&p.vertices) {
+                        Ok(v) => Some(Ok(format!("Perimeter[{label}] = {v}"))),
+                        Err(e) => Some(Err(format!("Perimeter: {e}"))),
+                    }
+                }
+                Some(GeoObject::Circle(c)) => {
+                    match grafito_geometry::measure::circle_circumference(c.radius) {
+                        Ok(v) => Some(Ok(format!("Perimeter[{label}] = {v}"))),
+                        Err(e) => Some(Err(format!("Perimeter: {e}"))),
+                    }
+                }
+                Some(GeoObject::Ellipse(e)) => {
+                    match grafito_geometry::measure::ellipse_perimeter(e.rx, e.ry) {
+                        Ok(v) => Some(Ok(format!("Perimeter[{label}] = {v} (Ramanujan)"))),
+                        Err(e) => Some(Err(format!("Perimeter: {e}"))),
+                    }
+                }
+                _ => Some(Err(format!(
+                    "Perimeter: '{label}' debe ser polígono, círculo o elipse"
+                ))),
+            }
+        }
+        "Length" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Length requiere Length[objeto]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Length: objeto '{label}' no encontrado"))),
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Line(l)) if l.kind == LineKind::Segment => {
+                    let v = (l.end.x - l.start.x).hypot(l.end.y - l.start.y);
+                    Some(Ok(format!("Length[{label}] = {v}")))
+                }
+                Some(GeoObject::Circle(c)) => match grafito_geometry::measure::circle_circumference(c.radius) {
+                    Ok(v) => Some(Ok(format!("Length[{label}] = {v}"))),
+                    Err(e) => Some(Err(format!("Length: {e}"))),
+                },
+                Some(GeoObject::Arc(a)) => match grafito_geometry::measure::arc_length(a.radius, a.start_angle, a.end_angle) {
+                    Ok(v) => Some(Ok(format!("Length[{label}] = {v}"))),
+                    Err(e) => Some(Err(format!("Length: {e}"))),
+                },
+                Some(GeoObject::Polygon(p)) => match grafito_geometry::measure::polygon_perimeter(&p.vertices) {
+                    Ok(v) => Some(Ok(format!("Length[{label}] = {v}"))),
+                    Err(e) => Some(Err(format!("Length: {e}"))),
+                },
+                Some(GeoObject::Polyline(p)) => match grafito_geometry::measure::polyline_length(&p.points) {
+                    Ok(v) => Some(Ok(format!("Length[{label}] = {v}"))),
+                    Err(e) => Some(Err(format!("Length: {e}"))),
+                },
+                Some(GeoObject::BezierCurve(b)) => match grafito_geometry::measure::bezier_arclength(&b.control_points) {
+                    Ok(v) => Some(Ok(format!("Length[{label}] = {v}"))),
+                    Err(e) => Some(Err(format!("Length: {e}"))),
+                },
+                _ => Some(Err(format!("Length: '{label}' debe ser segmento, círculo, arco, polígono, polilínea o Bézier"))),
+            }
+        }
+        "Radius" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Radius requiere Radius[objeto]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Radius: objeto '{label}' no encontrado"))),
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Circle(c)) if c.radius.is_finite() && c.radius >= 0.0 => {
+                    Some(Ok(format!("Radius[{label}] = {}", c.radius)))
+                }
+                Some(GeoObject::Arc(a)) if a.radius.is_finite() && a.radius >= 0.0 => {
+                    Some(Ok(format!("Radius[{label}] = {}", a.radius)))
+                }
+                _ => Some(Err(format!("Radius: '{label}' debe ser círculo o arco"))),
+            }
+        }
+        "Circumference" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: Circumference requiere Circumference[círculo]".into()
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "Circumference: objeto '{label}' no encontrado"
+                    )))
+                }
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Circle(c)) => {
+                    match grafito_geometry::measure::circle_circumference(c.radius) {
+                        Ok(v) => Some(Ok(format!("Circumference[{label}] = {v}"))),
+                        Err(e) => Some(Err(format!("Circumference: {e}"))),
+                    }
+                }
+                _ => Some(Err(format!("Circumference: '{label}' debe ser un círculo"))),
+            }
+        }
+        "Height" => {
+            // Altura desde C a la recta AB: Height[A, B, C].
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: Height requiere Height[A, B, C] (altura desde C a la recta AB)".into(),
+                ));
+            }
+            let a = match p2_point_label(document, cmd.args[0].trim(), "Height") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let b = match p2_point_label(document, cmd.args[1].trim(), "Height") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let c = match p2_point_label(document, cmd.args[2].trim(), "Height") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let base = (b.x - a.x).hypot(b.y - a.y);
+            if base == 0.0 || !base.is_finite() {
+                return Some(Err("Height: A y B deben ser distintos".into()));
+            }
+            let area2 = ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs();
+            Some(Ok(format!("Height = {}", area2 / base)))
+        }
+        "TriangleCenter" => {
+            if cmd.args.len() != 2 && cmd.args.len() != 4 {
+                return Some(Err(
+                    "Error: TriangleCenter requiere TriangleCenter[triángulo, n] o TriangleCenter[P, Q, R, n] (n: 1 centroide, 2 circuncentro, 3 incentro, 4 ortocentro, 5 nueve puntos, 6 simmediano)".into(),
+                ));
+            }
+            let (a, b, c) =
+                match p2_triangle_args(&cmd.args[..cmd.args.len() - 1], document, "TriangleCenter")
+                {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(e)),
+                };
+            let n: i64 = match cmd
+                .args
+                .last()
+                .map(String::as_str)
+                .unwrap_or("")
+                .trim()
+                .parse::<i64>()
+            {
+                Ok(v) => v,
+                Err(_) => return Some(Err("TriangleCenter: n debe ser entero 1..=6".into())),
+            };
+            match grafito_geometry::measure::triangle_center(n, a, b, c) {
+                Ok(p) => {
+                    let id = match try_insert_command_object(
+                        document,
+                        GeoObject::Point(PointObj::new(p)),
+                    ) {
+                        Ok(id) => id,
+                        Err(e) => return Some(Err(format!("TriangleCenter: {e}"))),
+                    };
+                    let label = document
+                        .get_object(id)
+                        .map(|o| o.label().to_string())
+                        .unwrap_or_default();
+                    Some(Ok(format!("TriangleCenter = {label} ({}, {})", p.x, p.y)))
+                }
+                Err(e) => Some(Err(format!("TriangleCenter: {e}"))),
+            }
+        }
+        "Barycenter" => {
+            if cmd.args.is_empty() {
+                return Some(Err(
+                    "Error: Barycenter requiere Barycenter[P, Q, ...]".into()
+                ));
+            }
+            let mut points = Vec::with_capacity(cmd.args.len());
+            for arg in &cmd.args {
+                match p2_point_label(document, arg.trim(), "Barycenter") {
+                    Ok(p) => points.push(p),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            match grafito_geometry::measure::barycenter(&points) {
+                Ok(p) => {
+                    let id = match try_insert_command_object(
+                        document,
+                        GeoObject::Point(PointObj::new(p)),
+                    ) {
+                        Ok(id) => id,
+                        Err(e) => return Some(Err(format!("Barycenter: {e}"))),
+                    };
+                    let label = document
+                        .get_object(id)
+                        .map(|o| o.label().to_string())
+                        .unwrap_or_default();
+                    Some(Ok(format!("Barycenter = {label} ({}, {})", p.x, p.y)))
+                }
+                Err(e) => Some(Err(format!("Barycenter: {e}"))),
+            }
+        }
+        "Trilinear" => {
+            // Trilinear[a, b, c, P, Q, R]: punto de trilineales α:β:γ.
+            if cmd.args.len() != 6 {
+                return Some(Err(
+                    "Error: Trilinear requiere Trilinear[a, b, c, P, Q, R]".into()
+                ));
+            }
+            let num = |i: usize| -> Result<f64, String> {
+                require_finite(parse_numeric_arg(&cmd.args[i], &document.variables))
+                    .map_err(|e| format!("Trilinear: {e}"))
+            };
+            let (alpha, beta, gamma) = match (num(0), num(1), num(2)) {
+                (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Some(Err(e)),
+            };
+            let (a, b, c) = match (
+                p2_point_label(document, cmd.args[3].trim(), "Trilinear"),
+                p2_point_label(document, cmd.args[4].trim(), "Trilinear"),
+                p2_point_label(document, cmd.args[5].trim(), "Trilinear"),
+            ) {
+                (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Some(Err(e)),
+            };
+            match grafito_geometry::measure::trilinear_point(alpha, beta, gamma, a, b, c) {
+                Ok(p) => {
+                    let id = match try_insert_command_object(
+                        document,
+                        GeoObject::Point(PointObj::new(p)),
+                    ) {
+                        Ok(id) => id,
+                        Err(e) => return Some(Err(format!("Trilinear: {e}"))),
+                    };
+                    let label = document
+                        .get_object(id)
+                        .map(|o| o.label().to_string())
+                        .unwrap_or_default();
+                    Some(Ok(format!("Trilinear = {label} ({}, {})", p.x, p.y)))
+                }
+                Err(e) => Some(Err(format!("Trilinear: {e}"))),
+            }
+        }
+        "TriangleCurve" => {
+            // TriangleCurve[P, Q, R, ecuación en A, B, C].
+            if cmd.args.len() != 4 {
+                return Some(Err(
+                    "Error: TriangleCurve requiere TriangleCurve[P, Q, R, ecuación en A, B, C]"
+                        .into(),
+                ));
+            }
+            let (p1, p2, p3) = match (
+                p2_point_label(document, cmd.args[0].trim(), "TriangleCurve"),
+                p2_point_label(document, cmd.args[1].trim(), "TriangleCurve"),
+                p2_point_label(document, cmd.args[2].trim(), "TriangleCurve"),
+            ) {
+                (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Some(Err(e)),
+            };
+            let equation = cmd.args[3].trim().trim_matches('"').trim_matches('\'');
+            if let Err(error) = check_w1_budget("TriangleCurve", "ecuación", equation) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let forms = match grafito_geometry::measure::barycentric_forms(p1, p2, p3) {
+                Ok(forms) => forms,
+                Err(e) => return Some(Err(format!("TriangleCurve: {e}"))),
+            };
+            let substituted = grafito_geometry::measure::substitute_barycentric(equation, &forms);
+            // Ecuación `lhs = rhs` → curva implícita (GeoGebra: A, B, C baricéntricas).
+            let (lhs, rhs) = match split_on_standalone_eq(&substituted) {
+                Some((l, r)) => (l.to_string(), r.to_string()),
+                None => (substituted, "0".to_string()),
+            };
+            if let Err(error) = check_w1_budget("TriangleCurve", "lhs", &lhs) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let obj =
+                GeoObject::ImplicitCurve(ImplicitCurveObj::new(&lhs, &rhs, RelationOperator::Eq));
+            if let Err(e) = try_insert_command_object(document, obj) {
+                return Some(Err(format!("TriangleCurve: {e}")));
+            }
+            Some(Ok(format!("TriangleCurve[{lhs} = {rhs}] created")))
+        }
+        "ConjugateDiameter" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: ConjugateDiameter requiere ConjugateDiameter[cónica]".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "ConjugateDiameter: objeto '{label}' no encontrado"
+                    )))
+                }
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Ellipse(e)) => Some(Ok(format!(
+                    "ConjugateDiameter[{label}] = {}",
+                    2.0 * e.rx.min(e.ry)
+                ))),
+                Some(GeoObject::Hyperbola(h)) => {
+                    Some(Ok(format!("ConjugateDiameter[{label}] = {}", 2.0 * h.b)))
+                }
+                _ => Some(Err(format!(
+                    "ConjugateDiameter: '{label}' debe ser elipse o hipérbola"
+                ))),
+            }
+        }
+        "MinorAxis" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: MinorAxis requiere MinorAxis[elipse]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("MinorAxis: objeto '{label}' no encontrado"))),
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Ellipse(e)) => {
+                    Some(Ok(format!("MinorAxis[{label}] = {}", 2.0 * e.rx.min(e.ry))))
+                }
+                _ => Some(Err(format!("MinorAxis: '{label}' debe ser una elipse"))),
+            }
+        }
+        "MajorAxis" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: MajorAxis requiere MajorAxis[elipse]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("MajorAxis: objeto '{label}' no encontrado"))),
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Ellipse(e)) => {
+                    Some(Ok(format!("MajorAxis[{label}] = {}", 2.0 * e.rx.max(e.ry))))
+                }
+                _ => Some(Err(format!("MajorAxis: '{label}' debe ser una elipse"))),
+            }
+        }
+        "SemiMajorAxisLength" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: SemiMajorAxisLength requiere SemiMajorAxisLength[elipse]".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "SemiMajorAxisLength: objeto '{label}' no encontrado"
+                    )))
+                }
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Ellipse(e)) => Some(Ok(format!(
+                    "SemiMajorAxisLength[{label}] = {}",
+                    e.rx.max(e.ry)
+                ))),
+                _ => Some(Err(format!(
+                    "SemiMajorAxisLength: '{label}' debe ser una elipse"
+                ))),
+            }
+        }
+        "SemiMinorAxisLength" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: SemiMinorAxisLength requiere SemiMinorAxisLength[elipse]".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "SemiMinorAxisLength: objeto '{label}' no encontrado"
+                    )))
+                }
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Ellipse(e)) => Some(Ok(format!(
+                    "SemiMinorAxisLength[{label}] = {}",
+                    e.rx.min(e.ry)
+                ))),
+                _ => Some(Err(format!(
+                    "SemiMinorAxisLength: '{label}' debe ser una elipse"
+                ))),
+            }
+        }
+        "LinearEccentricity" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: LinearEccentricity requiere LinearEccentricity[cónica]".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "LinearEccentricity: objeto '{label}' no encontrado"
+                    )))
+                }
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Ellipse(e)) => {
+                    match grafito_geometry::measure::ellipse_linear_eccentricity(e.rx, e.ry) {
+                        Ok(v) => Some(Ok(format!("LinearEccentricity[{label}] = {v}"))),
+                        Err(e) => Some(Err(format!("LinearEccentricity: {e}"))),
+                    }
+                }
+                Some(GeoObject::Hyperbola(h)) => {
+                    match grafito_geometry::measure::hyperbola_linear_eccentricity(h.a, h.b) {
+                        Ok(v) => Some(Ok(format!("LinearEccentricity[{label}] = {v}"))),
+                        Err(e) => Some(Err(format!("LinearEccentricity: {e}"))),
+                    }
+                }
+                _ => Some(Err(format!(
+                    "LinearEccentricity: '{label}' debe ser elipse o hipérbola"
+                ))),
+            }
+        }
+        "ClosestPoint" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: ClosestPoint requiere ClosestPoint[punto, objeto]".into(),
+                ));
+            }
+            let p = match p2_point_or_coords(document, cmd.args[0].trim(), "ClosestPoint") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let target = cmd.args[1].trim();
+            let id = match find_object_by_label(document, target) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "ClosestPoint: objeto '{target}' no encontrado"
+                    )))
+                }
+            };
+            let found = match document.get_object(id) {
+                Some(GeoObject::Polygon(poly)) => {
+                    grafito_geometry::measure::closest_on_polyline(p, &poly.vertices, true)
+                }
+                Some(GeoObject::Polyline(pl)) => {
+                    grafito_geometry::measure::closest_on_polyline(p, &pl.points, false)
+                }
+                Some(GeoObject::Circle(c)) => {
+                    grafito_geometry::measure::closest_on_circle(p, c.center, c.radius)
+                }
+                Some(GeoObject::Line(l)) if l.kind == LineKind::Segment => Some(
+                    grafito_geometry::measure::closest_on_segment(p, l.start, l.end),
+                ),
+                _ => {
+                    return Some(Err(format!(
+                        "ClosestPoint: '{target}' debe ser polígono, polilínea, círculo o segmento"
+                    )))
+                }
+            };
+            match found {
+                Some(q) => {
+                    let id = match try_insert_command_object(
+                        document,
+                        GeoObject::Point(PointObj::new(q)),
+                    ) {
+                        Ok(id) => id,
+                        Err(e) => return Some(Err(format!("ClosestPoint: {e}"))),
+                    };
+                    let label = document
+                        .get_object(id)
+                        .map(|o| o.label().to_string())
+                        .unwrap_or_default();
+                    Some(Ok(format!("ClosestPoint = {label} ({}, {})", q.x, q.y)))
+                }
+                None => Some(Err(
+                    "ClosestPoint: sin punto cercano (objeto degenerado)".into()
+                )),
+            }
+        }
+        "ClosestPointRegion" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: ClosestPointRegion requiere ClosestPointRegion[punto, polígono]".into(),
+                ));
+            }
+            let p = match p2_point_or_coords(document, cmd.args[0].trim(), "ClosestPointRegion") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let verts = match p2_polygon_label(document, cmd.args[1].trim(), "ClosestPointRegion") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            // Dentro (incluye borde) → el punto mismo; fuera → borde cercano.
+            let q = if grafito_geometry::measure::point_in_polygon(p, &verts) {
+                p
+            } else {
+                match grafito_geometry::measure::closest_on_polyline(p, &verts, true) {
+                    Some(q) => q,
+                    None => return Some(Err("ClosestPointRegion: polígono degenerado".into())),
+                }
+            };
+            let id = match try_insert_command_object(document, GeoObject::Point(PointObj::new(q))) {
+                Ok(id) => id,
+                Err(e) => return Some(Err(format!("ClosestPointRegion: {e}"))),
+            };
+            let label = document
+                .get_object(id)
+                .map(|o| o.label().to_string())
+                .unwrap_or_default();
+            Some(Ok(format!(
+                "ClosestPointRegion = {label} ({}, {})",
+                q.x, q.y
+            )))
+        }
+        "PointIn" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: PointIn requiere PointIn[punto, polígono]".into()
+                ));
+            }
+            let p = match p2_point_or_coords(document, cmd.args[0].trim(), "PointIn") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let verts = match p2_polygon_label(document, cmd.args[1].trim(), "PointIn") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let inside = grafito_geometry::measure::point_in_polygon(p, &verts);
+            Some(Ok(format!(
+                "PointIn = {}",
+                if inside { "verdadero" } else { "falso" }
+            )))
+        }
+        "RandomPointIn" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: RandomPointIn requiere RandomPointIn[polígono]".into()
+                ));
+            }
+            let verts = match p2_polygon_label(document, cmd.args[0].trim(), "RandomPointIn") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if verts.len() < 3 {
+                return Some(Err("RandomPointIn: se necesitan al menos 3 vértices".into()));
+            }
+            let (mut x_min, mut y_min) = (f64::INFINITY, f64::INFINITY);
+            let (mut x_max, mut y_max) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for v in &verts {
+                if !v.x.is_finite() || !v.y.is_finite() {
+                    return Some(Err("RandomPointIn: vértices no finitos".into()));
+                }
+                x_min = x_min.min(v.x);
+                y_min = y_min.min(v.y);
+                x_max = x_max.max(v.x);
+                y_max = y_max.max(v.y);
+            }
+            let x_ok = x_max
+                .partial_cmp(&x_min)
+                .is_some_and(|o| o == std::cmp::Ordering::Greater);
+            let y_ok = y_max
+                .partial_cmp(&y_min)
+                .is_some_and(|o| o == std::cmp::Ordering::Greater);
+            if !x_ok || !y_ok {
+                return Some(Err("RandomPointIn: polígono de área nula".into()));
+            }
+            // Muestreo por rechazo determinista (misma semilla → mismo punto).
+            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
+                document.version,
+                "RandomPointIn",
+                &arg_refs,
+            );
+            let mut found = None;
+            for _ in 0..10_000 {
+                let x = x_min + rng_unit(&mut rng) * (x_max - x_min);
+                let y = y_min + rng_unit(&mut rng) * (y_max - y_min);
+                let p = Point2::new(x, y);
+                if grafito_geometry::measure::point_in_polygon(p, &verts) {
+                    found = Some(p);
+                    break;
+                }
+            }
+            match found {
+                Some(q) => {
+                    let id = match try_insert_command_object(
+                        document,
+                        GeoObject::Point(PointObj::new(q)),
+                    ) {
+                        Ok(id) => id,
+                        Err(e) => return Some(Err(format!("RandomPointIn: {e}"))),
+                    };
+                    let label = document
+                        .get_object(id)
+                        .map(|o| o.label().to_string())
+                        .unwrap_or_default();
+                    Some(Ok(format!("RandomPointIn = {label} ({}, {})", q.x, q.y)))
+                }
+                None => Some(Err(
+                    "RandomPointIn: sin punto interior tras 10000 intentos".into()
+                )),
+            }
+        }
+        "IntersectPath" => {
+            // Intersección analítica recta × cónica (sin recorte de vista,
+            // a diferencia de Intersect): crea 0–2 puntos.
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: IntersectPath requiere IntersectPath[recta, cónica]".into(),
+                ));
+            }
+            let line_id = match find_object_by_label(document, cmd.args[0].trim()) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "IntersectPath: recta '{}' no encontrada",
+                        cmd.args[0].trim()
+                    )))
+                }
+            };
+            let (origin, direction) = match document.get_object(line_id) {
+                Some(GeoObject::Line(l)) => {
+                    let dx = l.end.x - l.start.x;
+                    let dy = l.end.y - l.start.y;
+                    if dx == 0.0 && dy == 0.0 {
+                        return Some(Err("IntersectPath: recta degenerada".into()));
+                    }
+                    (l.start, Point2::new(dx, dy))
+                }
+                _ => {
+                    return Some(Err(format!(
+                        "IntersectPath: '{}' debe ser una recta",
+                        cmd.args[0].trim()
+                    )))
+                }
+            };
+            let conic = cmd.args[1].trim();
+            let conic_id = match find_object_by_label(document, conic) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "IntersectPath: cónica '{conic}' no encontrada"
+                    )))
+                }
+            };
+            // Coeficientes de at²+bt+c=0 sobre la recta P(t) = origin + t·d.
+            let (qa, qb, qc) = match document.get_object(conic_id) {
+                Some(GeoObject::Circle(c)) => {
+                    let ox = origin.x - c.center.x;
+                    let oy = origin.y - c.center.y;
+                    let dx = direction.x;
+                    let dy = direction.y;
+                    (
+                        dx * dx + dy * dy,
+                        2.0 * (ox * dx + oy * dy),
+                        ox * ox + oy * oy - c.radius * c.radius,
+                    )
+                }
+                Some(GeoObject::Ellipse(e)) => {
+                    // Elipse rotada: pasa al marco local.
+                    let cos = e.angle.cos();
+                    let sin = e.angle.sin();
+                    let to_local = |p: Point2| -> (f64, f64) {
+                        let dx = p.x - e.center.x;
+                        let dy = p.y - e.center.y;
+                        (dx * cos + dy * sin, -dx * sin + dy * cos)
+                    };
+                    let (ox, oy) = to_local(origin);
+                    let (dx, dy) = to_local(Point2::new(
+                        origin.x + direction.x,
+                        origin.y + direction.y,
+                    ));
+                    let (dx, dy) = (dx - ox, dy - oy);
+                    let (rx2, ry2) = (e.rx * e.rx, e.ry * e.ry);
+                    if rx2 == 0.0 || ry2 == 0.0 {
+                        return Some(Err("IntersectPath: elipse degenerada".into()));
+                    }
+                    (
+                        dx * dx / rx2 + dy * dy / ry2,
+                        2.0 * (ox * dx / rx2 + oy * dy / ry2),
+                        ox * ox / rx2 + oy * oy / ry2 - 1.0,
+                    )
+                }
+                _ => {
+                    return Some(Err(format!(
+                        "IntersectPath: '{conic}' debe ser círculo o elipse (parábola/hipérbola pendientes)"
+                    )))
+                }
+            };
+            if qa.abs() < 1e-15 {
+                return Some(Err("IntersectPath: recta degenerada sobre la cónica".into()));
+            }
+            let disc = qb * qb - 4.0 * qa * qc;
+            if disc < 0.0 {
+                return Some(Ok("IntersectPath = {} (sin intersección real)".to_string()));
+            }
+            let mut made = Vec::new();
+            let ts = if disc == 0.0 {
+                vec![-qb / (2.0 * qa)]
+            } else {
+                let root = disc.sqrt();
+                vec![(-qb - root) / (2.0 * qa), (-qb + root) / (2.0 * qa)]
+            };
+            for t in ts {
+                let p = Point2::new(origin.x + t * direction.x, origin.y + t * direction.y);
+                if !p.x.is_finite() || !p.y.is_finite() {
+                    continue;
+                }
+                match try_insert_command_object(document, GeoObject::Point(PointObj::new(p))) {
+                    Ok(id) => {
+                        let label = document
+                            .get_object(id)
+                            .map(|o| o.label().to_string())
+                            .unwrap_or_default();
+                        made.push(label);
+                    }
+                    Err(e) => return Some(Err(format!("IntersectPath: {e}"))),
+                }
+            }
+            Some(Ok(format!("IntersectPath = {{{}}}", made.join(", "))))
+        }
+        "Envelope" => {
+            // Envolvente de familia a(t)x + b(t)y + c(t) = 0.
+            if cmd.args.len() != 3 && cmd.args.len() != 5 {
+                return Some(Err(
+                    "Error: Envelope requiere Envelope[a, b, c] o Envelope[a, b, c, t0, t1]".into(),
+                ));
+            }
+            let a = expand_all_cas(cmd.args[0].trim(), document);
+            let b = expand_all_cas(cmd.args[1].trim(), document);
+            let c = expand_all_cas(cmd.args[2].trim(), document);
+            for (what, e) in [("a", &a), ("b", &b), ("c", &c)] {
+                if let Err(error) = check_w1_budget("Envelope", what, e) {
+                    return Some(Err(format!("Error: {error}")));
+                }
+            }
+            let (t0, t1) = match (&cmd.args.get(3), &cmd.args.get(4)) {
+                (Some(a_raw), Some(b_raw)) => {
+                    let t0 = match require_finite(parse_numeric_arg(a_raw, &document.variables)) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(format!("Envelope: en t0: {e}"))),
+                    };
+                    let t1 = match require_finite(parse_numeric_arg(b_raw, &document.variables)) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(format!("Envelope: en t1: {e}"))),
+                    };
+                    (t0, t1)
+                }
+                _ => (-10.0, 10.0),
+            };
+            match grafito_geometry::measure::envelope_lines(&a, &b, &c, t0, t1, 200) {
+                Ok(points) => {
+                    let obj = GeoObject::Polyline(PolylineObj::new(points));
+                    if let Err(e) = try_insert_command_object(document, obj) {
+                        return Some(Err(format!("Envelope: {e}")));
+                    }
+                    Some(Ok(format!("Envelope[{a}, {b}, {c}] created")))
+                }
+                Err(e) => Some(Err(format!("Envelope: {e}"))),
+            }
+        }
+        "PlaneBisector" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: PlaneBisector requiere PlaneBisector[A, B]".into()
+                ));
+            }
+            let a = match p2_point3d_label(document, cmd.args[0].trim(), "PlaneBisector") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let b = match p2_point3d_label(document, cmd.args[1].trim(), "PlaneBisector") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let (nx, ny, nz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+            if nx == 0.0 && ny == 0.0 && nz == 0.0 {
+                return Some(Err("PlaneBisector: A y B deben ser distintos".into()));
+            }
+            let (mx, my, mz) = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5);
+            let d = -(nx * mx + ny * my + nz * mz);
+            if ![nx, ny, nz, d].iter().all(|v| v.is_finite()) {
+                return Some(Err("PlaneBisector: plano no finito".into()));
+            }
+            if let Err(e) = try_insert_command_object(
+                document,
+                GeoObject::Plane3D(Plane3DObj::from_equation(nx, ny, nz, d)),
+            ) {
+                return Some(Err(format!("PlaneBisector: {e}")));
+            }
+            Some(Ok(format!(
+                "PlaneBisector[{nx}x+{ny}y+{nz}z+{d} = 0] created"
+            )))
+        }
+        "PerpendicularPlane" => {
+            // Plano por P con normal AB: PerpendicularPlane[A, B, P].
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: PerpendicularPlane requiere PerpendicularPlane[A, B, P]".into(),
+                ));
+            }
+            let a = match p2_point3d_label(document, cmd.args[0].trim(), "PerpendicularPlane") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let b = match p2_point3d_label(document, cmd.args[1].trim(), "PerpendicularPlane") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let p = match p2_point3d_label(document, cmd.args[2].trim(), "PerpendicularPlane") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let (nx, ny, nz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+            if nx == 0.0 && ny == 0.0 && nz == 0.0 {
+                return Some(Err("PerpendicularPlane: A y B deben ser distintos".into()));
+            }
+            let d = -(nx * p.x + ny * p.y + nz * p.z);
+            if ![nx, ny, nz, d].iter().all(|v| v.is_finite()) {
+                return Some(Err("PerpendicularPlane: plano no finito".into()));
+            }
+            if let Err(e) = try_insert_command_object(
+                document,
+                GeoObject::Plane3D(Plane3DObj::from_equation(nx, ny, nz, d)),
+            ) {
+                return Some(Err(format!("PerpendicularPlane: {e}")));
+            }
+            Some(Ok(format!(
+                "PerpendicularPlane[{nx}x+{ny}y+{nz}z+{d} = 0] created"
+            )))
+        }
+        "Prove" => {
+            if cmd.args.is_empty() || cmd.args.len() > 3 {
+                return Some(Err(
+                    "Error: Prove requiere Prove[conclusión] o Prove[conclusión, {hipótesis}] o Prove[conclusión, {hipótesis}, {variables}]"
+                        .into(),
+                ));
+            }
+            let conclusion = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Prove", "conclusión", &conclusion) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let hyps = match prove_parse_brace_list(cmd.args.get(1), document, "Prove", "hipótesis")
+            {
+                Ok(h) => h,
+                Err(e) => return Some(Err(e)),
+            };
+            let vars = prove_resolve_vars(&conclusion, &hyps, cmd.args.get(2), document);
+            let vars = match vars {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Prove: {e}"))),
+            };
+            match grafito_geometry::prove::prove(&conclusion, &hyps, &vars) {
+                Ok(grafito_geometry::prove::ProveVerdict::Proved { basis_len }) => {
+                    if basis_len == 0 {
+                        Some(Ok(format!("Prove[{conclusion}] = verdadero (identidad)")))
+                    } else {
+                        Some(Ok(format!(
+                            "Prove[{conclusion}] = verdadero (base de {basis_len} polinomios)"
+                        )))
+                    }
+                }
+                Ok(grafito_geometry::prove::ProveVerdict::Disproved) => {
+                    Some(Ok(format!("Prove[{conclusion}] = falso")))
+                }
+                Ok(grafito_geometry::prove::ProveVerdict::Unknown { reason }) => {
+                    Some(Ok(format!("Prove[{conclusion}] = indefinido ({reason})")))
+                }
+                Err(e) => Some(Err(format!("Prove: {e}"))),
+            }
+        }
+        "ProveDetails" => {
+            if cmd.args.is_empty() || cmd.args.len() > 3 {
+                return Some(Err(
+                    "Error: ProveDetails requiere ProveDetails[conclusión, ...] como Prove".into(),
+                ));
+            }
+            let conclusion = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("ProveDetails", "conclusión", &conclusion) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let hyps = match prove_parse_brace_list(
+                cmd.args.get(1),
+                document,
+                "ProveDetails",
+                "hipótesis",
+            ) {
+                Ok(h) => h,
+                Err(e) => return Some(Err(e)),
+            };
+            let vars = prove_resolve_vars(&conclusion, &hyps, cmd.args.get(2), document);
+            let vars = match vars {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ProveDetails: {e}"))),
+            };
+            match grafito_geometry::prove::prove_trace(&conclusion, &hyps, &vars) {
+                Ok((grafito_geometry::prove::ProveVerdict::Proved { basis_len }, basis)) => {
+                    let shown: Vec<String> = basis.iter().take(8).cloned().collect();
+                    Some(Ok(format!(
+                        "ProveDetails[{conclusion}] = verdadero; base[{basis_len}]: {}",
+                        shown.join(" · ")
+                    )))
+                }
+                Ok((other, _)) => Some(Ok(format!("ProveDetails[{conclusion}] = {other:?}"))),
+                Err(e) => Some(Err(format!("ProveDetails: {e}"))),
+            }
+        }
+        "Relation" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: Relation requiere Relation[expr1, expr2]".into()));
+            }
+            let left = expand_all_cas(cmd.args[0].trim(), document);
+            let right = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("Relation", "expr1", &left) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("Relation", "expr2", &right) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match grafito_geometry::prove::relation(&left, &right) {
+                grafito_geometry::prove::RelationVerdict::TrueSymbolic => {
+                    Some(Ok(format!("Relation[{left}, {right}] = verdadero (simbólico)")))
+                }
+                grafito_geometry::prove::RelationVerdict::TrueNumeric { samples } => {
+                    Some(Ok(format!(
+                        "Relation[{left}, {right}] = verdadero en {samples} puntos (sugiere, no demuestra; usa Prove)"
+                    )))
+                }
+                grafito_geometry::prove::RelationVerdict::False { at, left: l, right: r } => {
+                    Some(Ok(format!(
+                        "Relation[{left}, {right}] = falso (contraejemplo en x={at}: {l} ≠ {r})"
+                    )))
+                }
+                grafito_geometry::prove::RelationVerdict::FalseConstant => {
+                    Some(Ok(format!("Relation[{left}, {right}] = falso (constante)")))
+                }
+                grafito_geometry::prove::RelationVerdict::Unknown { reason } => {
+                    Some(Ok(format!("Relation[{left}, {right}] = indefinido ({reason})")))
+                }
+            }
+        }
+        "Minimize" => {
+            if cmd.args.len() < 2 || cmd.args.len() > 4 {
+                return Some(Err(
+                    "Error: Minimize requiere Minimize[f, variable] o Minimize[f, variable, a, b]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Minimize", "f", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = match csolve_default_var(&expr, cmd.args.get(1)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Minimize: {e}"))),
+            };
+            if let Err(e) = check_single_free_var(&expr, &var, document, "Minimize") {
+                return Some(Err(e));
+            }
+            let (lo, hi) = match minimize_bounds(cmd, document, "Minimize") {
+                Ok(bounds) => bounds,
+                Err(e) => return Some(Err(e)),
+            };
+            match grafito_geometry::optimize::minimize_1d(&expr, &var, lo, hi, false) {
+                Ok(found) => Some(Ok(format!(
+                    "Minimize[{expr}] = {} en {var} = {} (mínimo en [{lo}, {hi}]; global no garantizado)",
+                    found.value, found.x
+                ))),
+                Err(e) => Some(Err(format!("Minimize: {e}"))),
+            }
+        }
+        "Maximize" => {
+            if cmd.args.len() < 2 || cmd.args.len() > 4 {
+                return Some(Err(
+                    "Error: Maximize requiere Maximize[f, variable] o Maximize[f, variable, a, b]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Maximize", "f", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = match csolve_default_var(&expr, cmd.args.get(1)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Maximize: {e}"))),
+            };
+            if let Err(e) = check_single_free_var(&expr, &var, document, "Maximize") {
+                return Some(Err(e));
+            }
+            let (lo, hi) = match minimize_bounds(cmd, document, "Maximize") {
+                Ok(bounds) => bounds,
+                Err(e) => return Some(Err(e)),
+            };
+            match grafito_geometry::optimize::minimize_1d(&expr, &var, lo, hi, true) {
+                Ok(found) => Some(Ok(format!(
+                    "Maximize[{expr}] = {} en {var} = {} (máximo en [{lo}, {hi}]; global no garantizado)",
+                    found.value, found.x
+                ))),
+                Err(e) => Some(Err(format!("Maximize: {e}"))),
+            }
+        }
+        "NSolveODE" => {
+            if cmd.args.len() < 4 || cmd.args.len() > 5 {
+                return Some(Err(
+                    "Error: NSolveODE requiere NSolveODE[y', x0, y0, x1] o NSolveODE[y', x0, y0, x1, n]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("NSolveODE", "campo", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let num = |i: usize, what: &str| -> Result<f64, String> {
+                let raw = cmd.args.get(i).map(String::as_str).unwrap_or("");
+                require_finite(parse_numeric_arg(raw, &document.variables))
+                    .map_err(|e| format!("NSolveODE: {what}: {e}"))
+            };
+            let (x0, y0, x1) = match (num(1, "x0"), num(2, "y0"), num(3, "x1")) {
+                (Ok(x0), Ok(y0), Ok(x1)) => (x0, y0, x1),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Some(Err(e)),
+            };
+            let n = match cmd.args.get(4) {
+                Some(raw) => match require_finite(parse_numeric_arg(raw, &document.variables)) {
+                    Ok(v) if (2.0..=1000.0).contains(&v) => {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let n = v as usize;
+                        n
+                    }
+                    _ => return Some(Err("NSolveODE: n debe estar entre 2 y 1000".to_string())),
+                },
+                None => 100,
+            };
+            match grafito_geometry::optimize::nsolve_ode_table(&expr, x0, y0, x1, n) {
+                Ok(table) => {
+                    let (xs, ys): (Vec<f64>, Vec<f64>) = table.into_iter().unzip();
+                    let last = ys.last().copied().unwrap_or(f64::NAN);
+                    let table_obj = DataTableObj::new("x", "y", xs.clone(), ys.clone());
+                    let table_id = table_obj.id;
+                    if let Err(e) =
+                        try_insert_command_object(document, GeoObject::DataTable(table_obj))
+                    {
+                        return Some(Err(format!("NSolveODE: {e}")));
+                    }
+                    if let Err(e) = try_insert_command_object(
+                        document,
+                        GeoObject::ScatterPlot(ScatterPlotObj::new(xs, ys).linked_to(table_id)),
+                    ) {
+                        return Some(Err(format!("NSolveODE: {e}")));
+                    }
+                    Some(Ok(format!(
+                        "NSolveODE: y({x1}) ≈ {last} ({n} puntos graficados)"
+                    )))
+                }
+                Err(e) => Some(Err(format!("NSolveODE: {e}"))),
+            }
+        }
+        "SlopeField" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: SlopeField requiere SlopeField[y'(x, y)]".into()));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("SlopeField", "campo", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if grafito_geometry::ast::parse_ast(&expr.replace(' ', "")).is_err() {
+                return Some(Err(format!("SlopeField: '{expr}' no parsea como campo")));
+            }
+            // Campo (1, f): tangente (dx, dy) = (1, y').
+            if let Err(e) = try_insert_command_object(
+                document,
+                GeoObject::VectorField2D(VectorField2DObj::new("1", expr.as_str())),
+            ) {
+                return Some(Err(format!("SlopeField: {e}")));
+            }
+            Some(Ok(
+                "SlopeField created — campo (1, y') con streamlines auto-renderizadas".to_string(),
+            ))
+        }
+        "StepGraph" => graph_styled_command(document, cmd, "StepGraph", ScatterStyle::Steps),
+        "StickGraph" => graph_styled_command(document, cmd, "StickGraph", ScatterStyle::Sticks),
+        "LineGraph" => graph_styled_command(document, cmd, "LineGraph", ScatterStyle::Lines),
+        "NormalQuantilePlot" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: NormalQuantilePlot requiere NormalQuantilePlot[datos]".into(),
+                ));
+            }
+            let data = match graph_series_data("NormalQuantilePlot", &cmd.args[0], document) {
+                Ok(data) => data,
+                Err(e) => return Some(Err(e)),
+            };
+            if data.len() < 3 {
+                return Some(Err(
+                    "NormalQuantilePlot: se necesitan al menos 3 datos finitos".into(),
+                ));
+            }
+            let mut sorted = data;
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let n = sorted.len() as f64;
+            let theory: Vec<f64> = (0..sorted.len())
+                .map(|i| {
+                    grafito_geometry::statistics::normal_quantile((i as f64 + 0.5) / n, 0.0, 1.0)
+                })
+                .collect();
+            if let Err(e) = try_insert_command_object(
+                document,
+                GeoObject::ScatterPlot(
+                    ScatterPlotObj::new(theory, sorted).with_style(ScatterStyle::Points),
+                ),
+            ) {
+                return Some(Err(format!("NormalQuantilePlot: {e}")));
+            }
+            Some(Ok(
+                "NormalQuantilePlot created — cuantiles teóricos N(0,1) vs datos".to_string(),
+            ))
         }
         "SolveODEN" => {
             if cmd.args.len() != 2 && cmd.args.len() != 3 {
@@ -14747,9 +17231,16 @@ fn execute_cas_command_typed(
         }
         "Simplify" => {
             let expr = expand_all_cas(cmd.args.first()?, document);
-            match symbolic::simplify(&expr) {
-                Ok(simplified) => Some(Ok(format!("{} = {}", expr, simplified))),
-                Err(e) => Some(Err(format!("Simplify error: {}", e))),
+            let (refined, conds) = refine_with_assumptions(&expr, document);
+            let suffix = assumption_suffix(&conds);
+            match symbolic::simplify(&refined) {
+                Ok(simplified) => Some(Ok(format!("{expr} = {simplified}{suffix}"))),
+                // El refinado no debe romper lo que antes funcionaba.
+                Err(_) if refined != expr => match symbolic::simplify(&expr) {
+                    Ok(simplified) => Some(Ok(format!("{expr} = {simplified}"))),
+                    Err(e) => Some(Err(format!("Simplify error: {e}"))),
+                },
+                Err(e) => Some(Err(format!("Simplify error: {e}"))),
             }
         }
         "TrigExpand" => {
@@ -14958,6 +17449,1027 @@ fn execute_cas_command_typed(
                     a, b, surface
                 ))),
                 Err(e) => Some(Err(format!("Error en SurfaceOfRevolution: {e}"))),
+            }
+        }
+        // Frente P0.2: 38 wrappers puros (números + polinomios + texto + matrices + vectores + curvatura).
+        "GCD" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: GCD requiere GCD[a, b]".into()));
+            }
+            let ra = expand_all_cas(cmd.args[0].trim(), document);
+            let rb = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("GCD", "a", &ra) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("GCD", "b", &rb) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let nt = grafito_geometry::number_theory::resolve_int_arg;
+            let a = match nt(&ra, &document.variables, "GCD") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("GCD: {e}"))),
+            };
+            let b = match nt(&rb, &document.variables, "GCD") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("GCD: {e}"))),
+            };
+            Some(Ok(format!(
+                "GCD[{ra}, {rb}] = {}",
+                grafito_geometry::number_theory::gcd(a, b)
+            )))
+        }
+        "LCM" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: LCM requiere LCM[a, b]".into()));
+            }
+            let ra = expand_all_cas(cmd.args[0].trim(), document);
+            let rb = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("LCM", "a", &ra) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("LCM", "b", &rb) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let nt = grafito_geometry::number_theory::resolve_int_arg;
+            let a = match nt(&ra, &document.variables, "LCM") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("LCM: {e}"))),
+            };
+            let b = match nt(&rb, &document.variables, "LCM") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("LCM: {e}"))),
+            };
+            match grafito_geometry::number_theory::lcm(a, b) {
+                Ok(m) => Some(Ok(format!("LCM[{ra}, {rb}] = {m}"))),
+                Err(e) => Some(Err(format!("LCM: {e}"))),
+            }
+        }
+        "ExtendedGCD" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: ExtendedGCD requiere ExtendedGCD[a, b]".into()));
+            }
+            let ra = expand_all_cas(cmd.args[0].trim(), document);
+            let rb = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("ExtendedGCD", "a", &ra) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("ExtendedGCD", "b", &rb) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let nt = grafito_geometry::number_theory::resolve_int_arg;
+            let a = match nt(&ra, &document.variables, "ExtendedGCD") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ExtendedGCD: {e}"))),
+            };
+            let b = match nt(&rb, &document.variables, "ExtendedGCD") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ExtendedGCD: {e}"))),
+            };
+            match grafito_geometry::number_theory::extended_gcd(a, b) {
+                Ok((g, x, y)) => Some(Ok(format!("ExtendedGCD[{ra}, {rb}] = ({g}, {x}, {y})"))),
+                Err(e) => Some(Err(format!("ExtendedGCD: {e}"))),
+            }
+        }
+        "Divisors" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Divisors requiere Divisors[n]".into()));
+            }
+            let rn = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Divisors", "n", &rn) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let n = match grafito_geometry::number_theory::resolve_int_arg(
+                &rn,
+                &document.variables,
+                "Divisors",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Divisors: {e}"))),
+            };
+            match grafito_geometry::number_theory::divisors(n) {
+                Ok(lista) => {
+                    let cuerpo = lista
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("Divisors[{rn}] = {{{cuerpo}}}")))
+                }
+                Err(e) => Some(Err(format!("Divisors: {e}"))),
+            }
+        }
+        "DivisorsSum" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: DivisorsSum requiere DivisorsSum[n]".into()));
+            }
+            let rn = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("DivisorsSum", "n", &rn) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let n = match grafito_geometry::number_theory::resolve_int_arg(
+                &rn,
+                &document.variables,
+                "DivisorsSum",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("DivisorsSum: {e}"))),
+            };
+            match grafito_geometry::number_theory::divisors_sigma(n) {
+                Ok(s) => Some(Ok(format!("DivisorsSum[{rn}] = {s}"))),
+                Err(e) => Some(Err(format!("DivisorsSum: {e}"))),
+            }
+        }
+        "NextPrime" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: NextPrime requiere NextPrime[n]".into()));
+            }
+            let rn = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("NextPrime", "n", &rn) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let n = match grafito_geometry::number_theory::resolve_int_arg(
+                &rn,
+                &document.variables,
+                "NextPrime",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("NextPrime: {e}"))),
+            };
+            match grafito_geometry::number_theory::next_prime(n) {
+                Ok(p) => Some(Ok(format!("NextPrime[{rn}] = {p}"))),
+                Err(e) => Some(Err(format!("NextPrime: {e}"))),
+            }
+        }
+        "PreviousPrime" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: PreviousPrime requiere PreviousPrime[n]".into()));
+            }
+            let rn = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("PreviousPrime", "n", &rn) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let n = match grafito_geometry::number_theory::resolve_int_arg(
+                &rn,
+                &document.variables,
+                "PreviousPrime",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("PreviousPrime: {e}"))),
+            };
+            match grafito_geometry::number_theory::previous_prime(n) {
+                Ok(p) => Some(Ok(format!("PreviousPrime[{rn}] = {p}"))),
+                Err(e) => Some(Err(format!("PreviousPrime: {e}"))),
+            }
+        }
+        "ModularExponent" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: ModularExponent requiere ModularExponent[base, exp, mod]".into(),
+                ));
+            }
+            let rb = expand_all_cas(cmd.args[0].trim(), document);
+            let re = expand_all_cas(cmd.args[1].trim(), document);
+            let rm = expand_all_cas(cmd.args[2].trim(), document);
+            if let Err(error) = check_w1_budget("ModularExponent", "base", &rb) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("ModularExponent", "exp", &re) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("ModularExponent", "mod", &rm) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let nt = grafito_geometry::number_theory::resolve_int_arg;
+            let base = match nt(&rb, &document.variables, "ModularExponent") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ModularExponent: {e}"))),
+            };
+            let exp = match nt(&re, &document.variables, "ModularExponent") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ModularExponent: {e}"))),
+            };
+            let modulo = match nt(&rm, &document.variables, "ModularExponent") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ModularExponent: {e}"))),
+            };
+            match grafito_geometry::number_theory::modular_exponent(base, exp, modulo) {
+                Ok(r) => Some(Ok(format!("ModularExponent[{rb}, {re}, {rm}] = {r}"))),
+                Err(e) => Some(Err(format!("ModularExponent: {e}"))),
+            }
+        }
+        "Mod" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: Mod requiere Mod[a, n]".into()));
+            }
+            let ra = expand_all_cas(cmd.args[0].trim(), document);
+            let rn = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("Mod", "a", &ra) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("Mod", "n", &rn) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let nt = grafito_geometry::number_theory::resolve_int_arg;
+            let a = match nt(&ra, &document.variables, "Mod") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Mod: {e}"))),
+            };
+            let n = match nt(&rn, &document.variables, "Mod") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Mod: {e}"))),
+            };
+            match grafito_geometry::number_theory::euclid_divmod(a, n) {
+                Ok((_, r)) => Some(Ok(format!("Mod[{ra}, {rn}] = {r}"))),
+                Err(e) => Some(Err(format!("Mod: {e}"))),
+            }
+        }
+        "Div" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: Div requiere Div[a, b]".into()));
+            }
+            let ra = expand_all_cas(cmd.args[0].trim(), document);
+            let rb = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("Div", "a", &ra) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("Div", "b", &rb) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let nt = grafito_geometry::number_theory::resolve_int_arg;
+            let a = match nt(&ra, &document.variables, "Div") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Div: {e}"))),
+            };
+            let b = match nt(&rb, &document.variables, "Div") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Div: {e}"))),
+            };
+            match grafito_geometry::number_theory::euclid_divmod(a, b) {
+                Ok((q, _)) => Some(Ok(format!("Div[{ra}, {rb}] = {q}"))),
+                Err(e) => Some(Err(format!("Div: {e}"))),
+            }
+        }
+        "ToBase" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: ToBase requiere ToBase[n, base]".into()));
+            }
+            let rn = expand_all_cas(cmd.args[0].trim(), document);
+            let rb = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("ToBase", "n", &rn) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("ToBase", "base", &rb) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let nt = grafito_geometry::number_theory::resolve_int_arg;
+            let n = match nt(&rn, &document.variables, "ToBase") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ToBase: {e}"))),
+            };
+            let base_int = match nt(&rb, &document.variables, "ToBase") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ToBase: {e}"))),
+            };
+            let base = match u32::try_from(base_int) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Some(Err("ToBase: la base debe estar entre 2 y 36".into()));
+                }
+            };
+            match grafito_geometry::number_theory::to_base(n, base) {
+                Ok(s) => Some(Ok(format!("ToBase[{rn}, {rb}] = {s}"))),
+                Err(e) => Some(Err(format!("ToBase: {e}"))),
+            }
+        }
+        "FromBase" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: FromBase requiere FromBase[texto, base]".into()));
+            }
+            let texto = expand_all_cas(cmd.args[0].trim(), document);
+            let rb = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("FromBase", "texto", &texto) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("FromBase", "base", &rb) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let cuerpo = texto.trim().trim_matches(|c| c == '"' || c == '\'');
+            let base_int = match grafito_geometry::number_theory::resolve_int_arg(
+                &rb,
+                &document.variables,
+                "FromBase",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("FromBase: {e}"))),
+            };
+            let base = match u32::try_from(base_int) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Some(Err("FromBase: la base debe estar entre 2 y 36".into()));
+                }
+            };
+            match grafito_geometry::number_theory::from_base(cuerpo, base) {
+                Ok(v) => Some(Ok(format!("FromBase[{texto}, {rb}] = {v}"))),
+                Err(e) => Some(Err(format!("FromBase: {e}"))),
+            }
+        }
+        "ContinuedFraction" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: ContinuedFraction requiere ContinuedFraction[x] o ContinuedFraction[x, n]"
+                        .into(),
+                ));
+            }
+            let rx = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("ContinuedFraction", "x", &rx) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let x = match parse_numeric_arg(&rx, &document.variables) {
+                Ok(v) if v.is_finite() => v,
+                _ => {
+                    return Some(Err("ContinuedFraction: x debe ser un número finito".into()));
+                }
+            };
+            let n = if let Some(raw) = cmd.args.get(1) {
+                let rn = expand_all_cas(raw.trim(), document);
+                let ni = match grafito_geometry::number_theory::resolve_int_arg(
+                    &rn,
+                    &document.variables,
+                    "ContinuedFraction",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("ContinuedFraction: {e}"))),
+                };
+                match usize::try_from(ni) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Some(Err("ContinuedFraction: n debe estar entre 1 y 64".into()));
+                    }
+                }
+            } else {
+                grafito_geometry::number_theory::MAX_CF_TERMS
+            };
+            match grafito_geometry::number_theory::continued_fraction(x, n) {
+                Ok(t) => {
+                    let cuerpo = t
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("ContinuedFraction[{rx}] = [{cuerpo}]")))
+                }
+                Err(e) => Some(Err(format!("ContinuedFraction: {e}"))),
+            }
+        }
+        "Substitute" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: Substitute requiere Substitute[expr, var, valor]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            let var = cmd.args[1].trim().to_string();
+            let valor = expand_all_cas(cmd.args[2].trim(), document);
+            if let Err(error) = check_w1_budget("Substitute", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("Substitute", "valor", &valor) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if !is_math_identifier(&var) {
+                return Some(Err("Error: Substitute requiere una variable válida".into()));
+            }
+            match symbolic::substitute(&expr, &var, &valor) {
+                Ok(r) => Some(Ok(format!("Substitute[{expr}, {var}, {valor}] = {r}"))),
+                Err(e) => Some(Err(format!("Substitute: {e}"))),
+            }
+        }
+        "Polynomial" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: Polynomial requiere Polynomial[{c0, c1, …}] o Polynomial[{…}, variable]"
+                        .into(),
+                ));
+            }
+            let lista = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Polynomial", "coeficientes", &lista) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: Polynomial requiere una variable válida".into()));
+            }
+            let recorte = lista.trim();
+            let Some(cuerpo) = recorte.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+                return Some(Err(
+                    "Error: Polynomial requiere una lista {c0, c1, …}".into()
+                ));
+            };
+            let mut coefs = Vec::new();
+            for parte in split_args(cuerpo) {
+                match parse_numeric_arg(parte.trim(), &document.variables) {
+                    Ok(v) if v.is_finite() => coefs.push(v),
+                    _ => {
+                        return Some(Err(format!(
+                            "Polynomial: coeficiente inválido '{}'",
+                            parte.trim()
+                        )));
+                    }
+                }
+            }
+            if coefs.is_empty() {
+                return Some(Err(
+                    "Error: Polynomial requiere al menos un coeficiente".into()
+                ));
+            }
+            match grafito_geometry::poly_tools::poly_from_coeffs(&coefs, var) {
+                Ok(p) => Some(Ok(format!("Polynomial[{lista}] = {p}"))),
+                Err(e) => Some(Err(format!("Polynomial: {e}"))),
+            }
+        }
+        "Coefficients" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: Coefficients requiere Coefficients[expr] o Coefficients[expr, variable]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if let Err(error) = check_w1_budget("Coefficients", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err(
+                    "Error: Coefficients requiere una variable válida".into()
+                ));
+            }
+            match grafito_geometry::poly_tools::poly_coeffs(&expr, var) {
+                Ok(c) => {
+                    let cuerpo = c
+                        .iter()
+                        .map(|v| fmt_scalar(*v))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("Coefficients[{expr}] = {{{cuerpo}}}")))
+                }
+                Err(e) => Some(Err(format!("Coefficients: {e}"))),
+            }
+        }
+        "Degree" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: Degree requiere Degree[expr] o Degree[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if let Err(error) = check_w1_budget("Degree", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Some(raw) = cmd.args.get(1) {
+                let var = raw.trim();
+                if !is_math_identifier(var) {
+                    return Some(Err("Error: Degree requiere una variable válida".into()));
+                }
+                match grafito_geometry::poly_tools::poly_degree_in(&expr, var) {
+                    Ok(g) => Some(Ok(format!("Degree[{expr}, {var}] = {g}"))),
+                    Err(e) => Some(Err(format!("Degree: {e}"))),
+                }
+            } else {
+                match grafito_geometry::poly_tools::poly_total_degree(&expr) {
+                    Ok(g) => Some(Ok(format!("Degree[{expr}] = {g}"))),
+                    Err(e) => Some(Err(format!("Degree: {e}"))),
+                }
+            }
+        }
+        "Roots" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: Roots requiere Roots[expr] o Roots[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if let Err(error) = check_w1_budget("Roots", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: Roots requiere una variable válida".into()));
+            }
+            match grafito_geometry::solve::solve_all_real(&expr, var) {
+                Ok(raices) => Some(Ok(format!(
+                    "Roots[{expr}] = {}",
+                    grafito_geometry::solve::format_real_roots(&raices)
+                ))),
+                Err(e) => Some(Err(format!("Roots: {e}"))),
+            }
+        }
+        "RootList" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: RootList requiere RootList[expr] o RootList[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if let Err(error) = check_w1_budget("RootList", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: RootList requiere una variable válida".into()));
+            }
+            match grafito_geometry::solve::solve_all_real(&expr, var) {
+                Ok(r) => {
+                    let cuerpo = r
+                        .roots
+                        .iter()
+                        .map(|x| grafito_geometry::solve::format_root(*x))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let mut mensaje = format!("RootList[{expr}] = {{{cuerpo}}}");
+                    if r.roots.is_empty() {
+                        mensaje.push_str(" (sin raíces reales)");
+                        if r.complex_count > 0 {
+                            mensaje.push_str(&format!("; {} complejas no reales", r.complex_count));
+                        }
+                    }
+                    if let Some(aviso) = r.notice {
+                        mensaje.push_str(&format!("; aviso: {aviso}"));
+                    }
+                    Some(Ok(mensaje))
+                }
+                Err(e) => Some(Err(format!("RootList: {e}"))),
+            }
+        }
+        "ComplexRoot" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: ComplexRoot requiere ComplexRoot[expr] o ComplexRoot[expr, variable]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if let Err(error) = check_w1_budget("ComplexRoot", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: ComplexRoot requiere una variable válida".into()));
+            }
+            let pre = grafito_geometry::expr::preprocess_expr(&expr);
+            let ast = match grafito_geometry::ast::parse_ast(&pre) {
+                Ok(a) => a,
+                Err(e) => {
+                    return Some(Err(format!("ComplexRoot: no se pudo parsear: {e}")));
+                }
+            };
+            match symbolic::solve_polynomial_complex(&ast, var) {
+                Some(raices) if raices.is_empty() => {
+                    if symbolic::is_identically_zero(&ast) {
+                        Some(Ok(format!(
+                            "ComplexRoot[{expr}] = {{}} (identidad: vale para todo {var})"
+                        )))
+                    } else {
+                        Some(Ok(format!("ComplexRoot[{expr}] = {{}} (sin raíces)")))
+                    }
+                }
+                Some(raices) => {
+                    let cuerpo = raices
+                        .iter()
+                        .map(|(re, im)| fmt_complex_pair(*re, *im))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("ComplexRoot[{expr}] = {{{cuerpo}}}")))
+                }
+                None => Some(Err(
+                    "ComplexRoot: no es polinomio en la variable (grado ≤ 20)".into(),
+                )),
+            }
+        }
+        "Numerator" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Numerator requiere Numerator[expr]".into()));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Numerator", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match grafito_geometry::poly_tools::fraction_parts(&expr) {
+                Ok((n, _)) => Some(Ok(format!("Numerator[{expr}] = {n}"))),
+                Err(_) => match grafito_geometry::poly_tools::fraction_sides(&expr) {
+                    Some((n, d)) if !is_zero_constant(&d) => {
+                        Some(Ok(format!("Numerator[{expr}] = {n}")))
+                    }
+                    Some(_) => Some(Err(format!("Numerator: '{expr}': división por cero"))),
+                    None => Some(Err(format!("Numerator: '{expr}' no es una fracción"))),
+                },
+            }
+        }
+        "Denominator" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Denominator requiere Denominator[expr]".into()));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Denominator", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match grafito_geometry::poly_tools::fraction_parts(&expr) {
+                Ok((_, d)) => Some(Ok(format!("Denominator[{expr}] = {d}"))),
+                Err(_) => match grafito_geometry::poly_tools::fraction_sides(&expr) {
+                    Some((_, d)) if !is_zero_constant(&d) => {
+                        Some(Ok(format!("Denominator[{expr}] = {d}")))
+                    }
+                    Some(_) => Some(Err(format!("Denominator: '{expr}': división por cero"))),
+                    None => Some(Err(format!("Denominator: '{expr}' no es una fracción"))),
+                },
+            }
+        }
+        "CommonDenominator" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: CommonDenominator requiere CommonDenominator[a, b]".into(),
+                ));
+            }
+            let ra = expand_all_cas(cmd.args[0].trim(), document);
+            let rb = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("CommonDenominator", "a", &ra) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("CommonDenominator", "b", &rb) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let da = match grafito_geometry::poly_tools::fraction_parts(&ra) {
+                Ok((_, d)) => d,
+                Err(e) => return Some(Err(format!("CommonDenominator: {e}"))),
+            };
+            let db = match grafito_geometry::poly_tools::fraction_parts(&rb) {
+                Ok((_, d)) => d,
+                Err(e) => return Some(Err(format!("CommonDenominator: {e}"))),
+            };
+            match grafito_geometry::number_theory::lcm(da, db) {
+                Ok(m) => Some(Ok(format!("CommonDenominator[{ra}, {rb}] = {m}"))),
+                Err(e) => Some(Err(format!("CommonDenominator: {e}"))),
+            }
+        }
+        "Division" => {
+            if cmd.args.len() < 2 || cmd.args.len() > 3 {
+                return Some(Err(
+                    "Error: Division requiere Division[p, q] o Division[p, q, variable]".into(),
+                ));
+            }
+            let p = expand_all_cas(cmd.args[0].trim(), document);
+            let q = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("Division", "p", &p) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("Division", "q", &q) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args.get(2).map(|s| s.trim()).unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: Division requiere una variable válida".into()));
+            }
+            let cp = match grafito_geometry::poly_tools::poly_coeffs(&p, var) {
+                Ok(c) => c,
+                Err(e) => return Some(Err(format!("Division: {e}"))),
+            };
+            let cq = match grafito_geometry::poly_tools::poly_coeffs(&q, var) {
+                Ok(c) => c,
+                Err(e) => return Some(Err(format!("Division: {e}"))),
+            };
+            match grafito_geometry::poly_tools::poly_divmod(&cp, &cq) {
+                Ok((c, r)) => Some(Ok(format!(
+                    "Division[{p}, {q}] = cociente: {}, resto: {}",
+                    grafito_geometry::poly_tools::format_poly(&c, var),
+                    grafito_geometry::poly_tools::format_poly(&r, var)
+                ))),
+                Err(e) => Some(Err(format!("Division: {e}"))),
+            }
+        }
+        "IsFactored" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: IsFactored requiere IsFactored[expr] o IsFactored[expr, variable]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if let Err(error) = check_w1_budget("IsFactored", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: IsFactored requiere una variable válida".into()));
+            }
+            match grafito_geometry::poly_tools::is_factored_shape(&expr, var) {
+                Ok(f) => Some(Ok(format!(
+                    "IsFactored[{expr}] = {}",
+                    if f { "true" } else { "false" }
+                ))),
+                Err(e) => Some(Err(format!("IsFactored: {e}"))),
+            }
+        }
+        "IsVertexForm" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: IsVertexForm requiere IsVertexForm[expr]".into()));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("IsVertexForm", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match grafito_geometry::poly_tools::is_vertex_form_shape(&expr) {
+                Ok(f) => Some(Ok(format!(
+                    "IsVertexForm[{expr}] = {}",
+                    if f { "true" } else { "false" }
+                ))),
+                Err(e) => Some(Err(format!("IsVertexForm: {e}"))),
+            }
+        }
+        "MinimalPolynomial" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: MinimalPolynomial requiere MinimalPolynomial[expr]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("MinimalPolynomial", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match grafito_geometry::poly_tools::minimal_polynomial(&expr) {
+                Ok(p) => Some(Ok(format!("MinimalPolynomial[{expr}] = {p}"))),
+                Err(e) => Some(Err(format!("MinimalPolynomial: {e}"))),
+            }
+        }
+        "LetterToUnicode" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: LetterToUnicode requiere LetterToUnicode[letra]".into(),
+                ));
+            }
+            let raw = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("LetterToUnicode", "letra", &raw) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let letra = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+            match grafito_geometry::number_theory::letter_to_unicode(letra) {
+                Ok(u) => Some(Ok(format!("LetterToUnicode[{raw}] = {u}"))),
+                Err(e) => Some(Err(format!("LetterToUnicode: {e}"))),
+            }
+        }
+        "UnicodeToLetter" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: UnicodeToLetter requiere UnicodeToLetter[codigo]".into(),
+                ));
+            }
+            let raw = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("UnicodeToLetter", "codigo", &raw) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let codigo = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+            match grafito_geometry::number_theory::unicode_to_letter(codigo) {
+                Ok(ch) => Some(Ok(format!("UnicodeToLetter[{raw}] = {ch}"))),
+                Err(e) => Some(Err(format!("UnicodeToLetter: {e}"))),
+            }
+        }
+        "TextToUnicode" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: TextToUnicode requiere TextToUnicode[texto]".into()
+                ));
+            }
+            let raw = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("TextToUnicode", "texto", &raw) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let texto = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+            if texto.is_empty() {
+                return Some(Err("TextToUnicode: se esperaba un texto no vacío".into()));
+            }
+            Some(Ok(format!(
+                "TextToUnicode[{raw}] = {{{}}}",
+                grafito_geometry::number_theory::text_to_unicode(texto)
+            )))
+        }
+        "UnicodeToText" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: UnicodeToText requiere UnicodeToText[codigos]".into()
+                ));
+            }
+            let raw = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("UnicodeToText", "codigos", &raw) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let codigos = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+            match grafito_geometry::number_theory::unicode_to_text(codigos) {
+                Ok(t) => Some(Ok(format!("UnicodeToText[{raw}] = {t}"))),
+                Err(e) => Some(Err(format!("UnicodeToText: {e}"))),
+            }
+        }
+        "CharacteristicPolynomial" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: CharacteristicPolynomial requiere CharacteristicPolynomial[matriz]"
+                        .into(),
+                ));
+            }
+            let matriz = match parse_matrix_arg_strict(cmd.args[0].trim(), &document.variables) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Some(Err(format!("CharacteristicPolynomial: {e}")));
+                }
+            };
+            match grafito_geometry::poly_tools::charpoly(&matriz) {
+                Ok(c) => Some(Ok(format!(
+                    "CharacteristicPolynomial = {}",
+                    grafito_geometry::poly_tools::format_poly(&c, "λ")
+                ))),
+                Err(e) => Some(Err(format!("CharacteristicPolynomial: {e}"))),
+            }
+        }
+        "ReducedRowEchelonForm" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: ReducedRowEchelonForm requiere ReducedRowEchelonForm[matriz]".into(),
+                ));
+            }
+            let matriz = match parse_matrix_arg_strict(cmd.args[0].trim(), &document.variables) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Some(Err(format!("ReducedRowEchelonForm: {e}")));
+                }
+            };
+            match grafito_geometry::poly_tools::rref(&matriz) {
+                Ok(r) => Some(Ok(format!("ReducedRowEchelonForm:\n{r}"))),
+                Err(e) => Some(Err(format!("ReducedRowEchelonForm: {e}"))),
+            }
+        }
+        "JordanDiagonalization" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: JordanDiagonalization requiere JordanDiagonalization[matriz]".into(),
+                ));
+            }
+            let matriz = match parse_matrix_arg_strict(cmd.args[0].trim(), &document.variables) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Some(Err(format!("JordanDiagonalization: {e}")));
+                }
+            };
+            match grafito_geometry::poly_tools::jordan_real(&matriz) {
+                Ok(j) => {
+                    let diag = j
+                        .diag
+                        .iter()
+                        .map(|v| fmt_scalar(*v))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!(
+                        "JordanDiagonalization:\nP:\n{}D = diag({diag})",
+                        j.p
+                    )))
+                }
+                Err(e) => Some(Err(format!("JordanDiagonalization: {e}"))),
+            }
+        }
+        "UnitPerpendicularVector" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: UnitPerpendicularVector requiere UnitPerpendicularVector[v]".into(),
+                ));
+            }
+            let comps = match parse_expression_vector_arg(cmd.args[0].trim()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(format!("UnitPerpendicularVector: {e}")));
+                }
+            };
+            let mut vals = Vec::with_capacity(comps.len());
+            for e in &comps {
+                match parse_numeric_arg(e.trim(), &document.variables) {
+                    Ok(v) if v.is_finite() => vals.push(v),
+                    _ => {
+                        return Some(Err(format!(
+                            "UnitPerpendicularVector: entrada inválida '{e}'"
+                        )));
+                    }
+                }
+            }
+            if vals.len() != 2 {
+                return Some(Err(
+                    "UnitPerpendicularVector: solo vectores 2D [x, y]".into()
+                ));
+            }
+            let (px, py) = match grafito_geometry::poly_tools::perp2(vals[0], vals[1]) {
+                Ok(p) => p,
+                Err(e) => return Some(Err(format!("UnitPerpendicularVector: {e}"))),
+            };
+            match grafito_geometry::poly_tools::normalize_vec(&[px, py]) {
+                Ok(n) => {
+                    let cuerpo = n
+                        .iter()
+                        .map(|v| fmt_scalar(*v))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("UnitPerpendicularVector = [{cuerpo}]")))
+                }
+                Err(e) => Some(Err(format!("UnitPerpendicularVector: {e}"))),
+            }
+        }
+        "Normalize" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Normalize requiere Normalize[v]".into()));
+            }
+            let comps = match parse_expression_vector_arg(cmd.args[0].trim()) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Normalize: {e}"))),
+            };
+            let mut vals = Vec::with_capacity(comps.len());
+            for e in &comps {
+                match parse_numeric_arg(e.trim(), &document.variables) {
+                    Ok(v) if v.is_finite() => vals.push(v),
+                    _ => {
+                        return Some(Err(format!("Normalize: entrada inválida '{e}'")));
+                    }
+                }
+            }
+            match grafito_geometry::poly_tools::normalize_vec(&vals) {
+                Ok(n) => {
+                    let cuerpo = n
+                        .iter()
+                        .map(|v| fmt_scalar(*v))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("Normalize = [{cuerpo}]")))
+                }
+                Err(e) => Some(Err(format!("Normalize: {e}"))),
+            }
+        }
+        "PerpendicularVector" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: PerpendicularVector requiere PerpendicularVector[v]".into(),
+                ));
+            }
+            let comps = match parse_expression_vector_arg(cmd.args[0].trim()) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("PerpendicularVector: {e}"))),
+            };
+            let mut vals = Vec::with_capacity(comps.len());
+            for e in &comps {
+                match parse_numeric_arg(e.trim(), &document.variables) {
+                    Ok(v) if v.is_finite() => vals.push(v),
+                    _ => {
+                        return Some(Err(format!("PerpendicularVector: entrada inválida '{e}'")));
+                    }
+                }
+            }
+            if vals.len() != 2 {
+                return Some(Err("PerpendicularVector: solo vectores 2D [x, y]".into()));
+            }
+            match grafito_geometry::poly_tools::perp2(vals[0], vals[1]) {
+                Ok((px, py)) => Some(Ok(format!(
+                    "PerpendicularVector = [{}, {}]",
+                    fmt_scalar(px),
+                    fmt_scalar(py)
+                ))),
+                Err(e) => Some(Err(format!("PerpendicularVector: {e}"))),
+            }
+        }
+        "CurvatureVector" => {
+            if cmd.args.len() != 2 && cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: CurvatureVector requiere CurvatureVector[expr, x0] o CurvatureVector[expr, variable, x0]"
+                        .into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if let Err(error) = check_w1_budget("CurvatureVector", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let (var, x0_raw) = if cmd.args.len() == 3 {
+                let v = cmd.args[1].trim();
+                if !is_math_identifier(v) {
+                    return Some(Err(
+                        "Error: CurvatureVector requiere una variable válida".into()
+                    ));
+                }
+                (v.to_string(), cmd.args[2].trim())
+            } else {
+                ("x".to_string(), cmd.args[1].trim())
+            };
+            let x0 = match parse_numeric_arg(x0_raw, &document.variables) {
+                Ok(v) if v.is_finite() => v,
+                _ => {
+                    return Some(Err("CurvatureVector: x0 debe ser finito".into()));
+                }
+            };
+            match grafito_geometry::poly_tools::curvature_vector(&expr, &var, x0) {
+                Ok((k, vx, vy)) => Some(Ok(format!(
+                    "CurvatureVector[{expr}] en {var}={x0}: κ = {k:.6}, K = ({vx:.6}, {vy:.6})"
+                ))),
+                Err(e) => Some(Err(format!("CurvatureVector: {e}"))),
             }
         }
         _ => None,
@@ -16670,6 +20182,46 @@ fn run_generate_animation_command(args: &[String], _document: &mut Document) -> 
     ))
 }
 
+/// Despacho de `Centroid`: polígono → centroide de área (P2); resto →
+/// análisis funcional legacy. Sin esta rama el `Centroid[polígono]` de
+/// GeoGebra era inalcanzable (sombra del análisis).
+fn run_centroid_dispatch(
+    document: &mut Document,
+    input_text: &mut String,
+    raw: &str,
+) -> CommandOutcome {
+    if let Some(id) = find_object_by_label(document, raw.trim()) {
+        if let Some(GeoObject::Polygon(poly)) = document.get_object(id) {
+            let verts = poly.vertices.clone();
+            return match grafito_geometry::measure::polygon_centroid(&verts) {
+                Some(p) => {
+                    let point_id = match try_insert_command_object(
+                        document,
+                        GeoObject::Point(PointObj::new(p)),
+                    ) {
+                        Ok(id) => id,
+                        Err(error) => return CommandOutcome::Error(format!("Centroid: {error}")),
+                    };
+                    let label = document
+                        .get_object(point_id)
+                        .map(|object| object.label().to_string())
+                        .unwrap_or_default();
+                    input_text.clear();
+                    CommandOutcome::Message(format!("Centroid = {label} ({}, {})", p.x, p.y))
+                }
+                None => CommandOutcome::Error("Centroid: polígono degenerado (área nula)".into()),
+            };
+        }
+    }
+    run_analysis_command(
+        document,
+        input_text,
+        raw,
+        &[AnalysisFeature::Centroid],
+        "Centroide",
+    )
+}
+
 fn run_analysis_command(
     document: &mut Document,
     input_text: &mut String,
@@ -17020,6 +20572,371 @@ pub fn taylor_remainder_observed(
     })
 }
 
+/// Variable para CSolve/CSolutions/NSolutions/Solutions.
+///
+/// Explícita si se da (validada); si no, la única variable de la expresión;
+/// cero o varias sin explicitar → error honesto (sin adivinar).
+fn csolve_default_var(expr: &str, arg: Option<&String>) -> Result<String, String> {
+    if let Some(given) = arg {
+        let var = given.trim();
+        if !is_math_identifier(var) {
+            return Err(format!("'{var}' no es una variable válida"));
+        }
+        return Ok(var.to_string());
+    }
+    let ast = grafito_geometry::ast::parse_ast(&expr.replace(' ', ""))
+        .map_err(|e| format!("no se pudo parsear '{expr}': {e}"))?;
+    let mut vars = HashSet::new();
+    ast.get_variables(&mut vars);
+    let mut sorted: Vec<String> = vars.into_iter().collect();
+    sorted.sort();
+    match sorted.len() {
+        1 => Ok(sorted.into_iter().next().unwrap_or_else(|| "x".to_string())),
+        0 => Err(format!("'{expr}' no tiene variable; indica una")),
+        _ => Err(format!(
+            "'{expr}' tiene varias variables ({}); indica una",
+            sorted.join(", ")
+        )),
+    }
+}
+
+/// Residuo máximo |p(z)| sobre las raíces (verificación de CSolutions).
+///
+/// Si el polinomio no evalúa en ℂ (p. ej. forma no soportada por el
+/// evaluador complejo), devuelve NaN y el llamador lo muestra tal cual.
+fn csolutions_max_residual(expr: &str, var: &str, roots: &[num_complex::Complex64]) -> f64 {
+    use std::collections::HashMap;
+    let Ok(parsed) = grafito_complex::complex_expr::parse(&expr.replace(' ', "")) else {
+        return f64::NAN;
+    };
+    let mut worst = 0.0f64;
+    for z in roots {
+        let mut vars = HashMap::new();
+        vars.insert(var.to_string(), *z);
+        match parsed.eval(&vars) {
+            Ok(value) => worst = worst.max(value.norm()),
+            Err(_) => return f64::NAN,
+        }
+    }
+    worst
+}
+
+/// Lista `{h1, h2}` de hipótesis/variables para Prove (vacía si ausente).
+fn prove_parse_brace_list(
+    arg: Option<&String>,
+    document: &Document,
+    cmd: &str,
+    what: &str,
+) -> Result<Vec<String>, String> {
+    let Some(raw) = arg else {
+        return Ok(Vec::new());
+    };
+    let expanded = expand_all_cas(raw.trim(), document);
+    let items = parse_w1_brace_list(&expanded);
+    if items.is_empty() {
+        return Err(format!(
+            "{cmd}: la lista de {what} está vacía; usa {{{what}1, {what}2}}"
+        ));
+    }
+    for item in &items {
+        if let Err(error) = check_w1_budget(cmd, what, item) {
+            return Err(format!("{cmd}: {error}"));
+        }
+    }
+    Ok(items)
+}
+
+/// Variables del sistema de Prove: explícitas o todas las de la conclusión
+/// e hipótesis (ordenadas, acotadas a `MAX_GROEBNER_VARS`).
+fn prove_resolve_vars(
+    conclusion: &str,
+    hyps: &[String],
+    arg: Option<&String>,
+    document: &Document,
+) -> Result<Vec<String>, String> {
+    if let Some(raw) = arg {
+        let expanded = expand_all_cas(raw.trim(), document);
+        let vars = parse_w1_brace_list(&expanded);
+        if vars.is_empty() {
+            return Err("la lista de variables está vacía".to_string());
+        }
+        for v in &vars {
+            if !is_math_identifier(v.trim()) {
+                return Err(format!("'{v}' no es una variable válida"));
+            }
+        }
+        return Ok(vars.into_iter().map(|v| v.trim().to_string()).collect());
+    }
+    let mut texts = Vec::new();
+    // La conclusión puede ser ecuación `lhs = rhs`: ambas partes aportan.
+    if let Some((lhs, rhs)) = split_on_standalone_eq(conclusion) {
+        texts.push(lhs.to_string());
+        texts.push(rhs.to_string());
+    } else {
+        texts.push(conclusion.to_string());
+    }
+    texts.extend(hyps.iter().cloned());
+    let mut set = std::collections::BTreeSet::new();
+    for text in &texts {
+        let ast = grafito_geometry::ast::parse_ast(&text.replace(' ', ""))
+            .map_err(|e| format!("no se pudo parsear '{text}': {e}"))?;
+        let mut vars = HashSet::new();
+        ast.get_variables(&mut vars);
+        set.extend(vars);
+    }
+    // `t_prove` es reservada del truco de Rabinowitsch: no es variable.
+    set.remove("t_prove");
+    let vars: Vec<String> = set.into_iter().collect();
+    // Vacío permitido: el motor decide constantes (identidad/refutado)
+    // antes de validar variables.
+    if vars.len() > grafito_geometry::cas::MAX_GROEBNER_VARS {
+        return Err(format!(
+            "demasiadas variables ({}); máximo {}",
+            vars.len(),
+            grafito_geometry::cas::MAX_GROEBNER_VARS
+        ));
+    }
+    Ok(vars)
+}
+
+/// Intervalo `[a, b]` para Minimize/Maximize (defecto `[-10, 10]`).
+fn minimize_bounds(cmd: &CasCmd, document: &Document, name: &str) -> Result<(f64, f64), String> {
+    match (cmd.args.get(2), cmd.args.get(3)) {
+        (Some(a_raw), Some(b_raw)) => {
+            let a = require_finite(parse_numeric_arg(a_raw, &document.variables))
+                .map_err(|e| format!("{name}: en a: {e}"))?;
+            let b = require_finite(parse_numeric_arg(b_raw, &document.variables))
+                .map_err(|e| format!("{name}: en b: {e}"))?;
+            if a.partial_cmp(&b)
+                .is_none_or(|ord| ord != std::cmp::Ordering::Less)
+            {
+                return Err(format!("{name}: se requiere a < b"));
+            }
+            Ok((a, b))
+        }
+        (None, None) => Ok((-10.0, 10.0)),
+        _ => Err(format!(
+            "{name}: intervalo incompleto; usa {name}[f, variable, a, b]"
+        )),
+    }
+}
+
+/// Serie de datos para gráficos: `{y…}` (xs = índices), `{xs},{ys}` aparte
+/// o etiqueta de DataTable (solo `ys` con índices, u `xs`+`ys` si se pide).
+fn graph_series_data(name: &str, arg: &str, document: &Document) -> Result<Vec<f64>, String> {
+    let trimmed = arg.trim();
+    if !trimmed.starts_with('{') {
+        let (id, _xs, ys) =
+            data_table_for_fit(document, name, trimmed).map_err(|e| format!("{name}: {e:?}"))?;
+        let _ = id;
+        return Ok(ys);
+    }
+    parse_data_command_arg(name, trimmed, &document.variables).map_err(|e| format!("{name}: {e:?}"))
+}
+
+/// Pares `(xs, ys)` para Step/Stick/LineGraph: dos listas o una tabla.
+fn graph_xy_data(
+    name: &str,
+    args: &[String],
+    document: &Document,
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    if args.len() == 2 {
+        let xs = parse_data_command_arg(name, args[0].trim(), &document.variables)
+            .map_err(|e| format!("{name}: {e:?}"))?;
+        let ys = parse_data_command_arg(name, args[1].trim(), &document.variables)
+            .map_err(|e| format!("{name}: {e:?}"))?;
+        return Ok((xs, ys));
+    }
+    if args.len() == 1 {
+        let trimmed = args[0].trim();
+        if !trimmed.starts_with('{') {
+            let (_id, xs, ys) = data_table_for_fit(document, name, trimmed)
+                .map_err(|e| format!("{name}: {e:?}"))?;
+            return Ok((xs, ys));
+        }
+        let ys = parse_data_command_arg(name, trimmed, &document.variables)
+            .map_err(|e| format!("{name}: {e:?}"))?;
+        let xs: Vec<f64> = (0..ys.len()).map(|i| i as f64).collect();
+        return Ok((xs, ys));
+    }
+    Err(format!("{name}: usa {name}[{{xs}},{{ys}}] o {name}[tabla]"))
+}
+
+/// Crea un ScatterPlot con estilo (Step/Stick/Line) desde datos.
+fn graph_styled_command(
+    document: &mut Document,
+    cmd: &CasCmd,
+    name: &str,
+    style: ScatterStyle,
+) -> Option<Result<String, String>> {
+    if cmd.args.is_empty() || cmd.args.len() > 2 {
+        return Some(Err(format!(
+            "Error: {name} requiere {name}[datos] o {name}[{{xs}},{{ys}}]"
+        )));
+    }
+    let (xs, ys) = match graph_xy_data(name, &cmd.args, document) {
+        Ok(pair) => pair,
+        Err(e) => return Some(Err(format!("{name}: {e}"))),
+    };
+    if xs.len() != ys.len() || xs.len() < 2 {
+        return Some(Err(format!(
+            "{name}: se necesitan al menos dos pares finitos"
+        )));
+    }
+    if xs.len() > 10_000 {
+        return Some(Err(format!("{name}: máximo 10000 puntos")));
+    }
+    if !xs.iter().all(|v| v.is_finite()) || !ys.iter().all(|v| v.is_finite()) {
+        return Some(Err(format!("{name}: los datos deben ser finitos")));
+    }
+    // Ordena por x (estable): Steps/Lines exigen `xs` ordenadas.
+    let mut pairs: Vec<(f64, f64)> = xs.into_iter().zip(ys).collect();
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (xs, ys): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
+    if let Err(e) = try_insert_command_object(
+        document,
+        GeoObject::ScatterPlot(ScatterPlotObj::new(xs, ys).with_style(style)),
+    ) {
+        return Some(Err(format!("{name}: {e}")));
+    }
+    Some(Ok(format!("{name} created")))
+}
+
+/// Exige que `expr` tenga una sola variable libre (`var`); el resto debe
+/// estar definido en el documento (si no, el barrido numérico mentiría).
+fn check_single_free_var(
+    expr: &str,
+    var: &str,
+    document: &Document,
+    name: &str,
+) -> Result<(), String> {
+    let ast = grafito_geometry::ast::parse_ast(&expr.replace(' ', ""))
+        .map_err(|e| format!("{name}: no se pudo parsear '{expr}': {e}"))?;
+    let mut vars = HashSet::new();
+    ast.get_variables(&mut vars);
+    let mut extra: Vec<String> = vars
+        .into_iter()
+        .filter(|v| v != var && !document.variables.contains_key(v))
+        .collect();
+    extra.sort();
+    if extra.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{name}: '{expr}' tiene varias variables ({}); fija las demás o indica una",
+            extra.join(", ")
+        ))
+    }
+}
+
+/// Punto por etiqueta o por coordenadas `(x, y)` / `[x, y]`.
+fn p2_point_or_coords(document: &Document, raw: &str, name: &str) -> Result<Point2, String> {
+    if let Ok(p) = p2_point_label(document, raw, name) {
+        return Ok(p);
+    }
+    parse_finite_point_arg(raw, &document.variables)
+        .map_err(|_| format!("{name}: '{raw}' debe ser punto o coordenadas"))
+}
+
+/// Uniforme en [0,1) desde el RNG determinista P1.
+fn rng_unit(rng: &mut grafito_geometry::list_ops::DeterministicRng) -> f64 {
+    // next_u64 cubre todo el rango: escala exacta a [0,1).
+    (rng.next_u64() as f64) / (u64::MAX as f64)
+}
+
+/// Punto 2D por etiqueta (para comandos de medida/construcción P2).
+fn p2_point_label(document: &Document, label: &str, name: &str) -> Result<Point2, String> {
+    let id = find_object_by_label(document, label)
+        .ok_or_else(|| format!("{name}: punto '{label}' no encontrado"))?;
+    match document.get_object(id) {
+        Some(GeoObject::Point(p)) => Ok(p.position),
+        _ => Err(format!("{name}: '{label}' debe ser un punto")),
+    }
+}
+
+/// Vértices de polígono por etiqueta.
+fn p2_polygon_label(document: &Document, label: &str, name: &str) -> Result<Vec<Point2>, String> {
+    let id = find_object_by_label(document, label)
+        .ok_or_else(|| format!("{name}: polígono '{label}' no encontrado"))?;
+    match document.get_object(id) {
+        Some(GeoObject::Polygon(p)) => Ok(p.vertices.clone()),
+        _ => Err(format!("{name}: '{label}' debe ser un polígono")),
+    }
+}
+
+/// Triángulo desde 1 polígono (3 vértices) o 3 puntos.
+fn p2_triangle_args(
+    args: &[String],
+    document: &Document,
+    name: &str,
+) -> Result<(Point2, Point2, Point2), String> {
+    if args.len() == 1 {
+        let verts = p2_polygon_label(document, args[0].trim(), name)?;
+        if verts.len() != 3 {
+            return Err(format!(
+                "{name}: el polígono debe ser triángulo (3 vértices)"
+            ));
+        }
+        return Ok((verts[0], verts[1], verts[2]));
+    }
+    if args.len() == 3 {
+        return Ok((
+            p2_point_label(document, args[0].trim(), name)?,
+            p2_point_label(document, args[1].trim(), name)?,
+            p2_point_label(document, args[2].trim(), name)?,
+        ));
+    }
+    Err(format!("{name}: usa {name}[triángulo] o {name}[P, Q, R]"))
+}
+
+/// Punto 3D por etiqueta.
+fn p2_point3d_label(
+    document: &Document,
+    label: &str,
+    name: &str,
+) -> Result<grafito_geometry::types3d::Point3D, String> {
+    let id = find_object_by_label(document, label)
+        .ok_or_else(|| format!("{name}: punto '{label}' no encontrado"))?;
+    match document.get_object(id) {
+        Some(GeoObject::Point3D(p)) => Ok(p.position),
+        _ => Err(format!("{name}: '{label}' debe ser un punto 3D")),
+    }
+}
+
+/// Número de capa 0..=255 para ShowLayer/HideLayer.
+fn parse_layer_number(raw: &str, variables: &BTreeMap<String, f64>) -> Result<u32, String> {
+    let value =
+        require_finite(parse_numeric_arg(raw, variables)).map_err(|e| format!("capa: {e}"))?;
+    if !(0.0..=255.0).contains(&value) || value.fract() != 0.0 {
+        return Err("la capa debe ser un entero 0..=255".to_string());
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(value as u32)
+}
+
+/// Aplica visibilidad a todos los objetos de una capa; devuelve cuántos.
+fn set_layer_visibility(document: &mut Document, layer: u32, visible: bool) -> usize {
+    let ids: Vec<_> = document
+        .objects_iter()
+        .filter_map(|(id, _)| (document.layer_of(*id) == layer).then_some(*id))
+        .collect();
+    let count = ids.len();
+    for id in ids {
+        if let Some(object) = document.get_object_mut(id) {
+            object.set_visible(visible);
+        }
+    }
+    count
+}
+
+/// Indica si `expr` es la constante cero (para Numerator/Denominator).
+fn is_zero_constant(expr: &str) -> bool {
+    matches!(
+        grafito_geometry::ast::parse_ast(&expr.replace(' ', "")),
+        Ok(grafito_geometry::ast::Expr::Const(v)) if v == 0.0
+    )
+}
+
 fn resolve_two_polygons(
     document: &Document,
     label_a: &str,
@@ -17049,17 +20966,48 @@ fn add_boolean_result(
     document: &mut Document,
     mp: &geo::MultiPolygon<f64>,
     base_label: &str,
+    op_name: &str,
 ) -> Result<(), String> {
-    let polys = grafito_geometry::boolean::multipolygon_to_polygons(mp);
-    for (i, verts) in polys.into_iter().enumerate() {
+    use grafito_geometry::boolean::{multipolygon_to_pieces, sort_pieces_deterministic};
+    let mut pieces = multipolygon_to_pieces(mp);
+    sort_pieces_deterministic(&mut pieces);
+    // Pre-chequeo atómico: ningún inserto parcial si excede el presupuesto
+    // (mismo patrón que `Net`): exteriores + agujeros materializados.
+    let need: usize = pieces.iter().map(|piece| 1 + piece.holes.len()).sum();
+    let max = grafito_core::validation::MAX_OBJECT_COUNT;
+    if document.object_count() + need > max {
+        return Err(format!(
+            "{op_name}: el resultado necesita {need} objetos y excede el máximo {max} (presupuesto MAX_OBJECT_COUNT)"
+        ));
+    }
+    let mut hole_seq = 0_usize;
+    for (i, piece) in pieces.into_iter().enumerate() {
+        if !piece
+            .exterior
+            .iter()
+            .all(|p| p.x.is_finite() && p.y.is_finite())
+        {
+            return Err(format!(
+                "{op_name}: el resultado contiene coordenadas no finitas"
+            ));
+        }
         let label = if i == 0 {
             base_label.to_string()
         } else {
             format!("{}{}", base_label, subscript_label(i))
         };
-        let mut poly = PolygonObj::new(verts);
+        let mut poly = PolygonObj::new(piece.exterior);
         poly.label = label;
         try_insert_command_object(document, GeoObject::Polygon(poly))?;
+        // Los agujeros se materializan como bordes sin relleno: nada se
+        // pierde en silencio (`PolygonObj` no modela interiores).
+        for hole in piece.holes {
+            hole_seq += 1;
+            let mut edge = PolygonObj::new(hole);
+            edge.label = format!("{base_label}h{}", subscript_label(hole_seq));
+            edge.fill_color = None;
+            try_insert_command_object(document, GeoObject::Polygon(edge))?;
+        }
     }
     Ok(())
 }
@@ -17473,6 +21421,10 @@ fn resolve_list_arg(arg: &str, document: &Document) -> Result<Vec<ListElem>, Str
     };
     let label = clean_label(label_part);
     if let Some(id) = find_object_by_label(document, label) {
+        if let Some(GeoObject::List(list)) = document.get_object(id) {
+            return list_items_to_elems(&list.items)
+                .map_err(|e| format!("'{label}' no es lista numérica: {e}"));
+        }
         if let Some(GeoObject::DataTable(table)) = document.get_object(id) {
             let data: &[f64] = match suffix {
                 Some(s) if s.eq_ignore_ascii_case("xs") || s.eq_ignore_ascii_case("x") => &table.xs,
@@ -17494,6 +21446,64 @@ fn resolve_list_arg(arg: &str, document: &Document) -> Result<Vec<ListElem>, Str
         "no se pudo resolver lista '{}': usa {{a,b}} o etiqueta DataTable",
         trimmed
     ))
+}
+
+/// Convierte elementos de literal (`ListElem`) a ítems persistibles.
+///
+/// Solo escalares finitos y anidamiento dentro de `MAX_LIST_DEPTH`;
+/// el texto no tiene literal (llega por API, no por sintaxis).
+fn list_elems_to_items(elems: &[ListElem]) -> Result<Vec<ListItem>, String> {
+    fn convert(elem: &ListElem, depth: usize) -> Result<ListItem, String> {
+        if depth > grafito_core::validation::MAX_LIST_DEPTH {
+            return Err(format!(
+                "anidamiento excede el máximo {}",
+                grafito_core::validation::MAX_LIST_DEPTH
+            ));
+        }
+        match elem {
+            ListElem::Scalar(value) => {
+                if !value.is_finite() {
+                    return Err("la lista contiene un valor no finito".to_string());
+                }
+                Ok(ListItem::Scalar(*value))
+            }
+            ListElem::List(inner) => {
+                let mut items = Vec::with_capacity(inner.len());
+                for child in inner {
+                    items.push(convert(child, depth + 1)?);
+                }
+                Ok(ListItem::List(items))
+            }
+        }
+    }
+    if elems.len() > grafito_core::validation::MAX_LIST_LENGTH {
+        return Err(format!(
+            "la lista excede el máximo {} elementos",
+            grafito_core::validation::MAX_LIST_LENGTH
+        ));
+    }
+    elems.iter().map(|e| convert(e, 0)).collect()
+}
+
+/// Convierte ítems persistidos a elementos de cómputo.
+///
+/// El texto no es numérico: su presencia da error honesto (el llamador
+/// indica el comando). El anidamiento se preserva tal cual.
+fn list_items_to_elems(items: &[ListItem]) -> Result<Vec<ListElem>, String> {
+    fn convert(item: &ListItem) -> Result<ListElem, String> {
+        match item {
+            ListItem::Scalar(value) => Ok(ListElem::Scalar(*value)),
+            ListItem::List(inner) => {
+                let mut elems = Vec::with_capacity(inner.len());
+                for child in inner {
+                    elems.push(convert(child)?);
+                }
+                Ok(ListElem::List(elems))
+            }
+            ListItem::Text(text) => Err(format!("'{text}' no es numérico")),
+        }
+    }
+    items.iter().map(convert).collect()
 }
 
 /// Valida longitud contra `MAX_ARRAY_LENGTH`.
@@ -18104,6 +22114,1916 @@ fn run_count_if_command(args: &[String], document: &Document) -> CommandOutcome 
         }
     }
     CommandOutcome::Message(format!("{count}"))
+}
+
+// Frente P1: listas de primera clase + estadística/probabilidad (GeoGebra, 82 visibles).
+// ÚNICO comentario de ola permitido en este archivo: los brazos delgados del dispatcher
+// delegan a `grafito_geometry::{list_ops, statistics}`. ReadOnly salvo DotPlot y
+// FrequencyPolygon (crean ScatterPlot/Polyline existentes). Sin `GeoObject::List`
+// todavía (matches exhaustivos fuera de alcance): las listas viajan como texto `{…}`.
+// RNG determinista sembrado por hash(document.version, canonical, args).
+// Descartes honestos: Selections (idéntico a KeepIf), ChiSquared (colisiona con la
+// distribución), Cauchy y BetaDist (brazos huérfanos previos ya responden).
+
+/// Resuelve lista plana `{…}` o `DataTable[.xs|.ys]` para comandos P1.
+fn p1_flat_list(command: &str, arg: &str, document: &Document) -> Result<Vec<f64>, CommandOutcome> {
+    let elems = resolve_list_arg(arg, document)
+        .map_err(|error| CommandOutcome::Error(format!("{command}: {error}")))?;
+    let mut out = Vec::with_capacity(elems.len());
+    for elem in elems {
+        match elem {
+            ListElem::Scalar(value) => out.push(value),
+            ListElem::List(_) => {
+                return Err(CommandOutcome::Error(format!(
+                    "{command}: requiere lista plana numérica"
+                )));
+            }
+        }
+    }
+    if out.len() > grafito_geometry::list_ops::MAX_LIST_LENGTH {
+        return Err(CommandOutcome::Error(format!(
+            "{command}: longitud {} excede el máximo {}",
+            out.len(),
+            grafito_geometry::list_ops::MAX_LIST_LENGTH
+        )));
+    }
+    Ok(out)
+}
+
+/// Entero finito como `i64` o error honesto.
+fn p1_int_arg(
+    command: &str,
+    field: &str,
+    value: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Result<i64, CommandOutcome> {
+    let parsed = parse_finite_command_arg(command, field, value, variables)?;
+    if parsed.fract() != 0.0
+        || !(-9_007_199_254_740_992.0..=9_007_199_254_740_992.0).contains(&parsed)
+    {
+        return Err(CommandOutcome::Error(format!(
+            "{command}: {field} debe ser un entero"
+        )));
+    }
+    Ok(parsed as i64)
+}
+
+/// Entero sin signo para parámetros discretos.
+fn p1_u32_arg(
+    command: &str,
+    field: &str,
+    value: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Result<u32, CommandOutcome> {
+    let parsed = p1_int_arg(command, field, value, variables)?;
+    u32::try_from(parsed)
+        .map_err(|_| CommandOutcome::Error(format!("{command}: {field} debe ser un entero ≥ 0")))
+}
+
+/// RNG determinista del comando (mismo documento+args → misma secuencia).
+fn p1_rng(
+    document: &Document,
+    canonical: &str,
+    args: &[String],
+) -> grafito_geometry::list_ops::DeterministicRng {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
+        document.version,
+        canonical,
+        &refs,
+    )
+}
+
+fn run_p1_element(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "Element: se requieren 2 argumentos Element[lista, n]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("Element", &args[0], document));
+    let n = command_result!(p1_int_arg("Element", "n", &args[1], &document.variables));
+    match grafito_geometry::list_ops::element(&data, n) {
+        Ok(value) => CommandOutcome::Message(format!("Element[{n}] = {value}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_unique(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Unique: se requiere 1 lista Unique[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("Unique", &args[0], document));
+    match grafito_geometry::list_ops::unique_sorted(&data) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_iteration_list(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(
+            "IterationList: se requieren 4 argumentos IterationList[f, var, semilla, n]".into(),
+        );
+    }
+    let expr = args.first().map_or("", String::as_str).trim();
+    let var = args.get(1).map_or("", String::as_str).trim();
+    let seed = command_result!(parse_finite_command_arg(
+        "IterationList",
+        "semilla",
+        args.get(2).map_or("", String::as_str),
+        &document.variables,
+    ));
+    let n = command_result!(p1_int_arg(
+        "IterationList",
+        "n",
+        args.get(3).map_or("", String::as_str),
+        &document.variables,
+    ));
+    let vars: Vec<(String, f64)> = document
+        .variables
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    match grafito_geometry::list_ops::iteration_list(expr, var, seed, n, &vars) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_union(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Union: se requieren 2 listas Union[a, b]".into());
+    }
+    let a = command_result!(p1_flat_list("Union", &args[0], document));
+    let b = command_result!(p1_flat_list("Union", &args[1], document));
+    match grafito_geometry::list_ops::union_sorted(&a, &b) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_intersection(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "Intersection: se requieren 2 listas Intersection[a, b]".into(),
+        );
+    }
+    let a = command_result!(p1_flat_list("Intersection", &args[0], document));
+    let b = command_result!(p1_flat_list("Intersection", &args[1], document));
+    match grafito_geometry::list_ops::intersection_sorted(&a, &b) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_insert(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error(
+            "Insert: se requieren 3 argumentos Insert[lista, pos, valor]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("Insert", &args[0], document));
+    let pos = command_result!(p1_int_arg("Insert", "pos", &args[1], &document.variables));
+    let value = command_result!(parse_finite_command_arg(
+        "Insert",
+        "valor",
+        &args[2],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::insert_at(&data, pos, value) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_remove(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "Remove: se requieren 2 argumentos Remove[lista, pos]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("Remove", &args[0], document));
+    let pos = command_result!(p1_int_arg("Remove", "pos", &args[1], &document.variables));
+    match grafito_geometry::list_ops::remove_at(&data, pos) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_index_of(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "IndexOf: se requieren 2 argumentos IndexOf[lista, valor]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("IndexOf", &args[0], document));
+    let value = command_result!(parse_finite_command_arg(
+        "IndexOf",
+        "valor",
+        &args[1],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::index_of(&data, value) {
+        Ok(pos) => CommandOutcome::Message(format!("IndexOf = {pos}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_map(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Map: se requieren 2 argumentos Map[f, lista]".into());
+    }
+    let expr = args.first().map_or("", String::as_str).trim();
+    let data = command_result!(p1_flat_list("Map", &args[1], document));
+    let vars: Vec<(String, f64)> = document
+        .variables
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    match grafito_geometry::list_ops::map_list(expr, &data, &vars) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_shuffle(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Shuffle: se requiere 1 lista Shuffle[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("Shuffle", &args[0], document));
+    let mut rng = p1_rng(document, "Shuffle", args);
+    match grafito_geometry::list_ops::shuffle_with_seed(&data, &mut rng) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sample(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Sample: se requieren 2 argumentos Sample[lista, k]".into());
+    }
+    let data = command_result!(p1_flat_list("Sample", &args[0], document));
+    let k = command_result!(p1_int_arg("Sample", "k", &args[1], &document.variables));
+    let mut rng = p1_rng(document, "Sample", args);
+    match grafito_geometry::list_ops::sample_with_seed(&data, k, &mut rng) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_random_element(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error(
+            "RandomElement: se requiere 1 lista RandomElement[lista]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("RandomElement", &args[0], document));
+    let mut rng = p1_rng(document, "RandomElement", args);
+    match grafito_geometry::list_ops::random_element_with_seed(&data, &mut rng) {
+        Ok(value) => CommandOutcome::Message(format!("RandomElement = {value}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_random_discrete(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "RandomDiscrete: se requieren 2 enteros RandomDiscrete[min, max]".into(),
+        );
+    }
+    let lo = command_result!(parse_finite_command_arg(
+        "RandomDiscrete",
+        "min",
+        &args[0],
+        &document.variables,
+    ));
+    let hi = command_result!(parse_finite_command_arg(
+        "RandomDiscrete",
+        "max",
+        &args[1],
+        &document.variables,
+    ));
+    let mut rng = p1_rng(document, "RandomDiscrete", args);
+    match grafito_geometry::list_ops::random_discrete_range(lo, hi, &mut rng) {
+        Ok(value) => CommandOutcome::Message(format!("RandomDiscrete = {value}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_list_min(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("ListMin: se requiere 1 lista ListMin[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("ListMin", &args[0], document));
+    match grafito_geometry::list_ops::list_min(&data) {
+        Ok(value) => CommandOutcome::Message(format!("ListMin = {value}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_list_max(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("ListMax: se requiere 1 lista ListMax[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("ListMax", &args[0], document));
+    match grafito_geometry::list_ops::list_max(&data) {
+        Ok(value) => CommandOutcome::Message(format!("ListMax = {value}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sum(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Sum: se requiere 1 lista Sum[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("Sum", &args[0], document));
+    match grafito_geometry::list_ops::list_sum(&data) {
+        Ok(value) => CommandOutcome::Message(format!("Sum = {value}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_product(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Product: se requiere 1 lista Product[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("Product", &args[0], document));
+    match grafito_geometry::list_ops::list_product(&data) {
+        Ok(value) => CommandOutcome::Message(format!("Product = {value}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_covariance(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "Covariance: se requieren 2 listas Covariance[xs, ys]".into(),
+        );
+    }
+    let xs = command_result!(p1_flat_list("Covariance", &args[0], document));
+    let ys = command_result!(p1_flat_list("Covariance", &args[1], document));
+    match grafito_geometry::statistics::covariance(&xs, &ys) {
+        Some(value) if value.is_finite() => {
+            CommandOutcome::Message(format!("Covariance = {value:.6}"))
+        }
+        _ => CommandOutcome::Error(
+            "Covariance: no computable (largos distintos, <2 datos o varianza nula)".into(),
+        ),
+    }
+}
+
+fn run_p1_rsquare(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("RSquare: se requieren 2 listas RSquare[xs, ys]".into());
+    }
+    let xs = command_result!(p1_flat_list("RSquare", &args[0], document));
+    let ys = command_result!(p1_flat_list("RSquare", &args[1], document));
+    match grafito_geometry::list_ops::rsquare(&xs, &ys) {
+        Ok(value) => CommandOutcome::Message(format!("RSquare = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_spearman(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Spearman: se requieren 2 listas Spearman[xs, ys]".into());
+    }
+    let xs = command_result!(p1_flat_list("Spearman", &args[0], document));
+    let ys = command_result!(p1_flat_list("Spearman", &args[1], document));
+    match grafito_geometry::list_ops::spearman(&xs, &ys) {
+        Ok(value) => CommandOutcome::Message(format!("Spearman = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_tied_rank(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("TiedRank: se requiere 1 lista TiedRank[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("TiedRank", &args[0], document));
+    match grafito_geometry::list_ops::tied_rank(&data) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_ordinal_rank(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("OrdinalRank: se requiere 1 lista OrdinalRank[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("OrdinalRank", &args[0], document));
+    match grafito_geometry::list_ops::ordinal_rank(&data) {
+        Ok(out) => CommandOutcome::Message(grafito_geometry::list_ops::format_scalars(&out)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_mad(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("MAD: se requiere 1 lista MAD[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("MAD", &args[0], document));
+    match grafito_geometry::list_ops::mad(&data) {
+        Ok(value) => CommandOutcome::Message(format!("MAD = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_quartile1(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Quartile1: se requiere 1 lista Quartile1[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("Quartile1", &args[0], document));
+    match grafito_geometry::statistics::q1(&data) {
+        Some(value) if value.is_finite() => {
+            CommandOutcome::Message(format!("Quartile1 = {value:.6}"))
+        }
+        _ => CommandOutcome::Error("Quartile1: lista vacía".into()),
+    }
+}
+
+fn run_p1_quartile3(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Quartile3: se requiere 1 lista Quartile3[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("Quartile3", &args[0], document));
+    match grafito_geometry::statistics::q3(&data) {
+        Some(value) if value.is_finite() => {
+            CommandOutcome::Message(format!("Quartile3 = {value:.6}"))
+        }
+        _ => CommandOutcome::Error("Quartile3: lista vacía".into()),
+    }
+}
+
+fn run_p1_percentile(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "Percentile: se requieren 2 argumentos Percentile[lista, p]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("Percentile", &args[0], document));
+    let p = command_result!(parse_finite_command_arg(
+        "Percentile",
+        "p",
+        &args[1],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::percentile(&data, p) {
+        Ok(value) => CommandOutcome::Message(format!("Percentile[{p}] = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sdx(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error("SDX: se requieren 1 o 2 listas SDX[xs]".into());
+    }
+    let xs = command_result!(p1_flat_list("SDX", &args[0], document));
+    match grafito_geometry::list_ops::population_sd(&xs, "SDX") {
+        Ok(value) => CommandOutcome::Message(format!("SDX = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sdy(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error("SDY: se requieren 1 o 2 listas SDY[ys]".into());
+    }
+    let ys = command_result!(p1_flat_list(
+        "SDY",
+        args.get(1).map_or(&args[0], |v| v),
+        document,
+    ));
+    match grafito_geometry::list_ops::population_sd(&ys, "SDY") {
+        Ok(value) => CommandOutcome::Message(format!("SDY = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sample_sdx(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error("SampleSDX: se requieren 1 o 2 listas SampleSDX[xs]".into());
+    }
+    let xs = command_result!(p1_flat_list("SampleSDX", &args[0], document));
+    match grafito_geometry::statistics::std_dev(&xs) {
+        Some(value) if value.is_finite() => {
+            CommandOutcome::Message(format!("SampleSDX = {value:.6}"))
+        }
+        _ => CommandOutcome::Error("SampleSDX: se requieren ≥2 datos finitos".into()),
+    }
+}
+
+fn run_p1_sample_sdy(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error("SampleSDY: se requieren 1 o 2 listas SampleSDY[ys]".into());
+    }
+    let ys = command_result!(p1_flat_list(
+        "SampleSDY",
+        args.get(1).map_or(&args[0], |v| v),
+        document,
+    ));
+    match grafito_geometry::statistics::std_dev(&ys) {
+        Some(value) if value.is_finite() => {
+            CommandOutcome::Message(format!("SampleSDY = {value:.6}"))
+        }
+        _ => CommandOutcome::Error("SampleSDY: se requieren ≥2 datos finitos".into()),
+    }
+}
+
+fn run_p1_meanx(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error("MeanX: se requieren 1 o 2 listas MeanX[xs]".into());
+    }
+    let xs = command_result!(p1_flat_list("MeanX", &args[0], document));
+    match grafito_geometry::list_ops::mean_of(&xs, "MeanX") {
+        Ok(value) => CommandOutcome::Message(format!("MeanX = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_meany(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error("MeanY: se requieren 1 o 2 listas MeanY[ys]".into());
+    }
+    let ys = command_result!(p1_flat_list(
+        "MeanY",
+        args.get(1).map_or(&args[0], |v| v),
+        document,
+    ));
+    match grafito_geometry::list_ops::mean_of(&ys, "MeanY") {
+        Ok(value) => CommandOutcome::Message(format!("MeanY = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sigma_xx(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("SigmaXX: se requiere 1 lista SigmaXX[xs]".into());
+    }
+    let xs = command_result!(p1_flat_list("SigmaXX", &args[0], document));
+    match grafito_geometry::list_ops::sigma_xx(&xs) {
+        Ok(value) => CommandOutcome::Message(format!("SigmaXX = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sigma_xy(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("SigmaXY: se requieren 2 listas SigmaXY[xs, ys]".into());
+    }
+    let xs = command_result!(p1_flat_list("SigmaXY", &args[0], document));
+    let ys = command_result!(p1_flat_list("SigmaXY", &args[1], document));
+    match grafito_geometry::list_ops::sigma_xy(&xs, &ys) {
+        Ok(value) => CommandOutcome::Message(format!("SigmaXY = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sigma_yy(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("SigmaYY: se requiere 1 lista SigmaYY[ys]".into());
+    }
+    let ys = command_result!(p1_flat_list("SigmaYY", &args[0], document));
+    match grafito_geometry::list_ops::sigma_yy(&ys) {
+        Ok(value) => CommandOutcome::Message(format!("SigmaYY = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sxx(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Sxx: se requiere 1 lista Sxx[xs]".into());
+    }
+    let xs = command_result!(p1_flat_list("Sxx", &args[0], document));
+    match grafito_geometry::list_ops::sxx(&xs) {
+        Ok(value) => CommandOutcome::Message(format!("Sxx = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sxy(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Sxy: se requieren 2 listas Sxy[xs, ys]".into());
+    }
+    let xs = command_result!(p1_flat_list("Sxy", &args[0], document));
+    let ys = command_result!(p1_flat_list("Sxy", &args[1], document));
+    match grafito_geometry::list_ops::sxy(&xs, &ys) {
+        Ok(value) => CommandOutcome::Message(format!("Sxy = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_syy(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Syy: se requiere 1 lista Syy[ys]".into());
+    }
+    let ys = command_result!(p1_flat_list("Syy", &args[0], document));
+    match grafito_geometry::list_ops::syy(&ys) {
+        Ok(value) => CommandOutcome::Message(format!("Syy = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_geometric_mean(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error(
+            "GeometricMean: se requiere 1 lista GeometricMean[lista]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("GeometricMean", &args[0], document));
+    match grafito_geometry::list_ops::geometric_mean(&data) {
+        Ok(value) => CommandOutcome::Message(format!("GeometricMean = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_harmonic_mean(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error(
+            "HarmonicMean: se requiere 1 lista HarmonicMean[lista]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("HarmonicMean", &args[0], document));
+    match grafito_geometry::list_ops::harmonic_mean(&data) {
+        Ok(value) => CommandOutcome::Message(format!("HarmonicMean = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_mode(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Mode: se requiere 1 lista Mode[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("Mode", &args[0], document));
+    match grafito_geometry::statistics::mode(&data) {
+        Some(value) if value.is_finite() => CommandOutcome::Message(format!("Mode = {value:.6}")),
+        _ => CommandOutcome::Error("Mode: lista vacía".into()),
+    }
+}
+
+fn run_p1_rms(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error(
+            "RootMeanSquare: se requiere 1 lista RootMeanSquare[lista]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("RootMeanSquare", &args[0], document));
+    match grafito_geometry::list_ops::root_mean_square(&data) {
+        Ok(value) => CommandOutcome::Message(format!("RootMeanSquare = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_sse(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error(
+            "SumSquaredErrors: se requiere 1 lista SumSquaredErrors[lista]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("SumSquaredErrors", &args[0], document));
+    match grafito_geometry::list_ops::sum_squared_errors(&data) {
+        Ok(value) => CommandOutcome::Message(format!("SumSquaredErrors = {value:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_zmean_estimate(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error(
+            "ZMeanEstimate: se requieren 3 argumentos ZMeanEstimate[lista, sigma, conf]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("ZMeanEstimate", &args[0], document));
+    let sigma = command_result!(parse_finite_command_arg(
+        "ZMeanEstimate",
+        "sigma",
+        &args[1],
+        &document.variables,
+    ));
+    let conf = command_result!(parse_finite_command_arg(
+        "ZMeanEstimate",
+        "conf",
+        &args[2],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::z_mean_estimate(&data, sigma, conf) {
+        Ok((lo, m, hi)) => {
+            CommandOutcome::Message(format!("ZMeanEstimate = [{lo:.6}, {m:.6}, {hi:.6}]"))
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_zmean2_estimate(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 5 {
+        return CommandOutcome::Error(
+            "ZMean2Estimate: ZMean2Estimate[l1, s1, l2, s2, conf]".into(),
+        );
+    }
+    let d1 = command_result!(p1_flat_list("ZMean2Estimate", &args[0], document));
+    let s1 = command_result!(parse_finite_command_arg(
+        "ZMean2Estimate",
+        "s1",
+        &args[1],
+        &document.variables,
+    ));
+    let d2 = command_result!(p1_flat_list("ZMean2Estimate", &args[2], document));
+    let s2 = command_result!(parse_finite_command_arg(
+        "ZMean2Estimate",
+        "s2",
+        &args[3],
+        &document.variables,
+    ));
+    let conf = command_result!(parse_finite_command_arg(
+        "ZMean2Estimate",
+        "conf",
+        &args[4],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::z_mean_2_estimate(&d1, s1, &d2, s2, conf) {
+        Ok((lo, d, hi)) => {
+            CommandOutcome::Message(format!("ZMean2Estimate = [{lo:.6}, {d:.6}, {hi:.6}]"))
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_zmean_test(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error(
+            "ZMeanTest: se requieren 3 argumentos ZMeanTest[lista, mu0, sigma]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("ZMeanTest", &args[0], document));
+    let mu0 = command_result!(parse_finite_command_arg(
+        "ZMeanTest",
+        "mu0",
+        &args[1],
+        &document.variables,
+    ));
+    let sigma = command_result!(parse_finite_command_arg(
+        "ZMeanTest",
+        "sigma",
+        &args[2],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::z_mean_test(&data, mu0, sigma) {
+        Ok((z, p)) => CommandOutcome::Message(format!("ZMeanTest: z = {z:.6}, p = {p:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_zmean2_test(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error("ZMean2Test: ZMean2Test[l1, s1, l2, s2]".into());
+    }
+    let d1 = command_result!(p1_flat_list("ZMean2Test", &args[0], document));
+    let s1 = command_result!(parse_finite_command_arg(
+        "ZMean2Test",
+        "s1",
+        &args[1],
+        &document.variables,
+    ));
+    let d2 = command_result!(p1_flat_list("ZMean2Test", &args[2], document));
+    let s2 = command_result!(parse_finite_command_arg(
+        "ZMean2Test",
+        "s2",
+        &args[3],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::z_mean_2_test(&d1, s1, &d2, s2) {
+        Ok((z, p)) => CommandOutcome::Message(format!("ZMean2Test: z = {z:.6}, p = {p:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_zprop_estimate(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error(
+            "ZProportionEstimate: ZProportionEstimate[exitos, n, conf]".into(),
+        );
+    }
+    let x = command_result!(parse_finite_command_arg(
+        "ZProportionEstimate",
+        "exitos",
+        &args[0],
+        &document.variables,
+    ));
+    let n = command_result!(parse_finite_command_arg(
+        "ZProportionEstimate",
+        "n",
+        &args[1],
+        &document.variables,
+    ));
+    let conf = command_result!(parse_finite_command_arg(
+        "ZProportionEstimate",
+        "conf",
+        &args[2],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::z_proportion_estimate(x, n, conf) {
+        Ok((lo, p, hi)) => {
+            CommandOutcome::Message(format!("ZProportionEstimate = [{lo:.6}, {p:.6}, {hi:.6}]"))
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_zprop2_estimate(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 5 {
+        return CommandOutcome::Error(
+            "ZProportion2Estimate: ZProportion2Estimate[x1, n1, x2, n2, conf]".into(),
+        );
+    }
+    let x1 = command_result!(parse_finite_command_arg(
+        "ZProportion2Estimate",
+        "x1",
+        &args[0],
+        &document.variables,
+    ));
+    let n1 = command_result!(parse_finite_command_arg(
+        "ZProportion2Estimate",
+        "n1",
+        &args[1],
+        &document.variables,
+    ));
+    let x2 = command_result!(parse_finite_command_arg(
+        "ZProportion2Estimate",
+        "x2",
+        &args[2],
+        &document.variables,
+    ));
+    let n2 = command_result!(parse_finite_command_arg(
+        "ZProportion2Estimate",
+        "n2",
+        &args[3],
+        &document.variables,
+    ));
+    let conf = command_result!(parse_finite_command_arg(
+        "ZProportion2Estimate",
+        "conf",
+        &args[4],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::z_proportion_2_estimate(x1, n1, x2, n2, conf) {
+        Ok((lo, d, hi)) => {
+            CommandOutcome::Message(format!("ZProportion2Estimate = [{lo:.6}, {d:.6}, {hi:.6}]"))
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_zprop_test(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("ZProportionTest: ZProportionTest[exitos, n, p0]".into());
+    }
+    let x = command_result!(parse_finite_command_arg(
+        "ZProportionTest",
+        "exitos",
+        &args[0],
+        &document.variables,
+    ));
+    let n = command_result!(parse_finite_command_arg(
+        "ZProportionTest",
+        "n",
+        &args[1],
+        &document.variables,
+    ));
+    let p0 = command_result!(parse_finite_command_arg(
+        "ZProportionTest",
+        "p0",
+        &args[2],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::z_proportion_test(x, n, p0) {
+        Ok((z, p)) => CommandOutcome::Message(format!("ZProportionTest: z = {z:.6}, p = {p:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_zprop2_test(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error("ZProportion2Test: ZProportion2Test[x1, n1, x2, n2]".into());
+    }
+    let x1 = command_result!(parse_finite_command_arg(
+        "ZProportion2Test",
+        "x1",
+        &args[0],
+        &document.variables,
+    ));
+    let n1 = command_result!(parse_finite_command_arg(
+        "ZProportion2Test",
+        "n1",
+        &args[1],
+        &document.variables,
+    ));
+    let x2 = command_result!(parse_finite_command_arg(
+        "ZProportion2Test",
+        "x2",
+        &args[2],
+        &document.variables,
+    ));
+    let n2 = command_result!(parse_finite_command_arg(
+        "ZProportion2Test",
+        "n2",
+        &args[3],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::z_proportion_2_test(x1, n1, x2, n2) {
+        Ok((z, p)) => CommandOutcome::Message(format!("ZProportion2Test: z = {z:.6}, p = {p:.6}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_tmean_estimate(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("TMeanEstimate: TMeanEstimate[lista, conf]".into());
+    }
+    let data = command_result!(p1_flat_list("TMeanEstimate", &args[0], document));
+    let conf = command_result!(parse_finite_command_arg(
+        "TMeanEstimate",
+        "conf",
+        &args[1],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::t_mean_estimate(&data, conf) {
+        Ok((lo, m, hi)) => {
+            CommandOutcome::Message(format!("TMeanEstimate = [{lo:.6}, {m:.6}, {hi:.6}]"))
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_tmean2_estimate(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("TMean2Estimate: TMean2Estimate[l1, l2, conf]".into());
+    }
+    let d1 = command_result!(p1_flat_list("TMean2Estimate", &args[0], document));
+    let d2 = command_result!(p1_flat_list("TMean2Estimate", &args[1], document));
+    let conf = command_result!(parse_finite_command_arg(
+        "TMean2Estimate",
+        "conf",
+        &args[2],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::t_mean_2_estimate(&d1, &d2, conf) {
+        Ok((lo, d, hi)) => {
+            CommandOutcome::Message(format!("TMean2Estimate = [{lo:.6}, {d:.6}, {hi:.6}]"))
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_contingency(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("ContingencyTable: ContingencyTable[{obs}, ncols]".into());
+    }
+    let obs = command_result!(p1_flat_list("ContingencyTable", &args[0], document));
+    let ncols = command_result!(p1_u32_arg(
+        "ContingencyTable",
+        "ncols",
+        &args[1],
+        &document.variables,
+    ));
+    match grafito_geometry::list_ops::contingency_chi2(&obs, ncols as usize) {
+        Ok((chi2, df, p)) => CommandOutcome::Message(format!(
+            "ContingencyTable: χ² = {chi2:.6}, gl = {df:.0}, p = {p:.6}"
+        )),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_class(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("Class: Class[lista, k, i] (i-ésima clase de k)".into());
+    }
+    let data = command_result!(p1_flat_list("Class", &args[0], document));
+    let k = command_result!(p1_int_arg("Class", "k", &args[1], &document.variables));
+    let i = command_result!(p1_int_arg("Class", "i", &args[2], &document.variables));
+    match grafito_geometry::list_ops::class_breaks(&data, k) {
+        Ok(breaks) => {
+            if i < 1 || i as usize > breaks.classes {
+                return CommandOutcome::Error(format!(
+                    "Class: i={i} fuera de [1, {}]",
+                    breaks.classes
+                ));
+            }
+            let a = breaks
+                .boundaries
+                .get(i as usize - 1)
+                .copied()
+                .unwrap_or(0.0);
+            let b = breaks.boundaries.get(i as usize).copied().unwrap_or(a);
+            CommandOutcome::Message(format!("Class[{i}] = [{a:.6}, {b:.6})"))
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_classes(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Classes: Classes[lista, k]".into());
+    }
+    let data = command_result!(p1_flat_list("Classes", &args[0], document));
+    let k = command_result!(p1_int_arg("Classes", "k", &args[1], &document.variables));
+    match grafito_geometry::list_ops::class_breaks(&data, k) {
+        Ok(breaks) => CommandOutcome::Message(format!(
+            "Classes(k={}, w={:.6}): {}",
+            breaks.classes,
+            breaks.width,
+            grafito_geometry::list_ops::format_scalars(&breaks.boundaries),
+        )),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_dotplot(args: &[String], document: &mut Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("DotPlot: se requiere 1 lista DotPlot[lista]".into());
+    }
+    let data = command_result!(p1_flat_list("DotPlot", &args[0], document));
+    match grafito_geometry::list_ops::dot_plot_points(&data) {
+        Ok((xs, ys)) => {
+            let obj = GeoObject::ScatterPlot(
+                ScatterPlotObj::new(xs, ys).with_style(ScatterStyle::Sticks),
+            );
+            insert_command_object!(document, obj);
+            CommandOutcome::Message("DotPlot created".into())
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_freq_polygon(args: &[String], document: &mut Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error(
+            "FrequencyPolygon: FrequencyPolygon[lista] o FrequencyPolygon[lista, k]".into(),
+        );
+    }
+    let data = command_result!(p1_flat_list("FrequencyPolygon", &args[0], document));
+    let k = match args.get(1) {
+        Some(raw) => command_result!(p1_int_arg(
+            "FrequencyPolygon",
+            "k",
+            raw,
+            &document.variables,
+        )),
+        None => 10,
+    };
+    match grafito_geometry::list_ops::frequency_polygon_points(&data, k) {
+        Ok((mids, freqs)) => {
+            let points: Vec<Point2> = mids
+                .iter()
+                .zip(freqs.iter())
+                .map(|(x, y)| Point2::new(*x, *y))
+                .collect();
+            if let Err(error) = require_finite_curve_points("FrequencyPolygon", &points) {
+                return error;
+            }
+            let obj = GeoObject::Polyline(PolylineObj::new(points));
+            insert_command_object!(document, obj);
+            CommandOutcome::Message("FrequencyPolygon created".into())
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_p1_erlang(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 2 | 3) {
+        return CommandOutcome::Error("Erlang: Erlang[k, lambda] o Erlang[k, lambda, x]".into());
+    }
+    let k = command_result!(p1_u32_arg("Erlang", "k", &args[0], &document.variables));
+    let lambda = command_result!(parse_finite_command_arg(
+        "Erlang",
+        "lambda",
+        &args[1],
+        &document.variables,
+    ));
+    if k < 1 || !lambda.is_finite() || lambda <= 0.0 {
+        return CommandOutcome::Error("Erlang: k ≥ 1 entero y lambda > 0".into());
+    }
+    let x = command_result!(parse_optional_finite_command_arg(
+        "Erlang",
+        "x",
+        args,
+        2,
+        f64::from(k) / lambda,
+        &document.variables,
+    ));
+    let pdf = grafito_geometry::statistics::erlang_pdf(x, k, lambda);
+    let cdf = grafito_geometry::statistics::erlang_cdf(x, k, lambda);
+    command_result!(require_finite_outputs("Erlang", &[pdf, cdf]));
+    CommandOutcome::Message(format!(
+        "Erlang[{k},{lambda}]: PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_fdistribution(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 2 | 3) {
+        return CommandOutcome::Error(
+            "FDistribution: FDistribution[d1, d2] o FDistribution[d1, d2, x]".into(),
+        );
+    }
+    let d1 = command_result!(parse_finite_command_arg(
+        "FDistribution",
+        "d1",
+        &args[0],
+        &document.variables,
+    ));
+    let d2 = command_result!(parse_finite_command_arg(
+        "FDistribution",
+        "d2",
+        &args[1],
+        &document.variables,
+    ));
+    if !d1.is_finite() || d1 <= 0.0 || !d2.is_finite() || d2 <= 0.0 {
+        return CommandOutcome::Error("FDistribution: d1, d2 finitos > 0".into());
+    }
+    let x = command_result!(parse_optional_finite_command_arg(
+        "FDistribution",
+        "x",
+        args,
+        2,
+        1.0,
+        &document.variables,
+    ));
+    let pdf = grafito_geometry::statistics::f_distribution_pdf(x, d1, d2);
+    let cdf = grafito_geometry::statistics::f_distribution_cdf(x, d1, d2);
+    command_result!(require_finite_outputs("FDistribution", &[pdf, cdf]));
+    CommandOutcome::Message(format!(
+        "FDistribution[{d1},{d2}]: PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_gamma(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 2 | 3) {
+        return CommandOutcome::Error("Gamma: Gamma[alpha, beta] o Gamma[alpha, beta, x]".into());
+    }
+    let alpha = command_result!(parse_finite_command_arg(
+        "Gamma",
+        "alpha",
+        &args[0],
+        &document.variables,
+    ));
+    let beta = command_result!(parse_finite_command_arg(
+        "Gamma",
+        "beta",
+        &args[1],
+        &document.variables,
+    ));
+    if !alpha.is_finite() || alpha <= 0.0 || !beta.is_finite() || beta <= 0.0 {
+        return CommandOutcome::Error("Gamma: alpha, beta finitos > 0".into());
+    }
+    let x = command_result!(parse_optional_finite_command_arg(
+        "Gamma",
+        "x",
+        args,
+        2,
+        alpha / beta,
+        &document.variables,
+    ));
+    let pdf = grafito_geometry::statistics::gamma_pdf(x, alpha, beta);
+    let cdf = grafito_geometry::statistics::gamma_cdf(x, alpha, beta);
+    command_result!(require_finite_outputs("Gamma", &[pdf, cdf]));
+    CommandOutcome::Message(format!(
+        "Gamma[{alpha},{beta}]: PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_hypergeometric(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 3 | 4) {
+        return CommandOutcome::Error(
+            "HyperGeometric: HyperGeometric[N, K, n] o HyperGeometric[N, K, n, k]".into(),
+        );
+    }
+    let n_pop = command_result!(p1_u32_arg(
+        "HyperGeometric",
+        "N",
+        &args[0],
+        &document.variables
+    ));
+    let k_succ = command_result!(p1_u32_arg(
+        "HyperGeometric",
+        "K",
+        &args[1],
+        &document.variables
+    ));
+    let n_draw = command_result!(p1_u32_arg(
+        "HyperGeometric",
+        "n",
+        &args[2],
+        &document.variables
+    ));
+    if k_succ > n_pop || n_draw > n_pop {
+        return CommandOutcome::Error("HyperGeometric: K ≤ N y n ≤ N".into());
+    }
+    let default_k = (f64::from(n_draw) * f64::from(k_succ) / f64::from(n_pop.max(1))).round();
+    let k_raw = command_result!(parse_optional_finite_command_arg(
+        "HyperGeometric",
+        "k",
+        args,
+        3,
+        default_k,
+        &document.variables,
+    ));
+    if k_raw.fract() != 0.0 || k_raw < 0.0 {
+        return CommandOutcome::Error("HyperGeometric: k debe ser un entero ≥ 0".into());
+    }
+    let k = k_raw as u32;
+    let pmf = grafito_geometry::statistics::hypergeometric_pmf(n_pop, k_succ, n_draw, k);
+    let cdf = grafito_geometry::statistics::hypergeometric_cdf(n_pop, k_succ, n_draw, k);
+    command_result!(require_finite_outputs("HyperGeometric", &[pmf, cdf]));
+    CommandOutcome::Message(format!(
+        "HyperGeometric[{n_pop},{k_succ},{n_draw}]: PMF({k}) = {pmf:.6}, CDF({k}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_lognormal(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 2 | 3) {
+        return CommandOutcome::Error(
+            "LogNormal: LogNormal[mu, sigma] o LogNormal[mu, sigma, x]".into(),
+        );
+    }
+    let mu = command_result!(parse_finite_command_arg(
+        "LogNormal",
+        "mu",
+        &args[0],
+        &document.variables,
+    ));
+    let sigma = command_result!(parse_finite_command_arg(
+        "LogNormal",
+        "sigma",
+        &args[1],
+        &document.variables,
+    ));
+    if !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+        return CommandOutcome::Error("LogNormal: mu finito y sigma > 0".into());
+    }
+    let x = command_result!(parse_optional_finite_command_arg(
+        "LogNormal",
+        "x",
+        args,
+        2,
+        mu.exp(),
+        &document.variables,
+    ));
+    let pdf = grafito_geometry::statistics::lognormal_pdf(x, mu, sigma);
+    let cdf = grafito_geometry::statistics::lognormal_cdf(x, mu, sigma);
+    command_result!(require_finite_outputs("LogNormal", &[pdf, cdf]));
+    CommandOutcome::Message(format!(
+        "LogNormal[{mu},{sigma}]: PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_logistic(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 2 | 3) {
+        return CommandOutcome::Error("Logistic: Logistic[mu, s] o Logistic[mu, s, x]".into());
+    }
+    let mu = command_result!(parse_finite_command_arg(
+        "Logistic",
+        "mu",
+        &args[0],
+        &document.variables,
+    ));
+    let s = command_result!(parse_finite_command_arg(
+        "Logistic",
+        "s",
+        &args[1],
+        &document.variables,
+    ));
+    if !mu.is_finite() || !s.is_finite() || s <= 0.0 {
+        return CommandOutcome::Error("Logistic: mu finito y s > 0".into());
+    }
+    let x = command_result!(parse_optional_finite_command_arg(
+        "Logistic",
+        "x",
+        args,
+        2,
+        mu,
+        &document.variables,
+    ));
+    let pdf = grafito_geometry::statistics::logistic_pdf(x, mu, s);
+    let cdf = grafito_geometry::statistics::logistic_cdf(x, mu, s);
+    command_result!(require_finite_outputs("Logistic", &[pdf, cdf]));
+    CommandOutcome::Message(format!(
+        "Logistic[{mu},{s}]: PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_pascal(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 2 | 3) {
+        return CommandOutcome::Error("Pascal: Pascal[r, p] o Pascal[r, p, k]".into());
+    }
+    let r = command_result!(p1_u32_arg("Pascal", "r", &args[0], &document.variables));
+    let p = command_result!(parse_finite_command_arg(
+        "Pascal",
+        "p",
+        &args[1],
+        &document.variables,
+    ));
+    if r < 1 || !p.is_finite() || !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("Pascal: r ≥ 1 entero y p en (0,1)".into());
+    }
+    let k_raw = command_result!(parse_optional_finite_command_arg(
+        "Pascal",
+        "k",
+        args,
+        2,
+        0.0,
+        &document.variables,
+    ));
+    if k_raw.fract() != 0.0 || k_raw < 0.0 {
+        return CommandOutcome::Error("Pascal: k debe ser un entero ≥ 0".into());
+    }
+    let k = k_raw as u32;
+    let pmf = grafito_geometry::statistics::negative_binomial_pmf(r, p, k);
+    let cdf = grafito_geometry::statistics::negative_binomial_cdf(r, p, k);
+    command_result!(require_finite_outputs("Pascal", &[pmf, cdf]));
+    CommandOutcome::Message(format!(
+        "Pascal[{r},{p}]: PMF({k}) = {pmf:.6}, CDF({k}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_triangular(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 3 | 4) {
+        return CommandOutcome::Error(
+            "Triangular: Triangular[a, b, c] o Triangular[a, b, c, x]".into(),
+        );
+    }
+    let a = command_result!(parse_finite_command_arg(
+        "Triangular",
+        "a",
+        &args[0],
+        &document.variables,
+    ));
+    let b = command_result!(parse_finite_command_arg(
+        "Triangular",
+        "b",
+        &args[1],
+        &document.variables,
+    ));
+    let c = command_result!(parse_finite_command_arg(
+        "Triangular",
+        "c",
+        &args[2],
+        &document.variables,
+    ));
+    if a > c || c > b || a >= b {
+        return CommandOutcome::Error("Triangular: se requiere a ≤ c ≤ b con a < b".into());
+    }
+    let x = command_result!(parse_optional_finite_command_arg(
+        "Triangular",
+        "x",
+        args,
+        3,
+        c,
+        &document.variables,
+    ));
+    let pdf = grafito_geometry::statistics::triangular_pdf(x, a, b, c);
+    let cdf = grafito_geometry::statistics::triangular_cdf(x, a, b, c);
+    command_result!(require_finite_outputs("Triangular", &[pdf, cdf]));
+    CommandOutcome::Message(format!(
+        "Triangular[{a},{b},{c}]: PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_weibull(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 2 | 3) {
+        return CommandOutcome::Error("Weibull: Weibull[k, lambda] o Weibull[k, lambda, x]".into());
+    }
+    let k = command_result!(parse_finite_command_arg(
+        "Weibull",
+        "k",
+        &args[0],
+        &document.variables,
+    ));
+    let lambda = command_result!(parse_finite_command_arg(
+        "Weibull",
+        "lambda",
+        &args[1],
+        &document.variables,
+    ));
+    if !k.is_finite() || k <= 0.0 || !lambda.is_finite() || lambda <= 0.0 {
+        return CommandOutcome::Error("Weibull: k, lambda finitos > 0".into());
+    }
+    let x = command_result!(parse_optional_finite_command_arg(
+        "Weibull",
+        "x",
+        args,
+        2,
+        lambda,
+        &document.variables,
+    ));
+    let pdf = grafito_geometry::statistics::weibull_pdf(x, k, lambda);
+    let cdf = grafito_geometry::statistics::weibull_cdf(x, k, lambda);
+    command_result!(require_finite_outputs("Weibull", &[pdf, cdf]));
+    CommandOutcome::Message(format!(
+        "Weibull[{k},{lambda}]: PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_zipf(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 2 | 3) {
+        return CommandOutcome::Error("Zipf: Zipf[s, N] o Zipf[s, N, k]".into());
+    }
+    let s = command_result!(parse_finite_command_arg(
+        "Zipf",
+        "s",
+        &args[0],
+        &document.variables,
+    ));
+    let n = command_result!(p1_u32_arg("Zipf", "N", &args[1], &document.variables));
+    if !s.is_finite() || s <= 0.0 || n < 1 {
+        return CommandOutcome::Error("Zipf: s > 0 y N ≥ 1".into());
+    }
+    let k_raw = command_result!(parse_optional_finite_command_arg(
+        "Zipf",
+        "k",
+        args,
+        2,
+        1.0,
+        &document.variables,
+    ));
+    if k_raw.fract() != 0.0 || k_raw < 1.0 {
+        return CommandOutcome::Error("Zipf: k debe ser un entero ≥ 1".into());
+    }
+    let k = k_raw as u32;
+    let pmf = grafito_geometry::statistics::zipf_pmf(k, s, n);
+    let cdf = grafito_geometry::statistics::zipf_cdf(k, s, n);
+    command_result!(require_finite_outputs("Zipf", &[pmf, cdf]));
+    CommandOutcome::Message(format!(
+        "Zipf[{s},{n}]: PMF({k}) = {pmf:.6}, CDF({k}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_bernoulli(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error("Bernoulli: Bernoulli[p] o Bernoulli[p, k]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "Bernoulli",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return CommandOutcome::Error("Bernoulli: p debe estar en [0,1]".into());
+    }
+    let k_raw = command_result!(parse_optional_finite_command_arg(
+        "Bernoulli",
+        "k",
+        args,
+        1,
+        1.0,
+        &document.variables,
+    ));
+    if k_raw.fract() != 0.0 || k_raw < 0.0 {
+        return CommandOutcome::Error("Bernoulli: k debe ser un entero ≥ 0".into());
+    }
+    let k = k_raw as u32;
+    let pmf = grafito_geometry::statistics::bernoulli_pmf(k, p);
+    let cdf = grafito_geometry::statistics::bernoulli_cdf(f64::from(k), p);
+    command_result!(require_finite_outputs("Bernoulli", &[pmf, cdf]));
+    CommandOutcome::Message(format!(
+        "Bernoulli[{p}]: PMF({k}) = {pmf:.6}, CDF({k}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_tdistribution(args: &[String], document: &Document) -> CommandOutcome {
+    if !matches!(args.len(), 1 | 2) {
+        return CommandOutcome::Error(
+            "TDistribution: TDistribution[df] o TDistribution[df, x]".into(),
+        );
+    }
+    let df = command_result!(parse_finite_command_arg(
+        "TDistribution",
+        "df",
+        &args[0],
+        &document.variables,
+    ));
+    if !df.is_finite() || df <= 0.0 {
+        return CommandOutcome::Error("TDistribution: df finito > 0".into());
+    }
+    let x = command_result!(parse_optional_finite_command_arg(
+        "TDistribution",
+        "x",
+        args,
+        1,
+        0.0,
+        &document.variables,
+    ));
+    let pdf = grafito_geometry::statistics::student_t_pdf(x, df);
+    let cdf = grafito_geometry::statistics::student_t_cdf(x, df);
+    command_result!(require_finite_outputs("TDistribution", &[pdf, cdf]));
+    CommandOutcome::Message(format!(
+        "TDistribution[{df}]: PDF({x}) = {pdf:.6}, CDF({x}) = {cdf:.6}"
+    ))
+}
+
+fn run_p1_inverse_beta(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InverseBeta: InverseBeta[p, alpha, beta]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseBeta",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let alpha = command_result!(parse_finite_command_arg(
+        "InverseBeta",
+        "alpha",
+        &args[1],
+        &document.variables,
+    ));
+    let beta = command_result!(parse_finite_command_arg(
+        "InverseBeta",
+        "beta",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseBeta: p debe estar en (0,1)".into());
+    }
+    if !alpha.is_finite() || alpha <= 0.0 || !beta.is_finite() || beta <= 0.0 {
+        return CommandOutcome::Error("InverseBeta: alpha, beta finitos > 0".into());
+    }
+    let q = grafito_geometry::statistics::beta_quantile(p, alpha, beta);
+    command_result!(require_finite_outputs("InverseBeta", &[q]));
+    CommandOutcome::Message(format!("InverseBeta[{p},{alpha},{beta}] = {q:.6}"))
+}
+
+fn run_p1_inverse_binomial(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InverseBinomial: InverseBinomial[p, n, ps]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseBinomial",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let n = command_result!(p1_u32_arg(
+        "InverseBinomial",
+        "n",
+        &args[1],
+        &document.variables
+    ));
+    let ps = command_result!(parse_finite_command_arg(
+        "InverseBinomial",
+        "ps",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseBinomial: p debe estar en (0,1)".into());
+    }
+    if !(0.0..=1.0).contains(&ps) {
+        return CommandOutcome::Error("InverseBinomial: ps debe estar en [0,1]".into());
+    }
+    let q = grafito_geometry::statistics::binomial_quantile(p, n, ps);
+    command_result!(require_finite_outputs("InverseBinomial", &[q]));
+    CommandOutcome::Message(format!("InverseBinomial[{p},{n},{ps}] = {q:.0}"))
+}
+
+fn run_p1_inverse_binomial_trials(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error(
+            "InverseBinomialMinimumTrials: InverseBinomialMinimumTrials[p, k, ps]".into(),
+        );
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseBinomialMinimumTrials",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let k = command_result!(p1_u32_arg(
+        "InverseBinomialMinimumTrials",
+        "k",
+        &args[1],
+        &document.variables,
+    ));
+    let ps = command_result!(parse_finite_command_arg(
+        "InverseBinomialMinimumTrials",
+        "ps",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseBinomialMinimumTrials: p debe estar en (0,1)".into());
+    }
+    if !(0.0 < ps && ps < 1.0) {
+        return CommandOutcome::Error(
+            "InverseBinomialMinimumTrials: ps debe estar en (0,1)".into(),
+        );
+    }
+    let n = grafito_geometry::statistics::inverse_binomial_minimum_trials(p, k, ps);
+    command_result!(require_finite_outputs("InverseBinomialMinimumTrials", &[n]));
+    CommandOutcome::Message(format!(
+        "InverseBinomialMinimumTrials[{p},{k},{ps}] = {n:.0}"
+    ))
+}
+
+fn run_p1_inverse_cauchy(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InverseCauchy: InverseCauchy[p, x0, gamma]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseCauchy",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let x0 = command_result!(parse_finite_command_arg(
+        "InverseCauchy",
+        "x0",
+        &args[1],
+        &document.variables,
+    ));
+    let gamma = command_result!(parse_finite_command_arg(
+        "InverseCauchy",
+        "gamma",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseCauchy: p debe estar en (0,1)".into());
+    }
+    if !x0.is_finite() || !gamma.is_finite() || gamma <= 0.0 {
+        return CommandOutcome::Error("InverseCauchy: x0 finito y gamma > 0".into());
+    }
+    let q = grafito_geometry::statistics::cauchy_quantile(p, x0, gamma);
+    command_result!(require_finite_outputs("InverseCauchy", &[q]));
+    CommandOutcome::Message(format!("InverseCauchy[{p},{x0},{gamma}] = {q:.6}"))
+}
+
+fn run_p1_inverse_gamma(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InverseGamma: InverseGamma[p, alpha, beta]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseGamma",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let alpha = command_result!(parse_finite_command_arg(
+        "InverseGamma",
+        "alpha",
+        &args[1],
+        &document.variables,
+    ));
+    let beta = command_result!(parse_finite_command_arg(
+        "InverseGamma",
+        "beta",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseGamma: p debe estar en (0,1)".into());
+    }
+    if !alpha.is_finite() || alpha <= 0.0 || !beta.is_finite() || beta <= 0.0 {
+        return CommandOutcome::Error("InverseGamma: alpha, beta finitos > 0".into());
+    }
+    let q = grafito_geometry::statistics::gamma_quantile(p, alpha, beta);
+    command_result!(require_finite_outputs("InverseGamma", &[q]));
+    CommandOutcome::Message(format!("InverseGamma[{p},{alpha},{beta}] = {q:.6}"))
+}
+
+fn run_p1_inverse_hypergeometric(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(
+            "InverseHyperGeometric: InverseHyperGeometric[p, N, K, n]".into(),
+        );
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseHyperGeometric",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let n_pop = command_result!(p1_u32_arg(
+        "InverseHyperGeometric",
+        "N",
+        &args[1],
+        &document.variables,
+    ));
+    let k_succ = command_result!(p1_u32_arg(
+        "InverseHyperGeometric",
+        "K",
+        &args[2],
+        &document.variables,
+    ));
+    let n_draw = command_result!(p1_u32_arg(
+        "InverseHyperGeometric",
+        "n",
+        &args[3],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseHyperGeometric: p debe estar en (0,1)".into());
+    }
+    if k_succ > n_pop || n_draw > n_pop {
+        return CommandOutcome::Error("InverseHyperGeometric: K ≤ N y n ≤ N".into());
+    }
+    let q = grafito_geometry::statistics::hypergeometric_quantile(p, n_pop, k_succ, n_draw);
+    command_result!(require_finite_outputs("InverseHyperGeometric", &[q]));
+    CommandOutcome::Message(format!(
+        "InverseHyperGeometric[{p},{n_pop},{k_succ},{n_draw}] = {q:.0}"
+    ))
+}
+
+fn run_p1_inverse_lognormal(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InverseLogNormal: InverseLogNormal[p, mu, sigma]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseLogNormal",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let mu = command_result!(parse_finite_command_arg(
+        "InverseLogNormal",
+        "mu",
+        &args[1],
+        &document.variables,
+    ));
+    let sigma = command_result!(parse_finite_command_arg(
+        "InverseLogNormal",
+        "sigma",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseLogNormal: p debe estar en (0,1)".into());
+    }
+    if !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+        return CommandOutcome::Error("InverseLogNormal: mu finito y sigma > 0".into());
+    }
+    let q = grafito_geometry::statistics::lognormal_quantile(p, mu, sigma);
+    command_result!(require_finite_outputs("InverseLogNormal", &[q]));
+    CommandOutcome::Message(format!("InverseLogNormal[{p},{mu},{sigma}] = {q:.6}"))
+}
+
+fn run_p1_inverse_logistic(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InverseLogistic: InverseLogistic[p, mu, s]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseLogistic",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let mu = command_result!(parse_finite_command_arg(
+        "InverseLogistic",
+        "mu",
+        &args[1],
+        &document.variables,
+    ));
+    let s = command_result!(parse_finite_command_arg(
+        "InverseLogistic",
+        "s",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseLogistic: p debe estar en (0,1)".into());
+    }
+    if !mu.is_finite() || !s.is_finite() || s <= 0.0 {
+        return CommandOutcome::Error("InverseLogistic: mu finito y s > 0".into());
+    }
+    let q = grafito_geometry::statistics::logistic_quantile(p, mu, s);
+    command_result!(require_finite_outputs("InverseLogistic", &[q]));
+    CommandOutcome::Message(format!("InverseLogistic[{p},{mu},{s}] = {q:.6}"))
+}
+
+fn run_p1_inverse_pascal(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InversePascal: InversePascal[p, r, ps]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InversePascal",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let r = command_result!(p1_u32_arg(
+        "InversePascal",
+        "r",
+        &args[1],
+        &document.variables
+    ));
+    let ps = command_result!(parse_finite_command_arg(
+        "InversePascal",
+        "ps",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InversePascal: p debe estar en (0,1)".into());
+    }
+    if r < 1 || !(0.0 < ps && ps < 1.0) {
+        return CommandOutcome::Error("InversePascal: r ≥ 1 y ps en (0,1)".into());
+    }
+    let q = grafito_geometry::statistics::negative_binomial_quantile(p, r, ps);
+    command_result!(require_finite_outputs("InversePascal", &[q]));
+    CommandOutcome::Message(format!("InversePascal[{p},{r},{ps}] = {q:.0}"))
+}
+
+fn run_p1_inverse_poisson(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("InversePoisson: InversePoisson[p, lambda]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InversePoisson",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let lambda = command_result!(parse_finite_command_arg(
+        "InversePoisson",
+        "lambda",
+        &args[1],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InversePoisson: p debe estar en (0,1)".into());
+    }
+    if !lambda.is_finite() || lambda <= 0.0 {
+        return CommandOutcome::Error("InversePoisson: lambda finito > 0".into());
+    }
+    let q = grafito_geometry::statistics::poisson_quantile(p, lambda);
+    command_result!(require_finite_outputs("InversePoisson", &[q]));
+    CommandOutcome::Message(format!("InversePoisson[{p},{lambda}] = {q:.0}"))
+}
+
+fn run_p1_inverse_weibull(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InverseWeibull: InverseWeibull[p, k, lambda]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseWeibull",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let k = command_result!(parse_finite_command_arg(
+        "InverseWeibull",
+        "k",
+        &args[1],
+        &document.variables,
+    ));
+    let lambda = command_result!(parse_finite_command_arg(
+        "InverseWeibull",
+        "lambda",
+        &args[2],
+        &document.variables,
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseWeibull: p debe estar en (0,1)".into());
+    }
+    if !k.is_finite() || k <= 0.0 || !lambda.is_finite() || lambda <= 0.0 {
+        return CommandOutcome::Error("InverseWeibull: k, lambda finitos > 0".into());
+    }
+    let q = grafito_geometry::statistics::weibull_quantile(p, k, lambda);
+    command_result!(require_finite_outputs("InverseWeibull", &[q]));
+    CommandOutcome::Message(format!("InverseWeibull[{p},{k},{lambda}] = {q:.6}"))
+}
+
+fn run_p1_inverse_zipf(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error("InverseZipf: InverseZipf[p, s, N]".into());
+    }
+    let p = command_result!(parse_finite_command_arg(
+        "InverseZipf",
+        "p",
+        &args[0],
+        &document.variables,
+    ));
+    let s = command_result!(parse_finite_command_arg(
+        "InverseZipf",
+        "s",
+        &args[1],
+        &document.variables,
+    ));
+    let n = command_result!(p1_u32_arg(
+        "InverseZipf",
+        "N",
+        &args[2],
+        &document.variables
+    ));
+    if !(0.0 < p && p < 1.0) {
+        return CommandOutcome::Error("InverseZipf: p debe estar en (0,1)".into());
+    }
+    if !s.is_finite() || s <= 0.0 || n < 1 {
+        return CommandOutcome::Error("InverseZipf: s > 0 y N ≥ 1".into());
+    }
+    let q = grafito_geometry::statistics::zipf_quantile(p, s, n);
+    command_result!(require_finite_outputs("InverseZipf", &[q]));
+    CommandOutcome::Message(format!("InverseZipf[{p},{s},{n}] = {q:.0}"))
 }
 
 // ---------------------------------------------------------------------------

@@ -361,6 +361,13 @@ pub const MAX_GROEBNER_VARS: usize = 4;
 pub const MAX_BUCHBERGER_DEGREE: usize = 64;
 /// Pasos máximos de una reducción multivariada.
 pub const MAX_REDUCE_STEPS: usize = 1024;
+/// Máximo de polinomios de una base exacta (Q exactos, algoritmo propio).
+///
+/// Más allá se delega a la vía histórica `f64` con su propia cota
+/// `MAX_GROEBNER_S_POLY`, que falla honesto a `Eliminate[...]`.
+pub const MAX_EXACT_BASIS_POLYS: usize = 64;
+/// Máximo de términos por polinomio de una base exacta.
+pub const MAX_EXACT_BASIS_TERMS: usize = 1024;
 
 /// Error honesto del motor CAS.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1961,11 +1968,11 @@ fn s_polynomial_ordered(
     Ok(s)
 }
 
-/// Valida y convierte `polys/vars` a mapas monomiales (cotas B2.4).
-fn parse_buchberger_input(
-    polys: &[String],
-    vars: &[String],
-) -> Result<(Vec<PolyMap>, Vec<String>), CasError> {
+/// Valida conteos y nombres de variables de Buchberger (cotas B2.4).
+///
+/// Devuelve las variables limpias en orden. La conversión a mapas y el
+/// cómputo viven en `parse_buchberger_input` / `buchberger_basis_exact`.
+fn validate_buchberger_header(polys: &[String], vars: &[String]) -> Result<Vec<String>, CasError> {
     if polys.is_empty() || polys.len() > MAX_GROEBNER_POLYS {
         return Err(CasError::ResourceLimit {
             detail: format!(
@@ -1996,6 +2003,15 @@ fn parse_buchberger_input(
             });
         }
     }
+    Ok(clean_vars)
+}
+
+/// Valida y convierte `polys/vars` a mapas monomiales (cotas B2.4).
+fn parse_buchberger_input(
+    polys: &[String],
+    vars: &[String],
+) -> Result<(Vec<PolyMap>, Vec<String>), CasError> {
+    let clean_vars = validate_buchberger_header(polys, vars)?;
     let index_of: std::collections::HashMap<String, usize> = clean_vars
         .iter()
         .enumerate()
@@ -2141,6 +2157,511 @@ fn format_buchberger_basis(basis: &[PolyMap], var_names: &[String]) -> Vec<Strin
     out
 }
 
+/// Coeficiente para Buchberger genérico (vía exacta sobre Q).
+///
+/// La vía histórica `f64` queda intacta con su `eps 1e-12`; esta vía solo
+/// se usa con `BigRational`, donde el cero es exacto y la división por
+/// cero devuelve `None` en vez de pánico.
+trait GbCoef: Clone + PartialEq + Sized {
+    /// Cero del anillo.
+    fn gb_zero() -> Self;
+    /// Cero exacto (sin `eps`).
+    fn gb_is_zero(&self) -> bool;
+    /// Suma exacta.
+    fn gb_add(&self, other: &Self) -> Self;
+    /// Resta exacta.
+    fn gb_sub(&self, other: &Self) -> Self;
+    /// Producto exacto.
+    fn gb_mul(&self, other: &Self) -> Self;
+    /// Cociente exacto; `None` si el divisor es cero.
+    fn gb_div(&self, other: &Self) -> Option<Self>;
+    /// Desde `f64` finito (valor binario exacto); `None` si no finito.
+    fn gb_from_f64(value: f64) -> Option<Self>;
+    /// A decimal para mostrar (re-parseable por el AST); `None` si no finito.
+    fn gb_to_decimal(&self) -> Option<f64>;
+}
+
+impl GbCoef for num_rational::BigRational {
+    fn gb_zero() -> Self {
+        num_traits::Zero::zero()
+    }
+    fn gb_is_zero(&self) -> bool {
+        num_traits::Zero::is_zero(self)
+    }
+    fn gb_add(&self, other: &Self) -> Self {
+        self + other
+    }
+    fn gb_sub(&self, other: &Self) -> Self {
+        self - other
+    }
+    fn gb_mul(&self, other: &Self) -> Self {
+        self * other
+    }
+    fn gb_div(&self, other: &Self) -> Option<Self> {
+        if num_traits::Zero::is_zero(other) {
+            None
+        } else {
+            Some(self / other)
+        }
+    }
+    fn gb_from_f64(value: f64) -> Option<Self> {
+        num_rational::BigRational::from_float(value)
+    }
+    fn gb_to_decimal(&self) -> Option<f64> {
+        num_traits::ToPrimitive::to_f64(self)
+    }
+}
+
+/// Suma `src` (o su opuesto) en `dst` con poda de ceros exactos.
+fn g_poly_add_into<C: GbCoef>(
+    dst: &mut std::collections::BTreeMap<Monom, C>,
+    src: &std::collections::BTreeMap<Monom, C>,
+    neg: bool,
+) {
+    for (m, c) in src {
+        let base = dst.get(m).cloned().unwrap_or_else(C::gb_zero);
+        let v = if neg { base.gb_sub(c) } else { base.gb_add(c) };
+        if v.gb_is_zero() {
+            dst.remove(m);
+        } else {
+            dst.insert(m.clone(), v);
+        }
+    }
+}
+
+/// Producto con cota `MAX_BUCHBERGER_DEGREE` (igual que `poly_mul_maps`).
+fn g_poly_mul_maps<C: GbCoef>(
+    a: &std::collections::BTreeMap<Monom, C>,
+    b: &std::collections::BTreeMap<Monom, C>,
+) -> Result<std::collections::BTreeMap<Monom, C>, CasError> {
+    let mut out = std::collections::BTreeMap::new();
+    for (ma, ca) in a {
+        for (mb, cb) in b {
+            if ma.len() != mb.len() {
+                return Err(CasError::ResourceLimit {
+                    detail: "dimensión monomial inconsistente".to_string(),
+                });
+            }
+            let mut m = Vec::with_capacity(ma.len());
+            let mut deg = 0_usize;
+            for (x, y) in ma.iter().zip(mb.iter()) {
+                let e = x.checked_add(*y).ok_or_else(|| CasError::ResourceLimit {
+                    detail: "exponente monomial excedido".to_string(),
+                })?;
+                deg = deg.saturating_add(e as usize);
+                m.push(e);
+            }
+            if deg > MAX_BUCHBERGER_DEGREE {
+                return Err(CasError::ResourceLimit {
+                    detail: format!(
+                        "grado {deg} excede {MAX_BUCHBERGER_DEGREE}; usa Eliminate[...]"
+                    ),
+                });
+            }
+            let v = out
+                .get(&m)
+                .cloned()
+                .unwrap_or_else(C::gb_zero)
+                .gb_add(&ca.gb_mul(cb));
+            if v.gb_is_zero() {
+                out.remove(&m);
+            } else {
+                out.insert(m, v);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `monomio * escalar * polinomio` genérico.
+fn g_monom_mul_poly<C: GbCoef>(
+    m: &Monom,
+    scalar: C,
+    p: &std::collections::BTreeMap<Monom, C>,
+) -> Result<std::collections::BTreeMap<Monom, C>, CasError> {
+    let shift = std::collections::BTreeMap::from([(m.clone(), scalar)]);
+    g_poly_mul_maps(&shift, p)
+}
+
+/// Término líder genérico según el orden.
+fn g_leading_term_ordered<C: GbCoef>(
+    p: &std::collections::BTreeMap<Monom, C>,
+    order: MonomialOrder,
+) -> Option<(Monom, C)> {
+    p.iter()
+        .max_by(|(a, _), (b, _)| monom_cmp(a, b, order))
+        .map(|(m, c)| (m.clone(), c.clone()))
+}
+
+/// Reducción multivariada genérica con cota `MAX_REDUCE_STEPS`.
+fn g_reduce_poly_ordered<C: GbCoef>(
+    p: &std::collections::BTreeMap<Monom, C>,
+    basis: &[std::collections::BTreeMap<Monom, C>],
+    order: MonomialOrder,
+) -> Result<std::collections::BTreeMap<Monom, C>, CasError> {
+    let mut work = p.clone();
+    let mut rest = std::collections::BTreeMap::new();
+    let mut steps = 0_usize;
+    while let Some((lm_w, lc_w)) = g_leading_term_ordered(&work, order) {
+        steps += 1;
+        if steps > MAX_REDUCE_STEPS {
+            return Err(CasError::ResourceLimit {
+                detail: format!("reducción excede {MAX_REDUCE_STEPS} pasos; usa Eliminate[...]"),
+            });
+        }
+        let mut reduced = false;
+        for b in basis {
+            if let Some((lm_b, lc_b)) = g_leading_term_ordered(b, order) {
+                if !lc_b.gb_is_zero() && monom_divides(&lm_b, &lm_w) {
+                    let t = monom_sub(&lm_w, &lm_b);
+                    let factor = lc_w.gb_div(&lc_b).ok_or_else(|| CasError::ResourceLimit {
+                        detail: "división por cero en reducción exacta".to_string(),
+                    })?;
+                    let sub = g_monom_mul_poly(&t, factor, b)?;
+                    g_poly_add_into(&mut work, &sub, true);
+                    reduced = true;
+                    break;
+                }
+            }
+        }
+        if !reduced {
+            work.remove(&lm_w);
+            if !lc_w.gb_is_zero() {
+                rest.insert(lm_w, lc_w);
+            }
+        }
+    }
+    Ok(rest)
+}
+
+/// S-polinomio genérico (`l = lcm` de los líderes).
+fn g_s_polynomial_ordered<C: GbCoef>(
+    f: &std::collections::BTreeMap<Monom, C>,
+    g: &std::collections::BTreeMap<Monom, C>,
+    order: MonomialOrder,
+) -> Result<std::collections::BTreeMap<Monom, C>, CasError> {
+    let (lm_f, lc_f) = g_leading_term_ordered(f, order).ok_or_else(|| CasError::ResourceLimit {
+        detail: "S-polinomio de polinomio nulo".to_string(),
+    })?;
+    let (lm_g, lc_g) = g_leading_term_ordered(g, order).ok_or_else(|| CasError::ResourceLimit {
+        detail: "S-polinomio de polinomio nulo".to_string(),
+    })?;
+    let l = monom_lcm(&lm_f, &lm_g);
+    let t1 = monom_sub(&l, &lm_f);
+    let t2 = monom_sub(&l, &lm_g);
+    let f1 = g_monom_mul_poly(&t1, lc_g, f)?;
+    let second = g_monom_mul_poly(&t2, lc_f, g)?;
+    let mut s = f1;
+    g_poly_add_into(&mut s, &second, true);
+    Ok(s)
+}
+
+/// Núcleo de Buchberger genérico: azúcar + primos relativos + conteo.
+///
+/// Espejo exacto de `buchberger_run` sin `eps`: cada par que no cumple el
+/// criterio cuenta en `s_used` contra `MAX_GROEBNER_S_POLY`.
+#[allow(clippy::too_many_lines)]
+fn g_buchberger_run<C: GbCoef>(
+    maps: Vec<std::collections::BTreeMap<Monom, C>>,
+    order: MonomialOrder,
+) -> Result<(Vec<std::collections::BTreeMap<Monom, C>>, usize), CasError> {
+    let total_deg_of = |p: &std::collections::BTreeMap<Monom, C>| -> u32 {
+        p.keys().map(monom_total_deg).max().unwrap_or(0)
+    };
+    let mut basis: Vec<std::collections::BTreeMap<Monom, C>> = Vec::new();
+    let mut sugars: Vec<u32> = Vec::new();
+    for m in maps {
+        let rest = g_reduce_poly_ordered(&m, &basis, order)?;
+        if !rest.is_empty() {
+            sugars.push(total_deg_of(&rest));
+            basis.push(rest);
+        }
+    }
+    if basis.is_empty() {
+        return Err(CasError::Unsupported {
+            feature: "Groebner",
+            hint: "sistema nulo o vacío; nada que triangular".to_string(),
+        });
+    }
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for i in 0..basis.len() {
+        for j in (i + 1)..basis.len() {
+            pairs.push((i, j));
+        }
+    }
+    let pair_key = |basis: &[std::collections::BTreeMap<Monom, C>],
+                    sugars: &[u32],
+                    i: usize,
+                    j: usize|
+     -> (u32, u32) {
+        let (lm_f, _) = g_leading_term_ordered(&basis[i], order).unwrap_or((vec![], C::gb_zero()));
+        let (lm_g, _) = g_leading_term_ordered(&basis[j], order).unwrap_or((vec![], C::gb_zero()));
+        let l = monom_lcm(&lm_f, &lm_g);
+        let deg_l = monom_total_deg(&l);
+        let deg_f = monom_total_deg(&lm_f);
+        let deg_g = monom_total_deg(&lm_g);
+        let s_f = sugars.get(i).copied().unwrap_or(0) + deg_l.saturating_sub(deg_f);
+        let s_g = sugars.get(j).copied().unwrap_or(0) + deg_l.saturating_sub(deg_g);
+        (s_f.max(s_g), deg_l)
+    };
+    let mut s_used = 0_usize;
+    while !pairs.is_empty() {
+        let mut best = 0_usize;
+        let mut best_key = pair_key(&basis, &sugars, pairs[0].0, pairs[0].1);
+        for (k, &(i, j)) in pairs.iter().enumerate().skip(1) {
+            if i >= basis.len() || j >= basis.len() {
+                continue;
+            }
+            let key = pair_key(&basis, &sugars, i, j);
+            if key < best_key {
+                best = k;
+                best_key = key;
+            }
+        }
+        let (i, j) = pairs.swap_remove(best);
+        if i >= basis.len() || j >= basis.len() {
+            continue;
+        }
+        let (f, g) = (basis[i].clone(), basis[j].clone());
+        if let (Some((lm_f, _)), Some((lm_g, _))) = (
+            g_leading_term_ordered(&f, order),
+            g_leading_term_ordered(&g, order),
+        ) {
+            let l = monom_lcm(&lm_f, &lm_g);
+            let disjoint = lm_f
+                .iter()
+                .zip(lm_g.iter())
+                .all(|(a, b)| *a == 0 || *b == 0);
+            let is_product = l
+                .iter()
+                .zip(lm_f.iter().zip(lm_g.iter()))
+                .all(|(x, (a, b))| (*x as usize) == (*a as usize) + (*b as usize));
+            if disjoint && is_product {
+                continue;
+            }
+        }
+        s_used += 1;
+        if s_used > MAX_GROEBNER_S_POLY {
+            return Err(CasError::ResourceLimit {
+                detail: format!(
+                    "Buchberger excede {MAX_GROEBNER_S_POLY} S-polinomios; usa Eliminate[...]"
+                ),
+            });
+        }
+        let s = g_s_polynomial_ordered(&f, &g, order)?;
+        let (lm_f, _) = g_leading_term_ordered(&f, order).unwrap_or((vec![], C::gb_zero()));
+        let (lm_g, _) = g_leading_term_ordered(&g, order).unwrap_or((vec![], C::gb_zero()));
+        let l = monom_lcm(&lm_f, &lm_g);
+        let deg_l = monom_total_deg(&l);
+        let new_sugar = (sugars[i] + deg_l.saturating_sub(monom_total_deg(&lm_f)))
+            .max(sugars[j] + deg_l.saturating_sub(monom_total_deg(&lm_g)));
+        let rest = g_reduce_poly_ordered(&s, &basis, order)?;
+        if !rest.is_empty() {
+            let n = basis.len();
+            for k in 0..n {
+                pairs.push((k, n));
+            }
+            sugars.push(new_sugar.max(total_deg_of(&rest)));
+            basis.push(rest);
+        }
+    }
+    Ok((basis, s_used))
+}
+
+/// Formatea una base genérica con el estilo de `format_poly_map`.
+///
+/// Los coeficientes se vuelcan a decimal de precisión completa para que la
+/// salida re-parsee con el AST de Grafito; el cómputo previo fue exacto.
+/// Devuelve `None` si algún coeficiente no es finito (delega a `f64`).
+fn g_format_basis<C: GbCoef>(
+    basis: &[std::collections::BTreeMap<Monom, C>],
+    vars: &[String],
+) -> Option<Vec<String>> {
+    let mut out = Vec::with_capacity(basis.len());
+    for p in basis {
+        if p.len() > MAX_EXACT_BASIS_TERMS {
+            return None;
+        }
+        let mut terms: Vec<(&Monom, f64)> = Vec::with_capacity(p.len());
+        for (m, c) in p {
+            terms.push((m, c.gb_to_decimal()?));
+        }
+        terms.sort_by(|a, b| b.0.cmp(a.0));
+        let mut s = String::new();
+        let mut first = true;
+        for (m, c) in &terms {
+            if !c.is_finite() {
+                return None;
+            }
+            if *c == 0.0 {
+                continue;
+            }
+            let mut body = String::new();
+            for (vi, e) in m.iter().enumerate() {
+                if *e == 0 {
+                    continue;
+                }
+                if let Some(name) = vars.get(vi) {
+                    if !body.is_empty() {
+                        body.push('*');
+                    }
+                    body.push_str(name);
+                    if *e > 1 {
+                        body.push_str(&format!("^{e}"));
+                    }
+                }
+            }
+            let ac = c.abs();
+            let coeff_str = if body.is_empty() {
+                format!("{ac}")
+            } else if (ac - 1.0).abs() < 1e-12 {
+                String::new()
+            } else {
+                format!("{ac}*")
+            };
+            let term = format!("{coeff_str}{body}");
+            if first {
+                if *c < 0.0 {
+                    s.push_str(&format!("-{term}"));
+                } else {
+                    s.push_str(&term);
+                }
+                first = false;
+            } else if *c < 0.0 {
+                s.push_str(&format!(" - {term}"));
+            } else {
+                s.push_str(&format!(" + {term}"));
+            }
+        }
+        if s.is_empty() {
+            s.push('0');
+        }
+        out.push(s);
+    }
+    out.sort();
+    out.dedup();
+    Some(out)
+}
+
+/// Base de Groebner exacta sobre Q con el algoritmo propio (sin `eps`).
+///
+/// Espejo de `buchberger_run` con cero exacto: sin falsos colapsos por
+/// tolerancia ni cancelaciones fantasma. Devuelve `None` ante cualquier
+/// borde (conversión no finita, base que excede `MAX_EXACT_BASIS_POLYS`,
+/// autoverificación fallida) para que la vía histórica `f64` decida el
+/// error honesto. El conteo `s_polys_used` es real (mismo criterio).
+fn buchberger_basis_exact(
+    maps: &[PolyMap],
+    clean_vars: &[String],
+    order: MonomialOrder,
+) -> Option<BuchbergerOutcome> {
+    use num_rational::BigRational;
+    let mut qmaps = Vec::with_capacity(maps.len());
+    for m in maps {
+        let mut q = std::collections::BTreeMap::new();
+        for (mon, c) in m {
+            q.insert(mon.clone(), BigRational::gb_from_f64(*c)?);
+        }
+        qmaps.push(q);
+    }
+    let (basis, s_used) = g_buchberger_run(qmaps, order).ok()?;
+    if basis.len() > MAX_EXACT_BASIS_POLYS {
+        return None;
+    }
+    // Autoverificación sólida: todo S-par reduce a cero en la base.
+    for i in 0..basis.len() {
+        for j in (i + 1)..basis.len() {
+            let s = g_s_polynomial_ordered(&basis[i], &basis[j], order).ok()?;
+            if !g_reduce_poly_ordered(&s, &basis, order).ok()?.is_empty() {
+                return None;
+            }
+        }
+    }
+    let mut strs = g_format_basis(&basis, clean_vars)?;
+    strs.retain(|s| s != "0" && !s.is_empty());
+    if strs.is_empty() {
+        return None;
+    }
+    Some(BuchbergerOutcome {
+        basis: strs,
+        s_polys_used: s_used,
+    })
+}
+
+/// Forma normal de `poly` módulo una base de Gröbner (reducción exacta).
+///
+/// `basis_polys` debe ser base del ideal (p. ej. salida de
+/// `buchberger_basis_ordered`); si no lo es, el resto igual se devuelve
+/// pero no es canónico. Sirve para simplificar con relaciones laterales
+/// (`x^2+y^2-1=0`): el resto de `x^2` módulo `x^2+y^2-1` es `1-y^2`.
+/// Cotas B2.4 heredadas; `Err` honesto si la entrada no es polinómica.
+pub fn buchberger_normal_form(
+    poly: &str,
+    basis_polys: &[String],
+    vars: &[String],
+    order: MonomialOrder,
+) -> Result<String, CasError> {
+    use num_rational::BigRational;
+    let clean_vars = validate_buchberger_header(basis_polys, vars)?;
+    let index_of: std::collections::HashMap<String, usize> = clean_vars
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.clone(), i))
+        .collect();
+    let nvars = clean_vars.len();
+    let valid = ValidExpr::try_new(poly)?;
+    let past = parse_validated(&valid)?;
+    let pmap = expr_to_poly_map(&past, &index_of, nvars)?;
+    let mut qmaps = Vec::with_capacity(basis_polys.len());
+    for b in basis_polys {
+        let bv = ValidExpr::try_new(b)?;
+        let bast = parse_validated(&bv)?;
+        let bmap = expr_to_poly_map(&bast, &index_of, nvars)?;
+        if bmap.is_empty() {
+            continue;
+        }
+        let mut q = std::collections::BTreeMap::new();
+        for (mon, c) in &bmap {
+            q.insert(
+                mon.clone(),
+                BigRational::gb_from_f64(*c).ok_or_else(|| CasError::Unsupported {
+                    feature: "Groebner",
+                    hint: "coeficiente no finito en la base".to_string(),
+                })?,
+            );
+        }
+        qmaps.push(q);
+    }
+    if qmaps.is_empty() {
+        return Err(CasError::Unsupported {
+            feature: "Groebner",
+            hint: "base nula o vacía; nada que reducir".to_string(),
+        });
+    }
+    let mut pq = std::collections::BTreeMap::new();
+    for (mon, c) in &pmap {
+        pq.insert(
+            mon.clone(),
+            BigRational::gb_from_f64(*c).ok_or_else(|| CasError::Unsupported {
+                feature: "Groebner",
+                hint: "coeficiente no finito en el polinomio".to_string(),
+            })?,
+        );
+    }
+    let rest = g_reduce_poly_ordered(&pq, &qmaps, order)?;
+    let strs = g_format_basis(std::slice::from_ref(&rest), &clean_vars).ok_or_else(|| {
+        CasError::ResourceLimit {
+            detail: "resto no formateable; usa Eliminate[...]".to_string(),
+        }
+    })?;
+    strs.into_iter()
+        .next()
+        .ok_or_else(|| CasError::Unsupported {
+            feature: "Groebner",
+            hint: "resto vacío inesperado".to_string(),
+        })
+}
+
 /// Base de Groebner por Buchberger lexicográfico acotado.
 ///
 /// `> MAX_GROEBNER_S_POLY` 128 S-polinomios, `> MAX_GROEBNER_POLYS` 8
@@ -2152,6 +2673,11 @@ pub fn buchberger_basis(polys: &[String], vars: &[String]) -> Result<BuchbergerO
 
 /// Base de Groebner con orden monomial explícito (B2.4).
 ///
+/// Intenta primero la vía exacta sobre Q (mismo algoritmo, cero exacto,
+/// con autoverificación de S-pares); ante cualquier borde delega a la vía
+/// histórica `f64`, que conserva la taxonomía de errores
+/// (`Unsupported`/`ResourceLimit` → `Eliminate[...]`).
+///
 /// `lex` es el histórico (eliminación); `grlex`/`grevlex` suelen dar bases
 /// más compactas para el mismo ideal. Referencia GeoGebra: `Groebner`.
 pub fn buchberger_basis_ordered(
@@ -2160,6 +2686,9 @@ pub fn buchberger_basis_ordered(
     order: MonomialOrder,
 ) -> Result<BuchbergerOutcome, CasError> {
     let (maps, clean_vars) = parse_buchberger_input(polys, vars)?;
+    if let Some(exact) = buchberger_basis_exact(&maps, &clean_vars, order) {
+        return Ok(exact);
+    }
     let (basis, s_used) = buchberger_run(maps, order)?;
     let basis_strs = format_buchberger_basis(&basis, &clean_vars);
     if basis_strs.is_empty() {
@@ -2500,6 +3029,42 @@ mod tests {
         let vars = vec!["x".to_string(), "y".to_string()];
         let err = buchberger_basis(&polys, &vars).expect_err("no polinomio");
         assert!(matches!(err, CasError::Unsupported { .. }), "got {err}");
+    }
+
+    #[test]
+    fn buchberger_exact_rationals_stay_exact() {
+        // Vía exacta sobre Q: `y = 1/4` como `0.5` sin ruido `eps`
+        // (el motor propio no fuerza forma mónica: `-2*y + 0.5`).
+        let polys = vec!["2*x + 2*y - 1".to_string(), "x - y".to_string()];
+        let vars = vec!["x".to_string(), "y".to_string()];
+        let out = buchberger_basis(&polys, &vars).expect("2x2 racional");
+        assert!(
+            out.basis.iter().any(|p| p.contains("0.5")),
+            "sin 1/2 exacto: {:?}",
+            out.basis
+        );
+        check_groebner_basis(&polys, &vars, MonomialOrder::Lex);
+    }
+
+    #[test]
+    fn buchberger_exact_rejects_division_honestly() {
+        // `x/y` no es polinomio: la vía exacta declina y la histórica
+        // emite el `Unsupported` de siempre.
+        let polys = vec!["x/y + 1".to_string(), "x - y".to_string()];
+        let vars = vec!["x".to_string(), "y".to_string()];
+        let err = buchberger_basis(&polys, &vars).expect_err("división");
+        assert!(matches!(err, CasError::Unsupported { .. }), "got {err}");
+    }
+
+    #[test]
+    fn buchberger_normal_form_uses_side_relation() {
+        // `x^2` módulo `x^2+y^2-1` → `1-y^2` (relación lateral exacta).
+        let vars = vec!["x".to_string(), "y".to_string()];
+        let basis = vec!["x^2 + y^2 - 1".to_string()];
+        let rest =
+            buchberger_normal_form("x^2", &basis, &vars, MonomialOrder::Lex).expect("forma normal");
+        assert!(rest.contains("y^2"), "sin lateral: {rest}");
+        assert!(!rest.contains('x'), "quedó x en {rest}");
     }
 
     #[test]

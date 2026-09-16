@@ -63,6 +63,11 @@ pub const MAX_FRACTAL_PIXELS: usize = 160_000;
 pub const MAX_FRACTAL_WORK_UNITS: usize = 64_000_000;
 /// Máximo de iteraciones por píxel aceptado por las rutas interactivas.
 pub const MAX_FRACTAL_ITER: u32 = 10_000;
+/// Filas por tile del cómputo progresivo cancelable
+/// ([`try_compute_fractal_cancelable`]): 64 filas × 400 px típicos ≈ 25k
+/// píxeles por tile, granularidad que permite cancelar entre tiles sin
+/// costo de sincronización por píxel. No es un presupuesto nuevo.
+pub const FRACTAL_TILE_ROWS: usize = 64;
 
 const MAX_CACHED_FRACTAL_PIXELS: usize = MAX_FRACTAL_PIXELS * 2;
 const MAX_CACHED_FRACTALS: usize = 4;
@@ -71,9 +76,25 @@ const MAX_CACHED_FRACTALS: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FractalError {
     InvalidBounds,
-    IterationLimitExceeded { requested: u32, maximum: u32 },
-    PixelBudgetExceeded { requested: usize, maximum: usize },
-    WorkBudgetExceeded { requested: usize, maximum: usize },
+    IterationLimitExceeded {
+        requested: u32,
+        maximum: u32,
+    },
+    PixelBudgetExceeded {
+        requested: usize,
+        maximum: usize,
+    },
+    WorkBudgetExceeded {
+        requested: usize,
+        maximum: usize,
+    },
+    /// El cómputo por tiles se canceló (`should_cancel` en
+    /// [`try_compute_fractal_cancelable`): no se cachea nada y el llamante
+    /// conserva lo ya pintado (progresivo honesto, sin parcial mentiroso).
+    Cancelled {
+        completed_rows: usize,
+        total_rows: usize,
+    },
 }
 
 impl fmt::Display for FractalError {
@@ -90,6 +111,13 @@ impl fmt::Display for FractalError {
             Self::WorkBudgetExceeded { requested, maximum } => write!(
                 f,
                 "fractal work request {requested} exceeds maximum {maximum}"
+            ),
+            Self::Cancelled {
+                completed_rows,
+                total_rows,
+            } => write!(
+                f,
+                "fractal computation cancelled after {completed_rows} of {total_rows} rows"
             ),
         }
     }
@@ -368,8 +396,40 @@ fn newton_iter(zr0: f64, zi0: f64, max_iter: u32) -> (u32, f64) {
     (i, i as f64)
 }
 
+/// Evalúa un píxel del fractal (origen único para el path completo y el
+/// path por tiles: mismo orden de filas, mismo resultado byte-idéntico).
+fn compute_pixel(fractal: &FractalType, x: f64, y: f64, max_iter: u32) -> FractalPixel {
+    let (iter, smooth) = match fractal {
+        FractalType::Mandelbrot { .. } => mandelbrot_iter(x, y, max_iter),
+        FractalType::Julia { cr, ci, .. } => julia_iter(x, y, *cr, *ci, max_iter),
+        FractalType::BurningShip { .. } => burning_ship_iter(x, y, max_iter),
+        FractalType::Tricorn { .. } => tricorn_iter(x, y, max_iter),
+        FractalType::Newton { .. } => newton_iter(x, y, max_iter),
+    };
+    FractalPixel {
+        x,
+        y,
+        iter,
+        max_iter,
+        escaped: iter < max_iter,
+        smooth_value: smooth,
+    }
+}
+
 /// Calcula un fractal con límites de recursos y caché LRU acotada para escenas estáticas.
-pub fn try_compute_fractal(
+///
+/// Tiling progresivo: el cómputo se divide en tiles de
+/// [`FRACTAL_TILE_ROWS`] filas; antes de cada tile se consulta
+/// `should_cancel(filas_completadas)` y se revalida el presupuesto del tile
+/// con [`validate_fractal_budget`] (mismo `checked_mul`, sin presupuestos
+/// nuevos). Cancelar retorna [`FractalError::Cancelled`] sin cachear nada —
+/// el llamante conserva el último frame válido.
+///
+/// Presupuestos intactos: 160k píxeles / 64M work / 10k iter / caché 4.
+/// [`FractalPixel`] y [`FractalError`] no cambian de forma (solo se agrega la
+/// variante `Cancelled`, honesta y no exhaustiva en los callers).
+#[allow(clippy::too_many_arguments)]
+pub fn try_compute_fractal_cancelable(
     fractal: &FractalType,
     x_min: f64,
     x_max: f64,
@@ -377,6 +437,7 @@ pub fn try_compute_fractal(
     y_max: f64,
     width: usize,
     height: usize,
+    should_cancel: &dyn Fn(usize) -> bool,
 ) -> Result<Vec<FractalPixel>, FractalError> {
     use rayon::prelude::*;
 
@@ -403,37 +464,68 @@ pub fn try_compute_fractal(
     let dx = (x_max - x_min) / width as f64;
     let dy = (y_max - y_min) / height as f64;
 
-    let pixels: Vec<_> = (0..height)
-        .into_par_iter()
-        .flat_map(|j| {
-            let y = y_min + j as f64 * dy;
-            (0..width)
-                .map(move |i| {
-                    let x = x_min + i as f64 * dx;
-                    let (iter, smooth) = match fractal {
-                        FractalType::Mandelbrot { .. } => mandelbrot_iter(x, y, max_iter),
-                        FractalType::Julia { cr, ci, .. } => julia_iter(x, y, *cr, *ci, max_iter),
-                        FractalType::BurningShip { .. } => burning_ship_iter(x, y, max_iter),
-                        FractalType::Tricorn { .. } => tricorn_iter(x, y, max_iter),
-                        FractalType::Newton { .. } => newton_iter(x, y, max_iter),
-                    };
-                    FractalPixel {
-                        x,
-                        y,
-                        iter,
-                        max_iter,
-                        escaped: iter < max_iter,
-                        smooth_value: smooth,
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let mut pixels = Vec::new();
+    let total_pixels = width
+        .checked_mul(height)
+        .ok_or(FractalError::PixelBudgetExceeded {
+            requested: usize::MAX,
+            maximum: MAX_FRACTAL_PIXELS,
+        })?;
+    pixels
+        .try_reserve_exact(total_pixels)
+        .map_err(|_| FractalError::PixelBudgetExceeded {
+            requested: total_pixels,
+            maximum: MAX_FRACTAL_PIXELS,
+        })?;
+    let mut rows_done = 0usize;
+    while rows_done < height {
+        if should_cancel(rows_done) {
+            return Err(FractalError::Cancelled {
+                completed_rows: rows_done,
+                total_rows: height,
+            });
+        }
+        let tile_rows = FRACTAL_TILE_ROWS.min(height - rows_done);
+        // Chequeo de presupuesto por tile con la misma validadora global
+        // (`checked_mul` adentro): el tile siempre cabe si el total cabe,
+        // pero el chequeo documenta la cota por tile y falla cerrado si un
+        // día el tileo cambia de granularidad.
+        validate_fractal_budget(width, tile_rows, max_iter)?;
+        let tile: Vec<_> = (rows_done..rows_done + tile_rows)
+            .into_par_iter()
+            .flat_map(|j| {
+                let y = y_min + j as f64 * dy;
+                (0..width)
+                    .map(move |i| {
+                        let x = x_min + i as f64 * dx;
+                        compute_pixel(fractal, x, y, max_iter)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        pixels.extend(tile);
+        rows_done += tile_rows;
+    }
     // Un solo `Arc` para la caché; `unwrap_or_clone` evita el clon extra del
     // `pixels.clone()` previo cuando nadie más retiene el buffer.
     let shared = std::sync::Arc::new(pixels);
     cache_pixels(key, std::sync::Arc::clone(&shared));
     Ok(std::sync::Arc::unwrap_or_clone(shared))
+}
+
+/// Calcula un fractal con límites de recursos y caché LRU acotada para escenas estáticas.
+pub fn try_compute_fractal(
+    fractal: &FractalType,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    width: usize,
+    height: usize,
+) -> Result<Vec<FractalPixel>, FractalError> {
+    try_compute_fractal_cancelable(fractal, x_min, x_max, y_min, y_max, width, height, &|_| {
+        false
+    })
 }
 
 /// Compatibilidad para los renderizadores existentes: entradas que exceden el
@@ -543,5 +635,74 @@ mod tests {
         assert_eq!(pixels.len(), 400);
         let escaped = pixels.iter().filter(|p| p.escaped).count();
         assert!(escaped > 0);
+    }
+
+    #[test]
+    fn tiled_cancelable_matches_whole_request_pixel_for_pixel() {
+        // Tiling multi-tile (height > FRACTAL_TILE_ROWS) byte-idéntico al
+        // path completo: mismo orden de filas, mismos iters.
+        let fractal = FractalType::Mandelbrot { max_iter: 32 };
+        let whole =
+            try_compute_fractal(&fractal, -2.0, 1.0, -1.5, 1.5, 16, FRACTAL_TILE_ROWS + 8).unwrap();
+        let tiled = try_compute_fractal_cancelable(
+            &fractal,
+            -2.0,
+            1.0,
+            -1.5,
+            1.5,
+            16,
+            FRACTAL_TILE_ROWS + 8,
+            &|_| false,
+        )
+        .unwrap();
+        assert_eq!(whole.len(), tiled.len());
+        for (a, b) in whole.iter().zip(tiled.iter()) {
+            assert_eq!(a.iter, b.iter);
+            assert_eq!(a.x.to_bits(), b.x.to_bits());
+            assert_eq!(a.y.to_bits(), b.y.to_bits());
+        }
+    }
+
+    #[test]
+    fn cancel_between_tiles_reports_honest_progress_without_caching() {
+        let fractal = FractalType::Mandelbrot { max_iter: 32 };
+        // Cancela todo desde la fila 0: cero filas completadas, nada cacheado.
+        let err = try_compute_fractal_cancelable(
+            &fractal,
+            -2.0,
+            1.0,
+            -1.5,
+            1.5,
+            8,
+            FRACTAL_TILE_ROWS + 4,
+            &|_| true,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FractalError::Cancelled {
+                completed_rows: 0,
+                total_rows: FRACTAL_TILE_ROWS + 4,
+            }
+        );
+        // Cancela tras el primer tile: el progreso reportado es exacto.
+        let err = try_compute_fractal_cancelable(
+            &fractal,
+            -2.0,
+            1.0,
+            -1.5,
+            1.5,
+            8,
+            FRACTAL_TILE_ROWS + 4,
+            &|rows_done| rows_done >= FRACTAL_TILE_ROWS,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FractalError::Cancelled {
+                completed_rows: FRACTAL_TILE_ROWS,
+                total_rows: FRACTAL_TILE_ROWS + 4,
+            }
+        );
     }
 }

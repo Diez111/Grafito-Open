@@ -77,6 +77,9 @@ pub enum GeoObject {
     RegressionLine(RegressionLineObj),
     DataTable(DataTableObj),
     PhasePortrait(PhasePortraitObj),
+    /// Lista persistible de primera clase (P1): valores y sublistas con
+    /// etiqueta referenciable. Sin representación gráfica propia.
+    List(ListObj),
 
     // Transformed Wrapper
     Transformed(TransformedObj),
@@ -123,6 +126,8 @@ impl GeoObject {
             | GeoObject::RegressionLine(_)
             | GeoObject::DataTable(_)
             | GeoObject::PhasePortrait(_) => RenderSpace::D2,
+            // Las listas no tienen geometría: espacio neutro D2.
+            GeoObject::List(_) => RenderSpace::D2,
             GeoObject::Point3D(_)
             | GeoObject::Segment3D(_)
             | GeoObject::Plane3D(_)
@@ -212,6 +217,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.id,
             GeoObject::RegressionLine(o) => o.id,
             GeoObject::DataTable(o) => o.id,
+            GeoObject::List(o) => o.id,
             GeoObject::PhasePortrait(o) => o.id,
             GeoObject::Pencil(o) => o.id,
             GeoObject::Transformed(o) => o.inner.id(),
@@ -274,6 +280,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => &o.label,
             GeoObject::RegressionLine(o) => &o.label,
             GeoObject::DataTable(o) => &o.label,
+            GeoObject::List(o) => &o.label,
             GeoObject::PhasePortrait(o) => &o.label,
             GeoObject::Pencil(o) => &o.label,
             GeoObject::Transformed(o) => o.inner.label(),
@@ -336,6 +343,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.label = label,
             GeoObject::RegressionLine(o) => o.label = label,
             GeoObject::DataTable(o) => o.label = label,
+            GeoObject::List(o) => o.label = label,
             GeoObject::PhasePortrait(o) => o.label = label,
             GeoObject::Pencil(o) => o.label = label,
             GeoObject::Transformed(o) => o.inner.set_label(label),
@@ -399,6 +407,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.color,
             GeoObject::RegressionLine(o) => o.color,
             GeoObject::DataTable(o) => o.color,
+            GeoObject::List(o) => o.color,
             GeoObject::PhasePortrait(o) => o.color,
             GeoObject::Transformed(o) => o.inner.color(),
         }
@@ -461,6 +470,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.color = color,
             GeoObject::RegressionLine(o) => o.color = color,
             GeoObject::DataTable(o) => o.color = color,
+            GeoObject::List(o) => o.color = color,
             GeoObject::PhasePortrait(o) => o.color = color,
             GeoObject::Transformed(o) => o.inner.set_color(color),
         }
@@ -524,7 +534,8 @@ impl GeoObject {
             GeoObject::RegressionLine(o) => o.visible,
             // Las tablas no tienen geometría de canvas y nunca participan del
             // render/export genérico aunque un documento legado marque visible.
-            GeoObject::DataTable(_) => false,
+            // Las listas igual: sin representación gráfica propia.
+            GeoObject::DataTable(_) | GeoObject::List(_) => false,
             GeoObject::PhasePortrait(o) => o.visible,
             GeoObject::Transformed(o) => o.inner.is_visible(),
         }
@@ -587,6 +598,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.visible = visible,
             GeoObject::RegressionLine(o) => o.visible = visible,
             GeoObject::DataTable(_) => {}
+            GeoObject::List(_) => {}
             GeoObject::PhasePortrait(o) => o.visible = visible,
             GeoObject::Transformed(o) => o.inner.set_visible(visible),
         }
@@ -756,6 +768,7 @@ impl GeoObject {
             | GeoObject::PieChart(_)
             | GeoObject::ScatterPlot(_)
             | GeoObject::BoxPlot(_)
+            | GeoObject::List(_)
             | GeoObject::RegressionLine(_) => true,
             GeoObject::Function(function) => function.fit.is_some(),
             GeoObject::Transformed(object) => object.inner.contains_private_data(),
@@ -821,6 +834,7 @@ impl GeoObject {
             GeoObject::BoxPlot(_) => "BoxPlot",
             GeoObject::RegressionLine(_) => "RegressionLine",
             GeoObject::DataTable(_) => "DataTable",
+            GeoObject::List(_) => "List",
             GeoObject::PhasePortrait(_) => "PhasePortrait",
             GeoObject::Transformed(_) => "Transformed",
         }
@@ -4577,9 +4591,26 @@ pub struct ScatterPlotObj {
     pub color: Color,
     pub visible: bool,
     pub point_size: f32,
+    /// Estilo de trazado (StepGraph/StickGraph/LineGraph lo fijan).
+    #[serde(default)]
+    pub style: ScatterStyle,
     /// Tabla local de la que se creó este gráfico, si existe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_data: Option<ObjectId>,
+}
+
+/// Estilo de trazado de un diagrama de dispersión.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ScatterStyle {
+    /// Puntos aislados (clásico).
+    #[default]
+    Points,
+    /// Bastones verticales desde `y = 0` hasta cada punto.
+    Sticks,
+    /// Escalones entre puntos consecutivos (requiere `xs` ordenadas).
+    Steps,
+    /// Polilínea entre puntos consecutivos (requiere `xs` ordenadas).
+    Lines,
 }
 impl ScatterPlotObj {
     pub fn new(xs: Vec<f64>, ys: Vec<f64>) -> Self {
@@ -4595,8 +4626,14 @@ impl ScatterPlotObj {
             color: Color::BLUE,
             visible: true,
             point_size: 5.0,
+            style: ScatterStyle::Points,
             source_data: None,
         }
+    }
+    /// Fija el estilo de trazado (Steps/Lines exigen `xs` ordenadas).
+    pub fn with_style(mut self, style: ScatterStyle) -> Self {
+        self.style = style;
+        self
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
@@ -4653,6 +4690,101 @@ impl DataTableObj {
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
         self
+    }
+}
+
+/// Frente P1 (listas de primera clase): ítem de lista heterogénea.
+///
+/// `GeoObject::List` queda diferido (los matches exhaustivos de
+/// `document.rs`/`validation.rs` y la piel están fuera del alcance de esta
+/// ola): los comandos P1 operan sobre literales `{…}` / columnas DataTable
+/// y devuelven texto `{…}` o escalares, sin persistir listas todavía.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum ListItem {
+    /// Escalar finito.
+    Scalar(f64),
+    /// Texto libre (etiquetas de lista).
+    Text(String),
+    /// Sub-lista anidada (profundidad máxima `MAX_LIST_DEPTH`).
+    List(Vec<ListItem>),
+}
+
+/// Frente P1 (listas de primera clase): lista persistible con etiqueta.
+///
+/// Todos los campos llevan `default` para compatibilidad de persistencia.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListObj {
+    #[serde(default)]
+    pub id: ObjectId,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub items: Vec<ListItem>,
+    /// Color cosmético (paridad con DataTable; sin geometría asociada).
+    #[serde(default = "default_stroke_color")]
+    pub color: Color,
+    /// Visible nominal (el render lo ignora como a DataTable: sin canvas).
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_stroke_color() -> Color {
+    Color::DEFAULT_STROKE
+}
+
+impl ListObj {
+    pub fn new(items: Vec<ListItem>) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            items,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Profundidad del árbol (`Scalar`/`Text` = 0).
+    pub fn depth(items: &[ListItem]) -> usize {
+        items
+            .iter()
+            .map(|item| match item {
+                ListItem::Scalar(_) | ListItem::Text(_) => 0,
+                ListItem::List(inner) => Self::depth(inner).saturating_add(1),
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Valida cotas P1 (`MAX_LIST_LENGTH` 10000, `MAX_LIST_DEPTH` 8).
+    /// Las consts viven en `grafito_geometry::list_ops` (`core::validation`
+    /// está fuera del alcance de esta ola).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.items.len() > grafito_geometry::list_ops::MAX_LIST_LENGTH {
+            return Err(format!(
+                "List '{}' excede el máximo {} elementos",
+                self.label,
+                grafito_geometry::list_ops::MAX_LIST_LENGTH
+            ));
+        }
+        let depth = Self::depth(&self.items);
+        if depth > grafito_geometry::list_ops::MAX_LIST_DEPTH {
+            return Err(format!(
+                "List '{}' excede la profundidad máxima {}",
+                self.label,
+                grafito_geometry::list_ops::MAX_LIST_DEPTH
+            ));
+        }
+        Ok(())
     }
 }
 

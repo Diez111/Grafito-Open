@@ -28,28 +28,31 @@ thread_local! {
     // Los valores se guardan como `Arc` para que el cache hit clone solo el
     // puntero (refcount) y no el payload completo (hasta 160k píxeles de
     // fractal, density² segmentos de retrato de fase, o el AST complejo).
+    // LRU real (`lru::LruCache`): el hit hace bump O(1) y el `put` desaloja
+    // la menos usada (antes `HashMap + keys().next()`, evicción arbitraria).
     static FRACTAL_RENDER_CACHE: RefCell<
-        HashMap<u64, Arc<Vec<grafito_geometry::fractals::FractalPixel>>>,
-    > = RefCell::new(HashMap::new());
-    static PHASE_PORTRAIT_CACHE: RefCell<HashMap<u64, PhasePortraitSegments>> =
-        RefCell::new(HashMap::new());
+        lru::LruCache<u64, Arc<Vec<grafito_geometry::fractals::FractalPixel>>>,
+    > = RefCell::new(lru::LruCache::new(FRACTAL_RENDER_CACHE_SIZE));
+    static PHASE_PORTRAIT_CACHE: RefCell<lru::LruCache<u64, PhasePortraitSegments>> =
+        RefCell::new(lru::LruCache::new(PHASE_RENDER_CACHE_SIZE));
     static ORDERED_VISIBLE_CACHE: RefCell<Option<(u64, Arc<Vec<ObjectId>>)>> =
         const { RefCell::new(None) };
     /// Cache de ASTs complejos parseados (ComplexGrid/ComplexMapping) keyed por
     /// la expresión. Evita re-parsear `complex_expr` en cada frame (H10).
-    static COMPLEX_EXPR_CACHE: RefCell<HashMap<String, Arc<grafito_complex::ComplexExpr>>> =
-        RefCell::new(HashMap::new());
+    static COMPLEX_EXPR_CACHE: RefCell<
+        lru::LruCache<String, Arc<grafito_complex::ComplexExpr>>,
+    > = RefCell::new(lru::LruCache::new(COMPLEX_EXPR_CACHE_SIZE));
     /// Texturas de domain coloring / heat map keyed por
     /// (version, objeto, expr, bounds, res, modo). Antes cada frame emitía
     /// 40k-90k `rect_filled` (4k-90k shapes); ahora una rasterización por
     /// cambio y un solo `painter.image`.
-    static COMPLEX_GRID_TEXTURES: RefCell<HashMap<u64, egui::TextureHandle>> =
-        RefCell::new(HashMap::new());
+    static COMPLEX_GRID_TEXTURES: RefCell<lru::LruCache<u64, egui::TextureHandle>> =
+        RefCell::new(lru::LruCache::new(COMPLEX_GRID_TEXTURE_SIZE));
     /// Streamlines RK4 de VectorField2D en world-space, keyed por
     /// (version, campo, viewport): antes se re-trazaban 25×200×4 evaluaciones
     /// por frame; ahora solo se proyectan a pantalla.
-    static VECTOR_FIELD_STREAMLINE_CACHE: RefCell<HashMap<u64, VectorFieldStreamlines>> =
-        RefCell::new(HashMap::new());
+    static VECTOR_FIELD_STREAMLINE_CACHE: RefCell<lru::LruCache<u64, VectorFieldStreamlines>> =
+        RefCell::new(lru::LruCache::new(VECTOR_FIELD_STREAMLINE_CACHE_SIZE));
     /// Última `document.version` en la que se ejecutó `prune_fill_texture_cache`.
     /// Permite saltar el write lock + barrido LRU cuando el documento no cambió.
     static LAST_FILL_PRUNE_DOC_VERSION: RefCell<Option<u64>> = const { RefCell::new(None) };
@@ -59,6 +62,23 @@ const PHASE_RENDER_CACHE_CAP: usize = 32;
 const COMPLEX_EXPR_CACHE_CAP: usize = 16;
 const COMPLEX_GRID_TEXTURE_CAP: usize = 16;
 const VECTOR_FIELD_STREAMLINE_CACHE_CAP: usize = 16;
+// Tamaños `NonZeroUsize` para `lru::LruCache::new` (misma API que
+// `grafito-render/src/lib.rs:TRANSFORMED_CACHE_SIZE`).
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const FRACTAL_RENDER_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(FRACTAL_RENDER_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const PHASE_RENDER_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(PHASE_RENDER_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const COMPLEX_EXPR_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(COMPLEX_EXPR_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const COMPLEX_GRID_TEXTURE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(COMPLEX_GRID_TEXTURE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const VECTOR_FIELD_STREAMLINE_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(VECTOR_FIELD_STREAMLINE_CACHE_CAP) };
 
 /// Segmentos de retrato de fase cacheados (Arc para cache hits baratos).
 type PhasePortraitSegments = Arc<Vec<(Point2, Point2)>>;
@@ -119,7 +139,7 @@ fn cached_try_compute_fractal(
     document_version: u64,
 ) -> Option<Arc<Vec<grafito_geometry::fractals::FractalPixel>>> {
     let key = fractal_render_cache_key(document_version, fr);
-    if let Some(cached) = FRACTAL_RENDER_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(cached) = FRACTAL_RENDER_CACHE.with(|c| c.borrow_mut().get(&key).cloned()) {
         return Some(cached);
     }
     let fractal_type = match fr.fractal_type.as_str() {
@@ -151,13 +171,7 @@ fn cached_try_compute_fractal(
         .ok()?,
     );
     FRACTAL_RENDER_CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        if cache.len() >= FRACTAL_RENDER_CACHE_CAP {
-            if let Some(k) = cache.keys().next().copied() {
-                cache.remove(&k);
-            }
-        }
-        cache.insert(key, pixels.clone());
+        c.borrow_mut().put(key, pixels.clone());
     });
     Some(pixels)
 }
@@ -170,18 +184,12 @@ fn cached_sample_phase_portrait(
     document_version: u64,
 ) -> PhasePortraitSegments {
     let key = phase_render_cache_key(document_version, portrait, variables);
-    if let Some(cached) = PHASE_PORTRAIT_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(cached) = PHASE_PORTRAIT_CACHE.with(|c| c.borrow_mut().get(&key).cloned()) {
         return cached;
     }
     let segments = Arc::new(grafito_render::sample_phase_portrait(portrait, variables));
     PHASE_PORTRAIT_CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        if cache.len() >= PHASE_RENDER_CACHE_CAP {
-            if let Some(k) = cache.keys().next().copied() {
-                cache.remove(&k);
-            }
-        }
-        cache.insert(key, segments.clone());
+        c.borrow_mut().put(key, segments.clone());
     });
     segments
 }
@@ -234,18 +242,12 @@ fn refine_function_samples(
 /// expresión (LRU acotado). Evita re-parsear `complex_expr` en cada frame
 /// (H10): el parseo solo ocurre en cache miss.
 fn cached_complex_expr(expr: &str) -> Option<Arc<grafito_complex::ComplexExpr>> {
-    if let Some(cached) = COMPLEX_EXPR_CACHE.with(|c| c.borrow().get(expr).cloned()) {
+    if let Some(cached) = COMPLEX_EXPR_CACHE.with(|c| c.borrow_mut().get(expr).cloned()) {
         return Some(cached);
     }
     let parsed = Arc::new(grafito_complex::complex_expr::parse(expr).ok()?);
     COMPLEX_EXPR_CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        if cache.len() >= COMPLEX_EXPR_CACHE_CAP {
-            if let Some(k) = cache.keys().next().cloned() {
-                cache.remove(&k);
-            }
-        }
-        cache.insert(expr.to_string(), parsed.clone());
+        c.borrow_mut().put(expr.to_string(), parsed.clone());
     });
     Some(parsed)
 }
@@ -839,20 +841,15 @@ fn cached_vector_field_streamlines(
     dy: f64,
 ) -> VectorFieldStreamlines {
     let key = vector_field_streamline_cache_key(document.version, vf, world_tl, world_br, dx, dy);
-    if let Some(cached) = VECTOR_FIELD_STREAMLINE_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(cached) = VECTOR_FIELD_STREAMLINE_CACHE.with(|c| c.borrow_mut().get(&key).cloned())
+    {
         return cached;
     }
     let segments = Arc::new(trace_vector_field_streamlines(
         document, vf, world_tl, world_br, dx, dy,
     ));
     VECTOR_FIELD_STREAMLINE_CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        if cache.len() >= VECTOR_FIELD_STREAMLINE_CACHE_CAP {
-            if let Some(k) = cache.keys().next().copied() {
-                cache.remove(&k);
-            }
-        }
-        cache.insert(key, segments.clone());
+        c.borrow_mut().put(key, segments.clone());
     });
     segments
 }
@@ -4930,11 +4927,50 @@ impl GrafitoApp {
                 }
             }
             GeoObject::ScatterPlot(sp) => {
+                use grafito_core::ScatterStyle;
                 let color = to_color32(sp.color);
                 let r = sp.point_size.max(1.0);
-                for (x, y) in sp.xs.iter().zip(sp.ys.iter()) {
-                    let s = view.world_to_screen(Point2::new(*x, *y));
-                    painter.circle_filled(canvas_rect.min + Vec2::new(s.x, s.y), r, color);
+                let stroke = Stroke::new(2.0, color);
+                let to_screen = |x: f64, y: f64| -> Pos2 {
+                    let s = view.world_to_screen(Point2::new(x, y));
+                    canvas_rect.min + Vec2::new(s.x, s.y)
+                };
+                match sp.style {
+                    ScatterStyle::Points => {
+                        for (x, y) in sp.xs.iter().zip(sp.ys.iter()) {
+                            painter.circle_filled(to_screen(*x, *y), r, color);
+                        }
+                    }
+                    ScatterStyle::Sticks => {
+                        for (x, y) in sp.xs.iter().zip(sp.ys.iter()) {
+                            painter.line_segment([to_screen(*x, 0.0), to_screen(*x, *y)], stroke);
+                            painter.circle_filled(to_screen(*x, *y), r, color);
+                        }
+                    }
+                    // Steps/Lines exigen `xs` ordenadas (StepGraph/LineGraph
+                    // ordenan al crear); acá se confía en el invariante.
+                    ScatterStyle::Steps => {
+                        let mut prev: Option<(f64, f64)> = None;
+                        for (x, y) in sp.xs.iter().zip(sp.ys.iter()) {
+                            if let Some((px, py)) = prev {
+                                painter
+                                    .line_segment([to_screen(px, py), to_screen(*x, py)], stroke);
+                                painter
+                                    .line_segment([to_screen(*x, py), to_screen(*x, *y)], stroke);
+                            }
+                            prev = Some((*x, *y));
+                        }
+                    }
+                    ScatterStyle::Lines => {
+                        let mut prev: Option<Pos2> = None;
+                        for (x, y) in sp.xs.iter().zip(sp.ys.iter()) {
+                            let here = to_screen(*x, *y);
+                            if let Some(from) = prev {
+                                painter.line_segment([from, here], stroke);
+                            }
+                            prev = Some(here);
+                        }
+                    }
                 }
             }
             GeoObject::BoxPlot(bp) => {
@@ -5401,7 +5437,7 @@ impl GrafitoApp {
                     let res = complex_grid_cpu_resolution(cg.density, self.document.render_quality);
                     let key = complex_grid_texture_key(self.document.version, cg, res);
                     let cached =
-                        COMPLEX_GRID_TEXTURES.with(|cache| cache.borrow().get(&key).cloned());
+                        COMPLEX_GRID_TEXTURES.with(|cache| cache.borrow_mut().get(&key).cloned());
                     let texture = match cached {
                         Some(handle) => Some(handle),
                         None => {
@@ -5417,11 +5453,7 @@ impl GrafitoApp {
                                     egui::TextureOptions::LINEAR,
                                 );
                                 COMPLEX_GRID_TEXTURES.with(|cache| {
-                                    let mut cache = cache.borrow_mut();
-                                    if cache.len() >= COMPLEX_GRID_TEXTURE_CAP {
-                                        cache.clear();
-                                    }
-                                    cache.insert(key, handle.clone());
+                                    cache.borrow_mut().put(key, handle.clone());
                                 });
                                 handle
                             })

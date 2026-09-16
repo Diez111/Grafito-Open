@@ -221,6 +221,10 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             ui.close_menu();
         }
         menu_button(ui, "Exportar", |ui| {
+            if ui.button("GeoGebra (.ggb)…").clicked() {
+                app.choose_and_export_ggb(ui.ctx());
+                ui.close_menu();
+            }
             for (label, format) in [
                 ("SVG…", crate::export::ExportFormat::Svg),
                 ("PNG…", crate::export::ExportFormat::Png),

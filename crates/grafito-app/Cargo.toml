@@ -20,6 +20,7 @@ path = "src/lib.rs"
 [dependencies]
 grafito-core.workspace = true
 grafito-geometry.workspace = true
+grafito-ggb.workspace = true
 gif.workspace = true
 grafito-agent.workspace = true
 grafito-command.workspace = true
@@ -53,6 +54,9 @@ grafito-profile.workspace = true
 grafito-pedagogy.workspace = true
 serde.workspace = true
 rayon.workspace = true
+# F3-Render caches: LRU real en `render_2d.rs` (misma versión que
+# grafito-geometry/grafito-render: 0.18, API `NonZeroUsize`).
+lru = "0.18"
 num-complex.workspace = true
 rfd.workspace = true
 uuid.workspace = true

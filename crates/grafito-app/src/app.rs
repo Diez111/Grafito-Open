@@ -178,6 +178,13 @@ pub(crate) struct PendingGgbImportJob {
     pub path: PathBuf,
 }
 
+/// Job de exportación `.ggb` en background — serialización + ZIP + escritura
+/// atómica fuera del UI thread. El `String` es el resumen para el toast.
+pub(crate) struct PendingGgbExportJob {
+    pub receiver: Receiver<Result<String, String>>,
+    pub path: PathBuf,
+}
+
 /// ── A8 Recovery de autosave al arranque ──────────────────────────────────
 /// Gap crítico: el sidecar `.autosave` se escribía (`tick_autosave` en
 /// background) pero nunca se ofrecía recuperar (`load_autosave_candidate` /
@@ -1688,6 +1695,9 @@ pub struct GrafitoApp {
     /// Job de importación `.ggb` en background (F1-1): lectura + parse fuera del
     /// UI thread, resultado aplicado con undo único vía `process_input`.
     pub(crate) pending_ggb_import_job: Option<PendingGgbImportJob>,
+    /// Job de exportación `.ggb` en background (P3a): serialización + ZIP +
+    /// escritura atómica fuera del UI thread.
+    pub(crate) pending_ggb_export_job: Option<PendingGgbExportJob>,
     pub(crate) pending_import_job: Option<PendingImportJob>,
     pub(crate) pending_text_job: Option<PendingTextWriteJob>,
     /// Acción encadenada tras un guardado async (New/Open con cambios sin guardar).
@@ -2401,6 +2411,7 @@ impl GrafitoApp {
             pending_export_job: None,
             last_export_dir: None,
             pending_ggb_import_job: None,
+            pending_ggb_export_job: None,
             pending_import_job: None,
             pending_text_job: None,
             pending_chained_action: None,
@@ -4429,6 +4440,32 @@ impl GrafitoApp {
                 }
             }
         }
+        // Export .ggb (P3a): el worker ya serializó + escribió atómicamente.
+        if let Some(job) = self.pending_ggb_export_job.take() {
+            match job.receiver.try_recv() {
+                Ok(Ok(summary)) => {
+                    self.last_export_dir = job.path.parent().map(|dir| dir.to_path_buf());
+                    self.notify(summary, grafito_ui::toast::ToastKind::Info);
+                    ctx.request_repaint();
+                }
+                Ok(Err(err)) => {
+                    self.notify(
+                        format!("Error al exportar .ggb a {}: {err}", job.path.display()),
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_ggb_export_job = Some(job);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.notify(
+                        "Exportación .ggb cancelada",
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                }
+            }
+        }
         // Import CSV/TSV: el commit ocurre aquí (mismo hilo que el sync) con
         // los mismos mensajes; la lectura ≤2MB ya ocurrió en el worker.
         if let Some(job) = self.pending_import_job.take() {
@@ -4641,6 +4678,62 @@ impl GrafitoApp {
             receiver: spawn_document_open(path, ctx),
         });
         self.notify("Abriendo documento…", grafito_ui::toast::ToastKind::Info);
+    }
+
+    /// P3a: Archivo → Exportar → "GeoGebra (.ggb)…". El diálogo `rfd` vive en
+    /// UI thread; serialización + ZIP + escritura atómica van al worker
+    /// `ggb-export` y el resumen se aplica en `poll_background_jobs`.
+    pub(crate) fn choose_and_export_ggb(&mut self, ctx: &egui::Context) {
+        // D2 lockdown: en examen no sale nada del documento.
+        if self.exam_blocks("Export") {
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("GeoGebra", &["ggb"])
+            .set_file_name("grafito_export.ggb")
+            .save_file()
+        else {
+            return;
+        };
+        if self.pending_ggb_export_job.is_some() {
+            self.notify(
+                "Ya hay una exportación .ggb en curso",
+                grafito_ui::toast::ToastKind::Info,
+            );
+            return;
+        }
+        let document = self.document.clone();
+        let path_clone = path.clone();
+        let ctx_clone = ctx.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let _ = std::thread::Builder::new()
+            .name("ggb-export".into())
+            .spawn(move || {
+                let result = (|| -> Result<String, String> {
+                    let (items, adapter_omitted) =
+                        crate::export::document_to_ggb_items(&document);
+                    if items.is_empty() {
+                        return Err(format!(
+                            "nada exportable a .ggb ({adapter_omitted} objetos omitidos: solo puntos, segmentos, círculos y polígonos viajan)"
+                        ));
+                    }
+                    let (bytes, report) = grafito_ggb::export::export_ggb_bytes(&items)
+                        .map_err(|e| e.to_string())?;
+                    crate::export::write_file_atomic(&path_clone, &bytes).map_err(|e| {
+                        format!("no se pudo escribir {}: {e}", path_clone.display())
+                    })?;
+                    let total_omitted = adapter_omitted + report.omitidos.len();
+                    let mut summary = format!("ggb exportado: {} objetos", report.escritos);
+                    if total_omitted > 0 {
+                        summary.push_str(&format!(" ({total_omitted} no exportables omitidos)"));
+                    }
+                    Ok(summary)
+                })();
+                let _ = tx.send(result);
+                ctx_clone.request_repaint();
+            });
+        self.pending_ggb_export_job = Some(PendingGgbExportJob { receiver: rx, path });
+        self.notify("Exportando .ggb…", grafito_ui::toast::ToastKind::Info);
     }
 
     /// F1-1: Archivo → "Importar GeoGebra (.ggb)…" con filtro `.ggb` (rfd).
@@ -8813,6 +8906,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         pending_export_job: None,
         last_export_dir: None,
         pending_ggb_import_job: None,
+        pending_ggb_export_job: None,
         pending_import_job: None,
         pending_text_job: None,
         pending_chained_action: None,

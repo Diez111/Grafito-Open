@@ -2,7 +2,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
+use std::sync::{atomic::AtomicBool, Arc};
 
+use crate::gpu_readback::{PendingGpuReadback, ReadbackPoll};
 use grafito_complex::math::complex_expr::ComplexExpr;
 use grafito_complex::math::complex_opcode::{compile_complex_expr, ComplexBytecodeProgram};
 
@@ -107,6 +109,32 @@ struct TransformParamsUniform {
     code_len: u32,
     _pad0: u32,
     _pad1: u32,
+}
+
+/// Submit compilado y validado, listo para `submit_buffers` (origen único
+/// sync/async). Todo lo que toca la GPU sale de acá; el plan es puro CPU.
+struct ComplexSubmit {
+    params: TransformParamsUniform,
+    code: Vec<u32>,
+    constants: Vec<[f32; 2]>,
+    in_data: Vec<[f32; 2]>,
+}
+
+/// Dispatch en vuelo: el submit ya está en la GPU y la espera se distribuye
+/// en frames vía [`PendingGpuReadback`]. Se resuelve con `resolve_eval`.
+/// El buffer readback pertenece al pipeline (persistente), así que el `wait`
+/// puede cruzar frames sin mover memoria GPU entre threads.
+#[derive(Debug)]
+pub struct PendingComplexEval {
+    vertex_count: usize,
+    wait: PendingGpuReadback,
+}
+
+impl PendingComplexEval {
+    /// Poll non-blocking delegado al waiter (para futuro slot en `canvas.rs`).
+    pub fn poll(&mut self) -> ReadbackPoll {
+        self.wait.poll()
+    }
 }
 
 impl ComplexComputePipeline {
@@ -259,20 +287,27 @@ impl ComplexComputePipeline {
         }
     }
 
-    /// Evaluates the complex expression on a set of vertices
-    /// Returns the transformed vec2 points, or None if AST unsupported
-    pub fn evaluate(
+    /// Compila y valida un submit sin tocar la GPU: origen único para el path
+    /// síncrono (`evaluate`) y el asíncrono (`dispatch`).
+    fn plan_submit(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         expr: &ComplexExpr,
         in_points: &[grafito_geometry::Point2],
         variables: &BTreeMap<String, f64>,
-    ) -> Option<Vec<grafito_geometry::Point2>> {
+    ) -> Option<ComplexSubmit> {
         if in_points.is_empty() {
-            return Some(Vec::new());
+            return Some(ComplexSubmit {
+                params: TransformParamsUniform {
+                    vertex_count: 0,
+                    code_len: 0,
+                    _pad0: 0,
+                    _pad1: 0,
+                },
+                code: Vec::new(),
+                constants: Vec::new(),
+                in_data: Vec::new(),
+            });
         }
-
         let mut prog = ComplexBytecodeProgram::default();
         if compile_complex_expr(expr, variables, &[("z", 0), ("x", 1), ("y", 2)], &mut prog)
             .is_err()
@@ -303,23 +338,41 @@ impl ComplexComputePipeline {
             in_data.push([x, y]);
         }
 
-        let vertex_bytes = (in_points.len() * std::mem::size_of::<[f32; 2]>()) as u64;
-
         let params = TransformParamsUniform {
             vertex_count,
             code_len: u32::try_from(prog.code.len()).ok()?,
             _pad0: 0,
             _pad1: 0,
         };
+        Some(ComplexSubmit {
+            params,
+            code: prog.code,
+            constants: f32_constants,
+            in_data,
+        })
+    }
 
-        queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
-        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&prog.code));
+    /// Escribe uniformes, hace submit del dispatch y arma el `map_async`.
+    /// Barato y non-blocking: no espera a la GPU. Retorna el flag que el
+    /// waiter background (o el poll síncrono legacy) observará.
+    fn submit_buffers(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        submit: &ComplexSubmit,
+    ) -> Arc<AtomicBool> {
+        queue.write_buffer(
+            &self.params_buffer,
+            0,
+            bytemuck::cast_slice(&[submit.params]),
+        );
+        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
         queue.write_buffer(
             &self.constants_buffer,
             0,
-            bytemuck::cast_slice(&f32_constants),
+            bytemuck::cast_slice(&submit.constants),
         );
-        queue.write_buffer(&self.in_buffer, 0, bytemuck::cast_slice(&in_data));
+        queue.write_buffer(&self.in_buffer, 0, bytemuck::cast_slice(&submit.in_data));
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Complex Compute Bind Group"),
@@ -360,27 +413,124 @@ impl ComplexComputePipeline {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let wg = (vertex_count).div_ceil(64).max(1);
+            let wg = (submit.params.vertex_count).div_ceil(64).max(1);
             cpass.dispatch_workgroups(wg, 1, 1);
         }
 
+        let vertex_bytes = (submit.in_data.len() * std::mem::size_of::<[f32; 2]>()) as u64;
         encoder.copy_buffer_to_buffer(&self.out_buffer, 0, &self.out_readback, 0, vertex_bytes);
         crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.out_readback.slice(..vertex_bytes);
-        let map_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let map_ok_clone = map_ok.clone();
+        let map_ok = Arc::new(AtomicBool::new(false));
+        let map_ok_clone = Arc::clone(&map_ok);
         slice.map_async(wgpu::MapMode::Read, move |result| {
             if result.is_ok() {
                 map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         });
-        // TODO P1 (B6-Next): migrar al patrón `dispatch_*` + slot background
-        // (ver `function_compute`/`implicit_compute` + `GpuComputeSlot` en
-        // canvas.rs). Sin waiter thread: en wgpu 22 `Device` no es `Clone`;
-        // la espera se distribuye en frames (poll no-bloqueante por frame).
-        // Mitigación actual: poll acotado con timeout en vez de Wait infinito.
+        map_ok
+    }
+
+    /// Copia inmediata del readback ya mapeado (sin espera GPU). El llamante
+    /// debe garantizar que el buffer está mapeado (`ReadbackPoll::Mapped`).
+    fn copy_mapped_points(&self, vertex_count: usize) -> Option<Vec<grafito_geometry::Point2>> {
+        let vertex_bytes = (vertex_count * std::mem::size_of::<[f32; 2]>()) as u64;
+        let slice = self.out_readback.slice(..vertex_bytes);
+        let data = slice.get_mapped_range();
+        let values_f32: &[[f32; 2]] = bytemuck::cast_slice(&data);
+        if values_f32.len() < vertex_count
+            || values_f32
+                .iter()
+                .any(|value| !value[0].is_finite() || !value[1].is_finite())
+        {
+            drop(data);
+            self.out_readback.unmap();
+            return None;
+        }
+        let mut result = Vec::with_capacity(vertex_count);
+        for v in &values_f32[..vertex_count] {
+            result.push(grafito_geometry::Point2::new(v[0] as f64, v[1] as f64));
+        }
+        drop(data);
+        self.out_readback.unmap();
+        Some(result)
+    }
+
+    /// Libera el buffer readback sin bloquear. Idempotente: si el `map_async`
+    /// falló o sigue pendiente, es no-op seguro; se llama en todo camino de
+    /// descarte (job obsoleto, timeout, objeto borrado) para no dejar el
+    /// pipeline inutilizado.
+    pub fn abort_eval(&self) {
+        self.out_readback.unmap();
+    }
+
+    /// Dispatch sin espera: hace submit + `map_async` y retorna
+    /// inmediatamente con un [`PendingComplexEval`]. El hilo del frame nunca
+    /// bloquea; el resolve llega en un frame posterior vía
+    /// [`Self::resolve_eval`]. Retorna `None` en los mismos casos que
+    /// [`Self::evaluate`].
+    pub fn dispatch(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        expr: &ComplexExpr,
+        in_points: &[grafito_geometry::Point2],
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<PendingComplexEval> {
+        let submit = self.plan_submit(expr, in_points, variables)?;
+        if submit.in_data.is_empty() {
+            return None;
+        }
+        let vertex_count = submit.in_data.len();
+        let map_ok = self.submit_buffers(device, queue, &submit);
+        log::trace!("Complex compute async dispatch (wait distributed over frames)");
+        Some(PendingComplexEval {
+            vertex_count,
+            wait: PendingGpuReadback::submit(&map_ok),
+        })
+    }
+
+    /// Resolve non-blocking de un dispatch previo. Solo copia si el poll ya
+    /// reportó `Mapped`; en cualquier otro caso hace `unmap` y retorna `None`
+    /// (el llamante usa el fallback CPU honesto). Nunca espera: el llamante
+    /// debe haber hecho el `device.poll(Maintain::Poll)` no-bloqueante del
+    /// frame antes de llamar.
+    pub fn resolve_eval(
+        &self,
+        pending: PendingComplexEval,
+    ) -> Option<Vec<grafito_geometry::Point2>> {
+        let PendingComplexEval {
+            vertex_count,
+            mut wait,
+        } = pending;
+        if wait.poll() != ReadbackPoll::Mapped {
+            self.abort_eval();
+            return None;
+        }
+        self.copy_mapped_points(vertex_count)
+    }
+
+    /// Evaluates the complex expression on a set of vertices
+    /// Returns the transformed vec2 points, or None if AST unsupported
+    ///
+    /// Path síncrono legacy (bloquea hasta 250 ms): solo para callers sin slot
+    /// background. El prepare usa `dispatch` + `resolve_eval`.
+    pub fn evaluate(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        expr: &ComplexExpr,
+        in_points: &[grafito_geometry::Point2],
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<Vec<grafito_geometry::Point2>> {
+        if in_points.is_empty() {
+            return Some(Vec::new());
+        }
+        let submit = self.plan_submit(expr, in_points, variables)?;
+        let vertex_count = submit.in_data.len();
+        let map_ok = self.submit_buffers(device, queue, &submit);
         log::trace!("Complex compute sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);
         crate::gpu_timing::read_and_log(&self.timing, device, "Complex Compute");
@@ -392,23 +542,6 @@ impl ComplexComputePipeline {
             return None;
         }
 
-        let data = slice.get_mapped_range();
-        let values_f32: &[[f32; 2]] = bytemuck::cast_slice(&data);
-        if values_f32
-            .iter()
-            .any(|value| !value[0].is_finite() || !value[1].is_finite())
-        {
-            drop(data);
-            self.out_readback.unmap();
-            return None;
-        }
-        let mut result = Vec::with_capacity(values_f32.len());
-        for v in values_f32 {
-            result.push(grafito_geometry::Point2::new(v[0] as f64, v[1] as f64));
-        }
-        drop(data);
-        self.out_readback.unmap();
-
-        Some(result)
+        self.copy_mapped_points(vertex_count)
     }
 }

@@ -32,6 +32,8 @@
 //! - `MAX_BKT_SUMMARY_LEN = 128`
 
 pub mod crdt;
+#[cfg(feature = "aula-iroh")]
+pub mod iroh_transport;
 pub mod offline;
 pub mod session;
 pub mod stubs;
@@ -40,6 +42,11 @@ pub mod transport;
 pub use crdt::{
     CrdtEntry, CrdtId, CrdtSiteId, HlcTimestamp, WhiteboardCrdt, MAX_CRDT_ENTRIES,
     MAX_CRDT_VALUE_BYTES,
+};
+#[cfg(feature = "aula-iroh")]
+pub use iroh_transport::{
+    AulaTicket, IrohTransport, AULA_ALPN, IROH_CONNECT_TIMEOUT, IROH_POLL_TIMEOUT,
+    IROH_SEND_TIMEOUT,
 };
 pub use offline::{
     decode_persist, OfflineEnvelope, OfflineOutbox, PersistLoad, MAX_OFFLINE_ATTEMPTS,

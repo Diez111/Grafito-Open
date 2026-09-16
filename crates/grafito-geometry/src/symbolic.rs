@@ -239,6 +239,71 @@ fn simplify_conditionally(
         }
         // Keeping unsupported forms intact is intentional: this additive API
         // only applies identities whose domain proof is represented above.
+        Sqrt(inner) => {
+            let (inner, conditions) = simplify_conditionally(inner, assumptions);
+            match &inner {
+                Pow(base, exponent)
+                    if matches!(base.as_ref(), Var(_))
+                        && matches!(exponent.as_ref(), Const(e) if *e == 2.0) =>
+                {
+                    if let Var(variable) = base.as_ref() {
+                        if assumptions.is_real(variable) {
+                            // sqrt(x²) = |x| solo si x es real (respaldado).
+                            return (Abs(Box::new(Var(variable.clone()))), conditions.clone());
+                        }
+                    }
+                    (Sqrt(Box::new(inner)), conditions)
+                }
+                _ => (Sqrt(Box::new(inner)), conditions),
+            }
+        }
+        Ln(inner) => {
+            let (inner, conditions) = simplify_conditionally(inner, assumptions);
+            match &inner {
+                Exp(arg) => {
+                    if let Var(variable) = arg.as_ref() {
+                        if assumptions.is_real(variable) {
+                            // ln(eˣ) = x solo si x es real (respaldado).
+                            return (Var(variable.clone()), conditions.clone());
+                        }
+                    }
+                    (Ln(Box::new(inner)), conditions)
+                }
+                _ => (Ln(Box::new(inner)), conditions),
+            }
+        }
+        Exp(inner) => {
+            let (inner, conditions) = simplify_conditionally(inner, assumptions);
+            match &inner {
+                Ln(arg) => {
+                    if let Var(variable) = arg.as_ref() {
+                        if assumptions.is_positive(variable) {
+                            // e^(ln x) = x solo si x > 0 (respaldado).
+                            return (Var(variable.clone()), conditions.clone());
+                        }
+                    }
+                    (Exp(Box::new(inner)), conditions)
+                }
+                _ => (Exp(Box::new(inner)), conditions),
+            }
+        }
+        Abs(inner) => {
+            let (inner, conditions) = simplify_conditionally(inner, assumptions);
+            match &inner {
+                Var(variable) => {
+                    if assumptions.is_positive(variable) {
+                        // |x| = x respaldado por x > 0.
+                        return (Var(variable.clone()), conditions.clone());
+                    }
+                    if assumptions.is_nonpositive(variable) {
+                        // |x| = -x respaldado por x ≤ 0.
+                        return (Neg(Box::new(Var(variable.clone()))), conditions.clone());
+                    }
+                    (Abs(Box::new(inner)), conditions)
+                }
+                _ => (Abs(Box::new(inner)), conditions),
+            }
+        }
         _ => (expression.clone(), BTreeSet::new()),
     }
 }
@@ -6785,13 +6850,168 @@ fn multiply_expanded_terms(
 }
 
 /// Distributividad de productos sobre sumas/restas y potencias enteras positivas.
+/// Memo de subexpansiones (DAG-lite): subárboles estructuralmente idénticos
+/// comparten cómputo en vez de re-expandirse.
+///
+/// La clave es una huella `u64` + sonda `structurally_eq` (a prueba de
+/// colisiones: ante duda se recomputa). Cada entrada guarda los términos y
+/// el `delta` de presupuesto consumido, que se vuelve a cargar en cada
+/// acierto: la trayectoria de presupuesto es idéntica a la corrida sin
+/// memo (mismos éxitos, mismos errores, mismos mensajes). La cota
+/// `MAX_EXPAND_MEMO_ENTRIES` solo afecta velocidad, jamás el resultado.
+struct ExpandMemo {
+    map: std::collections::HashMap<u64, Vec<(Expr, Vec<ExpandedTerm>, usize)>>,
+    hits: usize,
+}
+
+/// Máximo de subexpansiones memoizadas por `expand()` (solo velocidad).
+const MAX_EXPAND_MEMO_ENTRIES: usize = 1024;
+
+impl ExpandMemo {
+    fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            hits: 0,
+        }
+    }
+
+    fn lookup(
+        &mut self,
+        key: u64,
+        probe: &Expr,
+        budget: &mut ExpandBudget,
+    ) -> Option<Vec<ExpandedTerm>> {
+        let bucket = self.map.get(&key)?;
+        for (stored, terms, delta) in bucket {
+            if stored.structurally_eq(probe) {
+                budget.charge(*delta).ok()?;
+                self.hits += 1;
+                return Some(terms.clone());
+            }
+        }
+        None
+    }
+
+    fn store(&mut self, key: u64, probe: &Expr, terms: &[ExpandedTerm], delta: usize) {
+        if self.map.len() >= MAX_EXPAND_MEMO_ENTRIES {
+            return;
+        }
+        self.map
+            .entry(key)
+            .or_default()
+            .push((probe.clone(), terms.to_vec(), delta));
+    }
+}
+
+/// Huella estructural de un `Expr` para el memo (el desempate real lo hace
+/// `structurally_eq`; acá solo se busca distribuir).
+fn expr_fingerprint(expression: &Expr) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn feed(expression: &Expr, state: &mut impl Hasher) {
+        use Expr::*;
+        match expression {
+            Const(value) => {
+                0_u8.hash(state);
+                value.to_bits().hash(state);
+            }
+            Var(name) => {
+                1_u8.hash(state);
+                name.hash(state);
+            }
+            Neg(value) | Sin(value) | Cos(value) | Tan(value) | Asin(value) | Acos(value)
+            | Atan(value) | Exp(value) | Ln(value) | Log(value) | Sqrt(value) | Abs(value)
+            | Sinh(value) | Cosh(value) | Tanh(value) | Floor(value) | Ceil(value)
+            | Round(value) | Sec(value) | Csc(value) | Cot(value) | Asinh(value) | Acosh(value)
+            | Atanh(value) | Sign(value) | Heaviside(value) | Cbrt(value) | Re(value)
+            | Im(value) | Arg(value) | Conj(value) | Erf(value) | Erfc(value) | Gamma(value)
+            | LnGamma(value) | Digamma(value) | Trigamma(value) => {
+                std::mem::discriminant(expression).hash(state);
+                feed(value, state);
+            }
+            Add(left, right)
+            | Sub(left, right)
+            | Mul(left, right)
+            | Div(left, right)
+            | Pow(left, right)
+            | Atan2(left, right)
+            | Modulo(left, right)
+            | Min(left, right)
+            | Max(left, right)
+            | Beta(left, right)
+            | BesselJ(left, right)
+            | BesselY(left, right)
+            | BesselI(left, right)
+            | Lt(left, right)
+            | Gt(left, right)
+            | Le(left, right)
+            | Ge(left, right)
+            | Eq(left, right)
+            | Ne(left, right) => {
+                std::mem::discriminant(expression).hash(state);
+                feed(left, state);
+                feed(right, state);
+            }
+            Clamp(x, lo, hi) => {
+                std::mem::discriminant(expression).hash(state);
+                feed(x, state);
+                feed(lo, state);
+                feed(hi, state);
+            }
+            Sum(body, var, start, end) | Product(body, var, start, end) => {
+                std::mem::discriminant(expression).hash(state);
+                var.hash(state);
+                feed(body, state);
+                feed(start, state);
+                feed(end, state);
+            }
+            Piecewise(pieces, default) => {
+                std::mem::discriminant(expression).hash(state);
+                pieces.len().hash(state);
+                for (condition, value) in pieces {
+                    feed(condition, state);
+                    feed(value, state);
+                }
+                feed(default, state);
+            }
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    feed(expression, &mut hasher);
+    hasher.finish()
+}
+
 fn expand_expr(expression: &Expr, budget: &mut ExpandBudget) -> Result<Vec<ExpandedTerm>, String> {
+    let mut memo = ExpandMemo::new();
+    expand_expr_memo(expression, budget, &mut memo)
+}
+
+fn expand_expr_memo(
+    expression: &Expr,
+    budget: &mut ExpandBudget,
+    memo: &mut ExpandMemo,
+) -> Result<Vec<ExpandedTerm>, String> {
+    let key = expr_fingerprint(expression);
+    if let Some(terms) = memo.lookup(key, expression, budget) {
+        return Ok(terms);
+    }
+    let before = budget.work_units;
+    let terms = expand_expr_inner(expression, budget, memo)?;
+    let delta = budget.work_units.saturating_sub(before);
+    memo.store(key, expression, &terms, delta);
+    Ok(terms)
+}
+
+fn expand_expr_inner(
+    expression: &Expr,
+    budget: &mut ExpandBudget,
+    memo: &mut ExpandMemo,
+) -> Result<Vec<ExpandedTerm>, String> {
     use Expr::*;
     budget.charge(1)?;
     let terms = match expression {
         Add(left, right) | Sub(left, right) => {
-            let mut left_terms = expand_expr(left, budget)?;
-            let mut right_terms = expand_expr(right, budget)?;
+            let mut left_terms = expand_expr_memo(left, budget, memo)?;
+            let mut right_terms = expand_expr_memo(right, budget, memo)?;
             if matches!(expression, Sub(_, _)) {
                 budget.charge(right_terms.len())?;
                 for term in &mut right_terms {
@@ -6805,7 +7025,7 @@ fn expand_expr(expression: &Expr, budget: &mut ExpandBudget) -> Result<Vec<Expan
             left_terms
         }
         Neg(value) => {
-            let mut terms = expand_expr(value, budget)?;
+            let mut terms = expand_expr_memo(value, budget, memo)?;
             budget.charge(terms.len())?;
             for term in &mut terms {
                 term.negative = !term.negative;
@@ -6813,8 +7033,8 @@ fn expand_expr(expression: &Expr, budget: &mut ExpandBudget) -> Result<Vec<Expan
             terms
         }
         Mul(left, right) => {
-            let left = expand_expr(left, budget)?;
-            let right = expand_expr(right, budget)?;
+            let left = expand_expr_memo(left, budget, memo)?;
+            let right = expand_expr_memo(right, budget, memo)?;
             multiply_expanded_terms(left, &right, budget)?
         }
         Pow(base, exponent) => {
@@ -6840,7 +7060,7 @@ fn expand_expr(expression: &Expr, budget: &mut ExpandBudget) -> Result<Vec<Expan
                 };
             }
             let exponent = *exponent as usize;
-            let factor = expand_expr(base, budget)?;
+            let factor = expand_expr_memo(base, budget, memo)?;
             if exponent == 1 {
                 factor
             } else {
@@ -8993,5 +9213,33 @@ mod coverage_sweep_symbolic {
         let _ = cifactor("x^2+1", "x");
         assert!(is_everywhere_differentiable("x^2").is_ok());
         assert!(evaluate_exact_rational("1/2+1/2").is_ok());
+    }
+
+    #[test]
+    fn expand_memo_shares_repeated_subtrees() {
+        // `(x+1)*(x+1)`: los dos factores son el mismo subárbol.
+        let ast = parse_ast("(x+1)*(x+1)").expect("parse");
+        let mut budget = ExpandBudget::default();
+        let mut memo = ExpandMemo::new();
+        let terms = expand_expr_memo(&ast, &mut budget, &mut memo).expect("expande");
+        assert!(!terms.is_empty());
+        assert!(memo.hits >= 1, "sin aciertos de memo: {}", memo.hits);
+        // La vía pública da lo correcto: (3+1)^2 = 16.
+        let public = expand("(x+1)*(x+1)").expect("vía pública");
+        let value = parse_ast(&public.replace(' ', ""))
+            .expect("re-parse")
+            .eval_at("x", 3.0);
+        assert!((value - 16.0).abs() < 1e-9, "got {public}");
+    }
+
+    #[test]
+    fn expand_memo_preserves_budget_errors() {
+        // Sobre-presupuesto sigue siendo error honesto con memo activo.
+        assert!(expand("(x+1)^200000").is_err());
+        // Huellas distintas no colisionan en la práctica: sondas intactas.
+        let a = parse_ast("x+1").expect("a");
+        let b = parse_ast("x+2").expect("b");
+        assert!(!a.structurally_eq(&b));
+        assert_ne!(expr_fingerprint(&a), expr_fingerprint(&b));
     }
 }

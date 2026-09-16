@@ -1327,6 +1327,53 @@ fn assistant_graph_capability_by_canonical(
         .find(|capability| capability.canonical.eq_ignore_ascii_case(command))
 }
 
+/// Stopwords españoles que solo generan ruido por substring (`con` vive
+/// dentro de `ContinuedFraction`, `ConvexHull`, decenas de helps…).
+///
+/// Sin este filtro, cada comando nuevo que contenga esas letras desplaza
+/// resultados genuinos del presupuesto del catálogo. Los identificadores
+/// de sintaxis (`lhs`, `rhs`, `3d`) nunca son stopwords.
+fn is_catalog_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "con"
+            | "sin"
+            | "por"
+            | "para"
+            | "una"
+            | "uno"
+            | "unas"
+            | "unos"
+            | "las"
+            | "los"
+            | "del"
+            | "que"
+            | "como"
+            | "mas"
+            | "sus"
+            | "este"
+            | "esta"
+            | "estos"
+            | "estas"
+            | "son"
+            | "hay"
+            | "entre"
+            | "sobre"
+            | "desde"
+            | "hasta"
+            | "hacia"
+            | "cada"
+            | "todo"
+            | "toda"
+            | "todos"
+            | "todas"
+            | "the"
+            | "and"
+            | "for"
+            | "with"
+    )
+}
+
 fn score_named_terms(
     value: &str,
     terms: &[String],
@@ -1436,6 +1483,7 @@ pub fn assistant_tool_catalog(problem: &str, max_bytes: usize) -> String {
     let terms = normalized_problem
         .split(|character: char| !character.is_alphanumeric())
         .filter(|term| term.chars().count() >= 3 || matches!(*term, "3d" | "4d"))
+        .filter(|term| !is_catalog_stopword(term))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let generic_graph_request = ["grafic", "graf", "mostr", "dibuj", "visualiz"]

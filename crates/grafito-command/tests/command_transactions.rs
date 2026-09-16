@@ -1470,7 +1470,7 @@ fn limit_is_read_only_on_success() {
 #[test]
 fn commands_reject_extra_arguments_atomically() {
     for command in [
-        "Gamma[1,2]",
+        "Gamma[1,2,3,4]",
         "Julia[-0.7,0.3,100,extra]",
         "Function[x,extra]",
         "Limit[x,x,0,extra]",
@@ -1641,4 +1641,84 @@ fn reflect_accepts_the_documented_object_label() {
                 && (circle.center.y - 1.0).abs() < 1e-12
                 && (circle.radius - 3.0).abs() < 1e-12)
     }));
+}
+
+fn boolean_test_square(x0: f64, y0: f64, size: f64, label: &str) -> GeoObject {
+    let mut polygon = PolygonObj::new(vec![
+        Point2::new(x0, y0),
+        Point2::new(x0 + size, y0),
+        Point2::new(x0 + size, y0 + size),
+        Point2::new(x0, y0 + size),
+    ]);
+    polygon.label = label.to_string();
+    GeoObject::Polygon(polygon)
+}
+
+#[test]
+fn boolean_difference_materializes_holes_instead_of_dropping_them() {
+    let mut document = Document::new();
+    document.add_object(boolean_test_square(0.0, 0.0, 4.0, "A"));
+    document.add_object(boolean_test_square(1.0, 1.0, 2.0, "B"));
+
+    let outcome = run(&mut document, "PolygonDifference[A,B]");
+    assert!(matches!(outcome, CommandOutcome::Ok), "{outcome:?}");
+
+    // Exterior D + borde del agujero Dh₁ sin relleno.
+    let exterior = find_object_by_label(&document, "D").expect("falta D");
+    assert!(matches!(
+        document.get_object(exterior),
+        Some(GeoObject::Polygon(_))
+    ));
+    let hole = find_object_by_label(&document, "Dh₁").expect("falta Dh₁");
+    let Some(GeoObject::Polygon(edge)) = document.get_object(hole) else {
+        panic!("Dh₁ debe ser polígono");
+    };
+    assert!(
+        edge.fill_color.is_none(),
+        "el borde del agujero va sin relleno"
+    );
+    assert!(edge.vertices.len() >= 4, "anillo cerrado del agujero");
+}
+
+#[test]
+fn boolean_union_labels_follow_min_corner_order() {
+    let mut document = Document::new();
+    // A propósito en orden inverso: A lejos, B en el origen.
+    document.add_object(boolean_test_square(10.0, 10.0, 1.0, "A"));
+    document.add_object(boolean_test_square(0.0, 0.0, 1.0, "B"));
+
+    let outcome = run(&mut document, "PolygonUnion[A,B]");
+    assert!(matches!(outcome, CommandOutcome::Ok), "{outcome:?}");
+
+    // U es la del origen aunque se creó segunda (orden determinista).
+    let id = find_object_by_label(&document, "U").expect("falta U");
+    let Some(GeoObject::Polygon(poly)) = document.get_object(id) else {
+        panic!("U debe ser polígono");
+    };
+    let min_x = poly
+        .vertices
+        .iter()
+        .map(|p| p.x)
+        .reduce(f64::min)
+        .unwrap_or(f64::NAN);
+    assert!((min_x - 0.0).abs() < 1e-9, "U no es la del origen: {min_x}");
+    assert!(find_object_by_label(&document, "U₁").is_some(), "falta U₁");
+}
+
+#[test]
+fn boolean_result_over_budget_fails_atomically_before_inserting() {
+    let mut document = Document::new();
+    document.add_object(boolean_test_square(0.0, 0.0, 4.0, "A"));
+    document.add_object(boolean_test_square(1.0, 1.0, 2.0, "B"));
+    while document.object_count() < grafito_core::validation::MAX_OBJECT_COUNT {
+        document.add_point(Point2::new(0.0, 0.0));
+    }
+    // Diferencia anidada necesita 2 objetos (D + Dh₁): no entran.
+    let before = snapshot(&document);
+    let outcome = run(&mut document, "PolygonDifference[A,B]");
+    assert!(
+        matches!(outcome, CommandOutcome::Error(ref message) if message.contains("PolygonDifference") && message.contains("MAX_OBJECT_COUNT")),
+        "{outcome:?}"
+    );
+    assert_eq!(snapshot(&document), before, "debe ser atómico");
 }

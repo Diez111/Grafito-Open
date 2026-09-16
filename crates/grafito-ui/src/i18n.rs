@@ -1,4 +1,4 @@
-//! Grafito i18n — catálogo estático de mensajes ES/EN (tablas estáticas, cero deps).
+//! Grafito i18n — catálogo estático ES/EN + overlays PT/IT/FR/DE (tablas estáticas, cero deps).
 //!
 //! Oleada 2 (Fase E1): deja el catálogo 100% listo para que la Oleada 3 migre
 //! los call-sites (`toolbar.rs`, `panels.rs`, `app.rs`, `assistant.rs`,
@@ -10,7 +10,7 @@
 //!   [`palette_footer`]. Piel pura: sin I/O, sin spawn, sin lógica.
 //! - Español idéntico al UI actual (con tildes correctas como
 //!   `"Círculo centro-punto"` o `"Lápiz"` — Onda 1 los normaliza).
-//! - Números: [`format_number`] es sólo display (ES/PT coma, EN punto, sin
+//! - Números: [`format_number`] es sólo display (ES/PT/IT/FR/DE coma, EN punto, sin
 //!   miles, `NaN`/`∞`); [`parse_number_tolerant`] mapea `,`→`.` y rechaza
 //!   miles ambiguos (`"1.234,56"` → `None`).
 //!
@@ -22,9 +22,11 @@
 //! 1. el catálogo supere ~500 claves (el lineal deja de ser trivial), o
 //! 2. se necesiten plurales/género/selectores ICU (`{ $n -> [one] ... *[other] ... }`).
 //!
-//! El tercer idioma (`Locale::Pt`, frente W2) NO exige `fluent`: vive como
-//! variante plena con fallback PT→ES→EN en [`t`] (overlay [`PT_MESSAGES`] +
-//! catálogo ES/EN, ver docs de [`Locale`]). Nada de migración en este frente.
+//! Los idiomas extra (`Locale::Pt` frente W2; `Locale::It`/`Fr`/`De` en este
+//! frente) NO exigen `fluent`: viven como variantes plenas con fallback
+//! XX→ES→EN en [`t`] (overlays [`PT_MESSAGES`]/[`IT_MESSAGES`]/
+//! [`FR_MESSAGES`]/[`DE_MESSAGES`] + catálogo ES/EN, ver docs de [`Locale`]).
+//! Nada de migración en este frente.
 
 /// Idioma de la interfaz.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,6 +43,18 @@ pub enum Locale {
     /// [`PT_MESSAGES`], si no cae a ES (default, siempre completo) y en
     /// última instancia a EN. Ningún `t(key, Pt)` devuelve vacío.
     Pt,
+    /// Italiano. Variante plena: [`t`] resuelve IT si la clave está en
+    /// [`IT_MESSAGES`], si no cae a ES y en última instancia a EN.
+    /// Ningún `t(key, It)` devuelve vacío.
+    It,
+    /// Français. Variante plena: [`t`] resuelve FR si la clave está en
+    /// [`FR_MESSAGES`], si no cae a ES y en última instancia a EN.
+    /// Ningún `t(key, Fr)` devuelve vacío.
+    Fr,
+    /// Deutsch. Variante plena: [`t`] resuelve DE si la clave está en
+    /// [`DE_MESSAGES`], si no cae a ES y en última instancia a EN.
+    /// Ningún `t(key, De)` devuelve vacío.
+    De,
 }
 
 impl Locale {
@@ -50,6 +64,9 @@ impl Locale {
             Locale::Es => "es",
             Locale::En => "en",
             Locale::Pt => "pt",
+            Locale::It => "it",
+            Locale::Fr => "fr",
+            Locale::De => "de",
         }
     }
 }
@@ -68,14 +85,14 @@ pub struct Msg {
 impl Msg {
     /// Texto de la entrada en el idioma pedido.
     ///
-    /// `Pt` cae a ES aquí a propósito: el `const` no puede buscar el overlay
-    /// [`PT_MESSAGES`]; el runtime [`t`] sí resuelve PT primero y solo usa
-    /// este fallback cuando la clave no tiene PT.
+    /// `Pt`/`It`/`Fr`/`De` caen a ES aquí a propósito: el `const` no puede
+    /// buscar los overlays; el runtime [`t`] sí resuelve cada overlay primero
+    /// y solo usa este fallback cuando la clave no tiene traducción.
     pub const fn get(self, locale: Locale) -> &'static str {
         match locale {
             Locale::Es => self.es,
             Locale::En => self.en,
-            Locale::Pt => self.es,
+            Locale::Pt | Locale::It | Locale::Fr | Locale::De => self.es,
         }
     }
 }
@@ -300,11 +317,26 @@ pub static MESSAGES: &[Msg] = &[
 /// La clave debe ser `&'static str` (literal en el call-site) para poder
 /// devolver `&'static str` sin asignar. Si la clave no existe, devuelve la
 /// propia clave (fallback visible que la Oleada 3 detecta en revisión).
-/// `Pt`: overlay [`PT_MESSAGES`] primero; si la clave no tiene PT, cae a ES
-/// (default, siempre completo) y en última instancia a EN. Jamás vacío.
+/// `Pt`/`It`/`Fr`/`De`: overlay propio primero; si la clave no lo tiene, cae
+/// a ES (default, siempre completo) y en última instancia a EN. Jamás vacío.
 pub fn t(key: &'static str, locale: Locale) -> &'static str {
     if locale == Locale::Pt {
         if let Some(text) = pt(key) {
+            return text;
+        }
+    }
+    if locale == Locale::It {
+        if let Some(text) = it(key) {
+            return text;
+        }
+    }
+    if locale == Locale::Fr {
+        if let Some(text) = fr(key) {
+            return text;
+        }
+    }
+    if locale == Locale::De {
+        if let Some(text) = de(key) {
             return text;
         }
     }
@@ -490,6 +522,18 @@ pub fn palette_footer(filtered: usize, total: usize, locale: Locale) -> String {
     match locale {
         Locale::Es | Locale::Pt => format!(
             "{filtered} de {total} · {}",
+            t("palette.footer_nav", locale)
+        ),
+        Locale::It => format!(
+            "{filtered} di {total} · {}",
+            t("palette.footer_nav", locale)
+        ),
+        Locale::Fr => format!(
+            "{filtered} sur {total} · {}",
+            t("palette.footer_nav", locale)
+        ),
+        Locale::De => format!(
+            "{filtered} von {total} · {}",
             t("palette.footer_nav", locale)
         ),
         Locale::En => format!(
@@ -923,11 +967,1258 @@ pub fn pt_partial_badge_text() -> String {
     format!("{PT_PARTIAL_BADGE} · {cubiertas}/{total}")
 }
 
+// ── Italiano / Français / Deutsch: overlays completos (187/187 c/u) ──
+//
+// Generados desde `/tmp/opencode/i18n_table.txt` (187 líneas `clave|it|fr|de`,
+// mismo orden que `MESSAGES`, texto tal cual sin re-traducir). Patrón idéntico
+// al overlay PT (`PT_MESSAGES` + `pt()` + fallback en `t`): cada idioma resuelve
+// su overlay primero y cae a ES (default, siempre completo) y luego a EN.
+// Ningún `t(key, It|Fr|De)` devuelve vacío. Lookup lineal: el overlay es chico
+// (<200 claves). Sin `unwrap` en prod: el fallback se escribe con `if let`.
+
+/// Una entrada de overlay IT/FR/DE: clave del catálogo + texto traducido.
+#[derive(Debug, Clone, Copy)]
+pub struct OverlayMsg {
+    /// Clave estable de [`MESSAGES`] (nunca se renombra).
+    pub key: &'static str,
+    /// Texto traducido tal cual de la tabla (`{path}`/`{err}`/`{topic}`/
+    /// `{motor}`/`{guia}`/`{expr}`/`{p0}`/`{p1}`/`{param}` idénticos al ES/EN
+    /// cuando la clave los lleva. Sin vacíos.
+    pub text: &'static str,
+}
+
+/// Claves principales de UI con traducción al Italiano (187). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
+/// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
+/// panel.conformal (3).
+pub static IT_MESSAGES: &[OverlayMsg] = &[
+    // ── grupos (18) ──
+    OverlayMsg {
+        key: "toolbar.group.move",
+        text: "Seleziona",
+    },
+    OverlayMsg {
+        key: "toolbar.group.point",
+        text: "Punti",
+    },
+    OverlayMsg {
+        key: "toolbar.group.line",
+        text: "Rette",
+    },
+    OverlayMsg {
+        key: "toolbar.group.circle",
+        text: "Cerchi",
+    },
+    OverlayMsg {
+        key: "toolbar.group.polygon",
+        text: "Poligoni",
+    },
+    OverlayMsg {
+        key: "toolbar.group.pencil",
+        text: "Tratto",
+    },
+    OverlayMsg {
+        key: "toolbar.group.eraser",
+        text: "Cancella",
+    },
+    OverlayMsg {
+        key: "toolbar.group.conic",
+        text: "Coniche",
+    },
+    OverlayMsg {
+        key: "toolbar.group.curve",
+        text: "Curve",
+    },
+    OverlayMsg {
+        key: "toolbar.group.measure",
+        text: "Misura",
+    },
+    OverlayMsg {
+        key: "toolbar.group.analysis",
+        text: "Analisi",
+    },
+    OverlayMsg {
+        key: "toolbar.group.constraint",
+        text: "Vincoli",
+    },
+    OverlayMsg {
+        key: "toolbar.group.boolean",
+        text: "Booleane",
+    },
+    OverlayMsg {
+        key: "toolbar.group.threed",
+        text: "3D",
+    },
+    OverlayMsg {
+        key: "toolbar.group.fourd",
+        text: "4D proiettato",
+    },
+    OverlayMsg {
+        key: "toolbar.group.advanced",
+        text: "Avanzate",
+    },
+    OverlayMsg {
+        key: "toolbar.group.transform",
+        text: "Trasforma",
+    },
+    OverlayMsg {
+        key: "toolbar.group.dynamics",
+        text: "Dinamica",
+    },
+    // ── tools (87) ──
+    OverlayMsg {
+        key: "toolbar.tool.select",
+        text: "Seleziona",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.point",
+        text: "Punto",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.midpoint",
+        text: "Punto medio",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.line",
+        text: "Retta",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.segment",
+        text: "Segmento",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.ray",
+        text: "Semiretta",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.vector",
+        text: "Vettore",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.perpendicular",
+        text: "Perpendicolare",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.circle",
+        text: "Cerchio centro-punto",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.tangent",
+        text: "Tangente",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.polygon",
+        text: "Poligono",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.regular_polygon",
+        text: "Poligono regolare",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.pencil",
+        text: "Matita",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.eraser",
+        text: "Gomma",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.ellipse_foci",
+        text: "Ellisse per fuochi",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.parabola_focus",
+        text: "Parabola fuoco-direttrice",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.hyperbola_foci",
+        text: "Iperbole per fuochi",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.conic_five",
+        text: "Conica per 5 punti",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.function",
+        text: "f(x) Funzione",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.param2d",
+        text: "(x,y) Parametrica 2D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.polar",
+        text: "r(t) Polare",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.implicit",
+        text: "F(x,y)=0 Implicita",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.field2d",
+        text: "Campo vettoriale",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.locus",
+        text: "Luogo geometrico",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.distance",
+        text: "Distanza",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.angle",
+        text: "Angolo",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.area",
+        text: "Area",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.slope",
+        text: "m Pendenza",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.root",
+        text: "Radici",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.extremum",
+        text: "Estremi",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.inflection",
+        text: "Flesso",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.yintercept",
+        text: "Intersezione Y",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.xintercept",
+        text: "Intersezione X",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.intersect",
+        text: "Intersezione",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.analyze",
+        text: "Analizza",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.coincident",
+        text: "Coincidente",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.dist_constraint",
+        text: "Distanza",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.angle_constraint",
+        text: "Angolo",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.horizontal",
+        text: "Orizzontale",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.vertical",
+        text: "Verticale",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.equal_length",
+        text: "= Uguale lunghezza",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.symmetry",
+        text: "Simmetria",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.union",
+        text: "Unione",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.intersection",
+        text: "Intersezione",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.difference",
+        text: "Differenza",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.xor",
+        text: "XOR",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.point3d",
+        text: "Punto 3D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.segment3d",
+        text: "Segmento 3D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.line3d",
+        text: "Retta 3D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.plane3d",
+        text: "Piano 3D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.sphere3d",
+        text: "Sfera",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.cube3d",
+        text: "Cubo",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.cylinder3d",
+        text: "Cilindro",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.cone3d",
+        text: "Cono",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.torus3d",
+        text: "Toro",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.moebius",
+        text: "Nastro di Möbius",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.surface3d",
+        text: "z Superficie",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.curve3d",
+        text: "(x,y,z) Curva 3D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.field3d",
+        text: "Campo 3D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.hypersurface4d",
+        text: "Ipersuperficie 4D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.tesseract4d",
+        text: "Tesseratto 4D: oggetto centrato e proiettato",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.hypercube5d",
+        text: "Ipercubo 5D: oggetto centrato e proiettato",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.fractal",
+        text: "Frattale",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.histogram",
+        text: "Istogramma",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.scatter",
+        text: "Dispersione",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.domain_coloring",
+        text: "Domain Coloring",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.heatmap",
+        text: "Heat Map",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.complex_grid",
+        text: "Complex Grid",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.slider",
+        text: "Cursore",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.attractor3d",
+        text: "Attrattore 3D",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.parallel",
+        text: "Parallela",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.arc",
+        text: "Arco per 3 punti",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.sector",
+        text: "Settore circolare",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.button",
+        text: "Pulsante",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.image",
+        text: "Immagine",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.trig_animation",
+        text: "Animazione trigonometrica",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.translate",
+        text: "Trasla",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.rotate",
+        text: "Ruota",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.dilate",
+        text: "Omotetia",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.reflect",
+        text: "Rifletti",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.compass",
+        text: "Compasso",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.semicircle",
+        text: "Semicerchio",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.spline",
+        text: "Spline",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.prism3d",
+        text: "Prisma",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.tetrahedron3d",
+        text: "Tetraedro",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.checkbox",
+        text: "Casella",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.inputbox",
+        text: "Casella di input",
+    },
+    // ── paleta (19) ──
+    OverlayMsg {
+        key: "palette.action.point",
+        text: "Strumento Punto",
+    },
+    OverlayMsg {
+        key: "palette.action.line",
+        text: "Strumento Retta",
+    },
+    OverlayMsg {
+        key: "palette.action.circle",
+        text: "Strumento Circonferenza",
+    },
+    OverlayMsg {
+        key: "palette.action.polygon",
+        text: "Strumento Poligono",
+    },
+    OverlayMsg {
+        key: "palette.action.function",
+        text: "Strumento Funzione",
+    },
+    OverlayMsg {
+        key: "palette.action.pencil",
+        text: "Matita",
+    },
+    OverlayMsg {
+        key: "palette.action.eraser",
+        text: "Gomma",
+    },
+    OverlayMsg {
+        key: "palette.action.save",
+        text: "Salva",
+    },
+    OverlayMsg {
+        key: "palette.action.export_svg",
+        text: "Esporta SVG",
+    },
+    OverlayMsg {
+        key: "palette.action.export_png",
+        text: "Esporta PNG",
+    },
+    OverlayMsg {
+        key: "palette.action.export_tikz",
+        text: "Esporta TikZ",
+    },
+    OverlayMsg {
+        key: "palette.action.zoom_fit",
+        text: "Inquadra tutto",
+    },
+    OverlayMsg {
+        key: "palette.action.toggle_grid",
+        text: "Attiva/disattiva griglia",
+    },
+    OverlayMsg {
+        key: "palette.action.toggle_dark",
+        text: "Attiva/disattiva tema scuro",
+    },
+    OverlayMsg {
+        key: "palette.action.indicate_selection",
+        text: "Indica selezione",
+    },
+    OverlayMsg {
+        key: "palette.title",
+        text: "Tavolozza comandi",
+    },
+    OverlayMsg {
+        key: "palette.empty",
+        text: "Nessun comando trovato",
+    },
+    OverlayMsg {
+        key: "palette.custom_tools",
+        text: "Strumenti personalizzati",
+    },
+    OverlayMsg {
+        key: "palette.footer_nav",
+        text: "↑↓ naviga · Invio apri · Esc chiudi",
+    },
+    // ── onboarding (12) ──
+    OverlayMsg {
+        key: "onboarding.title",
+        text: "Benvenuto in Grafito",
+    },
+    OverlayMsg {
+        key: "onboarding.subtitle",
+        text: "Grafito — lavagna geometrica interattiva",
+    },
+    OverlayMsg {
+        key: "onboarding.bullet_primary",
+        text: "1. Disegna un punto e una retta",
+    },
+    OverlayMsg {
+        key: "onboarding.bullet_secondary",
+        text: "2. Chiedi all'assistente “grafica y=x²”",
+    },
+    OverlayMsg {
+        key: "onboarding.bullet_tertiary",
+        text: "3. Trascina un punto e guarda cosa si muove",
+    },
+    OverlayMsg {
+        key: "onboarding.bullet_university",
+        text:
+            "• L'università sblocca 18 gruppi — Coniche, 3D, CAS, Statistica, Complessi, Dinamica…",
+    },
+    OverlayMsg {
+        key: "onboarding.btn_example",
+        text: "Prova un esempio",
+    },
+    OverlayMsg {
+        key: "onboarding.btn_empty",
+        text: "Inizia vuoto",
+    },
+    OverlayMsg {
+        key: "onboarding.btn_dismiss",
+        text: "Non mostrare più",
+    },
+    OverlayMsg {
+        key: "onboarding.toast_example",
+        text: "Esempio caricato — esplora Grafito!",
+    },
+    OverlayMsg {
+        key: "onboarding.about_title",
+        text: "Informazioni su Grafito",
+    },
+    OverlayMsg {
+        key: "onboarding.hint",
+        text: "Puoi riaprire questa finestra da Aiuto → Benvenuto",
+    },
+    // ── cheat (10) ──
+    OverlayMsg {
+        key: "cheat.title",
+        text: "Scorciatoie da tastiera",
+    },
+    OverlayMsg {
+        key: "cheat.save",
+        text: "Salva: Ctrl+S",
+    },
+    OverlayMsg {
+        key: "cheat.undo_redo",
+        text: "Annulla / Ripeti: Ctrl+Z / Ctrl+Y",
+    },
+    OverlayMsg {
+        key: "cheat.tools_2d",
+        text: "Strumenti 2D: F1–F6",
+    },
+    OverlayMsg {
+        key: "cheat.tools_3d",
+        text: "3D: F8 Sfera · F9 Cubo",
+    },
+    OverlayMsg {
+        key: "cheat.pencil_eraser",
+        text: "Matita / Gomma: Ctrl+P / Ctrl+E",
+    },
+    OverlayMsg {
+        key: "cheat.palette_theme",
+        text: "Tavolozza / Tema: Ctrl+K / Ctrl+T",
+    },
+    OverlayMsg {
+        key: "cheat.analyze_snap",
+        text: "Analizza / Allinea: Ctrl+A / G",
+    },
+    OverlayMsg {
+        key: "cheat.views",
+        text: "Prospettive: Ctrl+Shift+1…0",
+    },
+    OverlayMsg {
+        key: "cheat.close",
+        text: "Annulla / Chiudi: Esc",
+    },
+    // ── toast (10) ──
+    OverlayMsg {
+        key: "toast.command_done",
+        text: "Comando completato",
+    },
+    OverlayMsg {
+        key: "toast.command_applied",
+        text: "Comando applicato in Grafito.",
+    },
+    OverlayMsg {
+        key: "toast.saved",
+        text: "Documento salvato in {path}",
+    },
+    OverlayMsg {
+        key: "toast.opened",
+        text: "Documento aperto da {path}",
+    },
+    OverlayMsg {
+        key: "toast.exported",
+        text: "Esportato in {path}",
+    },
+    OverlayMsg {
+        key: "toast.save_cancelled",
+        text: "Salvataggio annullato",
+    },
+    OverlayMsg {
+        key: "toast.save_error",
+        text: "Errore di salvataggio: {err}",
+    },
+    OverlayMsg {
+        key: "toast.load_error",
+        text: "Errore di caricamento: {err}",
+    },
+    OverlayMsg {
+        key: "toast.export_error",
+        text: "Errore di esportazione: {err}",
+    },
+    OverlayMsg {
+        key: "toast.anim_ready",
+        text: "Animazione pronta.",
+    },
+    // ── app / misc (12) ──
+    OverlayMsg {
+        key: "app.menu_file",
+        text: "File",
+    },
+    OverlayMsg {
+        key: "app.menu_edit",
+        text: "Modifica",
+    },
+    OverlayMsg {
+        key: "app.menu_view",
+        text: "Vista",
+    },
+    OverlayMsg {
+        key: "app.menu_help",
+        text: "Aiuto",
+    },
+    OverlayMsg {
+        key: "assistant.composer_hint",
+        text: "Scrivi la tua domanda",
+    },
+    OverlayMsg {
+        key: "assistant.limit_hint",
+        text: "Caratteri usati del limite · Invio invia, Shift+Invio a capo",
+    },
+    OverlayMsg {
+        key: "assistant.copied",
+        text: "Messaggio copiato.",
+    },
+    OverlayMsg {
+        key: "assistant.generating",
+        text: "Creo la tua animazione… ~20 s",
+    },
+    OverlayMsg {
+        key: "assistant.teaching_started",
+        text: "Lezione iniziata: {topic}",
+    },
+    OverlayMsg {
+        key: "panel.cas_empty",
+        text: "Nessun risultato — esegui un comando CAS",
+    },
+    OverlayMsg {
+        key: "common.cancel",
+        text: "Annulla",
+    },
+    OverlayMsg {
+        key: "common.retry",
+        text: "Riprova",
+    },
+    // ── anim (2) ──
+    OverlayMsg {
+        key: "anim.empty.guide",
+        text: "prova ad abbassare la risoluzione o riprova",
+    },
+    OverlayMsg {
+        key: "anim.empty.message",
+        text: "{motor} non ha prodotto fotogrammi; {guia}",
+    },
+    // ── media.title (14) ──
+    OverlayMsg {
+        key: "media.title.tangent",
+        text: "Tangente mobile · {expr}",
+    },
+    OverlayMsg {
+        key: "media.title.area",
+        text: "Area accumulata · {expr} [{p0},{p1}]",
+    },
+    OverlayMsg {
+        key: "media.title.sweep",
+        text: "Scansione · {expr} ({param})",
+    },
+    OverlayMsg {
+        key: "media.title.trace",
+        text: "Traccia · {expr}",
+    },
+    OverlayMsg {
+        key: "media.title.morph",
+        text: "Transizione",
+    },
+    OverlayMsg {
+        key: "media.title.locus",
+        text: "Luogo geometrico",
+    },
+    OverlayMsg {
+        key: "media.title.integral",
+        text: "Integrale — area sotto la curva",
+    },
+    OverlayMsg {
+        key: "media.title.derivative",
+        text: "Derivata come pendenza",
+    },
+    OverlayMsg {
+        key: "media.title.pitagoras",
+        text: "Teorema di Pitagora",
+    },
+    OverlayMsg {
+        key: "media.title.taylor",
+        text: "Serie di Taylor",
+    },
+    OverlayMsg {
+        key: "media.title.conformal",
+        text: "Mappa conforme",
+    },
+    OverlayMsg {
+        key: "media.title.subspace",
+        text: "Span lineare",
+    },
+    OverlayMsg {
+        key: "media.title.fractal",
+        text: "Frattale di Koch",
+    },
+    OverlayMsg {
+        key: "media.title.default",
+        text: "Animazione",
+    },
+    // ── panel.conformal (3) ──
+    OverlayMsg {
+        key: "panel.conformal.title",
+        text: "Animazione di mappatura conforme",
+    },
+    OverlayMsg {
+        key: "panel.conformal.animate",
+        text: "Anima deformazione (omotopia)",
+    },
+    OverlayMsg {
+        key: "panel.conformal.speed",
+        text: "Velocità",
+    },
+];
+
+/// Texto Italiano de `key`, o `None` si la clave no está en el catálogo.
+/// El overlay es total (187/187): `None` solo para claves inexistentes.
+pub fn it(key: &'static str) -> Option<&'static str> {
+    let mut i = 0;
+    while i < IT_MESSAGES.len() {
+        if IT_MESSAGES[i].key == key {
+            return Some(IT_MESSAGES[i].text);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Cobertura del overlay Italiano: `(cubiertas, total del catálogo)`.
+pub fn it_coverage() -> (usize, usize) {
+    (IT_MESSAGES.len(), MESSAGES.len())
+}
+
+/// Claves principales de UI con traducción al Français (187). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
+/// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
+/// panel.conformal (3).
+pub static FR_MESSAGES: &[OverlayMsg] = &[
+    // ── grupos (18) ──
+    OverlayMsg { key: "toolbar.group.move", text: "Sélectionner" },
+    OverlayMsg { key: "toolbar.group.point", text: "Points" },
+    OverlayMsg { key: "toolbar.group.line", text: "Droites" },
+    OverlayMsg { key: "toolbar.group.circle", text: "Cercles" },
+    OverlayMsg { key: "toolbar.group.polygon", text: "Polygones" },
+    OverlayMsg { key: "toolbar.group.pencil", text: "Tracé" },
+    OverlayMsg { key: "toolbar.group.eraser", text: "Effacer" },
+    OverlayMsg { key: "toolbar.group.conic", text: "Coniques" },
+    OverlayMsg { key: "toolbar.group.curve", text: "Courbes" },
+    OverlayMsg { key: "toolbar.group.measure", text: "Mesure" },
+    OverlayMsg { key: "toolbar.group.analysis", text: "Analyse" },
+    OverlayMsg { key: "toolbar.group.constraint", text: "Contraintes" },
+    OverlayMsg { key: "toolbar.group.boolean", text: "Booléens" },
+    OverlayMsg { key: "toolbar.group.threed", text: "3D" },
+    OverlayMsg { key: "toolbar.group.fourd", text: "4D projetée" },
+    OverlayMsg { key: "toolbar.group.advanced", text: "Avancé" },
+    OverlayMsg { key: "toolbar.group.transform", text: "Transformer" },
+    OverlayMsg { key: "toolbar.group.dynamics", text: "Dynamique" },
+    // ── tools (87) ──
+    OverlayMsg { key: "toolbar.tool.select", text: "Sélectionner" },
+    OverlayMsg { key: "toolbar.tool.point", text: "Point" },
+    OverlayMsg { key: "toolbar.tool.midpoint", text: "Milieu" },
+    OverlayMsg { key: "toolbar.tool.line", text: "Droite" },
+    OverlayMsg { key: "toolbar.tool.segment", text: "Segment" },
+    OverlayMsg { key: "toolbar.tool.ray", text: "Demi-droite" },
+    OverlayMsg { key: "toolbar.tool.vector", text: "Vecteur" },
+    OverlayMsg { key: "toolbar.tool.perpendicular", text: "Perpendiculaire" },
+    OverlayMsg { key: "toolbar.tool.circle", text: "Cercle centre-point" },
+    OverlayMsg { key: "toolbar.tool.tangent", text: "Tangente" },
+    OverlayMsg { key: "toolbar.tool.polygon", text: "Polygone" },
+    OverlayMsg { key: "toolbar.tool.regular_polygon", text: "Polygone régulier" },
+    OverlayMsg { key: "toolbar.tool.pencil", text: "Crayon" },
+    OverlayMsg { key: "toolbar.tool.eraser", text: "Gomme" },
+    OverlayMsg { key: "toolbar.tool.ellipse_foci", text: "Ellipse par foyers" },
+    OverlayMsg { key: "toolbar.tool.parabola_focus", text: "Parabole foyer-directrice" },
+    OverlayMsg { key: "toolbar.tool.hyperbola_foci", text: "Hyperbole par foyers" },
+    OverlayMsg { key: "toolbar.tool.conic_five", text: "Conique par 5 points" },
+    OverlayMsg { key: "toolbar.tool.function", text: "f(x) Fonction" },
+    OverlayMsg { key: "toolbar.tool.param2d", text: "(x,y) Paramétrique 2D" },
+    OverlayMsg { key: "toolbar.tool.polar", text: "r(t) Polaire" },
+    OverlayMsg { key: "toolbar.tool.implicit", text: "F(x,y)=0 Implicite" },
+    OverlayMsg { key: "toolbar.tool.field2d", text: "Champ vectoriel" },
+    OverlayMsg { key: "toolbar.tool.locus", text: "Lieu géométrique" },
+    OverlayMsg { key: "toolbar.tool.distance", text: "Distance" },
+    OverlayMsg { key: "toolbar.tool.angle", text: "Angle" },
+    OverlayMsg { key: "toolbar.tool.area", text: "Aire" },
+    OverlayMsg { key: "toolbar.tool.slope", text: "m Pente" },
+    OverlayMsg { key: "toolbar.tool.root", text: "Racines" },
+    OverlayMsg { key: "toolbar.tool.extremum", text: "Extremums" },
+    OverlayMsg { key: "toolbar.tool.inflection", text: "Inflexion" },
+    OverlayMsg { key: "toolbar.tool.yintercept", text: "Intersection Y" },
+    OverlayMsg { key: "toolbar.tool.xintercept", text: "Intersection X" },
+    OverlayMsg { key: "toolbar.tool.intersect", text: "Intersection" },
+    OverlayMsg { key: "toolbar.tool.analyze", text: "Analyser" },
+    OverlayMsg { key: "toolbar.tool.coincident", text: "Coïncident" },
+    OverlayMsg { key: "toolbar.tool.dist_constraint", text: "Distance" },
+    OverlayMsg { key: "toolbar.tool.angle_constraint", text: "Angle" },
+    OverlayMsg { key: "toolbar.tool.horizontal", text: "Horizontale" },
+    OverlayMsg { key: "toolbar.tool.vertical", text: "Verticale" },
+    OverlayMsg { key: "toolbar.tool.equal_length", text: "= Longueur égale" },
+    OverlayMsg { key: "toolbar.tool.symmetry", text: "Symétrie" },
+    OverlayMsg { key: "toolbar.tool.union", text: "Union" },
+    OverlayMsg { key: "toolbar.tool.intersection", text: "Intersection" },
+    OverlayMsg { key: "toolbar.tool.difference", text: "Différence" },
+    OverlayMsg { key: "toolbar.tool.xor", text: "XOR" },
+    OverlayMsg { key: "toolbar.tool.point3d", text: "Point 3D" },
+    OverlayMsg { key: "toolbar.tool.segment3d", text: "Segment 3D" },
+    OverlayMsg { key: "toolbar.tool.line3d", text: "Droite 3D" },
+    OverlayMsg { key: "toolbar.tool.plane3d", text: "Plan 3D" },
+    OverlayMsg { key: "toolbar.tool.sphere3d", text: "Sphère" },
+    OverlayMsg { key: "toolbar.tool.cube3d", text: "Cube" },
+    OverlayMsg { key: "toolbar.tool.cylinder3d", text: "Cylindre" },
+    OverlayMsg { key: "toolbar.tool.cone3d", text: "Cône" },
+    OverlayMsg { key: "toolbar.tool.torus3d", text: "Tore" },
+    OverlayMsg { key: "toolbar.tool.moebius", text: "Ruban de Möbius" },
+    OverlayMsg { key: "toolbar.tool.surface3d", text: "z Surface" },
+    OverlayMsg { key: "toolbar.tool.curve3d", text: "(x,y,z) Courbe 3D" },
+    OverlayMsg { key: "toolbar.tool.field3d", text: "Champ 3D" },
+    OverlayMsg { key: "toolbar.tool.hypersurface4d", text: "Hypersurface 4D" },
+    OverlayMsg { key: "toolbar.tool.tesseract4d", text: "Tesseract 4D : objet centré et projeté" },
+    OverlayMsg { key: "toolbar.tool.hypercube5d", text: "Hypercube 5D : objet centré et projeté" },
+    OverlayMsg { key: "toolbar.tool.fractal", text: "Fractale" },
+    OverlayMsg { key: "toolbar.tool.histogram", text: "Histogramme" },
+    OverlayMsg { key: "toolbar.tool.scatter", text: "Nuage de points" },
+    OverlayMsg { key: "toolbar.tool.domain_coloring", text: "Domain Coloring" },
+    OverlayMsg { key: "toolbar.tool.heatmap", text: "Heat Map" },
+    OverlayMsg { key: "toolbar.tool.complex_grid", text: "Complex Grid" },
+    OverlayMsg { key: "toolbar.tool.slider", text: "Curseur" },
+    OverlayMsg { key: "toolbar.tool.attractor3d", text: "Attracteur 3D" },
+    OverlayMsg { key: "toolbar.tool.parallel", text: "Parallèle" },
+    OverlayMsg { key: "toolbar.tool.arc", text: "Arc par 3 points" },
+    OverlayMsg { key: "toolbar.tool.sector", text: "Secteur circulaire" },
+    OverlayMsg { key: "toolbar.tool.button", text: "Bouton" },
+    OverlayMsg { key: "toolbar.tool.image", text: "Image" },
+    OverlayMsg { key: "toolbar.tool.trig_animation", text: "Animation trigonométrique" },
+    OverlayMsg { key: "toolbar.tool.translate", text: "Déplacer" },
+    OverlayMsg { key: "toolbar.tool.rotate", text: "Rotation" },
+    OverlayMsg { key: "toolbar.tool.dilate", text: "Homothétie" },
+    OverlayMsg { key: "toolbar.tool.reflect", text: "Réfléchir" },
+    OverlayMsg { key: "toolbar.tool.compass", text: "Compas" },
+    OverlayMsg { key: "toolbar.tool.semicircle", text: "Demi-cercle" },
+    OverlayMsg { key: "toolbar.tool.spline", text: "Spline" },
+    OverlayMsg { key: "toolbar.tool.prism3d", text: "Prisme" },
+    OverlayMsg { key: "toolbar.tool.tetrahedron3d", text: "Tétraèdre" },
+    OverlayMsg { key: "toolbar.tool.checkbox", text: "Case" },
+    OverlayMsg { key: "toolbar.tool.inputbox", text: "Zone de saisie" },
+    // ── paleta (19) ──
+    OverlayMsg { key: "palette.action.point", text: "Outil Point" },
+    OverlayMsg { key: "palette.action.line", text: "Outil Droite" },
+    OverlayMsg { key: "palette.action.circle", text: "Outil Circonférence" },
+    OverlayMsg { key: "palette.action.polygon", text: "Outil Polygone" },
+    OverlayMsg { key: "palette.action.function", text: "Outil Fonction" },
+    OverlayMsg { key: "palette.action.pencil", text: "Crayon" },
+    OverlayMsg { key: "palette.action.eraser", text: "Gomme" },
+    OverlayMsg { key: "palette.action.save", text: "Enregistrer" },
+    OverlayMsg { key: "palette.action.export_svg", text: "Exporter SVG" },
+    OverlayMsg { key: "palette.action.export_png", text: "Exporter PNG" },
+    OverlayMsg { key: "palette.action.export_tikz", text: "Exporter TikZ" },
+    OverlayMsg { key: "palette.action.zoom_fit", text: "Ajuster la vue" },
+    OverlayMsg { key: "palette.action.toggle_grid", text: "Afficher/masquer la grille" },
+    OverlayMsg { key: "palette.action.toggle_dark", text: "Basculer en mode sombre" },
+    OverlayMsg { key: "palette.action.indicate_selection", text: "Indiquer la sélection" },
+    OverlayMsg { key: "palette.title", text: "Palette de commandes" },
+    OverlayMsg { key: "palette.empty", text: "Aucune commande trouvée" },
+    OverlayMsg { key: "palette.custom_tools", text: "Outils personnalisés" },
+    OverlayMsg { key: "palette.footer_nav", text: "↑↓ naviguer · Entrée ouvrir · Échap fermer" },
+    // ── onboarding (12) ──
+    OverlayMsg { key: "onboarding.title", text: "Bienvenue dans Grafito" },
+    OverlayMsg { key: "onboarding.subtitle", text: "Grafito — tableau géométrique interactif" },
+    OverlayMsg { key: "onboarding.bullet_primary", text: "1. Dessinez un point et une droite" },
+    OverlayMsg { key: "onboarding.bullet_secondary", text: "2. Demandez à l'assistant « trace y=x² »" },
+    OverlayMsg { key: "onboarding.bullet_tertiary", text: "3. Faites glisser un point et regardez ce qui bouge" },
+    OverlayMsg { key: "onboarding.bullet_university", text: "• L'université débloque 18 groupes — Coniques, 3D, CAS, Statistiques, Complexes, Dynamique…" },
+    OverlayMsg { key: "onboarding.btn_example", text: "Essayer un exemple" },
+    OverlayMsg { key: "onboarding.btn_empty", text: "Commencer vide" },
+    OverlayMsg { key: "onboarding.btn_dismiss", text: "Ne plus afficher" },
+    OverlayMsg { key: "onboarding.toast_example", text: "Exemple chargé — explorez Grafito!" },
+    OverlayMsg { key: "onboarding.about_title", text: "À propos de Grafito" },
+    OverlayMsg { key: "onboarding.hint", text: "Vous pouvez rouvrir cette fenêtre depuis Aide → Bienvenue" },
+    // ── cheat (10) ──
+    OverlayMsg { key: "cheat.title", text: "Raccourcis clavier" },
+    OverlayMsg { key: "cheat.save", text: "Enregistrer : Ctrl+S" },
+    OverlayMsg { key: "cheat.undo_redo", text: "Annuler / Rétablir : Ctrl+Z / Ctrl+Y" },
+    OverlayMsg { key: "cheat.tools_2d", text: "Outils 2D : F1–F6" },
+    OverlayMsg { key: "cheat.tools_3d", text: "3D : F8 Sphère · F9 Cube" },
+    OverlayMsg { key: "cheat.pencil_eraser", text: "Crayon / Gomme : Ctrl+P / Ctrl+E" },
+    OverlayMsg { key: "cheat.palette_theme", text: "Palette / Thème : Ctrl+K / Ctrl+T" },
+    OverlayMsg { key: "cheat.analyze_snap", text: "Analyser / Ajuster : Ctrl+A / G" },
+    OverlayMsg { key: "cheat.views", text: "Perspectives : Ctrl+Shift+1…0" },
+    OverlayMsg { key: "cheat.close", text: "Annuler / Fermer : Échap" },
+    // ── toast (10) ──
+    OverlayMsg { key: "toast.command_done", text: "Commande terminée" },
+    OverlayMsg { key: "toast.command_applied", text: "Commande appliquée dans Grafito." },
+    OverlayMsg { key: "toast.saved", text: "Document enregistré dans {path}" },
+    OverlayMsg { key: "toast.opened", text: "Document ouvert depuis {path}" },
+    OverlayMsg { key: "toast.exported", text: "Exporté vers {path}" },
+    OverlayMsg { key: "toast.save_cancelled", text: "Enregistrement annulé" },
+    OverlayMsg { key: "toast.save_error", text: "Échec de l'enregistrement : {err}" },
+    OverlayMsg { key: "toast.load_error", text: "Échec du chargement : {err}" },
+    OverlayMsg { key: "toast.export_error", text: "Échec de l'exportation : {err}" },
+    OverlayMsg { key: "toast.anim_ready", text: "Animation prête." },
+    // ── app / misc (12) ──
+    OverlayMsg { key: "app.menu_file", text: "Fichier" },
+    OverlayMsg { key: "app.menu_edit", text: "Modifier" },
+    OverlayMsg { key: "app.menu_view", text: "Affichage" },
+    OverlayMsg { key: "app.menu_help", text: "Aide" },
+    OverlayMsg { key: "assistant.composer_hint", text: "Écrivez votre question" },
+    OverlayMsg { key: "assistant.limit_hint", text: "Caractères utilisés de la limite · Entrée envoie, Shift+Entrée saute une ligne" },
+    OverlayMsg { key: "assistant.copied", text: "Message copié." },
+    OverlayMsg { key: "assistant.generating", text: "Création de votre animation… ~20 s" },
+    OverlayMsg { key: "assistant.teaching_started", text: "Leçon commencée : {topic}" },
+    OverlayMsg { key: "panel.cas_empty", text: "Aucun résultat — exécutez une commande CAS" },
+    OverlayMsg { key: "common.cancel", text: "Annuler" },
+    OverlayMsg { key: "common.retry", text: "Réessayer" },
+    // ── anim (2) ──
+    OverlayMsg { key: "anim.empty.guide", text: "essayez de réduire la résolution ou réessayez" },
+    OverlayMsg { key: "anim.empty.message", text: "{motor} n'a produit aucune image ; {guia}" },
+    // ── media.title (14) ──
+    OverlayMsg { key: "media.title.tangent", text: "Tangente mobile · {expr}" },
+    OverlayMsg { key: "media.title.area", text: "Aire accumulée · {expr} [{p0},{p1}]" },
+    OverlayMsg { key: "media.title.sweep", text: "Balayage · {expr} ({param})" },
+    OverlayMsg { key: "media.title.trace", text: "Trace · {expr}" },
+    OverlayMsg { key: "media.title.morph", text: "Transition" },
+    OverlayMsg { key: "media.title.locus", text: "Lieu géométrique" },
+    OverlayMsg { key: "media.title.integral", text: "Intégrale — aire sous la courbe" },
+    OverlayMsg { key: "media.title.derivative", text: "Dérivée comme pente" },
+    OverlayMsg { key: "media.title.pitagoras", text: "Théorème de Pythagore" },
+    OverlayMsg { key: "media.title.taylor", text: "Série de Taylor" },
+    OverlayMsg { key: "media.title.conformal", text: "Application conforme" },
+    OverlayMsg { key: "media.title.subspace", text: "Vect engendré" },
+    OverlayMsg { key: "media.title.fractal", text: "Fractale de Koch" },
+    OverlayMsg { key: "media.title.default", text: "Animation" },
+    // ── panel.conformal (3) ──
+    OverlayMsg { key: "panel.conformal.title", text: "Animation de mapping conforme" },
+    OverlayMsg { key: "panel.conformal.animate", text: "Animer la déformation (homotopie)" },
+    OverlayMsg { key: "panel.conformal.speed", text: "Vitesse" },
+];
+
+/// Texto Français de `key`, o `None` si la clave no está en el catálogo.
+/// El overlay es total (187/187): `None` solo para claves inexistentes.
+pub fn fr(key: &'static str) -> Option<&'static str> {
+    let mut i = 0;
+    while i < FR_MESSAGES.len() {
+        if FR_MESSAGES[i].key == key {
+            return Some(FR_MESSAGES[i].text);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Cobertura del overlay Français: `(cubiertas, total del catálogo)`.
+pub fn fr_coverage() -> (usize, usize) {
+    (FR_MESSAGES.len(), MESSAGES.len())
+}
+
+/// Claves principales de UI con traducción al Deutsch (187). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
+/// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
+/// panel.conformal (3).
+pub static DE_MESSAGES: &[OverlayMsg] = &[
+    // ── grupos (18) ──
+    OverlayMsg { key: "toolbar.group.move", text: "Auswählen" },
+    OverlayMsg { key: "toolbar.group.point", text: "Punkte" },
+    OverlayMsg { key: "toolbar.group.line", text: "Geraden" },
+    OverlayMsg { key: "toolbar.group.circle", text: "Kreise" },
+    OverlayMsg { key: "toolbar.group.polygon", text: "Polygone" },
+    OverlayMsg { key: "toolbar.group.pencil", text: "Strich" },
+    OverlayMsg { key: "toolbar.group.eraser", text: "Löschen" },
+    OverlayMsg { key: "toolbar.group.conic", text: "Kegelschnitte" },
+    OverlayMsg { key: "toolbar.group.curve", text: "Kurven" },
+    OverlayMsg { key: "toolbar.group.measure", text: "Messung" },
+    OverlayMsg { key: "toolbar.group.analysis", text: "Analyse" },
+    OverlayMsg { key: "toolbar.group.constraint", text: "Bedingungen" },
+    OverlayMsg { key: "toolbar.group.boolean", text: "Boolesch" },
+    OverlayMsg { key: "toolbar.group.threed", text: "3D" },
+    OverlayMsg { key: "toolbar.group.fourd", text: "Projiziertes 4D" },
+    OverlayMsg { key: "toolbar.group.advanced", text: "Erweitert" },
+    OverlayMsg { key: "toolbar.group.transform", text: "Transformieren" },
+    OverlayMsg { key: "toolbar.group.dynamics", text: "Dynamik" },
+    // ── tools (87) ──
+    OverlayMsg { key: "toolbar.tool.select", text: "Auswählen" },
+    OverlayMsg { key: "toolbar.tool.point", text: "Punkt" },
+    OverlayMsg { key: "toolbar.tool.midpoint", text: "Mittelpunkt" },
+    OverlayMsg { key: "toolbar.tool.line", text: "Gerade" },
+    OverlayMsg { key: "toolbar.tool.segment", text: "Strecke" },
+    OverlayMsg { key: "toolbar.tool.ray", text: "Strahl" },
+    OverlayMsg { key: "toolbar.tool.vector", text: "Vektor" },
+    OverlayMsg { key: "toolbar.tool.perpendicular", text: "Senkrechte" },
+    OverlayMsg { key: "toolbar.tool.circle", text: "Kreis Mittelpunkt-Punkt" },
+    OverlayMsg { key: "toolbar.tool.tangent", text: "Tangente" },
+    OverlayMsg { key: "toolbar.tool.polygon", text: "Polygon" },
+    OverlayMsg { key: "toolbar.tool.regular_polygon", text: "Regelmäßiges Polygon" },
+    OverlayMsg { key: "toolbar.tool.pencil", text: "Stift" },
+    OverlayMsg { key: "toolbar.tool.eraser", text: "Radierer" },
+    OverlayMsg { key: "toolbar.tool.ellipse_foci", text: "Ellipse durch Brennpunkte" },
+    OverlayMsg { key: "toolbar.tool.parabola_focus", text: "Parabel Brennpunkt-Leitlinie" },
+    OverlayMsg { key: "toolbar.tool.hyperbola_foci", text: "Hyperbel durch Brennpunkte" },
+    OverlayMsg { key: "toolbar.tool.conic_five", text: "Kegelschnitt durch 5 Punkte" },
+    OverlayMsg { key: "toolbar.tool.function", text: "f(x) Funktion" },
+    OverlayMsg { key: "toolbar.tool.param2d", text: "(x,y) 2D-parametrisch" },
+    OverlayMsg { key: "toolbar.tool.polar", text: "r(t) Polar" },
+    OverlayMsg { key: "toolbar.tool.implicit", text: "F(x,y)=0 Implizit" },
+    OverlayMsg { key: "toolbar.tool.field2d", text: "Vektorfeld" },
+    OverlayMsg { key: "toolbar.tool.locus", text: "Ortskurve" },
+    OverlayMsg { key: "toolbar.tool.distance", text: "Abstand" },
+    OverlayMsg { key: "toolbar.tool.angle", text: "Winkel" },
+    OverlayMsg { key: "toolbar.tool.area", text: "Fläche" },
+    OverlayMsg { key: "toolbar.tool.slope", text: "m Steigung" },
+    OverlayMsg { key: "toolbar.tool.root", text: "Nullstellen" },
+    OverlayMsg { key: "toolbar.tool.extremum", text: "Extrema" },
+    OverlayMsg { key: "toolbar.tool.inflection", text: "Wendepunkt" },
+    OverlayMsg { key: "toolbar.tool.yintercept", text: "Y-Achsenabschnitt" },
+    OverlayMsg { key: "toolbar.tool.xintercept", text: "X-Achsenabschnitt" },
+    OverlayMsg { key: "toolbar.tool.intersect", text: "Schnittpunkt" },
+    OverlayMsg { key: "toolbar.tool.analyze", text: "Analysieren" },
+    OverlayMsg { key: "toolbar.tool.coincident", text: "Zusammenfallend" },
+    OverlayMsg { key: "toolbar.tool.dist_constraint", text: "Abstand" },
+    OverlayMsg { key: "toolbar.tool.angle_constraint", text: "Winkel" },
+    OverlayMsg { key: "toolbar.tool.horizontal", text: "Horizontal" },
+    OverlayMsg { key: "toolbar.tool.vertical", text: "Vertikal" },
+    OverlayMsg { key: "toolbar.tool.equal_length", text: "= Gleiche Länge" },
+    OverlayMsg { key: "toolbar.tool.symmetry", text: "Symmetrie" },
+    OverlayMsg { key: "toolbar.tool.union", text: "Vereinigung" },
+    OverlayMsg { key: "toolbar.tool.intersection", text: "Schnittmenge" },
+    OverlayMsg { key: "toolbar.tool.difference", text: "Differenz" },
+    OverlayMsg { key: "toolbar.tool.xor", text: "XOR" },
+    OverlayMsg { key: "toolbar.tool.point3d", text: "3D-Punkt" },
+    OverlayMsg { key: "toolbar.tool.segment3d", text: "3D-Strecke" },
+    OverlayMsg { key: "toolbar.tool.line3d", text: "3D-Gerade" },
+    OverlayMsg { key: "toolbar.tool.plane3d", text: "3D-Ebene" },
+    OverlayMsg { key: "toolbar.tool.sphere3d", text: "Kugel" },
+    OverlayMsg { key: "toolbar.tool.cube3d", text: "Würfel" },
+    OverlayMsg { key: "toolbar.tool.cylinder3d", text: "Zylinder" },
+    OverlayMsg { key: "toolbar.tool.cone3d", text: "Kegel" },
+    OverlayMsg { key: "toolbar.tool.torus3d", text: "Torus" },
+    OverlayMsg { key: "toolbar.tool.moebius", text: "Möbiusband" },
+    OverlayMsg { key: "toolbar.tool.surface3d", text: "z Fläche" },
+    OverlayMsg { key: "toolbar.tool.curve3d", text: "(x,y,z) 3D-Kurve" },
+    OverlayMsg { key: "toolbar.tool.field3d", text: "3D-Feld" },
+    OverlayMsg { key: "toolbar.tool.hypersurface4d", text: "4D-Hyperfläche" },
+    OverlayMsg { key: "toolbar.tool.tesseract4d", text: "4D-Tesserakt: zentriertes projiziertes Objekt" },
+    OverlayMsg { key: "toolbar.tool.hypercube5d", text: "5D-Hyperwürfel: zentriertes projiziertes Objekt" },
+    OverlayMsg { key: "toolbar.tool.fractal", text: "Fraktal" },
+    OverlayMsg { key: "toolbar.tool.histogram", text: "Histogramm" },
+    OverlayMsg { key: "toolbar.tool.scatter", text: "Streudiagramm" },
+    OverlayMsg { key: "toolbar.tool.domain_coloring", text: "Domain Coloring" },
+    OverlayMsg { key: "toolbar.tool.heatmap", text: "Heat Map" },
+    OverlayMsg { key: "toolbar.tool.complex_grid", text: "Complex Grid" },
+    OverlayMsg { key: "toolbar.tool.slider", text: "Schieberegler" },
+    OverlayMsg { key: "toolbar.tool.attractor3d", text: "3D-Attraktor" },
+    OverlayMsg { key: "toolbar.tool.parallel", text: "Parallele" },
+    OverlayMsg { key: "toolbar.tool.arc", text: "3-Punkt-Bogen" },
+    OverlayMsg { key: "toolbar.tool.sector", text: "Kreissektor" },
+    OverlayMsg { key: "toolbar.tool.button", text: "Schaltfläche" },
+    OverlayMsg { key: "toolbar.tool.image", text: "Bild" },
+    OverlayMsg { key: "toolbar.tool.trig_animation", text: "Trigonometrische Animation" },
+    OverlayMsg { key: "toolbar.tool.translate", text: "Verschieben" },
+    OverlayMsg { key: "toolbar.tool.rotate", text: "Drehen" },
+    OverlayMsg { key: "toolbar.tool.dilate", text: "Zentrische Streckung" },
+    OverlayMsg { key: "toolbar.tool.reflect", text: "Spiegeln" },
+    OverlayMsg { key: "toolbar.tool.compass", text: "Zirkel" },
+    OverlayMsg { key: "toolbar.tool.semicircle", text: "Halbkreis" },
+    OverlayMsg { key: "toolbar.tool.spline", text: "Spline" },
+    OverlayMsg { key: "toolbar.tool.prism3d", text: "Prisma" },
+    OverlayMsg { key: "toolbar.tool.tetrahedron3d", text: "Tetraeder" },
+    OverlayMsg { key: "toolbar.tool.checkbox", text: "Kontrollkästchen" },
+    OverlayMsg { key: "toolbar.tool.inputbox", text: "Eingabefeld" },
+    // ── paleta (19) ──
+    OverlayMsg { key: "palette.action.point", text: "Punkt-Werkzeug" },
+    OverlayMsg { key: "palette.action.line", text: "Geraden-Werkzeug" },
+    OverlayMsg { key: "palette.action.circle", text: "Kreis-Werkzeug" },
+    OverlayMsg { key: "palette.action.polygon", text: "Polygon-Werkzeug" },
+    OverlayMsg { key: "palette.action.function", text: "Funktions-Werkzeug" },
+    OverlayMsg { key: "palette.action.pencil", text: "Stift" },
+    OverlayMsg { key: "palette.action.eraser", text: "Radierer" },
+    OverlayMsg { key: "palette.action.save", text: "Speichern" },
+    OverlayMsg { key: "palette.action.export_svg", text: "SVG exportieren" },
+    OverlayMsg { key: "palette.action.export_png", text: "PNG exportieren" },
+    OverlayMsg { key: "palette.action.export_tikz", text: "TikZ exportieren" },
+    OverlayMsg { key: "palette.action.zoom_fit", text: "Alles einpassen" },
+    OverlayMsg { key: "palette.action.toggle_grid", text: "Raster umschalten" },
+    OverlayMsg { key: "palette.action.toggle_dark", text: "Dunkelmodus umschalten" },
+    OverlayMsg { key: "palette.action.indicate_selection", text: "Auswahl anzeigen" },
+    OverlayMsg { key: "palette.title", text: "Befehlspalette" },
+    OverlayMsg { key: "palette.empty", text: "Keine Befehle gefunden" },
+    OverlayMsg { key: "palette.custom_tools", text: "Benutzerdefinierte Werkzeuge" },
+    OverlayMsg { key: "palette.footer_nav", text: "↑↓ navigieren · Enter öffnen · Esc schließen" },
+    // ── onboarding (12) ──
+    OverlayMsg { key: "onboarding.title", text: "Willkommen bei Grafito" },
+    OverlayMsg { key: "onboarding.subtitle", text: "Grafito — interaktives Geometrie-Board" },
+    OverlayMsg { key: "onboarding.bullet_primary", text: "1. Zeichne einen Punkt und eine Gerade" },
+    OverlayMsg { key: "onboarding.bullet_secondary", text: "2. Bitte den Assistenten „zeichne y=x²“" },
+    OverlayMsg { key: "onboarding.bullet_tertiary", text: "3. Ziehe einen Punkt und beobachte, was sich bewegt" },
+    OverlayMsg { key: "onboarding.bullet_university", text: "• Universität schaltet 18 Gruppen frei — Kegelschnitte, 3D, CAS, Statistik, Komplexes, Dynamik…" },
+    OverlayMsg { key: "onboarding.btn_example", text: "Beispiel ausprobieren" },
+    OverlayMsg { key: "onboarding.btn_empty", text: "Leer starten" },
+    OverlayMsg { key: "onboarding.btn_dismiss", text: "Nicht mehr anzeigen" },
+    OverlayMsg { key: "onboarding.toast_example", text: "Beispiel geladen — erkunde Grafito!" },
+    OverlayMsg { key: "onboarding.about_title", text: "Über Grafito" },
+    OverlayMsg { key: "onboarding.hint", text: "Du kannst dieses Fenster über Hilfe → Willkommen erneut öffnen" },
+    // ── cheat (10) ──
+    OverlayMsg { key: "cheat.title", text: "Tastaturkürzel" },
+    OverlayMsg { key: "cheat.save", text: "Speichern: Strg+S" },
+    OverlayMsg { key: "cheat.undo_redo", text: "Rückgängig / Wiederholen: Strg+Z / Strg+Y" },
+    OverlayMsg { key: "cheat.tools_2d", text: "2D-Werkzeuge: F1–F6" },
+    OverlayMsg { key: "cheat.tools_3d", text: "3D: F8 Kugel · F9 Würfel" },
+    OverlayMsg { key: "cheat.pencil_eraser", text: "Stift / Radierer: Strg+P / Strg+E" },
+    OverlayMsg { key: "cheat.palette_theme", text: "Palette / Design: Strg+K / Strg+T" },
+    OverlayMsg { key: "cheat.analyze_snap", text: "Analysieren / Fangen: Strg+A / G" },
+    OverlayMsg { key: "cheat.views", text: "Ansichten: Strg+Shift+1…0" },
+    OverlayMsg { key: "cheat.close", text: "Abbrechen / Schließen: Esc" },
+    // ── toast (10) ──
+    OverlayMsg { key: "toast.command_done", text: "Befehl abgeschlossen" },
+    OverlayMsg { key: "toast.command_applied", text: "Befehl in Grafito angewendet." },
+    OverlayMsg { key: "toast.saved", text: "Dokument gespeichert unter {path}" },
+    OverlayMsg { key: "toast.opened", text: "Dokument geöffnet von {path}" },
+    OverlayMsg { key: "toast.exported", text: "Exportiert nach {path}" },
+    OverlayMsg { key: "toast.save_cancelled", text: "Speichern abgebrochen" },
+    OverlayMsg { key: "toast.save_error", text: "Fehler beim Speichern: {err}" },
+    OverlayMsg { key: "toast.load_error", text: "Fehler beim Laden: {err}" },
+    OverlayMsg { key: "toast.export_error", text: "Fehler beim Exportieren: {err}" },
+    OverlayMsg { key: "toast.anim_ready", text: "Animation bereit." },
+    // ── app / misc (12) ──
+    OverlayMsg { key: "app.menu_file", text: "Datei" },
+    OverlayMsg { key: "app.menu_edit", text: "Bearbeiten" },
+    OverlayMsg { key: "app.menu_view", text: "Ansicht" },
+    OverlayMsg { key: "app.menu_help", text: "Hilfe" },
+    OverlayMsg { key: "assistant.composer_hint", text: "Schreib deine Frage" },
+    OverlayMsg { key: "assistant.limit_hint", text: "Verwendete Zeichen des Limits · Enter sendet, Shift+Enter Zeilenumbruch" },
+    OverlayMsg { key: "assistant.copied", text: "Nachricht kopiert." },
+    OverlayMsg { key: "assistant.generating", text: "Erstelle deine Animation… ~20 s" },
+    OverlayMsg { key: "assistant.teaching_started", text: "Unterricht gestartet: {topic}" },
+    OverlayMsg { key: "panel.cas_empty", text: "Kein Ergebnis — führe einen CAS-Befehl aus" },
+    OverlayMsg { key: "common.cancel", text: "Abbrechen" },
+    OverlayMsg { key: "common.retry", text: "Wiederholen" },
+    // ── anim (2) ──
+    OverlayMsg { key: "anim.empty.guide", text: "versuche, die Auflösung zu senken oder wiederhole" },
+    OverlayMsg { key: "anim.empty.message", text: "{motor} hat keine Frames erzeugt; {guia}" },
+    // ── media.title (14) ──
+    OverlayMsg { key: "media.title.tangent", text: "Bewegliche Tangente · {expr}" },
+    OverlayMsg { key: "media.title.area", text: "Kumulierte Fläche · {expr} [{p0},{p1}]" },
+    OverlayMsg { key: "media.title.sweep", text: "Durchlauf · {expr} ({param})" },
+    OverlayMsg { key: "media.title.trace", text: "Spur · {expr}" },
+    OverlayMsg { key: "media.title.morph", text: "Übergang" },
+    OverlayMsg { key: "media.title.locus", text: "Ortskurve" },
+    OverlayMsg { key: "media.title.integral", text: "Integral — Fläche unter der Kurve" },
+    OverlayMsg { key: "media.title.derivative", text: "Ableitung als Steigung" },
+    OverlayMsg { key: "media.title.pitagoras", text: "Satz des Pythagoras" },
+    OverlayMsg { key: "media.title.taylor", text: "Taylorreihe" },
+    OverlayMsg { key: "media.title.conformal", text: "Konforme Abbildung" },
+    OverlayMsg { key: "media.title.subspace", text: "Lineare Hülle" },
+    OverlayMsg { key: "media.title.fractal", text: "Koch-Fraktal" },
+    OverlayMsg { key: "media.title.default", text: "Animation" },
+    // ── panel.conformal (3) ──
+    OverlayMsg { key: "panel.conformal.title", text: "Konforme Abbildungsanimation" },
+    OverlayMsg { key: "panel.conformal.animate", text: "Deformation animieren (Homotopie)" },
+    OverlayMsg { key: "panel.conformal.speed", text: "Geschwindigkeit" },
+];
+
+/// Texto Deutsch de `key`, o `None` si la clave no está en el catálogo.
+/// El overlay es total (187/187): `None` solo para claves inexistentes.
+pub fn de(key: &'static str) -> Option<&'static str> {
+    let mut i = 0;
+    while i < DE_MESSAGES.len() {
+        if DE_MESSAGES[i].key == key {
+            return Some(DE_MESSAGES[i].text);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Cobertura del overlay Deutsch: `(cubiertas, total del catálogo)`.
+pub fn de_coverage() -> (usize, usize) {
+    (DE_MESSAGES.len(), MESSAGES.len())
+}
 // ── Números (display + parse tolerante) ──
 
 /// Formatea un número sólo para mostrar (nunca para persistir ni calcular).
 ///
-/// - ES/PT: coma decimal (`3,14`); EN: punto (`3.14`). Sin separador de miles.
+/// - ES/PT/IT/FR/DE: coma decimal (`3,14`); EN: punto (`3.14`). Sin separador de miles.
 /// - `-0.0` se muestra como `"0"`.
 /// - `NaN` → `"NaN"`; `+∞` → `"∞"`; `-∞` → `"-∞"` (igual en todas las lenguas).
 pub fn format_number(value: f64, locale: Locale) -> String {
@@ -945,7 +2236,7 @@ pub fn format_number(value: f64, locale: Locale) -> String {
     }
     let plain = format!("{value}");
     match locale {
-        Locale::Es | Locale::Pt => plain.replace('.', ","),
+        Locale::Es | Locale::Pt | Locale::It | Locale::Fr | Locale::De => plain.replace('.', ","),
         Locale::En => plain,
     }
 }
@@ -981,11 +2272,12 @@ pub fn parse_number_tolerant(text: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        anim_msg, cheat_sheet_msg, format_number, group_label, media_title_msg, onboarding_msg,
-        palette_action, palette_footer, parse_number_tolerant, pt, pt_coverage, pt_is_partial,
-        pt_partial_badge_text, toast_msg, tool_label, Locale, ANIM_KEYS, CHEAT_KEYS, GROUP_SLUGS,
-        MEDIA_TITLE_KEYS, MESSAGES, MSG_COUNT, ONBOARDING_KEYS, PT_MESSAGES, PT_PARTIAL_BADGE,
-        TOAST_KEYS,
+        anim_msg, cheat_sheet_msg, de, de_coverage, format_number, fr, fr_coverage, group_label,
+        it, it_coverage, media_title_msg, onboarding_msg, palette_action, palette_footer,
+        parse_number_tolerant, pt, pt_coverage, pt_is_partial, pt_partial_badge_text, toast_msg,
+        tool_label, Locale, OverlayMsg, ANIM_KEYS, CHEAT_KEYS, DE_MESSAGES, FR_MESSAGES,
+        GROUP_SLUGS, IT_MESSAGES, MEDIA_TITLE_KEYS, MESSAGES, MSG_COUNT, ONBOARDING_KEYS,
+        PT_MESSAGES, PT_PARTIAL_BADGE, TOAST_KEYS,
     };
 
     #[test]
@@ -1434,5 +2726,199 @@ mod tests {
         assert_eq!(pt_partial_badge_text(), "Português parcial · 187/187");
         let (covered, total) = pt_coverage();
         assert_eq!((covered, total), (187, 187));
+    }
+
+    // ── Overlays IT/FR/DE (187/187 c/u, texto tal cual de la tabla) ──
+
+    /// Aserciones comunes de overlay total: 187 entradas, cobertura 187/187,
+    /// sin duplicados ni vacíos, claves dentro del catálogo y en su mismo orden.
+    fn assert_overlay_total(
+        table: &[OverlayMsg],
+        lookup: fn(&'static str) -> Option<&'static str>,
+        coverage: fn() -> (usize, usize),
+        tag: &str,
+    ) {
+        assert_eq!(table.len(), 187, "{tag}: overlay total");
+        assert_eq!(coverage(), (187, 187), "{tag}: cobertura total");
+        let mut keys: Vec<&str> = table.iter().map(|m| m.key).collect();
+        keys.sort_unstable();
+        let mut i = 1;
+        while i < keys.len() {
+            assert_ne!(keys[i - 1], keys[i], "{tag}: clave duplicada: {}", keys[i]);
+            i += 1;
+        }
+        for entry in table {
+            assert!(!entry.key.is_empty(), "{tag}: clave vacía");
+            assert!(
+                !entry.text.is_empty(),
+                "{tag}: traducción vacía en {}",
+                entry.key
+            );
+            assert!(
+                MESSAGES.iter().any(|m| m.key == entry.key),
+                "{tag}: clave fuera del catálogo: {}",
+                entry.key
+            );
+        }
+        // Mismo orden que el catálogo: el overlay sigue a MESSAGES.
+        let mut j = 0;
+        while j < MESSAGES.len() {
+            assert_eq!(table[j].key, MESSAGES[j].key, "{tag}: orden en {j}");
+            j += 1;
+        }
+        assert!(
+            lookup("does.not.exist").is_none(),
+            "{tag}: clave inexistente da None"
+        );
+    }
+
+    #[test]
+    fn it_covers_main_ui_keys() {
+        assert_overlay_total(IT_MESSAGES, it, it_coverage, "IT");
+        assert_eq!(it("toolbar.group.move"), Some("Seleziona"));
+        assert_eq!(it("palette.title"), Some("Tavolozza comandi"));
+        assert_eq!(it("toolbar.tool.translate"), Some("Trasla"));
+        assert_eq!(
+            it("panel.conformal.title"),
+            Some("Animazione di mappatura conforme")
+        );
+        assert_eq!(
+            it("media.title.integral"),
+            Some("Integrale — area sotto la curva")
+        );
+        assert_eq!(super::t("toolbar.group.move", Locale::It), "Seleziona");
+        assert_eq!(
+            super::t("toast.saved", Locale::It),
+            "Documento salvato in {path}"
+        );
+    }
+
+    #[test]
+    fn fr_covers_main_ui_keys() {
+        assert_overlay_total(FR_MESSAGES, fr, fr_coverage, "FR");
+        assert_eq!(fr("toolbar.group.move"), Some("Sélectionner"));
+        assert_eq!(fr("palette.title"), Some("Palette de commandes"));
+        assert_eq!(fr("toolbar.tool.translate"), Some("Déplacer"));
+        assert_eq!(
+            fr("panel.conformal.title"),
+            Some("Animation de mapping conforme")
+        );
+        assert_eq!(
+            fr("media.title.integral"),
+            Some("Intégrale — aire sous la courbe")
+        );
+        assert_eq!(super::t("toolbar.group.move", Locale::Fr), "Sélectionner");
+        assert_eq!(
+            super::t("toast.saved", Locale::Fr),
+            "Document enregistré dans {path}"
+        );
+    }
+
+    #[test]
+    fn de_covers_main_ui_keys() {
+        assert_overlay_total(DE_MESSAGES, de, de_coverage, "DE");
+        assert_eq!(de("toolbar.group.move"), Some("Auswählen"));
+        assert_eq!(de("palette.title"), Some("Befehlspalette"));
+        assert_eq!(de("toolbar.tool.translate"), Some("Verschieben"));
+        assert_eq!(
+            de("panel.conformal.title"),
+            Some("Konforme Abbildungsanimation")
+        );
+        assert_eq!(
+            de("media.title.integral"),
+            Some("Integral — Fläche unter der Kurve")
+        );
+        assert_eq!(super::t("toolbar.group.move", Locale::De), "Auswählen");
+        assert_eq!(
+            super::t("toast.saved", Locale::De),
+            "Dokument gespeichert unter {path}"
+        );
+    }
+
+    #[test]
+    fn overlay_placeholders_preserved_it_fr_de() {
+        // Para cada clave ES/EN con `{x}`, las 3 traducciones contienen `{x}`.
+        let markers = [
+            "{path}", "{err}", "{topic}", "{motor}", "{guia}", "{expr}", "{p0}", "{p1}", "{param}",
+        ];
+        for m in MESSAGES {
+            for marker in markers {
+                if m.es.contains(marker) || m.en.contains(marker) {
+                    for (tag, found) in [("IT", it(m.key)), ("FR", fr(m.key)), ("DE", de(m.key))] {
+                        let text = found.expect("overlay total: clave del catálogo");
+                        assert!(
+                            text.contains(marker),
+                            "{tag} {} debe contener {marker}: {text}",
+                            m.key
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn t_never_empty_for_any_locale() {
+        // Ninguna clave×idioma devuelve vacío (overlays totales + ES/EN completos).
+        let locales = [
+            Locale::Es,
+            Locale::En,
+            Locale::Pt,
+            Locale::It,
+            Locale::Fr,
+            Locale::De,
+        ];
+        for m in MESSAGES {
+            for locale in locales {
+                assert!(
+                    !super::t(m.key, locale).is_empty(),
+                    "t vacío en {} × {:?}",
+                    m.key,
+                    locale
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn locale_code_roundtrip_it_fr_de() {
+        assert_eq!(Locale::It.code(), "it");
+        assert_eq!(Locale::Fr.code(), "fr");
+        assert_eq!(Locale::De.code(), "de");
+        // Pie localizado por idioma (conector propio + navegación del overlay).
+        assert_eq!(
+            palette_footer(3, 213, Locale::It),
+            "3 di 213 · ↑↓ naviga · Invio apri · Esc chiudi"
+        );
+        assert_eq!(
+            palette_footer(3, 213, Locale::Fr),
+            "3 sur 213 · ↑↓ naviguer · Entrée ouvrir · Échap fermer"
+        );
+        assert_eq!(
+            palette_footer(3, 213, Locale::De),
+            "3 von 213 · ↑↓ navigieren · Enter öffnen · Esc schließen"
+        );
+        // Coma decimal como ES/PT (solo EN usa punto).
+        assert_eq!(format_number(3.25, Locale::It), "3,25");
+        assert_eq!(format_number(3.25, Locale::Fr), "3,25");
+        assert_eq!(format_number(3.25, Locale::De), "3,25");
+        assert_eq!(format_number(3.25, Locale::En), "3.25");
+        // Helpers por dominio fluyen a los 3 idiomas.
+        assert_eq!(group_label("move", Locale::It), "Seleziona");
+        assert_eq!(group_label("move", Locale::Fr), "Sélectionner");
+        assert_eq!(group_label("move", Locale::De), "Auswählen");
+        assert_eq!(tool_label("translate", Locale::De), "Verschieben");
+        assert_eq!(
+            palette_action("save", Locale::It),
+            it("palette.action.save").expect("overlay total")
+        );
+        assert_eq!(
+            toast_msg("anim_ready", Locale::Fr),
+            fr("toast.anim_ready").expect("overlay total")
+        );
+        assert_eq!(
+            media_title_msg("taylor", Locale::De),
+            de("media.title.taylor").expect("overlay total")
+        );
     }
 }

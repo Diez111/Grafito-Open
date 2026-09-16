@@ -656,6 +656,9 @@ pub fn toolbar_live_text(current: Tool, locale: Locale) -> String {
         Locale::Es => format!("Herramienta: {name}"),
         Locale::En => format!("Tool: {name}"),
         Locale::Pt => format!("Ferramenta: {name}"),
+        Locale::It => format!("Strumento: {name}"),
+        Locale::Fr => format!("Outil : {name}"),
+        Locale::De => format!("Werkzeug: {name}"),
     }
 }
 
@@ -1339,14 +1342,14 @@ pub fn toolbar_localized(
     }
 }
 
-/// Selector compacto de idioma ES/EN/PT para la barra de herramientas.
+/// Selector compacto de idioma ES/EN/PT/IT/FR/DE para la barra de herramientas.
 ///
 /// Piel pura: muta `locale` en memoria, sin I/O ni spawn. La persistencia vive
 /// en `AppConfig::locale` (grafito-app/src/utils.rs): tras el cambio, el caller
 /// guarda la config (ver `save_app_config`). Códigos de idioma, no texto
 /// traducible: no necesita claves del catálogo.
 ///
-/// Diseño (Scandinavian): control segmentado de tres celdas iguales, radio
+/// Diseño (Scandinavian): control segmentado de seis celdas iguales, radio
 /// `RADIUS_SM` y 2 px entre segmentos; el activo usa el acento. Antes eran
 /// `selectable_label` sueltos que en menú quedaban como píldoras irregulares.
 pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
@@ -1360,6 +1363,9 @@ pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
                 (Locale::Es, "ES", "Español"),
                 (Locale::En, "EN", "English"),
                 (Locale::Pt, "PT", "Português"),
+                (Locale::It, "IT", "Italiano"),
+                (Locale::Fr, "FR", "Français"),
+                (Locale::De, "DE", "Deutsch"),
             ] {
                 let selected = *locale == value;
                 let color = if selected {

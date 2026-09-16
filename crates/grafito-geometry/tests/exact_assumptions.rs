@@ -151,3 +151,64 @@ fn conditional_simplification_preserves_zero_over_x_and_zero_exponent_domains() 
         SimplificationOutcome::Unconditional(parse_ast("0^0").unwrap())
     );
 }
+
+#[test]
+fn conditional_inverse_identities_need_assumptions() {
+    use grafito_geometry::symbolic::simplify_with_assumptions;
+    let mut positive = Assumptions::new();
+    positive.assume_positive("x");
+    // ln(e^x) = x con x real (positive implica real): respaldado, sin coletilla.
+    match simplify_with_assumptions(&parse_ast("ln(exp(x))").unwrap(), &positive) {
+        SimplificationOutcome::Unconditional(back) => {
+            assert_eq!(back, parse_ast("x").unwrap());
+        }
+        other => panic!("ln(exp(x)) debe colapsar a x, got {other:?}"),
+    }
+    // e^(ln x) = x solo con x > 0.
+    match simplify_with_assumptions(&parse_ast("exp(ln(x))").unwrap(), &positive) {
+        SimplificationOutcome::Unconditional(back) => {
+            assert_eq!(back, parse_ast("x").unwrap());
+        }
+        other => panic!("exp(ln(x)) debe colapsar a x, got {other:?}"),
+    }
+    // sqrt(x^2) = |x| con x real.
+    let mut real = Assumptions::new();
+    real.assume_real("x");
+    match simplify_with_assumptions(&parse_ast("sqrt(x^2)").unwrap(), &real) {
+        SimplificationOutcome::Unconditional(back) => {
+            assert_eq!(back, parse_ast("abs(x)").unwrap());
+        }
+        other => panic!("sqrt(x^2) debe colapsar a abs(x), got {other:?}"),
+    }
+    // Sin hipótesis nada de esto se toca.
+    let none = Assumptions::new();
+    for source in ["ln(exp(x))", "exp(ln(x))", "sqrt(x^2)", "abs(x)"] {
+        match simplify_with_assumptions(&parse_ast(source).unwrap(), &none) {
+            SimplificationOutcome::Unconditional(back) => {
+                assert_eq!(back, parse_ast(source).unwrap(), "sin hipótesis intacto");
+            }
+            other => panic!("{source} sin hipótesis debe quedar intacto, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn abs_collapses_under_sign_assumptions() {
+    use grafito_geometry::symbolic::simplify_with_assumptions;
+    let mut positive = Assumptions::new();
+    positive.assume_positive("x");
+    match simplify_with_assumptions(&parse_ast("abs(x)").unwrap(), &positive) {
+        SimplificationOutcome::Unconditional(back) => {
+            assert_eq!(back, parse_ast("x").unwrap());
+        }
+        other => panic!("abs(x) con x>0 debe ser x, got {other:?}"),
+    }
+    let mut nonpositive = Assumptions::new();
+    nonpositive.assume_nonpositive("x");
+    match simplify_with_assumptions(&parse_ast("abs(x)").unwrap(), &nonpositive) {
+        SimplificationOutcome::Unconditional(back) => {
+            assert_eq!(back, parse_ast("-x").unwrap());
+        }
+        other => panic!("abs(x) con x≤0 debe ser -x, got {other:?}"),
+    }
+}

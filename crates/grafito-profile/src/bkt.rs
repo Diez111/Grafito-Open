@@ -238,18 +238,18 @@ pub fn bkt_params_for_branch(branch_id: &str) -> BktParams {
     }
 }
 
-/// IDs de los 43 LOs del currículum cubiertos por [`bkt_params_for_lo_opt`].
+/// IDs de los 45 LOs del currículum cubiertos por [`bkt_params_for_lo_opt`].
 ///
 /// Espejo manual de `Curriculum::all()` en
-/// `grafito-pedagogy/src/curriculum.rs`: 5 primaria, 11 secundaria, 8 AM1,
-/// 7 AM2, 6 Álgebra y 6 Probabilidad = 43 en total (ver test `all_counts`
+/// `grafito-pedagogy/src/curriculum.rs`: 5 primaria, 12 secundaria, 8 AM1,
+/// 7 AM2, 7 Álgebra y 6 Probabilidad = 45 en total (ver test `all_counts`
 /// allí).
 /// `grafito-profile` no depende de `grafito-pedagogy` (hoja sin ciclos), así
 /// que la cobertura se verifica contra esta lista: si el currículum añade,
 /// renombra o quita un LO hay que actualizar esta constante Y el `match` de
 /// [`bkt_params_for_lo_opt`]; el test `all_los_covered_against_mirror` falla
 /// en caso contrario (longitud + `is_some` por ID).
-pub const ALL_LO_IDS: [&str; 43] = [
+pub const ALL_LO_IDS: [&str; 45] = [
     "pri-conteo",
     "pri-fracc-vis",
     "pri-perim-area",
@@ -266,6 +266,7 @@ pub const ALL_LO_IDS: [&str; 43] = [
     "sec-vect",
     "sec-prob",
     "sec-pitagoras",
+    "sec-fractales",
     "am1-func",
     "am1-lim",
     "am1-cont",
@@ -286,6 +287,7 @@ pub const ALL_LO_IDS: [&str; 43] = [
     "alg-matrices",
     "alg-determinantes",
     "alg-conicas",
+    "alg-subespacios",
     "alg-transformaciones",
     "prob-basica",
     "prob-var",
@@ -295,10 +297,10 @@ pub const ALL_LO_IDS: [&str; 43] = [
     "prob-muestreo",
 ];
 
-/// Mapeo fino por LO individual (43 LOs) con distinción conocido/desconocido.
+/// Mapeo fino por LO individual (45 LOs) con distinción conocido/desconocido.
 ///
 /// Fuente única de verdad para [`bkt_params_for_lo`] e [`is_known_lo`]: los
-/// 43 brazos retornan `BktParams` y el `match` completo se envuelve en
+/// 45 brazos retornan `BktParams` y el `match` completo se envuelve en
 /// `Some(...)`; cualquier otro ID usa `return None` temprano. Si se añade un
 /// LO en `grafito-pedagogy/src/curriculum.rs`, añadir su brazo aquí Y su ID
 /// en [`ALL_LO_IDS`].
@@ -340,7 +342,7 @@ pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
             p_slip: 0.08,
         },
 
-        // Secundaria (11) — incluye sec-pitagoras
+        // Secundaria (12) — incluye sec-pitagoras y sec-fractales
         "sec-fracc" => BktParams {
             p_init: 0.33,
             p_learn: 0.30,
@@ -406,6 +408,12 @@ pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
             p_learn: 0.28,
             p_guess: 0.19,
             p_slip: 0.12,
+        },
+        "sec-fractales" => BktParams {
+            p_init: 0.30,
+            p_learn: 0.29,
+            p_guess: 0.20,
+            p_slip: 0.11,
         },
 
         // AM1 (8)
@@ -502,7 +510,7 @@ pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
             p_slip: 0.15,
         },
 
-        // Álgebra (6)
+        // Álgebra (7)
         "alg-vectores" => BktParams {
             p_init: 0.25,
             p_learn: 0.28,
@@ -530,6 +538,12 @@ pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
         "alg-conicas" => BktParams {
             p_init: 0.22,
             p_learn: 0.26,
+            p_guess: 0.19,
+            p_slip: 0.13,
+        },
+        "alg-subespacios" => BktParams {
+            p_init: 0.23,
+            p_learn: 0.27,
             p_guess: 0.19,
             p_slip: 0.13,
         },
@@ -583,12 +597,12 @@ pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
         // `geometry3d`/`trigonometry`/`calculus`/`stats`/`complex`), que NO
         // son LOs: `bkt_params_for_lo` las resuelve vía `bkt_params_for_branch`
         // para compatibilidad con perfiles antiguos. Se usa `return` temprano
-        // para no contaminar el `Some(match ...)` que envuelve los 43 LOs.
+        // para no contaminar el `Some(match ...)` que envuelve los 45 LOs.
         _ => return None,
     })
 }
 
-/// ¿El ID corresponde a uno de los 43 LOs del currículum?
+/// ¿El ID corresponde a uno de los 45 LOs del currículum?
 ///
 /// Equivale a `bkt_params_for_lo_opt(lo_id).is_some()`. Retorna `false` para
 /// claves legacy de rama (`algebra`, `calculus`, …) aunque
@@ -716,11 +730,11 @@ mod tests {
     }
 
     #[test]
-    fn all_lo_ids_mirror_has_43_entries() {
+    fn all_lo_ids_mirror_has_45_entries() {
         // Espejo de `Curriculum::all().len()` (ver
         // `grafito-pedagogy/src/curriculum.rs::all_counts`): si el currículum
         // cambia de tamaño, actualizar `ALL_LO_IDS` + `bkt_params_for_lo_opt`.
-        assert_eq!(ALL_LO_IDS.len(), 43, "deben ser 43 LOs");
+        assert_eq!(ALL_LO_IDS.len(), 45, "deben ser 45 LOs");
         // Sin duplicados.
         let mut sorted = ALL_LO_IDS;
         sorted.sort_unstable();
@@ -734,7 +748,7 @@ mod tests {
         // Verifica por ID que cada LO del espejo tiene parámetros conocidos y
         // válidos. Falla si falta un brazo en `bkt_params_for_lo_opt` (opt
         // retornaría `None`) o si algún parámetro es inválido.
-        assert_eq!(ALL_LO_IDS.len(), 43, "deben ser 43 LOs");
+        assert_eq!(ALL_LO_IDS.len(), 45, "deben ser 45 LOs");
         for id in ALL_LO_IDS {
             assert!(
                 is_known_lo(id),

@@ -6,7 +6,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
+use std::sync::{atomic::AtomicBool, Arc};
 
+use crate::gpu_readback::{PendingGpuReadback, ReadbackPoll};
 use grafito_complex::math::complex_expr::ComplexExpr;
 use grafito_complex::math::complex_opcode::{compile_complex_expr, ComplexBytecodeProgram};
 
@@ -100,6 +102,32 @@ struct GridParamsUniform {
 
 /// Result of a GPU domain coloring evaluation: one RGBA color per grid cell.
 pub type GridColors = Vec<[f32; 4]>;
+
+/// Submit compilado y validado, listo para `submit_buffers` (origen único
+/// sync/async). Todo lo que toca la GPU sale de acá; el plan es puro CPU.
+struct DomainColoringSubmit {
+    params: GridParamsUniform,
+    code: Vec<u32>,
+    constants: Vec<[f32; 2]>,
+    in_data: Vec<[f32; 2]>,
+}
+
+/// Dispatch en vuelo: el submit ya está en la GPU y la espera se distribuye
+/// en frames vía [`PendingGpuReadback`]. Se resuelve con `resolve_eval`.
+/// El buffer readback pertenece al pipeline (persistente), así que el `wait`
+/// puede cruzar frames sin mover memoria GPU entre threads.
+#[derive(Debug)]
+pub struct PendingDomainColoringEval {
+    cell_count: usize,
+    wait: PendingGpuReadback,
+}
+
+impl PendingDomainColoringEval {
+    /// Poll non-blocking delegado al waiter (para futuro slot en `canvas.rs`).
+    pub fn poll(&mut self) -> ReadbackPoll {
+        self.wait.poll()
+    }
+}
 
 impl DomainColoringComputePipeline {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -246,23 +274,28 @@ impl DomainColoringComputePipeline {
         }
     }
 
-    /// Evaluates the complex expression on a grid of (x, y) points and returns
-    /// RGBA colors. Returns None if the expression cannot be compiled for GPU
-    /// or if the grid is too large.
-    pub fn evaluate(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+    /// Compila y valida un submit sin tocar la GPU: origen único para el path
+    /// síncrono (`evaluate`) y el asíncrono (`dispatch`).
+    fn plan_submit(
         expr: &ComplexExpr,
         points: &[(f64, f64)],
         variables: &BTreeMap<String, f64>,
         dc_mode: u32,
-    ) -> Option<GridColors> {
-        if points.is_empty() {
-            return Some(Vec::new());
-        }
-
-        if !domain_cells_within_budget(points.len()) {
+    ) -> Option<DomainColoringSubmit> {
+        if points.is_empty() || !domain_cells_within_budget(points.len()) {
+            if points.is_empty() {
+                return Some(DomainColoringSubmit {
+                    params: GridParamsUniform {
+                        grid_size: 0,
+                        code_len: 0,
+                        dc_mode,
+                        _pad1: 0,
+                    },
+                    code: Vec::new(),
+                    constants: Vec::new(),
+                    in_data: Vec::new(),
+                });
+            }
             return None;
         }
 
@@ -290,24 +323,41 @@ impl DomainColoringComputePipeline {
             in_data.push([x, y]);
         }
 
-        let point_bytes = (points.len() * std::mem::size_of::<[f32; 2]>()) as u64;
-        let color_bytes = (points.len() * std::mem::size_of::<[f32; 4]>()) as u64;
-
         let params = GridParamsUniform {
             grid_size,
             code_len: u32::try_from(prog.code.len()).ok()?,
             dc_mode,
             _pad1: 0,
         };
+        Some(DomainColoringSubmit {
+            params,
+            code: prog.code,
+            constants: f32_constants,
+            in_data,
+        })
+    }
 
-        queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
-        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&prog.code));
+    /// Escribe uniformes, hace submit del dispatch y arma el `map_async`.
+    /// Barato y non-blocking: no espera a la GPU. Retorna el flag que el
+    /// waiter background (o el poll síncrono legacy) observará.
+    fn submit_buffers(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        submit: &DomainColoringSubmit,
+    ) -> Arc<AtomicBool> {
+        queue.write_buffer(
+            &self.params_buffer,
+            0,
+            bytemuck::cast_slice(&[submit.params]),
+        );
+        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
         queue.write_buffer(
             &self.constants_buffer,
             0,
-            bytemuck::cast_slice(&f32_constants),
+            bytemuck::cast_slice(&submit.constants),
         );
-        queue.write_buffer(&self.in_buffer, 0, bytemuck::cast_slice(&in_data));
+        queue.write_buffer(&self.in_buffer, 0, bytemuck::cast_slice(&submit.in_data));
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Domain Coloring Bind Group"),
@@ -348,27 +398,121 @@ impl DomainColoringComputePipeline {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let wg = (grid_size).div_ceil(64).max(1);
+            let wg = (submit.params.grid_size).div_ceil(64).max(1);
             cpass.dispatch_workgroups(wg, 1, 1);
         }
 
+        let color_bytes = (submit.in_data.len() * std::mem::size_of::<[f32; 4]>()) as u64;
         encoder.copy_buffer_to_buffer(&self.out_buffer, 0, &self.out_readback, 0, color_bytes);
         crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.out_readback.slice(..color_bytes);
-        let map_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let map_ok_clone = map_ok.clone();
+        let map_ok = Arc::new(AtomicBool::new(false));
+        let map_ok_clone = Arc::clone(&map_ok);
         slice.map_async(wgpu::MapMode::Read, move |result| {
             if result.is_ok() {
                 map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         });
-        // TODO P1 (B6-Next): migrar al patrón `dispatch_*` + slot background
-        // (ver `function_compute`/`implicit_compute` + `GpuComputeSlot` en
-        // canvas.rs). Sin waiter thread: en wgpu 22 `Device` no es `Clone`;
-        // la espera se distribuye en frames (poll no-bloqueante por frame).
-        // Mitigación actual: poll acotado con timeout en vez de Wait infinito.
+        map_ok
+    }
+
+    /// Copia inmediata del readback ya mapeado (sin espera GPU). El llamante
+    /// debe garantizar que el buffer está mapeado (`ReadbackPoll::Mapped`).
+    fn copy_mapped_colors(&self, cell_count: usize) -> Option<GridColors> {
+        let color_bytes = (cell_count * std::mem::size_of::<[f32; 4]>()) as u64;
+        let slice = self.out_readback.slice(..color_bytes);
+        let data = slice.get_mapped_range();
+        let colors_f32: &[[f32; 4]] = bytemuck::cast_slice(&data);
+        if colors_f32.len() < cell_count
+            || colors_f32
+                .iter()
+                .any(|color| color.iter().any(|component| !component.is_finite()))
+        {
+            drop(data);
+            self.out_readback.unmap();
+            return None;
+        }
+        let result = colors_f32[..cell_count].to_vec();
+        drop(data);
+        self.out_readback.unmap();
+        Some(result)
+    }
+
+    /// Libera el buffer readback sin bloquear. Idempotente: si el `map_async`
+    /// falló o sigue pendiente, es no-op seguro; se llama en todo camino de
+    /// descarte (job obsoleto, timeout, objeto borrado) para no dejar el
+    /// pipeline inutilizado.
+    pub fn abort_eval(&self) {
+        self.out_readback.unmap();
+    }
+
+    /// Dispatch sin espera: hace submit + `map_async` y retorna
+    /// inmediatamente con un [`PendingDomainColoringEval`]. El hilo del frame
+    /// nunca bloquea; el resolve llega en un frame posterior vía
+    /// [`Self::resolve_eval`]. Retorna `None` en los mismos casos que
+    /// [`Self::evaluate`].
+    pub fn dispatch(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        expr: &ComplexExpr,
+        points: &[(f64, f64)],
+        variables: &BTreeMap<String, f64>,
+        dc_mode: u32,
+    ) -> Option<PendingDomainColoringEval> {
+        let submit = Self::plan_submit(expr, points, variables, dc_mode)?;
+        if submit.in_data.is_empty() {
+            return None;
+        }
+        let cell_count = submit.in_data.len();
+        let map_ok = self.submit_buffers(device, queue, &submit);
+        log::trace!("Domain coloring async dispatch (wait distributed over frames)");
+        Some(PendingDomainColoringEval {
+            cell_count,
+            wait: PendingGpuReadback::submit(&map_ok),
+        })
+    }
+
+    /// Resolve non-blocking de un dispatch previo. Solo copia si el poll ya
+    /// reportó `Mapped`; en cualquier otro caso hace `unmap` y retorna `None`
+    /// (el llamante usa el fallback CPU honesto). Nunca espera: el llamante
+    /// debe haber hecho el `device.poll(Maintain::Poll)` no-bloqueante del
+    /// frame antes de llamar.
+    pub fn resolve_eval(&self, pending: PendingDomainColoringEval) -> Option<GridColors> {
+        let PendingDomainColoringEval {
+            cell_count,
+            mut wait,
+        } = pending;
+        if wait.poll() != ReadbackPoll::Mapped {
+            self.abort_eval();
+            return None;
+        }
+        self.copy_mapped_colors(cell_count)
+    }
+
+    /// Evaluates the complex expression on a grid of (x, y) points and returns
+    /// RGBA colors. Returns None if the expression cannot be compiled for GPU
+    /// or if the grid is too large.
+    ///
+    /// Path síncrono legacy (bloquea hasta 250 ms): solo para callers sin slot
+    /// background. El prepare usa `dispatch` + `resolve_eval`.
+    pub fn evaluate(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        expr: &ComplexExpr,
+        points: &[(f64, f64)],
+        variables: &BTreeMap<String, f64>,
+        dc_mode: u32,
+    ) -> Option<GridColors> {
+        if points.is_empty() {
+            return Some(Vec::new());
+        }
+        let submit = Self::plan_submit(expr, points, variables, dc_mode)?;
+        let cell_count = submit.in_data.len();
+        let map_ok = self.submit_buffers(device, queue, &submit);
         log::trace!("Domain coloring sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);
         crate::gpu_timing::read_and_log(&self.timing, device, "Domain Coloring");
@@ -378,21 +522,6 @@ impl DomainColoringComputePipeline {
             return None;
         }
 
-        let data = slice.get_mapped_range();
-        let colors_f32: &[[f32; 4]] = bytemuck::cast_slice(&data);
-        if colors_f32
-            .iter()
-            .any(|color| color.iter().any(|component| !component.is_finite()))
-        {
-            drop(data);
-            self.out_readback.unmap();
-            return None;
-        }
-        let result = colors_f32.to_vec();
-        drop(data);
-        self.out_readback.unmap();
-
-        let _ = point_bytes;
-        Some(result)
+        self.copy_mapped_colors(cell_count)
     }
 }

@@ -36,6 +36,7 @@ grafito-ui = { path = "crates/grafito-ui" }
 grafito-assistant = { path = "crates/grafito-assistant", default-features = false }
 grafito-assistant-types = { path = "crates/grafito-assistant-types" }
 grafito-whiteboard = { path = "crates/grafito-whiteboard" }
+grafito-ggb = { path = "crates/grafito-ggb" }
 grafito-classroom = { path = "crates/grafito-classroom" }
 # R3: LaTeX real offline (pipeline pulldown-latex→formulary→tiny-skia, STIX
 # embebida; llamadores: draw_math en grafito-ui con fallback al subset).
@@ -45,7 +46,6 @@ grafito-tex = { path = "crates/grafito-tex" }
 eframe = "0.29"
 wgpu = "22.0"
 pollster = "0.3"
-raw-window-handle = "0.6"
 
 # UI
 # `rayon` habilita tessellation paralela de egui (epaint/rayon). eframe 0.29

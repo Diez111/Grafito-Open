@@ -2446,6 +2446,554 @@ pub fn confidence_interval_proportion(
     Some((lower, p_hat, upper))
 }
 
+// ── Frente P1: distribuciones faltantes (solo agregados, sin cambiar firmas).
+// Estrategia del brief: si hay CDF, la inversa va por Newton-bisección
+// determinista (tol 1e-12, cap 200 iters, NaN honesto si no converge).
+
+/// Tope de `N` para Zipf (sumas armónicas acotadas).
+pub const MAX_ZIPF_N: u32 = 100_000;
+/// Iteraciones máximas de la inversión numérica de CDF.
+pub const MAX_CDF_INVERSION_ITERS: usize = 200;
+/// Tolerancia de la inversión numérica de CDF.
+pub const CDF_INVERSION_TOL: f64 = 1e-12;
+
+/// Probabilidad válida en `(0, 1)` (forma positiva para guardas mínimas).
+fn is_unit_prob(p: f64) -> bool {
+    p.is_finite() && 0.0 < p && p < 1.0
+}
+
+/// Invierte una CDF monótona por bisección sobre `[lo, hi]` (expande `hi`
+/// hasta cubrir `p`). `NaN` honesto si no converge o la CDF no es finita.
+pub fn invert_cdf_bisection(p: f64, mut lo: f64, mut hi: f64, cdf: impl Fn(f64) -> f64) -> f64 {
+    if !(is_unit_prob(p) && lo.is_finite() && hi.is_finite() && hi > lo) {
+        return f64::NAN;
+    }
+    let mut expand = 0;
+    while expand < MAX_CDF_INVERSION_ITERS {
+        let c = cdf(hi);
+        if !c.is_finite() {
+            return f64::NAN;
+        }
+        if c >= p {
+            break;
+        }
+        hi *= 2.0;
+        if !hi.is_finite() || hi > 1e12 {
+            return f64::INFINITY;
+        }
+        expand += 1;
+    }
+    for _ in 0..MAX_CDF_INVERSION_ITERS {
+        let mid = lo + (hi - lo) / 2.0;
+        if mid == lo || mid == hi || !mid.is_finite() {
+            break;
+        }
+        let c = cdf(mid);
+        if !c.is_finite() {
+            return f64::NAN;
+        }
+        if c < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if (hi - lo).abs() <= CDF_INVERSION_TOL * hi.abs().max(1.0) {
+            break;
+        }
+    }
+    lo + (hi - lo) / 2.0
+}
+
+/// Gamma incompleta inferior regularizada P(a, x) (serie o fracción continua).
+fn gamma_p(a: f64, x: f64) -> f64 {
+    if a <= 0.0 || x < 0.0 {
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+    if x < a + 1.0 {
+        let mut term = 1.0 / a;
+        let mut sum = term;
+        for n in 1..=500 {
+            term *= x / (a + n as f64);
+            sum += term;
+            if term.abs() < sum.abs() * 1e-15 {
+                break;
+            }
+        }
+        sum * (-x + a * x.ln() - super::special_functions::ln_gamma(a)).exp()
+    } else {
+        1.0 - gamma_q_cf(a, x)
+    }
+}
+
+/// Q(a, x) = 1 − P(a, x) por fracción continua (Lentz modificado).
+fn gamma_q_cf(a: f64, x: f64) -> f64 {
+    const EPS: f64 = 1e-15;
+    const FPMIN: f64 = 1e-300;
+    let mut b = x + 1.0 - a;
+    let mut c = 1.0 / FPMIN;
+    let mut d = 1.0 / b.max(FPMIN);
+    let mut h = d;
+    for i in 1..=500 {
+        let an = -(i as f64) * (i as f64 - a);
+        b += 2.0;
+        d = (an * d + b).max(FPMIN);
+        d = 1.0 / d;
+        c = (b + an / c).max(FPMIN);
+        let cd = c * d;
+        h *= cd;
+        if (cd - 1.0).abs() < EPS {
+            break;
+        }
+    }
+    (-x + a * x.ln() - super::special_functions::ln_gamma(a)).exp() * h
+}
+
+/// `Gamma[alpha, beta, x]`: CDF con forma `alpha > 0` y tasa `beta > 0`.
+pub fn gamma_cdf(x: f64, alpha: f64, beta: f64) -> f64 {
+    if !x.is_finite() || !alpha.is_finite() || !beta.is_finite() || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    gamma_p(alpha, beta * x).clamp(0.0, 1.0)
+}
+
+/// Cuantil Gamma por Newton-bisección (`NaN` si no converge).
+pub fn gamma_quantile(p: f64, alpha: f64, beta: f64) -> f64 {
+    if !(is_unit_prob(p) && alpha.is_finite() && beta.is_finite() && alpha > 0.0 && beta > 0.0) {
+        return f64::NAN;
+    }
+    invert_cdf_bisection(
+        p,
+        0.0,
+        alpha / beta + 10.0 * (alpha).sqrt() / beta + 10.0,
+        |v| gamma_cdf(v, alpha, beta),
+    )
+}
+
+/// `Erlang[k, lambda, x]`: PDF (k entero ≥ 1, tasa `lambda > 0`).
+pub fn erlang_pdf(x: f64, k: u32, lambda: f64) -> f64 {
+    if !x.is_finite() || !lambda.is_finite() || lambda <= 0.0 || k < 1 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return 0.0;
+    }
+    gamma_pdf(x, f64::from(k), lambda)
+}
+
+/// `Erlang[k, lambda, x]`: CDF (caso entero de la Gamma).
+pub fn erlang_cdf(x: f64, k: u32, lambda: f64) -> f64 {
+    if !x.is_finite() || !lambda.is_finite() || lambda <= 0.0 || k < 1 {
+        return f64::NAN;
+    }
+    gamma_cdf(x, f64::from(k), lambda)
+}
+
+/// Cuantil Erlang por Newton-bisección.
+pub fn erlang_quantile(p: f64, k: u32, lambda: f64) -> f64 {
+    if !lambda.is_finite() || lambda <= 0.0 || k < 1 {
+        return f64::NAN;
+    }
+    gamma_quantile(p, f64::from(k), lambda)
+}
+
+/// Fracción continua de la beta incompleta (Lentz modificado).
+fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
+    const EPS: f64 = 1e-15;
+    const FPMIN: f64 = 1e-300;
+    let qab = a + b;
+    let qap = a + 1.0;
+    let qam = a - 1.0;
+    let mut c = 1.0;
+    let mut d = (1.0 - qab * x / qap).max(FPMIN);
+    d = 1.0 / d;
+    let mut h = d;
+    for m in 1..=300 {
+        let m2 = 2 * m;
+        let mut aa = m as f64 * (b - m as f64) * x / ((qam + m2 as f64) * (a + m2 as f64));
+        d = (1.0 + aa * d).max(FPMIN);
+        d = 1.0 / d;
+        c = (1.0 + aa / c).max(FPMIN);
+        h *= d * c;
+        aa = -(a + m as f64) * (qab + m as f64) * x / ((a + m2 as f64) * (qap + m2 as f64));
+        d = (1.0 + aa * d).max(FPMIN);
+        d = 1.0 / d;
+        c = (1.0 + aa / c).max(FPMIN);
+        let cd = c * d;
+        h *= cd;
+        if (cd - 1.0).abs() < EPS {
+            break;
+        }
+    }
+    h
+}
+
+/// `BetaDist[alpha, beta, x]`: CDF beta regularizada.
+pub fn beta_cdf(x: f64, alpha: f64, beta: f64) -> f64 {
+    if !x.is_finite() || !alpha.is_finite() || !beta.is_finite() || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let front = (super::special_functions::ln_gamma(alpha + beta)
+        - super::special_functions::ln_gamma(alpha)
+        - super::special_functions::ln_gamma(beta)
+        + alpha * x.ln()
+        + beta * (1.0 - x).ln())
+    .exp();
+    let result = if x < (alpha + 1.0) / (alpha + beta + 2.0) {
+        front * beta_cf(alpha, beta, x) / alpha
+    } else {
+        1.0 - front * beta_cf(beta, alpha, 1.0 - x) / beta
+    };
+    result.clamp(0.0, 1.0)
+}
+
+/// Cuantil Beta por Newton-bisección.
+pub fn beta_quantile(p: f64, alpha: f64, beta: f64) -> f64 {
+    if !alpha.is_finite() || !beta.is_finite() || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NAN;
+    }
+    invert_cdf_bisection(p, 0.0, 1.0, |v| beta_cdf(v, alpha, beta))
+}
+
+/// `LogNormal[mu, sigma, x]`: PDF (`sigma > 0`, `x > 0`).
+pub fn lognormal_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
+    if !x.is_finite() || !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    normal_pdf(x.ln(), mu, sigma) / x
+}
+
+/// `LogNormal[mu, sigma, x]`: CDF vía la normal sobre `ln(x)`.
+pub fn lognormal_cdf(x: f64, mu: f64, sigma: f64) -> f64 {
+    if !x.is_finite() || !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    normal_cdf(x.ln(), mu, sigma)
+}
+
+/// Cuantil LogNormal cerrado.
+pub fn lognormal_quantile(p: f64, mu: f64, sigma: f64) -> f64 {
+    if !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+        return f64::NAN;
+    }
+    let q = normal_quantile(p, mu, sigma);
+    if q.is_nan() {
+        f64::NAN
+    } else {
+        q.exp()
+    }
+}
+
+/// `Triangular[a, b, c, x]`: PDF con `a ≤ c ≤ b`, `a < b`.
+pub fn triangular_pdf(x: f64, a: f64, b: f64, c: f64) -> f64 {
+    if !([x, a, b, c].iter().all(|v| v.is_finite()) && a <= c && c <= b && a < b) {
+        return f64::NAN;
+    }
+    if x < a || x > b {
+        return 0.0;
+    }
+    if x < c {
+        2.0 * (x - a) / ((b - a) * (c - a))
+    } else if x > c {
+        2.0 * (b - x) / ((b - a) * (b - c))
+    } else {
+        2.0 / (b - a)
+    }
+}
+
+/// `Triangular[a, b, c, x]`: CDF cerrada.
+pub fn triangular_cdf(x: f64, a: f64, b: f64, c: f64) -> f64 {
+    if !([x, a, b, c].iter().all(|v| v.is_finite()) && a <= c && c <= b && a < b) {
+        return f64::NAN;
+    }
+    if x <= a {
+        return 0.0;
+    }
+    if x >= b {
+        return 1.0;
+    }
+    if x <= c {
+        (x - a).powi(2) / ((b - a) * (c - a))
+    } else {
+        1.0 - (b - x).powi(2) / ((b - a) * (b - c))
+    }
+}
+
+/// Cuantil Triangular cerrado.
+pub fn triangular_quantile(p: f64, a: f64, b: f64, c: f64) -> f64 {
+    if !(is_unit_prob(p) && [a, b, c].iter().all(|v| v.is_finite()) && a <= c && c <= b && a < b) {
+        return f64::NAN;
+    }
+    let fc = (c - a) / (b - a);
+    if p <= fc {
+        a + ((b - a) * (c - a) * p).sqrt()
+    } else {
+        b - ((b - a) * (b - c) * (1.0 - p)).sqrt()
+    }
+}
+
+/// Número armónico generalizado H(N, s) (Zipf), `N ≤ MAX_ZIPF_N`.
+fn zipf_norm(s: f64, n: u32) -> f64 {
+    let mut h = 0.0;
+    for k in 1..=n {
+        h += (f64::from(k)).powf(-s);
+        if !h.is_finite() {
+            return f64::INFINITY;
+        }
+    }
+    h
+}
+
+/// `Zipf[s, N, k]`: PMF (`s > 0`, `1 ≤ k ≤ N ≤ MAX_ZIPF_N`).
+pub fn zipf_pmf(k: u32, s: f64, n: u32) -> f64 {
+    if !(s.is_finite() && s > 0.0 && (1..=MAX_ZIPF_N).contains(&n) && k >= 1 && k <= n) {
+        return f64::NAN;
+    }
+    let h = zipf_norm(s, n);
+    if !h.is_finite() || h == 0.0 {
+        return f64::NAN;
+    }
+    (f64::from(k)).powf(-s) / h
+}
+
+/// `Zipf[s, N, k]`: CDF por suma acotada.
+pub fn zipf_cdf(k: u32, s: f64, n: u32) -> f64 {
+    if !(s.is_finite() && s > 0.0 && (1..=MAX_ZIPF_N).contains(&n)) {
+        return f64::NAN;
+    }
+    if k < 1 {
+        return 0.0;
+    }
+    let upto = k.min(n);
+    let h = zipf_norm(s, n);
+    if !h.is_finite() || h == 0.0 {
+        return f64::NAN;
+    }
+    let mut acc = 0.0;
+    for i in 1..=upto {
+        acc += (f64::from(i)).powf(-s);
+    }
+    (acc / h).clamp(0.0, 1.0)
+}
+
+/// Cuantil Zipf por barrido acotado (`1..=N`).
+pub fn zipf_quantile(p: f64, s: f64, n: u32) -> f64 {
+    if !(is_unit_prob(p) && s.is_finite() && s > 0.0 && (1..=MAX_ZIPF_N).contains(&n)) {
+        return f64::NAN;
+    }
+    let h = zipf_norm(s, n);
+    if !h.is_finite() || h == 0.0 {
+        return f64::NAN;
+    }
+    let mut acc = 0.0;
+    for k in 1..=n {
+        acc += (f64::from(k)).powf(-s) / h;
+        if acc >= p {
+            return f64::from(k);
+        }
+    }
+    f64::from(n)
+}
+
+/// `Bernoulli[p, k]`: PMF (`k ∈ {0, 1}`).
+pub fn bernoulli_pmf(k: u32, p: f64) -> f64 {
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return f64::NAN;
+    }
+    match k {
+        0 => 1.0 - p,
+        1 => p,
+        _ => 0.0,
+    }
+}
+
+/// `Bernoulli[p, k]`: CDF escalonada.
+pub fn bernoulli_cdf(k: f64, p: f64) -> f64 {
+    if !k.is_finite() || !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return f64::NAN;
+    }
+    if k < 0.0 {
+        0.0
+    } else if k < 1.0 {
+        1.0 - p
+    } else {
+        1.0
+    }
+}
+
+/// `HyperGeometric[N, K, n, k]`: CDF por suma de PMF acotada.
+pub fn hypergeometric_cdf(n_pop: u32, k_success: u32, n_draw: u32, k_observed: u32) -> f64 {
+    if k_success > n_pop || n_draw > n_pop {
+        return f64::NAN;
+    }
+    let lo = n_draw.saturating_sub(n_pop - k_success);
+    let hi = k_success.min(n_draw);
+    if k_observed < lo {
+        return 0.0;
+    }
+    let upto = k_observed.min(hi);
+    let mut acc = 0.0;
+    let mut steps = 0usize;
+    for k in lo..=upto {
+        let pmf = hypergeometric_pmf(n_pop, k_success, n_draw, k);
+        if pmf.is_nan() {
+            return f64::NAN;
+        }
+        acc += pmf;
+        steps += 1;
+        if steps > MAX_DISCRETE_CDF_ITERATIONS {
+            return f64::NAN;
+        }
+    }
+    acc.clamp(0.0, 1.0)
+}
+
+/// Cuantil hipergeométrico por barrido acotado.
+pub fn hypergeometric_quantile(p: f64, n_pop: u32, k_success: u32, n_draw: u32) -> f64 {
+    if !(is_unit_prob(p) && k_success <= n_pop && n_draw <= n_pop) {
+        return f64::NAN;
+    }
+    let lo = n_draw.saturating_sub(n_pop - k_success);
+    let hi = k_success.min(n_draw);
+    let mut acc = 0.0;
+    for k in lo..=hi {
+        let pmf = hypergeometric_pmf(n_pop, k_success, n_draw, k);
+        if pmf.is_nan() {
+            return f64::NAN;
+        }
+        acc += pmf;
+        if acc >= p {
+            return f64::from(k);
+        }
+        if (k - lo) as usize > MAX_DISCRETE_CDF_ITERATIONS {
+            return f64::NAN;
+        }
+    }
+    f64::from(hi)
+}
+
+/// Cuantil binomial por barrido acotado de PMF.
+pub fn binomial_quantile(p: f64, n: u32, prob: f64) -> f64 {
+    if !(is_unit_prob(p) && prob.is_finite() && (0.0..=1.0).contains(&prob)) {
+        return f64::NAN;
+    }
+    let mut acc = 0.0;
+    for k in 0..=n {
+        let pmf = binomial_pmf(n, prob, k);
+        if pmf.is_nan() {
+            return f64::NAN;
+        }
+        acc += pmf;
+        if acc >= p {
+            return f64::from(k);
+        }
+        if k as usize > MAX_DISCRETE_CDF_ITERATIONS {
+            return f64::NAN;
+        }
+    }
+    f64::from(n)
+}
+
+/// Menor `n ≥ k` con `P(X ≥ k) ≥ p` (`X ~ Binomial(n, ps)`); `NaN` si excede la cota.
+pub fn inverse_binomial_minimum_trials(p: f64, k: u32, ps: f64) -> f64 {
+    if !(is_unit_prob(p) && is_unit_prob(ps)) {
+        return f64::NAN;
+    }
+    for n in k..=MAX_DISCRETE_CDF_ITERATIONS as u32 {
+        let tail = if k == 0 {
+            1.0
+        } else {
+            1.0 - binomial_cdf(n, ps, k - 1)
+        };
+        if tail.is_nan() {
+            return f64::NAN;
+        }
+        if tail >= p {
+            return f64::from(n);
+        }
+    }
+    f64::NAN
+}
+
+/// Cuantil Poisson por barrido acotado de PMF.
+pub fn poisson_quantile(p: f64, lambda: f64) -> f64 {
+    if !(is_unit_prob(p) && lambda.is_finite() && lambda > 0.0) {
+        return f64::NAN;
+    }
+    let mut acc = 0.0;
+    for k in 0..=MAX_DISCRETE_CDF_ITERATIONS as u32 {
+        let pmf = poisson_pmf(lambda, k);
+        if pmf.is_nan() {
+            return f64::NAN;
+        }
+        acc += pmf;
+        if acc >= p {
+            return f64::from(k);
+        }
+    }
+    f64::NAN
+}
+
+/// Cuantil Pascal / binomial negativa (fallos antes del r-ésimo éxito).
+pub fn negative_binomial_quantile(p: f64, r: u32, prob: f64) -> f64 {
+    if !(is_unit_prob(p) && r >= 1 && is_unit_prob(prob)) {
+        return f64::NAN;
+    }
+    let mut acc = 0.0;
+    for k in 0..=MAX_DISCRETE_CDF_ITERATIONS as u32 {
+        let pmf = negative_binomial_pmf(r, prob, k);
+        if pmf.is_nan() {
+            return f64::NAN;
+        }
+        acc += pmf;
+        if acc >= p {
+            return f64::from(k);
+        }
+    }
+    f64::NAN
+}
+
+/// Cuantil Cauchy cerrado.
+pub fn cauchy_quantile(p: f64, x0: f64, gamma: f64) -> f64 {
+    if !(is_unit_prob(p) && x0.is_finite() && gamma.is_finite() && gamma > 0.0) {
+        return f64::NAN;
+    }
+    x0 + gamma * (std::f64::consts::PI * (p - 0.5)).tan()
+}
+
+/// Cuantil logístico cerrado.
+pub fn logistic_quantile(p: f64, mu: f64, s: f64) -> f64 {
+    if !(is_unit_prob(p) && mu.is_finite() && s.is_finite() && s > 0.0) {
+        return f64::NAN;
+    }
+    mu + s * (p / (1.0 - p)).ln()
+}
+
+/// Cuantil Weibull cerrado.
+pub fn weibull_quantile(p: f64, k: f64, lambda: f64) -> f64 {
+    if !(is_unit_prob(p) && k.is_finite() && lambda.is_finite() && k > 0.0 && lambda > 0.0) {
+        return f64::NAN;
+    }
+    lambda * (-(1.0 - p).ln()).powf(1.0 / k)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -56,7 +56,7 @@ pub(crate) struct AppConfig {
     /// Opt-in explícito para Aula/red avanzada (loopback F0 sin red).
     #[serde(default)]
     pub(crate) advanced_red_opt_in: bool,
-    /// Idioma de la interfaz ES/EN/PT (O2 i18n + W2 PT, catálogo `grafito-ui/src/i18n.rs`).
+    /// Idioma de la interfaz ES/EN/PT/IT/FR/DE (O2 i18n + W2 PT + frente IT/FR/DE, catálogo `grafito-ui/src/i18n.rs`).
     /// `#[serde(default)]` conserva configs viejas sin el campo (resuelven a español).
     #[serde(default)]
     pub(crate) locale: AppLocale,
@@ -79,7 +79,8 @@ fn default_assistant_model() -> String {
 /// `Es` por defecto. En instalaciones frescas [`AppConfig::default`] detecta el
 /// idioma del sistema con [`AppLocale::resolve`] (variables `LANGUAGE` →
 /// `LC_ALL` → `LANG` → `LC_MESSAGES`): subtag primario `en` → inglés, `pt` →
-/// portugués, cualquier otro valor resuelve a español.
+/// portugués, `it` → italiano, `fr` → francés, `de` → alemán; cualquier otro
+/// valor resuelve a español.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum AppLocale {
@@ -90,15 +91,25 @@ pub(crate) enum AppLocale {
     En,
     /// Português (W2: seleccionable en el selector ES/EN/PT, persiste `"pt"`).
     Pt,
+    /// Italiano (seleccionable en el selector, persiste `"it"`).
+    It,
+    /// Français (seleccionable en el selector, persiste `"fr"`).
+    Fr,
+    /// Deutsch (seleccionable en el selector, persiste `"de"`).
+    De,
 }
 
 impl AppLocale {
-    /// Código BCP-47 persistido en `grafito_config.json` (`"es"` / `"en"` / `"pt"`).
+    /// Código BCP-47 persistido en `grafito_config.json` (`"es"` / `"en"` / `"pt"` /
+    /// `"it"` / `"fr"` / `"de"`).
     pub(crate) const fn code(self) -> &'static str {
         match self {
             AppLocale::Es => "es",
             AppLocale::En => "en",
             AppLocale::Pt => "pt",
+            AppLocale::It => "it",
+            AppLocale::Fr => "fr",
+            AppLocale::De => "de",
         }
     }
 
@@ -120,10 +131,10 @@ impl AppLocale {
     /// Núcleo testeable de [`AppLocale::resolve`]: la primera etiqueta no vacía
     /// en orden `LANGUAGE` → `LC_ALL` → `LANG` → `LC_MESSAGES` gana; `LANGUAGE`
     /// admite lista separada por `':'` (se toma la primera etiqueta útil).
-    /// Solo los subtags primarios `en`/`pt` (insensibles a mayúsculas, sin
-    /// importar región ni codificación: `en`, `en_US.UTF-8`, `pt_BR`…)
-    /// resuelven a su idioma; todo lo demás (`es`, `C`, `POSIX`, vacío,
-    /// desconocido) resuelve a español.
+    /// Solo los subtags primarios `en`/`pt`/`it`/`fr`/`de` (insensibles a
+    /// mayúsculas, sin importar región ni codificación: `en`, `en_US.UTF-8`,
+    /// `pt_BR`…) resuelven a su idioma; todo lo demás (`es`, `C`, `POSIX`,
+    /// vacío, desconocido) resuelve a español.
     pub(crate) fn resolve_for_env(
         language: Option<&str>,
         lc_all: Option<&str>,
@@ -146,8 +157,8 @@ impl AppLocale {
         AppLocale::Es
     }
 
-    /// Subtags primarios `en`/`pt` resuelven a su idioma; el resto a español
-    /// (default ES).
+    /// Subtags primarios `en`/`pt`/`it`/`fr`/`de` resuelven a su idioma; el
+    /// resto a español (default ES).
     fn resolve_for_tag(tag: &str) -> Self {
         let without_codeset = tag.split(['.', '@']).next().unwrap_or("");
         let primary = without_codeset.split(['_', '-']).next().unwrap_or("");
@@ -156,6 +167,12 @@ impl AppLocale {
             AppLocale::En
         } else if primary.eq_ignore_ascii_case("pt") {
             AppLocale::Pt
+        } else if primary.eq_ignore_ascii_case("it") {
+            AppLocale::It
+        } else if primary.eq_ignore_ascii_case("fr") {
+            AppLocale::Fr
+        } else if primary.eq_ignore_ascii_case("de") {
+            AppLocale::De
         } else {
             AppLocale::Es
         }
@@ -167,15 +184,21 @@ impl AppLocale {
             AppLocale::Es => grafito_ui::i18n::Locale::Es,
             AppLocale::En => grafito_ui::i18n::Locale::En,
             AppLocale::Pt => grafito_ui::i18n::Locale::Pt,
+            AppLocale::It => grafito_ui::i18n::Locale::It,
+            AppLocale::Fr => grafito_ui::i18n::Locale::Fr,
+            AppLocale::De => grafito_ui::i18n::Locale::De,
         }
     }
 
-    /// Conversión inversa (el selector ES/EN/PT escribe [`AppConfig::locale`]).
+    /// Conversión inversa (el selector ES/EN/PT/IT/FR/DE escribe [`AppConfig::locale`]).
     pub(crate) const fn from_ui_locale(locale: grafito_ui::i18n::Locale) -> Self {
         match locale {
             grafito_ui::i18n::Locale::Es => AppLocale::Es,
             grafito_ui::i18n::Locale::En => AppLocale::En,
             grafito_ui::i18n::Locale::Pt => AppLocale::Pt,
+            grafito_ui::i18n::Locale::It => AppLocale::It,
+            grafito_ui::i18n::Locale::Fr => AppLocale::Fr,
+            grafito_ui::i18n::Locale::De => AppLocale::De,
         }
     }
 }
@@ -679,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn locale_defaults_to_spanish_for_anything_not_english_or_portuguese() {
+    fn locale_defaults_to_spanish_for_anything_not_english_portuguese_italian_french_or_german() {
         for tag in [
             "es",
             "es_AR.UTF-8",
@@ -688,7 +711,8 @@ mod tests {
             "POSIX",
             "",
             "   ",
-            "fr_FR.UTF-8",
+            "ru_RU.UTF-8",
+            "ja_JP.UTF-8",
             "english",
             "enx",
             "portugues",
@@ -723,6 +747,46 @@ mod tests {
     }
 
     #[test]
+    fn locale_resolves_italian_french_german_primary_subtags() {
+        // Frente IT/FR/DE: el sistema en italiano/francés/alemán arranca en su
+        // idioma (cualquier región o codificación).
+        for (tag, expected) in [
+            ("it", AppLocale::It),
+            ("IT", AppLocale::It),
+            (" it ", AppLocale::It),
+            ("it_IT", AppLocale::It),
+            ("it_IT.UTF-8", AppLocale::It),
+            ("fr", AppLocale::Fr),
+            ("FR", AppLocale::Fr),
+            ("fr_FR.UTF-8", AppLocale::Fr),
+            ("fr-CA", AppLocale::Fr),
+            ("de", AppLocale::De),
+            ("DE", AppLocale::De),
+            ("de_DE.UTF-8", AppLocale::De),
+            ("de-AT", AppLocale::De),
+        ] {
+            assert_eq!(
+                AppLocale::resolve_for_env(None, None, Some(tag), None),
+                expected,
+                "tag {tag:?} debería resolver a {expected:?}"
+            );
+        }
+        // LANGUAGE lista ':' respeta la primera útil también en IT/FR/DE.
+        assert_eq!(
+            AppLocale::resolve_for_env(Some("it:es"), Some("en_US.UTF-8"), Some("en"), None),
+            AppLocale::It
+        );
+        assert_eq!(
+            AppLocale::resolve_for_env(Some("fr:es"), Some("en_US.UTF-8"), Some("en"), None),
+            AppLocale::Fr
+        );
+        assert_eq!(
+            AppLocale::resolve_for_env(Some("de:es"), Some("en_US.UTF-8"), Some("en"), None),
+            AppLocale::De
+        );
+    }
+
+    #[test]
     fn locale_env_priority_language_then_lc_all_then_lang_then_lc_messages() {
         // LANGUAGE (lista ':' = primera útil) gana a todo.
         assert_eq!(
@@ -753,10 +817,16 @@ mod tests {
         assert_eq!(AppLocale::Es.code(), "es");
         assert_eq!(AppLocale::En.code(), "en");
         assert_eq!(AppLocale::Pt.code(), "pt");
+        assert_eq!(AppLocale::It.code(), "it");
+        assert_eq!(AppLocale::Fr.code(), "fr");
+        assert_eq!(AppLocale::De.code(), "de");
         assert_eq!(AppLocale::default(), AppLocale::Es);
         assert_eq!(AppLocale::Es.as_ui_locale(), grafito_ui::i18n::Locale::Es);
         assert_eq!(AppLocale::En.as_ui_locale(), grafito_ui::i18n::Locale::En);
         assert_eq!(AppLocale::Pt.as_ui_locale(), grafito_ui::i18n::Locale::Pt);
+        assert_eq!(AppLocale::It.as_ui_locale(), grafito_ui::i18n::Locale::It);
+        assert_eq!(AppLocale::Fr.as_ui_locale(), grafito_ui::i18n::Locale::Fr);
+        assert_eq!(AppLocale::De.as_ui_locale(), grafito_ui::i18n::Locale::De);
         assert_eq!(
             AppLocale::from_ui_locale(grafito_ui::i18n::Locale::Es),
             AppLocale::Es
@@ -768,6 +838,18 @@ mod tests {
         assert_eq!(
             AppLocale::from_ui_locale(grafito_ui::i18n::Locale::Pt),
             AppLocale::Pt
+        );
+        assert_eq!(
+            AppLocale::from_ui_locale(grafito_ui::i18n::Locale::It),
+            AppLocale::It
+        );
+        assert_eq!(
+            AppLocale::from_ui_locale(grafito_ui::i18n::Locale::Fr),
+            AppLocale::Fr
+        );
+        assert_eq!(
+            AppLocale::from_ui_locale(grafito_ui::i18n::Locale::De),
+            AppLocale::De
         );
     }
 
@@ -791,6 +873,22 @@ mod tests {
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.locale, AppLocale::Pt);
         assert_eq!(back.locale.as_ui_locale(), grafito_ui::i18n::Locale::Pt);
+        // Frente IT/FR/DE: cada idioma persiste con su código y vuelve intacto.
+        for (locale, code) in [
+            (AppLocale::It, "it"),
+            (AppLocale::Fr, "fr"),
+            (AppLocale::De, "de"),
+        ] {
+            updated.locale = locale;
+            let json = serde_json::to_string(&updated).unwrap();
+            assert!(
+                json.contains(&format!("\"locale\":\"{code}\"")),
+                "JSON inesperado: {json}"
+            );
+            let back: AppConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.locale, locale);
+            assert_eq!(back.locale.as_ui_locale(), locale.as_ui_locale());
+        }
     }
 
     /// Ruta única por test (sin tocar env global ni el outbox real).

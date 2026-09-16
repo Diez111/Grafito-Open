@@ -28,6 +28,95 @@ pub fn multipolygon_to_polygons(mp: &MultiPolygon<f64>) -> Vec<Vec<Point2>> {
     mp.iter().map(geo_to_polygon).collect()
 }
 
+/// Una pieza booleana: anillo exterior + agujeros interiores.
+///
+/// `PolygonObj` no modela agujeros; las piezas los conservan para que el
+/// llamador decida cómo materializarlos (nunca se pierden en silencio).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BooleanPiece {
+    /// Anillo exterior (cerrado: repite el primer punto, como `geo_to_polygon`).
+    pub exterior: Vec<Point2>,
+    /// Anillos interiores (cerrados); vacío si no hay agujeros.
+    pub holes: Vec<Vec<Point2>>,
+}
+
+/// Convierte un anillo `geo` a vértices, descartando coordenadas no finitas.
+///
+/// Devuelve `None` si quedan menos de 3 vértices distintos (astilla
+/// degenerada que no debe convertirse en objeto).
+fn ring_to_vertices_finite(ring: &LineString<f64>) -> Option<Vec<Point2>> {
+    let mut pts: Vec<Point2> = Vec::new();
+    for c in ring.coords() {
+        if !c.x.is_finite() || !c.y.is_finite() {
+            continue;
+        }
+        let p = Point2::new(c.x, c.y);
+        if pts.last() != Some(&p) {
+            pts.push(p);
+        }
+    }
+    // Anillo cerrado: repone el cierre si había al menos un triángulo.
+    let distinct = if pts.first() == pts.last() {
+        pts.len().saturating_sub(1)
+    } else {
+        pts.len()
+    };
+    if distinct < 3 {
+        return None;
+    }
+    if pts.first() != pts.last() {
+        if let Some(first) = pts.first().copied() {
+            pts.push(first);
+        }
+    }
+    Some(pts)
+}
+
+/// Descompone un `MultiPolygon` en piezas con agujeros preservados.
+///
+/// A diferencia de `multipolygon_to_polygons` (solo exteriores), acá ningún
+/// anillo interior se pierde: cada agujero viaja en `BooleanPiece.holes`.
+/// Las piezas degeneradas se descartan de forma determinista.
+pub fn multipolygon_to_pieces(mp: &MultiPolygon<f64>) -> Vec<BooleanPiece> {
+    let mut pieces = Vec::with_capacity(mp.0.len());
+    for poly in mp {
+        let Some(exterior) = ring_to_vertices_finite(poly.exterior()) else {
+            continue;
+        };
+        let mut holes = Vec::with_capacity(poly.interiors().len());
+        for hole in poly.interiors() {
+            if let Some(ring) = ring_to_vertices_finite(hole) {
+                holes.push(ring);
+            }
+        }
+        pieces.push(BooleanPiece { exterior, holes });
+    }
+    pieces
+}
+
+/// Esquina mínima del exterior (para orden canónico).
+fn piece_min_corner(piece: &BooleanPiece) -> (f64, f64) {
+    piece
+        .exterior
+        .iter()
+        .map(|p| (p.x, p.y))
+        .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
+        .unwrap_or((f64::INFINITY, f64::INFINITY))
+}
+
+/// Ordena piezas por esquina mínima del exterior.
+///
+/// El orden de `geo::MultiPolygon` no es estable entre corridas; sin este
+/// orden las etiquetas `U/U₁/…` saldrían no-deterministas. `total_cmp`
+/// evita el colapso de `NaN` (ya filtrados, defensa en profundidad).
+pub fn sort_pieces_deterministic(pieces: &mut [BooleanPiece]) {
+    pieces.sort_by(|a, b| {
+        let (ax, ay) = piece_min_corner(a);
+        let (bx, by) = piece_min_corner(b);
+        ax.total_cmp(&bx).then_with(|| ay.total_cmp(&by))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +238,70 @@ mod tests {
             2,
             "expected two disjoint polygons in the union"
         );
+    }
+
+    #[test]
+    fn pieces_preserve_holes_instead_of_dropping_them() {
+        // Cuadrado 4x4 menos cuadrado 2x2: un exterior + un agujero.
+        let outer = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(4.0, 4.0),
+            Point2::new(0.0, 4.0),
+        ];
+        let inner = vec![
+            Point2::new(1.0, 1.0),
+            Point2::new(3.0, 1.0),
+            Point2::new(3.0, 3.0),
+            Point2::new(1.0, 3.0),
+        ];
+        let diff = polygon_to_geo(&outer).difference(&polygon_to_geo(&inner));
+        let pieces = multipolygon_to_pieces(&diff);
+        assert_eq!(pieces.len(), 1, "una sola pieza con agujero");
+        assert_eq!(pieces[0].holes.len(), 1, "el agujero debe conservarse");
+        // El agujero encierra (2,2) y el exterior encierra (0.5,0.5).
+        assert!(pieces[0].holes[0].iter().any(|p| (p.x - 1.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn sort_pieces_is_deterministic_by_min_corner() {
+        let a = vec![
+            Point2::new(10.0, 10.0),
+            Point2::new(11.0, 10.0),
+            Point2::new(11.0, 11.0),
+            Point2::new(10.0, 11.0),
+        ];
+        let b = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(0.0, 1.0),
+        ];
+        let mp = polygon_to_geo(&a).union(&polygon_to_geo(&b));
+        let mut pieces = multipolygon_to_pieces(&mp);
+        pieces.reverse();
+        sort_pieces_deterministic(&mut pieces);
+        let (x0, _) = pieces[0]
+            .exterior
+            .iter()
+            .map(|p| (p.x, p.y))
+            .reduce(|m, v| (m.0.min(v.0), m.1.min(v.1)))
+            .unwrap();
+        assert!((x0 - 0.0).abs() < 1e-9, "primero el de origen");
+    }
+
+    #[test]
+    fn pieces_keep_closed_rings_like_geo_to_polygon() {
+        let tri = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(0.0, 2.0),
+        ];
+        let mp = MultiPolygon(vec![polygon_to_geo(&tri)]);
+        let pieces = multipolygon_to_pieces(&mp);
+        assert_eq!(pieces.len(), 1);
+        assert!(pieces[0].holes.is_empty());
+        let ext = &pieces[0].exterior;
+        assert_eq!(ext.first(), ext.last(), "anillo cerrado");
     }
 }

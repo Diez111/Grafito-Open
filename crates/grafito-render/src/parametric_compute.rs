@@ -9,6 +9,7 @@
 //! If an expression uses operations that are not supported by the bytecode
 //! machine, compilation fails and the caller falls back to the CPU evaluator.
 
+use crate::gpu_readback::{PendingGpuReadback, ReadbackPoll};
 use crate::implicit_compute::{
     compile_expr_with_mapping, f32_bounds_have_precision, BytecodeProgram, CompileError,
 };
@@ -18,6 +19,7 @@ use grafito_core::object::{
 };
 use grafito_core::parametric_sampling;
 use std::collections::BTreeMap;
+use std::sync::{atomic::AtomicBool, Arc};
 
 /// Presupuesto de muestras por curva paramétrica: una curva densa se evalúa en
 /// UN solo dispatch de `steps + 1 <= MAX_CURVE_STEPS + 1` workgroups (64 hilos
@@ -382,7 +384,7 @@ pub struct ParametricComputePipeline {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ParametricParamsUniform {
+pub(crate) struct ParametricParamsUniform {
     mode: u32,
     n: u32,
     m: u32,
@@ -394,6 +396,30 @@ struct ParametricParamsUniform {
     y_max: f32,
     code_len: u32,
     _pad: [u32; 2],
+}
+
+/// Dispatch single-submit en vuelo: el submit ya está en la GPU y la espera
+/// se distribuye en frames vía [`PendingGpuReadback`]. Se resuelve con
+/// `resolve_raw`. El buffer readback pertenece al pipeline (persistente),
+/// así que el `wait` puede cruzar frames sin mover memoria GPU entre threads.
+///
+/// Nota: el path batch (`dispatch_batch`) NO se migra — crea su readback por
+/// batch (buffer local efímero, no persistente en el pipeline), así que un
+/// `Pending` que cruce frames no podría resolver contra `self` sin cambiar la
+/// propiedad del buffer y el ciclo de vida del slot. Queda sincrónico con
+/// poll acotado (presupuesto intacto) hasta que el slot soporte readbacks
+/// propios por job.
+#[derive(Debug)]
+pub struct PendingParametricEval {
+    output_count: usize,
+    wait: PendingGpuReadback,
+}
+
+impl PendingParametricEval {
+    /// Poll non-blocking delegado al waiter (para futuro slot en `canvas.rs`).
+    pub fn poll(&mut self) -> ReadbackPoll {
+        self.wait.poll()
+    }
 }
 
 impl ParametricComputePipeline {
@@ -534,14 +560,17 @@ impl ParametricComputePipeline {
         }
     }
 
-    fn dispatch_and_readback(
+    /// Escribe uniformes, hace submit del dispatch y arma el `map_async`.
+    /// Barato y non-blocking: no espera a la GPU. Retorna el flag que el
+    /// waiter background (o el poll síncrono legacy) observará.
+    fn submit_raw(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         params: ParametricParamsUniform,
         prog: &BytecodeProgram,
         output_count: usize,
-    ) -> Option<Vec<f32>> {
+    ) -> Arc<AtomicBool> {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
         queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&prog.code));
         queue.write_buffer(
@@ -606,8 +635,8 @@ impl ParametricComputePipeline {
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.values_readback.slice(..);
-        let map_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let map_ok_clone = map_ok.clone();
+        let map_ok = Arc::new(AtomicBool::new(false));
+        let map_ok_clone = Arc::clone(&map_ok);
         slice.map_async(wgpu::MapMode::Read, move |result| {
             if result.is_ok() {
                 map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -615,11 +644,77 @@ impl ParametricComputePipeline {
                 log::error!("Parametric compute readback failed: {:?}", result.err());
             }
         });
-        // TODO P1 (B6-Next): migrar al patrón `dispatch_*` + slot background
-        // (ver `function_compute`/`implicit_compute` + `GpuComputeSlot` en
-        // canvas.rs). Sin waiter thread: en wgpu 22 `Device` no es `Clone`;
-        // la espera se distribuye en frames (poll no-bloqueante por frame).
-        // Mitigación actual: poll acotado con timeout en vez de Wait infinito.
+        map_ok
+    }
+
+    /// Copia inmediata del readback ya mapeado (sin espera GPU). El llamante
+    /// debe garantizar que el buffer está mapeado (`ReadbackPoll::Mapped`).
+    fn copy_mapped_raw(&self, output_count: usize) -> Option<Vec<f32>> {
+        let slice = self.values_readback.slice(..);
+        let data = slice.get_mapped_range();
+        let values_f32: &[f32] = bytemuck::cast_slice(&data);
+        let out: Vec<f32> = values_f32.get(..output_count)?.to_vec();
+        drop(data);
+        self.values_readback.unmap();
+        Some(out)
+    }
+
+    /// Libera el buffer readback sin bloquear. Idempotente: si el `map_async`
+    /// falló o sigue pendiente, es no-op seguro; se llama en todo camino de
+    /// descarte (job obsoleto, timeout, objeto borrado) para no dejar el
+    /// pipeline inutilizado.
+    pub fn abort_raw(&self) {
+        self.values_readback.unmap();
+    }
+
+    /// Dispatch sin espera del single-submit: hace submit + `map_async` y
+    /// retorna inmediatamente con un [`PendingParametricEval`]. El hilo del
+    /// frame nunca bloquea; el resolve llega en un frame posterior vía
+    /// [`Self::resolve_raw`]. Variante de bajo nivel (`pub(crate)`: expone
+    /// tipos internos del pipeline); los callers fuera del crate usan los
+    /// pares tipados (`dispatch_curve_2d`/`resolve_curve_2d`, etc.).
+    pub(crate) fn dispatch_raw(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: ParametricParamsUniform,
+        prog: &BytecodeProgram,
+        output_count: usize,
+    ) -> Option<PendingParametricEval> {
+        let map_ok = self.submit_raw(device, queue, params, prog, output_count);
+        log::trace!("Parametric compute async dispatch (wait distributed over frames)");
+        Some(PendingParametricEval {
+            output_count,
+            wait: PendingGpuReadback::submit(&map_ok),
+        })
+    }
+
+    /// Resolve non-blocking de un dispatch previo. Solo copia si el poll ya
+    /// reportó `Mapped`; en cualquier otro caso hace `unmap` y retorna `None`
+    /// (el llamante usa el fallback CPU honesto). Nunca espera: el llamante
+    /// debe haber hecho el `device.poll(Maintain::Poll)` no-bloqueante del
+    /// frame antes de llamar.
+    pub(crate) fn resolve_raw(&self, pending: PendingParametricEval) -> Option<Vec<f32>> {
+        let PendingParametricEval {
+            output_count,
+            mut wait,
+        } = pending;
+        if wait.poll() != ReadbackPoll::Mapped {
+            self.abort_raw();
+            return None;
+        }
+        self.copy_mapped_raw(output_count)
+    }
+
+    fn dispatch_and_readback(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: ParametricParamsUniform,
+        prog: &BytecodeProgram,
+        output_count: usize,
+    ) -> Option<Vec<f32>> {
+        let map_ok = self.submit_raw(device, queue, params, prog, output_count);
         log::trace!("Parametric compute sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);
         crate::gpu_timing::read_and_log(&self.timing, device, "Parametric Compute");
@@ -630,13 +725,7 @@ impl ParametricComputePipeline {
             self.values_readback.unmap();
             return None;
         }
-        let data = slice.get_mapped_range();
-        let values_f32: &[f32] = bytemuck::cast_slice(&data);
-        let out: Vec<f32> = values_f32[..output_count].to_vec();
-        drop(data);
-        self.values_readback.unmap();
-
-        Some(out)
+        self.copy_mapped_raw(output_count)
     }
 
     fn compile_parametric_expr(
@@ -726,6 +815,87 @@ impl ParametricComputePipeline {
             prepared.output_count,
         )?;
         Some(curve_2d_from_values(&values))
+    }
+
+    /// Dispatch sin espera de una curva 2D: preflight CPU + submit +
+    /// `map_async`, retorna inmediatamente. El resolve llega en un frame
+    /// posterior vía [`Self::resolve_curve_2d`]. Retorna `None` en los mismos
+    /// casos que [`Self::evaluate_curve_2d`].
+    pub fn dispatch_curve_2d(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pc: &ParametricCurve2DObj,
+        steps: usize,
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<PendingParametricEval> {
+        let prepared = prepare_curve_2d(pc, steps, self.max_curve_samples, variables)?;
+        self.dispatch_raw(
+            device,
+            queue,
+            prepared.params,
+            &prepared.prog,
+            prepared.output_count,
+        )
+    }
+
+    /// Resolve non-blocking de [`Self::dispatch_curve_2d`]. Solo convierte si
+    /// el poll ya reportó `Mapped`; si no, `unmap` + `None` (fallback CPU).
+    pub fn resolve_curve_2d(&self, pending: PendingParametricEval) -> Option<Curve2DSamples> {
+        self.resolve_raw(pending)
+            .map(|values| curve_2d_from_values(&values))
+    }
+
+    /// Dispatch sin espera de una curva 3D (misma semántica que
+    /// [`Self::dispatch_curve_2d`]; resolve con [`Self::resolve_curve_3d`]).
+    pub fn dispatch_curve_3d(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pc: &ParametricCurve3DObj,
+        steps: usize,
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<PendingParametricEval> {
+        let prepared = prepare_curve_3d(pc, steps, self.max_curve_samples, variables)?;
+        self.dispatch_raw(
+            device,
+            queue,
+            prepared.params,
+            &prepared.prog,
+            prepared.output_count,
+        )
+    }
+
+    /// Resolve non-blocking de [`Self::dispatch_curve_3d`].
+    pub fn resolve_curve_3d(&self, pending: PendingParametricEval) -> Option<Curve3DSamples> {
+        self.resolve_raw(pending)
+            .map(|values| curve_3d_from_values(&values))
+    }
+
+    /// Dispatch sin espera de una curva polar (misma semántica que
+    /// [`Self::dispatch_curve_2d`]; resolve con [`Self::resolve_polar`]).
+    pub fn dispatch_polar(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pol: &PolarCurveObj,
+        steps: usize,
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<PendingParametricEval> {
+        let prepared = prepare_polar(pol, steps, self.max_curve_samples, variables)?;
+        self.dispatch_raw(
+            device,
+            queue,
+            prepared.params,
+            &prepared.prog,
+            prepared.output_count,
+        )
+    }
+
+    /// Resolve non-blocking de [`Self::dispatch_polar`].
+    pub fn resolve_polar(&self, pending: PendingParametricEval) -> Option<Curve2DSamples> {
+        self.resolve_raw(pending)
+            .map(|values| curve_2d_from_values(&values))
     }
 
     /// Evaluate a 3D parametric surface on the GPU.
@@ -1011,11 +1181,10 @@ impl ParametricComputePipeline {
                 log::error!("Parametric batch readback failed: {:?}", result.err());
             }
         });
-        // TODO P1 (B6-Next): migrar al patrón `dispatch_*` + slot background
-        // (ver `function_compute`/`implicit_compute` + `GpuComputeSlot` en
-        // canvas.rs). Sin waiter thread: en wgpu 22 `Device` no es `Clone`;
-        // la espera se distribuye en frames (poll no-bloqueante por frame).
-        // Mitigación actual: poll acotado con timeout en vez de Wait infinito.
+        // Nota: este batch queda sincrónico a propósito — el readback es un
+        // buffer local por batch (ver `PendingParametricEval`): migrarlo al
+        // slot exigiría readbacks propios por job en `canvas.rs`. Poll acotado
+        // con timeout en vez de Wait infinito (presupuesto intacto).
         log::trace!("Parametric batch sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);
         crate::gpu_timing::read_and_log(&timing, device, "Parametric Batch");

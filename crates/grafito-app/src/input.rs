@@ -78,6 +78,60 @@ pub(crate) fn canvas_local_pointer(canvas_rect: Rect, pointer: egui::Pos2) -> Op
 }
 
 impl GrafitoApp {
+    /// Dispara guiones de click (P3b): botón de acción primero, mapa
+    /// `OnClick` después. Presupuesto fresco por click; si el documento
+    /// mutó se empuja undo y se marca autosave (igual que un comando).
+    fn fire_click_scripts(&mut self, id: grafito_core::ObjectId, time: f64) {
+        use grafito_command::commands::CommandOutcome;
+        let label = match self.document.get_object(id) {
+            Some(object) => object.label().to_string(),
+            None => return,
+        };
+        if label.is_empty() {
+            return;
+        }
+        // ¿Es botón de acción? Su guion tiene prioridad.
+        let is_button = self
+            .document
+            .get_object(id)
+            .and_then(grafito_command::ggbscript::action_view_of)
+            .is_some_and(|view| {
+                matches!(view.kind, grafito_command::ggbscript::ActionKind::Button)
+            });
+        let outcome = if is_button {
+            match grafito_command::ggbscript::run_button_script(&mut self.document, &label) {
+                Ok(n) => CommandOutcome::Message(format!("Botón {label}: {n} pasos")),
+                Err(error) => CommandOutcome::Error(error),
+            }
+        } else if self
+            .document
+            .object_scripts
+            .get(&label)
+            .and_then(|scripts| scripts.on_click.clone())
+            .is_some()
+        {
+            match grafito_command::ggbscript::run_click_script(&mut self.document, &label) {
+                Ok(n) => CommandOutcome::Message(format!("OnClick[{label}]: {n} pasos")),
+                Err(error) => CommandOutcome::Error(error),
+            }
+        } else {
+            return;
+        };
+        let before = self.document.clone();
+        let mutated = crate::lifecycle::command_mutated_document(&outcome, &before, &self.document);
+        crate::app::save_command_snapshot_if_mutated(
+            &outcome,
+            before,
+            &self.document,
+            &mut self.undo_stack,
+            &mut self.redo_stack,
+        );
+        if mutated {
+            self.mark_autosave_dirty();
+        }
+        self.handle_command_outcome(outcome, time, "click");
+    }
+
     fn handle_canvas_primary_click(&mut self, world: Point2, time: f64) {
         if !matches!(self.pending_action, PendingAction::None) {
             let tolerance = 10.0 / self.document.view().scale;
@@ -97,6 +151,9 @@ impl GrafitoApp {
                     self.document.clear_selection();
                     self.document.select(id);
                     self.selected_object = Some(id);
+                    // P3b: los clicks disparan guiones (botón de acción u
+                    // OnClick guardado) con presupuesto fresco y undo honesto.
+                    self.fire_click_scripts(id, time);
                 } else {
                     self.document.clear_selection();
                     self.selected_object = None;

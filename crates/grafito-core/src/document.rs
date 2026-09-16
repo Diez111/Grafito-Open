@@ -827,6 +827,21 @@ pub fn whiteboard_pages_to_svg(
         .collect()
 }
 
+/// Guiones asociados a una etiqueta de objeto (comandos `OnClick`/`OnUpdate`).
+///
+/// Los guiones ya pasaron el allowlist al guardarse. `OnClick` se ejecuta
+/// desde la piel; `OnUpdate` queda diferido a P3c con su diseño de
+/// ejecución (tracking de cambios + presupuesto de recursión en el commit).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectScripts {
+    /// Guion al hacer click sobre el objeto (una o varias líneas `;`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_click: Option<String>,
+    /// Guion al actualizarse el objeto (almacenado; ejecución en P3c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     /// The main document containing all geometric objects.
@@ -850,6 +865,16 @@ pub struct Document {
     /// valores describen la restricción (positive, nonzero, real, integer, etc.).
     #[serde(default)]
     pub variables_assumptions: BTreeMap<String, String>,
+    /// Guiones por etiqueta (`OnClick`/`OnUpdate`, comandos P3b).
+    ///
+    /// Se validan contra el allowlist al guardar; la ejecución de `OnClick`
+    /// vive en la piel (click) y la de `OnUpdate` queda diferida a P3c
+    /// (requiere tracking de cambios por objeto en el commit).
+    #[serde(default)]
+    pub object_scripts: BTreeMap<String, ObjectScripts>,
+    /// Guion `OnLoad` del documento (P3b: almacenado; ejecución en P3c).
+    #[serde(default)]
+    pub on_load_script: Option<String>,
     #[serde(default)]
     variable_meta: VarMetaMap,
     pub spreadsheet: Vec<Vec<String>>,
@@ -978,6 +1003,8 @@ impl Default for Document {
             next_label_number: BTreeMap::new(),
             variables: BTreeMap::new(),
             variables_assumptions: BTreeMap::new(),
+            object_scripts: BTreeMap::new(),
+            on_load_script: None,
             variable_meta: BTreeMap::new(),
             spreadsheet: Vec::new(),
             cas_worksheet: Vec::new(),
@@ -4443,7 +4470,8 @@ impl Document {
                     continue;
                 }
                 // Las tablas son fuentes de análisis, no geometría seleccionable.
-                GeoObject::DataTable(_) => continue,
+                // Las listas igual: sin representación espacial.
+                GeoObject::DataTable(_) | GeoObject::List(_) => continue,
                 GeoObject::PhasePortrait(pp) => (pp.x_min, pp.y_min, pp.x_max, pp.y_max),
                 GeoObject::Transformed(_) => (0.0, 0.0, 0.0, 0.0),
                 GeoObject::ComplexIntegral(_) => (0.0, 0.0, 0.0, 0.0),
@@ -6749,6 +6777,9 @@ impl Document {
                 .unwrap_or(usize::MAX),
             GeoObject::DataTable(o) => 256usize
                 .checked_add(o.xs.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::List(o) => 256usize
+                .checked_add(o.items.len().checked_mul(32).unwrap_or(usize::MAX))
                 .unwrap_or(usize::MAX),
             GeoObject::Transformed(o) => 1024usize
                 .checked_add(o.complex_expr.len())

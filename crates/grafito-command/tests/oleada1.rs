@@ -137,7 +137,15 @@ fn oleada1_todos_visibles_en_paleta() {
     // Frente trig+racionalización (+4 visibles S): 287 → 291.
     // Frente R3.1 (Rename stub→visible): 291 → 292.
     // Frente 3D-A2 (Vista3D visible S): 292 → 293.
-    assert_eq!(command_registry::palette_commands().count(), 293);
+    // Frente P0.2 (álgebra CAS: +41 visibles S): 293 → 334.
+    // Frente P0.3 (complejo: +7 visibles S): 334 → 341.
+    // Frente P0.4 (demostración: +3 visibles S): 341 → 344.
+    // Frente P0.5 (optimización+gráficos: +8 visibles S): 344 → 352.
+    // Frente P1 (listas+stats: +82 visibles S): 352 → 434.
+    // Frente P1b (constructor List: +1 visible S): 434 → 435.
+    // Frente P2 (medidas/geometría: +25 visibles S): 435 → 460.
+    // Frente P3b (scripting: +11 visibles S + Execute real): 460 → 472.
+    assert_eq!(command_registry::palette_commands().count(), 472);
 }
 
 #[test]

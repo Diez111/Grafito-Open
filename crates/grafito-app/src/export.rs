@@ -39,10 +39,11 @@ const MAX_PROJECTED_COORDINATE: f64 = 1.0e12;
 static NEXT_EXPORT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Formatos de exportacion profesional admitidos por la aplicacion.
-// NOTE(2026-09-08, W-D): PDF vectorial real de 1 página vía `printpdf 0.12`
-// (`serialize_pdf_vectorial` desde `build_export_scene`: rectas, círculos,
+// NOTE(2026-09-08, W-D; multipágina P3a 2026-09-16): PDF vectorial real vía
+// `printpdf 0.12` (`pdf_page_ops` desde `build_export_scene`: rectas, círculos,
 // polígonos/polilíneas y texto con Helvetica integrada, sin geometría
-// inventada). El interino de conteo (`document_to_pdf` del core) queda como
+// inventada): una página por hoja del libro con contenido (tope MAX_PDF_PAGES).
+// El interino de conteo (`document_to_pdf` del core) queda como
 // referencia histórica sin usar en este frente.
 // `export_pdf` devuelve `(path, summary)` —el mismo tipo del canal de
 // `PendingExportJob`— a propósito: no se añade `ExportFormat::Pdf` para no
@@ -132,6 +133,7 @@ impl ExportFormat {
             | ExportObjectKind::HyperSurface4D
             | ExportObjectKind::VectorField3D
             | ExportObjectKind::DataTable
+            | ExportObjectKind::List
             | ExportObjectKind::Transformed
             | ExportObjectKind::Prism3D
             | ExportObjectKind::Quadric3D
@@ -236,6 +238,9 @@ pub(crate) enum ExportObjectKind {
     BoxPlot,
     RegressionLine,
     DataTable,
+    // Listas: sin representación gráfica; se exportan por valor vía .ggb,
+    // no por SVG/PNG/PDF/TikZ (honesto: Unsupported, no silencio).
+    List,
     PhasePortrait,
     Transformed,
     Prism3D,
@@ -245,7 +250,7 @@ pub(crate) enum ExportObjectKind {
 
 impl ExportObjectKind {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 57] = [
+    pub(crate) const ALL: [Self; 58] = [
         Self::Point,
         Self::Line,
         Self::Circle,
@@ -298,6 +303,7 @@ impl ExportObjectKind {
         Self::BoxPlot,
         Self::RegressionLine,
         Self::DataTable,
+        Self::List,
         Self::PhasePortrait,
         Self::Transformed,
         Self::Prism3D,
@@ -359,6 +365,7 @@ impl ExportObjectKind {
             Self::BoxPlot => "BoxPlot",
             Self::RegressionLine => "RegressionLine",
             Self::DataTable => "DataTable",
+            Self::List => "List",
             Self::PhasePortrait => "PhasePortrait",
             Self::Transformed => "Transformed",
             Self::Prism3D => "Prism3D",
@@ -421,6 +428,7 @@ impl ExportObjectKind {
             GeoObject::BoxPlot(_) => Self::BoxPlot,
             GeoObject::RegressionLine(_) => Self::RegressionLine,
             GeoObject::DataTable(_) => Self::DataTable,
+            GeoObject::List(_) => Self::List,
             GeoObject::PhasePortrait(_) => Self::PhasePortrait,
             GeoObject::Transformed(_) => Self::Transformed,
             GeoObject::Prism3D(_) => Self::Prism3D,
@@ -1958,15 +1966,70 @@ impl SceneBuilder<'_> {
                         "el diagrama de dispersion necesita pares x/y completos",
                     ));
                 }
-                for (&x, &y) in scatter.xs.iter().zip(&scatter.ys) {
-                    let center = self.required_projection(item, Point2::new(x, y))?;
-                    self.push_marker(
-                        item,
-                        &mut primitives,
-                        center,
-                        scatter.point_size,
-                        scatter.color,
-                    )?;
+                use grafito_core::ScatterStyle;
+                match scatter.style {
+                    ScatterStyle::Points => {
+                        for (&x, &y) in scatter.xs.iter().zip(&scatter.ys) {
+                            let center = self.required_projection(item, Point2::new(x, y))?;
+                            self.push_marker(
+                                item,
+                                &mut primitives,
+                                center,
+                                scatter.point_size,
+                                scatter.color,
+                            )?;
+                        }
+                    }
+                    ScatterStyle::Sticks => {
+                        let stroke = validate_stroke(self.format, item, 2.0, scatter.color)?;
+                        for (&x, &y) in scatter.xs.iter().zip(&scatter.ys) {
+                            self.push_world_polyline(
+                                item,
+                                &mut primitives,
+                                [Some(Point2::new(x, 0.0)), Some(Point2::new(x, y))],
+                                stroke,
+                                false,
+                            )?;
+                            let center = self.required_projection(item, Point2::new(x, y))?;
+                            self.push_marker(
+                                item,
+                                &mut primitives,
+                                center,
+                                scatter.point_size,
+                                scatter.color,
+                            )?;
+                        }
+                    }
+                    ScatterStyle::Steps => {
+                        let stroke = validate_stroke(self.format, item, 2.0, scatter.color)?;
+                        let mut prev: Option<(f64, f64)> = None;
+                        for (&x, &y) in scatter.xs.iter().zip(&scatter.ys) {
+                            if let Some((px, py)) = prev {
+                                self.push_world_polyline(
+                                    item,
+                                    &mut primitives,
+                                    [
+                                        Some(Point2::new(px, py)),
+                                        Some(Point2::new(x, py)),
+                                        Some(Point2::new(x, y)),
+                                    ],
+                                    stroke,
+                                    false,
+                                )?;
+                            }
+                            prev = Some((x, y));
+                        }
+                    }
+                    ScatterStyle::Lines => {
+                        let stroke = validate_stroke(self.format, item, 2.0, scatter.color)?;
+                        let points: Vec<Option<Point2>> = scatter
+                            .xs
+                            .iter()
+                            .zip(&scatter.ys)
+                            .map(|(&x, &y)| Some(Point2::new(x, y)))
+                            .collect();
+                        self.push_world_polyline(item, &mut primitives, points, stroke, false)?;
+                    }
                 }
             }
             GeoObject::BoxPlot(box_plot) => {
@@ -4037,31 +4100,6 @@ fn pdf_failure(reason: impl Into<String>) -> String {
     reason.into()
 }
 
-/// Chequeo previo de alcance multipágina (P1a-4, puro, sin I/O).
-///
-/// Retorna `Some(Err honesto)` si el libro tiene >1 hoja con contenido: el PDF
-/// vectorial es de 1 página por ahora (solo vista + hoja actual) y truncaría
-/// en silencio. `None` = 0/1 hoja con contenido, exportable.
-fn pdf_multipage_book_error(document: &Document) -> Option<String> {
-    let (pages, current) = document.whiteboard_export_pages();
-    let non_empty: Vec<&str> = pages
-        .iter()
-        .filter(|page| !page.doc.elements().is_empty())
-        .map(|page| page.title.as_str())
-        .collect();
-    if non_empty.len() > 1 {
-        let actual = pages
-            .get(current)
-            .map(|page| page.title.as_str())
-            .unwrap_or("Hoja actual");
-        return Some(format!(
-            "PDF no reemplazó el destino; PDF de 1 página por ahora: el libro tiene {} hojas con contenido, solo se exportaría '{actual}' (multipágina pendiente)",
-            non_empty.len()
-        ));
-    }
-    None
-}
-
 fn map_core_exchange_error(context: &'static str, error: ExchangeError) -> String {
     match error {
         ExchangeError::TooManyObjects { got } => format!(
@@ -4076,30 +4114,59 @@ fn map_core_exchange_error(context: &'static str, error: ExchangeError) -> Strin
     }
 }
 
-/// Exporta el PDF vectorial de 1 página desde `build_export_scene`
+/// Hojas máximas de un PDF multipágina (anti-DoS: cada hoja construye escena).
+pub const MAX_PDF_PAGES: usize = 64;
+
+/// Exporta el PDF vectorial desde `build_export_scene`
 /// (rectas/círculos/polígonos/polilíneas/texto, Helvetica integrada).
 /// Puro + escritura atómica: ningún error toca el destino.
 /// Devuelve `(path, summary)` como el canal de `PendingExportJob`.
 /// No se añade `ExportFormat::Pdf` a propósito (ver nota del módulo).
 ///
-/// P1a-4 honesto (costo S: se eligió `Err` + hover en vez de paginar, que es M):
-/// si el libro de pizarra tiene >1 hoja con contenido, falla ANTES de escribir
-/// con "1 página por ahora" en vez de truncar en silencio a la hoja actual.
+/// Multipágina real: una página PDF por hoja del libro con contenido (la
+/// vista + cada pizarra no vacía); 0/1 hoja conserva el comportamiento y el
+/// mensaje históricos. Más de `MAX_PDF_PAGES` hojas → error honesto.
 pub(crate) fn export_pdf(
     document: &Document,
     path: impl AsRef<Path>,
 ) -> Result<(PathBuf, String), String> {
     let path = path.as_ref();
-    if let Some(err) = pdf_multipage_book_error(document) {
-        return Err(err);
-    }
     // La escena vectorial es la misma que SVG (1px = 1pt); los errores se
     // re-etiquetan a PDF para no mentir con el nombre del formato.
     let options = ExportOptions::from_document(document, ExportFormat::Svg)
         .map_err(map_export_error_to_pdf)?;
-    let scene = build_export_scene(document, ExportFormat::Svg, options)
-        .map_err(map_export_error_to_pdf)?;
-    let bytes = serialize_pdf_vectorial(&scene)?;
+    let (pages, _) = document.whiteboard_export_pages();
+    let live: Vec<_> = pages
+        .iter()
+        .filter(|page| !page.doc.elements().is_empty())
+        .collect();
+    let mut pdf_pages = Vec::new();
+    let mut primitives = 0usize;
+    if live.len() <= 1 {
+        let scene = build_export_scene(document, ExportFormat::Svg, options)
+            .map_err(map_export_error_to_pdf)?;
+        primitives = scene.primitive_count();
+        let (ops, width, height) = pdf_page_ops(&scene)?;
+        pdf_pages.push((ops, width, height));
+    } else {
+        if live.len() > MAX_PDF_PAGES {
+            return Err(pdf_failure(format!(
+                "PDF no reemplazó el destino; {} hojas exceden el máximo {MAX_PDF_PAGES}",
+                live.len()
+            )));
+        }
+        for page in &live {
+            let mut page_doc = document.clone();
+            page_doc.whiteboard = page.doc.clone();
+            let scene = build_export_scene(&page_doc, ExportFormat::Svg, options)
+                .map_err(map_export_error_to_pdf)?;
+            primitives += scene.primitive_count();
+            let (ops, width, height) = pdf_page_ops(&scene)?;
+            pdf_pages.push((ops, width, height));
+        }
+    }
+    let page_count = pdf_pages.len();
+    let bytes = pdf_save_pages(pdf_pages)?;
     if bytes.len() > MAX_EXPORT_OUTPUT_BYTES {
         return Err(pdf_failure(format!(
             "PDF no reemplazó el destino; {} bytes exceden el límite {MAX_EXPORT_OUTPUT_BYTES}",
@@ -4117,8 +4184,7 @@ pub(crate) fn export_pdf(
     Ok((
         path.to_path_buf(),
         format!(
-            "PDF exportado: {total} objetos ({hidden} ocultos, {} primitivas vectoriales) -> {}",
-            scene.primitive_count(),
+            "PDF exportado ({page_count} pág.): {total} objetos ({hidden} ocultos, {primitives} primitivas vectoriales) -> {}",
             path.display()
         ),
     ))
@@ -4211,7 +4277,11 @@ fn pdf_line_points(points: &[ScreenPoint], page_h_px: f64) -> Option<Vec<printpd
 
 /// Escena → PDF vectorial de 1 página (`printpdf 0.12`, Helvetica integrada).
 /// Puro en memoria; respeta `MAX_EXPORT_OUTPUT_BYTES`.
-fn serialize_pdf_vectorial(scene: &ExportScene) -> Result<Vec<u8>, String> {
+/// Ops de una página PDF desde una escena (fondo + primitivas + texto).
+///
+/// Extraído de `serialize_pdf_vectorial` para paginar: cada hoja del libro
+/// genera su escena y sus ops; el guardado va en `pdf_save_pages`.
+fn pdf_page_ops(scene: &ExportScene) -> Result<(Vec<printpdf::Op>, u32, u32), String> {
     if scene.width == 0 || scene.height == 0 {
         return Err(
             "PDF no reemplazó el destino; vista invalida: las dimensiones deben ser mayores que cero"
@@ -4375,13 +4445,27 @@ fn serialize_pdf_vectorial(scene: &ExportScene) -> Result<Vec<u8>, String> {
         ops.push(printpdf::Op::EndTextSection);
     }
 
+    Ok((ops, scene.width, scene.height))
+}
+
+/// Guarda páginas PDF (una por hoja con contenido) en un solo documento.
+///
+/// Límite de salida `MAX_EXPORT_OUTPUT_BYTES` sobre el total, como antes.
+fn pdf_save_pages(pages: Vec<(Vec<printpdf::Op>, u32, u32)>) -> Result<Vec<u8>, String> {
+    if pages.is_empty() {
+        return Err("PDF no reemplazó el destino; sin páginas que guardar".to_string());
+    }
     let mut document = printpdf::PdfDocument::new("Grafito");
-    let page = printpdf::PdfPage::new(
-        pdf_mm_from_px(f64::from(scene.width)),
-        pdf_mm_from_px(page_h),
-        ops,
-    );
-    document.with_pages(vec![page]);
+    let mut pdf_pages = Vec::with_capacity(pages.len());
+    for (ops, width, height) in pages {
+        let page_h = f64::from(height);
+        pdf_pages.push(printpdf::PdfPage::new(
+            pdf_mm_from_px(f64::from(width)),
+            pdf_mm_from_px(page_h),
+            ops,
+        ));
+    }
+    document.with_pages(pdf_pages);
     let mut warnings = Vec::new();
     let bytes = document.save(&printpdf::PdfSaveOptions::default(), &mut warnings);
     if bytes.len() > MAX_EXPORT_OUTPUT_BYTES {
@@ -4619,7 +4703,7 @@ pub(crate) fn write_text_atomic(path: impl AsRef<Path>, text: &str) -> io::Resul
     write_file_atomic(path.as_ref(), text.as_bytes())
 }
 
-fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_file_atomic_with(path, |file| file.write_all(bytes))
 }
 
@@ -5351,6 +5435,77 @@ fn plot_finite_pixel(img: &mut RgbaImage, x: f64, y: f64, color: Rgba<u8>) {
     img.put_pixel(x as u32, y as u32, color);
 }
 
+// ── Exportador .ggb (P3a): Document → ítems del crate grafito-ggb ─────
+
+/// Convierte el documento a ítems exportables `.ggb`.
+///
+/// Devuelve `(ítems, omitidos)`: puntos, segmentos (literales), círculos y
+/// polígonos (literales) viajan; el resto (funciones, textos, 3D, tablas,
+/// listas, sliders/variables, ...) se cuenta como omitido con total
+/// honesto. Las etiquetas vacías también se omiten (el importador exige
+/// etiqueta para referenciar).
+pub(crate) fn document_to_ggb_items(
+    document: &Document,
+) -> (Vec<grafito_ggb::export::GgbExportItem>, usize) {
+    use grafito_ggb::export::GgbExportItem;
+    let mut items = Vec::new();
+    let mut omitted = 0usize;
+    let lit = |x: f64, y: f64| format!("({x}, {y})");
+    for (_, object) in document.objects_iter() {
+        if !object.is_visible() {
+            continue;
+        }
+        let label = object.label().to_string();
+        match object {
+            GeoObject::Point(p) => {
+                if label.is_empty() || !p.position.x.is_finite() || !p.position.y.is_finite() {
+                    omitted += 1;
+                    continue;
+                }
+                items.push(GgbExportItem::Point {
+                    label,
+                    x: p.position.x,
+                    y: p.position.y,
+                });
+            }
+            GeoObject::Line(l)
+                if l.kind == grafito_core::LineKind::Segment && !label.is_empty() =>
+            {
+                items.push(GgbExportItem::Segment {
+                    label,
+                    from: lit(l.start.x, l.start.y),
+                    to: lit(l.end.x, l.end.y),
+                });
+            }
+            GeoObject::Circle(c) => {
+                if label.is_empty() {
+                    omitted += 1;
+                    continue;
+                }
+                items.push(GgbExportItem::Circle {
+                    label,
+                    cx: c.center.x,
+                    cy: c.center.y,
+                    r: c.radius,
+                });
+            }
+            GeoObject::Polygon(p) => {
+                if label.is_empty() {
+                    omitted += 1;
+                    continue;
+                }
+                items.push(GgbExportItem::Polygon {
+                    label,
+                    vertices: p.vertices.iter().map(|v| lit(v.x, v.y)).collect(),
+                });
+            }
+            _ => {
+                omitted += 1;
+            }
+        }
+    }
+    (items, omitted)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6295,13 +6450,68 @@ mod tests {
         let scene = build_export_scene(&document, ExportFormat::Svg, options)
             .expect("escena vectorial fixture");
         assert!(scene.primitive_count() > 0);
-        let bytes = serialize_pdf_vectorial(&scene).expect("pdf en memoria");
+        let (ops, width, height) = pdf_page_ops(&scene).expect("ops en memoria");
+        let bytes = pdf_save_pages(vec![(ops, width, height)]).expect("pdf en memoria");
         assert!(bytes.starts_with(b"%PDF"), "magic %PDF esperado");
         assert!(bytes.windows(4).any(|w| w == b"xref"));
         assert!(bytes.windows(5).any(|w| w == b"%%EOF"));
         // La escena trae punto/recta/círculo/polígono/texto: el PDF no es
         // un cascarón vacío (página + fondo + geometría + cierre).
         assert!(bytes.len() > 500, "PDF vectorial sospechosamente chico");
+    }
+
+    #[test]
+    fn pdf_multipage_book_writes_one_page_per_sheet() {
+        use grafito_core::WhiteboardPageData;
+        use grafito_whiteboard::{WhiteboardDoc, WhiteboardElement};
+        let mut document = common_2d_document();
+        let mut first = WhiteboardDoc::new();
+        first.add(WhiteboardElement::Text {
+            at: (10.0, 10.0),
+            text: "hoja uno".to_string(),
+            size: 12.0,
+        });
+        let mut second = WhiteboardDoc::new();
+        second.add(WhiteboardElement::Text {
+            at: (20.0, 20.0),
+            text: "hoja dos".to_string(),
+            size: 12.0,
+        });
+        let mut page1 = WhiteboardPageData::blank("Hoja 1");
+        page1.doc = first;
+        let mut page2 = WhiteboardPageData::blank("Hoja 2");
+        page2.doc = second;
+        document
+            .set_whiteboard_book(vec![page1, page2], 0)
+            .expect("libro 2 hojas");
+        let path = temp_export_path("pdf");
+        let (written, summary) = export_pdf(&document, &path).expect("PDF multipágina");
+        assert_eq!(written, path);
+        assert!(summary.contains("2 pág."), "resumen multipágina: {summary}");
+        let bytes = std::fs::read(&path).expect("pdf escrito");
+        assert!(bytes.starts_with(b"%PDF"));
+        // Dos páginas: dos marcadores de página en el contenido.
+        assert!(
+            bytes.windows(5).filter(|w| *w == b"/Page").count() >= 2,
+            "se esperaban 2 páginas"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ggb_adapter_maps_supported_and_counts_rest() {
+        use grafito_core::{FunctionObj, GeoObject, PointObj};
+        use grafito_geometry::Point2;
+        let mut document = Document::new();
+        document
+            .try_add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0))))
+            .expect("punto");
+        document
+            .try_add_object(GeoObject::Function(FunctionObj::new("x^2")))
+            .expect("función (no exportable)");
+        let (items, omitted) = document_to_ggb_items(&document);
+        assert_eq!(items.len(), 1, "solo el punto viaja");
+        assert_eq!(omitted, 1, "la función se cuenta");
     }
 
     #[test]
@@ -6348,30 +6558,26 @@ mod tests {
 
     #[test]
     fn pdf_multipage_book_falla_honesto_antes_de_escribir() {
-        // P1a-4 red-first: libro con 2 hojas con contenido no se trunca en
-        // silencio a 1 página; falla honesto ANTES de tocar el destino.
+        // P3a: el tope MAX_PDF_PAGES falla honesto ANTES de tocar el destino.
+        // (set_whiteboard_book capa a 32: se asigna directo para el tope.)
         use grafito_whiteboard::WhiteboardElement;
         let mut document = common_2d_document();
-        let mut hoja1 = grafito_core::WhiteboardPageData::blank("Hoja 1");
-        hoja1.doc.add(WhiteboardElement::Text {
-            at: (0.0, 0.0),
-            text: "uno".to_string(),
-            size: 14.0,
-        });
-        let mut hoja2 = grafito_core::WhiteboardPageData::blank("Hoja 2");
-        hoja2.doc.add(WhiteboardElement::Text {
-            at: (10.0, 10.0),
-            text: "dos".to_string(),
-            size: 14.0,
-        });
-        document
-            .set_whiteboard_book(vec![hoja1, hoja2], 0)
-            .expect("libro 2 hojas");
+        let mut hojas = Vec::new();
+        for i in 0..70 {
+            let mut hoja = grafito_core::WhiteboardPageData::blank(&format!("Hoja {i}"));
+            hoja.doc.add(WhiteboardElement::Text {
+                at: (0.0, 0.0),
+                text: "x".to_string(),
+                size: 14.0,
+            });
+            hojas.push(hoja);
+        }
+        document.whiteboard_pages = hojas;
         let path = temp_export_path("pdf");
         std::fs::write(&path, b"keep me").expect("sentinel");
-        let error = export_pdf(&document, &path).expect_err("multipágina debe fallar honesto");
+        let error = export_pdf(&document, &path).expect_err("tope debe fallar honesto");
         assert!(
-            error.contains("1 página por ahora"),
+            error.contains("exceden el máximo"),
             "alcance honesto esperado, fue: {error}"
         );
         assert_eq!(

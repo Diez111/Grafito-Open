@@ -12,6 +12,15 @@ description = "Aula colaborativa de Grafito: asistencia y dashboard de aprendiza
 grafito-profile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# P3c: transporte P2P real QUIC (flag `aula-iroh`; el build default sigue
+# puro sin I/O ni red). iroh MIT/Apache, MSRV 1.91. `tls-ring` a propósito:
+# sin proveedor TLS iroh exige `crypto_provider` manual en el builder.
+iroh = { version = "1", features = ["tls-ring"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
+
+[features]
+# P2P real para el aula (ver `src/iroh_transport.rs` + ADR-0003).
+aula-iroh = ["dep:iroh", "dep:tokio"]
 
 [lints]
 workspace = true

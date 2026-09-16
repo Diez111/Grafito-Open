@@ -117,6 +117,43 @@ pub fn extract_cas_command(text: &str) -> Option<(String, String, std::ops::Rang
     None
 }
 
+/// Pre-simplifica `expr` con las hipótesis del documento (`Assume[...]`).
+///
+/// Devuelve `(expresión, condiciones)`: sin hipótesis devuelve la entrada
+/// intacta (cero cambio de conducta); con hipótesis aplica
+/// `simplify_with_assumptions` y describe las condiciones en español.
+/// Si la expresión no parsea, devuelve la entrada intacta (el llamador
+/// emite su propio error honesto).
+pub fn refine_with_assumptions(expr: &str, document: &Document) -> (String, Vec<String>) {
+    use grafito_geometry::assumptions::Assumptions;
+    use grafito_geometry::symbolic::simplify_with_assumptions;
+    let assumptions = Assumptions::from_map(&document.variables_assumptions);
+    if assumptions.facts().is_empty() {
+        return (expr.to_string(), Vec::new());
+    }
+    let Ok(ast) = grafito_geometry::ast::parse_ast(&expr.replace(' ', "")) else {
+        return (expr.to_string(), Vec::new());
+    };
+    match simplify_with_assumptions(&ast, &assumptions) {
+        grafito_geometry::symbolic::SimplificationOutcome::Unconditional(done) => {
+            (done.to_expr_string(), Vec::new())
+        }
+        grafito_geometry::symbolic::SimplificationOutcome::Conditional(done) => {
+            let conds = done.conditions.iter().map(|fact| fact.describe()).collect();
+            (done.expression.to_expr_string(), conds)
+        }
+    }
+}
+
+/// Sufijo de mensaje con las condiciones de un refinado (`(si: x ≠ 0)`).
+pub fn assumption_suffix(conds: &[String]) -> String {
+    if conds.is_empty() {
+        String::new()
+    } else {
+        format!("  (si: {})", conds.join(", "))
+    }
+}
+
 pub fn expand_all_cas(text: &str, document: &Document) -> String {
     let mut current = text.to_string();
     let mut iterations = 0;

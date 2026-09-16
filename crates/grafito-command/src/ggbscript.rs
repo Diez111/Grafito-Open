@@ -662,6 +662,269 @@ pub fn toggle_checkbox(document: &mut Document, label: &str) -> Result<bool, Str
     }
     Ok(next)
 }
+/// Ejecuta el guion de un botón por etiqueta (API pública para la piel).
+///
+/// Crea presupuesto fresco dedicado: los clicks no comparten la cota de
+/// otros guiones en curso. Error honesto si no es botón o falla el guion.
+pub fn run_button_script(document: &mut Document, label: &str) -> Result<usize, String> {
+    let mut budget = crate::commands::ScriptBudget::default();
+    press_button(document, label, &mut budget)
+}
+
+/// Ejecuta el guion `OnClick` guardado para `label` (comando `OnClick`).
+///
+/// Sin guion → error honesto (la piel solo llama cuando hay algo que correr
+/// o un botón que pulsar; ver `run_button_script`).
+pub fn run_click_script(document: &mut Document, label: &str) -> Result<usize, String> {
+    let script = document
+        .object_scripts
+        .get(label.trim().trim_matches('"').trim_matches('\''))
+        .and_then(|scripts| scripts.on_click.clone())
+        .ok_or_else(|| format!("'{label}' no tiene guion OnClick"))?;
+    let steps = check_script_allowlist(&script)?;
+    let mut budget = crate::commands::ScriptBudget::default();
+    run_ggb_steps(document, &steps, &mut budget)
+}
+
+/// Valida y guarda un guion `OnClick`/`OnUpdate` para una etiqueta.
+///
+/// El guion pasa el allowlist al guardar (falla rápido y honesto); la
+/// ejecución de `OnUpdate` vive en P3c (ver `ObjectScripts`).
+pub fn store_object_script(
+    document: &mut Document,
+    label: &str,
+    kind: &str,
+    script: &str,
+) -> Result<(), String> {
+    let clean = label.trim().trim_matches('"').trim_matches('\'');
+    if find_object_by_label(document, clean).is_none() {
+        return Err(format!("no existe el objeto '{clean}'"));
+    }
+    let script = unquote(script);
+    if script.len() > 65_536 {
+        return Err("guion excede el tamaño máximo (65536 bytes)".to_string());
+    }
+    check_script_allowlist(&script)?;
+    let entry = document
+        .object_scripts
+        .entry(clean.to_string())
+        .or_default();
+    match kind {
+        "click" => entry.on_click = Some(script.to_string()),
+        "update" => entry.on_update = Some(script.to_string()),
+        _ => return Err(format!("kind de guion desconocido '{kind}'")),
+    }
+    Ok(())
+}
+
+// ── Tortuga (P3b): mini-lenguaje FD/BK/LT/RT/PU/PD/REPEAT ─────────────
+
+/// Operaciones máximas de un programa tortuga (anti-DoS).
+pub const MAX_TURTLE_OPS: usize = 10_000;
+/// Anidamiento máximo de `REPEAT`.
+pub const MAX_TURTLE_DEPTH: usize = 32;
+/// Sub-trazados máximos (uno por objeto Polyline).
+pub const MAX_TURTLE_PATHS: usize = 64;
+
+/// Interpreta un programa tortuga a sub-trazados `[(x, y)]`.
+///
+/// Lenguaje: `FD n | BK n | LT n | RT n | PU | PD | REPEAT n [ ... ]`,
+/// insensible a mayúsculas, números finitos. Arranca en `(0,0)` mirando a
+/// `+x` con lápiz bajo. Cada `PD` tras `PU` abre un sub-trazado nuevo.
+pub(crate) fn turtle_subpaths(program: &str) -> Result<Vec<Vec<(f64, f64)>>, String> {
+    let spaced = program.replace('[', " [ ").replace(']', " ] ");
+    let tokens: Vec<&str> = spaced.split_whitespace().collect();
+    if tokens.len() > MAX_TURTLE_OPS {
+        return Err(format!("programa tortuga excede {MAX_TURTLE_OPS} tokens"));
+    }
+    let mut turtle = Turtle {
+        x: 0.0,
+        y: 0.0,
+        heading: 0.0,
+        pen: true,
+        paths: vec![Vec::new()],
+        ops: 0,
+    };
+    let mut pos = 0usize;
+    turtle_seq(&tokens, &mut pos, tokens.len(), 0, &mut turtle)?;
+    if pos != tokens.len() {
+        return Err("programa tortuga: tokens sobrantes".to_string());
+    }
+    let paths: Vec<Vec<(f64, f64)>> = turtle
+        .paths
+        .into_iter()
+        .filter(|path| path.len() >= 2)
+        .collect();
+    if paths.len() > MAX_TURTLE_PATHS {
+        return Err(format!(
+            "programa tortuga excede {MAX_TURTLE_PATHS} sub-trazados"
+        ));
+    }
+    if paths.is_empty() {
+        return Err("programa tortuga: sin trazo (¿lápiz arriba todo el tiempo?)".to_string());
+    }
+    Ok(paths)
+}
+
+struct Turtle {
+    x: f64,
+    y: f64,
+    heading: f64,
+    pen: bool,
+    paths: Vec<Vec<(f64, f64)>>,
+    ops: usize,
+}
+
+impl Turtle {
+    fn step(&mut self, what: &str) -> Result<(), String> {
+        self.ops = self.ops.saturating_add(1);
+        if self.ops > MAX_TURTLE_OPS {
+            return Err(format!(
+                "programa tortuga excede {MAX_TURTLE_OPS} operaciones ({what})"
+            ));
+        }
+        Ok(())
+    }
+
+    fn advance(&mut self, distance: f64) -> Result<(), String> {
+        if !distance.is_finite() {
+            return Err("tortuga: distancia no finita".to_string());
+        }
+        let radians = self.heading.to_radians();
+        let (nx, ny) = (
+            self.x + distance * radians.cos(),
+            self.y + distance * radians.sin(),
+        );
+        if !nx.is_finite() || !ny.is_finite() {
+            return Err("tortuga: posición no finita".to_string());
+        }
+        if self.pen {
+            let current = self
+                .paths
+                .last_mut()
+                .ok_or_else(|| "programa tortuga: sin trazado activo".to_string())?;
+            if current.is_empty() {
+                current.push((self.x, self.y));
+            }
+            current.push((nx, ny));
+        }
+        self.x = nx;
+        self.y = ny;
+        Ok(())
+    }
+
+    fn number(&mut self, tokens: &[&str], pos: &mut usize, op: &str) -> Result<f64, String> {
+        let raw = tokens.get(*pos).copied().unwrap_or("");
+        *pos += 1;
+        let value: f64 = raw
+            .parse()
+            .map_err(|_| format!("tortuga: {op} espera un número, llegó '{raw}'"))?;
+        if !value.is_finite() {
+            return Err(format!("tortuga: {op} con número no finito"));
+        }
+        Ok(value)
+    }
+}
+
+/// Cierre `]` que empareja el `[` en `open` (excluye anidados).
+fn turtle_matching_close(tokens: &[&str], open: usize) -> Option<usize> {
+    let mut nested = 0usize;
+    let mut scan = open + 1;
+    while let Some(&token) = tokens.get(scan) {
+        match token {
+            "[" => nested += 1,
+            "]" if nested == 0 => return Some(scan),
+            "]" => nested = nested.saturating_sub(1),
+            _ => {}
+        }
+        scan += 1;
+    }
+    None
+}
+
+/// Ejecuta `tokens[pos..end)`; `]` fuera de lugar es error.
+fn turtle_seq(
+    tokens: &[&str],
+    pos: &mut usize,
+    end: usize,
+    depth: usize,
+    turtle: &mut Turtle,
+) -> Result<(), String> {
+    if depth > MAX_TURTLE_DEPTH {
+        return Err(format!("tortuga: anidamiento excede {MAX_TURTLE_DEPTH}"));
+    }
+    while *pos < end {
+        let token = tokens.get(*pos).copied().unwrap_or("");
+        match token.to_ascii_uppercase().as_str() {
+            "FD" => {
+                *pos += 1;
+                let d = turtle.number(tokens, pos, "FD")?;
+                turtle.step("FD")?;
+                turtle.advance(d)?;
+            }
+            "BK" => {
+                *pos += 1;
+                let d = turtle.number(tokens, pos, "BK")?;
+                turtle.step("BK")?;
+                turtle.advance(-d)?;
+            }
+            "LT" => {
+                *pos += 1;
+                let a = turtle.number(tokens, pos, "LT")?;
+                turtle.step("LT")?;
+                turtle.heading += a;
+            }
+            "RT" => {
+                *pos += 1;
+                let a = turtle.number(tokens, pos, "RT")?;
+                turtle.step("RT")?;
+                turtle.heading -= a;
+            }
+            "PU" => {
+                *pos += 1;
+                turtle.step("PU")?;
+                turtle.pen = false;
+            }
+            "PD" => {
+                *pos += 1;
+                turtle.step("PD")?;
+                turtle.pen = true;
+                turtle.paths.push(Vec::new());
+            }
+            "REPEAT" => {
+                *pos += 1;
+                let n = turtle.number(tokens, pos, "REPEAT")?;
+                if n < 0.0 || n.fract() != 0.0 || n > MAX_TURTLE_OPS as f64 {
+                    return Err("tortuga: REPEAT espera entero 0..=10000".to_string());
+                }
+                let open = *pos;
+                if tokens.get(open).copied().unwrap_or("") != "[" {
+                    return Err("tortuga: REPEAT espera '['".to_string());
+                }
+                let close = turtle_matching_close(tokens, open)
+                    .ok_or_else(|| "tortuga: '[' sin cierre en REPEAT".to_string())?;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let times = n as usize;
+                for _ in 0..times {
+                    let mut inner = open + 1;
+                    turtle_seq(tokens, &mut inner, close, depth + 1, turtle)?;
+                    turtle.step("REPEAT")?;
+                }
+                *pos = close + 1;
+            }
+            "[" => {
+                return Err("tortuga: '[' suelto (solo vale tras REPEAT)".to_string());
+            }
+            "]" => {
+                return Err("tortuga: ']' sin '[' que lo abra".to_string());
+            }
+            _ => {
+                return Err(format!("tortuga: instrucción desconocida '{token}'"));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn run_visibility(
     command: &str,
@@ -1401,6 +1664,41 @@ fn run_load_tool(args: &[String], input_text: &mut String) -> CommandOutcome {
     }
 }
 
+/// Tope de bytes para guiones Execute/OnClick (espejo de
+/// `commands::MAX_COMMAND_INPUT_BYTES`, privado de ese módulo).
+const MAX_SCRIPT_TEXT_BYTES: usize = 65_536;
+
+/// Ejecuta un guion del subset con presupuesto y rollback atómico (P3b).
+///
+/// Comparte `script_budget` con el anidado (If/Repeat/Button): sin vía de
+/// escape por profundidad. Cada paso pasa el allowlist al inicio.
+fn run_execute(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+    script_budget: &mut ScriptBudget,
+) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Execute requiere Execute[guion]".into());
+    }
+    let script_raw = unquote(args[0].trim());
+    let script = script_raw.as_str();
+    if script.len() > MAX_SCRIPT_TEXT_BYTES {
+        return CommandOutcome::Error("Execute: guion excede el tamaño máximo".into());
+    }
+    let steps = match check_script_allowlist(script) {
+        Ok(steps) => steps,
+        Err(error) => return CommandOutcome::Error(format!("Execute: {error}")),
+    };
+    match run_ggb_steps(document, &steps, script_budget) {
+        Ok(count) => {
+            input_text.clear();
+            CommandOutcome::Message(format!("Execute: {count} pasos"))
+        }
+        Err(error) => CommandOutcome::Error(format!("Execute: {error}")),
+    }
+}
+
 /// Error honesto para comandos GGBScript conocidos pero no soportados.
 fn unsupported(command: &str, alternative: &str) -> CommandOutcome {
     CommandOutcome::Error(format!(
@@ -1439,10 +1737,7 @@ pub(crate) fn handle_ggb_command(
         "Repeat" => run_repeat(document, args, input_text, script_budget),
         "DefineTool" => run_define_tool(args, input_text),
         "LoadTool" => run_load_tool(args, input_text),
-        "Execute" => unsupported(
-            "Execute",
-            "usa If/Repeat con pasos del subset o pulsa un Button",
-        ),
+        "Execute" => run_execute(document, args, input_text, script_budget),
         "StartAnimation" => unsupported("StartAnimation", "usa PlayPause[variable] o PlayPause[]"),
         "StopAnimation" => unsupported("StopAnimation", "usa PlayPause[variable] o PlayPause[]"),
         "Delete" => unsupported("Delete", "usa Erase[etiqueta] o EraseAll[]"),
@@ -1764,7 +2059,6 @@ mod tests {
     #[test]
     fn unsupported_commands_fail_honestly() {
         for (cmd, hint) in [
-            ("Execute[\"Show[A]\"]", "If/Repeat"),
             ("StartAnimation[]", "PlayPause"),
             ("StopAnimation[]", "PlayPause"),
             ("Delete[A]", "Erase"),

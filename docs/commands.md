@@ -7,6 +7,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Crear
 
 - `Point[(x, y)]`: Crea un punto libre. Mutacion: crea objetos. Riesgo: bajo.
+- `ToPoint[complejo]`: Crea el punto (a, b) desde un complejo: ToPoint["a+bi"]. Mutacion: crea objetos. Riesgo: bajo. Alias: `to_punto`, `a_punto`.
 - `Circle[centro, radio]`: Crea una circunferencia. Mutacion: crea objetos. Riesgo: bajo.
 - `Polygon[(x1, y1), ...]`: Crea un poligono cerrado. Mutacion: crea objetos. Riesgo: bajo.
 - `Polyline[P1, P2, ...]`: Crea una polilinea abierta: cadena de segmentos sin cierre ni relleno (minimo 2 puntos, maximo 8192). Mutacion: crea objetos. Riesgo: bajo. Alias: `polilinea`.
@@ -219,6 +220,10 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `FrequencyTable[{datos}]`: Tabla de frecuencias: FrequencyTable[{datos}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `frequency_table`, `frecuencia`, `tabl frecuencias`.
 - `StemPlot[{datos}]`: Diagrama tallo-hoja: StemPlot[{datos}] texto. Mutacion: solo consulta. Riesgo: bajo. Alias: `stem_plot`, `stemleaf`, `tallo_hoja`, `diagrama_tallo`.
 - `ResidualPlot[{xs}, {ys}]`: Residuos de regresión lineal: ResidualPlot[{xs}, {ys}] o ResidualPlot[tabla]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ResidualPlot[tabla]`. Alias: `residual_plot`, `grafico_residuos`.
+- `StepGraph[{xs}, {ys}]`: Gráfico escalonado de datos: StepGraph[{xs}, {ys}] o StepGraph[tabla] o StepGraph[{ys}]. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `StepGraph[datos]`. Alias: `grafico_escalon`, `escalon`.
+- `StickGraph[{xs}, {ys}]`: Bastones verticales desde y=0: StickGraph[{xs}, {ys}] o StickGraph[tabla] o StickGraph[{ys}]. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `StickGraph[datos]`. Alias: `grafico_bastones`, `bastones`.
+- `LineGraph[{xs}, {ys}]`: Poligonal por los puntos ordenados: LineGraph[{xs}, {ys}] o LineGraph[tabla] o LineGraph[{ys}]. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `LineGraph[datos]`. Alias: `grafico_lineas`, `poligonal`.
+- `NormalQuantilePlot[datos]`: QQ-plot normal: cuantiles teóricos N(0,1) vs datos ordenados. NormalQuantilePlot[datos]. Mutacion: crea objetos. Riesgo: bajo. Alias: `qqplot`, `qq_plot`, `grafico_cuantil`.
 - `TTest[{datos}, mu0]`: Prueba t de una muestra: TTest[{datos}, mu0]. Mutacion: solo consulta. Riesgo: bajo. Alias: `t_test`, `prueba_t`.
 - `TTest2[{a}, {b}]`: Prueba t de dos muestras independientes: TTest2[{a}, {b}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `t_test2`, `prueba_t2`.
 - `TTestPaired[{a}, {b}]`: Prueba t pareada: TTestPaired[{antes}, {despues}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `ttest_paired`, `t_paired`, `prueba_t_pareada`, `ttestpareado`.
@@ -312,6 +317,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `ShortestDistance[punto, objeto]`: Distancia euclídea mínima entre un punto y un objeto (punto/segmento/círculo/polígono). Valida finitud y límites. Mutacion: solo consulta. Riesgo: bajo. Alias: `distanciaminima`, `closestdistance`, `distanciamínima`.
 ## Lista
 
+- `List[elementos]`: Crea una lista persistible con etiqueta: List[{1, 2, {3}}]. Referenciable por Element/Zip/Sort y el resto de la familia. Mutacion: crea objetos. Riesgo: bajo. Alias: `lista`.
 - `Sequence[expr, var, start, end]`: Genera lista {expr(var=start)...expr(var=end)} evaluando expr con var entera; valida MAX_ARRAY_LENGTH 200k y MAX_DISCRETE_COUNT 10k. Mutacion: solo consulta. Riesgo: bajo. Alias: `seq`, `secuencia`.
 - `SequenceLive[expr, var, start, end]`: Secuencia viva: crea DataTable con binding variable_meta y re-evalúa automáticamente al cambiar variables (dependencia registrada). Mutacion: crea objetos. Riesgo: bajo. Alias: `secuenciaviva`, `seqviva`, `viva`.
 - `Zip[list1, list2]`: Empareja dos listas en lista de pares {{a1,b1},…}; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `emparejar`, `cremallera`.
@@ -325,6 +331,92 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Take[list, n]`: Primeros n elementos de la lista; valida 0≤n≤len y MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `tomar`, `coger`.
 - `KeepIf[list, predicado]`: Filtra con predicado simple sobre x (ej x>2); valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `keep_if`, `filtrar`, `selectif`, `filter`.
 - `CountIf[list, predicado]`: Cuenta elementos que cumplen predicado simple sobre x; valida longitud. Mutacion: solo consulta. Riesgo: bajo. Alias: `count_if`, `contarsi`, `contar_si`.
+- `Element[lista, n]`: Elemento n-ésimo (1-based) de una lista; error honesto si está fuera de rango. Mutacion: solo consulta. Riesgo: bajo. Alias: `elemento`.
+- `Unique[lista]`: Únicos ordenados de una lista numérica (orden total determinista). Mutacion: solo consulta. Riesgo: bajo. Alias: `unico`.
+- `IterationList[f, var, semilla, n]`: Itera f sobre var desde la semilla n veces: {f(s), f(f(s)), …}. Mutacion: solo consulta. Riesgo: bajo. Alias: `iteracion`.
+- `Union[a, b]`: Unión de dos listas como conjuntos, orden determinista. Mutacion: solo consulta. Riesgo: bajo. Alias: `unir_listas`.
+- `Intersection[a, b]`: Intersección de dos listas como conjuntos, orden determinista. Mutacion: solo consulta. Riesgo: bajo. Alias: `intersecar`.
+- `Insert[lista, pos, valor]`: Inserta un valor en la posición 1-based (1..=len+1). Mutacion: solo consulta. Riesgo: bajo. Alias: `insertar`.
+- `Remove[lista, pos]`: Quita el elemento en la posición 1-based. Mutacion: solo consulta. Riesgo: bajo. Alias: `quitar`.
+- `IndexOf[lista, valor]`: Primera posición 1-based de un valor (igualdad exacta). Mutacion: solo consulta. Riesgo: bajo. Alias: `indice`.
+- `Map[f, lista]`: Aplica la expresión con x ligada a cada elemento. Mutacion: solo consulta. Riesgo: bajo. Alias: `mapear`.
+- `Shuffle[lista]`: Permutación determinista (semilla = hash de versión+args). Mutacion: solo consulta. Riesgo: bajo. Alias: `mezclar`.
+- `Sample[lista, k]`: Muestra k elementos sin reposición, determinista. Mutacion: solo consulta. Riesgo: bajo. Alias: `muestrear`.
+- `RandomElement[lista]`: Un elemento uniforme de la lista, determinista. Mutacion: solo consulta. Riesgo: bajo. Alias: `elemento_azar`.
+- `RandomDiscrete[min, max]`: Entero uniforme en [min, max], determinista. Mutacion: solo consulta. Riesgo: bajo. Alias: `entero_azar`.
+- `ListMin[lista]`: Mínimo de una lista numérica. Mutacion: solo consulta. Riesgo: bajo. Alias: `list_min`, `min_lista`.
+- `ListMax[lista]`: Máximo de una lista numérica. Mutacion: solo consulta. Riesgo: bajo. Alias: `list_max`, `max_lista`.
+- `Sum[lista]`: Suma de una lista numérica. Mutacion: solo consulta. Riesgo: bajo. Alias: `suma`.
+- `Product[lista]`: Producto de una lista numérica. Mutacion: solo consulta. Riesgo: bajo. Alias: `producto`.
+## Estadística
+
+- `Covariance[xs, ys]`: Covarianza muestral (÷n−1) de dos listas del mismo largo. Mutacion: solo consulta. Riesgo: bajo. Alias: `covarianza`.
+- `RSquare[xs, ys]`: R² de la regresión lineal de ys sobre xs. Mutacion: solo consulta. Riesgo: bajo. Alias: `r_cuadrado`.
+- `Spearman[xs, ys]`: Correlación de rangos de Spearman (empates promediados). Mutacion: solo consulta. Riesgo: bajo. Alias: `coef_spearman`.
+- `TiedRank[lista]`: Rangos promedio 1-based (empates promediados). Mutacion: solo consulta. Riesgo: bajo. Alias: `rangos_empatados`.
+- `OrdinalRank[lista]`: Rangos 1..n (empates por orden de aparición). Mutacion: solo consulta. Riesgo: bajo. Alias: `rangos_ordinales`.
+- `MAD[lista]`: Desviación absoluta mediana: mediana(|x−mediana|). Mutacion: solo consulta. Riesgo: bajo. Alias: `desv_mediana`.
+- `Quartile1[lista]`: Primer cuartil (interpolación lineal). Mutacion: solo consulta. Riesgo: bajo. Alias: `cuartil1`.
+- `Quartile3[lista]`: Tercer cuartil (interpolación lineal). Mutacion: solo consulta. Riesgo: bajo. Alias: `cuartil3`.
+- `Percentile[lista, p]`: Percentil p en [0,100] (interpola como quantile). Mutacion: solo consulta. Riesgo: bajo. Alias: `percentil`.
+- `SDX[xs]`: Desvío poblacional (÷n) de las abscisas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SDX[xs, ys]`. Alias: `desv_pob_x`.
+- `SDY[ys]`: Desvío poblacional (÷n) de las ordenadas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SDY[xs, ys]`. Alias: `desv_pob_y`.
+- `SampleSDX[xs]`: Desvío muestral (÷n−1) de las abscisas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SampleSDX[xs, ys]`. Alias: `desv_muestral_x`.
+- `SampleSDY[ys]`: Desvío muestral (÷n−1) de las ordenadas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SampleSDY[xs, ys]`. Alias: `desv_muestral_y`.
+- `MeanX[xs]`: Media de las abscisas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `MeanX[xs, ys]`. Alias: `media_x`.
+- `MeanY[ys]`: Media de las ordenadas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `MeanY[xs, ys]`. Alias: `media_y`.
+- `SigmaXX[xs]`: Suma Σx² de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `suma_cuadrados_x`.
+- `SigmaXY[xs, ys]`: Suma Σxy de dos listas del mismo largo. Mutacion: solo consulta. Riesgo: bajo. Alias: `suma_productos_xy`.
+- `SigmaYY[ys]`: Suma Σy² de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `suma_cuadrados_y`.
+- `Sxx[xs]`: Suma Σ(x−x̄)² de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `sc_x`.
+- `Sxy[xs, ys]`: Suma Σ(x−x̄)(y−ȳ) de dos listas. Mutacion: solo consulta. Riesgo: bajo. Alias: `sc_xy`.
+- `Syy[ys]`: Suma Σ(y−ȳ)² de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `sc_y`.
+- `GeometricMean[lista]`: Media geométrica (exige valores finitos > 0). Mutacion: solo consulta. Riesgo: bajo. Alias: `media_geometrica`.
+- `HarmonicMean[lista]`: Media armónica (exige valores finitos ≠ 0). Mutacion: solo consulta. Riesgo: bajo. Alias: `media_armonica`.
+- `Mode[lista]`: Moda (valor más frecuente) de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `moda`.
+- `RootMeanSquare[lista]`: Media cuadrática √(Σx²/n). Mutacion: solo consulta. Riesgo: bajo. Alias: `rms`.
+- `SumSquaredErrors[lista]`: Suma de errores cuadráticos Σ(x−x̄)². Mutacion: solo consulta. Riesgo: bajo. Alias: `sse`.
+- `ZMeanEstimate[lista, sigma, conf]`: Intervalo Z de la media con sigma conocida. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_media_estim`.
+- `ZMean2Estimate[l1, s1, l2, s2, conf]`: Intervalo Z de μ₁−μ₂ con sigmas conocidas. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_media2_estim`.
+- `ZMeanTest[lista, mu0, sigma]`: Prueba Z bilateral de la media (z, p). Mutacion: solo consulta. Riesgo: bajo. Alias: `z_media_test`.
+- `ZMean2Test[l1, s1, l2, s2]`: Prueba Z bilateral de μ₁−μ₂ (z, p). Mutacion: solo consulta. Riesgo: bajo. Alias: `z_media2_test`.
+- `ZProportionEstimate[exitos, n, conf]`: Intervalo Z (Wald) de una proporción. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_prop_estim`.
+- `ZProportion2Estimate[x1, n1, x2, n2, conf]`: Intervalo Z de p₁−p₂ (no agrupado). Mutacion: solo consulta. Riesgo: bajo. Alias: `z_prop2_estim`.
+- `ZProportionTest[exitos, n, p0]`: Prueba Z bilateral de una proporción contra p0. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_prop_test`.
+- `ZProportion2Test[x1, n1, x2, n2]`: Prueba Z bilateral de p₁−p₂ (agrupada). Mutacion: solo consulta. Riesgo: bajo. Alias: `z_prop2_test`.
+- `TMeanEstimate[lista, conf]`: Intervalo t de la media (sigma desconocida). Mutacion: solo consulta. Riesgo: bajo. Alias: `t_media_estim`.
+- `TMean2Estimate[l1, l2, conf]`: Intervalo t de Welch de μ₁−μ₂. Mutacion: solo consulta. Riesgo: bajo. Alias: `t_media2_estim`.
+- `ContingencyTable[obs, ncols]`: Chi² de independencia de una tabla plana filas×ncols. Mutacion: solo consulta. Riesgo: bajo. Alias: `contingencia`.
+- `Class[lista, k, i]`: i-ésima clase de k clases de igual ancho. Mutacion: solo consulta. Riesgo: bajo. Alias: `clase`.
+- `Classes[lista, k]`: Fronteras de k clases de igual ancho. Mutacion: solo consulta. Riesgo: bajo. Alias: `clases`.
+- `DotPlot[lista]`: Diagrama de puntos (crea ScatterPlot con bastones). Mutacion: crea objetos. Riesgo: medio. Alias: `diagrama_puntos`.
+- `FrequencyPolygon[lista]`: Polígono de frecuencias (crea Polyline de puntos medios). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FrequencyPolygon[lista, k]`. Alias: `poligono_frecuencias`.
+## Probabilidad
+
+- `Erlang[k, lambda]`: Erlang(k, λ): PDF y CDF (k entero ≥ 1). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Erlang[k, lambda, x]`. Alias: `erlang_dist`.
+- `FDistribution[d1, d2]`: F de Fisher-Snedecor: PDF y CDF. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `FDistribution[d1, d2, x]`. Alias: `dist_f`.
+- `Gamma[x]`: Gamma(α, β): PDF y CDF por gamma incompleta. Gamma[x] sigue siendo la función Γ. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Gamma[alpha, beta]`, `Gamma[alpha, beta, x]`. Alias: `dist_gamma`.
+- `HyperGeometric[N, K, n]`: Hipergeométrica(N,K,n): PMF y CDF por suma acotada. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `HyperGeometric[N, K, n, k]`. Alias: `hipergeometrica`.
+- `LogNormal[mu, sigma]`: Log-normal(μ, σ): PDF y CDF vía la normal. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LogNormal[mu, sigma, x]`. Alias: `lognormal_dist`.
+- `Logistic[mu, s]`: Logística(μ, s): PDF y CDF cerradas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Logistic[mu, s, x]`. Alias: `logistica_dist`.
+- `Pascal[r, p]`: Pascal r,p (fallos antes del r-ésimo éxito): PMF y CDF. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Pascal[r, p, k]`. Alias: `pascal_dist`.
+- `Triangular[a, b, c]`: Triangular(a,b,c): PDF y CDF cerradas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Triangular[a, b, c, x]`. Alias: `triangular_dist`.
+- `Weibull[k, lambda]`: Weibull(k, λ): PDF y CDF cerradas. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Weibull[k, lambda, x]`. Alias: `weibull_dist`.
+- `Zipf[s, N]`: Zipf(s, N≤100000): PMF y CDF por suma acotada. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Zipf[s, N, k]`. Alias: `zipf_dist`.
+- `Bernoulli[p]`: Bernoulli(p): PMF y CDF escalonada. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Bernoulli[p, k]`. Alias: `bernoulli_dist`.
+- `TDistribution[df]`: t de Student: PDF y CDF. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `TDistribution[df, x]`. Alias: `dist_t`.
+- `InverseBeta[p, alpha, beta]`: Cuantil Beta por Newton-bisección (tol 1e-12, cap 200). Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_beta`.
+- `InverseBinomial[p, n, ps]`: Cuantil binomial por barrido acotado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_binomial`.
+- `InverseBinomialMinimumTrials[p, k, ps]`: Menor n con P(X≥k) ≥ p para X~Binomial(n,ps). Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_binomial_ensayos`.
+- `InverseCauchy[p, x0, gamma]`: Cuantil Cauchy cerrado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_cauchy`.
+- `InverseGamma[p, alpha, beta]`: Cuantil Gamma por Newton-bisección. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_gamma`.
+- `InverseHyperGeometric[p, N, K, n]`: Cuantil hipergeométrico por barrido acotado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_hipergeometrica`.
+- `InverseLogNormal[p, mu, sigma]`: Cuantil Log-normal cerrado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_lognormal`.
+- `InverseLogistic[p, mu, s]`: Cuantil logístico cerrado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_logistica`.
+- `InversePascal[p, r, ps]`: Cuantil Pascal por barrido acotado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_pascal`.
+- `InversePoisson[p, lambda]`: Cuantil Poisson por barrido acotado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_poisson`.
+- `InverseWeibull[p, k, lambda]`: Cuantil Weibull cerrado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_weibull`.
+- `InverseZipf[p, s, N]`: Cuantil Zipf por barrido acotado. Mutacion: solo consulta. Riesgo: bajo. Alias: `inv_zipf`.
 ## Cónicas
 
 - `Focus[conica]`: Devuelve el/los focos de una cónica (elipse, hipérbola, parábola) usando grafito-geometry::exact. Mutacion: solo consulta. Riesgo: bajo. Alias: `Foco`, `focos`.
@@ -360,7 +452,18 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Repeat[n, guion]`: Repite un guion del subset de 1 a 1000 veces con presupuesto total de 1000 pasos. Mutacion: transforma objetos. Riesgo: medio. Alias: `Repetir`.
 - `DefineTool[nombre, pasos]`: Define una custom tool desde una secuencia y devuelve su JSON .ggt versionado. Mutacion: solo consulta. Riesgo: bajo. Alias: `DefinirHerramienta`.
 - `LoadTool[json]`: Valida un JSON .ggt (versión, nombre, cotas, allowlist) y lo describe sin ejecutar. Mutacion: solo consulta. Riesgo: bajo. Alias: `CargarHerramienta`.
-- `Execute[guion]`: No soportado: usa If/Repeat con pasos del subset o pulsa un Button. Mutacion: solo consulta. Riesgo: bajo. Alias: `Ejecutar`.
+- `Execute[guion]`: Ejecuta un guion del subset GGBScript con presupuesto y rollback atómico: Execute[guion]. Comparte la cota de 1000 pasos con el anidado. Mutacion: transforma objetos. Riesgo: bajo. Alias: `Ejecutar`.
+- `CenterView[x, y]`: Centra la vista 2D en (x, y): CenterView[x, y]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `centrar_vista`.
+- `Pan[dx, dy]`: Desplaza la vista en píxeles de pantalla: Pan[dx, dy]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `desplazar_vista`, `paneo`.
+- `OnClick[etiqueta, guion]`: Guarda un guion que se ejecuta al hacer click sobre el objeto: OnClick[etiqueta, guion]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `al_click`, `al_hacer_click`.
+- `OnUpdate[etiqueta, guion]`: Guarda un guion OnUpdate (ejecución en P3c: requiere tracking de cambios). Mutacion: transforma objetos. Riesgo: bajo. Alias: `al_actualizar`.
+- `OnLoad[guion]`: Guarda el guion de apertura del documento (ejecución en P3c). Mutacion: transforma objetos. Riesgo: bajo. Alias: `al_cargar`.
+- `Turtle[programa]`: Tortuga Logo: FD/BK/LT/RT/PU/PD/REPEAT a polilíneas. Turtle[programa]. Mutacion: crea objetos. Riesgo: bajo. Alias: `tortuga`.
+- `UpdateConstruction[]`: Recalcula secuencias vivas y vinculados: UpdateConstruction[]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `actualizar_construccion`.
+- `SetFilling[objeto, alfa]`: Alfa de relleno de polígono 0..=1: SetFilling[objeto, alfa]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `relleno`, `transparencia_relleno`.
+- `SetLineThickness[objeto, grosor]`: Grosor de línea 0.5..=20 en línea/círculo/polígono/polilínea/elipse: SetLineThickness[objeto, grosor]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `grosor_linea`.
+- `ShowLayer[n]`: Hace visibles los objetos de la capa n: ShowLayer[n]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `mostrar_capa`.
+- `HideLayer[n]`: Oculta los objetos de la capa n: HideLayer[n]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `ocultar_capa`.
 - `StartAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StartAnimation[variable]`. Alias: `IniciarAnimacion`.
 - `StopAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StopAnimation[variable]`. Alias: `DetenerAnimacion`.
 - `Delete[objeto]`: No soportado: usa Erase[etiqueta] o EraseAll[]. Mutacion: solo consulta. Riesgo: bajo. Alias: `Eliminar`, `Borrar`.
@@ -431,6 +534,15 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `IsInteger[valor]`: Indica si un valor numérico finito es entero. Mutacion: solo consulta. Riesgo: bajo.
 - `IsPrime[n]`: Indica si un entero entre 2 y 1e12 es primo (vía PrimeFactors). Mutacion: solo consulta. Riesgo: bajo.
 - `IsInRegion[punto, region]`: Indica si un punto está dentro de un círculo o polígono del documento. Mutacion: solo consulta. Riesgo: bajo.
+- `CSolve[expr, variable?]`: Raíces en ℂ de un polinomio: grados 1–2 exactos, 3–16 por Durand–Kerner acotado (100 iteraciones). CSolve[expr] o CSolve[expr, variable]. Mutacion: solo consulta. Riesgo: bajo. Alias: `csol`, `resolver_complejo`.
+- `CSolutions[expr, variable?]`: Como CSolve pero verificando cada raíz por sustitución e informando el residuo máximo |p(z)|. Mutacion: solo consulta. Riesgo: bajo. Alias: `csoluciones`.
+- `NSolutions[expr, variable?]`: Todas las raíces reales por aislamiento Sturm + bisección + Newton (solo mensaje, sin objetos). Mutacion: solo consulta. Riesgo: bajo. Alias: `nsoluciones`, `soluciones_numericas`.
+- `Solutions[ecuación, variable?]`: Conjunto solución de una ecuación `lhs = rhs` (solo mensaje, sin objetos; Solve además grafica). Mutacion: solo consulta. Riesgo: bajo. Alias: `soluciones`.
+- `ToComplex[a, b]`: Forma canónica a+bi desde partes o literal: ToComplex[a, b] o ToComplex["a+bi"]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ToComplex[complejo]`. Alias: `to_complejo`, `complejo`.
+- `ToPolar[a, b]`: Forma polar (r; θ) con θ en radianes: ToPolar[a, b] o ToPolar["a+bi"]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ToPolar[complejo]`. Alias: `to_polar`, `a_polar`.
+- `Prove[conclusión, hipótesis?, variables?]`: Demuestra una conclusión bajo hipótesis por Rabinowitsch + Gröbner acotado: Prove[conclusión] o Prove[conclusión, {hipótesis}] o Prove[conclusión, {hipótesis}, {variables}]. Fuera de cotas responde indefinido, jamás falso positivo. Mutacion: solo consulta. Riesgo: bajo. Alias: `demostrar`, `probar`.
+- `ProveDetails[conclusión, hipótesis?, variables?]`: Como Prove pero mostrando la base de Gröbner certificante (hasta 8 polinomios). Mutacion: solo consulta. Riesgo: bajo. Alias: `detalles_demostracion`.
+- `Relation[expr1, expr2]`: Conjetura expr1 = expr2: simbólico exacto si el motor decide; si no, muestreo numérico que refuta con contraejemplo o sugiere (usa Prove para demostrar). Mutacion: solo consulta. Riesgo: bajo. Alias: `relacion`, `conjetura`.
 ## Texto
 
 - `FormulaText[expr]`: Crea un texto con la fórmula literal dada. Mutacion: crea objetos. Riesgo: bajo.
@@ -458,6 +570,94 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Cell[celda]`: Lee una celda de la planilla por etiqueta A1. Mutacion: solo consulta. Riesgo: bajo.
 - `Column[col]`: Lee una columna de la planilla por letra o índice. Mutacion: solo consulta. Riesgo: bajo.
 - `Row[fila]`: Lee una fila de la planilla por número. Mutacion: solo consulta. Riesgo: bajo.
+## CAS
+
+- `GCD[a, b]`: Máximo común divisor de dos enteros (Euclides exacto en i128). Mutacion: solo consulta. Riesgo: bajo. Alias: `mcd`, `maximo_comun_divisor`.
+- `LCM[a, b]`: Mínimo común múltiplo de dos enteros (exacto en i128, error si desborda). Mutacion: solo consulta. Riesgo: bajo. Alias: `mcm`, `minimo_comun_multiplo`.
+- `ExtendedGCD[a, b]`: Euclides extendido: devuelve (mcd, x, y) con a·x+b·y=mcd, exacto en i128. Mutacion: solo consulta. Riesgo: bajo. Alias: `extended_gcd`, `mcd_extendido`, `bezout`.
+- `Divisors[n]`: Lista ordenada de divisores positivos de n (1 <= n <= 1e12). Mutacion: solo consulta. Riesgo: bajo. Alias: `divisores`, `DivisorsList`, `divisors_list`, `lista_divisores`.
+- `DivisorsSum[n]`: Suma de divisores σ(n) exacta en i128 (1 <= n <= 1e12). Mutacion: solo consulta. Riesgo: bajo. Alias: `divisors_sum`, `suma_divisores`, `sigma_divisores`.
+- `NextPrime[n]`: Menor primo mayor que n (Miller-Rabin determinista, cota 1e12). Mutacion: solo consulta. Riesgo: bajo. Alias: `next_prime`, `siguiente_primo`, `proximo_primo`.
+- `PreviousPrime[n]`: Mayor primo menor que n (Miller-Rabin determinista, cota 1e12). Mutacion: solo consulta. Riesgo: bajo. Alias: `previous_prime`, `primo_anterior`.
+- `ModularExponent[base, exp, mod]`: Potencia modular base^exp mod m (exponente >= 0, m >= 1, exacta). Mutacion: solo consulta. Riesgo: bajo. Alias: `modular_exponent`, `potencia_modular`, `modexp`.
+- `Mod[a, n]`: Resto euclídeo no negativo de a dividido b (b ≠ 0). Mutacion: solo consulta. Riesgo: bajo. Alias: `modulo_entero`, `resto_euclideo`.
+- `Div[a, b]`: Cociente entero euclídeo de a dividido b (b ≠ 0). Mutacion: solo consulta. Riesgo: bajo. Alias: `div_entero`, `cociente_entero`, `division_entera`.
+- `ToBase[n, base]`: Convierte un entero a base 2..=36 (dígitos 0-9a-z). Mutacion: solo consulta. Riesgo: bajo. Alias: `to_base`, `a_base`.
+- `FromBase[texto, base]`: Lee un entero escrito en base 2..=36 (exacto en i128). Mutacion: solo consulta. Riesgo: bajo. Alias: `from_base`, `desde_base`.
+- `ContinuedFraction[x]`: Fracción continua simple de un número finito (hasta 64 términos). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ContinuedFraction[x, n]`. Alias: `continued_fraction`, `fraccion_continua`.
+- `Substitute[expr, var, valor]`: Sustituye una variable por un valor en una expresión (vía AST). Mutacion: solo consulta. Riesgo: bajo. Alias: `sustituir`, `sustituye`.
+- `Polynomial[coefs]`: Construye la forma canónica a_n·x^n+… desde coeficientes ascendentes. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Polynomial[coefs, variable]`. Alias: `polinomio`.
+- `Coefficients[expr]`: Lista de coeficientes por grado del polinomio expandido. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Coefficients[expr, variable]`. Alias: `coeficientes`.
+- `Degree[expr]`: Grado total del polinomio (con variable: grado en ella). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Degree[expr, variable]`. Alias: `grado_polinomio`.
+- `Roots[expr]`: Raíces reales del polinomio en una variable (grado ≤ 16). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Roots[expr, variable]`. Alias: `raices_polinomio`.
+- `RootList[expr]`: Raíces reales en formato lista {r1, r2, …} (grado ≤ 16). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `RootList[expr, variable]`. Alias: `root_list`, `lista_raices`.
+- `ComplexRoot[expr]`: Raíces en ℂ del polinomio como pares (re, im) (grado ≤ 20). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ComplexRoot[expr, variable]`. Alias: `complex_root`.
+- `Numerator[expr]`: Numerador reducido de una fracción constante exacta. Mutacion: solo consulta. Riesgo: bajo. Alias: `numerador`.
+- `Denominator[expr]`: Denominador reducido y positivo de una fracción constante exacta. Mutacion: solo consulta. Riesgo: bajo. Alias: `denominador`.
+- `CommonDenominator[a, b]`: Mínimo común denominador de dos fracciones constantes exactas. Mutacion: solo consulta. Riesgo: bajo. Alias: `common_denominator`, `denominador_comun`.
+- `Division[p, q]`: División polinómica con cociente y resto (grados ≤ 1024). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Division[p, q, variable]`. Alias: `division_polinomica`, `cociente_resto`.
+- `IsFactored[expr]`: Indica si la forma ya es producto o potencia de factores no constantes. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `IsFactored[expr, variable]`. Alias: `is_factored`, `esta_factorizado`.
+- `IsVertexForm[expr]`: Indica si la forma es a·(x−h)²+k (a y k opcionales). Mutacion: solo consulta. Riesgo: bajo. Alias: `is_vertex_form`, `es_forma_vertice`.
+- `MinimalPolynomial[expr]`: Polinomio minimal exacto de radicales cuadráticos (grado ≤ 8). Mutacion: solo consulta. Riesgo: bajo. Alias: `minimal_polynomial`, `polinomio_minimo`.
+## Texto
+
+- `LetterToUnicode[letra]`: Código U+HHHH (y decimal) del carácter dado. Mutacion: solo consulta. Riesgo: bajo. Alias: `letter_to_unicode`, `letra_a_unicode`.
+- `UnicodeToLetter[codigo]`: Carácter desde decimal, U+HHHH o 0xHH (UTF-8 seguro). Mutacion: solo consulta. Riesgo: bajo. Alias: `unicode_to_letter`, `unicode_a_letra`.
+- `TextToUnicode[texto]`: Lista de códigos decimales de cada carácter (UTF-8 seguro). Mutacion: solo consulta. Riesgo: bajo. Alias: `text_to_unicode`, `texto_a_unicode`.
+- `UnicodeToText[codigos]`: Reconstruye el texto desde códigos separados por comas o espacios. Mutacion: solo consulta. Riesgo: bajo. Alias: `unicode_to_text`, `unicode_a_texto`.
+## Matrices
+
+- `CharacteristicPolynomial[matriz]`: Polinomio característico numérico por Faddeeva-LeVerrier (n ≤ 64). Mutacion: solo consulta. Riesgo: bajo. Alias: `characteristic_polynomial`, `polinomio_caracteristico`, `charpoly`.
+- `ReducedRowEchelonForm[matriz]`: Forma escalonada reducida por filas (Gauss-Jordan numérico). Mutacion: solo consulta. Riesgo: bajo. Alias: `reduced_row_echelon_form`, `forma_escalonada`, `rref`.
+- `SVD[matriz]`: Descomposición en valores singulares U·Σ·Vᵀ (numérica, motor SVD). Mutacion: solo consulta. Riesgo: bajo. Alias: `descomposicion_svd`, `valores_singulares`.
+- `LUDecomposition[matriz]`: Descomposición LU con pivoteo parcial (numérica, motor LU). Mutacion: solo consulta. Riesgo: bajo. Alias: `lu_decomposition`, `descomposicion_lu`.
+- `QRDecomposition[matriz]`: Descomposición QR con Q ortogonal (numérica, motor QR). Mutacion: solo consulta. Riesgo: bajo. Alias: `qr_decomposition`, `descomposicion_qr`.
+- `JordanDiagonalization[matriz]`: Diagonalización real P·D·P⁻¹ (numérica; error honesto si es defectiva o compleja). Mutacion: solo consulta. Riesgo: bajo. Alias: `jordan_diagonalization`, `diagonalizacion_jordan`, `jordan`.
+## Construir
+
+- `UnitPerpendicularVector[v]`: Calcula el perpendicular 2D unitario de un vector no nulo. Mutacion: solo consulta. Riesgo: bajo. Alias: `unit_perpendicular_vector`, `vector_perpendicular_unitario`.
+- `Normalize[v]`: Calcula el vector unitario en la dirección dada (2D o 3D). Mutacion: solo consulta. Riesgo: bajo. Alias: `normalizar`, `normaliza_vector`.
+- `PerpendicularVector[v]`: Calcula el perpendicular 2D (−y, x) de un vector no nulo. Mutacion: solo consulta. Riesgo: bajo. Alias: `perpendicular_vector`, `vector_perpendicular`.
+## Análisis
+
+- `CurvatureVector[expr, x0]`: Calcula el vector curvatura con signo de y=f(x) en x0 (numérico). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CurvatureVector[expr, variable, x0]`. Alias: `curvature_vector`, `vector_curvatura`.
+- `Minimize[f, variable]`: Mínimo en [a,b] por grilla densa + sección áurea: Minimize[f, variable] o Minimize[f, variable, a, b]. Global no garantizado (se declara). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Minimize[f, variable, a, b]`. Alias: `minimizar`, `minimo`.
+- `Maximize[f, variable]`: Máximo en [a,b] por grilla densa + sección áurea: Maximize[f, variable] o Maximize[f, variable, a, b]. Global no garantizado (se declara). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Maximize[f, variable, a, b]`. Alias: `maximizar`, `maximo`.
+- `NSolveODE[campo, x0, y0, x1]`: Integra y'=f(x,y) por RK45 Dormand–Prince con paso adaptativo: NSolveODE[campo, x0, y0, x1] o NSolveODE[campo, x0, y0, x1, n]. Crea tabla + gráfico enlazados. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `NSolveODE[campo, x0, y0, x1, n]`. Alias: `edo_numerica`, `rk45`.
+- `SlopeField[expr]`: Campo de pendientes de y'=f(x,y) como campo vectorial (1, f): SlopeField[expr]. Mutacion: crea objetos. Riesgo: bajo. Alias: `campo_pendientes`, `campo_direcciones`.
+- `Area[objeto]`: Área de polígono, círculo o elipse: Area[objeto]. Mutacion: solo consulta. Riesgo: bajo. Alias: `superficie`.
+- `Perimeter[objeto]`: Perímetro de polígono, círculo o elipse (Ramanujan): Perimeter[objeto]. Mutacion: solo consulta. Riesgo: bajo. Alias: `perimetro`, `perímetro`.
+- `Length[objeto]`: Longitud de segmento, círculo, arco, polígono, polilínea o Bézier (Simpson adaptativo): Length[objeto]. Mutacion: solo consulta. Riesgo: bajo. Alias: `longitud`, `largo`.
+- `Radius[objeto]`: Radio de círculo o arco: Radius[objeto]. Mutacion: solo consulta. Riesgo: bajo. Alias: `radio`.
+- `Circumference[círculo]`: Longitud de circunferencia: Circumference[círculo]. Mutacion: solo consulta. Riesgo: bajo. Alias: `circunferencia`.
+- `Height[A, B, C]`: Altura desde C a la recta AB: Height[A, B, C]. Mutacion: solo consulta. Riesgo: bajo. Alias: `altura`.
+## Construir
+
+- `TriangleCenter[triángulo, n]`: Centro de Kimberling 1–6 (centroide, circuncentro, incentro, ortocentro, nueve puntos, simmediano): TriangleCenter[triángulo, n] o TriangleCenter[P, Q, R, n]. Mutacion: crea objetos. Riesgo: bajo. Alias: `centro_triangulo`, `kimberling`.
+- `Centroid[polígono]`: Centroide de área de un polígono: Centroid[polígono]. Mutacion: crea objetos. Riesgo: bajo. Alias: `centroide`.
+- `Barycenter[P, Q, ...]`: Promedio de puntos: Barycenter[P, Q, ...]. Mutacion: crea objetos. Riesgo: bajo. Alias: `baricentro`.
+- `Trilinear[a, b, c, P, Q, R]`: Punto de trilineales α:β:γ sobre el triángulo: Trilinear[a, b, c, P, Q, R]. Mutacion: crea objetos. Riesgo: bajo. Alias: `trilineal`.
+- `TriangleCurve[P, Q, R, ecuación]`: Curva implícita desde ecuación baricéntrica en A, B, C: TriangleCurve[P, Q, R, ecuación]. Mutacion: crea objetos. Riesgo: bajo. Alias: `curva_triangulo`.
+## Cónicas
+
+- `ConjugateDiameter[cónica]`: Diámetro conjugado: 2·min(rx,ry) en elipse, 2b en hipérbola. Mutacion: solo consulta. Riesgo: bajo. Alias: `diametro_conjugado`.
+- `MinorAxis[elipse]`: Eje menor de elipse: MinorAxis[elipse]. Mutacion: solo consulta. Riesgo: bajo. Alias: `eje_menor`.
+- `MajorAxis[elipse]`: Eje mayor de elipse: MajorAxis[elipse]. Mutacion: solo consulta. Riesgo: bajo. Alias: `eje_mayor`.
+- `SemiMajorAxisLength[elipse]`: Semieje mayor de elipse: SemiMajorAxisLength[elipse]. Mutacion: solo consulta. Riesgo: bajo. Alias: `semieje_mayor`.
+- `SemiMinorAxisLength[elipse]`: Semieje menor de elipse: SemiMinorAxisLength[elipse]. Mutacion: solo consulta. Riesgo: bajo. Alias: `semieje_menor`.
+- `LinearEccentricity[cónica]`: Excentricidad lineal: sqrt(|rx²−ry²|) en elipse, sqrt(a²+b²) en hipérbola. Mutacion: solo consulta. Riesgo: bajo. Alias: `excentricidad_lineal`.
+## Construir
+
+- `ClosestPoint[punto, objeto]`: Punto más cercano sobre polígono, polilínea, círculo o segmento: ClosestPoint[punto, objeto]. Mutacion: crea objetos. Riesgo: bajo. Alias: `punto_cercano`, `punto_mas_cercano`.
+- `ClosestPointRegion[punto, polígono]`: Punto más cercano dentro de la región poligonal (adentro → el punto mismo): ClosestPointRegion[punto, polígono]. Mutacion: crea objetos. Riesgo: bajo. Alias: `punto_region`.
+- `PointIn[punto, polígono]`: Pertenece el punto al polígono (borde cuenta adentro): PointIn[punto, polígono]. Mutacion: solo consulta. Riesgo: bajo. Alias: `punto_en`, `dentro`.
+- `RandomPointIn[polígono]`: Punto aleatorio determinista dentro del polígono (misma semilla → mismo punto): RandomPointIn[polígono]. Mutacion: crea objetos. Riesgo: bajo. Alias: `punto_aleatorio`.
+- `IntersectPath[recta, cónica]`: Intersección analítica recta × círculo/elipse (sin recorte de vista, a diferencia de Intersect): IntersectPath[recta, cónica]. Mutacion: crea objetos. Riesgo: bajo. Alias: `interseccion_trayectoria`.
+- `Envelope[a, b, c]`: Envolvente numérica de familia a(t)x+b(t)y+c(t)=0 (200 muestras, derivadas centrales): Envelope[a, b, c] o Envelope[a, b, c, t0, t1]. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Envelope[a, b, c, t0, t1]`. Alias: `curva_envolvente`.
+## 3D
+
+- `PlaneBisector[A, B]`: Plano mediatriz de dos puntos 3D: PlaneBisector[A, B]. Mutacion: crea objetos. Riesgo: bajo. Alias: `plano_mediatriz`, `bisector`.
+- `PerpendicularPlane[A, B, P]`: Plano por P con normal AB: PerpendicularPlane[A, B, P]. Mutacion: crea objetos. Riesgo: bajo. Alias: `plano_perpendicular`.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 

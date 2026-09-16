@@ -151,8 +151,8 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | tools seguras (`all_safe_tool_schemas`, assistant) | 21 (3 base + 8 pedag + 8 math + 2 harness1) | assistant/src/agent.rs:2250-2259,2721-2766 (math 8 verificado por conteo `ToolSchema::new`) |
 | Assistant | tools seguras (`all_safe_tool_schemas`, agent hoja) | 9 (3 base + 6 pedag, sin math/harness) | agent/src/tools.rs:3060-3081 |
 | Tex | TEX_INPUT_MAX_BYTES | 8 KiB | tex/src/lib.rs:37 |
-| Comandos | COMMANDS registrados | 338 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
-| Comandos | palette-visible | 293 (45 ocultos) + 15 acciones UI = 308 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible; 3D-A2: +Vista3D) |
+| Comandos | COMMANDS registrados | 516 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
+| Comandos | palette-visible | 472 (45 ocultos) + 15 acciones UI = 487 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real) |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
 | Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
@@ -210,10 +210,10 @@ Notas:
 ## 10. Snapshot histórico v1.2.35-beta — Paridad parcial GeoGebra: subset verificado, resto stub honesto (2026-08-26; la versión vigente es 1.1.0)
 
 **Pedagogía multi-nivel (primaria→ingeniería)**
-- `grafito-pedagogy::Curriculum` 42 LOs: UTN AM1 8, AM2 7, Álgebra 6, Prob 6, Secundaria 10, Primaria 5 (level_min, requires DAG, tags, topological_order Kahn)
+- `grafito-pedagogy::Curriculum` 45 LOs: UTN AM1 8, AM2 7, Álgebra 7, Prob 6, Secundaria 12, Primaria 5 (level_min, requires DAG, tags, topological_order Kahn)
 - `UdlProfile {Concrete,Graphic,Symbolic,Formal}` + `level_value()` (Primary 2, Secondary 8, AM1 12...)
 - `SocraticFsm` Review→HeuristicQ→AwaitStudent→Rectify→Summarize (Telling<5%), `ScaffoldEngine` ya usa `history`
-- `ExerciseGenerator::generate_with_seed` wyhash paramétrico (a,b,c) + `ValidatorKind` + `FeedbackEngine` 8 misconceptions (Sign/Distributive/ChainRule/Fraction/Domain/Notation)
+- `ExerciseGenerator::generate_with_seed` wyhash paramétrico (a,b,c) + `ValidatorKind` + `FeedbackEngine` 10 misconceptions (Sign/Distributive/ChainRule/Fraction/Domain/Notation/Exponent/Algebra/Concept/None)
 
 **Perfil adaptativo**
 - `BKT` bayesiano + `Scheduler` Leitner `next_interval=86400*2^(level-1)*(2-mastery)` → `BranchState {next_review_epoch, box_level, bkt_p_known}` + `branches_due()` + `recommend_next_with_scheduler()`
@@ -249,7 +249,7 @@ Notas:
 |---|---|
 | RequestBudget 8192 / 2048 / 8 / 60s | `crates/grafito-assistant-types/src/lib.rs:198-209` |
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
-| 338 comandos (`command!(`), 293 visibles + 15 UI = 308 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible; 3D-A2: +Vista3D) |
+| 516 comandos (`command!(`), 472 visibles + 15 UI = 487 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real) |
 | 15 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs` |
 | 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
 | 87 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (contado F5: 87 variantes) |
@@ -280,12 +280,17 @@ Notas:
 | Voiceover Piper sidecar honesto + captions sidecar/quemadas | `crates/grafito-app/src/voice.rs:39-56,102-134`; `grafito-ui/src/assistant.rs:997-998,1016-1017` |
 | Write por trazo + Rectangle/Ellipse/Arc | `crates/grafito-anim/src/player.rs:23,469,482`; `scene.rs:533-542` |
 | LaTeX offline SVG/raster (tex, STIX) + draw_math | `crates/grafito-tex/src/lib.rs:1,157,247,352`; `grafito-ui/src/assistant.rs:10649-10820` |
-| 13 plantillas nativas (11 protocolo + subspace + fractal, sync 13↔13↔13) + `media.title` 14 ES/EN/PT | `crates/grafito-anim/src/protocol.rs` (`CANONICAL_TEMPLATES` 13) + `crates/grafito-app/src/anim_native.rs` (`NATIVE_TEMPLATES` 13) + `crates/grafito-ui/src/i18n.rs` (`media.title.*` 14: +`subspace`/`fractal`) |
+| 13 plantillas nativas (11 protocolo + subspace + fractal, sync 13↔13↔13) + `media.title` 14 ES/EN/PT/IT/FR/DE | `crates/grafito-anim/src/protocol.rs` (`CANONICAL_TEMPLATES` 13) + `crates/grafito-app/src/anim_native.rs` (`NATIVE_TEMPLATES` 13) + `crates/grafito-ui/src/i18n.rs` (`media.title.*` 14: +`subspace`/`fractal`) |
 | 18 members (tex) + root; 19 dirs en crates/ | `Cargo.toml` members + `ls crates/` (release-tests no listado) |
 | F18: `StreamDelta` (Reasoning/Text/Status) + `usage` real por proveedor + reasoning plegable por turno | `crates/grafito-assistant/src/lib.rs` (`StreamDelta`, `stream_progress_sender`, `parse_token_usage`, `post_json_with_reasoning_fallback`, `request_anthropic_completion_streaming`); `crates/grafito-app/src/assistant.rs` (`drain_remote_stream_preview`); `crates/grafito-ui/src/assistant.rs` (`draw_reasoning_disclosure`, `draw_turn_metrics`, `composer_mode_chip`) |
 | F18: búsqueda web sin claves (DDG HTML + Instant Answer) | `crates/grafito-assistant/src/web.rs` (23 tests) + tool opt-in `web_search` (`agent.rs`) |
 
 ## 14. Paridad GeoGebra 2026 — frente F10-C (BUILD 2026-09-05, rama f10-plan-total)
+
+> Plan de cierre ejecutado 2026-09-16 (P0–P3, ver ADR-0003): 338 → **516 comandos**
+> (472 visibles + 15 UI = 487 en paleta), i18n ES/EN/PT/IT/FR/DE (187 claves),
+> export `.ggb` + PDF multipágina + P2P iroh tras flag. GeoGebra lista ~590:
+> cobertura nominal ≈87% con el resto declarado abajo como stub honesto.
 
 Cerebro puro en `crates/grafito-core/src/symbolic/` (`csv.rs`, `solids.rs`,
 `exchange.rs`, `mod.rs` con `groebner_gate`); piel fina en
@@ -302,10 +307,10 @@ Sin tocar geometría exacta, A11Y ni perf; sin `unwrap` (gates §9).
 | Volumen/área 3D | `symbolic/solids.rs` (esfera/cubo/cilindro/cono/toro/tetra/pirámide/prisma exactos; cuádrica → `None` + `solid_measure_status`) | Volume/Area 3D | S cerrado |
 | Vistas ortográficas | `symbolic/solids.rs` (`OrthoView` alzado/planta/perfil) + `render_3d.rs` (`OrthoProjection`, píxeles egui) | vistas 3D | S cerrado (cableado cámara P2) |
 | Groebner | `symbolic/mod.rs` (`groebner_gate`: 2×2 lineal exacto, >2×2 `Err` → Eliminate); Buchberger real acotado (`geometry/cas.rs:2149`) | CAS Groebner | S cerrado |
-| PDF | `app/src/export.rs` (`serialize_pdf_vectorial` vía `printpdf 0.12`: rectas/círculos/polígonos/texto Helvetica, 1 pág.; `document_to_pdf` queda referencia histórica) | export PDF | S cerrado (multipágina falla honesto) |
+| PDF | `app/src/export.rs` (`pdf_page_ops` vía `printpdf 0.12`: rectas/círculos/polígonos/texto Helvetica, 1 página por hoja con contenido, tope `MAX_PDF_PAGES` 64; `document_to_pdf` queda referencia histórica) | export PDF | S cerrado |
 | CSV RFC 4180 | `symbolic/csv.rs` (`to_csv` CRLF + `parse_csv` con `""`, cotas 20k filas/10M) | import/export CSV | S cerrado (wiring UI P2) |
 | Clipboard SVG/PNG | `app/src/export.rs` (SVG real punto/círculo/polígono/texto; PNG vía `clipboard_png_bytes` + `arboard` "Copiar PNG", headless honesto) | copiar SVG/PNG | S cerrado |
-| Gruntz / Risch / marching-tetra / Net / iroh / CRDT | Reales y cableados: Risch-Norman (`geometry/integral.rs`), Gruntz (`geometry/cas.rs:599`; consumido por `Limit` desde F14), marching-tetra (`implicit_surface_compute.rs`), Net (`commands.rs:15598`), Buchberger (`cas.rs:2149`); stub honesto solo P2P/CRDT (`classroom/stubs.rs`) | CAS y P2P | S cerrado (wiring); P2P real = L fuera del cap |
+| Gruntz / Risch / marching-tetra / Net / iroh / CRDT | Reales y cableados: Risch-Norman (`geometry/integral.rs`), Gruntz (`geometry/cas.rs:599`; consumido por `Limit` desde F14), marching-tetra (`implicit_surface_compute.rs`), Net (`commands.rs:15598`), Buchberger (`cas.rs:2149`), P2P real `IrohTransport` tras flag `aula-iroh` (`classroom/src/iroh_transport.rs`, ping/pong verificado); stub honesto solo cifrado-sesión/outbox-persistente (`classroom/stubs.rs`) | CAS y P2P | S cerrado (wiring); UI de sala P2P = P3c diferido |
 
 ### 14.1 Frente C3 — voz, guion corto, trazo, LaTeX, run_command (sync 2026-09-11)
 

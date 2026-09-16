@@ -10,10 +10,12 @@
 //! If an expression uses operations that are not supported by the bytecode
 //! machine, compilation fails and the caller falls back to the CPU evaluator.
 
+use crate::gpu_readback::{PendingGpuReadback, ReadbackPoll};
 use crate::implicit_compute::{compile_expr, f32_bounds_have_precision, BytecodeProgram};
 use grafito_core::object::{VectorField2DObj, VectorFieldSamples};
 use grafito_core::vector_field_sampling;
 use std::collections::BTreeMap;
+use std::sync::{atomic::AtomicBool, Arc};
 
 /// Cota del lado de la grilla (paridad con `MAX_IMPLICIT_GRID_SIZE`):
 /// con 1024 el buffer máximo es 1025²·4·4 B ≈ 16,8 MB, sin desborde posible.
@@ -67,6 +69,34 @@ struct VectorParamsUniform {
     ny: u32,
     code_len: u32,
     _pad0: u32,
+}
+
+/// Submit compilado y validado, listo para `submit_buffers` (origen único
+/// sync/async). Todo lo que toca la GPU sale de acá; el plan es puro CPU.
+struct VectorSubmit {
+    params: VectorParamsUniform,
+    code: Vec<u32>,
+    constants: Vec<f32>,
+    grid_size: usize,
+    output_count: usize,
+}
+
+/// Dispatch en vuelo: el submit ya está en la GPU y la espera se distribuye
+/// en frames vía [`PendingGpuReadback`]. Se resuelve con `resolve_eval`.
+/// El buffer readback pertenece al pipeline (persistente), así que el `wait`
+/// puede cruzar frames sin mover memoria GPU entre threads.
+#[derive(Debug)]
+pub struct PendingVectorEval {
+    grid_size: usize,
+    output_count: usize,
+    wait: PendingGpuReadback,
+}
+
+impl PendingVectorEval {
+    /// Poll non-blocking delegado al waiter (para futuro slot en `canvas.rs`).
+    pub fn poll(&mut self) -> ReadbackPoll {
+        self.wait.poll()
+    }
 }
 
 impl VectorComputePipeline {
@@ -204,17 +234,15 @@ impl VectorComputePipeline {
         })
     }
 
-    /// Evaluate the 2D vector field on the GPU and return (x, y, u, v) samples.
-    /// Returns `None` if the expression cannot be compiled to GPU bytecode.
-    pub fn evaluate(
+    /// Compila y valida un submit sin tocar la GPU: origen único para el path
+    /// síncrono (`evaluate`) y el asíncrono (`dispatch`).
+    fn plan_submit(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         vf: &VectorField2DObj,
         bounds: (f64, f64, f64, f64),
         grid_size: usize,
         variables: &BTreeMap<String, f64>,
-    ) -> Option<VectorFieldSamples> {
+    ) -> Option<VectorSubmit> {
         if grid_size > self.max_grid {
             return None;
         }
@@ -237,6 +265,7 @@ impl VectorComputePipeline {
             return None;
         }
         let side = grid_side_u32(grid_size)?;
+        let output_count = vector_value_count(grid_size)?;
         let params = VectorParamsUniform {
             x_min: x_min as f32,
             x_max: x_max as f32,
@@ -247,13 +276,34 @@ impl VectorComputePipeline {
             code_len: u32::try_from(prog.code.len()).ok()?,
             _pad0: 0,
         };
+        Some(VectorSubmit {
+            params,
+            code: prog.code,
+            constants: prog.constants,
+            grid_size,
+            output_count,
+        })
+    }
 
-        queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
-        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&prog.code));
+    /// Escribe uniformes, hace submit del dispatch y arma el `map_async`.
+    /// Barato y non-blocking: no espera a la GPU. Retorna el flag que el
+    /// waiter background (o el poll síncrono legacy) observará.
+    fn submit_buffers(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        submit: &VectorSubmit,
+    ) -> Option<Arc<AtomicBool>> {
+        queue.write_buffer(
+            &self.params_buffer,
+            0,
+            bytemuck::cast_slice(&[submit.params]),
+        );
+        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
         queue.write_buffer(
             &self.constants_buffer,
             0,
-            bytemuck::cast_slice(&prog.constants),
+            bytemuck::cast_slice(&submit.constants),
         );
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -291,25 +341,29 @@ impl VectorComputePipeline {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let wg_x = side.div_ceil(16).max(1);
-            let wg_y = side.div_ceil(16).max(1);
+            let wg_x = submit.params.nx.div_ceil(16).max(1);
+            let wg_y = submit.params.ny.div_ceil(16).max(1);
             cpass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
-        let output_count = vector_value_count(grid_size)?;
         encoder.copy_buffer_to_buffer(
             &self.values_buffer,
             0,
             &self.values_readback,
             0,
-            u64::try_from(output_count.checked_mul(std::mem::size_of::<f32>())?).ok()?,
+            u64::try_from(
+                submit
+                    .output_count
+                    .checked_mul(std::mem::size_of::<f32>())?,
+            )
+            .ok()?,
         );
         crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.values_readback.slice(..);
-        let map_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let map_ok_clone = map_ok.clone();
+        let map_ok = Arc::new(AtomicBool::new(false));
+        let map_ok_clone = Arc::clone(&map_ok);
         slice.map_async(wgpu::MapMode::Read, move |result| {
             if result.is_ok() {
                 map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -317,21 +371,13 @@ impl VectorComputePipeline {
                 log::error!("Vector field compute readback failed: {:?}", result.err());
             }
         });
-        // TODO P1 (B6-Next): migrar al patrón `dispatch_*` + slot background
-        // (ver `function_compute`/`implicit_compute` + `GpuComputeSlot` en
-        // canvas.rs). Sin waiter thread: en wgpu 22 `Device` no es `Clone`;
-        // la espera se distribuye en frames (poll no-bloqueante por frame).
-        // Mitigación actual: poll acotado con timeout en vez de Wait infinito.
-        log::trace!("Vector compute sync readback (bounded poll) — 1 intento por frame");
-        let mapped = crate::sync_readback_with_timeout(device, &map_ok);
-        crate::gpu_timing::read_and_log(&self.timing, device, "Vector Compute");
+        Some(map_ok)
+    }
 
-        if !mapped {
-            // `unmap` is idempotent: when `map_async` reported an
-            // error the buffer was never mapped, so this is a no-op.
-            self.values_readback.unmap();
-            return None;
-        }
+    /// Copia inmediata del readback ya mapeado (sin espera GPU). El llamante
+    /// debe garantizar que el buffer está mapeado (`ReadbackPoll::Mapped`).
+    fn copy_mapped_samples(&self, grid_size: usize) -> Option<VectorFieldSamples> {
+        let slice = self.values_readback.slice(..);
         let data = slice.get_mapped_range();
         let values_f32: &[f32] = bytemuck::cast_slice(&data);
         let side_len = usize::try_from(grid_side_u32(grid_size)?).ok()?;
@@ -342,10 +388,10 @@ impl VectorComputePipeline {
         for j in 0..=grid_size {
             for i in 0..=grid_size {
                 let base = (j * (grid_size + 1) + i) * 4;
-                let x = values_f32[base] as f64;
-                let y = values_f32[base + 1] as f64;
-                let u = values_f32[base + 2] as f64;
-                let v = values_f32[base + 3] as f64;
+                let x = values_f32.get(base).copied().unwrap_or(f32::NAN) as f64;
+                let y = values_f32.get(base + 1).copied().unwrap_or(f32::NAN) as f64;
+                let u = values_f32.get(base + 2).copied().unwrap_or(f32::NAN) as f64;
+                let v = values_f32.get(base + 3).copied().unwrap_or(f32::NAN) as f64;
                 let u = if u.is_finite() && u.abs() < 1e6 {
                     u
                 } else {
@@ -364,6 +410,88 @@ impl VectorComputePipeline {
         self.values_readback.unmap();
 
         Some(samples)
+    }
+
+    /// Libera el buffer readback sin bloquear. Idempotente: si el `map_async`
+    /// falló o sigue pendiente, es no-op seguro; se llama en todo camino de
+    /// descarte (job obsoleto, timeout, objeto borrado) para no dejar el
+    /// pipeline inutilizado.
+    pub fn abort_eval(&self) {
+        self.values_readback.unmap();
+    }
+
+    /// Dispatch sin espera: hace submit + `map_async` y retorna
+    /// inmediatamente con un [`PendingVectorEval`]. El hilo del frame nunca
+    /// bloquea; el resolve llega en un frame posterior vía
+    /// [`Self::resolve_eval`]. Retorna `None` en los mismos casos que
+    /// [`Self::evaluate`].
+    pub fn dispatch(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vf: &VectorField2DObj,
+        bounds: (f64, f64, f64, f64),
+        grid_size: usize,
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<PendingVectorEval> {
+        let submit = self.plan_submit(vf, bounds, grid_size, variables)?;
+        let (grid_size, output_count) = (submit.grid_size, submit.output_count);
+        let map_ok = self.submit_buffers(device, queue, &submit)?;
+        log::trace!("Vector compute async dispatch (wait distributed over frames)");
+        Some(PendingVectorEval {
+            grid_size,
+            output_count,
+            wait: PendingGpuReadback::submit(&map_ok),
+        })
+    }
+
+    /// Resolve non-blocking de un dispatch previo. Solo copia si el poll ya
+    /// reportó `Mapped`; en cualquier otro caso hace `unmap` y retorna `None`
+    /// (el llamante usa el fallback CPU honesto). Nunca espera: el llamante
+    /// debe haber hecho el `device.poll(Maintain::Poll)` no-bloqueante del
+    /// frame antes de llamar.
+    pub fn resolve_eval(&self, pending: PendingVectorEval) -> Option<VectorFieldSamples> {
+        let PendingVectorEval {
+            grid_size,
+            output_count,
+            mut wait,
+        } = pending;
+        if wait.poll() != ReadbackPoll::Mapped {
+            self.abort_eval();
+            return None;
+        }
+        let _ = output_count;
+        self.copy_mapped_samples(grid_size)
+    }
+
+    /// Evaluate the 2D vector field on the GPU and return (x, y, u, v) samples.
+    /// Returns `None` if the expression cannot be compiled to GPU bytecode.
+    ///
+    /// Path síncrono legacy (bloquea hasta 250 ms): solo para callers sin slot
+    /// background. El prepare usa `dispatch` + `resolve_eval`.
+    pub fn evaluate(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vf: &VectorField2DObj,
+        bounds: (f64, f64, f64, f64),
+        grid_size: usize,
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<VectorFieldSamples> {
+        let submit = self.plan_submit(vf, bounds, grid_size, variables)?;
+        let grid_size = submit.grid_size;
+        let map_ok = self.submit_buffers(device, queue, &submit)?;
+        log::trace!("Vector compute sync readback (bounded poll) — 1 intento por frame");
+        let mapped = crate::sync_readback_with_timeout(device, &map_ok);
+        crate::gpu_timing::read_and_log(&self.timing, device, "Vector Compute");
+
+        if !mapped {
+            // `unmap` is idempotent: when `map_async` reported an
+            // error the buffer was never mapped, so this is a no-op.
+            self.values_readback.unmap();
+            return None;
+        }
+        self.copy_mapped_samples(grid_size)
     }
 }
 

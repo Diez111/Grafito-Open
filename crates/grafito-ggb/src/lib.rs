@@ -1,5 +1,6 @@
-//! Importador `.ggb` (GeoGebra) a comandos Grafito — Cerebro puro.
+//! Importador/exportador `.ggb` (GeoGebra) a comandos Grafito — Cerebro puro.
 mod error;
+pub mod export;
 mod map;
 mod model;
 mod parse;

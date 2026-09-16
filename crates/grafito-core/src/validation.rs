@@ -28,6 +28,10 @@ pub const MAX_HYPERSURFACE_RES: usize = 100;
 pub const MAX_HISTOGRAM_BINS: usize = grafito_geometry::statistics::MAX_HISTOGRAM_BINS;
 /// Máximo de filas para una tabla local persistente y sus ajustes enlazados.
 pub const MAX_DATA_TABLE_ROWS: usize = grafito_geometry::statistics::MAX_FIT_DATA_POINTS;
+/// Máximo de ítems de una lista persistible (P1).
+pub const MAX_LIST_LENGTH: usize = 10_000;
+/// Profundidad máxima de anidamiento de listas (P1).
+pub const MAX_LIST_DEPTH: usize = 8;
 /// Maximum number of vertices accepted for one polygon.
 pub const MAX_POLYGON_VERTICES: usize = 8_192;
 /// Maximum nesting accepted for `GeoObject::Transformed` wrappers.
@@ -1467,6 +1471,9 @@ fn validate_geo_object_legacy_match(doc: &Document, obj: &GeoObject) -> Result<(
             validate_finite_slice(&o.xs, "DataTable.xs")?;
             validate_finite_slice(&o.ys, "DataTable.ys")?;
         }
+        GeoObject::List(o) => {
+            validate_list_items(&o.items, "List.items", 0)?;
+        }
         GeoObject::Transformed(_) => {
             return Err("Transformed object was not validated recursively".to_string());
         }
@@ -1628,6 +1635,32 @@ fn validate_finite_slice(values: &[f64], field: &str) -> Result<(), String> {
     }
     for (index, value) in values.iter().copied().enumerate() {
         validate_finite(value, &format!("{field}[{index}]"))?;
+    }
+    Ok(())
+}
+
+/// Valida ítems de lista con cotas P1 (longitud, profundidad, finitud,
+/// textos acotados). Recursiva acotada por `MAX_LIST_DEPTH`.
+fn validate_list_items(items: &[crate::ListItem], field: &str, depth: usize) -> Result<(), String> {
+    use crate::ListItem;
+    if items.len() > MAX_LIST_LENGTH {
+        return Err(format!("{field} length exceeds maximum {MAX_LIST_LENGTH}"));
+    }
+    if depth > MAX_LIST_DEPTH {
+        return Err(format!("{field} depth exceeds maximum {MAX_LIST_DEPTH}"));
+    }
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            ListItem::Scalar(value) => {
+                validate_finite(*value, &format!("{field}[{index}]"))?;
+            }
+            ListItem::Text(text) => {
+                validate_string(text, &format!("{field}[{index}]"))?;
+            }
+            ListItem::List(inner) => {
+                validate_list_items(inner, &format!("{field}[{index}]"), depth + 1)?;
+            }
+        }
     }
     Ok(())
 }
