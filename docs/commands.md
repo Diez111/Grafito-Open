@@ -70,8 +70,8 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Translate[punto, (dx, dy)]`: Traslada un objeto. Mutacion: transforma objetos. Riesgo: medio.
 - `Rotate[punto, centro, angulo]`: Rota un objeto. Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Rotate[punto, angulo]`.
 - `Dilate[punto, factor, centro]`: Aplica una homotecia. Mutacion: transforma objetos. Riesgo: medio.
-- `Reflect[obj, punto_a, punto_b]`: Refleja un objeto respecto a un eje (linea) o a un circulo (inversion). Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Reflect[obj, circulo]`. Alias: `mirror`.
-- `Shear[objeto, angulo, eje]`: Aplica cizallamiento afin: x' = x + k*y con k = tan(angulo). Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Shear[objeto, angulo]`. Alias: `cizalla`, `trasquilacion`.
+- `Reflect[obj, punto_a, punto_b]`: [exacto] Refleja un objeto respecto a un eje (linea) o a un circulo (inversion exacta punto/linea/circulo/poligono; circulo que pasa por el centro invierte a recta; [no-soportado] resto de tipos con error honesto). Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Reflect[obj, circulo]`. Alias: `mirror`.
+- `Shear[objeto, angulo, eje]`: [exacto] Aplica cizallamiento afin punto/linea/poligono (x' = x + k*y, k = tan(angulo)). [no-soportado] circulo (la imagen real es una elipse, no un circulo) y resto de tipos, con error honesto, sin objeto sustituto. Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Shear[objeto, angulo]`. Alias: `cizalla`, `trasquilacion`.
 - `Stretch[objeto, factor, eje]`: Aplica estiramiento afin: x' = factor*x (o y' = factor*y segun eje). Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Stretch[objeto, factor]`. Alias: `estirar`, `estiramiento`.
 ## Crear
 
@@ -144,7 +144,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Inflection[f]`: Busca puntos de inflexion. Mutacion: crea objetos. Riesgo: medio. Alias: `inflexion`.
 - `YIntercept[f]`: Calcula el intercepto con el eje Y. Mutacion: crea objetos. Riesgo: bajo. Alias: `interceptoy`, `intercepto_y`.
 - `XIntercept[f]`: Calcula los interceptos con el eje X. Mutacion: crea objetos. Riesgo: medio. Alias: `interceptox`, `intercepto_x`.
-- `Intersect[a, b]`: Calcula intersecciones entre curvas. Mutacion: crea objetos. Riesgo: medio. Alias: `interseccion`.
+- `Intersect[a, b]`: [exacto] Calcula intersecciones entre curvas 2D. [no-soportado] pares 3D sin solver (esfera-cubo, recta-cubo, resto de poliedros) con error honesto UnsupportedIntersection, sin objeto sustituto. Mutacion: crea objetos. Riesgo: medio. Alias: `interseccion`.
 - `Analyze[f]`: Ejecuta el analisis disponible de una funcion. Mutacion: crea objetos. Riesgo: medio. Alias: `analizar`, `analisis`.
 - `FunctionStudy[f]`: Recorrido visual de f: ceros, extremos, AV y tabla de signos; marca puntos en el canvas. Mutacion: crea objetos. Riesgo: medio. Alias: `estudiofuncion`, `estudio`.
 ## Complejos
@@ -293,7 +293,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (Cube/Tetrahedron/Pyramid/Prism vía PolyhedronNet::unfold; persiste una cara = un polígono 2D). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Net[poliedro, escala]`. Alias: `desarrollo`, `desplegado`, `unwrap`.
 - `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `cuadrica`, `cuádrica`.
 - `ImplicitSurface[expr, x0, x1, y0, y1, z0, z1, res]`: Crea una superficie implícita F(x,y,z)=0 en la caja dada (marching-tetra, res 8..=32, 16 por defecto). Mutacion: crea objetos. Riesgo: medio. Alias: `superficieimplicita`, `implicitsurface3d`.
-- `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Cubo (polígono ortográfico; resto de poliedros stub honesto). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
+- `Intersection3D[a, b]`: [exacto] Intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (curva parametrica real) o Plano-Cubo (poligono ortografico real). [no-soportado] resto (esfera-cubo, recta-cubo, demas poliedros) con error honesto UnsupportedIntersection, sin objeto sustituto. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
 - `Vista3D[vista]`: Pide la vista del canvas 3D: perspectiva (orbital) o alzado/planta/perfil (ortográficas vía OrthoView del cerebro). Solo consulta: no crea ni muta objetos. Mutacion: solo consulta. Riesgo: bajo. Alias: `vista`, `view3d`.
 ## Crear
 
@@ -753,7 +753,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Side[sólido]`: Área lateral de cilindro, cono o prisma; mensaje con el valor. Mutacion: solo consulta. Riesgo: bajo.
 ## 3D
 
-- `IntersectConic[esfera, plano]`: Círculo de esfera por plano como mensaje honesto; sin objeto círculo-3D en esta versión. Mutacion: solo consulta. Riesgo: bajo.
+- `IntersectConic[esfera, plano]`: [aproximado] Circulo de esfera por plano calculado exacto (centro+radio) pero solo como mensaje honesto; [no-soportado] objeto circulo-3D en esta version (no se crea sustituto). Mutacion: solo consulta. Riesgo: bajo.
 ## Estadística
 
 - `Variance[lista]`: Varianza poblacional (÷n) de una lista. Mutacion: solo consulta. Riesgo: bajo.

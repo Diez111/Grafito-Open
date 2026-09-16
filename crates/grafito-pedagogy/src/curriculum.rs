@@ -2,7 +2,7 @@
 
 use crate::level::UTNProgram;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 /// Objetivo de aprendizaje atómico.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -720,14 +720,17 @@ impl Curriculum {
     }
 
     /// Orden topológico (Kahn). Error si hay ciclo.
+    /// Ola 1: mapas `BTreeMap` deterministas — el orden no depende del hash
+    /// aleatorio del proceso (los niveles cero ya se ordenaban; ahora también
+    /// las adyacencias e índices).
     pub fn topological_order() -> Result<Vec<LearningObjective>, String> {
         let all = Self::all();
-        let mut id_to_lo: HashMap<String, LearningObjective> = HashMap::new();
+        let mut id_to_lo: BTreeMap<String, LearningObjective> = BTreeMap::new();
         for lo in &all {
             id_to_lo.insert(lo.id.clone(), lo.clone());
         }
-        let mut indegree: HashMap<String, usize> = HashMap::new();
-        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        let mut indegree: BTreeMap<String, usize> = BTreeMap::new();
+        let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for lo in &all {
             indegree.entry(lo.id.clone()).or_insert(0);
         }
@@ -869,7 +872,7 @@ mod tests {
         let order = Curriculum::topological_order().expect("sin ciclo");
         assert_eq!(order.len(), Curriculum::all().len());
         // verificar orden: cada prereq aparece antes
-        let mut pos: HashMap<String, usize> = HashMap::new();
+        let mut pos: BTreeMap<String, usize> = BTreeMap::new();
         for (i, lo) in order.iter().enumerate() {
             pos.insert(lo.id.clone(), i);
         }
@@ -881,6 +884,16 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn topological_order_es_determinista() {
+        // Ola 1: dos corridas deben dar el mismo orden byte a byte
+        // (BTreeMap en Kahn, sin dependencia del hash aleatorio).
+        let a = Curriculum::topological_order().expect("sin ciclo");
+        let b = Curriculum::topological_order().expect("sin ciclo");
+        let ids_a: Vec<&str> = a.iter().map(|lo| lo.id.as_str()).collect();
+        let ids_b: Vec<&str> = b.iter().map(|lo| lo.id.as_str()).collect();
+        assert_eq!(ids_a, ids_b, "el orden topológico debe ser estable");
     }
     #[test]
     fn unlocked_for_level() {
@@ -943,7 +956,7 @@ mod tests {
         // Orden topológico sin ciclos y respeta aristas.
         let orden = Curriculum::topological_order().expect("sin ciclos");
         assert_eq!(orden.len(), 45);
-        let mut pos: HashMap<String, usize> = HashMap::new();
+        let mut pos: BTreeMap<String, usize> = BTreeMap::new();
         for (i, lo) in orden.iter().enumerate() {
             pos.insert(lo.id.clone(), i);
         }
@@ -960,7 +973,7 @@ mod tests {
     fn level_min_coherente_con_prerequisitos() {
         // Coherencia: level_min(dependiente) >= level_min(prerequisito).
         let todos = Curriculum::all();
-        let por_id: HashMap<&str, &LearningObjective> =
+        let por_id: BTreeMap<&str, &LearningObjective> =
             todos.iter().map(|lo| (lo.id.as_str(), lo)).collect();
         for lo in &todos {
             for req in &lo.requires {

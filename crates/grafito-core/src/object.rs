@@ -8,6 +8,7 @@ use grafito_geometry::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
@@ -725,7 +726,7 @@ impl GeoObject {
                     o.cached_asts = Default::default();
                 }
                 GeoObject::ImplicitSurface3D(o) => {
-                    o.mesh_slots = RwLock::new(Vec::new());
+                    o.mesh_slots = RwLock::new(VecDeque::new());
                 }
                 GeoObject::Transformed(o) => pending.push(o.inner.as_mut()),
                 _ => {}
@@ -2070,10 +2071,11 @@ pub struct ImplicitSurface3DObj {
     pub width: f32,
     pub fill_color: Option<Color>,
     /// Mallas derivadas por clave, hasta `IMPLICIT_SURFACE_MESH_SLOTS`
-    /// (orden de inserción; se expulsa la más vieja). Se ignora en
-    /// `Clone`/`PartialEq`/serde.
+    /// (orden de inserción; se expulsa la más vieja con `pop_front` O(1)
+    /// — Ola 2: `VecDeque` en vez de `Vec` + `remove(0)` O(n)).
+    /// Se ignora en `Clone`/`PartialEq`/serde.
     #[serde(skip)]
-    pub mesh_slots: RwLock<Vec<(u64, Arc<grafito_geometry::TriangleMesh3D>)>>,
+    pub mesh_slots: RwLock<VecDeque<(u64, Arc<grafito_geometry::TriangleMesh3D>)>>,
 }
 
 impl Clone for ImplicitSurface3DObj {
@@ -2094,7 +2096,7 @@ impl Clone for ImplicitSurface3DObj {
             width: self.width,
             fill_color: self.fill_color,
             // Caché runtime: se empieza vacía (el clon recomputa con su clave).
-            mesh_slots: RwLock::new(Vec::new()),
+            mesh_slots: RwLock::new(VecDeque::new()),
         }
     }
 }
@@ -2139,7 +2141,7 @@ impl ImplicitSurface3DObj {
             visible: true,
             width: 1.5,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.4)),
-            mesh_slots: RwLock::new(Vec::new()),
+            mesh_slots: RwLock::new(VecDeque::new()),
         }
     }
 
@@ -2227,9 +2229,9 @@ impl ImplicitSurface3DObj {
                 return Ok(mesh.clone());
             }
             if guard.len() >= IMPLICIT_SURFACE_MESH_SLOTS {
-                guard.remove(0);
+                guard.pop_front();
             }
-            guard.push((key, fresh.clone()));
+            guard.push_back((key, fresh.clone()));
         }
         Ok(fresh)
     }
@@ -2239,7 +2241,7 @@ impl ImplicitSurface3DObj {
         self.mesh_slots
             .read()
             .ok()
-            .and_then(|guard| guard.last().map(|(_, mesh)| mesh.clone()))
+            .and_then(|guard| guard.back().map(|(_, mesh)| mesh.clone()))
     }
 
     /// Los slots se auto-invalidan por clave en `mesh_snapshot`, así que este

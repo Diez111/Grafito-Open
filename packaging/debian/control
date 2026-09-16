@@ -1,6 +1,8 @@
 Source: grafito
 Section: graphics
 Priority: optional
+# Contacto de empaquetado. Para vulnerabilidades NO usar esta dirección:
+# ver .github/SECURITY.md (diezprocapoxd@gmail.com, 48h ack / 7 días assessment).
 Maintainer: Lautaro Agustin Diez <71948453+Diez111@users.noreply.github.com>
 Homepage: https://github.com/Diez111/Grafito
 

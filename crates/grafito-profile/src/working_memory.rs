@@ -22,14 +22,14 @@
 //!   `set_topic(name)`, `set_session_epoch(epoch)`.
 //!
 //! Invariantes que este crate garantiza (tests abajo):
-//! `snapshot()` es un clon profundo (`HashMap` propio); mutar el perfil
+//! `snapshot()` es un clon profundo (`BTreeMap` propio); mutar el perfil
 //! después no afecta al espejo ya entregado. La UI nunca debe mutar el
 //! perfil directamente: todo intento pasa por `record_attempt` en el hilo
 //! del asistente y la persistencia va por `spawn_profile_save` (background,
 //! nunca en `Ui::`).
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Memoria de trabajo de la sesión (RAM episódica).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +39,8 @@ pub struct WorkingMemory {
     /// Pasos/intentos totales en la sesión.
     pub steps_tried: u32,
     /// Conteo por tipo de misconception (ej. "sign" -> 2).
-    pub misconception_counts: HashMap<String, u8>,
+    /// `BTreeMap` a propósito: serialización estable (claves ordenadas).
+    pub misconception_counts: BTreeMap<String, u8>,
     /// Epoch de inicio/actualización de la sesión.
     pub session_epoch: u64,
     /// Último concepto mencionado/intentado.
@@ -52,7 +53,7 @@ impl Default for WorkingMemory {
         Self {
             current_topic: None,
             steps_tried: 0,
-            misconception_counts: HashMap::new(),
+            misconception_counts: BTreeMap::new(),
             session_epoch: 0,
             last_concept: None,
         }

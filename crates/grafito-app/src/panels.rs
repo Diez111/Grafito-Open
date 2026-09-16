@@ -1,8 +1,8 @@
 //! Paneles laterales removibles e inspectores (CAS, vista, estadística, propiedades).
 
 use crate::export::{
-    copy_png_to_os_clipboard, datatable_csv_text, sanitize_export_stem, spawn_csv_export,
-    spawn_pdf_export,
+    datatable_csv_text, sanitize_export_stem, spawn_csv_export, spawn_pdf_export,
+    spawn_png_clipboard,
 };
 use crate::GrafitoApp;
 use egui::Color32;
@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
 const MAX_LOCAL_DATA_IMPORT_BYTES: usize = 2_000_000;
 
@@ -1352,7 +1353,9 @@ fn draw_multidimensional_motion_card(
                     },
                     grafito_ui::toast::ToastKind::Info,
                 );
-                ui.ctx().request_repaint();
+                // Ola 2: one-shot vía presupuesto (ZERO = inmediato) en vez de
+                // `request_repaint()` directo en el draw.
+                app.request_repaint_budget(Duration::ZERO);
             }
 
             ui.add_space(SPACE_SM);
@@ -1404,7 +1407,8 @@ fn draw_multidimensional_motion_card(
                 .changed()
             {
                 app.set_multidimensional_motion_speed(speed);
-                ui.ctx().request_repaint();
+                // Ola 2: one-shot vía presupuesto (ZERO = inmediato).
+                app.request_repaint_budget(Duration::ZERO);
             }
             if ui
                 .small_button("Restablecer velocidad")
@@ -1414,7 +1418,8 @@ fn draw_multidimensional_motion_card(
                 app.set_multidimensional_motion_speed(
                     crate::app::DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED,
                 );
-                ui.ctx().request_repaint();
+                // Ola 2: one-shot vía presupuesto (ZERO = inmediato).
+                app.request_repaint_budget(Duration::ZERO);
             }
 
             if !can_animate {
@@ -2101,16 +2106,16 @@ pub(crate) fn draw_export_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                         "Copiar PNG",
                         "Copia el PNG real del lienzo al portapapeles del sistema (para Word/Moodle)",
                     ) {
-                        match copy_png_to_os_clipboard(&app.document) {
-                            Ok(summary) => {
-                                app.cas_result = summary.clone();
-                                app.notify(summary, grafito_ui::toast::ToastKind::Success);
-                            }
-                            Err(error) => {
-                                app.cas_result = error.clone();
-                                app.notify(error, grafito_ui::toast::ToastKind::Error);
-                            }
-                        }
+                        // worker: no Ui:: — arboard bloquea; el resultado se
+                        // publica en `poll_background_jobs` vía `PendingClipboardJob`.
+                        app.pending_clipboard_job =
+                            Some(crate::app::PendingClipboardJob {
+                                receiver: spawn_png_clipboard(app.document.clone(), ui.ctx()),
+                            });
+                        app.notify(
+                            "Copiando PNG al portapapeles…",
+                            grafito_ui::toast::ToastKind::Info,
+                        );
                     }
                     ui.end_row();
                     // Fila 3 — texto puro al portapapeles (G-C).
@@ -2369,7 +2374,8 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         });
                                     if vista != app.view3d {
                                         app.view3d = vista;
-                                        ui.ctx().request_repaint();
+                                        // Ola 2: one-shot vía presupuesto.
+                                        app.request_repaint_budget(Duration::ZERO);
                                     }
                                     ui.label(
                                         egui::RichText::new(
@@ -4006,6 +4012,12 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                                         .hint_text(ieq::hint_for(&live_now))
                                         .desired_width(f32::INFINITY),
                                 );
+                                // A11Y foco visible en ecuación del inspector
+                                // (anillo 2px del tema, ref `toolbar.rs:714`).
+                                if eq_resp.has_focus() {
+                                    current_theme(ui.ctx())
+                                        .paint_focus_ring(ui.painter(), eq_resp.rect);
+                                }
                                 if eq_resp.changed() {
                                     ieq::update_draft(&mut eq_state, &draft);
                                     ieq::revalidate_state(&mut eq_state, &live_now);
@@ -4708,7 +4720,8 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                             let had_valid =
                                 app.implicit_surface_slot.last_valid().is_some();
                             app.maybe_submit_implicit_slot();
-                            ui.ctx().request_repaint();
+                            // Ola 2: one-shot vía presupuesto (ZERO = inmediato).
+                            app.request_repaint_budget(Duration::ZERO);
                             if app.implicit_surface_slot.has_pending() && !was_pending {
                                 app.notify(
                                     "Vista previa en curso…",
@@ -4740,7 +4753,8 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                         );
                         if cancel_resp.clicked() {
                             app.implicit_surface_slot.cancel();
-                            ui.ctx().request_repaint();
+                            // Ola 2: one-shot vía presupuesto (ZERO = inmediato).
+                            app.request_repaint_budget(Duration::ZERO);
                             app.notify(
                                 "Vista previa cancelada.",
                                 grafito_ui::toast::ToastKind::Info,
@@ -7829,6 +7843,12 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                                                 .hint_text("=A1+B1")
                                                 .font(egui::FontId::monospace(TYPE_XS)),
                                         );
+                                        // A11Y foco visible en celda (anillo 2px del tema,
+                                        // ref `toolbar.rs:714`).
+                                        if resp.has_focus() {
+                                            current_theme(ui.ctx())
+                                                .paint_focus_ring(ui.painter(), resp.rect);
+                                        }
                                         if !resp.has_focus() && !resp.lost_focus() {
                                             resp.request_focus();
                                         }

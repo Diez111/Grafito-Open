@@ -70,6 +70,45 @@ pub struct ExportReport {
     pub omitidos: Vec<(String, String)>,
 }
 
+/// Expone los omitidos del reporte para que el caller (toast/diálogo)
+/// muestre conteo + lista en vez de solo loguearlos (Ola 1).
+pub fn export_omitidos(report: &ExportReport) -> &[(String, String)] {
+    &report.omitidos
+}
+
+/// Resumen honesto con conteo + lista (máx. `max_list` + "y N más").
+/// Combina los omitidos del adaptador (objetos que nunca viajaron: 3D,
+/// CAS, funciones, …) con los del serializador (`report.omitidos`).
+pub fn omitidos_resumen(
+    report: &ExportReport,
+    adapter_omitidos: &[(String, String)],
+    max_list: usize,
+) -> String {
+    let total = adapter_omitidos.len() + report.omitidos.len();
+    if total == 0 {
+        return "sin omitidos".to_string();
+    }
+    let max_list = max_list.max(1);
+    let primeros = adapter_omitidos
+        .iter()
+        .chain(report.omitidos.iter())
+        .take(max_list)
+        .map(|(label, reason)| {
+            if label.is_empty() {
+                reason.clone()
+            } else {
+                format!("'{label}': {reason}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if total > max_list {
+        format!("{total} omitidos: {primeros}… y {} más", total - max_list)
+    } else {
+        format!("{total} omitidos: {primeros}")
+    }
+}
+
 fn fmt_num(v: f64) -> String {
     if !v.is_finite() {
         return "0".to_string();
@@ -564,5 +603,24 @@ mod export_tests {
         assert_eq!(report.omitidos.len(), 3);
         // El ZIP sigue siendo válido aunque todo se omita parcialmente.
         assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn export_omitidos_expone_conteo_y_lista() {
+        // Ola 1: `export_omitidos` + `omitidos_resumen` para el toast del caller.
+        let report = ExportReport {
+            escritos: 1,
+            omitidos: vec![("s".to_string(), "segmento sin puntos".to_string())],
+        };
+        assert_eq!(export_omitidos(&report).len(), 1);
+        let adapter = vec![("f".to_string(), "Function no viaja".to_string())];
+        let resumen = omitidos_resumen(&report, &adapter, 3);
+        assert!(resumen.contains("2 omitidos"), "conteo, fue: {resumen}");
+        assert!(resumen.contains("'f'"), "lista adaptador, fue: {resumen}");
+        assert!(resumen.contains("'s'"), "lista reporte, fue: {resumen}");
+        assert_eq!(
+            omitidos_resumen(&ExportReport::default(), &[], 3),
+            "sin omitidos"
+        );
     }
 }

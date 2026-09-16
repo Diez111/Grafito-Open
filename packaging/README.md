@@ -42,6 +42,18 @@ El paquete instala `/usr/bin/grafito`, el lanzador de escritorio, iconos hicolor
 y documentación. `postinst` actualiza las cachés después de instalar y
 `postrm` lo hace después de retirar los archivos.
 
+El lanzador declara `TryExec=/usr/bin/grafito` (el entorno oculta la entrada
+si el binario falta) y `StartupNotify=false` explícito. Los plugins por
+defecto (`/usr/share/grafito/plugins`, p. ej. `j-space`) son archivos del
+paquete: `remove`/`purge` los retiran sin `rm` manual en `postrm`, y la
+configuración de usuario (`$HOME`) nunca se toca desde los hooks.
+
+## Contacto de seguridad
+
+Las vulnerabilidades NO se reportan al `Maintainer` de `debian/control`
+(dirección de empaquetado). Ver [.github/SECURITY.md](../.github/SECURITY.md):
+diezprocapoxd@gmail.com, acuse en 48h, evaluación en 7 días.
+
 ## Windows (`.exe` GNU)
 
 ### Requisitos

@@ -1041,6 +1041,9 @@ pub(crate) fn assistant_graph_perspective(
 pub(crate) fn load_assistant_attachment(
     path: PathBuf,
 ) -> Result<grafito_assistant_types::ImageAttachment, String> {
+    // worker: no Ui:: — `File::open` + lectura acotada corren en el hilo
+    // `std::thread::spawn` de `attach_assistant_image` (`assistant.rs`);
+    // el Ui:: solo recibe el `Result` por canal y publica el toast.
     let limits = AttachmentLimits::default();
     let file = File::open(path).map_err(|_| "No se pudo leer la imagen.".to_string())?;
     let bytes = read_bounded_attachment(file, limits.max_bytes)?;

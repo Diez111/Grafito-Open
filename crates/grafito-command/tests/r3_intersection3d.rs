@@ -124,7 +124,7 @@ fn plano_lejos_es_honesto_y_tetra_sigue_stub() {
         .expect("plano");
     let outcome = run(&mut doc2, &format!("Intersection3D[{plano2}, {tetra}]"));
     assert!(
-        matches!(&outcome, CommandOutcome::Message(m) if m.contains("solo cubo")),
+        matches!(&outcome, CommandOutcome::Error(m) if m.contains("UnsupportedIntersection")),
         "{outcome:?}"
     );
     let _ = find_object_by_label(&doc2, &plano2);

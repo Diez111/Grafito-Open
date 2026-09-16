@@ -4105,6 +4105,9 @@ fn map_core_exchange_error(context: &'static str, error: ExchangeError) -> Strin
         ExchangeError::TooManyObjects { got } => format!(
             "{context} no reemplazó el destino; {got} objetos exceden el límite {MAX_EXCHANGE_OBJECTS}"
         ),
+        ExchangeError::TooManyPages { got } => format!(
+            "{context} no reemplazó el destino; {got} páginas exceden el máximo {MAX_PDF_PAGES}"
+        ),
         ExchangeError::InvalidData { feature, detail } => {
             format!("{context} no reemplazó el destino; dato inválido en {feature}: {detail}")
         }
@@ -4556,6 +4559,25 @@ pub(crate) fn spawn_csv_export(
     rx
 }
 
+/// Spawns copia PNG al portapapeles OS en background — arboard bloquea
+/// (Wayland/data-control) y jamás debe correr en Ui::. Canal
+/// `Result<String, String>` apto para `PendingClipboardJob`; el summary se
+/// publica en `poll_background_jobs`.
+pub(crate) fn spawn_png_clipboard(
+    document: Document,
+    ctx: &egui::Context,
+) -> std::sync::mpsc::Receiver<Result<String, String>> {
+    let ctx = egui::Context::clone(ctx);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("png-clipboard".into())
+        .spawn(move || {
+            let _ = tx.send(copy_png_to_os_clipboard(&document));
+            ctx.request_repaint();
+        });
+    rx
+}
+
 /// Tallo seguro para `set_file_name` del diálogo (etiqueta → `[A-Za-z0-9_-]`,
 /// máx. 64; fallback `"tabla"`). Puro y testeado.
 pub(crate) fn sanitize_export_stem(raw: &str) -> String {
@@ -4678,6 +4700,10 @@ pub(crate) fn png_bytes_to_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), Str
 /// Headless honesto: sin servidor gráfico / Wayland sin data-control devuelve
 /// `Err` con la causa en vez de pánico; el llamador (panel) lo muestra en toast.
 /// Devuelve el resumen para `cas_result` en éxito.
+///
+/// worker: no Ui:: — arboard bloquea el hilo OS (Wayland/data-control);
+/// el call-site en `panels.rs` usa [`spawn_png_clipboard`] y publica el
+/// resultado en `poll_background_jobs`, nunca directo en Ui::.
 pub(crate) fn copy_png_to_os_clipboard(document: &Document) -> Result<String, String> {
     let png = clipboard_png_bytes(document)
         .map_err(|error| format!("PNG no se copió al portapapeles; {error}"))?;
@@ -5441,15 +5467,19 @@ fn plot_finite_pixel(img: &mut RgbaImage, x: f64, y: f64, color: Rgba<u8>) {
 ///
 /// Devuelve `(ítems, omitidos)`: puntos, segmentos (literales), círculos y
 /// polígonos (literales) viajan; el resto (funciones, textos, 3D, tablas,
-/// listas, sliders/variables, ...) se cuenta como omitido con total
-/// honesto. Las etiquetas vacías también se omiten (el importador exige
+/// listas, sliders/variables, ...) se devuelve como `(etiqueta, motivo)` para
+/// que el caller muestre conteo + lista en el toast (Ola 1; antes solo conteo).
+/// Las etiquetas vacías también se omiten (el importador exige
 /// etiqueta para referenciar).
 pub(crate) fn document_to_ggb_items(
     document: &Document,
-) -> (Vec<grafito_ggb::export::GgbExportItem>, usize) {
+) -> (
+    Vec<grafito_ggb::export::GgbExportItem>,
+    Vec<(String, String)>,
+) {
     use grafito_ggb::export::GgbExportItem;
     let mut items = Vec::new();
-    let mut omitted = 0usize;
+    let mut omitted: Vec<(String, String)> = Vec::new();
     let lit = |x: f64, y: f64| format!("({x}, {y})");
     for (_, object) in document.objects_iter() {
         if !object.is_visible() {
@@ -5459,7 +5489,7 @@ pub(crate) fn document_to_ggb_items(
         match object {
             GeoObject::Point(p) => {
                 if label.is_empty() || !p.position.x.is_finite() || !p.position.y.is_finite() {
-                    omitted += 1;
+                    omitted.push((label, "punto sin etiqueta o no finito".to_string()));
                     continue;
                 }
                 items.push(GgbExportItem::Point {
@@ -5479,7 +5509,7 @@ pub(crate) fn document_to_ggb_items(
             }
             GeoObject::Circle(c) => {
                 if label.is_empty() {
-                    omitted += 1;
+                    omitted.push((label, "círculo sin etiqueta".to_string()));
                     continue;
                 }
                 items.push(GgbExportItem::Circle {
@@ -5491,7 +5521,7 @@ pub(crate) fn document_to_ggb_items(
             }
             GeoObject::Polygon(p) => {
                 if label.is_empty() {
-                    omitted += 1;
+                    omitted.push((label, "polígono sin etiqueta".to_string()));
                     continue;
                 }
                 items.push(GgbExportItem::Polygon {
@@ -5500,7 +5530,13 @@ pub(crate) fn document_to_ggb_items(
                 });
             }
             _ => {
-                omitted += 1;
+                omitted.push((
+                    label,
+                    format!(
+                        "{} no viaja a .ggb (solo puntos, segmentos, círculos y polígonos)",
+                        object.name()
+                    ),
+                ));
             }
         }
     }
@@ -6511,7 +6547,47 @@ mod tests {
             .expect("función (no exportable)");
         let (items, omitted) = document_to_ggb_items(&document);
         assert_eq!(items.len(), 1, "solo el punto viaja");
-        assert_eq!(omitted, 1, "la función se cuenta");
+        assert_eq!(omitted.len(), 1, "la función se cuenta");
+    }
+
+    #[test]
+    fn ggb_adapter_omitidos_no_vacio_para_doc_con_3d_y_cas() {
+        // Ola 1: roundtrip de omitidos — doc con 3D/CAS deja omitidos no vacío
+        // con conteo + lista para el toast del caller.
+        use grafito_core::{FunctionObj, GeoObject, PointObj, Sphere3DObj};
+        use grafito_geometry::{Point2, Point3D};
+        let mut document = Document::new();
+        document
+            .try_add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0))))
+            .expect("punto");
+        document
+            .try_add_object(GeoObject::Function(FunctionObj::new("x^2")))
+            .expect("función (CAS, no exportable)");
+        document
+            .try_add_object(GeoObject::Sphere3D(Sphere3DObj::new(
+                Point3D::new(0.0, 0.0, 0.0),
+                1.0,
+            )))
+            .expect("esfera 3D (no exportable)");
+        let (items, adapter_omitidos) = document_to_ggb_items(&document);
+        assert_eq!(items.len(), 1, "solo el punto viaja");
+        assert!(
+            adapter_omitidos.len() >= 2,
+            "3D + CAS omitidos, fue: {adapter_omitidos:?}"
+        );
+        // El serializador no agrega más omitidos con ítems sanos, pero el
+        // resumen combinado sí trae conteo + lista.
+        let (bytes, report) = grafito_ggb::export::export_ggb_bytes(&items).expect("exporta");
+        assert!(!bytes.is_empty());
+        let detalle = grafito_ggb::export::omitidos_resumen(&report, &adapter_omitidos, 3);
+        assert!(
+            detalle.contains(&format!("{} omitidos", adapter_omitidos.len())),
+            "conteo honesto, fue: {detalle}"
+        );
+        assert!(
+            grafito_ggb::export::export_omitidos(&report).is_empty(),
+            "ítems sanos: el reporte no omite nada más"
+        );
     }
 
     #[test]

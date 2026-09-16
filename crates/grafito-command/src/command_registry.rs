@@ -776,7 +776,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Reflect",
         ["mirror"],
         "Transformar",
-        "Refleja un objeto respecto a un eje (linea) o a un circulo (inversion).",
+        "[exacto] Refleja un objeto respecto a un eje (linea) o a un circulo (inversion exacta punto/linea/circulo/poligono; circulo que pasa por el centro invierte a recta; [no-soportado] resto de tipos con error honesto).",
         TransformsObject,
         Medium,
         true,
@@ -791,7 +791,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Shear",
         ["cizalla", "trasquilacion"],
         "Transformar",
-        "Aplica cizallamiento afin: x' = x + k*y con k = tan(angulo).",
+        "[exacto] Aplica cizallamiento afin punto/linea/poligono (x' = x + k*y, k = tan(angulo)). [no-soportado] circulo (la imagen real es una elipse, no un circulo) y resto de tipos, con error honesto, sin objeto sustituto.",
         TransformsObject,
         Medium,
         true,
@@ -1576,7 +1576,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Intersect",
         ["interseccion"],
         "Análisis",
-        "Calcula intersecciones entre curvas.",
+        "[exacto] Calcula intersecciones entre curvas 2D. [no-soportado] pares 3D sin solver (esfera-cubo, recta-cubo, resto de poliedros) con error honesto UnsupportedIntersection, sin objeto sustituto.",
         CreatesObject,
         Medium,
         true,
@@ -3211,7 +3211,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Intersection3D",
         ["intersect3d", "interseccion3d", "intersección3d"],
         "3D",
-        "Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Cubo (polígono ortográfico; resto de poliedros stub honesto).",
+        "[exacto] Intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (curva parametrica real) o Plano-Cubo (poligono ortografico real). [no-soportado] resto (esfera-cubo, recta-cubo, demas poliedros) con error honesto UnsupportedIntersection, sin objeto sustituto.",
         CreatesObject,
         Medium,
         true,
@@ -7715,7 +7715,7 @@ const COMMANDS: &[CommandSpec] = &[
         "IntersectConic",
         [],
         "3D",
-        "Círculo de esfera por plano como mensaje honesto; sin objeto círculo-3D en esta versión.",
+        "[aproximado] Circulo de esfera por plano calculado exacto (centro+radio) pero solo como mensaje honesto; [no-soportado] objeto circulo-3D en esta version (no se crea sustituto).",
         ReadOnly,
         Low,
         true,
@@ -9845,6 +9845,29 @@ mod registry_tests {
                 resolve(&spaced).is_some(),
                 "resolve debe trim para {}",
                 spec.canonical
+            );
+        }
+    }
+
+    #[test]
+    fn helps_llevan_etiqueta_de_exactitud() {
+        // Ola 1 semántica exacta: Reflect/Shear/Intersection3D/Intersect/
+        // IntersectConic declaran [exacto], [aproximado] o [no-soportado].
+        for canonical in [
+            "Reflect",
+            "Shear",
+            "Intersection3D",
+            "Intersect",
+            "IntersectConic",
+        ] {
+            let spec =
+                resolve(canonical).unwrap_or_else(|| panic!("spec {canonical} debe existir"));
+            let help = spec.help;
+            assert!(
+                help.contains("[exacto]")
+                    || help.contains("[aproximado]")
+                    || help.contains("[no-soportado]"),
+                "{canonical} debe etiquetar exactitud en help, fue: {help}"
             );
         }
     }

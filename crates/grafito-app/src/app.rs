@@ -59,6 +59,11 @@ pub(crate) const CUSTOM_TOOL_HISTORY_LIMIT: usize = 64;
 pub(crate) struct PendingSaveJob {
     pub receiver: Receiver<Result<PathBuf, String>>,
 }
+/// Job de portapapeles PNG en background — arboard bloquea (Wayland) y
+/// jamás corre en Ui::. `None` = idle.
+pub(crate) struct PendingClipboardJob {
+    pub receiver: Receiver<Result<String, String>>,
+}
 /// Job de apertura en background — evita bloquear UI thread en `choose_and_open_document`.
 pub(crate) struct PendingOpenJob {
     pub receiver: Receiver<Result<(PathBuf, Document), String>>,
@@ -528,13 +533,26 @@ pub(crate) const MIN_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 0.25;
 pub(crate) const DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 1.0;
 pub(crate) const MAX_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 2.0;
 
-// ── F17 Repaint coalesce ─────────────────────────────────────────────────────
+// ── F17 Repaint coalesce + Ola 2 presupuesto único ──────────────────────────
 // El scheduler unificado de `GrafitoApp::update` (ver `update`) es la única
 // fuente de `ctx.request_repaint_after` para el estado global (animating /
 // warmup / busy). Los widgets periféricos NO deben llamar
 // `ctx.request_repaint_after` directamente: deben pedir vía
 // `GrafitoApp::request_repaint_budget` para que `RepaintBudget` acumule la
 // necesidad mínima del frame y el scheduler la aplique una sola vez al final.
+//
+// Presupuesto único de relojes (Ola 2) — todos coalescen al mínimo por frame:
+//   scheduler base              16 ms (`needs_repaint_delay`, 60 Hz interacción)
+//   motion multidimensional     33 ms (`MULTIDIMENSIONAL_MOTION_REPAINT_INTERVAL`)
+//   settle post-interacción    150 ms (`VIEW_SETTLE_DURATION`, histéresis)
+//   pulso "Generando anim…"     48 ms (fallback local `grafito-ui`, subsumido
+//                               por el scheduler cuando `assistant.is_pending`)
+//   playback media card         40 ms (fallback local `grafito-ui`, idem)
+// Los one-shot de respuesta a input (`clicked`, scroll, consumo de tecla)
+// usan `request_repaint_budget(Duration::ZERO)` = inmediato por la misma ruta
+// (ver `RepaintBudget::apply`); quedan 3 inmediatos directos sin handle al
+// presupuesto (`teaching_ui` fn libre ×2, `WhiteboardSession` ×1), todos
+// transitorios de un frame y documentados in situ.
 //
 // Inventario F17 — fuentes de wake extra (todas coalescidas por el presupuesto):
 //   1. whiteboard_ui.rs:482   — 16ms  pointer/touch down (canvas pizarra)
@@ -1700,6 +1718,7 @@ pub struct GrafitoApp {
     pub(crate) pending_ggb_export_job: Option<PendingGgbExportJob>,
     pub(crate) pending_import_job: Option<PendingImportJob>,
     pub(crate) pending_text_job: Option<PendingTextWriteJob>,
+    pub(crate) pending_clipboard_job: Option<PendingClipboardJob>,
     /// Acción encadenada tras un guardado async (New/Open con cambios sin guardar).
     /// `resolve_unsaved_decision` consume `lifecycle.pending_action`, así que la acción
     /// viaja aquí y `poll_background_jobs` la ejecuta al confirmar el save.
@@ -2414,6 +2433,7 @@ impl GrafitoApp {
             pending_ggb_export_job: None,
             pending_import_job: None,
             pending_text_job: None,
+            pending_clipboard_job: None,
             pending_chained_action: None,
             implicit_surface_slot: crate::implicit_surface_compute::ImplicitSurfaceSlot::new(),
             implicit_slot_key: None,
@@ -4551,6 +4571,33 @@ impl GrafitoApp {
                 }
             }
         }
+        // Portapapeles PNG: arboard corre en worker (`spawn_png_clipboard`);
+        // acá solo se publica el summary/error con toast.
+        if let Some(job) = self.pending_clipboard_job.take() {
+            match job.receiver.try_recv() {
+                Ok(Ok(summary)) => {
+                    self.cas_result = summary.clone();
+                    self.notify(summary, grafito_ui::toast::ToastKind::Success);
+                    ctx.request_repaint();
+                }
+                Ok(Err(error)) => {
+                    self.cas_result = error.clone();
+                    self.notify(error, grafito_ui::toast::ToastKind::Error);
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_clipboard_job = Some(job);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.cas_result = "No se pudo copiar PNG: el proceso terminó".to_string();
+                    self.notify(
+                        "No se pudo copiar PNG (el proceso terminó sin resultado)",
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    ctx.request_repaint();
+                }
+            }
+        }
         self.poll_implicit_surface_slot(ctx);
     }
 
@@ -4729,11 +4776,12 @@ impl GrafitoApp {
             .name("ggb-export".into())
             .spawn(move || {
                 let result = (|| -> Result<String, String> {
-                    let (items, adapter_omitted) =
+                    let (items, adapter_omitidos) =
                         crate::export::document_to_ggb_items(&document);
                     if items.is_empty() {
                         return Err(format!(
-                            "nada exportable a .ggb ({adapter_omitted} objetos omitidos: solo puntos, segmentos, círculos y polígonos viajan)"
+                            "nada exportable a .ggb ({} objetos omitidos: solo puntos, segmentos, círculos y polígonos viajan)",
+                            adapter_omitidos.len()
                         ));
                     }
                     let (bytes, report) = grafito_ggb::export::export_ggb_bytes(&items)
@@ -4741,10 +4789,14 @@ impl GrafitoApp {
                     crate::export::write_file_atomic(&path_clone, &bytes).map_err(|e| {
                         format!("no se pudo escribir {}: {e}", path_clone.display())
                     })?;
-                    let total_omitted = adapter_omitted + report.omitidos.len();
                     let mut summary = format!("ggb exportado: {} objetos", report.escritos);
-                    if total_omitted > 0 {
-                        summary.push_str(&format!(" ({total_omitted} no exportables omitidos)"));
+                    let detalle = grafito_ggb::export::omitidos_resumen(
+                        &report,
+                        &adapter_omitidos,
+                        3,
+                    );
+                    if detalle != "sin omitidos" {
+                        summary.push_str(&format!(" ({detalle})"));
                     }
                     Ok(summary)
                 })();
@@ -6337,45 +6389,24 @@ mod transient_render_state_tests {
     }
 }
 
-impl eframe::App for GrafitoApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        #[cfg(feature = "profile")]
-        puffin::GlobalProfiler::lock().new_frame();
-        #[cfg(feature = "profile")]
-        puffin::profile_scope!("app_update");
-        // Optional puffin_egui profiler window — keep behind a cfg(false) to avoid
-        // egui version duplication (puffin_egui 0.28 vs egui 0.29). Enable manually
-        // when a compatible egui version is available.
-        #[cfg(all(feature = "profile", any()))]
-        puffin_egui::profiler_window(ctx);
-
-        // F17: reset del presupuesto de repintado coalescido del frame.
-        self.repaint_budget = RepaintBudget::default();
-
-        if self.whiteboard_open {
-            crate::whiteboard_ui::draw_whiteboard_overlay(self, ctx);
-            return;
-        }
-
-        self.handle_native_close_request(ctx);
-        // AS3 cold-start: el archivo CLI se abre en background en el primer
-        // frame (nunca I/O de documentos en `new()`), con splash honesto.
-        self.maybe_start_startup_open(ctx);
-        self.poll_background_jobs(ctx);
-        // Aula: sincronizar opt-in (Piel pura, sin I/O) — campo classroom
-        self.classroom.set_opt_in(self.advanced_red_opt_in);
-        // D2 outbox: aviso honesto de carga corrupta, una sola vez (el load
-        // fue en `ClassroomPanel::new`, arranque; acá solo se muestra).
-        if let Some(aviso) = self.classroom.take_outbox_notice() {
-            self.notify(aviso, grafito_ui::toast::ToastKind::Error);
-        }
-        // Autosave tick (nunca en Ui::): escribe sidecar en background si debounce vencido
-        self.tick_autosave(ctx);
-        // A8 recovery (nunca I/O en Ui::): chequeo sidecar en background + poll.
-        // Si hay sidecar más nuevo, `draw_recovery_modal` (junto a onboarding) lo ofrece.
+impl GrafitoApp {
+    /// A8 recovery (nunca I/O en `Ui::`): chequeo sidecar en background + poll.
+    /// Si hay sidecar más nuevo, `draw_recovery_modal` (junto a onboarding) lo
+    /// ofrece. Ola 2: extraído de `update` sin cambiar firma pública.
+    fn handle_recovery_tick(&mut self, ctx: &egui::Context) {
         self.maybe_start_recovery_check(ctx);
         self.poll_recovery_job();
+    }
 
+    /// Scheduler unificado de repintado: acumula flags warmup/animating/busy y
+    /// pide un solo `request_repaint_after` por frame (presupuesto único 16 ms
+    /// base, 33 ms motion multidimensional, 150 ms settle — ver comentario F17).
+    /// Ola 2: extraído de `update` sin cambiar firma pública ni comportamiento;
+    /// `draw_layers` (capas UI) queda inline a propósito: comparte el `shell`
+    /// computado arriba y partirlo exigiría mover estado entre fns.
+    /// Retorna `(dt, mapping_animating)` que `update` reutiliza abajo
+    /// (`plan_2d_scene`, motion multidimensional).
+    fn dispatch_frame_scheduler(&mut self, ctx: &egui::Context) -> (f64, bool) {
         // Unified repaint scheduler: gather warmup/animating/busy flags.
         let mut needs_repaint = false;
         let needs_repaint_delay = Duration::from_millis(16);
@@ -6464,6 +6495,51 @@ impl eframe::App for GrafitoApp {
                 ctx.request_repaint_after(delay);
             }
         }
+        (dt, mapping_animating)
+    }
+}
+
+impl eframe::App for GrafitoApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "profile")]
+        puffin::GlobalProfiler::lock().new_frame();
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("app_update");
+        // Optional puffin_egui profiler window — keep behind a cfg(false) to avoid
+        // egui version duplication (puffin_egui 0.28 vs egui 0.29). Enable manually
+        // when a compatible egui version is available.
+        #[cfg(all(feature = "profile", any()))]
+        puffin_egui::profiler_window(ctx);
+
+        // F17: reset del presupuesto de repintado coalescido del frame.
+        self.repaint_budget = RepaintBudget::default();
+
+        if self.whiteboard_open {
+            crate::whiteboard_ui::draw_whiteboard_overlay(self, ctx);
+            return;
+        }
+
+        self.handle_native_close_request(ctx);
+        // AS3 cold-start: el archivo CLI se abre en background en el primer
+        // frame (nunca I/O de documentos en `new()`), con splash honesto.
+        self.maybe_start_startup_open(ctx);
+        self.poll_background_jobs(ctx);
+        // Aula: sincronizar opt-in (Piel pura, sin I/O) — campo classroom
+        self.classroom.set_opt_in(self.advanced_red_opt_in);
+        // D2 outbox: aviso honesto de carga corrupta, una sola vez (el load
+        // fue en `ClassroomPanel::new`, arranque; acá solo se muestra).
+        if let Some(aviso) = self.classroom.take_outbox_notice() {
+            self.notify(aviso, grafito_ui::toast::ToastKind::Error);
+        }
+        // Autosave tick (nunca en Ui::): escribe sidecar en background si debounce vencido
+        self.tick_autosave(ctx);
+        // A8 recovery (nunca I/O en Ui::): ver `handle_recovery_tick`.
+        self.handle_recovery_tick(ctx);
+
+        // Scheduler unificado de repintado (ver `dispatch_frame_scheduler`).
+        // Retorna `(dt, mapping_animating)`: los consume `plan_2d_scene` y el
+        // motion multidimensional más abajo en `update`.
+        let (dt, mapping_animating) = self.dispatch_frame_scheduler(ctx);
 
         self.handle_keyboard_shortcuts(ctx);
 
@@ -8136,13 +8212,15 @@ impl GrafitoApp {
         if !self.show_onboarding {
             return;
         }
+        use grafito_ui::i18n::{onboarding_msg, t};
+        let locale = self.config_locale();
         let theme = grafito_ui::theme::current_theme(ctx);
         let mut open = self.show_onboarding;
-        egui::Window::new("Bienvenido a Grafito")
+        egui::Window::new(t("onboarding.title", locale))
             .id(egui::Id::new("onboarding_window"))
             .collapsible(false)
             .resizable(false)
-            .default_width(420.0)
+            .default_width(grafito_ui::tokens::ONBOARDING_WINDOW_WIDTH)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .open(&mut open)
             .frame(
@@ -8150,13 +8228,16 @@ impl GrafitoApp {
                     .fill(theme.panel_bg)
                     .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
+                    .inner_margin(egui::Margin::symmetric(
+                        grafito_ui::tokens::ONBOARDING_INNER_PAD_X,
+                        grafito_ui::tokens::SPACE_LG,
+                    )),
             )
             .show(ctx, |ui| {
-                ui.set_max_width(420.0);
+                ui.set_max_width(grafito_ui::tokens::ONBOARDING_WINDOW_WIDTH);
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        egui::RichText::new("Grafito — pizarra geométrica interactiva")
+                        egui::RichText::new(onboarding_msg("subtitle", locale))
                             .size(grafito_ui::tokens::TYPE_MD)
                             .strong()
                             .color(theme.text_primary),
@@ -8166,17 +8247,17 @@ impl GrafitoApp {
                 ui.separator();
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.label(
-                    egui::RichText::new("1. Dibujá un punto y una recta")
+                    egui::RichText::new(onboarding_msg("bullet_primary", locale))
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_primary),
                 );
                 ui.label(
-                    egui::RichText::new("2. Pedí “graficá y=x²” en el asistente")
+                    egui::RichText::new(onboarding_msg("bullet_secondary", locale))
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_primary),
                 );
                 ui.label(
-                    egui::RichText::new("3. Arrastrá un punto y mirá qué se mueve")
+                    egui::RichText::new(onboarding_msg("bullet_tertiary", locale))
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_primary),
                 );
@@ -8184,15 +8265,19 @@ impl GrafitoApp {
                 ui.separator();
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.horizontal(|ui| {
-                    let total_w = 3.0 * 120.0 + 2.0 * 8.0;
+                    let total_w = 3.0 * grafito_ui::tokens::ONBOARDING_BUTTON_W
+                        + 2.0 * grafito_ui::tokens::ONBOARDING_BUTTON_GAP;
                     let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
                     ui.add_space(pad);
-                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.x = grafito_ui::tokens::ONBOARDING_BUTTON_GAP;
                     if ui
                         .add_sized(
-                            egui::vec2(120.0, 32.0),
+                            egui::vec2(
+                                grafito_ui::tokens::ONBOARDING_BUTTON_W,
+                                grafito_ui::tokens::ONBOARDING_BUTTON_H,
+                            ),
                             egui::Button::new(
-                                egui::RichText::new("Probar ejemplo")
+                                egui::RichText::new(onboarding_msg("btn_example", locale))
                                     .size(grafito_ui::tokens::TYPE_SM),
                             )
                             .rounding(grafito_ui::tokens::RADIUS_MD)
@@ -8206,15 +8291,18 @@ impl GrafitoApp {
                         // SOLO "No mostrar de nuevo" (vía helper, fuente única).
                         self.apply_onboarding_choice(OnboardingChoice::TryExample);
                         self.notify(
-                            "Ejemplo cargado — ¡explora Grafito!",
+                            onboarding_msg("toast_example", locale),
                             grafito_ui::toast::ToastKind::Success,
                         );
                     }
                     if ui
                         .add_sized(
-                            egui::vec2(120.0, 32.0),
+                            egui::vec2(
+                                grafito_ui::tokens::ONBOARDING_BUTTON_W,
+                                grafito_ui::tokens::ONBOARDING_BUTTON_H,
+                            ),
                             egui::Button::new(
-                                egui::RichText::new("Empezar vacío")
+                                egui::RichText::new(onboarding_msg("btn_empty", locale))
                                     .size(grafito_ui::tokens::TYPE_SM),
                             )
                             .rounding(grafito_ui::tokens::RADIUS_MD)
@@ -8228,9 +8316,12 @@ impl GrafitoApp {
                     }
                     if ui
                         .add_sized(
-                            egui::vec2(120.0, 32.0),
+                            egui::vec2(
+                                grafito_ui::tokens::ONBOARDING_BUTTON_W,
+                                grafito_ui::tokens::ONBOARDING_BUTTON_H,
+                            ),
                             egui::Button::new(
-                                egui::RichText::new("No mostrar de nuevo")
+                                egui::RichText::new(onboarding_msg("btn_dismiss", locale))
                                     .size(grafito_ui::tokens::TYPE_SM)
                                     .color(theme.text_secondary),
                             )
@@ -8928,6 +9019,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         pending_ggb_export_job: None,
         pending_import_job: None,
         pending_text_job: None,
+        pending_clipboard_job: None,
         pending_chained_action: None,
         implicit_surface_slot: crate::implicit_surface_compute::ImplicitSurfaceSlot::new(),
         implicit_slot_key: None,

@@ -2129,8 +2129,13 @@ fn auto_define_variables(text: &str, document: &mut Document) -> HashSet<String>
             continue;
         }
 
-        // Auto-define undefined variable to 1.0
-        document.set_variable(word.clone(), 1.0);
+        // Auto-define undefined variable to 1.0 (fail-closed: si el
+        // documento la rechaza —p. ej. ownership de planilla— no se cuenta
+        // como creada ni se silencia el error).
+        if let Err(error) = document.try_set_variable(word.clone(), 1.0) {
+            log::warn!("Auto-define de '{word}' rechazado: {error}");
+            continue;
+        }
         created.insert(word);
     }
 
@@ -7679,16 +7684,85 @@ fn handle_remaining_cas_commands(
                             )
                             .with_label(label),
                         ),
-                        GeoObject::Circle(circle) => GeoObject::Circle(
-                            CircleObj::new(
-                                command_result!(invert(circle.center).map_err(|error| {
-                                    CommandOutcome::Error(format!("Reflect: {error}"))
-                                })),
-                                // radio se preserva como stub; inversión exacta de círculo es más compleja
-                                circle.radius,
-                            )
-                            .with_label(label),
-                        ),
+                        GeoObject::Circle(circle) => {
+                            // Inversión real de círculo respecto al círculo (center, radius):
+                            // si no pasa por el centro de inversión → otro círculo con
+                            // C' = O + (R²/(d²-r²))·(C-O), r' = R²·r/|d²-r²|;
+                            // si pasa por O → recta (imagen de círculo por el centro).
+                            let dx = circle.center.x - center.x;
+                            let dy = circle.center.y - center.y;
+                            let d2 = dx * dx + dy * dy;
+                            if !d2.is_finite() {
+                                return CommandOutcome::Error(
+                                    "Reflect: centro de círculo no finito para inversión".into(),
+                                );
+                            }
+                            if !circle.radius.is_finite() || circle.radius <= 1e-12 {
+                                return CommandOutcome::Error(
+                                    "Reflect: radio del círculo a invertir no válido".into(),
+                                );
+                            }
+                            let r = circle.radius;
+                            if d2 <= 1e-24 {
+                                // Concéntrico con la inversión: otro círculo centrado en O.
+                                let new_radius = r2 / r;
+                                if !new_radius.is_finite() || new_radius <= 0.0 {
+                                    return CommandOutcome::Error(
+                                        "Reflect: inversión concéntrica produjo radio no finito"
+                                            .into(),
+                                    );
+                                }
+                                GeoObject::Circle(
+                                    CircleObj::new(center, new_radius).with_label(label),
+                                )
+                            } else {
+                                let denom = d2 - r * r;
+                                // Escala relativa: el círculo pasa por O si |d²-r²| ≈ 0.
+                                if denom.abs() <= 1e-9 * d2.max(r * r).max(1e-12) {
+                                    // Pasa por el centro: la imagen es una recta.
+                                    // Puntos perpendiculares a OC están garantizados ≠ O.
+                                    let d = d2.sqrt();
+                                    let ux = -dy / d;
+                                    let uy = dx / d;
+                                    let p1 = Point2::new(
+                                        circle.center.x + r * ux,
+                                        circle.center.y + r * uy,
+                                    );
+                                    let p2 = Point2::new(
+                                        circle.center.x - r * ux,
+                                        circle.center.y - r * uy,
+                                    );
+                                    let q1 = command_result!(invert(p1).map_err(|error| {
+                                        CommandOutcome::Error(format!("Reflect: {error}"))
+                                    }));
+                                    let q2 = command_result!(invert(p2).map_err(|error| {
+                                        CommandOutcome::Error(format!("Reflect: {error}"))
+                                    }));
+                                    GeoObject::Line(
+                                        LineObj::new(q1, q2).with_label(label),
+                                    )
+                                } else {
+                                    let factor = r2 / denom;
+                                    let nx = center.x + dx * factor;
+                                    let ny = center.y + dy * factor;
+                                    let new_radius = (r2 * r / denom.abs()).abs();
+                                    if !nx.is_finite()
+                                        || !ny.is_finite()
+                                        || !new_radius.is_finite()
+                                        || new_radius <= 0.0
+                                    {
+                                        return CommandOutcome::Error(
+                                            "Reflect: inversión del círculo produjo valores no finitos"
+                                                .into(),
+                                        );
+                                    }
+                                    GeoObject::Circle(
+                                        CircleObj::new(Point2::new(nx, ny), new_radius)
+                                            .with_label(label),
+                                    )
+                                }
+                            }
+                        }
                         GeoObject::Polygon(polygon) => {
                             let vertices = command_result!(polygon
                                 .vertices
@@ -7790,15 +7864,14 @@ fn handle_remaining_cas_commands(
                         )
                         .with_label(label),
                     ),
-                    GeoObject::Circle(circle) => GeoObject::Circle(
-                        CircleObj::new(
-                            command_result!(shear_point(circle.center).map_err(|error| {
-                                CommandOutcome::Error(format!("Shear: {error}"))
-                            })),
-                            circle.radius,
-                        )
-                        .with_label(label),
-                    ),
+                    GeoObject::Circle(_) => {
+                        // La cizalla de un círculo es una elipse, no un círculo:
+                        // preservar centro+radio sería un objeto falso. Fail-closed.
+                        return CommandOutcome::Error(
+                            "Shear: el círculo cizallado es una elipse (no representable como círculo); usa un polígono aproximado"
+                                .into(),
+                        );
+                    }
                     GeoObject::Polygon(polygon) => {
                         let vertices = command_result!(polygon
                             .vertices
@@ -7812,18 +7885,12 @@ fn handle_remaining_cas_commands(
                         GeoObject::Polygon(reflected)
                     }
                     _ => {
-                        // Fallback Transformed stub: usa expresión afín simple
-                        // Shear aproximado como z + k*im(z) (aunque no es holomorfo, sirve como stub visual)
-                        let expr = if y_axis {
-                            format!("z + {}*re(z)*i", k)
-                        } else {
-                            format!("z + {}*im(z)", k)
-                        };
-                        let inner = object.clone();
-                        // Intenta crear Transformed validado; si falla, usa new sin validar
-                        let transformed = grafito_core::TransformedObj::try_new(inner, &expr)
-                            .unwrap_or_else(|_| grafito_core::TransformedObj::new(object, &expr));
-                        GeoObject::Transformed(transformed)
+                        // La cizalla no es holomorfa: expresarla como `z + k·im(z)`
+                        // sería un stub visual persistido. Fail-closed honesto.
+                        return CommandOutcome::Error(
+                            "Shear: tipo no soportado para cizalla afín (solo punto/línea/polígono)"
+                                .into(),
+                        );
                     }
                 };
                 (new_obj, false)
@@ -21493,7 +21560,7 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
     if let Some(outcome) = try_plane_sphere_intersection(document, &b, &a, "Intersection3D") {
         return outcome;
     }
-    // R3.2: plano-cubo real vía solids+ortho; resto de poliedros sigue stub honesto.
+    // R3.2: plano-cubo real vía solids+ortho; resto de poliedros fail-closed.
     if let Some(outcome) = try_plane_cube_intersection(document, &a, &b, "Intersection3D") {
         return outcome;
     }
@@ -21501,16 +21568,24 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
         return outcome;
     }
     if is_polyhedron_object(&a) || is_polyhedron_object(&b) {
-        // Intersección Plano-Poliedro: solo cubo real; resto stub validado.
+        // Intersección Plano-Poliedro: solo cubo real; resto error honesto
+        // sin objeto sustituto (Ola 1 semántica exacta).
         if matches!(
             (&a, &b),
             (GeoObject::Plane3D(_), _) | (_, GeoObject::Plane3D(_))
         ) {
-            return CommandOutcome::Message(
-                "Intersection3D: Plano-Poliedro solo cubo como polígono (resto stub) — use vista 3D para visualización"
+            return CommandOutcome::Error(
+                "Intersection3D: UnsupportedIntersection Plano-Poliedro (solo Plano-Cubo como polígono; esfera-cubo y recta-cubo no soportados) — sugerencia: use la vista 3D para visualizar el corte"
                     .into(),
             );
         }
+        // Pares sin plano (esfera-cubo, recta-cubo, cubo-cubo, …): tampoco
+        // hay solver; error honesto sin crear puntos de relleno.
+        return CommandOutcome::Error(format!(
+            "Intersection3D: UnsupportedIntersection {}-{} (solo Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera o Plano-Cubo) — sugerencia: use la vista 3D para visualizar",
+            a.name(),
+            b.name()
+        ));
     }
     let eps = 1e-9;
 
@@ -21590,7 +21665,7 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
             }
         }
         _ => CommandOutcome::Error(
-            "Intersection3D: soporta Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera o Plano-Cubo (resto de poliedros como stub)".into(),
+            "Intersection3D: UnsupportedIntersection (solo Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera o Plano-Cubo; esfera-cubo y recta-cubo no soportados) — sugerencia: use la vista 3D para visualizar".into(),
         ),
     }
 }
@@ -21830,14 +21905,24 @@ fn try_intersect_3d_via_generic(
     if let Some(o) = try_plane_cube_intersection(document, b, a, "Intersect") {
         return Some(o);
     }
-    // Plano-Poliedro genérico stub (resto no-cubo).
+    // Plano-Poliedro resto no-cubo: fail-closed honesto (Ola 1), sin
+    // objeto sustituto.
     if (matches!(a, GeoObject::Plane3D(_)) && is_polyhedron_object(b))
         || (matches!(b, GeoObject::Plane3D(_)) && is_polyhedron_object(a))
     {
-        return Some(CommandOutcome::Message(
-            "Intersect: intersección Plano-Poliedro solo cubo como polígono (resto stub) — use vista 3D para visualización"
+        return Some(CommandOutcome::Error(
+            "Intersect: UnsupportedIntersection Plano-Poliedro (solo Plano-Cubo como polígono; esfera-cubo y recta-cubo no soportados) — sugerencia: use Intersection3D o la vista 3D para visualizar"
                 .into(),
         ));
+    }
+    // Pares 3D sin solver (esfera-cubo, recta-cubo, cubo-cubo, …): error
+    // honesto sin crear puntos de relleno.
+    if a.is_3d() && b.is_3d() {
+        return Some(CommandOutcome::Error(format!(
+            "Intersect: UnsupportedIntersection {}-{} (solo pares 2D y Plano-Esfera/Plano-Cubo 3D) — sugerencia: use Intersection3D o la vista 3D",
+            a.name(),
+            b.name()
+        )));
     }
     // No es intersección 3D conocida, deja que el caller continúe.
     None
@@ -32491,5 +32576,59 @@ mod coverage_sweep_handlers {
             "Erase quita el punto y sus dependientes en cascada"
         );
         assert_sano(&doc2, "Erase");
+    }
+    #[test]
+    fn intersecciones_no_soportadas_fallan_honesto_sin_sustituto() {
+        // Ola 1 semántica exacta: esfera-cubo / recta-cubo / plano-poliedro
+        // no-cubo dan Err(UnsupportedIntersection) sin crear objeto sustituto.
+        use grafito_core::{Cube3DObj, Plane3DObj, Sphere3DObj, Tetrahedron3DObj};
+        let mut doc = Document::new();
+        doc.try_add_object(GeoObject::Sphere3D(
+            Sphere3DObj::new(grafito_geometry::Point3D::new(0.0, 0.0, 0.0), 1.0).with_label("S"),
+        ))
+        .expect("esfera fixture");
+        doc.try_add_object(GeoObject::Cube3D(
+            Cube3DObj::new(grafito_geometry::Point3D::new(0.0, 0.0, 0.0), 2.0).with_label("C"),
+        ))
+        .expect("cubo fixture");
+        doc.try_add_object(GeoObject::Tetrahedron3D(
+            Tetrahedron3DObj::new(grafito_geometry::Point3D::new(0.0, 0.0, 0.0), 2.0)
+                .with_label("T"),
+        ))
+        .expect("tetra fixture");
+        doc.try_add_object(GeoObject::Plane3D(
+            Plane3DObj::from_equation(0.0, 0.0, 1.0, 0.0).with_label("P"),
+        ))
+        .expect("plano fixture");
+        // Esfera-cubo: sin solver → Err honesto.
+        let antes = doc.objects_iter().count();
+        for cmd in [
+            "Intersection3D[S, C]",
+            "Intersect[S, C]",
+            "Intersection3D[P, T]",
+        ] {
+            let mut t = cmd.to_string();
+            match process_input(&mut doc, &mut t) {
+                CommandOutcome::Error(m) => assert!(
+                    m.contains("UnsupportedIntersection"),
+                    "{cmd} debe marcar UnsupportedIntersection, fue: {m}"
+                ),
+                other => panic!("{cmd} debe fallar honesto, fue: {other:?}"),
+            }
+            assert_eq!(
+                doc.objects_iter().count(),
+                antes,
+                "{cmd} no debe crear objeto sustituto"
+            );
+        }
+        // Control: Plano-Cubo sí es real y crea el polígono.
+        let mut t = "Intersection3D[P, C]".to_string();
+        let out = process_input(&mut doc, &mut t);
+        assert!(
+            !matches!(out, CommandOutcome::Error(_)),
+            "Plano-Cubo real: {out:?}"
+        );
+        assert_eq!(doc.objects_iter().count(), antes + 1);
+        assert_sano(&doc, "Intersection3D");
     }
 }

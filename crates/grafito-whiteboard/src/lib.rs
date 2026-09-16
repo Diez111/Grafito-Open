@@ -367,9 +367,11 @@ mod tests {
             color: (0, 0, 0),
             width: 2.0,
         };
-        let (min, max) = element.bounds().unwrap();
-        assert_eq!(min, (-1.0, -2.0));
-        assert_eq!(max, (5.0, 3.0));
+        assert_eq!(
+            element.bounds(),
+            Some(((-1.0, -2.0), (5.0, 3.0))),
+            "bounds reales sin unwrap: compara el Option directo"
+        );
     }
 
     #[test]
@@ -380,11 +382,45 @@ mod tests {
             max: (5.0, 5.0),
             fill: None,
         };
-        let (min, max) = element.bounds().unwrap();
-        assert_eq!(min, (5.0, 5.0));
-        assert_eq!(max, (8.0, 9.0));
+        assert_eq!(
+            element.bounds(),
+            Some(((5.0, 5.0), (8.0, 9.0))),
+            "rectángulo invertido se normaliza sin unwrap"
+        );
         let distance = element.distance_to((6.5, 7.0));
         assert!(distance.is_finite() && distance >= 0.0);
+    }
+
+    #[test]
+    fn degenerate_elements_never_panic_and_are_skipped() {
+        // Trazo vacío: bounds() es None (fail-closed), jamás pánico.
+        let empty = WhiteboardElement::Stroke {
+            points: vec![],
+            color: (0, 0, 0),
+            width: 2.0,
+        };
+        assert_eq!(empty.bounds(), None, "trazo vacío da None, no pánico");
+        assert!(
+            empty.distance_to((0.0, 0.0)).is_infinite(),
+            "hit-test de trazo vacío es infinito, no pánico"
+        );
+        // El documento saltea el degenerado con filter_map (skip honesto):
+        // describe/select/erase no paniquean y el elemento válido sigue útil.
+        let mut doc = WhiteboardDoc::new();
+        doc.add(empty);
+        doc.add(WhiteboardElement::Rectangle {
+            min: (0.0, 0.0),
+            max: (4.0, 4.0),
+            fill: None,
+        });
+        assert_eq!(doc.select_at((2.0, 2.0), 0.5), Some(1));
+        assert_eq!(doc.erase_at((2.0, 2.0), 0.5), Some(1));
+        assert_eq!(
+            doc.len(),
+            1,
+            "solo quedó el degenerado, salteado sin pánico"
+        );
+        let _ = doc.describe();
     }
 
     #[test]

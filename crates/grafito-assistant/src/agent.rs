@@ -4568,7 +4568,8 @@ mod tests {
                     Ok(_) => {
                         counter.fetch_add(1, Ordering::SeqCst);
                     }
-                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    // Ola 4: poll con deadline a 1ms (antes 10ms).
+                    Err(_) => std::thread::sleep(Duration::from_millis(1)),
                 }
             }
         });
@@ -4628,7 +4629,8 @@ mod tests {
                         .expect("stub writes");
                         break;
                     }
-                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    // Ola 4: poll con deadline a 1ms (antes 10ms).
+                    Err(_) => std::thread::sleep(Duration::from_millis(1)),
                 }
             }
         });
@@ -6782,8 +6784,9 @@ mod tests {
                     break;
                 }
             }
-            // Supera por lejos el timeout por turno del test.
-            std::thread::sleep(Duration::from_millis(1_500));
+            // Ola 4: 400ms superan por lejos el timeout por turno del test
+            // (200ms); antes 1500ms que solo alargaban la suite.
+            std::thread::sleep(Duration::from_millis(400));
             let payload = "{\"status\":\"completed\",\"output\":[]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",

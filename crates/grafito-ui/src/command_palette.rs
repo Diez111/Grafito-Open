@@ -547,6 +547,26 @@ impl CommandPaletteState {
             .collect()
     }
 
+    /// Índice siguiente con wrap-around para Up/Down. Puro, sin I/O.
+    /// `down=true` avanza, `down=false` retrocede. `None` si vacío.
+    pub fn nav_wrapped(current: usize, len: usize, down: bool) -> Option<usize> {
+        if len == 0 {
+            return None;
+        }
+        let last = len - 1;
+        Some(if down {
+            if current >= last {
+                0
+            } else {
+                current + 1
+            }
+        } else if current == 0 {
+            last
+        } else {
+            current - 1
+        })
+    }
+
     pub fn clamp_selected_index(&mut self) {
         let len = self.filtered_commands().len();
         self.clamp_to(len);
@@ -643,12 +663,18 @@ impl CommandPaletteState {
 
                 if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
                     let filtered = self.filtered_commands_localized(locale);
-                    if self.selected_index < filtered.len().saturating_sub(1) {
-                        self.selected_index += 1;
+                    if let Some(next) = Self::nav_wrapped(self.selected_index, filtered.len(), true)
+                    {
+                        self.selected_index = next;
                     }
                 }
-                if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && self.selected_index > 0 {
-                    self.selected_index -= 1;
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    let filtered = self.filtered_commands_localized(locale);
+                    if let Some(next) =
+                        Self::nav_wrapped(self.selected_index, filtered.len(), false)
+                    {
+                        self.selected_index = next;
+                    }
                 }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     dismissed = true;
@@ -803,6 +829,17 @@ mod tests {
             keys.contains(&"Point Tool"),
             "buscar 'lienzo' (sólo en syntax_hint) debería encontrar punto, encontró {keys:?}"
         );
+    }
+
+    #[test]
+    fn nav_wrapped_da_la_vuelta_en_ambos_extremos() {
+        // 614 entradas en paleta: el wrap evita callejones sin salida por teclado.
+        assert_eq!(CommandPaletteState::nav_wrapped(0, 0, true), None);
+        assert_eq!(CommandPaletteState::nav_wrapped(0, 614, false), Some(613));
+        assert_eq!(CommandPaletteState::nav_wrapped(613, 614, true), Some(0));
+        assert_eq!(CommandPaletteState::nav_wrapped(5, 614, true), Some(6));
+        assert_eq!(CommandPaletteState::nav_wrapped(5, 614, false), Some(4));
+        assert_eq!(CommandPaletteState::nav_wrapped(0, 1, true), Some(0));
     }
 
     #[test]

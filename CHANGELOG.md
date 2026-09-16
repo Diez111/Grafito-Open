@@ -12,7 +12,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 ## [Unreleased]
 
 #### Agregado
-- **Cierre del gap GeoGebra (P0–P4)**: 338 → **621 comandos** (577 visibles + 15 acciones UI = 592 en paleta, 25 categorías).
+- **Cierre del gap GeoGebra (P0–P4)**: 338 → **639 comandos** (599 visibles + 15 acciones UI = 614 en paleta, 25 categorías).
   - **CAS**: assumptions con `refine` condicional (`sqrt(x²)→|x|`, `ln(eˣ)`, `e^(ln x)` bajo hipótesis), Gröbner exacto sobre ℚ con autoverificación, forma normal de lado (`buchberger_normal_form`), raíces complejas (cuadrática exacta + Durand–Kerner), `CSolve/CSolutions/NSolutions/Solutions`, demostración por Rabinowitsch (`Prove/ProveDetails/Relation`), suma de Riemann (5 métodos), `ImplicitDerivative`, `Iteration`, `InflectionPoint`, `RemovableDiscontinuity`, `RandomBetween/RandomPolynomial`, `Factors`, `AreEqual`, `ToExponential`, Hermite parcial (racionales grado ≤6), Bernoulli y EDOs exactas.
   - **Listas y texto**: `GeoObject::List` persistible (cotas `MAX_LIST_LENGTH` 10 000 / `MAX_LIST_DEPTH` 8), `List` constructor, `ColumnName`, `DataFunction`, `Frequency`, `PointList`, `RemoveUndefined`, `SelectedElement/Index`, `ParseToNumber/Function`, `ReadText`, `ReplaceAll`, `Split`, `Text`, `VerticalText`, `RotateText` (rotación real en canvas vía `TextObj.rotation`).
   - **Geometría**: medidas (`Area/Perimeter/Length/Radius/Circumference/Height`), centros de triángulo Kimberling 1–6, `Centroid/Barycenter/Trilinear/TriangleCurve`, proximidad (`ClosestPoint/Region`, `PointIn`, `RandomPointIn` determinista), `IntersectPath`, `Envelope`, cónicas (ejes, excentricidad, parámetro focal, 5 puntos), arcos circulares/circunscritos, `Cubic`, `PerpendicularLine`, `Direction`, `RigidPolygon`, `InteriorAngles`, planos 3D (`PlaneBisector/PerpendicularPlane`, `Bottom/Top/Ends/Side`, `IntersectConic` esfera×plano).
@@ -27,7 +27,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 #### Corregido
 - **Asistente**: ranking del catálogo insensible a tildes (plegado `fold_spanish`) y sinónimos en español por comando; los pedidos complejos excluyen `Function` y priorizan `DomainColoring/ComplexGrid`; `LUDecomposition/QRDecomposition` responden con aridad honesta en vez de "no reconocido".
-- **Docs**: `README.en.md` y `docs/architecture.md` §14 sincronizados con los conteos reales (621/577/25/15).
+- **Docs**: `README.en.md` y `docs/architecture.md` §14 sincronizados con los conteos reales (639/599/25/15).
 
 ## [1.1.0] - 2026-09-12
 

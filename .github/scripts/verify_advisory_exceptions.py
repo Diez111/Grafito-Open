@@ -20,10 +20,14 @@ EXPECTED_ADVISORY_IGNORES = (
     "RUSTSEC-2025-0141",
     "RUSTSEC-2024-0436",
     "RUSTSEC-2026-0192",
-    "RUSTSEC-2025-0165",
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 )
+# Both committed lockfiles are audited: the root workspace graph and the
+# standalone fuzz workspace (`fuzz/Cargo.lock`), which otherwise drifts
+# (e.g. stale geo 0.29.3 / i_overlay 1.9.4 hit RUSTSEC-2025-0165, already
+# fixed to geo 0.33.1 in the root graph with no ignore left to hide it).
+AUDITED_LOCKFILES = ("Cargo.lock", "fuzz/Cargo.lock")
 EXCEPTION_EXPIRES = date(2026, 12, 31)
 PATCHED_QUICK_XML_VERSION = "0.41.0"
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
@@ -138,6 +142,11 @@ def build_audit_command(lockfile: str | Path = "Cargo.lock") -> list[str]:
     for identifier in EXPECTED_ADVISORY_IGNORES:
         command.extend(("--ignore", identifier))
     return command
+
+
+def build_audit_commands(repo_root: str | Path = ".") -> list[list[str]]:
+    root = Path(repo_root)
+    return [build_audit_command(root / lockfile) for lockfile in AUDITED_LOCKFILES]
 
 
 def metadata_command() -> list[str]:
@@ -460,6 +469,10 @@ def validate_policy(repo_root: Path, *, today: date | None = None) -> None:
     deny_ids = parse_deny_ids((repo_root / "deny.toml").read_text(encoding="utf-8"))
     assert_exact_ids(deny_ids, "cargo deny")
 
+    for lockfile in AUDITED_LOCKFILES:
+        if not (repo_root / lockfile).is_file():
+            raise PolicyError(f"audited lockfile is missing: {lockfile}")
+
     workflow_text = "\n".join(
         path.read_text(encoding="utf-8")
         for pattern in ("*.yml", "*.yaml")
@@ -495,12 +508,13 @@ def run_audit(repo_root: Path) -> None:
     ) as isolated_home:
         environment = os.environ.copy()
         environment["CARGO_HOME"] = isolated_home
-        subprocess.run(
-            build_audit_command(repo_root / "Cargo.lock"),
-            cwd=isolated_home,
-            env=environment,
-            check=True,
-        )
+        for command in build_audit_commands(repo_root):
+            subprocess.run(
+                command,
+                cwd=isolated_home,
+                env=environment,
+                check=True,
+            )
 
 
 def main(argv: list[str] | None = None) -> int:

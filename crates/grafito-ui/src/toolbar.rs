@@ -1358,7 +1358,8 @@ pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
     let text_secondary = ui.visuals().text_color();
     let mut resp = ui
         .horizontal(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+            ui.spacing_mut().item_spacing =
+                egui::vec2(crate::tokens::SPACE_XXS, crate::tokens::SPACE_XXS);
             for (value, short, name) in [
                 (Locale::Es, "ES", "Español"),
                 (Locale::En, "EN", "English"),
@@ -1380,7 +1381,10 @@ pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
                         .color(color),
                 )
                 .rounding(crate::tokens::RADIUS_SM)
-                .min_size(egui::vec2(36.0, 24.0))
+                .min_size(egui::vec2(
+                    crate::tokens::TOOLBAR_LOCALE_MIN_W,
+                    crate::tokens::TOOLBAR_LOCALE_MIN_H,
+                ))
                 .fill(if selected {
                     selection_fill
                 } else {
@@ -1502,9 +1506,12 @@ pub fn toolbar_filtered_localized(
 
     let frame = egui::Frame::none()
         .fill(theme.toolbar_bg)
-        .inner_margin(egui::Margin::symmetric(4.0, TOOLBAR_VERTICAL_PADDING))
+        .inner_margin(egui::Margin::symmetric(
+            crate::tokens::TOOLBAR_INNER_PAD_X,
+            TOOLBAR_VERTICAL_PADDING,
+        ))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+            ui.spacing_mut().item_spacing = egui::vec2(crate::tokens::SPACE_XXS, 0.0);
             ui.set_height(TOOLBAR_BUTTON_SIZE);
             if toolbar_uses_overflow(ui.ctx().screen_rect().width()) {
                 compact_toolbar(ui, current_tool, groups, locale);
@@ -1537,7 +1544,7 @@ pub fn toolbar_inline_localized(
     groups: &[ToolGroupId],
     locale: Locale,
 ) {
-    ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+    ui.spacing_mut().item_spacing = egui::vec2(crate::tokens::SPACE_XXS, 0.0);
     if toolbar_uses_overflow(ui.ctx().screen_rect().width()) {
         compact_toolbar(ui, current_tool, groups, locale);
     } else {

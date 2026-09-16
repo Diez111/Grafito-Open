@@ -314,22 +314,77 @@ fn draw_edit_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 fn draw_view_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     menu_button(ui, "Vista", |ui| {
         ui.checkbox(&mut app.show_grid, "Mostrar cuadrícula");
-        ui.checkbox(&mut app.dark_mode, "Modo oscuro (Ctrl+T)")
+        // Ctrl+T como `shortcut_text` real (antes texto literal en la etiqueta).
+        // El toggle muta `dark_mode` igual que `shortcuts.rs::Ctrl+T`.
+        let dark_label = if app.dark_mode {
+            "Modo oscuro ✓"
+        } else {
+            "Modo oscuro"
+        };
+        if ui
+            .add(egui::Button::new(dark_label).shortcut_text("Ctrl+T"))
             .clicked()
-            .then(|| {
-                if app.dark_mode {
-                    DARK.apply(ui.ctx());
-                } else {
-                    LIGHT.apply(ui.ctx());
-                }
-            });
-        ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula")
-            .changed();
+        {
+            app.dark_mode = !app.dark_mode;
+            if app.dark_mode {
+                DARK.apply(ui.ctx());
+            } else {
+                LIGHT.apply(ui.ctx());
+            }
+            ui.close_menu();
+        }
+        // G snap como `shortcut_text` real (handler en `shortcuts.rs:146`).
+        let snap_label = if app.snap_to_grid {
+            "Ajustar a cuadrícula ✓"
+        } else {
+            "Ajustar a cuadrícula"
+        };
+        if ui
+            .add(egui::Button::new(snap_label).shortcut_text("G"))
+            .clicked()
+        {
+            app.snap_to_grid = !app.snap_to_grid;
+            app.snap_config.snap_to_grid = app.snap_to_grid;
+            ui.close_menu();
+        }
         ui.separator();
         // D2: salida de examen con confirmación (nunca directo).
         app.exam_mode_checkbox(ui);
-        ui.checkbox(&mut app.document.view_mut().x_log, "Eje X log");
-        ui.checkbox(&mut app.document.view_mut().y_log, "Eje Y log");
+        // Shift+L/K/J como `shortcut_text` real (handlers `shortcuts.rs:133-144`).
+        let (x_log, y_log) = {
+            let v = app.document.view();
+            (v.x_log, v.y_log)
+        };
+        if ui
+            .add(
+                egui::Button::new(if x_log { "Eje X log ✓" } else { "Eje X log" })
+                    .shortcut_text("Shift+L"),
+            )
+            .clicked()
+        {
+            app.document.view_mut().x_log = !x_log;
+            ui.close_menu();
+        }
+        if ui
+            .add(
+                egui::Button::new(if y_log { "Eje Y log ✓" } else { "Eje Y log" })
+                    .shortcut_text("Shift+K"),
+            )
+            .clicked()
+        {
+            app.document.view_mut().y_log = !y_log;
+            ui.close_menu();
+        }
+        if ui
+            .add(egui::Button::new("Ambos ejes log").shortcut_text("Shift+J"))
+            .clicked()
+        {
+            let both = !x_log || !y_log;
+            let v = app.document.view_mut();
+            v.x_log = both;
+            v.y_log = both;
+            ui.close_menu();
+        }
         ui.separator();
         ui.checkbox(&mut app.use_gpu, "Renderizado GPU");
     });
@@ -437,6 +492,51 @@ fn draw_perspectives_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 
 fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     menu_button(ui, "Herramientas", |ui| {
+        // Atajos verificados (`shortcuts.rs`): cada entrada muestra su
+        // `shortcut_text` real y dispara la misma mutación que el handler.
+        // F7 está libre a propósito (hueco entre F6 Función y F8 Esfera 3D):
+        // no hay herramienta asignada, se reserva para no romper la serie F1-F6/F8-F9.
+        // Ctrl+Y es dual: sin Shift es Rehacer (`CtrlYShortcut::Redo`),
+        // con Shift es herramienta YIntercept (`shortcuts.rs:28-37`);
+        // el menú Editar muestra "Ctrl+Y" para Rehacer (ver `ui.rs:295`).
+        if ui
+            .add(egui::Button::new("Analizar").shortcut_text("Ctrl+A"))
+            .clicked()
+        {
+            app.current_tool = Tool::Analyze;
+            app.tool_ghost = None;
+            app.reset_tool_input();
+            ui.close_menu();
+        }
+        if ui
+            .add(egui::Button::new("Paleta de comandos…").shortcut_text("Ctrl+K"))
+            .clicked()
+        {
+            app.command_palette.open = true;
+            app.command_palette.search.clear();
+            app.command_palette.selected_index = 0;
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui
+            .add(egui::Button::new("Lápiz").shortcut_text("Ctrl+P"))
+            .clicked()
+        {
+            app.current_tool = Tool::Pencil;
+            app.tool_ghost = None;
+            app.reset_tool_input();
+            ui.close_menu();
+        }
+        if ui
+            .add(egui::Button::new("Borrador").shortcut_text("Ctrl+E"))
+            .clicked()
+        {
+            app.current_tool = Tool::Eraser;
+            app.tool_ghost = None;
+            app.reset_tool_input();
+            ui.close_menu();
+        }
+        ui.separator();
         if ui
             .checkbox(&mut app.keyboard_visible, "Teclado visible")
             .changed()

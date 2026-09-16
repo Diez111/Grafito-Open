@@ -256,7 +256,8 @@ fn symbolic_partial(solution: &str, answer: &str) -> bool {
     if sol_toks.len() == 1 && ans_toks.len() == 1 {
         return false;
     }
-    let mut sol_counts = std::collections::HashMap::new();
+    // Ola 1: BTreeMap determinista (el conteo no depende del hash aleatorio).
+    let mut sol_counts = std::collections::BTreeMap::new();
     for t in &sol_toks {
         *sol_counts.entry(t).or_insert(0usize) += 1;
     }

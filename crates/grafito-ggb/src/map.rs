@@ -7,7 +7,7 @@ use crate::model::{Construccion, GgbElemento, ItemOrden};
 use crate::{
     ImportReport, MappedObject, OmittedObject, MAX_DATA_TABLE_ROWS, MAX_ELEMS, MAX_EXPR_CHARS,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 fn fmt_num(v: f64) -> String {
     if !v.is_finite() {
@@ -619,9 +619,11 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
         tipos: BTreeMap::new(),
         omitidos: Vec::new(),
     };
-    let mut puntos: HashMap<String, (f64, f64)> = HashMap::new();
-    let mut lineas: HashMap<String, ((f64, f64), (f64, f64))> = HashMap::new();
-    let mut circulos: HashMap<String, ((f64, f64), f64)> = HashMap::new();
+    // Ola 1: BTreeMap determinista (iteración ordenada por etiqueta;
+    // la salida del mapeo no depende del hash aleatorio del proceso).
+    let mut puntos: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    let mut lineas: BTreeMap<String, ((f64, f64), (f64, f64))> = BTreeMap::new();
+    let mut circulos: BTreeMap<String, ((f64, f64), f64)> = BTreeMap::new();
     for el in &construccion.elementos {
         if el.tipo.eq_ignore_ascii_case("point") {
             if let Some([x, y, _, _]) = el.coords {

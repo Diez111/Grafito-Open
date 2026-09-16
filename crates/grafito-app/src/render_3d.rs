@@ -1763,10 +1763,12 @@ impl GrafitoApp {
         }
 
         // Axis labels
-        let label_font = egui::FontId::proportional(14.0);
+        let label_font = egui::FontId::proportional(grafito_ui::tokens::TYPE_ANNOTATION);
         if let Some(pos) = projector.project_point(&Point3D::new(axis_len, 0.0, 0.0)) {
             painter.text(
-                origin + Vec2::new(pos.0, pos.1) + Vec2::new(4.0, -4.0),
+                origin
+                    + Vec2::new(pos.0, pos.1)
+                    + Vec2::new(grafito_ui::tokens::SPACE_XS, -grafito_ui::tokens::SPACE_XS),
                 egui::Align2::LEFT_BOTTOM,
                 "X",
                 label_font.clone(),
@@ -1775,7 +1777,9 @@ impl GrafitoApp {
         }
         if let Some(pos) = projector.project_point(&Point3D::new(0.0, axis_len, 0.0)) {
             painter.text(
-                origin + Vec2::new(pos.0, pos.1) + Vec2::new(4.0, -4.0),
+                origin
+                    + Vec2::new(pos.0, pos.1)
+                    + Vec2::new(grafito_ui::tokens::SPACE_XS, -grafito_ui::tokens::SPACE_XS),
                 egui::Align2::LEFT_BOTTOM,
                 "Y",
                 label_font.clone(),
@@ -1784,7 +1788,9 @@ impl GrafitoApp {
         }
         if let Some(pos) = projector.project_point(&Point3D::new(0.0, 0.0, axis_len)) {
             painter.text(
-                origin + Vec2::new(pos.0, pos.1) + Vec2::new(4.0, -4.0),
+                origin
+                    + Vec2::new(pos.0, pos.1)
+                    + Vec2::new(grafito_ui::tokens::SPACE_XS, -grafito_ui::tokens::SPACE_XS),
                 egui::Align2::LEFT_BOTTOM,
                 "Z",
                 label_font.clone(),
@@ -2260,7 +2266,7 @@ impl GrafitoApp {
                         if !p.label.is_empty() {
                             if let Some(pt) = projector.project_point(&center) {
                                 painter.text(
-                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    origin + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                     egui::Align2::CENTER_BOTTOM,
                                     &p.label,
                                     egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
@@ -2514,7 +2520,7 @@ impl GrafitoApp {
                         if !p.label.is_empty() {
                             if let Some(pt) = projector.project_point(&p.center) {
                                 painter.text(
-                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    origin + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                     egui::Align2::CENTER_BOTTOM,
                                     &p.label,
                                     egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
@@ -2560,7 +2566,7 @@ impl GrafitoApp {
                         if !c.label.is_empty() {
                             if let Some(pt) = projector.project_point(&c.apex) {
                                 painter.text(
-                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    origin + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                     egui::Align2::CENTER_BOTTOM,
                                     &c.label,
                                     egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
@@ -2612,7 +2618,7 @@ impl GrafitoApp {
                         if !c.label.is_empty() {
                             if let Some(pt) = projector.project_point(&c.base_point) {
                                 painter.text(
-                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    origin + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                     egui::Align2::CENTER_BOTTOM,
                                     &c.label,
                                     egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
@@ -3797,10 +3803,10 @@ impl GrafitoApp {
                                 projector.project_point(&Point3D::from_vec3(top_center))
                             {
                                 painter.text(
-                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    origin + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                     egui::Align2::CENTER_BOTTOM,
                                     &prism.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -3856,10 +3862,10 @@ impl GrafitoApp {
                         if !quadric.label.is_empty() {
                             if let Some(pt) = projector.project_point(&ellipsoid.center) {
                                 painter.text(
-                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    origin + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                     egui::Align2::CENTER_BOTTOM,
                                     &quadric.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -3907,10 +3913,11 @@ impl GrafitoApp {
                                 let center = Point3D::from_vec3(center_acc / center_count as f32);
                                 if let Some(pt) = projector.project_point(&center) {
                                     painter.text(
-                                        origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                        origin
+                                            + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                         egui::Align2::CENTER_BOTTOM,
                                         &quadric.label,
-                                        egui::FontId::proportional(12.0),
+                                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                         label_color,
                                     );
                                 }
@@ -3959,10 +3966,10 @@ impl GrafitoApp {
                             );
                             if let Some(pt) = projector.project_point(&center) {
                                 painter.text(
-                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    origin + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                     egui::Align2::CENTER_BOTTOM,
                                     &surface.label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -3975,10 +3982,10 @@ impl GrafitoApp {
                         );
                         if let Some(pt) = projector.project_point(&center) {
                             painter.text(
-                                origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                origin + Vec2::new(pt.0, pt.1 - grafito_ui::tokens::SPACE_SM),
                                 egui::Align2::CENTER_BOTTOM,
                                 &surface.label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -4030,10 +4037,10 @@ impl GrafitoApp {
                 }
             } else if self.implicit_surface_slot.has_pending() && !overlay_only {
                 painter.text(
-                    origin + Vec2::new(8.0, 8.0),
+                    origin + Vec2::new(grafito_ui::tokens::SPACE_SM, grafito_ui::tokens::SPACE_SM),
                     egui::Align2::LEFT_TOP,
                     "refinando implícita…",
-                    egui::FontId::proportional(11.0),
+                    egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                     label_color,
                 );
             }

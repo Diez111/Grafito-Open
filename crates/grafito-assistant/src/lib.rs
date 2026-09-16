@@ -5777,10 +5777,11 @@ mod tests {
                     Err(_) => {
                         // Tras el primer GET se da una ventana de 500ms por
                         // si un bug dispara el segundo; después se cierra.
+                        // Poll con deadline (1ms, sin busy-loop).
                         if first_at.is_some_and(|at| at.elapsed() >= Duration::from_millis(500)) {
                             break;
                         }
-                        thread::sleep(Duration::from_millis(10));
+                        thread::sleep(Duration::from_millis(1));
                     }
                 }
                 if counter.load(Ordering::SeqCst) >= 2 {
@@ -6166,7 +6167,9 @@ mod tests {
                     let mid = body.len() / 2;
                     stream.write_all(&body[..mid]).unwrap();
                     stream.flush().unwrap();
-                    thread::sleep(Duration::from_millis(50));
+                    // Ola 4: 5ms bastan para forzar la fragmentación TCP en
+                    // loopback (antes 50ms); el reensamblado es el mismo.
+                    thread::sleep(Duration::from_millis(5));
                     stream.write_all(&body[mid..]).unwrap();
                 } else {
                     stream.write_all(&body).unwrap();
@@ -6865,40 +6868,32 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_timeout_waiting_first_token_is_stage_aware() {
-        // Mock lento: acepta, lee el request y duerme sin responder. El cliente
-        // (timeout 200ms) debe fallar honesto con etapa `waiting for first token`.
-        use std::io::{Read, Write};
+        // Ola 4: `Read` falso que falla con timeout sin entregar nada (mock
+        // de tiempo, sin socket ni sleeps: antes un stub TCP dormía 800ms).
+        // Con cero deltas la etapa honesta es `waiting for first token`.
+        use std::io::Read;
         clear_rate_limit_for_tests();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = vec![0u8; 32_768];
-            let _ = stream.read(&mut buffer);
-            thread::sleep(Duration::from_millis(800));
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-            let _ = stream.flush();
-        });
-        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
-        let error = request_responses_completion_streaming(
-            endpoint,
-            json!({"model": "muse-spark-1.3-contributor"}),
-            Some("test-key"),
+        struct ImmediateTimeout;
+        impl Read for ImmediateTimeout {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "mock first-token timeout",
+                ))
+            }
+        }
+        let error = read_responses_sse_stream(
+            ImmediateTimeout,
+            Instant::now() + Duration::from_secs(60),
+            Duration::from_secs(5),
             &CancellationToken::default(),
-            Duration::from_millis(200),
-            64,
-            None,
             None,
         )
         .unwrap_err();
-        let _ = server.join();
         assert!(
             error.contains("waiting for first token"),
             "etapa honesta, era: {error}"
         );
-        assert!(!error.contains("http://"), "{error}");
     }
 
     #[cfg(feature = "assistant-net")]

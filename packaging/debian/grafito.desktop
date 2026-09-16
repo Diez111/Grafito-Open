@@ -2,6 +2,7 @@
 Name=Grafito
 Comment=Mathematical function graphing calculator
 Exec=/usr/bin/grafito
+TryExec=/usr/bin/grafito
 Icon=grafito
 Terminal=false
 Type=Application

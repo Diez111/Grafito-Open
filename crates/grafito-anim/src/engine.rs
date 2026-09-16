@@ -732,6 +732,8 @@ impl AnimEngine {
 }
 
 /// Espera salida graciosa hasta `grace` y luego hace kill (cooperativo).
+/// Poll con deadline (5ms): nunca duerme más allá de `grace` (Ola 4: este
+/// `sleep` es el intervalo de sondeo, no una espera fija).
 fn wait_or_kill(child: &mut Child, grace: Duration) {
     let deadline = Instant::now() + grace;
     loop {
@@ -1039,6 +1041,24 @@ fn send_parsed_line(sender: &SyncSender<WireMessage>, line: &[u8]) {
     }
 }
 
+/// Tope de líneas de stderr retenidas por motor (presupuesto anti-OOM).
+///
+/// Espeja el `64` documentado en `docs/architecture.md` §8 (`diagnostics cap`).
+/// `push_diagnostic_line` es la única vía de inserción: pura y testeable sin
+/// spawnear nada.
+pub const MAX_DIAGNOSTIC_LINES: usize = 64;
+
+/// Inserta una línea de stderr con tope: más allá de `MAX_DIAGNOSTIC_LINES`
+/// se descarta (las primeras 64 se conservan). Retorna `true` si se retuvo.
+fn push_diagnostic_line(guard: &mut Vec<String>, line: String) -> bool {
+    if guard.len() < MAX_DIAGNOSTIC_LINES {
+        guard.push(line);
+        true
+    } else {
+        false
+    }
+}
+
 fn spawn_stderr_drainer(
     stderr: std::process::ChildStderr,
     shared: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -1052,9 +1072,7 @@ fn spawn_stderr_drainer(
                 Ok(0) => break,
                 Ok(_) => {
                     let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
-                    if guard.len() < 64 {
-                        guard.push(line.trim_end().to_string());
-                    }
+                    push_diagnostic_line(&mut guard, line.trim_end().to_string());
                 }
                 Err(_) => break,
             }
@@ -1482,12 +1500,28 @@ done
             engine.state()
         );
         // El proceso debe estar muerto (kill <200 ms aunque ignore SHUTDOWN).
+        // Poll con deadline 500ms (Ola 4): sondeo, no espera fija.
         let proc = PathBuf::from(format!("/proc/{pid}"));
         let deadline = Instant::now() + Duration::from_millis(500);
         while proc.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!proc.exists(), "el worker {pid} debió morir en <200 ms");
+    }
+
+    // ── Ola 4 P0: diagnostics cap 64 (puro, sin spawn ni sleeps) ──────
+    #[test]
+    fn diagnostics_cap_64_retains_first_lines_and_drops_rest() {
+        assert_eq!(MAX_DIAGNOSTIC_LINES, 64);
+        let mut guard: Vec<String> = Vec::new();
+        for i in 0..70 {
+            push_diagnostic_line(&mut guard, format!("línea {i}"));
+        }
+        assert_eq!(guard.len(), 64, "tope anti-OOM de stderr");
+        assert_eq!(guard.first().map(String::as_str), Some("línea 0"));
+        assert_eq!(guard.last().map(String::as_str), Some("línea 63"));
+        assert!(!push_diagnostic_line(&mut guard, "una más".to_string()));
+        assert_eq!(guard.len(), 64);
     }
 
     // ── T3 Timeouts configurables + line_cap ─────────────────────────────

@@ -63,6 +63,21 @@ class AdvisoryPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(policy.PolicyError, "expired"):
             policy.validate_policy(Path("."), today=policy.EXCEPTION_EXPIRES)
 
+    def test_audit_covers_root_and_fuzz_lockfiles(self):
+        commands = policy.build_audit_commands("/workspace")
+
+        self.assertEqual(
+            [command[3] for command in commands],
+            ["/workspace/Cargo.lock", "/workspace/fuzz/Cargo.lock"],
+        )
+        for command in commands:
+            self.assertEqual(command[:3], ["cargo", "audit", "--file"])
+            self.assertIn("--deny", command)
+            policy.assert_exact_ids(
+                policy.extract_audit_ignore_ids(" ".join(command)),
+                "generated cargo-audit command",
+            )
+
     def test_audit_runs_outside_project_and_user_cargo_configuration(self):
         repo_root = Path("/workspace")
         with mock.patch.object(policy, "validate_policy") as validate, mock.patch.object(
@@ -71,12 +86,14 @@ class AdvisoryPolicyTests(unittest.TestCase):
             policy.run_audit(repo_root)
 
         validate.assert_called_once_with(repo_root)
-        command = run.call_args.args[0]
-        options = run.call_args.kwargs
-        self.assertEqual(command, policy.build_audit_command(repo_root / "Cargo.lock"))
-        self.assertNotEqual(Path(options["cwd"]), repo_root)
-        self.assertEqual(Path(options["env"]["CARGO_HOME"]), Path(options["cwd"]))
-        self.assertTrue(options["check"])
+        expected = policy.build_audit_commands(repo_root)
+        self.assertEqual(run.call_count, len(expected))
+        for call, command in zip(run.call_args_list, expected):
+            self.assertEqual(call.args[0], command)
+            options = call.kwargs
+            self.assertNotEqual(Path(options["cwd"]), repo_root)
+            self.assertEqual(Path(options["env"]["CARGO_HOME"]), Path(options["cwd"]))
+            self.assertTrue(options["check"])
 
     def test_metadata_command_is_locked_and_all_features(self):
         command = policy.metadata_command()

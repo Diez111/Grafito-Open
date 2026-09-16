@@ -726,6 +726,17 @@ fn complex_grid_heatmap_image(
 /// Rasteriza el domain coloring complejo (modo 1) en una `ColorImage` res×res;
 /// fila 0 = `y_max`. Usa el AST cacheado y evalúa una vez por píxel en cache
 /// miss (antes: parse + res² `rect_filled` por frame).
+///
+/// Costo del `HashMap<String, Complex64>` por frame (Ola 4, medido en diseño):
+/// se construye UNA vez por imagen (no por píxel): `N = vars + 1` inserts con
+/// `N` chico (las variables del documento rara vez pasan la decena). El costo
+/// caliente es el lookup por píxel dentro de `expr.eval(&vars)`: `res²`
+/// evaluaciones × `N` probes hash. Con `res ≤ 256` y AST cacheado (hit tras el
+/// primer frame) el frame queda en ~65k evals, despreciable frente al pintado.
+/// Mejora futura (no hecha): pre-resolver cada nombre a índice una vez por
+/// imagen y evaluar sobre un `&[Complex64]` plano para evitar el hash por
+/// píxel; el miss-rate del AST se pinnea en
+/// `complex_expr_cache_hit_after_first_parse` (segundo `get` = hit).
 fn complex_grid_domain_coloring_image(
     document: &grafito_core::Document,
     cg: &grafito_core::ComplexGridObj,
@@ -3146,7 +3157,14 @@ impl GrafitoApp {
         let painter = clipped_to_canvas(painter, canvas_rect);
         let theme = current_theme(painter.ctx());
         let card_size = Vec2::new(210.0, 190.0);
-        let card = Rect::from_min_size(canvas_rect.min + Vec2::new(14.0, 14.0), card_size);
+        let card = Rect::from_min_size(
+            canvas_rect.min
+                + Vec2::new(
+                    grafito_ui::tokens::OVERLAY_CARD_MARGIN,
+                    grafito_ui::tokens::OVERLAY_CARD_MARGIN,
+                ),
+            card_size,
+        );
         let bg = theme.panel_bg;
         painter.rect_filled(card, 10.0, bg);
         painter.rect_stroke(card, 10.0, Stroke::new(1.0, theme.separator));
@@ -3161,10 +3179,14 @@ impl GrafitoApp {
         let foot_y = center + Vec2::new(0.0, -sin_t * radius);
 
         painter.text(
-            card.min + Vec2::new(12.0, 10.0),
+            card.min
+                + Vec2::new(
+                    grafito_ui::tokens::SPACE_MD,
+                    grafito_ui::tokens::SPACE_SM_PLUS,
+                ),
             egui::Align2::LEFT_TOP,
             "Círculo unitario",
-            egui::FontId::proportional(13.0),
+            egui::FontId::proportional(grafito_ui::tokens::TYPE_CARD_TITLE),
             theme.text_primary,
         );
         painter.circle_stroke(center, radius, Stroke::new(1.5, accent));
@@ -3363,17 +3385,25 @@ impl GrafitoApp {
         }
 
         let card = Rect::from_min_size(
-            canvas_rect.min + Vec2::new(14.0, 14.0),
+            canvas_rect.min
+                + Vec2::new(
+                    grafito_ui::tokens::OVERLAY_CARD_MARGIN,
+                    grafito_ui::tokens::OVERLAY_CARD_MARGIN,
+                ),
             Vec2::new(250.0, 86.0),
         );
         let bg = theme.panel_bg;
         painter.rect_filled(card, 10.0, bg);
         painter.rect_stroke(card, 10.0, Stroke::new(1.0, theme.separator));
         painter.text(
-            card.min + Vec2::new(12.0, 10.0),
+            card.min
+                + Vec2::new(
+                    grafito_ui::tokens::SPACE_MD,
+                    grafito_ui::tokens::SPACE_SM_PLUS,
+                ),
             egui::Align2::LEFT_TOP,
             "Animación compleja",
-            egui::FontId::proportional(13.0),
+            egui::FontId::proportional(grafito_ui::tokens::TYPE_CARD_TITLE),
             theme.text_primary,
         );
         painter.text(
@@ -3528,17 +3558,24 @@ impl GrafitoApp {
             }
 
             let color = Self::hovered_analysis_color(hover.is_snap, hover.feature, hover.snap_kind);
-            let radius = if hover.is_snap { 6.0 } else { 4.0 };
+            let radius = if hover.is_snap {
+                grafito_ui::tokens::HOVER_MARKER_R_SNAP
+            } else {
+                grafito_ui::tokens::HOVER_MARKER_R
+            };
             painter.circle_filled(pos, radius, color);
             painter.circle_stroke(
                 pos,
-                radius + 1.0,
+                radius + grafito_ui::tokens::HOVER_MARKER_RING,
                 egui::Stroke::new(1.0, egui::Color32::WHITE),
             );
 
-            let font = egui::FontId::proportional(14.0);
+            let font = egui::FontId::proportional(grafito_ui::tokens::TYPE_ANNOTATION);
             painter.text(
-                pos + egui::Vec2::new(10.0, -10.0),
+                pos + egui::Vec2::new(
+                    grafito_ui::tokens::SPACE_SM_PLUS,
+                    -grafito_ui::tokens::SPACE_SM_PLUS,
+                ),
                 egui::Align2::LEFT_BOTTOM,
                 &hover.label,
                 font,
@@ -3978,6 +4015,8 @@ impl GrafitoApp {
             .collect();
 
         // 8) Subir textura a GPU.
+        // Ola 2: solo en cache-miss (arriba hay early-return con blit en hit);
+        // nunca es `load_texture` por frame en estado estable.
         // P1b: nombre con hash del `cache_key` (mismo patrón retención+hash
         // que el resto del caché): el `insert_with_ctx` de abajo ya retira
         // con gracia la versión vieja, y el nombre versionado evita confundir
@@ -4166,6 +4205,7 @@ impl GrafitoApp {
 
         // Construir ColorImage directamente desde los Color32 (sin
         // conversión a bytes intermedia) y subir como TextureHandle.
+        // Ola 2: solo en cache-miss (el bloque 6 hace blit + return en hit).
         // P1b: nombre con hash (igual que el fill complejo de arriba).
         let image = egui::ColorImage {
             size: [texture_w as usize, texture_h as usize],
@@ -4421,7 +4461,14 @@ impl GrafitoApp {
                     if matches!(poly.line_style, LineStyle::Solid) {
                         painter.add(Shape::convex_polygon(points, fill, stroke));
                     } else {
-                        painter.add(Shape::convex_polygon(points.clone(), fill, Stroke::NONE));
+                        // Ola 2: sin `points.clone()` por frame cuando no hay
+                        // relleno — un `convex_polygon` con fill TRANSPARENT y
+                        // `Stroke::NONE` no dibuja nada; se omite y `points`
+                        // se presta al stroke punteado. Con relleno se conserva
+                        // el clon (z-order fill-debajo-del-borde exacto).
+                        if fill != Color32::TRANSPARENT {
+                            painter.add(Shape::convex_polygon(points.clone(), fill, Stroke::NONE));
+                        }
                         stroke_polyline(&painter, &points, true, stroke, poly.line_style);
                     }
                 }
@@ -4774,9 +4821,11 @@ impl GrafitoApp {
                     let s = view.world_to_screen(Point2::new(x, y));
                     pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
                 }
-                // PERF: un solo `convex_polygon` con fill+stroke reemplaza el
-                // `pts.clone()` + 64 `line_segment` por frame. La elipse muestreada
+                // PERF: un solo `convex_polygon` con fill+stroke reemplaza
+                // 64 `line_segment` por frame. La elipse muestreada
                 // en 64 puntos es convexa, así que el contorno es idéntico.
+                // Ola 2: con fill TRANSPARENT se omite el polígono (no dibuja
+                // nada) y se evita el `pts.clone()` por frame.
                 let fill = el
                     .fill_color
                     .map(to_color32)
@@ -4784,7 +4833,9 @@ impl GrafitoApp {
                 if matches!(el.line_style, LineStyle::Solid) {
                     painter.add(Shape::convex_polygon(pts, fill, stroke));
                 } else {
-                    painter.add(Shape::convex_polygon(pts.clone(), fill, Stroke::NONE));
+                    if fill != Color32::TRANSPARENT {
+                        painter.add(Shape::convex_polygon(pts.clone(), fill, Stroke::NONE));
+                    }
                     stroke_polyline(&painter, &pts, true, stroke, el.line_style);
                 }
                 if !el.label.is_empty() {
@@ -5520,6 +5571,8 @@ impl GrafitoApp {
                                 complex_grid_domain_coloring_image(&self.document, cg, res)
                             };
                             image.map(|image| {
+                                // Ola 2: solo en miss de `COMPLEX_GRID_TEXTURES`
+                                // (el `Some(handle)` de arriba blitea sin subir).
                                 let handle = painter.ctx().load_texture(
                                     format!("grafito_complex_grid_{}_{key:016x}", cg.id),
                                     image,
@@ -6808,5 +6861,22 @@ mod coverage_sweep_render2d_pure {
             decide_function_label("", "x"),
             FunctionLabelDraw::Ascii
         ));
+    }
+}
+
+#[cfg(test)]
+mod complex_expr_cache_ola4_tests {
+    use super::*;
+    /// Ola 4: miss-rate del AST complejo — el primer `get` parsea (miss) y el
+    /// segundo es hit (mismo `Arc`, sin re-parsear por frame).
+    #[test]
+    fn complex_expr_cache_hit_after_first_parse() {
+        let first = cached_complex_expr("z*z").expect("parse válido");
+        let second = cached_complex_expr("z*z").expect("hit");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "el segundo acceso debe ser hit del LRU, sin re-parsear"
+        );
+        assert!(cached_complex_expr("esto no es una expresión válida ((((").is_none());
     }
 }

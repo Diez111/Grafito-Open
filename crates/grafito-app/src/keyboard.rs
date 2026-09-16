@@ -136,7 +136,7 @@ fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
             // Chips de 32 px en panel de 44: 6 px de aire arriba y abajo,
             // fila ópticamente centrada (nada pegado al hairline).
-            let chip_h = 32.0;
+            let chip_h = grafito_ui::tokens::KEYBOARD_KEY_H;
             ui.add_space((MATH_KEYBOARD_COMPACT_HEIGHT - chip_h) / 2.0);
             ui.horizontal_centered(|ui| {
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
@@ -145,8 +145,12 @@ fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                 // Ancho adaptativo: reserva iconos y reparte el resto
                 // entre las 6 teclas (32..40 px: casi cuadradas con 32 de alto,
                 // nunca pastillas achatadas).
-                let reserve = 3.0 * 32.0 + 9.0 * grafito_ui::tokens::SPACE_SM;
-                let chip_w = ((ui.available_width() - reserve) / 6.0).clamp(32.0, 40.0);
+                let reserve =
+                    3.0 * grafito_ui::tokens::KEYBOARD_KEY_H + 9.0 * grafito_ui::tokens::SPACE_SM;
+                let chip_w = ((ui.available_width() - reserve) / 6.0).clamp(
+                    grafito_ui::tokens::KEYBOARD_KEY_H,
+                    grafito_ui::tokens::KEYBOARD_CHIP_W_MAX,
+                );
                 for (label, insertion) in [
                     ("x", "x"),
                     ("y", "y"),
@@ -177,7 +181,7 @@ fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                             rect.center(),
                             egui::Align2::CENTER_CENTER,
                             label,
-                            egui::FontId::proportional(15.0),
+                            egui::FontId::proportional(grafito_ui::tokens::TYPE_BASE),
                             visuals.text,
                         );
                     }
@@ -197,8 +201,10 @@ fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ),
                 ];
                 for (icon, role, tip) in actions {
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(32.0, chip_h), egui::Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(grafito_ui::tokens::KEYBOARD_KEY_H, chip_h),
+                        egui::Sense::click(),
+                    );
                     let resp = resp.on_hover_text(*tip);
                     resp.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, *tip)
@@ -317,8 +323,10 @@ pub(crate) fn draw_math_keyboard(
 
                     macro_rules! kb {
                         ($ui:expr, $t:expr, $i:expr) => {{
-                            let (r, resp) = $ui
-                                .allocate_exact_size(egui::vec2(btn_w, 32.0), egui::Sense::click());
+                            let (r, resp) = $ui.allocate_exact_size(
+                                egui::vec2(btn_w, grafito_ui::tokens::KEYBOARD_KEY_H),
+                                egui::Sense::click(),
+                            );
                             resp.widget_info(|| {
                                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, $t)
                             });
@@ -327,8 +335,12 @@ pub(crate) fn draw_math_keyboard(
                                     KeyboardKeyRole::Standard,
                                     resp.hovered(),
                                 );
-                                $ui.painter()
-                                    .rect(r, 4.0, visuals.background, visuals.border);
+                                $ui.painter().rect(
+                                    r,
+                                    grafito_ui::tokens::RADIUS_XS,
+                                    visuals.background,
+                                    visuals.border,
+                                );
                                 $ui.painter().text(
                                     r.center(),
                                     egui::Align2::CENTER_CENTER,
@@ -473,8 +485,10 @@ pub(crate) fn draw_math_keyboard(
                         ui.add_space(sp);
                         // Backspace
                         {
-                            let (r, resp) = ui
-                                .allocate_exact_size(egui::vec2(btn_w, 32.0), egui::Sense::click());
+                            let (r, resp) = ui.allocate_exact_size(
+                                egui::vec2(btn_w, grafito_ui::tokens::KEYBOARD_KEY_H),
+                                egui::Sense::click(),
+                            );
                             resp.widget_info(|| {
                                 egui::WidgetInfo::labeled(
                                     egui::WidgetType::Button,
@@ -484,13 +498,17 @@ pub(crate) fn draw_math_keyboard(
                             });
                             let visuals =
                                 theme.keyboard_key_visuals(KeyboardKeyRole::Delete, resp.hovered());
-                            ui.painter()
-                                .rect(r, 4.0, visuals.background, visuals.border);
+                            ui.painter().rect(
+                                r,
+                                grafito_ui::tokens::RADIUS_XS,
+                                visuals.background,
+                                visuals.border,
+                            );
                             ui.painter().text(
                                 r.center(),
                                 egui::Align2::CENTER_CENTER,
                                 "Del",
-                                egui::FontId::proportional(14.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_ANNOTATION),
                                 visuals.text,
                             );
                             if resp.clicked() {
@@ -500,8 +518,10 @@ pub(crate) fn draw_math_keyboard(
                         ui.add_space(sp);
                         // Enter
                         {
-                            let (r, resp) = ui
-                                .allocate_exact_size(egui::vec2(btn_w, 32.0), egui::Sense::click());
+                            let (r, resp) = ui.allocate_exact_size(
+                                egui::vec2(btn_w, grafito_ui::tokens::KEYBOARD_KEY_H),
+                                egui::Sense::click(),
+                            );
                             resp.widget_info(|| {
                                 egui::WidgetInfo::labeled(
                                     egui::WidgetType::Button,
@@ -511,13 +531,17 @@ pub(crate) fn draw_math_keyboard(
                             });
                             let visuals =
                                 theme.keyboard_key_visuals(KeyboardKeyRole::Enter, resp.hovered());
-                            ui.painter()
-                                .rect(r, 4.0, visuals.background, visuals.border);
+                            ui.painter().rect(
+                                r,
+                                grafito_ui::tokens::RADIUS_XS,
+                                visuals.background,
+                                visuals.border,
+                            );
                             ui.painter().text(
                                 r.center(),
                                 egui::Align2::CENTER_CENTER,
                                 "Enter",
-                                egui::FontId::proportional(13.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_CARD_TITLE),
                                 visuals.text,
                             );
                             if resp.clicked() {

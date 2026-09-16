@@ -28,6 +28,9 @@ use super::solids;
 pub const MAX_LAYERS: u32 = 255;
 /// Máximo de objetos serializados por SVG/PDF (igual que el documento).
 pub const MAX_EXCHANGE_OBJECTS: usize = 5_000;
+/// Hojas máximas del PDF interino de conteo (coherente con
+/// `MAX_PDF_PAGES` de `grafito-app/src/export.rs`: 40 etiquetas por página).
+pub const MAX_PDF_PAGES: usize = 64;
 /// Máximo de filas de una tabla viva exportada.
 pub const MAX_TABLE_ROWS: usize = 20_000;
 
@@ -35,6 +38,8 @@ pub const MAX_TABLE_ROWS: usize = 20_000;
 pub enum ExchangeError {
     #[error("intercambio supera el máximo de {MAX_EXCHANGE_OBJECTS} objetos (recibidos {got})")]
     TooManyObjects { got: usize },
+    #[error("pdf supera el máximo de {MAX_PDF_PAGES} páginas (pedidas {got})")]
+    TooManyPages { got: usize },
     #[error("dato inválido para {feature}: {detail}")]
     InvalidData {
         feature: &'static str,
@@ -298,6 +303,9 @@ fn escape_pdf_text(text: &str) -> String {
 /// PDF 1.4 mínimo multipágina (Helvetica) con el conteo de objetos y
 /// 40 etiquetas por página. P1a-4: pagina de verdad en vez de truncar a 1
 /// página en silencio; abre en cualquier visor y nunca inventa geometría.
+/// Tope fail-closed [`MAX_PDF_PAGES`] (64, coherente con `export.rs`
+/// multipágina: 40 objs/página ⇒ ~2560 objetos; más páginas devuelve
+/// `Err(TooManyPages)` sin tocar el destino).
 /// Interino hasta el vectorial con `printpdf` del lead.
 pub fn document_to_pdf(document: &Document) -> Result<Vec<u8>, ExchangeError> {
     const ROWS_PER_PAGE: usize = 40;
@@ -310,6 +318,11 @@ pub fn document_to_pdf(document: &Document) -> Result<Vec<u8>, ExchangeError> {
     }
     // Paginación simple: 40 filas por página, numeración global continua.
     let page_count = objects.len().max(1).div_ceil(ROWS_PER_PAGE).max(1);
+    // Fail-closed anti-DoS: 5000 objetos ⇒ hasta 125 páginas; el tope 64
+    // es el mismo que el PDF vectorial de `export.rs`.
+    if page_count > MAX_PDF_PAGES {
+        return Err(ExchangeError::TooManyPages { got: page_count });
+    }
     let mut contents: Vec<String> = Vec::with_capacity(page_count);
     // Construir contenidos por página (caso 0 objetos = 1 página solo conteo).
     if objects.is_empty() {
@@ -751,6 +764,23 @@ mod tests {
             "la fila 41 debe existir (sin truncar)"
         );
         assert!(!text.contains("... y"), "ya no se trunca con '... y N mas'");
+    }
+
+    #[test]
+    fn pdf_rejects_over_64_pages() {
+        // 64 páginas × 40 objs = 2560; 2561 objetos ⇒ 65 páginas ⇒ fail-closed
+        // TooManyPages (mismo tope que `MAX_PDF_PAGES` de `export.rs`).
+        let mut document = Document::new();
+        for idx in 0..=2560 {
+            document
+                .try_add_object(point_fixture(&format!("P{idx}")))
+                .expect("punto fixture");
+        }
+        let err = document_to_pdf(&document).expect_err("más de 64 páginas falla");
+        assert!(
+            matches!(err, ExchangeError::TooManyPages { got: 65 }),
+            "TooManyPages con 65 pedidas, fue: {err}"
+        );
     }
 
     #[test]

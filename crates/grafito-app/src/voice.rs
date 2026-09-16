@@ -1054,7 +1054,9 @@ mod tests {
         let token = CancellationToken::default();
         let clon = token.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            // Ola 4: 50ms bastan para que el hijo entre en `wait` antes del
+            // cancel (antes 300ms); el watcher mata en CANCEL_GRACE igual.
+            std::thread::sleep(std::time::Duration::from_millis(50));
             clon.cancel();
         });
         let err =

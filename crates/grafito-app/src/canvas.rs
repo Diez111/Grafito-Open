@@ -98,6 +98,14 @@ pub(crate) fn plan_2d_scene(
     }
 }
 
+/// Clave del cache 3D: versión del documento + cámara + calidad + tema + viewport.
+///
+/// La cámara va DENTRO de la clave a propósito (Ola 4): los billboards y el
+/// orden de pintado dependen de la vista, así que partir la clave en
+/// `(documento) + (cámara)` invalidaría igual en cada movimiento y solo
+/// ahorraría la comparación de la cámara. Split diferido con rationale:
+/// si algún día el mesh se vuelve independiente de la vista, partir en
+/// `mesh_key` (versión+calidad) y `view_key` (cámara+viewport+tema).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cache3DKey {
     pub version: u64,

@@ -1226,6 +1226,9 @@ pub fn draw_panel_ejercicio(
     panel: &mut PanelEjercicio,
 ) -> Option<AccionEjercicio> {
     if panel.sondear() {
+        // Ola 2: inmediato a propósito — cosecha de un job instantáneo de CPU
+        // (un solo frame extra); sin handle al `RepaintBudget` en esta fn
+        // libre y con latencia cero requerida. Lo periódico va por presupuesto.
         ui.ctx().request_repaint();
     }
     let tema = grafito_ui::theme::current_theme(ui.ctx());
@@ -1233,6 +1236,7 @@ pub fn draw_panel_ejercicio(
         EstadoPanelEjercicio::Vacio => None,
         EstadoPanelEjercicio::Generando => {
             // El job es instantáneo (CPU pura): este frame cosecha al siguiente.
+            // Ola 2: inmediato (transitorio de 1 frame, ver nota en `sondear`).
             ui.ctx().request_repaint();
             ui.horizontal(|ui| {
                 ui.spinner();

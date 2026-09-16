@@ -1021,6 +1021,25 @@ pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String
     })
 }
 
+/// Longitud del cache LRU solo para tests (determinista, sin sleeps).
+#[cfg(test)]
+pub(crate) fn compiled_expr_cache_len_for_tests() -> usize {
+    COMPILED_EXPR_CACHE.with(|cache| cache.borrow().len())
+}
+
+/// ¿Sigue `key` (trimmed) en el cache? Solo para tests de desalojo.
+#[cfg(test)]
+pub(crate) fn compiled_expr_cache_contains_for_tests(key: &str) -> bool {
+    COMPILED_EXPR_CACHE.with(|cache| cache.borrow().contains(&key.trim().to_owned()))
+}
+
+/// Vacía el cache LRU. Solo para tests (el `thread_local!` se comparte
+/// entre tests del mismo hilo; sin esto el desalojo no es determinista).
+#[cfg(test)]
+pub(crate) fn clear_compiled_expr_cache_for_tests() {
+    COMPILED_EXPR_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
 /// Evaluate a mathematical expression string with given variable values.
 pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
     // F10-FIX (SIGABRT): rechazar ANTES de `build_operator_tree` (~evalexpr,
@@ -2377,6 +2396,32 @@ pub fn eval_integral_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Ola 4 P0: el LRU de 128 (`MAX_COMPILED_EXPR_CACHE`) desaloja de verdad.
+    ///
+    /// Determinista y sin sleeps: vacía el cache del hilo, inserta 129
+    /// expresiones distintas por el path cacheado y verifica tope + víctima
+    /// LRU (la primera insertada) + superviviente (la última).
+    #[test]
+    fn compiled_expr_cache_evicts_lru_past_128() {
+        clear_compiled_expr_cache_for_tests();
+        assert_eq!(MAX_COMPILED_EXPR_CACHE, 128);
+        for i in 0..=128 {
+            let expr = format!("{i}+1");
+            let got = evaluate_cached(&expr, &[]).expect("expr numérica válida");
+            assert_eq!(got, (i + 1) as f64, "expr {expr}");
+        }
+        assert_eq!(compiled_expr_cache_len_for_tests(), 128);
+        assert!(
+            !compiled_expr_cache_contains_for_tests("0+1"),
+            "la primera insertada debió ser desalojada (LRU)"
+        );
+        assert!(
+            compiled_expr_cache_contains_for_tests("128+1"),
+            "la última insertada debe seguir en el cache"
+        );
+        clear_compiled_expr_cache_for_tests();
+        assert_eq!(compiled_expr_cache_len_for_tests(), 0);
+    }
     #[test]
     fn batch_par_sobre_umbral_coincide_con_escalar_punto_a_punto() {
         // F10-D: el path rayon (>=1024) debe dar bit a bit lo mismo que el

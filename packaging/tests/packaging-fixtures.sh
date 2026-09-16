@@ -141,6 +141,21 @@ desktop_icon="$(sed -n 's/^Icon=//p' "$PROJECT_ROOT/packaging/debian/grafito.des
     exit 1
 }
 grep -Fq 'Icon=' "$PROJECT_ROOT/packaging/debian/grafito.desktop"
+# Ola 4: lanzador honesto — TryExec evita entradas muertas si falta el binario
+# y StartupNotify=false queda explícito (sin animación de arranque fantasma).
+grep -Fq 'TryExec=/usr/bin/grafito' "$PROJECT_ROOT/packaging/debian/grafito.desktop" || {
+    echo "desktop entry must declare TryExec=/usr/bin/grafito" >&2
+    exit 1
+}
+grep -Fq 'StartupNotify=false' "$PROJECT_ROOT/packaging/debian/grafito.desktop" || {
+    echo "desktop entry must declare StartupNotify explicitly" >&2
+    exit 1
+}
+# El contacto de seguridad vive en .github/SECURITY.md, no en control.
+grep -Fq 'SECURITY.md' "$PROJECT_ROOT/packaging/debian/control" || {
+    echo "debian/control must point security reports at SECURITY.md" >&2
+    exit 1
+}
 
 # Default assistant plugins must ship in the package (e.g. j-space).
 grep -Fq 'usr/share/grafito/plugins' "$build_deb" || {

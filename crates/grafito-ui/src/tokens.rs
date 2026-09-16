@@ -48,6 +48,12 @@ pub const TYPE_LG: f32 = 19.0;
 pub const TYPE_XL: f32 = 24.0;
 /// Texto doble-extra-grande: splash, branding.
 pub const TYPE_XXL: f32 = 28.0;
+/// Título de card overlay (círculo unitario, animación compleja) — Inter 13.
+/// Ola 2: faltaba en la escala; evita el literal `13.0` en draws.
+pub const TYPE_CARD_TITLE: f32 = 13.0;
+/// Anotación flotante (hover del canvas, ejes 3D, teclas Del/Enter) — Inter 14.
+/// Ola 2: faltaba en la escala; evita el literal `14.0` en draws.
+pub const TYPE_ANNOTATION: f32 = 14.0;
 
 // ═══════════════════════════════════════════════════════════
 // Spacing scale — Scandinavian (16 / 24 / 40)
@@ -56,8 +62,14 @@ pub const TYPE_XXL: f32 = 28.0;
 
 /// Espacio extra-pequeño: entre items muy cercanos.
 pub const SPACE_XS: f32 = 4.0;
+/// Espacio mínimo: separadores densos (toolbar, locale) — 2 px.
+/// Ola 2: evita el literal `2.0` en `item_spacing` densos.
+pub const SPACE_XXS: f32 = 2.0;
 /// Espacio pequeño: entre items de un grupo.
 pub const SPACE_SM: f32 = 8.0;
+/// Intermedio 10 px: offsets de texto en cards overlay del canvas.
+/// Ola 2: evita el literal `10.0` en `render_2d`.
+pub const SPACE_SM_PLUS: f32 = 10.0;
 /// Espacio mediano: padding interno de chips.
 pub const SPACE_MD: f32 = 12.0;
 /// Espacio grande: padding interno de paneles — Scandinavian 16.
@@ -80,6 +92,9 @@ pub const SPACING_BUTTON_Y: f32 = 8.0;
 // Radii — Scandinavian (8 / 12 / 16)
 // ═══════════════════════════════════════════════════════════
 
+/// Radio extra-pequeño: teclas del teclado en pantalla — 4 px.
+/// Ola 2: completa la escala (4 / 8 / 12 / 16); evita `rect(r, 4.0, …)`.
+pub const RADIUS_XS: f32 = 4.0;
 pub const RADIUS_SM: f32 = 8.0;
 pub const RADIUS_MD: f32 = 12.0;
 pub const RADIUS_LG: f32 = 16.0;
@@ -186,6 +201,45 @@ pub const INSPECTOR_CARD_RADIUS: f32 = RADIUS_MD;
 
 /// Tamaño logo splash — 128 px cuadrado.
 pub const SPLASH_LOGO_SIZE: f32 = 128.0;
+
+// ═══════════════════════════════════════════════════════════
+// Ola 2 — literales de draws centralizados (sin magia en Piel)
+// ═══════════════════════════════════════════════════════════
+
+/// Ancho del breakpoint angosto del preview de adjuntos del asistente.
+/// `assistant.rs`: preview arriba si `available_width < 720`.
+pub const ASSISTANT_PREVIEW_NARROW_BREAKPOINT: f32 = 720.0;
+
+/// Botón del selector de idioma del toolbar — 36×24 mínimo táctil.
+pub const TOOLBAR_LOCALE_MIN_W: f32 = 36.0;
+/// Alto mínimo del botón de idioma — 24 px (piso táctil reducido, texto 11).
+pub const TOOLBAR_LOCALE_MIN_H: f32 = 24.0;
+/// Padding horizontal interno del frame del toolbar — 4 px = SPACE_XS.
+pub const TOOLBAR_INNER_PAD_X: f32 = SPACE_XS;
+
+/// Alto de tecla del teclado en pantalla — 32 px (piso táctil).
+pub const KEYBOARD_KEY_H: f32 = 32.0;
+/// Ancho máximo de chip del teclado — 40 px (clamp superior).
+pub const KEYBOARD_CHIP_W_MAX: f32 = 40.0;
+
+/// Ancho de la ventana de onboarding — 420 px Scandinavian.
+pub const ONBOARDING_WINDOW_WIDTH: f32 = 420.0;
+/// Botón de onboarding — 120×32.
+pub const ONBOARDING_BUTTON_W: f32 = 120.0;
+pub const ONBOARDING_BUTTON_H: f32 = KEYBOARD_KEY_H;
+/// Separación entre botones de onboarding — 8 px = SPACE_SM.
+pub const ONBOARDING_BUTTON_GAP: f32 = SPACE_SM;
+/// Padding horizontal interno de la ventana de onboarding — 20 px.
+pub const ONBOARDING_INNER_PAD_X: f32 = 20.0;
+
+/// Margen de las cards overlay del canvas 2D (círculo unitario, etc.) — 14 px.
+pub const OVERLAY_CARD_MARGIN: f32 = 14.0;
+/// Radio del marcador de hover con snap — 6 px.
+pub const HOVER_MARKER_R_SNAP: f32 = 6.0;
+/// Radio del marcador de hover libre — 4 px = SPACE_XS.
+pub const HOVER_MARKER_R: f32 = SPACE_XS;
+/// Anillo extra del marcador de hover — 1 px.
+pub const HOVER_MARKER_RING: f32 = 1.0;
 
 // ═══════════════════════════════════════════════════════════
 // Helpers — layout functions (Scandinavian, sin hardcodes)

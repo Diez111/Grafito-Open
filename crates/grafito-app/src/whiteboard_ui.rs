@@ -802,6 +802,9 @@ impl WhiteboardSession {
                 if rect.contains(pos) {
                     let factor = (1.0 + scroll * 0.008).clamp(0.85, 1.15) as f64;
                     self.zoom_at(factor, pos, rect);
+                    // Ola 2: inmediato a propósito — respuesta a input de rueda
+                    // (un frame por evento, no loop); `WhiteboardSession` no
+                    // tiene handle al `RepaintBudget` de `GrafitoApp`.
                     ui.ctx().request_repaint();
                 }
             }

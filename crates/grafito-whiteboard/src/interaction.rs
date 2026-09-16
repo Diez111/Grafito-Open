@@ -148,10 +148,12 @@ mod tests {
 
     #[test]
     fn rectangle_is_normalized_even_when_dragged_reversed() {
-        let rectangle = make_element(WhiteboardTool::Rectangle, (8.0, 8.0), (2.0, 2.0)).unwrap();
-        let (min, max) = rectangle.bounds().unwrap();
-        assert_eq!(min, (2.0, 2.0));
-        assert_eq!(max, (8.0, 8.0));
+        let rectangle = make_element(WhiteboardTool::Rectangle, (8.0, 8.0), (2.0, 2.0));
+        assert_eq!(
+            rectangle.as_ref().and_then(|element| element.bounds()),
+            Some(((2.0, 2.0), (8.0, 8.0))),
+            "rectángulo invertido se normaliza sin unwrap"
+        );
     }
 
     #[test]

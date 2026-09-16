@@ -4805,7 +4805,8 @@ pub fn draw_assistant_settings_window(
             ui.add_space(crate::tokens::SPACE_XS);
             // Layout responsive: angosto (<720) → preview arriba, ancho → preview al costado
             // Scandinavian: preview con fondo levemente distinto para profesionalismo
-            let is_narrow = ui.available_width() < 720.0;
+            let is_narrow =
+                ui.available_width() < crate::tokens::ASSISTANT_PREVIEW_NARROW_BREAKPOINT;
             if is_narrow {
                 egui::Frame::none()
                     .fill(theme.input_bg.gamma_multiply(0.55))
@@ -9458,9 +9459,14 @@ fn draw_assistant_header(
 
 /// Botón fantasma con icono para la fila del composer (Adjuntar/Razonar/Buscar).
 ///
-/// Pill quiet 30x28 con hairline; activo = fondo `accent_muted` + icono
+/// Pill quiet 30x44 con hairline; activo = fondo `accent_muted` + icono
 /// `accent`. Tooltip + `widget_info` conservan el significado (a11y): el
 /// texto visible se reemplaza por icono sin perder accesibilidad.
+///
+/// Táctil aula: alto 44 (`HIT_TARGET_AULA`) alineado con el editor
+/// (`ASSISTANT_COMPOSER_EDITOR_HEIGHT`); el ancho queda en 30 a propósito
+/// para que los 3 chips + Enviar entren en el panel angosto de 300 px
+/// (F18 fix superposición Buscar/Enviar) — documentado, no recorte.
 fn composer_icon_toggle(
     ui: &mut egui::Ui,
     icon: crate::icons::Icon,
@@ -9469,7 +9475,7 @@ fn composer_icon_toggle(
     tooltip: &str,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(30.0, crate::tokens::hit_target_size(24.0)),
+        egui::vec2(30.0, crate::tokens::HIT_TARGET_AULA),
         egui::Sense::click(),
     );
     if ui.is_rect_visible(rect) {
@@ -9690,7 +9696,12 @@ fn draw_assistant_composer(
                                 .add_enabled(
                                     can_submit,
                                     egui::Button::new("")
-                                        .min_size(egui::vec2(44.0, 30.0))
+                                        // Táctil aula 44x44 (`HIT_TARGET_AULA`);
+                                        // primario Enviar, sin compromiso de layout.
+                                        .min_size(egui::vec2(
+                                            crate::tokens::HIT_TARGET_AULA,
+                                            crate::tokens::HIT_TARGET_AULA,
+                                        ))
                                         .rounding(crate::tokens::RADIUS_MD)
                                         .fill(if can_submit {
                                             theme.accent

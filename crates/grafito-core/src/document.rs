@@ -957,17 +957,22 @@ pub const MAX_TRAIL_POINTS: usize = 512;
 
 /// Buffer FIFO de muestras 2D para el rastro de un objeto.
 ///
+/// Ola 2: `VecDeque` en vez de `Vec` — la evicción del más antiguo es
+/// `pop_front` O(1) en lugar de `remove(0)` O(n).
+///
 /// Efímero: filtra `NaN`/`Inf` al empujar, evicciona el más antiguo al superar
 /// [`MAX_TRAIL_POINTS`]. El renderer lo dibuja con fade `(i+1)/len`.
 #[derive(Debug, Clone, Default)]
 pub struct TrailBuffer {
-    points: Vec<Point2>,
+    points: VecDeque<Point2>,
 }
 
 impl TrailBuffer {
     /// Buffer vacío.
     pub fn new() -> Self {
-        Self { points: Vec::new() }
+        Self {
+            points: VecDeque::new(),
+        }
     }
 
     /// Empuja una muestra; ignora no-finitos. Retorna `true` si se guardó.
@@ -976,9 +981,9 @@ impl TrailBuffer {
             return false;
         }
         if self.points.len() >= MAX_TRAIL_POINTS {
-            self.points.remove(0);
+            self.points.pop_front();
         }
-        self.points.push(p);
+        self.points.push_back(p);
         true
     }
 
@@ -999,7 +1004,7 @@ impl TrailBuffer {
 
     /// Copia ordenada (más antigua primero) para el renderer.
     pub fn as_vec(&self) -> Vec<Point2> {
-        self.points.clone()
+        self.points.iter().copied().collect()
     }
 }
 
@@ -4798,6 +4803,12 @@ impl Document {
         Ok(Some(std::mem::replace(self, staged)))
     }
 
+    /// Atajo legacy que nunca paniquea: delega en [`Self::try_set_variable`]
+    /// y registra el rechazo con `log::warn`.
+    ///
+    /// Path recomendado para código nuevo (scripts, sliders, comandos):
+    /// [`Self::try_set_variable`], cuyo `Err` hay que propagar o mostrar en
+    /// la UI en vez de ignorarlo en silencio.
     pub fn set_variable(&mut self, name: String, value: f64) {
         if let Err(error) = self.try_set_variable(name, value) {
             log::warn!("Variable update rejected: {error}");

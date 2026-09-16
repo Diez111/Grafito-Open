@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Purge de plugins: /usr/share/grafito/plugins (p. ej. j-space) son archivos
+# del paquete (ver debian/install + build-deb.sh), así que dpkg los retira
+# solo con `remove`/`purge` sin `rm` manual acá. No hay estado de usuario que
+# purgar: la configuración vive en $HOME y nunca se toca desde postrm.
 case "${1:-}" in
     remove|purge|disappear|abort-install|abort-upgrade|failed-upgrade)
         if [[ -x /usr/bin/gtk-update-icon-cache ]]; then

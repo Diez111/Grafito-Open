@@ -312,8 +312,18 @@ fn emit_ledger(on_event: &mut impl FnMut(AgentEvent), tracked: &JSpaceLedger) {
     }
 }
 
+/// Backoff de reintento puro (testeable sin dormir): `base_ms * 2^attempt`
+/// con el exponente topado en 6 para no desbordar. El `sleep` del loop usa
+/// este valor; los tests lo verifican sin esperar (mock de tiempo).
+fn retry_backoff_ms(base_ms: u64, attempt: u32) -> u64 {
+    base_ms.saturating_mul(1u64 << attempt.min(6))
+}
+
 /// Llama al proveedor con reintentos y backoff (solo transporte, nunca dispatches).
 /// No reintenta si hay cancelación ni cuando se agotan los intentos.
+/// El `sleep` entre intentos es poll con deadline implícita (backoff acotado
+/// por `retry_backoff_ms`); los tests usan `retry_base_delay_ms: 0` o verifican
+/// la función pura sin dormir.
 fn complete_with_retries<C>(
     completer: &C,
     messages: &[Value],
@@ -335,10 +345,10 @@ where
                     return Err(error);
                 }
                 attempt += 1;
-                let backoff_ms = budget
-                    .retry_base_delay_ms
-                    .saturating_mul(1u64 << attempt.min(6));
-                std::thread::sleep(Duration::from_millis(backoff_ms));
+                std::thread::sleep(Duration::from_millis(retry_backoff_ms(
+                    budget.retry_base_delay_ms,
+                    attempt,
+                )));
             }
         }
     }
@@ -785,5 +795,15 @@ mod tests {
             |_| {},
         );
         assert!(result.is_err());
+    }
+
+    /// Ola 4: el backoff es puro y acotado (mock de tiempo, sin dormir).
+    #[test]
+    fn retry_backoff_doubles_capped_at_2_pow_6() {
+        assert_eq!(retry_backoff_ms(200, 1), 400);
+        assert_eq!(retry_backoff_ms(200, 2), 800);
+        assert_eq!(retry_backoff_ms(200, 6), 200 * 64);
+        assert_eq!(retry_backoff_ms(200, 100), 200 * 64);
+        assert_eq!(retry_backoff_ms(0, 3), 0);
     }
 }

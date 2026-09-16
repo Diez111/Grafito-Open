@@ -303,7 +303,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: ${{ runner.temp }}/cargo-tools
-          key: supply-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-audit-0.22.2-deny-0.20.2
+          key: supply-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock') }}-audit-0.22.2-deny-0.20.2
       - name: Install supply-chain tools
         if: steps.cache-supply.outputs.cache-hit != 'true'
         run: |
@@ -317,8 +317,11 @@ jobs:
         run: python3 .github/scripts/test_verify_advisory_exceptions.py
       - name: Verify reviewed advisory exception boundary
         run: python3 .github/scripts/verify_advisory_exceptions.py check
-      - name: Audit lockfile
-        # The script constructs the complete argument vector from one fixed ID tuple.
+      - name: Audit lockfiles (root + fuzz)
+        # The script constructs the complete argument vectors from one fixed ID
+        # tuple and audits BOTH committed lockfiles: the root workspace graph
+        # and the standalone fuzz workspace (`fuzz/Cargo.lock`), which drifts
+        # silently otherwise (stale geo 0.29.3 / i_overlay 1.9.4).
         run: python3 .github/scripts/verify_advisory_exceptions.py audit
       - run: cargo deny --workspace --locked check advisories bans licenses sources
 

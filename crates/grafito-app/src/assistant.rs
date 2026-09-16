@@ -11793,7 +11793,9 @@ mod tests {
             "puente marcado muere dentro de la cota"
         );
         // Colgado de verdad: timeout rápido sin bloquear (detach con marca).
-        let colgado = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(30)));
+        // Ola 4: el hilo cuelga 2s en vez de 30s (alcanza para los joins de
+        // 50-120ms y acorta la vida del hilo detached).
+        let colgado = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(2)));
         let inicio = std::time::Instant::now();
         assert!(!join_puente_bounded(colgado, Duration::from_millis(50)));
         assert!(inicio.elapsed() < Duration::from_secs(2));
@@ -11812,8 +11814,9 @@ mod tests {
         assert!(join_gif_handle_bounded(h, Duration::from_secs(2)).is_some());
         assert!(inicio.elapsed() < Duration::from_secs(2));
         // Colgado: da timeout rápido sin bloquear (detach con marca).
+        // Ola 4: cuelga 2s en vez de 30s (alcanza para el join de 120ms).
         let colgado = std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_secs(30));
+            std::thread::sleep(Duration::from_secs(2));
             Ok::<_, crate::anim_native::GifExportError>(std::path::PathBuf::from("y"))
         });
         let inicio = std::time::Instant::now();

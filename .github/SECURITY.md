@@ -129,8 +129,9 @@ Reachability is narrower than the package-level audit report:
 Residual risk is a build-time CPU denial of service if the locked, checksummed
 AT-SPI or Wayland XML inputs themselves become malicious, plus the possibility
 that a future dependency change creates runtime reachability. The CI boundary
-therefore constructs cargo-audit arguments from one fixed six-ID tuple, requires
-exact parity with `deny.toml`, and rejects direct audit invocations or either
+therefore constructs cargo-audit arguments from one fixed five-ID tuple, requires
+exact parity with `deny.toml`, audits BOTH `Cargo.lock` and `fuzz/Cargo.lock`
+(the standalone fuzz workspace drifts silently otherwise), and rejects direct audit invocations or either
 space/equal ignore syntax in workflows. The audit runs from an isolated working
 directory and `CARGO_HOME`, with an explicit lockfile, so project or user
 `audit.toml` files cannot append hidden exceptions. CI resolves locked

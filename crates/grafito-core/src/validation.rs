@@ -2041,3 +2041,47 @@ mod tests_text_rotation {
         assert!(validate_object_candidate_typed(&doc, &crate::GeoObject::Text(bad)).is_err());
     }
 }
+
+#[cfg(test)]
+mod tests_budgets_ola4 {
+    use super::*;
+
+    /// Ola 4 P0: `MAX_EXPR_LENGTH` 2000 en la frontera exacta.
+    ///
+    /// Puro y determinista: 2000 pasa, 2001 falla con mensaje que cita el tope.
+    #[test]
+    fn expr_length_2000_passes_2001_fails() {
+        assert_eq!(MAX_EXPR_LENGTH, 2_000);
+        assert!(validate_expr(&"x".repeat(2_000)).is_ok());
+        let err = validate_expr(&"x".repeat(2_001)).unwrap_err();
+        assert!(
+            err.contains("2000"),
+            "el mensaje debe citar el tope, fue: {err}"
+        );
+    }
+
+    /// Ola 4 P0: presupuesto 10 MiB con documento real.
+    ///
+    /// Determinista y sin sleeps: un `Document` real pequeño pasa la guarda
+    /// (`parse_document_json` Ok sobre su JSON) y un payload de
+    /// `MAX_DOCUMENT_SIZE_BYTES + 1` se rechaza con el mensaje de tamaño
+    /// antes de deserializar (la misma comparación que aplica persistencia).
+    #[test]
+    fn document_size_budget_10mb_with_real_document() {
+        assert_eq!(MAX_DOCUMENT_SIZE_BYTES, 10_000_000);
+        let doc = Document::new();
+        let json = validate_and_serialize(&doc).expect("documento vacío válido");
+        assert!(
+            json.len() < MAX_DOCUMENT_SIZE_BYTES,
+            "documento real pequeño bajo el tope, len={}",
+            json.len()
+        );
+        assert!(parse_document_json(&json).is_ok());
+        let oversized = "x".repeat(MAX_DOCUMENT_SIZE_BYTES + 1);
+        let err = parse_document_json(&oversized).unwrap_err();
+        assert!(
+            err.contains("exceeds maximum"),
+            "la guarda de tamaño debe rechazar, fue: {err}"
+        );
+    }
+}

@@ -1338,39 +1338,40 @@ impl GrafitoApp {
             crate::snap::SnapKind::Free => {
                 // Sin snap: medir la distancia a la curva del primer objeto bajo
                 // el cursor, si está cerca.
-                let mut handled = false;
-                for (_, obj) in self.document.objects_iter() {
-                    if !obj.is_visible() {
-                        continue;
-                    }
-                    let vars = self.document.variables.clone();
-                    if let Some(y_curve) = evaluate_curve_at(obj, world, &vars) {
-                        let y_match = match obj {
-                            GeoObject::Function(_) => (y_curve - world.y).abs() <= pixel_tolerance,
-                            _ => y_curve.abs() <= pixel_tolerance,
-                        };
-                        if y_match {
-                            self.hovered_analysis = Some(crate::app::HoveredAnalysis {
-                                point: world,
-                                label: format!("({:.2}, {:.2})", world.x, world.y),
-                                is_snap: false,
-                                feature: None,
-                                snap_kind: Some(snap.kind),
-                            });
-                            handled = true;
-                            break;
+                // Ola 2: se presta `&variables` una vez fuera del loop en vez
+                // de `variables.clone()` por objeto bajo el cursor (drag/hover
+                // por frame). El bloque acota el préstamo inmutable para poder
+                // asignar `hovered_analysis` después (mismo valor en ambas
+                // ramas: el `handled` original solo elegía cuándo salir).
+                let _hit_curve = {
+                    let vars = self.document.variables();
+                    let mut hit = false;
+                    for (_, obj) in self.document.objects_iter() {
+                        if !obj.is_visible() {
+                            continue;
+                        }
+                        if let Some(y_curve) = evaluate_curve_at(obj, world, vars) {
+                            let y_match = match obj {
+                                GeoObject::Function(_) => {
+                                    (y_curve - world.y).abs() <= pixel_tolerance
+                                }
+                                _ => y_curve.abs() <= pixel_tolerance,
+                            };
+                            if y_match {
+                                hit = true;
+                                break;
+                            }
                         }
                     }
-                }
-                if !handled {
-                    self.hovered_analysis = Some(crate::app::HoveredAnalysis {
-                        point: world,
-                        label: format!("({:.2}, {:.2})", world.x, world.y),
-                        is_snap: false,
-                        feature: None,
-                        snap_kind: Some(snap.kind),
-                    });
-                }
+                    hit
+                };
+                self.hovered_analysis = Some(crate::app::HoveredAnalysis {
+                    point: world,
+                    label: format!("({:.2}, {:.2})", world.x, world.y),
+                    is_snap: false,
+                    feature: None,
+                    snap_kind: Some(snap.kind),
+                });
             }
             _ => {
                 let is_snap = matches!(
@@ -1626,6 +1627,9 @@ impl GrafitoApp {
         // El overlay se recorta al canvas para no invadir paneles.
         let painter = ui.painter().with_clip_rect(canvas_rect);
         let view = *self.document.view();
+        // Posición del puntero antes del loop de dibujo: el anillo de foco
+        // A11Y la necesita por slider (hoisted; se reutiliza abajo).
+        let pointer_pos = ui.input(|i| i.pointer.latest_pos().or(i.pointer.hover_pos()));
 
         let mut geoms: Vec<CanvasSliderGeom> = Vec::new();
         for (name, value, meta) in &entries {
@@ -1660,6 +1664,15 @@ impl GrafitoApp {
             }
             painter.circle_filled(thumb, SPACE_SM, thumb_fill);
             painter.circle_stroke(thumb, SPACE_SM, ui.visuals().widgets.active.fg_stroke);
+            // A11Y foco visible en slider de canvas (pintor custom sin
+            // `Response::has_focus`): anillo 2px del tema sobre el hover,
+            // igual que `toolbar.rs:714` para widgets egui.
+            if pointer_pos
+                .is_some_and(|pos| canvas_slider_hit(pos, track, thumb, SPACE_SM, SPACE_SM))
+            {
+                let theme = grafito_ui::theme::current_theme(ui.ctx());
+                theme.paint_focus_ring(&painter, track.expand(SPACE_XS));
+            }
             painter.text(
                 anchor,
                 egui::Align2::LEFT_TOP,
@@ -1677,7 +1690,6 @@ impl GrafitoApp {
             });
         }
 
-        let pointer_pos = ui.input(|i| i.pointer.latest_pos().or(i.pointer.hover_pos()));
         let primary_down = ui.input(|i| i.pointer.button_down(PointerButton::Primary));
         let primary_pressed = ui.input(|i| i.pointer.button_pressed(PointerButton::Primary));
         let double_clicked = ui.input(|i| i.pointer.button_double_clicked(PointerButton::Primary));
@@ -1764,6 +1776,10 @@ impl GrafitoApp {
                                 .ctx()
                                 .memory(|mem| mem.data.get_temp::<Document>(undo_id).is_some());
                             if !has_snapshot {
+                                // Ola 2: este `clone()` es una vez por gesto
+                                // (no por frame) y `save_snapshot` exige un
+                                // `Document` propio al soltar; un `Arc` solo
+                                // movería la copia a `finish_canvas_slider_gesture`.
                                 let snapshot = self.document.clone();
                                 ui.ctx()
                                     .memory_mut(|mem| mem.data.insert_temp(undo_id, snapshot));

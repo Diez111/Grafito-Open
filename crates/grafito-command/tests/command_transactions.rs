@@ -1625,6 +1625,162 @@ fn parallel_rejects_reversed_or_missing_operands_atomically() {
 }
 
 #[test]
+fn reflect_circle_inversion_is_geometrically_exact() {
+    // Ola 0: la inversión de círculo es real (C' = O + R²/(d²-r²)·(C-O),
+    // r' = R²·r/|d²-r²|), jamás radio preservado.
+    // Espejo unidad O=(0,0) R=1; fuente C=(3,0) r=1 → C'=(0.375,0) r'=0.125.
+    let mut document = Document::new();
+    document.add_object(GeoObject::Circle(
+        CircleObj::new(Point2::new(0.0, 0.0), 1.0).with_label("Espejo"),
+    ));
+    document.add_object(GeoObject::Circle(
+        CircleObj::new(Point2::new(3.0, 0.0), 1.0).with_label("C"),
+    ));
+
+    let outcome = run(&mut document, "Reflect[C,Espejo]");
+    assert!(matches!(outcome, CommandOutcome::Ok), "{outcome:?}");
+    let inverted = document
+        .objects_iter()
+        .find_map(|(_, object)| match object {
+            GeoObject::Circle(circle) if circle.label == "C'" => Some(circle.clone()),
+            _ => None,
+        })
+        .expect("la inversión de C existe como círculo");
+    assert!(
+        (inverted.center.x - 0.375).abs() < 1e-9,
+        "Cx: {}",
+        inverted.center.x
+    );
+    assert!(inverted.center.y.abs() < 1e-9, "Cy: {}", inverted.center.y);
+    assert!(
+        (inverted.radius - 0.125).abs() < 1e-9,
+        "r: {}",
+        inverted.radius
+    );
+}
+
+#[test]
+fn reflect_circle_through_inversion_center_becomes_line() {
+    // Ola 0: círculo que pasa por O (C=(1,0) r=1) invierte a recta, no a círculo falso.
+    let mut document = Document::new();
+    document.add_object(GeoObject::Circle(
+        CircleObj::new(Point2::new(0.0, 0.0), 1.0).with_label("Espejo"),
+    ));
+    document.add_object(GeoObject::Circle(
+        CircleObj::new(Point2::new(1.0, 0.0), 1.0).with_label("C"),
+    ));
+
+    let outcome = run(&mut document, "Reflect[C,Espejo]");
+    assert!(matches!(outcome, CommandOutcome::Ok), "{outcome:?}");
+    assert!(
+        document.objects_iter().any(|(_, object)| matches!(
+            object,
+            GeoObject::Line(line) if line.label == "C'"
+        )),
+        "la imagen de un círculo por O es una recta etiquetada C'"
+    );
+    assert!(
+        !document.objects_iter().any(|(_, object)| matches!(
+            object,
+            GeoObject::Circle(circle) if circle.label == "C'"
+        )),
+        "ningún círculo falso con etiqueta C'"
+    );
+}
+
+#[test]
+fn reflect_concentric_circle_inverts_radius() {
+    // Ola 0: círculo concéntrico con la inversión (O=(0,0) r=2 vs R=1)
+    // → mismo centro, radio R²/r = 0.5.
+    let mut document = Document::new();
+    document.add_object(GeoObject::Circle(
+        CircleObj::new(Point2::new(0.0, 0.0), 1.0).with_label("Espejo"),
+    ));
+    document.add_object(GeoObject::Circle(
+        CircleObj::new(Point2::new(0.0, 0.0), 2.0).with_label("C"),
+    ));
+
+    let outcome = run(&mut document, "Reflect[C,Espejo]");
+    assert!(matches!(outcome, CommandOutcome::Ok), "{outcome:?}");
+    let inverted = document
+        .objects_iter()
+        .find_map(|(_, object)| match object {
+            GeoObject::Circle(circle) if circle.label == "C'" => Some(circle.clone()),
+            _ => None,
+        })
+        .expect("la inversión concéntrica existe");
+    assert!(inverted.center.x.abs() < 1e-12 && inverted.center.y.abs() < 1e-12);
+    assert!(
+        (inverted.radius - 0.5).abs() < 1e-9,
+        "r: {}",
+        inverted.radius
+    );
+}
+
+#[test]
+fn shear_rejects_circle_and_unsupported_types_without_fake_transformed() {
+    // Ola 0: sin stub Transformed visual persistido; círculo (elipse real) y
+    // tipos no afines dan Err honesto y no crean nada.
+    let mut document = Document::new();
+    document.add_object(GeoObject::Circle(
+        CircleObj::new(Point2::new(1.0, 0.0), 2.0).with_label("C"),
+    ));
+    let before = snapshot(&document);
+    let outcome = run(&mut document, "Shear[C, 30]");
+    assert!(matches!(outcome, CommandOutcome::Error(_)), "{outcome:?}");
+    assert_eq!(snapshot(&document), before, "Shear de círculo no muta");
+
+    let outcome = run(&mut document, "Function[x^2]");
+    assert!(!matches!(outcome, CommandOutcome::Error(_)), "{outcome:?}");
+    let label = document
+        .objects_iter()
+        .find_map(|(_, object)| match object {
+            GeoObject::Function(f) => Some(f.label.clone()),
+            _ => None,
+        })
+        .expect("la función existe");
+    let before = snapshot(&document);
+    let outcome = run(&mut document, &format!("Shear[{label}, 30]"));
+    assert!(matches!(outcome, CommandOutcome::Error(_)), "{outcome:?}");
+    assert_eq!(snapshot(&document), before, "Shear de función no muta");
+    assert!(
+        !document
+            .objects_iter()
+            .any(|(_, object)| matches!(object, GeoObject::Transformed(_))),
+        "ningún stub Transformed persistido"
+    );
+}
+
+#[test]
+fn shear_point_line_polygon_stay_affine_exact() {
+    // La cizalla real x' = x + tan(30°)·y sobre punto: (1,1) → (1+k, 1).
+    let mut document = Document::new();
+    document.add_object(GeoObject::Point(
+        PointObj::new(Point2::new(1.0, 1.0)).with_label("P"),
+    ));
+    let outcome = run(&mut document, "Shear[P, 30]");
+    assert!(matches!(outcome, CommandOutcome::Ok), "{outcome:?}");
+    let expected = 1.0 + 30f64.to_radians().tan();
+    let sheared = document
+        .objects_iter()
+        .find_map(|(_, object)| match object {
+            GeoObject::Point(p) if p.label == "P'" => Some(p.clone()),
+            _ => None,
+        })
+        .expect("el punto cizallado existe");
+    assert!(
+        (sheared.position.x - expected).abs() < 1e-9,
+        "x: {}",
+        sheared.position.x
+    );
+    assert!(
+        (sheared.position.y - 1.0).abs() < 1e-12,
+        "y: {}",
+        sheared.position.y
+    );
+}
+
+#[test]
 fn reflect_accepts_the_documented_object_label() {
     let mut document = Document::new();
     document.add_object(GeoObject::Circle(

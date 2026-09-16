@@ -2817,6 +2817,7 @@ dependencies = [
  "grafito-complex",
  "grafito-core",
  "grafito-geometry",
+ "log",
  "num-complex",
  "serde_json",
  "sha2 0.10.9",

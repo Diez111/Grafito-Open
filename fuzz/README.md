@@ -54,7 +54,12 @@ run does not establish the absence of defects or security vulnerabilities.
 
 ## Updating Fuzz Dependencies
 
-Update fuzz dependencies intentionally and independently of the root workspace:
+Update fuzz dependencies intentionally and independently of the root workspace.
+Keep the fuzz graph aligned with the root one: `fuzz/Cargo.lock` once drifted
+to geo 0.29.3 / i_overlay 1.9.4 (RUSTSEC-2025-0165, fixed as geo 0.33.1 /
+i_overlay 4.5.2 in the root graph with no ignore left). CI audits BOTH
+lockfiles (`python3 .github/scripts/verify_advisory_exceptions.py audit` in
+the `supply-chain` job), so a stale fuzz graph fails the gate until refreshed:
 
 ```sh
 cargo +nightly-2026-08-01 generate-lockfile --manifest-path fuzz/Cargo.toml

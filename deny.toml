@@ -7,29 +7,36 @@ no-default-features = false
 
 [advisories]
 version = 2
-# The first four warnings require parent-library or framework migrations rather
+# The first three warnings require parent-library or framework migrations rather
 # than a safe lockfile-only update. The final two entries are time-bounded
 # vulnerability exceptions whose exact graph and expiry are enforced in CI.
+# RUSTSEC-2025-0165 (geo/i_overlay) was resolved via geo 0.29.3→0.33.1 and its
+# ignore removed; `fuzz/Cargo.lock` is audited too so a stale fuzz graph fails.
 # See `.github/SECURITY.md` for the complete reachability analysis.
 ignore = [
-    { id = "RUSTSEC-2025-0141", reason = "puffin 0.19.1 requires bincode 1.3.3; bincode 1.x has no maintained replacement and puffin 0.20 requires Rust 1.92." },
-    { id = "RUSTSEC-2024-0436", reason = "simba 0.9.1 requires paste 1.0.15, the latest 1.x release; nalgebra 0.34 requires Rust 1.87, below the workspace MSRV 1.92." },
-    { id = "RUSTSEC-2026-0192", reason = "eframe 0.29.1 pins owned_ttf_parser 0.25.1 and ttf-parser 0.25.1; remediation requires a coordinated eframe/wgpu framework migration." },
-    { id = "RUSTSEC-2025-0165", reason = "RESUELTO vía migración geo 0.29.3→0.33.1 (i_overlay 1.9.4→4.5.2, i_tree 0.8.3→0.18.0); se conserva la entrada como registro histórico mientras el aviso siga en la DB." },
+    { id = "RUSTSEC-2025-0141", reason = "Temporary through 2026-12-31; owner: Grafito maintainers. puffin 0.19.1 requires bincode 1.3.3; bincode 1.x has no maintained replacement and puffin 0.20 requires Rust 1.92." },
+    { id = "RUSTSEC-2024-0436", reason = "Temporary through 2026-12-31; owner: Grafito maintainers. simba 0.9.1 requires paste 1.0.15, the latest 1.x release; nalgebra 0.34 requires Rust 1.87, below the workspace MSRV 1.92." },
+    { id = "RUSTSEC-2026-0192", reason = "Temporary through 2026-12-31; owner: Grafito maintainers. eframe 0.29.1 pins owned_ttf_parser 0.25.1 and ttf-parser 0.25.1; remediation requires a coordinated eframe/wgpu framework migration." },
     { id = "RUSTSEC-2026-0194", reason = "Temporary through 2026-12-31; owner: Grafito maintainers. Affected attribute iteration is reached only when proc macros parse crate-shipped AT-SPI XML at build time; zbus_xml 4 requires quick-xml ^0.30 and wayland-scanner 0.31.11 now uses patched ^0.41, leaving the zbus path blocked for fixed >=0.41. Remove on a compatible zbus_xml release or any reachability change; see .github/SECURITY.md." },
     { id = "RUSTSEC-2026-0195", reason = "Temporary through 2026-12-31; owner: Grafito maintainers. Neither reviewed consumer invokes NsReader (zbus_xml 4 deserialization uses Reader; wayland-scanner 0.31.11 now uses patched quick-xml 0.41.0), so the vulnerable namespace allocation is not reachable; the zbus path still blocks fixed >=0.41. Remove on a compatible zbus_xml release or any reachability change; see .github/SECURITY.md." },
 ]
 
 [bans]
-# multiple-versions downgraded to warn while quick-xml 0.30/0.41 coexist (RUSTSEC-2026-0194/0195).
-# zbus_xml 4 → quick-xml ^0.30 blocks fixed >=0.41 (wayland-scanner 0.31.11 now patched ^0.41); see .github/SECURITY.md.
+# multiple-versions is deny so a fourth quick-xml (or any new duplicate) fails.
+# Known coexisting lines are allowlisted explicitly below: quick-xml 0.30.0
+# (zbus_xml 4 requires ^0.30, blocked from >=0.41), 0.41.0 (wayland-scanner
+# 0.31.11, patched) and 0.42.0 (grafito-ggb reviewed direct dep); ecosystem
+# duplicates (windows-sys, syn, calloop) and bincode 1.3.3 keep wildcards/pins.
+# zbus_xml 4 → quick-xml ^0.30 blocks fixed >=0.41; see .github/SECURITY.md.
 # windows-sys, syn, calloop have legitimate multi-major duplicates via windows/wayland/egui ecosystem.
-multiple-versions = "warn"
+multiple-versions = "deny"
 skip = [
     { name = "bincode", version-req = "=1.3.3", reason = "bincode 1.3.3 required by puffin 0.19.1, no maintained alternative" },
-    # quick-xml temporal: 0.30.0 (zbus_xml) y 0.41.0 (wayland-scanner dep transitiva) — RUSTSEC-2026-0194/0195
+    # quick-xml: 0.30.0 (zbus_xml) y 0.41.0 (wayland-scanner) + 0.42.0
+    # (grafito-ggb, dep directa revisada) — RUSTSEC-2026-0194/0195
     { name = "quick-xml", version-req = "=0.30.0", reason = "quick-xml 0.30.0 required by zbus_xml 4, blocked from 0.41 by RUSTSEC advisories" },
     { name = "quick-xml", version-req = "=0.41.0", reason = "quick-xml 0.41.0 required by wayland-scanner 0.31.11, coexistence with 0.30.0 is expected" },
+    { name = "quick-xml", version-req = "=0.42.0", reason = "quick-xml 0.42.0 reviewed direct dep of grafito-ggb (streaming .ggb import, bounds + DOCTYPE/ENTITY rejection); see .github/SECURITY.md" },
     { name = "windows-sys", version-req = "*", reason = "windows-sys multiple versions via windows/egui ecosystem" },
     { name = "syn", version-req = "*", reason = "syn multiple versions via proc-macro ecosystem" },
     { name = "calloop", version-req = "*", reason = "calloop multiple versions via wayland/egui ecosystem" },
