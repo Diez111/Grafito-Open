@@ -527,7 +527,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.parametric-curve-2d",
         "ParametricCurve2D",
-        ["parametric_curve_2d", "param2d"],
+        ["parametric_curve_2d", "param2d", "Curve"],
         "Crear",
         "Crea una curva parametrica 2D.",
         CreatesObject,
@@ -1097,7 +1097,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "boolean.difference",
         "PolygonDifference",
-        ["polydifference"],
+        ["polydifference", "Difference"],
         "Booleanas",
         "Resta dos poligonos.",
         CreatesObject,
@@ -1185,7 +1185,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.solve",
         "Solve",
-        ["resolver"],
+        ["resolver", "PlotSolve"],
         "CAS",
         "Resuelve una ecuacion en la variable indicada.",
         CreatesObject,
@@ -2218,7 +2218,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.std-dev",
         "StdDev",
-        ["desviacion"],
+        ["desviacion", "SampleSD", "desvio_muestral"],
         "Estadística",
         "Calcula el desvio estandar.",
         ReadOnly,
@@ -2230,7 +2230,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.correlation",
         "Correlation",
-        ["correlacion"],
+        ["correlacion", "CorrelationCoefficient"],
         "Estadística",
         "Calcula una correlacion.",
         ReadOnly,
@@ -2257,7 +2257,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "probability.inverse-t",
         "InverseT",
-        ["inverse_t", "cuantilt", "cuantil_t"],
+        ["inverse_t", "cuantilt", "cuantil_t", "InverseTDistribution"],
         "Probabilidad",
         "Cuantil t-Student: InverseT[p, df] (p en (0,1), df>0).",
         ReadOnly,
@@ -2281,7 +2281,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "probability.inverse-f",
         "InverseF",
-        ["inverse_f", "cuantilf", "cuantil_f"],
+        ["inverse_f", "cuantilf", "cuantil_f", "InverseFDistribution"],
         "Probabilidad",
         "Cuantil F de Fisher: InverseF[p, df1, df2] (p en (0,1), df1>0, df2>0).",
         ReadOnly,
@@ -2462,7 +2462,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.chi-squared-test",
         "ChiSqTest",
-        ["chi2test", "prueba_chi2", "chi_cuadrado"],
+        ["chi2test", "prueba_chi2", "chi_cuadrado", "ChiSquaredTest"],
         "Estadística",
         "Prueba chi-cuadrado de bondad de ajuste: ChiSqTest[{obs}, {esp}].",
         ReadOnly,
@@ -2516,7 +2516,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "finance.pmt",
         "Pmt",
-        ["pago", "cuota"],
+        ["pago", "cuota", "Payment"],
         "Financiera",
         "Calcula el pago periodico TVM; 4-5 args con tipo 0/1.",
         ReadOnly,
@@ -4773,7 +4773,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "dynamic.trace",
         "Rastro",
-        ["Estela"],
+        ["Estela", "SetTrace"],
         "Dinámica",
         "Activa/desactiva el rastro de un objeto: al arrastrarlo deja una estela con fade. Rastro[etiqueta] alterna; Rastro[etiqueta, true|false] fija el estado. (Trace con matriz sigue siendo traza matricial.)",
         TransformsObject,
@@ -5319,7 +5319,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.inv-laplace-t",
         "InvLaplaceT",
-        ["laplaceinversa", "invlaplace_t"],
+        ["laplaceinversa", "invlaplace_t", "InverseLaplace"],
         "CAS",
         "Calculá la Laplace inversa de racionales propios con denominador de grado ≤2: InvLaplaceT[expr] o InvLaplaceT[expr, s, t]. Grado ≥3, impropias o retardos quedan fuera del subset y dan error honesto.",
         ReadOnly,
@@ -5451,6 +5451,21 @@ const COMMANDS: &[CommandSpec] = &[
         "GroebnerOrdered",
         [
             signature!("GroebnerOrdered[polinomios, variables, orden]"; "polinomios": Expression required, "variables": ParameterList required, "orden": Expression required)
+        ]
+    ),
+    // Frente P5: paridad nominal con GeoGebra (grado-lex = grlex en Grafito).
+    command!(
+        "cas.groebner-lex-deg",
+        "GroebnerLexDeg",
+        ["groebner_gradolex"],
+        "CAS",
+        "Base de Groebner en orden grado-lexicográfico (grlex), apto para eliminación: GroebnerLexDeg[polinomios, variables]. Equivalentes: GroebnerOrdered[..., \"grlex\"].",
+        ReadOnly,
+        Low,
+        true,
+        "GroebnerLexDeg",
+        [
+            signature!("GroebnerLexDeg[polinomios, variables]"; "polinomios": Expression required, "variables": ParameterList required)
         ]
     ),
     command!(
@@ -8293,6 +8308,217 @@ const COMMANDS: &[CommandSpec] = &[
         "SetConstructionStep",
         [signature!("SetConstructionStep[n]"; "n": Integer required)]
     ),
+    // ── Frente P5: cierre nominal GeoGebra (29 comandos) ────────────────
+    command!(
+        "statistics.sd",
+        "SD",
+        ["desvio_poblacional", "stdevp"],
+        "Estadística",
+        "Desvío estándar poblacional (÷n) de una lista: SD[lista].",
+        ReadOnly,
+        Low,
+        true,
+        "SD",
+        [signature!("SD[lista]"; "lista": Data required)]
+    ),
+    command!(
+        "statistics.sample-variance",
+        "SampleVariance",
+        ["varianza_muestral"],
+        "Estadística",
+        "Varianza muestral (÷n−1) de una lista: SampleVariance[lista].",
+        ReadOnly,
+        Low,
+        true,
+        "SampleVariance",
+        [signature!("SampleVariance[lista]"; "lista": Data required)]
+    ),
+    command!(
+        "scripting.set-seed",
+        "SetSeed",
+        ["semilla", "fijar_semilla"],
+        "Dinámica",
+        "Fija la semilla de los comandos aleatorios (RandomBetween, RandomPolynomial, Shuffle, Sample, Random*): SetSeed[entero]. Determinista: misma semilla → misma secuencia.",
+        TransformsObject,
+        Low,
+        true,
+        "SetSeed",
+        [signature!("SetSeed[semilla]"; "semilla": Integer required)]
+    ),
+    command!(
+        "scripting.cas-loaded",
+        "CASLoaded",
+        ["cas_cargado"],
+        "Dinámica",
+        "Indica si el motor CAS está disponible: CASLoaded[] → verdadero/falso.",
+        ReadOnly,
+        Low,
+        true,
+        "CASLoaded",
+        [signature!("CASLoaded[]"; )]
+    ),
+    command!(
+        "scripting.copy-free-object",
+        "CopyFreeObject",
+        ["copiar_libre", "copia_libre"],
+        "Dinámica",
+        "Crea una copia libre (sin dependencias) de un objeto existente: CopyFreeObject[etiqueta].",
+        CreatesObject,
+        Low,
+        true,
+        "CopyFreeObject",
+        [signature!("CopyFreeObject[etiqueta]"; "etiqueta": ObjectLabel required)]
+    ),
+    command!(
+        "scripting.set-background-color",
+        "SetBackgroundColor",
+        ["color_fondo"],
+        "Dinámica",
+        "Fondo del lienzo 2D (color nombrado red/green/blue/black/white/gray o \"r,g,b\" 0..1): SetBackgroundColor[color]. Con objeto, tiñe su relleno si lo tiene.",
+        TransformsObject,
+        Low,
+        true,
+        "SetBackgroundColor",
+        [
+            signature!("SetBackgroundColor[color]"; "color": Expression required),
+            signature!("SetBackgroundColor[objeto, color]"; "objeto": ObjectLabel required, "color": Expression required)
+        ]
+    ),
+    command!(
+        "scripting.set-spin-speed",
+        "SetSpinSpeed",
+        ["velocidad_giro"],
+        "Dinámica",
+        "Velocidad de giro automático de la vista 3D (grados por segundo, 0 = quieto): SetSpinSpeed[grados].",
+        TransformsObject,
+        Low,
+        true,
+        "SetSpinSpeed",
+        [signature!("SetSpinSpeed[grados]"; "grados": Number required)]
+    ),
+    command!(
+        "scripting.attach-copy-to-view",
+        "AttachCopyToView",
+        ["adjuntar_vista"],
+        "Dinámica",
+        "Copia un objeto y la adjunta a una vista (0 = 2D, 1 = 3D): AttachCopyToView[etiqueta, vista].",
+        CreatesObject,
+        Low,
+        true,
+        "AttachCopyToView",
+        [signature!("AttachCopyToView[etiqueta, vista]"; "etiqueta": ObjectLabel required, "vista": Integer required)]
+    ),
+    command!(
+        "scripting.object-ref",
+        "Object",
+        ["objeto_por_nombre"],
+        "Dinámica",
+        "Etiqueta resuelta de un nombre dinámico: Object[\"A\"] → A. Deprecado en GeoGebra; en Grafito devuelve la etiqueta existente o error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "Object",
+        [signature!("Object[nombre]"; "nombre": Expression required)]
+    ),
+    command!(
+        "scripting.slope-measure",
+        "Slope",
+        ["pendiente"],
+        "Análisis",
+        "Pendiente de una recta o de una función en x=0 (derivada numérica): Slope[objeto].",
+        ReadOnly,
+        Low,
+        true,
+        "Slope",
+        [signature!("Slope[objeto]"; "objeto": ObjectLabel required)]
+    ),
+    command!(
+        "scripting.set-value",
+        "SetValue",
+        ["fijar_valor"],
+        "Dinámica",
+        "Asigna valor a una variable libre o mueve un punto libre: SetValue[nombre, valor] o SetValue[punto, (x, y)].",
+        TransformsObject,
+        Low,
+        true,
+        "SetValue",
+        [
+            signature!("SetValue[nombre, valor]"; "nombre": ObjectLabel required, "valor": Number required),
+            signature!("SetValue[punto, (x, y)]"; "punto": ObjectLabel required, "valor": Point required)
+        ]
+    ),
+    command!(
+        "scripting.turtle-forward",
+        "TurtleForward",
+        ["tortuga_avanza"],
+        "Dinámica",
+        "Tortuga Logo: avanza n dibujando si el lápiz está abajo. Estado persistente del documento.",
+        CreatesObject,
+        Low,
+        true,
+        "TurtleForward",
+        [signature!("TurtleForward[n]"; "n": Number required)]
+    ),
+    command!(
+        "scripting.turtle-back",
+        "TurtleBack",
+        ["tortuga_retrocede"],
+        "Dinámica",
+        "Tortuga Logo: retrocede n dibujando si el lápiz está abajo.",
+        CreatesObject,
+        Low,
+        true,
+        "TurtleBack",
+        [signature!("TurtleBack[n]"; "n": Number required)]
+    ),
+    command!(
+        "scripting.turtle-left",
+        "TurtleLeft",
+        ["tortuga_izquierda"],
+        "Dinámica",
+        "Tortuga Logo: gira a la izquierda (antihorario) los grados dados.",
+        TransformsObject,
+        Low,
+        true,
+        "TurtleLeft",
+        [signature!("TurtleLeft[grados]"; "grados": Number required)]
+    ),
+    command!(
+        "scripting.turtle-right",
+        "TurtleRight",
+        ["tortuga_derecha"],
+        "Dinámica",
+        "Tortuga Logo: gira a la derecha (horario) los grados dados.",
+        TransformsObject,
+        Low,
+        true,
+        "TurtleRight",
+        [signature!("TurtleRight[grados]"; "grados": Number required)]
+    ),
+    command!(
+        "scripting.turtle-up",
+        "TurtleUp",
+        ["tortuga_arriba"],
+        "Dinámica",
+        "Tortuga Logo: levanta el lápiz (deja de dibujar).",
+        TransformsObject,
+        Low,
+        true,
+        "TurtleUp",
+        [signature!("TurtleUp[]"; )]
+    ),
+    command!(
+        "scripting.turtle-down",
+        "TurtleDown",
+        ["tortuga_abajo"],
+        "Dinámica",
+        "Tortuga Logo: baja el lápiz (vuelve a dibujar).",
+        TransformsObject,
+        Low,
+        true,
+        "TurtleDown",
+        [signature!("TurtleDown[]"; )]
+    ),
     ];
 
 /// Returns every registered stable text command.
@@ -8975,6 +9201,27 @@ mod registry_tests {
             "Envelope",
             "PlaneBisector",
             "PerpendicularPlane",
+            // Frente P5: 20 handlers nuevos (GroebnerLexDeg, SD/SampleSD/
+            // SampleVariance, SetSeed, CASLoaded, CopyFreeObject,
+            // SetBackgroundColor, SetSpinSpeed, AttachCopyToView, Object,
+            // TurtleForward/Back/Left/Right/Up/Down).
+            "GroebnerLexDeg",
+            "SD",
+            "SampleSD",
+            "SampleVariance",
+            "SetSeed",
+            "CASLoaded",
+            "CopyFreeObject",
+            "SetBackgroundColor",
+            "SetSpinSpeed",
+            "AttachCopyToView",
+            "Object",
+            "TurtleForward",
+            "TurtleBack",
+            "TurtleLeft",
+            "TurtleRight",
+            "TurtleUp",
+            "TurtleDown",
             // Frente P3b: 11 handlers nuevos (vistas, listeners, tortuga,
             // ajustes) + Execute real (spec existente pasa a visible).
             "CenterView",
@@ -9575,11 +9822,11 @@ mod registry_tests {
         // Frente P4: +105 visibles S (20 CAS + 15 listas/texto + 22 geometría +
         // 6 stats/prob + 8 distribuciones huérfanas con brazo existente + 34
         // scripting/display; Payment/PresentValue/FutureValue SKIP: PV/FV/Pmt ya existen).
-        assert_eq!(all().len(), 621, "COMMANDS registrados (docs §8)");
+        assert_eq!(all().len(), 639, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            581,
-            "comandos visibles en paleta (docs §8: 581 + 15 UI = 596)"
+            599,
+            "comandos visibles en paleta (docs §8: 599 + 15 UI = 614)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

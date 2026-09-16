@@ -4683,6 +4683,25 @@ impl GrafitoApp {
     /// P3a: Archivo → Exportar → "GeoGebra (.ggb)…". El diálogo `rfd` vive en
     /// UI thread; serialización + ZIP + escritura atómica van al worker
     /// `ggb-export` y el resumen se aplica en `poll_background_jobs`.
+    /// PDF multipágina desde el menú Archivo → Exportar (mismo worker que el
+    /// panel de exportación: `spawn_pdf_export` + `PendingExportJob`).
+    pub(crate) fn choose_and_export_pdf(&mut self, ctx: &egui::Context) {
+        if self.exam_blocks("Export") {
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name("grafito_export.pdf")
+            .save_file()
+        else {
+            return;
+        };
+        self.pending_export_job = Some(PendingExportJob {
+            receiver: crate::export::spawn_pdf_export(self.document.clone(), path, ctx),
+        });
+        self.notify("Exportando PDF…", grafito_ui::toast::ToastKind::Info);
+    }
+
     pub(crate) fn choose_and_export_ggb(&mut self, ctx: &egui::Context) {
         // D2 lockdown: en examen no sale nada del documento.
         if self.exam_blocks("Export") {

@@ -2060,7 +2060,7 @@ pub(crate) fn draw_export_section(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                     if action(
                         ui,
                         "PDF",
-                        "Vectorial de 1 página por ahora: vista + hoja actual (rectas, círculos, polígonos y texto Helvetica). Si el libro tiene varias hojas con contenido, avisa sin escribir.",
+                        "Vectorial multipágina: una página por hoja de pizarra con contenido (rectas, círculos, polígonos y texto Helvetica), hasta 64 hojas.",
                     ) {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("PDF", &["pdf"])

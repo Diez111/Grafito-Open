@@ -189,8 +189,10 @@ fn p4_todos_visibles_en_paleta() {
     }
     // Frente P4: 516 → 621 totales, 472 → 577 visibles.
     // Frente P4-fix: 4 comandos sin tool pasan a visibles: 577 → 581.
-    assert_eq!(command_registry::all().len(), 621);
-    assert_eq!(command_registry::palette_commands().count(), 581);
+    // Frente P5: +18 visibles: 581 → 599, 621 → 639.
+    // Frente P5 (cierre nominal GeoGebra, +18 visibles S): 621 → 639, 581 → 599.
+    assert_eq!(command_registry::all().len(), 639);
+    assert_eq!(command_registry::palette_commands().count(), 599);
 }
 
 #[test]

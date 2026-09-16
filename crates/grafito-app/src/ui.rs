@@ -240,6 +240,15 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                     ui.close_menu();
                 }
             }
+            // PDF multipágina: una página por hoja de pizarra con contenido.
+            if ui
+                .button("PDF…")
+                .on_hover_text("Vectorial multipágina (una por hoja con contenido).")
+                .clicked()
+            {
+                app.choose_and_export_pdf(ui.ctx());
+                ui.close_menu();
+            }
             ui.separator();
             // W3 — export con salida: revela la carpeta de la última exportación.
             let reveal = ui.add_enabled(

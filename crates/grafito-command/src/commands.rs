@@ -3790,6 +3790,426 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Message(format!("Pan = ({dx}, {dy})px"));
         }
+        // ── Frente P5: cierre nominal GeoGebra ──────────────────────────
+        "GroebnerLexDeg" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error(
+                    "GroebnerLexDeg requiere GroebnerLexDeg[polinomios, variables]".into(),
+                );
+            }
+            let polys = parse_w1_brace_list(&cmd.args[0]);
+            let vars = parse_w1_brace_list(&cmd.args[1]);
+            if polys.is_empty() || vars.is_empty() {
+                return CommandOutcome::Error(
+                    "GroebnerLexDeg requiere polinomios y variables no vacíos".into(),
+                );
+            }
+            for poly in &polys {
+                if let Err(error) = check_w1_budget("GroebnerLexDeg", "polinomio", poly) {
+                    return CommandOutcome::Error(format!("GroebnerLexDeg: {error}"));
+                }
+            }
+            match cas_gate::cas_groebner_ordered(&polys, &vars, "grlex") {
+                Ok(out) => return CommandOutcome::Message(out),
+                Err(error) => return CommandOutcome::Error(format!("GroebnerLexDeg: {error}")),
+            }
+        }
+        "SD" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error("SD requiere SD[lista]".into());
+            }
+            let data = match resolve_list_arg(&cmd.args[0], document) {
+                Ok(elems) => match p4_list_elems_to_flat(&elems, "SD") {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("SD: {e}")),
+                },
+                Err(e) => return CommandOutcome::Error(format!("SD: {e}")),
+            };
+            if data.is_empty() {
+                return CommandOutcome::Error("SD: lista vacía".into());
+            }
+            match grafito_geometry::stats_extra::population_variance(&data) {
+                Ok(v) => {
+                    let sd = v.sqrt();
+                    if !sd.is_finite() {
+                        return CommandOutcome::Error("SD: resultado no finito".into());
+                    }
+                    input_text.clear();
+                    return CommandOutcome::Message(format!("SD = {sd:.6} (poblacional, ÷n)"));
+                }
+                Err(e) => return CommandOutcome::Error(format!("SD: {e}")),
+            }
+        }
+        "SampleVariance" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error(
+                    "SampleVariance requiere SampleVariance[lista]".into(),
+                );
+            }
+            let data = match resolve_list_arg(&cmd.args[0], document) {
+                Ok(elems) => match p4_list_elems_to_flat(&elems, "SampleVariance") {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("SampleVariance: {e}")),
+                },
+                Err(e) => return CommandOutcome::Error(format!("SampleVariance: {e}")),
+            };
+            match grafito_geometry::statistics::variance(&data) {
+                Some(v) if v.is_finite() => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "SampleVariance = {v:.6} (muestral, ÷n−1)"
+                    ));
+                }
+                _ => {
+                    return CommandOutcome::Error(
+                        "SampleVariance: se necesitan al menos 2 valores finitos".into(),
+                    )
+                }
+            }
+        }
+        "SampleSD" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error("SampleSD requiere SampleSD[lista]".into());
+            }
+            let data = match resolve_list_arg(&cmd.args[0], document) {
+                Ok(elems) => match p4_list_elems_to_flat(&elems, "SampleSD") {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("SampleSD: {e}")),
+                },
+                Err(e) => return CommandOutcome::Error(format!("SampleSD: {e}")),
+            };
+            match grafito_geometry::statistics::std_dev(&data) {
+                Some(v) if v.is_finite() => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!("SampleSD = {v:.6} (muestral, ÷n−1)"));
+                }
+                _ => {
+                    return CommandOutcome::Error(
+                        "SampleSD: se necesitan al menos 2 valores finitos".into(),
+                    )
+                }
+            }
+        }
+        "SetSeed" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error("SetSeed requiere SetSeed[entero]".into());
+            }
+            let value = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("SetSeed: en semilla: {e}")),
+            };
+            if value.fract() != 0.0 || !(0.0..=1e15).contains(&value) {
+                return CommandOutcome::Error(
+                    "SetSeed: la semilla debe ser un entero 0..=1e15".into(),
+                );
+            }
+            match document.try_set_variable("__rng_seed".to_string(), value) {
+                Ok(()) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "SetSeed = {value} (los comandos aleatorios usan esta semilla)"
+                    ));
+                }
+                Err(e) => return CommandOutcome::Error(format!("SetSeed: {e}")),
+            }
+        }
+        "CASLoaded" => {
+            if !cmd.args.is_empty() {
+                return CommandOutcome::Error("CASLoaded no lleva argumentos".into());
+            }
+            // El CAS nativo (Gröbner/Risch/Laplace/EDO) está compilado siempre;
+            // alkahest-cas es opt-in y no condiciona el subset verificado.
+            input_text.clear();
+            return CommandOutcome::Message(
+                "CASLoaded = verdadero (CAS nativo disponible)".to_string(),
+            );
+        }
+        "CopyFreeObject" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error(
+                    "CopyFreeObject requiere CopyFreeObject[etiqueta]".into(),
+                );
+            }
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let Some(id) = find_object_by_label(document, label) else {
+                return CommandOutcome::Error(format!(
+                    "CopyFreeObject: objeto '{label}' no encontrado"
+                ));
+            };
+            let Some(source) = document.get_object(id).cloned() else {
+                return CommandOutcome::Error(format!(
+                    "CopyFreeObject: objeto '{label}' no encontrado"
+                ));
+            };
+            let copy = match source {
+                GeoObject::Point(p) => {
+                    let mut copy = PointObj::new(p.position);
+                    copy.x_expr = None;
+                    copy.y_expr = None;
+                    GeoObject::Point(copy)
+                }
+                GeoObject::Line(l) => GeoObject::Line(LineObj::new_with_kind(
+                    l.start,
+                    l.end,
+                    l.kind,
+                )),
+                GeoObject::Circle(c) => GeoObject::Circle({
+                    let mut copy = CircleObj::new(c.center, c.radius);
+                    copy.radius_expr = None;
+                    copy
+                }),
+                GeoObject::Polygon(p) => GeoObject::Polygon(PolygonObj::new(p.vertices)),
+                GeoObject::Polyline(p) => GeoObject::Polyline(PolylineObj::new(p.points)),
+                GeoObject::Ellipse(e) => GeoObject::Ellipse({
+                    let mut copy = EllipseObj::new(e.center, e.rx, e.ry);
+                    copy.angle = e.angle;
+                    copy
+                }),
+                _ => {
+                    return CommandOutcome::Error(format!(
+                        "CopyFreeObject: '{label}' no es copiable como libre (puntos, rectas, círculos, polígonos, polilíneas, elipses)"
+                    ))
+                }
+            };
+            return match try_insert_command_object(document, copy) {
+                Ok(new_id) => {
+                    let new_label = document
+                        .get_object(new_id)
+                        .map(|object| object.label().to_string())
+                        .unwrap_or_default();
+                    input_text.clear();
+                    CommandOutcome::Message(format!(
+                        "CopyFreeObject = {new_label} (copia libre de {label})"
+                    ))
+                }
+                Err(e) => CommandOutcome::Error(format!("CopyFreeObject: {e}")),
+            };
+        }
+        "SetBackgroundColor" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return CommandOutcome::Error(
+                    "SetBackgroundColor requiere SetBackgroundColor[color] o SetBackgroundColor[objeto, color]"
+                        .into(),
+                );
+            }
+            let color = match parse_named_color(&cmd.args[cmd.args.len() - 1]) {
+                Ok(color) => color,
+                Err(e) => return CommandOutcome::Error(format!("SetBackgroundColor: {e}")),
+            };
+            if cmd.args.len() == 2 {
+                let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+                let Some(id) = find_object_by_label(document, label) else {
+                    return CommandOutcome::Error(format!(
+                        "SetBackgroundColor: objeto '{label}' no encontrado"
+                    ));
+                };
+                let applied = match document.get_object_mut(id) {
+                    Some(GeoObject::Polygon(p)) => {
+                        p.fill_color = Some(color);
+                        true
+                    }
+                    Some(GeoObject::Ellipse(e)) => {
+                        e.fill_color = Some(color);
+                        true
+                    }
+                    Some(GeoObject::Text(t)) => {
+                        t.color = color;
+                        true
+                    }
+                    _ => false,
+                };
+                if !applied {
+                    return CommandOutcome::Error(format!(
+                        "SetBackgroundColor: '{label}' no admite fondo (polígonos, elipses, textos)"
+                    ));
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!("SetBackgroundColor[{label}] aplicado"));
+            }
+            // Vista: guarda el color empacado (r,g,b en 0..255) en __view_bg.
+            let packed = f64::from((color.r * 255.0).round()) * 65536.0
+                + f64::from((color.g * 255.0).round()) * 256.0
+                + f64::from((color.b * 255.0).round());
+            return match document.try_set_variable("__view_bg".to_string(), packed) {
+                Ok(()) => {
+                    input_text.clear();
+                    CommandOutcome::Message(
+                        "SetBackgroundColor: fondo del lienzo actualizado".to_string(),
+                    )
+                }
+                Err(e) => CommandOutcome::Error(format!("SetBackgroundColor: {e}")),
+            };
+        }
+        "SetSpinSpeed" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error(
+                    "SetSpinSpeed requiere SetSpinSpeed[grados por segundo, 0..=360]".into(),
+                );
+            }
+            let value = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("SetSpinSpeed: {e}")),
+            };
+            if !(0.0..=360.0).contains(&value) {
+                return CommandOutcome::Error(
+                    "SetSpinSpeed: la velocidad debe estar entre 0 y 360 grados por segundo".into(),
+                );
+            }
+            return match document.try_set_variable("__view_spin_speed".to_string(), value) {
+                Ok(()) => {
+                    input_text.clear();
+                    CommandOutcome::Message(format!(
+                        "SetSpinSpeed = {value}°/s (la vista 3D lo aplica al girar automáticamente)"
+                    ))
+                }
+                Err(e) => CommandOutcome::Error(format!("SetSpinSpeed: {e}")),
+            };
+        }
+        "AttachCopyToView" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error(
+                    "AttachCopyToView requiere AttachCopyToView[etiqueta, vista 0|1]".into(),
+                );
+            }
+            let label = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            let target = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables))
+            {
+                Ok(v) if v == 0.0 || v == 1.0 => v as u8,
+                Ok(_) => {
+                    return CommandOutcome::Error(
+                        "AttachCopyToView: vista debe ser 0 (2D) o 1 (3D)".into(),
+                    )
+                }
+                Err(e) => return CommandOutcome::Error(format!("AttachCopyToView: {e}")),
+            };
+            if find_object_by_label(document, label).is_none() {
+                return CommandOutcome::Error(format!(
+                    "AttachCopyToView: objeto '{label}' no encontrado"
+                ));
+            }
+            // La copia libre queda en el documento (compartido por ambos lienzos);
+            // la vista destino se anota para la UI.
+            let copy = CasCmd {
+                command: "CopyFreeObject".to_string(),
+                args: vec![label.to_string()],
+            };
+            match handle_remaining_cas_commands(document, &copy, input_text, script_budget) {
+                CommandOutcome::Message(message) => {
+                    let copy_label = message
+                        .split('=')
+                        .nth(1)
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .unwrap_or("copia")
+                        .to_string();
+                    let _ = document
+                        .try_set_variable(format!("__attach_view_{copy_label}"), f64::from(target));
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "AttachCopyToView = {copy_label} en vista {target} (documento compartido)"
+                    ));
+                }
+                other => return other,
+            }
+        }
+        "Object" => {
+            if cmd.args.len() != 1 {
+                return CommandOutcome::Error("Object requiere Object[nombre]".into());
+            }
+            let raw = cmd.args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+            return match find_object_by_label(document, raw) {
+                Some(id) => {
+                    let label = document
+                        .get_object(id)
+                        .map(|object| object.label().to_string())
+                        .unwrap_or_else(|| raw.to_string());
+                    input_text.clear();
+                    CommandOutcome::Message(format!("Object = {label}"))
+                }
+                None => CommandOutcome::Error(format!(
+                    "Object: no existe un objeto llamado '{raw}' (deprecado en GeoGebra)"
+                )),
+            };
+        }
+        "TurtleForward" | "TurtleBack" => {
+            let forward = cmd.command == "TurtleForward";
+            let (x, y, heading, pen) = turtle_state(document);
+            let distance = match require_finite(parse_numeric_arg(
+                cmd.args.first().map(String::as_str).unwrap_or("0"),
+                &document.variables,
+            )) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("{}: {e}", cmd.command)),
+            };
+            let radians = heading.to_radians();
+            let (dx, dy) = if forward {
+                (distance * radians.cos(), distance * radians.sin())
+            } else {
+                (-distance * radians.cos(), -distance * radians.sin())
+            };
+            let (nx, ny) = (x + dx, y + dy);
+            if !nx.is_finite() || !ny.is_finite() {
+                return CommandOutcome::Error(format!("{}: posición no finita", cmd.command));
+            }
+            if pen {
+                let segment = GeoObject::Line(LineObj::new_with_kind(
+                    Point2::new(x, y),
+                    Point2::new(nx, ny),
+                    LineKind::Segment,
+                ));
+                if let Err(e) = try_insert_command_object(document, segment) {
+                    return CommandOutcome::Error(format!("{}: {e}", cmd.command));
+                }
+            }
+            if let Err(e) = turtle_store(document, nx, ny, heading, pen) {
+                return CommandOutcome::Error(format!("{}: {e}", cmd.command));
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "{} = ({nx:.4}, {ny:.4}) pen={}",
+                cmd.command,
+                if pen { "abajo" } else { "arriba" }
+            ));
+        }
+        "TurtleLeft" | "TurtleRight" => {
+            let left = cmd.command == "TurtleLeft";
+            let (x, y, heading, pen) = turtle_state(document);
+            let degrees = match require_finite(parse_numeric_arg(
+                cmd.args.first().map(String::as_str).unwrap_or("0"),
+                &document.variables,
+            )) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("{}: {e}", cmd.command)),
+            };
+            let new_heading = if left {
+                heading + degrees
+            } else {
+                heading - degrees
+            };
+            if !new_heading.is_finite() {
+                return CommandOutcome::Error(format!("{}: ángulo no finito", cmd.command));
+            }
+            if let Err(e) = turtle_store(document, x, y, new_heading, pen) {
+                return CommandOutcome::Error(format!("{}: {e}", cmd.command));
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "{} = {new_heading:.2}° (rumbo actual)",
+                cmd.command
+            ));
+        }
+        "TurtleUp" | "TurtleDown" => {
+            let down = cmd.command == "TurtleDown";
+            let (x, y, heading, _) = turtle_state(document);
+            if let Err(e) = turtle_store(document, x, y, heading, down) {
+                return CommandOutcome::Error(format!("{}: {e}", cmd.command));
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "{}: lápiz {}",
+                cmd.command,
+                if down { "abajo" } else { "arriba" }
+            ));
+        }
         "OnClick" => {
             if cmd.args.len() != 2 {
                 return CommandOutcome::Error("OnClick requiere OnClick[etiqueta, guion]".into());
@@ -16034,12 +16454,8 @@ fn execute_cas_command_typed(
                 return Some(Err("RandomPointIn: polígono de área nula".into()));
             }
             // Muestreo por rechazo determinista (misma semilla → mismo punto).
-            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
-                document.version,
-                "RandomPointIn",
-                &arg_refs,
-            );
+            let arg_refs = cmd.args.as_slice();
+            let mut rng = p1_rng(document, "RandomPointIn", arg_refs);
             let mut found = None;
             for _ in 0..10_000 {
                 let x = x_min + rng_unit(&mut rng) * (x_max - x_min);
@@ -18899,12 +19315,8 @@ fn execute_cas_command_typed(
             }
             #[allow(clippy::cast_possible_truncation)]
             let (a, b) = (a_raw as i64, b_raw as i64);
-            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-            let mut seeder = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
-                document.version,
-                "RandomBetween",
-                &arg_refs,
-            );
+            let arg_refs = cmd.args.as_slice();
+            let mut seeder = p1_rng(document, "RandomBetween", arg_refs);
             let seed = seeder.next_u64();
             match grafito_geometry::cas_extra::random_between(a, b, seed) {
                 Ok(v) => Some(Ok(format!("RandomBetween[{a}, {b}] = {v}"))),
@@ -18928,12 +19340,8 @@ fn execute_cas_command_typed(
             }
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let grado = g_raw as usize;
-            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-            let mut seeder = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
-                document.version,
-                "RandomPolynomial",
-                &arg_refs,
-            );
+            let arg_refs = cmd.args.as_slice();
+            let mut seeder = p1_rng(document, "RandomPolynomial", arg_refs);
             let seed = seeder.next_u64();
             match grafito_geometry::cas_extra::random_polynomial(grado, seed) {
                 Ok(coeffs) => {
@@ -20346,12 +20754,8 @@ fn execute_cas_command_typed(
                 Ok(v) => v,
                 Err(e) => return Some(Err(format!("RandomUniform: en b: {e}"))),
             };
-            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
-                document.version,
-                "RandomUniform",
-                &arg_refs,
-            );
+            let arg_refs = cmd.args.as_slice();
+            let mut rng = p1_rng(document, "RandomUniform", arg_refs);
             match grafito_geometry::stats_extra::random_uniform(&mut rng, a, b) {
                 Ok(v) => Some(Ok(format!("RandomUniform[{a}, {b}] = {v:.6}"))),
                 Err(e) => Some(Err(format!("RandomUniform: {e}"))),
@@ -20371,12 +20775,8 @@ fn execute_cas_command_typed(
                 Ok(v) => v,
                 Err(e) => return Some(Err(format!("RandomNormal: en sigma: {e}"))),
             };
-            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
-                document.version,
-                "RandomNormal",
-                &arg_refs,
-            );
+            let arg_refs = cmd.args.as_slice();
+            let mut rng = p1_rng(document, "RandomNormal", arg_refs);
             match grafito_geometry::stats_extra::random_normal(&mut rng, mu, sigma) {
                 Ok(v) => Some(Ok(format!("RandomNormal[{mu}, {sigma}] = {v:.6}"))),
                 Err(e) => Some(Err(format!("RandomNormal: {e}"))),
@@ -20401,12 +20801,8 @@ fn execute_cas_command_typed(
                 Ok(v) => v,
                 Err(e) => return Some(Err(format!("RandomBinomial: en p: {e}"))),
             };
-            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
-                document.version,
-                "RandomBinomial",
-                &arg_refs,
-            );
+            let arg_refs = cmd.args.as_slice();
+            let mut rng = p1_rng(document, "RandomBinomial", arg_refs);
             match grafito_geometry::stats_extra::random_binomial(&mut rng, n, p) {
                 Ok(v) => Some(Ok(format!("RandomBinomial[{n}, {p}] = {v}"))),
                 Err(e) => Some(Err(format!("RandomBinomial: {e}"))),
@@ -20423,12 +20819,8 @@ fn execute_cas_command_typed(
                 Ok(v) => v,
                 Err(e) => return Some(Err(format!("RandomPoisson: en lambda: {e}"))),
             };
-            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
-                document.version,
-                "RandomPoisson",
-                &arg_refs,
-            );
+            let arg_refs = cmd.args.as_slice();
+            let mut rng = p1_rng(document, "RandomPoisson", arg_refs);
             match grafito_geometry::stats_extra::random_poisson(&mut rng, lambda) {
                 Ok(v) => Some(Ok(format!("RandomPoisson[{lambda}] = {v}"))),
                 Err(e) => Some(Err(format!("RandomPoisson: {e}"))),
@@ -23401,6 +23793,72 @@ fn set_layer_visibility(document: &mut Document, layer: u32, visible: bool) -> u
 }
 
 /// Indica si `expr` es la constante cero (para Numerator/Denominator).
+/// Color nombrado (red/blue/…) o literal `"r,g,b"` con componentes 0..=1.
+fn parse_named_color(raw: &str) -> Result<Color, String> {
+    let text = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    let lower = text.to_ascii_lowercase();
+    let named = match lower.as_str() {
+        "red" | "rojo" | "roja" => Some(Color::RED),
+        "green" | "verde" => Some(Color::GREEN),
+        "blue" | "azul" => Some(Color::BLUE),
+        "black" | "negro" | "negra" => Some(Color::BLACK),
+        "white" | "blanco" | "blanca" => Some(Color::WHITE),
+        "gray" | "grey" | "gris" => Some(Color::GRAY),
+        _ => None,
+    };
+    if let Some(color) = named {
+        return Ok(color);
+    }
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    if parts.len() == 3 {
+        let mut channels = [0.0_f32; 3];
+        for (i, part) in parts.iter().enumerate() {
+            let value: f64 = part
+                .parse()
+                .map_err(|_| format!("color '{text}': componente '{part}' no numérico"))?;
+            if !(0.0..=1.0).contains(&value) {
+                return Err(format!("color '{text}': componentes deben ser 0..=1"));
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                channels[i] = value as f32;
+            }
+        }
+        return Ok(Color::new(channels[0], channels[1], channels[2], 0.35));
+    }
+    Err(format!(
+        "color '{text}' no soportado (usa red/blue/green/black/white/gray o \"r,g,b\" 0..1)"
+    ))
+}
+
+/// Estado persistente de la tortuga: `(x, y, rumbo°, lápiz abajo)`.
+///
+/// Vive en variables `__turtle_*` del documento (defaults 0, 0, 0°, abajo).
+fn turtle_state(document: &Document) -> (f64, f64, f64, bool) {
+    let get = |name: &str, default: f64| document.variables.get(name).copied().unwrap_or(default);
+    (
+        get("__turtle_x", 0.0),
+        get("__turtle_y", 0.0),
+        get("__turtle_heading", 0.0),
+        get("__turtle_pen", 1.0) != 0.0,
+    )
+}
+
+/// Guarda el estado de la tortuga (crea/actualiza las variables `__turtle_*`).
+fn turtle_store(
+    document: &mut Document,
+    x: f64,
+    y: f64,
+    heading: f64,
+    pen: bool,
+) -> Result<(), String> {
+    document.try_set_variable("__turtle_x".to_string(), x)?;
+    document.try_set_variable("__turtle_y".to_string(), y)?;
+    document.try_set_variable("__turtle_heading".to_string(), heading)?;
+    document.try_set_variable("__turtle_pen".to_string(), if pen { 1.0 } else { 0.0 })?;
+    Ok(())
+}
+
 fn is_zero_constant(expr: &str) -> bool {
     matches!(
         grafito_geometry::ast::parse_ast(&expr.replace(' ', "")),
@@ -24672,12 +25130,23 @@ fn p1_u32_arg(
 }
 
 /// RNG determinista del comando (mismo documento+args → misma secuencia).
+///
+/// `SetSeed[n]` guarda `__rng_seed` en las variables del documento y se mezcla
+/// aquí: la misma semilla producirá la misma secuencia en comandos aleatorios
+/// mientras el documento no cambie (el `version` sigue distinguiendo estados).
 fn p1_rng(
     document: &Document,
     canonical: &str,
     args: &[String],
 ) -> grafito_geometry::list_ops::DeterministicRng {
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let seed_mix = document
+        .variables
+        .get("__rng_seed")
+        .map(|seed| format!("seed:{seed}"));
+    if let Some(seed) = seed_mix.as_deref() {
+        refs.push(seed);
+    }
     grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
         document.version,
         canonical,

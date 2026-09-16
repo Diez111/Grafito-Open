@@ -48,7 +48,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `LocusEquation[locus]`: Aproximación por regresión (no exacta) a partir de muestreo de locus; no es eliminación Groebner exacta; genera curva implícita presupuestada con RMSE. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `LocusEquation[locus, grado]`. Alias: `locus_equation`, `ecuacionlocus`, `ecuacion_locus`.
 ## Crear
 
-- `ParametricCurve2D[x(t), y(t), t0, t1]`: Crea una curva parametrica 2D. Mutacion: crea objetos. Riesgo: medio. Alias: `parametric_curve_2d`, `param2d`.
+- `ParametricCurve2D[x(t), y(t), t0, t1]`: Crea una curva parametrica 2D. Mutacion: crea objetos. Riesgo: medio. Alias: `parametric_curve_2d`, `param2d`, `Curve`.
 - `PolarCurve[r(t), t0, t1]`: Crea una curva polar. Mutacion: crea objetos. Riesgo: medio. Alias: `polar_curve`, `polar`.
 - `ImplicitCurve[f(x, y) = c]`: Crea una curva implicita. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `ImplicitCurve[lhs, rhs, relacion]`. Alias: `ImplicitRegion`.
 - `VectorField2D[u(x, y), v(x, y)]`: Crea un campo vectorial 2D. Mutacion: crea objetos. Riesgo: alto. Alias: `vector_field_2d`, `vf2d`.
@@ -103,7 +103,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 
 - `PolygonUnion[poly1, poly2]`: Une dos poligonos. Mutacion: crea objetos. Riesgo: alto. Alias: `polyunion`.
 - `PolygonIntersection[poly1, poly2]`: Interseca dos poligonos. Mutacion: crea objetos. Riesgo: alto. Alias: `polyintersection`.
-- `PolygonDifference[poly1, poly2]`: Resta dos poligonos. Mutacion: crea objetos. Riesgo: alto. Alias: `polydifference`.
+- `PolygonDifference[poly1, poly2]`: Resta dos poligonos. Mutacion: crea objetos. Riesgo: alto. Alias: `polydifference`, `Difference`.
 - `PolygonXor[poly1, poly2]`: Calcula la diferencia simetrica. Mutacion: crea objetos. Riesgo: alto. Alias: `polyxor`.
 ## Expresiones
 
@@ -113,7 +113,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 
 - `Derivative[expr, variable]`: Deriva simbolicamente una expresion. Mutacion: crea objetos. Riesgo: bajo. Alias: `derivada`, `deriv`, `diff`.
 - `Integral[expr]`: Calcula una integral simbolica o definida. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Integral[expr, variable]`, `Integral[expr, a, b]`, `Integral[expr, variable, a, b]`. Alias: `integrar`, `int`.
-- `Solve[expr, variable]`: Resuelve una ecuacion en la variable indicada. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Solve[expr, variable, minimo, maximo]`. Alias: `resolver`.
+- `Solve[expr, variable]`: Resuelve una ecuacion en la variable indicada. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Solve[expr, variable, minimo, maximo]`. Alias: `resolver`, `PlotSolve`.
 - `NSolve[expr, variable, minimo, maximo]`: Aproxima una sola raíz numérica en el intervalo dado (1 raíz). Mutacion: crea objetos. Riesgo: medio.
 - `SolveNlSystem[eq1, eq2, var1, var2]`: Resuelve un sistema polinómico 2x2 por eliminación (puntos verificados). Mutacion: crea objetos. Riesgo: medio. Alias: `sistema_nolineal`.
 - `Limit[expr, variable, punto]`: Estima un limite bilateral finito. Mutacion: solo consulta. Riesgo: medio. Alias: `limite`, `lim`.
@@ -205,14 +205,14 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `FitImplicit[tabla, expr]`: Ajuste implícito genérico Gauss-Newton: FitImplicit[tabla, exprConParams, a0, b0, ...] minimiza y - expr(x; params). Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `FitImplicit[tabla, expr, a0, b0, c0]`. Alias: `fit_implicit`, `implicit_fit`, `ajuste implicito`.
 - `Mean[{data}]`: Calcula la media. Mutacion: solo consulta. Riesgo: bajo. Alias: `media`.
 - `Median[{data}]`: Calcula la mediana. Mutacion: solo consulta. Riesgo: bajo. Alias: `mediana`.
-- `StdDev[{data}]`: Calcula el desvio estandar. Mutacion: solo consulta. Riesgo: bajo. Alias: `desviacion`.
-- `Correlation[{xs}, {ys}]`: Calcula una correlacion. Mutacion: solo consulta. Riesgo: bajo. Alias: `correlacion`.
+- `StdDev[{data}]`: Calcula el desvio estandar. Mutacion: solo consulta. Riesgo: bajo. Alias: `desviacion`, `SampleSD`, `desvio_muestral`.
+- `Correlation[{xs}, {ys}]`: Calcula una correlacion. Mutacion: solo consulta. Riesgo: bajo. Alias: `correlacion`, `CorrelationCoefficient`.
 ## Probabilidad
 
 - `InverseNormal[p]`: Cuantil normal: InverseNormal[p, mu, sigma] (p en (0,1), sigma>0); con un arg usa N(0,1). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InverseNormal[p, mu, sigma]`. Alias: `inverse_normal`, `cuantilnormal`, `cuantil_normal`.
-- `InverseT[p, df]`: Cuantil t-Student: InverseT[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_t`, `cuantilt`, `cuantil_t`.
+- `InverseT[p, df]`: Cuantil t-Student: InverseT[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_t`, `cuantilt`, `cuantil_t`, `InverseTDistribution`.
 - `InverseChiSquared[p, df]`: Cuantil chi-cuadrado: InverseChiSquared[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_chi_squared`, `inversachicuadrado`, `cuantilchicuadrado`.
-- `InverseF[p, df1, df2]`: Cuantil F de Fisher: InverseF[p, df1, df2] (p en (0,1), df1>0, df2>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_f`, `cuantilf`, `cuantil_f`.
+- `InverseF[p, df1, df2]`: Cuantil F de Fisher: InverseF[p, df1, df2] (p en (0,1), df1>0, df2>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_f`, `cuantilf`, `cuantil_f`, `InverseFDistribution`.
 - `InverseExponential[p, lambda]`: Cuantil exponencial cerrado: -ln(1-p)/λ (p en (0,1), λ>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_exponential`, `cuantilexponencial`, `cuantil_exponencial`.
 - `InverseUniform[p, a, b]`: Cuantil uniforme cerrado: a+p·(b-a) (p en [0,1], a<b). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_uniform`, `cuantiluniforme`, `cuantil_uniforme`.
 ## Estadística
@@ -228,13 +228,13 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `TTest2[{a}, {b}]`: Prueba t de dos muestras independientes: TTest2[{a}, {b}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `t_test2`, `prueba_t2`.
 - `TTestPaired[{a}, {b}]`: Prueba t pareada: TTestPaired[{antes}, {despues}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `ttest_paired`, `t_paired`, `prueba_t_pareada`, `ttestpareado`.
 - `ZTest[{datos}, mu0, sigma]`: Prueba z de una muestra con sigma conocido: ZTest[{datos}, mu0, sigma]. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_test`, `prueba_z`.
-- `ChiSqTest[{obs}, {esp}]`: Prueba chi-cuadrado de bondad de ajuste: ChiSqTest[{obs}, {esp}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `chi2test`, `prueba_chi2`, `chi_cuadrado`.
+- `ChiSqTest[{obs}, {esp}]`: Prueba chi-cuadrado de bondad de ajuste: ChiSqTest[{obs}, {esp}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `chi2test`, `prueba_chi2`, `chi_cuadrado`, `ChiSquaredTest`.
 - `ANOVA[{g1}, {g2}]`: ANOVA de un factor: ANOVA[{g1}, {g2}, ...]. Mutacion: solo consulta. Riesgo: bajo. Alias: `anova_oneway`.
 ## Financiera
 
 - `Rate[nper, pmt, pv, fv]`: Calcula la tasa periodica (tipo 0=anual) resolviendo TVM con exp/log; 4-5 args. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Rate[nper, pmt, pv, fv, tipo]`. Alias: `tasa`, `tipo`.
 - `Nper[rate, pmt, pv, fv]`: Calcula numero de periodos via TVM con exp/log; usa log((pmt*(1+r*tipo)-fv*r)/(pmt*(1+r*tipo)+pv*r))/log(1+r). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Nper[rate, pmt, pv, fv, tipo]`. Alias: `n_per`, `periodos`, `plazo`.
-- `Pmt[rate, nper, pv, fv]`: Calcula el pago periodico TVM; 4-5 args con tipo 0/1. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Pmt[rate, nper, pv, fv, tipo]`. Alias: `pago`, `cuota`.
+- `Pmt[rate, nper, pv, fv]`: Calcula el pago periodico TVM; 4-5 args con tipo 0/1. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Pmt[rate, nper, pv, fv, tipo]`. Alias: `pago`, `cuota`, `Payment`.
 - `PV[rate, nper, pmt, fv]`: Calcula valor presente TVM; usa exp/log para (1+rate)^nper. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `PV[rate, nper, pmt, fv, tipo]`. Alias: `va`, `valoractual`, `presentvalue`.
 - `FV[rate, nper, pmt, pv]`: Calcula valor futuro TVM; usa exp/log para (1+rate)^nper. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `FV[rate, nper, pmt, pv, tipo]`. Alias: `vf`, `valorfuturo`, `futurevalue`.
 ## Atractores
@@ -438,7 +438,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Dinámica
 
 - `Slider[variable, min, max, paso, modo]`: Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Slider[variable, min, max, paso]`. Alias: `Deslizador`.
-- `Rastro[objeto]`: Activa/desactiva el rastro de un objeto: al arrastrarlo deja una estela con fade. Rastro[etiqueta] alterna; Rastro[etiqueta, true|false] fija el estado. (Trace con matriz sigue siendo traza matricial.) Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `Rastro[objeto, estado]`. Alias: `Estela`.
+- `Rastro[objeto]`: Activa/desactiva el rastro de un objeto: al arrastrarlo deja una estela con fade. Rastro[etiqueta] alterna; Rastro[etiqueta, true|false] fija el estado. (Trace con matriz sigue siendo traza matricial.) Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `Rastro[objeto, estado]`. Alias: `Estela`, `SetTrace`.
 - `Button[rotulo, guion]`: Crea un botón (action object sobre texto) con guion del subset GGBScript; el click lo ejecuta la UI. Mutacion: crea objetos. Riesgo: bajo. Alias: `Boton`.
 - `Checkbox[rotulo, variable]`: Crea un checkbox ligado a una variable (1 activado, 0 desactivado). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Checkbox[rotulo, variable, inicial]`. Alias: `Casilla`.
 - `InputBox[rotulo, variable]`: Crea una caja de entrada ligada a una variable numérica. Mutacion: crea objetos. Riesgo: bajo. Alias: `CajaEntrada`.
@@ -483,7 +483,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `SolveODE2[a, b, c, rhs]`: Resolvé EDO lineal de 2do orden a·y''+b·y'+c·y=rhs con a, b, c constantes (a≠0): SolveODE2[a, b, c, rhs] o SolveODE2[a, b, c, rhs, variable]. Orden ≥3 o coeficientes variables quedan fuera del subset y dan error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SolveODE2[a, b, c, rhs, variable]`. Alias: `edo2`, `edo_2`.
 - `ODESystem2[a11, a12, a21, a22]`: Resolvé sistema lineal 2x2 constante x'=A·x por autovalores: ODESystem2[a11, a12, a21, a22] o ODESystem2[a11, a12, a21, a22, t]. No lineal o no constante queda fuera del subset y da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ODESystem2[a11, a12, a21, a22, t]`. Alias: `sistemaedo2`, `odesys2`.
 - `LaplaceT[expr]`: Calculá la transformada de Laplace directa del subset F3c (1, t^n con n≤20, exp, sin/cos y combinaciones lineales): LaplaceT[expr] o LaplaceT[expr, t, s]. El resto da error honesto, no inventa. Laplace es distribución. ¿Buscabas LaplaceT[expr]? Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LaplaceT[expr, t]`, `LaplaceT[expr, t, s]`. Alias: `transformadalaplace`, `laplace_t`.
-- `InvLaplaceT[expr]`: Calculá la Laplace inversa de racionales propios con denominador de grado ≤2: InvLaplaceT[expr] o InvLaplaceT[expr, s, t]. Grado ≥3, impropias o retardos quedan fuera del subset y dan error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InvLaplaceT[expr, s]`, `InvLaplaceT[expr, s, t]`. Alias: `laplaceinversa`, `invlaplace_t`.
+- `InvLaplaceT[expr]`: Calculá la Laplace inversa de racionales propios con denominador de grado ≤2: InvLaplaceT[expr] o InvLaplaceT[expr, s, t]. Grado ≥3, impropias o retardos quedan fuera del subset y dan error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InvLaplaceT[expr, s]`, `InvLaplaceT[expr, s, t]`. Alias: `laplaceinversa`, `invlaplace_t`, `InverseLaplace`.
 - `RischInt[expr]`: Integrá por Risch-Norman (polinomios, exponenciales, logaritmos): RischInt[expr], RischInt[expr, variable] o definida RischInt[expr, variable, a, b] por FTC. Sin primitiva en el subset (p. ej. exp(x^2)) da error honesto que deriva a cuadratura. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `RischInt[expr, variable]`, `RischInt[expr, variable, a, b]`. Alias: `risch`, `risch_int`.
 - `GroebnerBasis[polinomios, variables]`: Calculá la base de Groebner por Buchberger acotado (hasta 8 polinomios en 4 variables, 128 S-polinomios; 3x3 lineal verificado): GroebnerBasis[polinomios, variables]. Fuera de cota o no polinómico da error honesto que deriva a Eliminate. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebner_basis`, `basegroebner`.
 - `SolveODEN[coeficientes, rhs]`: Resolvé EDO lineal de orden n≤8 con coeficientes constantes por anulador + resonancia: SolveODEN[{a2,a1,a0}, rhs] o SolveODEN[{a2,a1,a0}, rhs, x]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SolveODEN[coeficientes, rhs, variable]`. Alias: `edo_n`, `solveode`.
@@ -492,6 +492,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `LaplaceDeriv[n, y]`: Laplace de derivada L{y⁽ⁿ⁾} con iniciales (n≤8): LaplaceDeriv[n, y] o LaplaceDeriv[n, y, t, s, {y0, y1}]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LaplaceDeriv[n, y, t, s, iniciales]`. Alias: `derivadalaplace`.
 - `LaplaceInt[f]`: Laplace de integral L{∫₀ᵗ f} = L{f}/s: LaplaceInt[f] o LaplaceInt[f, t, s]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LaplaceInt[f, t, s]`. Alias: `integrallaplace`.
 - `GroebnerOrdered[polinomios, variables, orden]`: Base de Groebner con orden monomial explícito (mismas cotas que GroebnerBasis): GroebnerOrdered[polinomios, variables, orden] con orden lex|grlex|grevlex. Útil para eliminación. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebnerorden`, `baseordenada`.
+- `GroebnerLexDeg[polinomios, variables]`: Base de Groebner en orden grado-lexicográfico (grlex), apto para eliminación: GroebnerLexDeg[polinomios, variables]. Equivalentes: GroebnerOrdered[..., "grlex"]. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebner_gradolex`.
 - `Eliminate[polinomios, variables, eliminar]`: Elimina variables por Groebner lexicográfico (intersecciones): Eliminate[polinomios, variables, eliminar]. Fuera de cota da ResourceLimit honesto. Mutacion: solo consulta. Riesgo: bajo. Alias: `elimina`, `eliminacion`.
 ## Estadística
 
@@ -807,6 +808,31 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Corner[n]`: Esquina visible de la vista en mundo: Corner[1..=4]. Mutacion: solo consulta. Riesgo: bajo.
 - `ConstructionStep[n]`: Error honesto: el protocolo vive en la app y requiere cableado UI P3c. Mutacion: solo consulta. Riesgo: bajo.
 - `SetConstructionStep[n]`: Error honesto: sin rebobinado del documento; requiere cableado UI P3c. Mutacion: solo consulta. Riesgo: bajo.
+## Estadística
+
+- `SD[lista]`: Desvío estándar poblacional (÷n) de una lista: SD[lista]. Mutacion: solo consulta. Riesgo: bajo. Alias: `desvio_poblacional`, `stdevp`.
+- `SampleVariance[lista]`: Varianza muestral (÷n−1) de una lista: SampleVariance[lista]. Mutacion: solo consulta. Riesgo: bajo. Alias: `varianza_muestral`.
+## Dinámica
+
+- `SetSeed[semilla]`: Fija la semilla de los comandos aleatorios (RandomBetween, RandomPolynomial, Shuffle, Sample, Random*): SetSeed[entero]. Determinista: misma semilla → misma secuencia. Mutacion: transforma objetos. Riesgo: bajo. Alias: `semilla`, `fijar_semilla`.
+- `CASLoaded[]`: Indica si el motor CAS está disponible: CASLoaded[] → verdadero/falso. Mutacion: solo consulta. Riesgo: bajo. Alias: `cas_cargado`.
+- `CopyFreeObject[etiqueta]`: Crea una copia libre (sin dependencias) de un objeto existente: CopyFreeObject[etiqueta]. Mutacion: crea objetos. Riesgo: bajo. Alias: `copiar_libre`, `copia_libre`.
+- `SetBackgroundColor[color]`: Fondo del lienzo 2D (color nombrado red/green/blue/black/white/gray o "r,g,b" 0..1): SetBackgroundColor[color]. Con objeto, tiñe su relleno si lo tiene. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `SetBackgroundColor[objeto, color]`. Alias: `color_fondo`.
+- `SetSpinSpeed[grados]`: Velocidad de giro automático de la vista 3D (grados por segundo, 0 = quieto): SetSpinSpeed[grados]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `velocidad_giro`.
+- `AttachCopyToView[etiqueta, vista]`: Copia un objeto y la adjunta a una vista (0 = 2D, 1 = 3D): AttachCopyToView[etiqueta, vista]. Mutacion: crea objetos. Riesgo: bajo. Alias: `adjuntar_vista`.
+- `Object[nombre]`: Etiqueta resuelta de un nombre dinámico: Object["A"] → A. Deprecado en GeoGebra; en Grafito devuelve la etiqueta existente o error honesto. Mutacion: solo consulta. Riesgo: bajo. Alias: `objeto_por_nombre`.
+## Análisis
+
+- `Slope[objeto]`: Pendiente de una recta o de una función en x=0 (derivada numérica): Slope[objeto]. Mutacion: solo consulta. Riesgo: bajo. Alias: `pendiente`.
+## Dinámica
+
+- `SetValue[nombre, valor]`: Asigna valor a una variable libre o mueve un punto libre: SetValue[nombre, valor] o SetValue[punto, (x, y)]. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `SetValue[punto, (x, y)]`. Alias: `fijar_valor`.
+- `TurtleForward[n]`: Tortuga Logo: avanza n dibujando si el lápiz está abajo. Estado persistente del documento. Mutacion: crea objetos. Riesgo: bajo. Alias: `tortuga_avanza`.
+- `TurtleBack[n]`: Tortuga Logo: retrocede n dibujando si el lápiz está abajo. Mutacion: crea objetos. Riesgo: bajo. Alias: `tortuga_retrocede`.
+- `TurtleLeft[grados]`: Tortuga Logo: gira a la izquierda (antihorario) los grados dados. Mutacion: transforma objetos. Riesgo: bajo. Alias: `tortuga_izquierda`.
+- `TurtleRight[grados]`: Tortuga Logo: gira a la derecha (horario) los grados dados. Mutacion: transforma objetos. Riesgo: bajo. Alias: `tortuga_derecha`.
+- `TurtleUp[]`: Tortuga Logo: levanta el lápiz (deja de dibujar). Mutacion: transforma objetos. Riesgo: bajo. Alias: `tortuga_arriba`.
+- `TurtleDown[]`: Tortuga Logo: baja el lápiz (vuelve a dibujar). Mutacion: transforma objetos. Riesgo: bajo. Alias: `tortuga_abajo`.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 
