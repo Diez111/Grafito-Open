@@ -2167,6 +2167,15 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             staged.version = document.version.wrapping_add(1);
             staged.spatial_dirty = true;
             *document = staged;
+        } else if document.selection() != staged.selection() {
+            // Frente P4: la selección es `#[serde(skip)]` (efímera) y no cuenta
+            // en la comparación semántica; sin esta propagación `SelectObjects`
+            // se descartaría siempre (staged == document en JSON).
+            let sel: Vec<_> = staged.selection().to_vec();
+            document.clear_selection();
+            for id in sel {
+                document.select(id);
+            }
         }
     }
     outcome
@@ -11415,7 +11424,12 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Message(format!("Eigenvectors:\n{lines}"));
         }
-        "LU" if !cmd.args.is_empty() => {
+        "LU" => {
+            if cmd.args.is_empty() {
+                return CommandOutcome::Error(
+                    "LU: requiere una matriz, ej. LU[[1,2],[3,4]]".into(),
+                );
+            }
             let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
                 Ok(m) => m,
                 Err(e) => return CommandOutcome::Error(format!("LU: {e}")),
@@ -11426,7 +11440,12 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Message(format!("L:\n{}U:\n{}", l, u));
         }
-        "QR" if !cmd.args.is_empty() => {
+        "QR" => {
+            if cmd.args.is_empty() {
+                return CommandOutcome::Error(
+                    "QR: requiere una matriz, ej. QR[[1,2],[3,4]]".into(),
+                );
+            }
             let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
                 Ok(m) => m,
                 Err(e) => return CommandOutcome::Error(format!("QR: {e}")),
@@ -18472,6 +18491,2458 @@ fn execute_cas_command_typed(
                 Err(e) => Some(Err(format!("CurvatureVector: {e}"))),
             }
         }
+        // Frente P4-A: CAS (20 visibles; motores en geometry::cas_extra).
+        "ImplicitDerivative" => {
+            if cmd.args.len() != 2 && cmd.args.len() != 3 && cmd.args.len() != 5 {
+                return Some(Err(
+                    "Error: ImplicitDerivative requiere ImplicitDerivative[f, x] o ImplicitDerivative[f, x, y] o ImplicitDerivative[f, x, y, x0, y0]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("ImplicitDerivative", "f", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let x_var = cmd.args[1].trim();
+            if !is_math_identifier(x_var) {
+                return Some(Err(
+                    "ImplicitDerivative: la variable x no es un identificador válido".into(),
+                ));
+            }
+            if cmd.args.len() == 5 {
+                let y_var = cmd.args[2].trim();
+                if !is_math_identifier(y_var) {
+                    return Some(Err(
+                        "ImplicitDerivative: la variable y no es un identificador válido".into(),
+                    ));
+                }
+                let x0 = match require_finite(parse_numeric_arg(&cmd.args[3], &document.variables))
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("ImplicitDerivative: en x0: {e}"))),
+                };
+                let y0 = match require_finite(parse_numeric_arg(&cmd.args[4], &document.variables))
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("ImplicitDerivative: en y0: {e}"))),
+                };
+                match grafito_geometry::cas_extra::implicit_derivative_at(
+                    &expr, x_var, y_var, x0, y0,
+                ) {
+                    Ok(v) => Some(Ok(format!(
+                        "ImplicitDerivative[{expr}] en ({x0}, {y0}) = {v}"
+                    ))),
+                    Err(e) => Some(Err(format!("ImplicitDerivative: {e}"))),
+                }
+            } else {
+                let y_var = if cmd.args.len() == 3 {
+                    let y = cmd.args[2].trim();
+                    if !is_math_identifier(y) {
+                        return Some(Err(
+                            "ImplicitDerivative: la variable y no es un identificador válido"
+                                .into(),
+                        ));
+                    }
+                    y.to_string()
+                } else {
+                    "y".to_string()
+                };
+                match grafito_geometry::cas_extra::implicit_derivative(&expr, x_var, &y_var) {
+                    Ok(out) => Some(Ok(format!("d{y_var}/d{x_var}({expr}) = {out}"))),
+                    Err(e) => Some(Err(format!("ImplicitDerivative: {e}"))),
+                }
+            }
+        }
+        "Iteration" => {
+            if cmd.args.len() != 4 {
+                return Some(Err(
+                    "Error: Iteration requiere Iteration[f, x, x0, n]".into()
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Iteration", "f", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args[1].trim();
+            if !is_math_identifier(var) {
+                return Some(Err(
+                    "Iteration: la variable no es un identificador válido".into()
+                ));
+            }
+            let x0 = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Iteration: en x0: {e}"))),
+            };
+            let n_raw = match require_finite(parse_numeric_arg(&cmd.args[3], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Iteration: en n: {e}"))),
+            };
+            if n_raw.fract() != 0.0 || !(0.0..=1024.0).contains(&n_raw) {
+                return Some(Err("Iteration: n debe ser un entero 0..=1024".into()));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = n_raw as usize;
+            match grafito_geometry::cas_extra::iterate_function(&expr, var, x0, n) {
+                Ok(vals) => {
+                    let cuerpo = vals
+                        .iter()
+                        .map(|v| format!("{v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("Iteration[{expr}] = {{{cuerpo}}}")))
+                }
+                Err(e) => Some(Err(format!("Iteration: {e}"))),
+            }
+        }
+        "Numeric" => {
+            if cmd.args.len() != 1 && cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: Numeric requiere Numeric[expr] o Numeric[expr, var, valor]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Numeric", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if cmd.args.len() == 1 {
+                match grafito_geometry::cas_extra::numeric(&expr) {
+                    Ok(v) => Some(Ok(format!("Numeric[{expr}] = {v}"))),
+                    Err(e) => Some(Err(format!("Numeric: {e}"))),
+                }
+            } else {
+                let var = cmd.args[1].trim();
+                if !is_math_identifier(var) {
+                    return Some(Err(
+                        "Numeric: la variable no es un identificador válido".into()
+                    ));
+                }
+                let val = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables))
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("Numeric: en valor: {e}"))),
+                };
+                match grafito_geometry::cas_extra::numeric_at(&expr, var, val) {
+                    Ok(v) => Some(Ok(format!("Numeric[{expr}, {var}={val}] = {v}"))),
+                    Err(e) => Some(Err(format!("Numeric: {e}"))),
+                }
+            }
+        }
+        "ToExponential" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: ToExponential requiere ToExponential[a, b]".into()
+                ));
+            }
+            let re = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ToExponential: en a: {e}"))),
+            };
+            let im = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ToExponential: en b: {e}"))),
+            };
+            match grafito_geometry::cas_extra::to_exponential(re, im) {
+                Ok(out) => Some(Ok(format!("ToExponential[{re}, {im}] = {out}"))),
+                Err(e) => Some(Err(format!("ToExponential: {e}"))),
+            }
+        }
+        "LeftSide" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: LeftSide requiere LeftSide[ecuación]".into()));
+            }
+            let eq = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("LeftSide", "ecuación", &eq) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match grafito_geometry::cas_extra::left_side(&eq) {
+                Ok(out) => Some(Ok(format!("LeftSide[{eq}] = {out}"))),
+                Err(e) => Some(Err(format!("LeftSide: {e}"))),
+            }
+        }
+        "RightSide" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: RightSide requiere RightSide[ecuación]".into()));
+            }
+            let eq = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("RightSide", "ecuación", &eq) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match grafito_geometry::cas_extra::right_side(&eq) {
+                Ok(out) => Some(Ok(format!("RightSide[{eq}] = {out}"))),
+                Err(e) => Some(Err(format!("RightSide: {e}"))),
+            }
+        }
+        "Factors" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Factors requiere Factors[n]".into()));
+            }
+            let raw = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("Factors", "n", &raw) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let val = match require_finite(parse_numeric_arg(&raw, &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Factors: {e}"))),
+            };
+            let rounded = val.round();
+            if rounded >= i64::MIN as f64 && rounded < i64::MAX as f64 {
+                #[allow(clippy::cast_possible_truncation)]
+                let n = rounded as i64;
+                match grafito_geometry::cas_extra::factors(n) {
+                    Ok(pairs) => Some(Ok(format!(
+                        "Factors[{raw}] = {}",
+                        grafito_geometry::cas_extra::format_factors(&pairs)
+                    ))),
+                    Err(e) => Some(Err(format!("Factors: {e}"))),
+                }
+            } else {
+                Some(Err("Factors: n fuera del rango entero de 64 bits".into()))
+            }
+        }
+        "AreEqual" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: AreEqual requiere AreEqual[a, b]".into()));
+            }
+            let a = expand_all_cas(cmd.args[0].trim(), document);
+            let b = expand_all_cas(cmd.args[1].trim(), document);
+            if let Err(error) = check_w1_budget("AreEqual", "a", &a) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            if let Err(error) = check_w1_budget("AreEqual", "b", &b) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            match grafito_geometry::cas_extra::are_equal(&a, &b) {
+                Ok(v) => match v {
+                    grafito_geometry::cas_extra::EqualityVerdict::Equal => {
+                        Some(Ok(format!("AreEqual[{a}, {b}] = verdadero")))
+                    }
+                    grafito_geometry::cas_extra::EqualityVerdict::NotEqual => {
+                        Some(Ok(format!("AreEqual[{a}, {b}] = falso")))
+                    }
+                    grafito_geometry::cas_extra::EqualityVerdict::Unknown => {
+                        Some(Ok(format!("AreEqual[{a}, {b}] = indefinido (coinciden en el sondeo, sin prueba simbólica)")))
+                    }
+                },
+                Err(e) => Some(Err(format!("AreEqual: {e}"))),
+            }
+        }
+        "RemovableDiscontinuity" => {
+            if cmd.args.len() != 2 && cmd.args.len() != 3 {
+                return Some(Err("Error: RemovableDiscontinuity requiere RemovableDiscontinuity[f, punto] o RemovableDiscontinuity[f, x, punto]".into()));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("RemovableDiscontinuity", "f", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let (var, at_raw) = if cmd.args.len() == 2 {
+                ("x", cmd.args[1].trim())
+            } else {
+                let v = cmd.args[1].trim();
+                if !is_math_identifier(v) {
+                    return Some(Err(
+                        "RemovableDiscontinuity: la variable no es un identificador válido".into(),
+                    ));
+                }
+                (v, cmd.args[2].trim())
+            };
+            let at = match require_finite(parse_numeric_arg(at_raw, &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RemovableDiscontinuity: en punto: {e}"))),
+            };
+            match grafito_geometry::cas_extra::removable_discontinuity(&expr, var, at) {
+                Ok(out) => {
+                    if out.is_removable {
+                        let lim = out
+                            .limit
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_else(|| "¿?".to_string());
+                        Some(Ok(format!("RemovableDiscontinuity[{expr}] en {var}={at}: evitable, límite = {lim}")))
+                    } else {
+                        Some(Ok(format!(
+                            "RemovableDiscontinuity[{expr}] en {var}={at}: no evitable"
+                        )))
+                    }
+                }
+                Err(e) => Some(Err(format!("RemovableDiscontinuity: {e}"))),
+            }
+        }
+        "InflectionPoint" => {
+            if cmd.args.len() != 1 && cmd.args.len() != 4 {
+                return Some(Err("Error: InflectionPoint requiere InflectionPoint[f] o InflectionPoint[f, var, a, b]".into()));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("InflectionPoint", "f", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let (var, lo, hi) = if cmd.args.len() == 1 {
+                ("x".to_string(), -10.0, 10.0)
+            } else {
+                let v = cmd.args[1].trim();
+                if !is_math_identifier(v) {
+                    return Some(Err(
+                        "InflectionPoint: la variable no es un identificador válido".into(),
+                    ));
+                }
+                let lo = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables))
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("InflectionPoint: en a: {e}"))),
+                };
+                let hi = match require_finite(parse_numeric_arg(&cmd.args[3], &document.variables))
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("InflectionPoint: en b: {e}"))),
+                };
+                (v.to_string(), lo, hi)
+            };
+            match grafito_geometry::cas_extra::inflection_points(&expr, &var, lo, hi) {
+                Ok(pts) => {
+                    if pts.is_empty() {
+                        Some(Ok(format!(
+                            "InflectionPoint[{expr}] = {{}} (sin inflexiones en [{lo}, {hi}])"
+                        )))
+                    } else {
+                        let cuerpo = pts
+                            .iter()
+                            .map(|v| format!("{v:.6}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        Some(Ok(format!("InflectionPoint[{expr}] = {{{cuerpo}}}")))
+                    }
+                }
+                Err(e) => Some(Err(format!("InflectionPoint: {e}"))),
+            }
+        }
+        "Dimension" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Dimension requiere Dimension[matriz]".into()));
+            }
+            let mat = match parse_matrix_arg_strict(cmd.args[0].trim(), &document.variables) {
+                Ok(m) => m,
+                Err(e) => return Some(Err(format!("Dimension: {e}"))),
+            };
+            let rows: Vec<Vec<f64>> = (0..mat.rows).map(|r| mat.row(r)).collect();
+            match grafito_geometry::cas_extra::matrix_dimension(&rows) {
+                Ok((r, c)) => Some(Ok(format!("Dimension = {r}×{c}"))),
+                Err(e) => Some(Err(format!("Dimension: {e}"))),
+            }
+        }
+        "Identity" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Identity requiere Identity[n]".into()));
+            }
+            let n_raw = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Identity: en n: {e}"))),
+            };
+            if n_raw.fract() != 0.0 || !(1.0..=64.0).contains(&n_raw) {
+                return Some(Err("Identity: n debe ser un entero 1..=64".into()));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = n_raw as usize;
+            match grafito_geometry::cas_extra::identity_matrix(n) {
+                Ok(m) => {
+                    let cuerpo = m
+                        .iter()
+                        .map(|row| {
+                            format!(
+                                "[{}]",
+                                row.iter()
+                                    .map(|v| format!("{v}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("Identity[{n}] = [{cuerpo}]")))
+                }
+                Err(e) => Some(Err(format!("Identity: {e}"))),
+            }
+        }
+        "MatrixRank" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: MatrixRank requiere MatrixRank[matriz]".into()));
+            }
+            let mat = match parse_matrix_arg_strict(cmd.args[0].trim(), &document.variables) {
+                Ok(m) => m,
+                Err(e) => return Some(Err(format!("MatrixRank: {e}"))),
+            };
+            let rows: Vec<Vec<f64>> = (0..mat.rows).map(|r| mat.row(r)).collect();
+            match grafito_geometry::cas_extra::matrix_rank(&rows) {
+                Ok(r) => Some(Ok(format!("MatrixRank = {r}"))),
+                Err(e) => Some(Err(format!("MatrixRank: {e}"))),
+            }
+        }
+        "RandomBetween" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: RandomBetween requiere RandomBetween[a, b]".into()
+                ));
+            }
+            let a_raw = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomBetween: en a: {e}"))),
+            };
+            let b_raw = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomBetween: en b: {e}"))),
+            };
+            if a_raw.fract() != 0.0 || b_raw.fract() != 0.0 {
+                return Some(Err("RandomBetween: a y b deben ser enteros".into()));
+            }
+            if a_raw < i64::MIN as f64
+                || a_raw >= i64::MAX as f64
+                || b_raw < i64::MIN as f64
+                || b_raw >= i64::MAX as f64
+            {
+                return Some(Err("RandomBetween: rango fuera de 64 bits".into()));
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let (a, b) = (a_raw as i64, b_raw as i64);
+            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+            let mut seeder = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
+                document.version,
+                "RandomBetween",
+                &arg_refs,
+            );
+            let seed = seeder.next_u64();
+            match grafito_geometry::cas_extra::random_between(a, b, seed) {
+                Ok(v) => Some(Ok(format!("RandomBetween[{a}, {b}] = {v}"))),
+                Err(e) => Some(Err(format!("RandomBetween: {e}"))),
+            }
+        }
+        "RandomPolynomial" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: RandomPolynomial requiere RandomPolynomial[grado]".into(),
+                ));
+            }
+            let g_raw = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomPolynomial: en grado: {e}"))),
+            };
+            if g_raw.fract() != 0.0 || !(0.0..=8.0).contains(&g_raw) {
+                return Some(Err(
+                    "RandomPolynomial: el grado debe ser un entero 0..=8".into()
+                ));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let grado = g_raw as usize;
+            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+            let mut seeder = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
+                document.version,
+                "RandomPolynomial",
+                &arg_refs,
+            );
+            let seed = seeder.next_u64();
+            match grafito_geometry::cas_extra::random_polynomial(grado, seed) {
+                Ok(coeffs) => {
+                    let cuerpo = coeffs
+                        .iter()
+                        .map(|v| format!("{v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("RandomPolynomial[{grado}] = {{{cuerpo}}}")))
+                }
+                Err(e) => Some(Err(format!("RandomPolynomial: {e}"))),
+            }
+        }
+        "LeftSum" | "LowerSum" | "UpperSum" | "TrapezoidalSum" | "RectangleSum" => {
+            if cmd.args.len() != 5 {
+                return Some(Err(format!(
+                    "Error: {} requiere {}[f, var, a, b, n]",
+                    cmd.command, cmd.command
+                )));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget(&cmd.command, "f", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let var = cmd.args[1].trim();
+            if !is_math_identifier(var) {
+                return Some(Err(format!(
+                    "{}: la variable no es un identificador válido",
+                    cmd.command
+                )));
+            }
+            let a = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("{}: en a: {e}", cmd.command))),
+            };
+            let b = match require_finite(parse_numeric_arg(&cmd.args[3], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("{}: en b: {e}", cmd.command))),
+            };
+            let n_raw = match require_finite(parse_numeric_arg(&cmd.args[4], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("{}: en n: {e}", cmd.command))),
+            };
+            if n_raw.fract() != 0.0 || !(1.0..=100_000.0).contains(&n_raw) {
+                return Some(Err(format!(
+                    "{}: n debe ser un entero 1..=100000",
+                    cmd.command
+                )));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = n_raw as usize;
+            let out = match cmd.command.as_str() {
+                "LeftSum" => grafito_geometry::cas_extra::left_sum(&expr, var, a, b, n),
+                "LowerSum" => grafito_geometry::cas_extra::lower_sum(&expr, var, a, b, n),
+                "UpperSum" => grafito_geometry::cas_extra::upper_sum(&expr, var, a, b, n),
+                "TrapezoidalSum" => {
+                    grafito_geometry::cas_extra::trapezoidal_sum(&expr, var, a, b, n)
+                }
+                _ => grafito_geometry::cas_extra::rectangle_sum(&expr, var, a, b, n),
+            };
+            match out {
+                Ok(v) => {
+                    let nota = if cmd.command == "LowerSum" || cmd.command == "UpperSum" {
+                        " (estimación con 8 muestras por subintervalo)"
+                    } else {
+                        ""
+                    };
+                    Some(Ok(format!("{}[{expr}] = {v:.6}{nota}", cmd.command)))
+                }
+                Err(e) => Some(Err(format!("{}: {e}", cmd.command))),
+            }
+        }
+        // Frente P4-B: listas/texto (15; motores en geometry::text_ops).
+        "ColumnName" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: ColumnName requiere ColumnName[n]".into()));
+            }
+            let n_raw = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("ColumnName: en n: {e}"))),
+            };
+            if n_raw.fract() != 0.0 || !(1.0..=16384.0).contains(&n_raw) {
+                return Some(Err("ColumnName: n debe ser un entero 1..=16384".into()));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = n_raw as usize;
+            match grafito_geometry::text_ops::column_name(n) {
+                Ok(out) => Some(Ok(format!("ColumnName[{n}] = {out}"))),
+                Err(e) => Some(Err(format!("ColumnName: {e}"))),
+            }
+        }
+        "DataFunction" => {
+            if cmd.args.len() != 2 && cmd.args.len() != 3 {
+                return Some(Err("Error: DataFunction requiere DataFunction[expr, xs] o DataFunction[expr, xs, ys]".into()));
+            }
+            let expr = expand_all_cas(cmd.args[0].trim(), document);
+            if let Err(error) = check_w1_budget("DataFunction", "expr", &expr) {
+                return Some(Err(format!("Error: {error}")));
+            }
+            let xs = match resolve_list_arg(&cmd.args[1], document) {
+                Ok(elems) => match p4_list_elems_to_flat(&elems, "DataFunction") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("DataFunction: {e}"))),
+                },
+                Err(e) => return Some(Err(format!("DataFunction: {e}"))),
+            };
+            let ys = if cmd.args.len() == 3 {
+                match resolve_list_arg(&cmd.args[2], document) {
+                    Ok(elems) => match p4_list_elems_to_flat(&elems, "DataFunction") {
+                        Ok(v) => Some(v),
+                        Err(e) => return Some(Err(format!("DataFunction: {e}"))),
+                    },
+                    Err(e) => return Some(Err(format!("DataFunction: {e}"))),
+                }
+            } else {
+                None
+            };
+            let vars: Vec<(String, f64)> = document
+                .variables
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            match grafito_geometry::text_ops::data_function(&expr, &xs, ys.as_deref(), &vars) {
+                Ok(out) => {
+                    let cuerpo = out
+                        .iter()
+                        .map(|v| format!("{v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("DataFunction[{expr}] = {{{cuerpo}}}")))
+                }
+                Err(e) => Some(Err(format!("DataFunction: {e}"))),
+            }
+        }
+        "Frequency" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Frequency requiere Frequency[lista]".into()));
+            }
+            let data = match resolve_list_arg(&cmd.args[0], document) {
+                Ok(elems) => match p4_list_elems_to_flat(&elems, "Frequency") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("Frequency: {e}"))),
+                },
+                Err(e) => return Some(Err(format!("Frequency: {e}"))),
+            };
+            match grafito_geometry::text_ops::frequency(&data) {
+                Ok(pairs) => {
+                    let cuerpo = pairs
+                        .iter()
+                        .map(|(v, c)| format!("{v}×{c}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("Frequency = {{{cuerpo}}}")))
+                }
+                Err(e) => Some(Err(format!("Frequency: {e}"))),
+            }
+        }
+        "PointList" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: PointList requiere PointList[matriz]".into()));
+            }
+            let mat = match parse_matrix_arg_strict(cmd.args[0].trim(), &document.variables) {
+                Ok(m) => m,
+                Err(e) => return Some(Err(format!("PointList: {e}"))),
+            };
+            let rows: Vec<Vec<f64>> = (0..mat.rows).map(|r| mat.row(r)).collect();
+            let out = match grafito_geometry::text_ops::point_list(&rows) {
+                Ok(o) => o,
+                Err(e) => return Some(Err(format!("PointList: {e}"))),
+            };
+            let max = grafito_core::validation::MAX_OBJECT_COUNT;
+            if document.object_count() + out.points.len() > max {
+                return Some(Err(format!(
+                    "PointList: {} puntos exceden el máximo {max}",
+                    out.points.len()
+                )));
+            }
+            let mut hechos = 0usize;
+            for p in &out.points {
+                let obj = if out.dim == 3 {
+                    GeoObject::Point3D(grafito_core::Point3DObj::new(
+                        grafito_geometry::Point3D::new(p[0], p[1], p[2]),
+                    ))
+                } else {
+                    GeoObject::Point(grafito_core::PointObj::new(Point2::new(p[0], p[1])))
+                };
+                match try_insert_command_object(document, obj) {
+                    Ok(_) => hechos += 1,
+                    Err(e) => return Some(Err(format!("PointList: {e}"))),
+                }
+            }
+            Some(Ok(format!(
+                "PointList: {hechos} punto(s) (dim {})",
+                out.dim
+            )))
+        }
+        "RemoveUndefined" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: RemoveUndefined requiere RemoveUndefined[lista]".into(),
+                ));
+            }
+            let data = match resolve_list_arg(&cmd.args[0], document) {
+                Ok(elems) => match p4_list_elems_to_flat(&elems, "RemoveUndefined") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("RemoveUndefined: {e}"))),
+                },
+                Err(e) => return Some(Err(format!("RemoveUndefined: {e}"))),
+            };
+            let out = grafito_geometry::text_ops::remove_undefined(&data);
+            let cuerpo = out
+                .iter()
+                .map(|v| format!("{v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(Ok(format!(
+                "RemoveUndefined = {{{cuerpo}}} ({} de {})",
+                out.len(),
+                data.len()
+            )))
+        }
+        "SelectedIndex" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: SelectedIndex requiere SelectedIndex[lista]".into()
+                ));
+            }
+            let labels = parse_w1_brace_list(&cmd.args[0]);
+            if labels.is_empty() {
+                return Some(Err("SelectedIndex: lista vacía".into()));
+            }
+            let selection: Vec<String> = document
+                .selection()
+                .iter()
+                .filter_map(|id| document.get_object(*id).map(|o| o.label().to_string()))
+                .collect();
+            match grafito_geometry::text_ops::selected_index(&labels, &selection) {
+                Ok(i) => Some(Ok(format!("SelectedIndex = {i}"))),
+                Err(e) => Some(Err(format!("SelectedIndex: {e}"))),
+            }
+        }
+        "SelectedElement" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: SelectedElement requiere SelectedElement[lista]".into(),
+                ));
+            }
+            let labels = parse_w1_brace_list(&cmd.args[0]);
+            if labels.is_empty() {
+                return Some(Err("SelectedElement: lista vacía".into()));
+            }
+            let selection: Vec<String> = document
+                .selection()
+                .iter()
+                .filter_map(|id| document.get_object(*id).map(|o| o.label().to_string()))
+                .collect();
+            match grafito_geometry::text_ops::selected_element(&labels, &labels, &selection) {
+                Ok(elem) => Some(Ok(format!("SelectedElement = {elem}"))),
+                Err(e) => Some(Err(format!("SelectedElement: {e}"))),
+            }
+        }
+        "ParseToFunction" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: ParseToFunction requiere ParseToFunction[texto, var]".into(),
+                ));
+            }
+            let texto = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            let var = cmd.args[1].trim().trim_matches('"').trim_matches('\'');
+            if !is_math_identifier(var) {
+                return Some(Err(
+                    "ParseToFunction: la variable no es un identificador válido".into(),
+                ));
+            }
+            match grafito_geometry::text_ops::parse_to_function(texto, var) {
+                Ok(out) => Some(Ok(format!("ParseToFunction = {out}"))),
+                Err(e) => Some(Err(format!("ParseToFunction: {e}"))),
+            }
+        }
+        "ParseToNumber" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: ParseToNumber requiere ParseToNumber[texto]".into()
+                ));
+            }
+            let texto = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            match grafito_geometry::text_ops::parse_to_number(texto) {
+                Ok(v) => Some(Ok(format!("ParseToNumber[{texto}] = {v}"))),
+                Err(e) => Some(Err(format!("ParseToNumber: {e}"))),
+            }
+        }
+        "ReadText" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: ReadText requiere ReadText[etiqueta]".into()));
+            }
+            let label = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("ReadText: no existe el objeto '{label}'"))),
+            };
+            match document.get_object(id) {
+                Some(GeoObject::Text(t)) => Some(Ok(format!(
+                    "ReadText[{label}] = {}",
+                    grafito_geometry::text_ops::read_text(&t.content)
+                ))),
+                Some(other) => Some(Err(format!(
+                    "ReadText: '{label}' es {} (solo texto)",
+                    other.name()
+                ))),
+                None => Some(Err(format!("ReadText: no existe el objeto '{label}'"))),
+            }
+        }
+        "ReplaceAll" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: ReplaceAll requiere ReplaceAll[texto, buscar, reemplazo]".into(),
+                ));
+            }
+            let texto = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            let buscar = cmd.args[1].trim().trim_matches('"').trim_matches('\'');
+            let reemplazo = cmd.args[2].trim().trim_matches('"').trim_matches('\'');
+            match grafito_geometry::text_ops::replace_all(texto, buscar, reemplazo) {
+                Ok(out) => Some(Ok(format!("ReplaceAll = {out}"))),
+                Err(e) => Some(Err(format!("ReplaceAll: {e}"))),
+            }
+        }
+        "RotateText" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: RotateText requiere RotateText[texto, grados]".into()
+                ));
+            }
+            let texto = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            let grados = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables))
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RotateText: en grados: {e}"))),
+            };
+            let radianes = grados.to_radians();
+            if !radianes.is_finite() {
+                return Some(Err("RotateText: ángulo no finito".into()));
+            }
+            match grafito_geometry::text_ops::rotate_text(texto, radianes) {
+                Ok(out) => {
+                    let mut obj =
+                        grafito_core::TextObj::new(out.content.clone(), Point2::new(0.0, 0.0));
+                    obj.rotation = out.angle_rad;
+                    match try_insert_command_object(document, GeoObject::Text(obj)) {
+                        Ok(_) => Some(Ok(format!("RotateText[{texto}, {grados}°] creado"))),
+                        Err(e) => Some(Err(format!("RotateText: {e}"))),
+                    }
+                }
+                Err(e) => Some(Err(format!("RotateText: {e}"))),
+            }
+        }
+        "Split" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: Split requiere Split[texto, delim]".into()));
+            }
+            let texto = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            let delim = cmd.args[1].trim().trim_matches('"').trim_matches('\'');
+            match grafito_geometry::text_ops::split_text(texto, delim) {
+                Ok(partes) => {
+                    let cuerpo = partes.join("|");
+                    Some(Ok(format!(
+                        "Split = {{{cuerpo}}} ({} parte(s))",
+                        partes.len()
+                    )))
+                }
+                Err(e) => Some(Err(format!("Split: {e}"))),
+            }
+        }
+        "Text" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Text requiere Text[texto]".into()));
+            }
+            let texto = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            if texto.is_empty() {
+                return Some(Err("Text: texto vacío".into()));
+            }
+            if texto.chars().count() > grafito_core::validation::MAX_STRING_LENGTH {
+                return Some(Err("Text: el texto excede el máximo".into()));
+            }
+            match try_insert_command_object(
+                document,
+                GeoObject::Text(grafito_core::TextObj::new(texto, Point2::new(0.0, 0.0))),
+            ) {
+                Ok(_) => Some(Ok(format!("Text[{texto}] creado"))),
+                Err(e) => Some(Err(format!("Text: {e}"))),
+            }
+        }
+        "VerticalText" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: VerticalText requiere VerticalText[texto]".into()
+                ));
+            }
+            let texto = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            match grafito_geometry::text_ops::vertical_text(texto) {
+                Ok(out) => match try_insert_command_object(
+                    document,
+                    GeoObject::Text(grafito_core::TextObj::new(
+                        out.clone(),
+                        Point2::new(0.0, 0.0),
+                    )),
+                ) {
+                    Ok(_) => Some(Ok(format!("VerticalText[{texto}] creado"))),
+                    Err(e) => Some(Err(format!("VerticalText: {e}"))),
+                },
+                Err(e) => Some(Err(format!("VerticalText: {e}"))),
+            }
+        }
+        // Frente P4-C: geometría (22; motores en geometry::measure_extra).
+        "AffineRatio" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: AffineRatio requiere AffineRatio[A, B, C]".into()
+                ));
+            }
+            let a = match p2_point_or_coords(document, cmd.args[0].trim(), "AffineRatio") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let b = match p2_point_or_coords(document, cmd.args[1].trim(), "AffineRatio") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let c = match p2_point_or_coords(document, cmd.args[2].trim(), "AffineRatio") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            match grafito_geometry::measure_extra::affine_ratio(a, b, c) {
+                Ok(v) => Some(Ok(format!("AffineRatio = {v:.6}"))),
+                Err(e) => Some(Err(format!("AffineRatio: {e}"))),
+            }
+        }
+        "CrossRatio" => {
+            if cmd.args.len() != 4 {
+                return Some(Err(
+                    "Error: CrossRatio requiere CrossRatio[A, B, C, D]".into()
+                ));
+            }
+            let mut pts = Vec::with_capacity(4);
+            for raw in &cmd.args {
+                match p2_point_or_coords(document, raw.trim(), "CrossRatio") {
+                    Ok(p) => pts.push(p),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            match grafito_geometry::measure_extra::cross_ratio(pts[0], pts[1], pts[2], pts[3]) {
+                Ok(v) => Some(Ok(format!("CrossRatio = {v:.6}"))),
+                Err(e) => Some(Err(format!("CrossRatio: {e}"))),
+            }
+        }
+        "AreCongruent" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: AreCongruent requiere AreCongruent[obj1, obj2]".into()
+                ));
+            }
+            let id_a = match find_object_by_label(document, cmd.args[0].trim()) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "AreCongruent: no existe '{}'",
+                        cmd.args[0].trim()
+                    )))
+                }
+            };
+            let id_b = match find_object_by_label(document, cmd.args[1].trim()) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "AreCongruent: no existe '{}'",
+                        cmd.args[1].trim()
+                    )))
+                }
+            };
+            let obj_a = match document.get_object(id_a) {
+                Some(o) => o.clone(),
+                None => return Some(Err("AreCongruent: objeto inválido".into())),
+            };
+            let obj_b = match document.get_object(id_b) {
+                Some(o) => o.clone(),
+                None => return Some(Err("AreCongruent: objeto inválido".into())),
+            };
+            match (&obj_a, &obj_b) {
+                (GeoObject::Line(a), GeoObject::Line(b)) => {
+                    match grafito_geometry::measure_extra::segments_congruent(a.start, a.end, b.start, b.end) {
+                        Ok(true) => Some(Ok(format!("AreCongruent[{}, {}] = verdadero", cmd.args[0].trim(), cmd.args[1].trim()))),
+                        Ok(false) => Some(Ok(format!("AreCongruent[{}, {}] = falso", cmd.args[0].trim(), cmd.args[1].trim()))),
+                        Err(e) => Some(Err(format!("AreCongruent: {e}"))),
+                    }
+                }
+                (GeoObject::Polygon(a), GeoObject::Polygon(b)) => {
+                    match grafito_geometry::measure_extra::polygons_congruent_sss(&a.vertices, &b.vertices) {
+                        Ok(true) => Some(Ok(format!("AreCongruent[{}, {}] = verdadero (SSS)", cmd.args[0].trim(), cmd.args[1].trim()))),
+                        Ok(false) => Some(Ok(format!("AreCongruent[{}, {}] = falso (SSS)", cmd.args[0].trim(), cmd.args[1].trim()))),
+                        Err(e) => Some(Err(format!("AreCongruent: {e}"))),
+                    }
+                }
+                _ => Some(Err(format!("AreCongruent: '{}'×'{}' sin criterio (solo segmentos por longitud y polígonos por SSS)", obj_a.name(), obj_b.name()))),
+            }
+        }
+        "CircularArc" => {
+            if cmd.args.len() != 4 {
+                return Some(Err("Error: CircularArc requiere CircularArc[centro, r, a0, a1] (ángulos en radianes)".into()));
+            }
+            let centro = match p2_point_or_coords(document, cmd.args[0].trim(), "CircularArc") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let r = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("CircularArc: en r: {e}"))),
+            };
+            let a0 = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("CircularArc: en a0: {e}"))),
+            };
+            let a1 = match require_finite(parse_numeric_arg(&cmd.args[3], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("CircularArc: en a1: {e}"))),
+            };
+            match grafito_geometry::measure_extra::circular_arc(centro, r, a0, a1) {
+                Ok(d) => match try_insert_command_object(
+                    document,
+                    GeoObject::Arc(grafito_core::ArcObj::new(
+                        d.center,
+                        d.radius,
+                        d.start_angle,
+                        d.end_angle,
+                    )),
+                ) {
+                    Ok(_) => Some(Ok(format!("CircularArc creado (r={r}, {a0}→{a1} rad)"))),
+                    Err(e) => Some(Err(format!("CircularArc: {e}"))),
+                },
+                Err(e) => Some(Err(format!("CircularArc: {e}"))),
+            }
+        }
+        "CircularSector" => {
+            if cmd.args.len() != 4 {
+                return Some(Err("Error: CircularSector requiere CircularSector[centro, r, a0, a1] (ángulos en radianes)".into()));
+            }
+            let centro = match p2_point_or_coords(document, cmd.args[0].trim(), "CircularSector") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let r = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("CircularSector: en r: {e}"))),
+            };
+            let a0 = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("CircularSector: en a0: {e}"))),
+            };
+            let a1 = match require_finite(parse_numeric_arg(&cmd.args[3], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("CircularSector: en a1: {e}"))),
+            };
+            match grafito_geometry::measure_extra::circular_sector(centro, r, a0, a1) {
+                Ok(d) => match try_insert_command_object(
+                    document,
+                    GeoObject::Sector(grafito_core::SectorObj::new(
+                        d.center,
+                        d.radius,
+                        d.start_angle,
+                        d.end_angle,
+                    )),
+                ) {
+                    Ok(_) => Some(Ok(format!("CircularSector creado (r={r}, {a0}→{a1} rad)"))),
+                    Err(e) => Some(Err(format!("CircularSector: {e}"))),
+                },
+                Err(e) => Some(Err(format!("CircularSector: {e}"))),
+            }
+        }
+        "CircumcircularArc" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: CircumcircularArc requiere CircumcircularArc[A, B, C]".into(),
+                ));
+            }
+            let a = match p2_point_or_coords(document, cmd.args[0].trim(), "CircumcircularArc") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let b = match p2_point_or_coords(document, cmd.args[1].trim(), "CircumcircularArc") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let c = match p2_point_or_coords(document, cmd.args[2].trim(), "CircumcircularArc") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            match grafito_geometry::measure_extra::circumcircular_arc(a, b, c) {
+                Ok(d) => match try_insert_command_object(
+                    document,
+                    GeoObject::Arc(grafito_core::ArcObj::new(
+                        d.center,
+                        d.radius,
+                        d.start_angle,
+                        d.end_angle,
+                    )),
+                ) {
+                    Ok(_) => Some(Ok("CircumcircularArc creado".to_string())),
+                    Err(e) => Some(Err(format!("CircumcircularArc: {e}"))),
+                },
+                Err(e) => Some(Err(format!("CircumcircularArc: {e}"))),
+            }
+        }
+        "CircumcircularSector" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: CircumcircularSector requiere CircumcircularSector[A, B, C]".into(),
+                ));
+            }
+            let a = match p2_point_or_coords(document, cmd.args[0].trim(), "CircumcircularSector") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let b = match p2_point_or_coords(document, cmd.args[1].trim(), "CircumcircularSector") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let c = match p2_point_or_coords(document, cmd.args[2].trim(), "CircumcircularSector") {
+                Ok(p) => p,
+                Err(e) => return Some(Err(format!("CircumcircularSector: {e}"))),
+            };
+            // Nota: el error interno dice CircumcircularArc; lo reetiqueto acá.
+            match grafito_geometry::measure_extra::circumcircular_sector(a, b, c) {
+                Ok(d) => match try_insert_command_object(
+                    document,
+                    GeoObject::Sector(grafito_core::SectorObj::new(
+                        d.center,
+                        d.radius,
+                        d.start_angle,
+                        d.end_angle,
+                    )),
+                ) {
+                    Ok(_) => Some(Ok("CircumcircularSector creado".to_string())),
+                    Err(e) => Some(Err(format!("CircumcircularSector: {e}"))),
+                },
+                Err(e) => Some(Err(format!(
+                    "CircumcircularSector: {}",
+                    e.replace("CircumcircularArc", "CircumcircularSector")
+                ))),
+            }
+        }
+        "Cubic" => {
+            if cmd.args.len() != 9 {
+                return Some(Err(
+                    "Error: Cubic requiere Cubic[P1, ..., P9] (9 puntos)".into()
+                ));
+            }
+            let mut pts = Vec::with_capacity(9);
+            for raw in &cmd.args {
+                match p2_point_or_coords(document, raw.trim(), "Cubic") {
+                    Ok(p) => pts.push(p),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            match grafito_geometry::measure_extra::cubic_through_nine(&pts) {
+                Ok(coeffs) => {
+                    // Monomios [x³, x²y, xy², y³, x², xy, y², x, y, 1].
+                    let monos = [
+                        "x^3", "x^2*y", "x*y^2", "y^3", "x^2", "x*y", "y^2", "x", "y", "",
+                    ];
+                    let mut lhs = String::new();
+                    for (c, m) in coeffs.iter().zip(monos.iter()) {
+                        if c.abs() < 1e-12 {
+                            continue;
+                        }
+                        if !lhs.is_empty() {
+                            lhs.push_str(if *c >= 0.0 { " + " } else { " - " });
+                        } else if *c < 0.0 {
+                            lhs.push('-');
+                        }
+                        let mag = c.abs();
+                        if m.is_empty() {
+                            lhs.push_str(&format!("{mag}"));
+                        } else if (mag - 1.0).abs() < 1e-12 {
+                            lhs.push_str(m);
+                        } else {
+                            lhs.push_str(&format!("{mag}*{m}"));
+                        }
+                    }
+                    if lhs.is_empty() {
+                        return Some(Err("Cubic: ajuste degenerado".into()));
+                    }
+                    if let Err(error) = check_w1_budget("Cubic", "lhs", &lhs) {
+                        return Some(Err(format!("Error: {error}")));
+                    }
+                    match try_insert_command_object(
+                        document,
+                        GeoObject::ImplicitCurve(grafito_core::ImplicitCurveObj::new(
+                            &lhs,
+                            "0",
+                            grafito_core::RelationOperator::Eq,
+                        )),
+                    ) {
+                        Ok(_) => Some(Ok(format!("Cubic[{lhs} = 0] creada"))),
+                        Err(e) => Some(Err(format!("Cubic: {e}"))),
+                    }
+                }
+                Err(e) => Some(Err(format!("Cubic: {e}"))),
+            }
+        }
+        "Direction" => {
+            if cmd.args.len() != 1 && cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: Direction requiere Direction[recta|plano] o Direction[A, B]".into(),
+                ));
+            }
+            if cmd.args.len() == 2 {
+                // Intenta 2D y luego 3D.
+                let a2 = p2_point_or_coords(document, cmd.args[0].trim(), "Direction");
+                let b2 = p2_point_or_coords(document, cmd.args[1].trim(), "Direction");
+                if let (Ok(a), Ok(b)) = (a2, b2) {
+                    match grafito_geometry::measure_extra::line_direction_2d(a, b) {
+                        Ok((dx, dy)) => return Some(Ok(format!("Direction = ({dx:.6}, {dy:.6})"))),
+                        Err(e) => return Some(Err(format!("Direction: {e}"))),
+                    }
+                }
+                let a3 = match p2_point3d_label(document, cmd.args[0].trim(), "Direction") {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(e)),
+                };
+                let b3 = match p2_point3d_label(document, cmd.args[1].trim(), "Direction") {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(e)),
+                };
+                match grafito_geometry::measure_extra::line_direction_3d(a3, b3) {
+                    Ok((dx, dy, dz)) => {
+                        Some(Ok(format!("Direction = ({dx:.6}, {dy:.6}, {dz:.6})")))
+                    }
+                    Err(e) => Some(Err(format!("Direction: {e}"))),
+                }
+            } else {
+                let label = cmd.args[0].trim();
+                let id = match find_object_by_label(document, label) {
+                    Some(id) => id,
+                    None => {
+                        // Quizás son coordenadas de punto único: error honesto.
+                        return Some(Err(format!(
+                            "Direction: no existe '{label}' (usa recta, plano o dos puntos)"
+                        )));
+                    }
+                };
+                match document.get_object(id).cloned() {
+                    Some(GeoObject::Line(l)) => {
+                        match grafito_geometry::measure_extra::line_direction_2d(l.start, l.end) {
+                            Ok((dx, dy)) => {
+                                Some(Ok(format!("Direction[{label}] = ({dx:.6}, {dy:.6})")))
+                            }
+                            Err(e) => Some(Err(format!("Direction: {e}"))),
+                        }
+                    }
+                    Some(GeoObject::Plane3D(p)) => {
+                        match grafito_geometry::measure_extra::plane_normal_direction(
+                            p.a, p.b, p.c, p.d,
+                        ) {
+                            Ok((nx, ny, nz)) => Some(Ok(format!(
+                                "Direction[{label}] normal = ({nx:.6}, {ny:.6}, {nz:.6})"
+                            ))),
+                            Err(e) => Some(Err(format!("Direction: {e}"))),
+                        }
+                    }
+                    Some(other) => Some(Err(format!(
+                        "Direction: '{}' es {} (solo recta 2D, plano 3D o par de puntos)",
+                        label,
+                        other.name()
+                    ))),
+                    None => Some(Err(format!("Direction: no existe '{label}'"))),
+                }
+            }
+        }
+        "PerpendicularLine" => {
+            if cmd.args.len() != 2 && cmd.args.len() != 3 {
+                return Some(Err("Error: PerpendicularLine requiere PerpendicularLine[P, recta] o PerpendicularLine[P, A, B]".into()));
+            }
+            let p = match p2_point_or_coords(document, cmd.args[0].trim(), "PerpendicularLine") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (a, b) = if cmd.args.len() == 2 {
+                let label = cmd.args[1].trim();
+                let id = match find_object_by_label(document, label) {
+                    Some(id) => id,
+                    None => return Some(Err(format!("PerpendicularLine: no existe '{label}'"))),
+                };
+                match document.get_object(id).cloned() {
+                    Some(GeoObject::Line(l)) => (l.start, l.end),
+                    Some(other) => {
+                        return Some(Err(format!(
+                            "PerpendicularLine: '{label}' es {} (solo recta)",
+                            other.name()
+                        )))
+                    }
+                    None => return Some(Err(format!("PerpendicularLine: no existe '{label}'"))),
+                }
+            } else {
+                let a = match p2_point_or_coords(document, cmd.args[1].trim(), "PerpendicularLine")
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let b = match p2_point_or_coords(document, cmd.args[2].trim(), "PerpendicularLine")
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                (a, b)
+            };
+            match grafito_geometry::measure_extra::perpendicular_line_through_point(p, a, b) {
+                Ok((base, (dx, dy))) => {
+                    let q = Point2::new(base.x + dx, base.y + dy);
+                    match try_insert_command_object(
+                        document,
+                        GeoObject::Line(grafito_core::LineObj::new_with_kind(
+                            base,
+                            q,
+                            grafito_geometry::LineKind::Line,
+                        )),
+                    ) {
+                        Ok(_) => Some(Ok(format!(
+                            "PerpendicularLine por ({}, {}) dirección ({dx:.4}, {dy:.4})",
+                            base.x, base.y
+                        ))),
+                        Err(e) => Some(Err(format!("PerpendicularLine: {e}"))),
+                    }
+                }
+                Err(e) => Some(Err(format!("PerpendicularLine: {e}"))),
+            }
+        }
+        "RigidPolygon" => {
+            if cmd.args.len() < 3 || cmd.args.len() > 12 {
+                return Some(Err(
+                    "Error: RigidPolygon requiere RigidPolygon[P1, ..., Pn] (3..=12 puntos)".into(),
+                ));
+            }
+            let mut verts = Vec::with_capacity(cmd.args.len());
+            for raw in &cmd.args {
+                match p2_point_or_coords(document, raw.trim(), "RigidPolygon") {
+                    Ok(p) => verts.push(p),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            let n = verts.len();
+            let bars = match grafito_geometry::measure_extra::rigid_bars_for_polygon(n) {
+                Ok(b) => b,
+                Err(e) => return Some(Err(format!("RigidPolygon: {e}"))),
+            };
+            match grafito_geometry::measure_extra::validate_rigidity_bars(n, &bars) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Some(Err(
+                        "RigidPolygon: conteo de barras no rígido (interno)".into()
+                    ))
+                }
+                Err(e) => return Some(Err(format!("RigidPolygon: {e}"))),
+            }
+            match try_insert_command_object(document, GeoObject::Polygon(grafito_core::PolygonObj::new(verts))) {
+                Ok(_) => Some(Ok(format!("RigidPolygon[{n} vértices] creado (constructor normal + validación Laman 2n−3={} barras; sin ligas automáticas, ver help)", 2 * n - 3))),
+                Err(e) => Some(Err(format!("RigidPolygon: {e}"))),
+            }
+        }
+        "Conic" => {
+            if cmd.args.len() != 5 {
+                return Some(Err("Error: Conic requiere Conic[P1, P2, P3, P4, P5] (cónica por 5 puntos; ConicByFivePoints existe como restricción paramétrica, esta crea curva implícita)".into()));
+            }
+            let mut pts = Vec::with_capacity(5);
+            for raw in &cmd.args {
+                match p2_point_or_coords(document, raw.trim(), "Conic") {
+                    Ok(p) => pts.push(p),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            match grafito_geometry::measure_extra::conic_through_five(&pts) {
+                Ok(coeffs) => {
+                    // [a,b,c,d,e,f] → "a*x^2 + b*x*y + c*y^2 + d*x + e*y + f = 0".
+                    let names = ["x^2", "x*y", "y^2", "x", "y", ""];
+                    let mut lhs = String::new();
+                    for (c, m) in coeffs.iter().zip(names.iter()) {
+                        if c.abs() < 1e-12 {
+                            continue;
+                        }
+                        if !lhs.is_empty() {
+                            lhs.push_str(if *c >= 0.0 { " + " } else { " - " });
+                        } else if *c < 0.0 {
+                            lhs.push('-');
+                        }
+                        let mag = c.abs();
+                        if m.is_empty() {
+                            lhs.push_str(&format!("{mag}"));
+                        } else if (mag - 1.0).abs() < 1e-12 {
+                            lhs.push_str(m);
+                        } else {
+                            lhs.push_str(&format!("{mag}*{m}"));
+                        }
+                    }
+                    if lhs.is_empty() {
+                        return Some(Err("Conic: ajuste degenerado".into()));
+                    }
+                    if let Err(error) = check_w1_budget("Conic", "lhs", &lhs) {
+                        return Some(Err(format!("Error: {error}")));
+                    }
+                    match try_insert_command_object(
+                        document,
+                        GeoObject::ImplicitCurve(grafito_core::ImplicitCurveObj::new(
+                            &lhs,
+                            "0",
+                            grafito_core::RelationOperator::Eq,
+                        )),
+                    ) {
+                        Ok(_) => Some(Ok(format!("Conic[{lhs} = 0] creada"))),
+                        Err(e) => Some(Err(format!("Conic: {e}"))),
+                    }
+                }
+                Err(e) => Some(Err(format!("Conic: {e}"))),
+            }
+        }
+        "Parameter" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Parameter requiere Parameter[cónica]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Parameter: no existe '{label}'"))),
+            };
+            match document.get_object(id).cloned() {
+                Some(GeoObject::Parabola(p)) => {
+                    match grafito_geometry::measure_extra::parabola_focal_parameter(p.p) {
+                        Ok(v) => Some(Ok(format!("Parameter[{label}] = {v:.6} (p focal)"))),
+                        Err(e) => Some(Err(format!("Parameter: {e}"))),
+                    }
+                }
+                Some(GeoObject::Ellipse(e)) => {
+                    match grafito_geometry::measure_extra::ellipse_focal_parameter(e.rx, e.ry) {
+                        Ok(v) => Some(Ok(format!(
+                            "Parameter[{label}] = {v:.6} (semidistancia focal)"
+                        ))),
+                        Err(e) => Some(Err(format!("Parameter: {e}"))),
+                    }
+                }
+                Some(GeoObject::Hyperbola(h)) => {
+                    match grafito_geometry::measure_extra::hyperbola_focal_parameter(h.a, h.b) {
+                        Ok(v) => Some(Ok(format!(
+                            "Parameter[{label}] = {v:.6} (semidistancia focal)"
+                        ))),
+                        Err(e) => Some(Err(format!("Parameter: {e}"))),
+                    }
+                }
+                Some(other) => Some(Err(format!(
+                    "Parameter: '{}' es {} (solo parábola/elipse/hipérbola)",
+                    label,
+                    other.name()
+                ))),
+                None => Some(Err(format!("Parameter: no existe '{label}'"))),
+            }
+        }
+        "PathParameter" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: PathParameter requiere PathParameter[P, polilínea|polígono]".into(),
+                ));
+            }
+            let p = match p2_point_or_coords(document, cmd.args[0].trim(), "PathParameter") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let label = cmd.args[1].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("PathParameter: no existe '{label}'"))),
+            };
+            let verts = match document.get_object(id).cloned() {
+                Some(GeoObject::Polyline(pl)) => pl.points,
+                Some(GeoObject::Polygon(pg)) => pg.vertices,
+                Some(other) => {
+                    return Some(Err(format!(
+                        "PathParameter: '{label}' es {} (solo polilínea/polígono)",
+                        other.name()
+                    )))
+                }
+                None => return Some(Err(format!("PathParameter: no existe '{label}'"))),
+            };
+            match grafito_geometry::measure_extra::path_parameter_polyline(p, &verts) {
+                Ok(t) => Some(Ok(format!("PathParameter[{label}] = {t:.6}"))),
+                Err(e) => Some(Err(format!("PathParameter: {e}"))),
+            }
+        }
+        "Type" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Type requiere Type[objeto]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Type: no existe '{label}'"))),
+            };
+            match document.get_object(id) {
+                Some(o) => Some(Ok(format!("Type[{label}] = {}", o.name()))),
+                None => Some(Err(format!("Type: no existe '{label}'"))),
+            }
+        }
+        "Vertex" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Vertex requiere Vertex[polígono|cónica]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Vertex: no existe '{label}'"))),
+            };
+            match document.get_object(id).cloned() {
+                Some(GeoObject::Polygon(pg)) => {
+                    let verts =
+                        match grafito_geometry::measure_extra::polygon_vertex_list(&pg.vertices) {
+                            Ok(v) => v,
+                            Err(e) => return Some(Err(format!("Vertex: {e}"))),
+                        };
+                    let max = grafito_core::validation::MAX_OBJECT_COUNT;
+                    if document.object_count() + verts.len() > max {
+                        return Some(Err(format!(
+                            "Vertex: {} vértices exceden el máximo {max}",
+                            verts.len()
+                        )));
+                    }
+                    let mut hechos = 0usize;
+                    for v in &verts {
+                        match try_insert_command_object(
+                            document,
+                            GeoObject::Point(grafito_core::PointObj::new(*v)),
+                        ) {
+                            Ok(_) => hechos += 1,
+                            Err(e) => return Some(Err(format!("Vertex: {e}"))),
+                        }
+                    }
+                    Some(Ok(format!("Vertex[{label}]: {hechos} vértice(s)")))
+                }
+                Some(GeoObject::Ellipse(e)) => {
+                    match grafito_geometry::measure_extra::ellipse_vertices(
+                        e.center, e.rx, e.ry, e.angle,
+                    ) {
+                        Ok(vs) => {
+                            let max = grafito_core::validation::MAX_OBJECT_COUNT;
+                            if document.object_count() + vs.len() > max {
+                                return Some(Err(format!(
+                                    "Vertex: {} vértices exceden el máximo {max}",
+                                    vs.len()
+                                )));
+                            }
+                            for v in &vs {
+                                if let Err(e) = try_insert_command_object(
+                                    document,
+                                    GeoObject::Point(grafito_core::PointObj::new(*v)),
+                                ) {
+                                    return Some(Err(format!("Vertex: {e}")));
+                                }
+                            }
+                            Some(Ok(format!(
+                                "Vertex[{label}]: {} vértices de elipse",
+                                vs.len()
+                            )))
+                        }
+                        Err(e) => Some(Err(format!("Vertex: {e}"))),
+                    }
+                }
+                Some(GeoObject::Hyperbola(h)) => {
+                    match grafito_geometry::measure_extra::hyperbola_vertices(
+                        h.center, h.a, h.angle,
+                    ) {
+                        Ok(vs) => {
+                            for v in &vs {
+                                if let Err(e) = try_insert_command_object(
+                                    document,
+                                    GeoObject::Point(grafito_core::PointObj::new(*v)),
+                                ) {
+                                    return Some(Err(format!("Vertex: {e}")));
+                                }
+                            }
+                            Some(Ok(format!(
+                                "Vertex[{label}]: {} vértices de hipérbola",
+                                vs.len()
+                            )))
+                        }
+                        Err(e) => Some(Err(format!("Vertex: {e}"))),
+                    }
+                }
+                Some(GeoObject::Parabola(p)) => {
+                    match grafito_geometry::measure_extra::parabola_vertex(p.vertex) {
+                        Ok(v) => match try_insert_command_object(
+                            document,
+                            GeoObject::Point(grafito_core::PointObj::new(v)),
+                        ) {
+                            Ok(_) => Some(Ok(format!("Vertex[{label}]: vértice de parábola"))),
+                            Err(e) => Some(Err(format!("Vertex: {e}"))),
+                        },
+                        Err(e) => Some(Err(format!("Vertex: {e}"))),
+                    }
+                }
+                Some(other) => Some(Err(format!(
+                    "Vertex: '{}' es {} (solo polígono/elipse/hipérbola/parábola)",
+                    label,
+                    other.name()
+                ))),
+                None => Some(Err(format!("Vertex: no existe '{label}'"))),
+            }
+        }
+        "InteriorAngles" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: InteriorAngles requiere InteriorAngles[polígono]".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("InteriorAngles: no existe '{label}'"))),
+            };
+            let verts = match document.get_object(id).cloned() {
+                Some(GeoObject::Polygon(pg)) => pg.vertices,
+                Some(other) => {
+                    return Some(Err(format!(
+                        "InteriorAngles: '{label}' es {} (solo polígono)",
+                        other.name()
+                    )))
+                }
+                None => return Some(Err(format!("InteriorAngles: no existe '{label}'"))),
+            };
+            match grafito_geometry::measure_extra::interior_angles(&verts) {
+                Ok(angs) => {
+                    let cuerpo = angs
+                        .iter()
+                        .map(|a| format!("{a:.4}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(Ok(format!("InteriorAngles[{label}] = {{{cuerpo}}} rad")))
+                }
+                Err(e) => Some(Err(format!("InteriorAngles: {e}"))),
+            }
+        }
+        "Bottom" | "Top" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(format!(
+                    "Error: {} requiere {}[sólido]",
+                    cmd.command, cmd.command
+                )));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("{}: no existe '{label}'", cmd.command))),
+            };
+            let obj = match document.get_object(id).cloned() {
+                Some(o) => o,
+                None => return Some(Err(format!("{}: no existe '{label}'", cmd.command))),
+            };
+            let extent: Result<(f64, f64), String> = match &obj {
+                GeoObject::Cube3D(c) => grafito_geometry::measure_extra::cube_z_extent(c.center, c.size),
+                GeoObject::Sphere3D(s) => grafito_geometry::measure_extra::sphere_z_extent(s.center, s.radius),
+                GeoObject::Cylinder3D(c) => grafito_geometry::measure_extra::cylinder_z_extent(c.base_center, c.top_center, c.radius),
+                GeoObject::Cone3D(c) => grafito_geometry::measure_extra::cone_z_extent(c.base_center, c.apex, c.radius),
+                GeoObject::Prism3D(p) => grafito_geometry::measure_extra::prism_z_extent(&p.base_vertices, p.direction),
+                GeoObject::Pyramid3D(p) => grafito_geometry::measure_extra::pyramid_z_extent(p.base_center, p.apex, p.base_size),
+                GeoObject::Torus3D(t) => grafito_geometry::measure_extra::torus_z_extent(t.center, t.r_major, t.r_minor),
+                _ => Err(format!("{}: '{}' es {} (solo cubo/esfera/cilindro/cono/prisma/pirámide/toro con cotas reales; cuádrica/superficie sin forma cerrada)", cmd.command, label, obj.name())),
+            };
+            match extent {
+                Ok((lo, hi)) => {
+                    let z = if cmd.command == "Bottom" { lo } else { hi };
+                    match grafito_geometry::measure_extra::z_plane(z) {
+                        Ok(pl) => {
+                            let obj = GeoObject::Plane3D(grafito_core::Plane3DObj::from_equation(
+                                pl.a, pl.b, pl.c, pl.d,
+                            ));
+                            match try_insert_command_object(document, obj) {
+                                Ok(_) => Some(Ok(format!(
+                                    "{}[{label}] = z = {z:.6} (plano creado)",
+                                    cmd.command
+                                ))),
+                                Err(e) => Some(Err(format!("{}: {e}", cmd.command))),
+                            }
+                        }
+                        Err(e) => Some(Err(format!("{}: {e}", cmd.command))),
+                    }
+                }
+                Err(e) => Some(Err(format!("{}: {e}", cmd.command))),
+            }
+        }
+        "Ends" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Ends requiere Ends[cilindro|prisma]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Ends: no existe '{label}'"))),
+            };
+            let obj = match document.get_object(id).cloned() {
+                Some(o) => o,
+                None => return Some(Err(format!("Ends: no existe '{label}'"))),
+            };
+            let planes: Result<(grafito_geometry::Plane3D, grafito_geometry::Plane3D), String> =
+                match &obj {
+                    GeoObject::Cylinder3D(c) => {
+                        grafito_geometry::measure_extra::cylinder_end_planes(
+                            c.base_center,
+                            c.top_center,
+                            c.radius,
+                        )
+                    }
+                    GeoObject::Prism3D(p) => grafito_geometry::measure_extra::prism_end_planes(
+                        &p.base_vertices,
+                        p.direction,
+                    ),
+                    _ => Err(format!(
+                        "Ends: '{}' es {} (solo cilindro/prisma)",
+                        label,
+                        obj.name()
+                    )),
+                };
+            match planes {
+                Ok((p0, p1)) => {
+                    let max = grafito_core::validation::MAX_OBJECT_COUNT;
+                    if document.object_count() + 2 > max {
+                        return Some(Err(format!("Ends: 2 planos exceden el máximo {max}")));
+                    }
+                    for pl in [p0, p1] {
+                        let obj = GeoObject::Plane3D(grafito_core::Plane3DObj::from_equation(
+                            pl.a, pl.b, pl.c, pl.d,
+                        ));
+                        if let Err(e) = try_insert_command_object(document, obj) {
+                            return Some(Err(format!("Ends: {e}")));
+                        }
+                    }
+                    Some(Ok(format!("Ends[{label}]: 2 plano(s) creados")))
+                }
+                Err(e) => Some(Err(format!("Ends: {e}"))),
+            }
+        }
+        "Side" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Side requiere Side[sólido]".into()));
+            }
+            let label = cmd.args[0].trim();
+            let id = match find_object_by_label(document, label) {
+                Some(id) => id,
+                None => return Some(Err(format!("Side: no existe '{label}'"))),
+            };
+            let obj = match document.get_object(id).cloned() {
+                Some(o) => o,
+                None => return Some(Err(format!("Side: no existe '{label}'"))),
+            };
+            let area: Result<f64, String> = match &obj {
+                GeoObject::Cylinder3D(c) => {
+                    let h = ((c.top_center.x - c.base_center.x).powi(2)
+                        + (c.top_center.y - c.base_center.y).powi(2)
+                        + (c.top_center.z - c.base_center.z).powi(2))
+                    .sqrt();
+                    grafito_geometry::measure_extra::cylinder_lateral_area(c.radius, h)
+                }
+                GeoObject::Cone3D(c) => {
+                    let h = ((c.apex.x - c.base_center.x).powi(2)
+                        + (c.apex.y - c.base_center.y).powi(2)
+                        + (c.apex.z - c.base_center.z).powi(2))
+                    .sqrt();
+                    // Generatriz ≈ sqrt(h² + r²) para el área lateral π·r·g.
+                    let g = (h * h + c.radius * c.radius).sqrt();
+                    grafito_geometry::measure_extra::cone_lateral_area(c.radius, g)
+                }
+                GeoObject::Prism3D(p) => grafito_geometry::measure_extra::prism_lateral_area(
+                    &p.base_vertices,
+                    p.direction,
+                ),
+                _ => Err(format!(
+                    "Side: '{}' es {} (solo cilindro/cono/prisma con área lateral cerrada)",
+                    label,
+                    obj.name()
+                )),
+            };
+            match area {
+                Ok(v) => Some(Ok(format!("Side[{label}] = {v:.6}"))),
+                Err(e) => Some(Err(format!("Side: {e}"))),
+            }
+        }
+        "IntersectConic" => {
+            if cmd.args.len() != 2 {
+                return Some(Err("Error: IntersectConic requiere IntersectConic[esfera, plano] (solo ese par da círculo; resto error honesto)".into()));
+            }
+            let id_a = match find_object_by_label(document, cmd.args[0].trim()) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "IntersectConic: no existe '{}'",
+                        cmd.args[0].trim()
+                    )))
+                }
+            };
+            let id_b = match find_object_by_label(document, cmd.args[1].trim()) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(format!(
+                        "IntersectConic: no existe '{}'",
+                        cmd.args[1].trim()
+                    )))
+                }
+            };
+            let obj_a = match document.get_object(id_a).cloned() {
+                Some(o) => o,
+                None => return Some(Err("IntersectConic: objeto inválido".into())),
+            };
+            let obj_b = match document.get_object(id_b).cloned() {
+                Some(o) => o,
+                None => return Some(Err("IntersectConic: objeto inválido".into())),
+            };
+            // Normaliza orden: esfera primero.
+            let (esfera, plano) = match (&obj_a, &obj_b) {
+                (GeoObject::Sphere3D(_), GeoObject::Plane3D(_)) => (&obj_a, &obj_b),
+                (GeoObject::Plane3D(_), GeoObject::Sphere3D(_)) => (&obj_b, &obj_a),
+                _ => {
+                    let msg = grafito_geometry::measure_extra::intersect_conic_unsupported(
+                        obj_a.name(),
+                        obj_b.name(),
+                    );
+                    return Some(Err(format!("IntersectConic: {msg}")));
+                }
+            };
+            let (GeoObject::Sphere3D(s), GeoObject::Plane3D(p)) = (esfera, plano) else {
+                return Some(Err("IntersectConic: par inválido".into()));
+            };
+            let pl = grafito_geometry::Plane3D::from_equation(p.a, p.b, p.c, p.d);
+            match grafito_geometry::measure_extra::sphere_plane_circle(s.center, s.radius, pl) {
+                Ok(circ) => Some(Ok(format!(
+                    "IntersectConic: círculo centro ({:.4}, {:.4}, {:.4}) radio {:.6} (sin objeto círculo-3D en esta versión: punto/mensaje honesto)",
+                    circ.center.x, circ.center.y, circ.center.z, circ.radius
+                ))),
+                Err(e) => Some(Err(format!("IntersectConic: {e}"))),
+            }
+        }
+        // Frente P4-D: stats/prob nuevos (6; el resto ya existe o es huérfano con brazo).
+        "Variance" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: Variance requiere Variance[lista] (varianza poblacional)".into(),
+                ));
+            }
+            let data = match resolve_list_arg(&cmd.args[0], document) {
+                Ok(elems) => match p4_list_elems_to_flat(&elems, "Variance") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("Variance: {e}"))),
+                },
+                Err(e) => return Some(Err(format!("Variance: {e}"))),
+            };
+            match grafito_geometry::stats_extra::population_variance(&data) {
+                Ok(v) => Some(Ok(format!("Variance = {v:.6} (poblacional, ÷n)"))),
+                Err(e) => Some(Err(format!("Variance: {e}"))),
+            }
+        }
+        "HistogramRight" => {
+            if cmd.args.len() != 1 && cmd.args.len() != 2 {
+                return Some(Err("Error: HistogramRight requiere HistogramRight[lista] o HistogramRight[lista, bins] (bins cerrados a derecha, solo mensaje)".into()));
+            }
+            let data = match resolve_list_arg(&cmd.args[0], document) {
+                Ok(elems) => match p4_list_elems_to_flat(&elems, "HistogramRight") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(format!("HistogramRight: {e}"))),
+                },
+                Err(e) => return Some(Err(format!("HistogramRight: {e}"))),
+            };
+            let bins = if cmd.args.len() == 2 {
+                match cmd.args[1].trim().parse::<usize>() {
+                    Ok(b) if (1..=1000).contains(&b) => b,
+                    _ => {
+                        return Some(Err(
+                            "HistogramRight: bins debe ser un entero 1..=1000".into()
+                        ))
+                    }
+                }
+            } else {
+                10
+            };
+            let hist = grafito_geometry::stats_extra::histogram_right(&data, bins);
+            if hist.is_empty() {
+                return Some(Err(
+                    "HistogramRight: sin datos finitos o bins inválidos".into()
+                ));
+            }
+            let cuerpo = hist
+                .iter()
+                .map(|(l, r, c)| format!("({l:.3}, {r:.3}]: {c:.0}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(Ok(format!(
+                "HistogramRight ({bins} bins, derecha cerrada) = {{{cuerpo}}}"
+            )))
+        }
+        "RandomUniform" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: RandomUniform requiere RandomUniform[a, b]".into()
+                ));
+            }
+            let a = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomUniform: en a: {e}"))),
+            };
+            let b = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomUniform: en b: {e}"))),
+            };
+            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
+                document.version,
+                "RandomUniform",
+                &arg_refs,
+            );
+            match grafito_geometry::stats_extra::random_uniform(&mut rng, a, b) {
+                Ok(v) => Some(Ok(format!("RandomUniform[{a}, {b}] = {v:.6}"))),
+                Err(e) => Some(Err(format!("RandomUniform: {e}"))),
+            }
+        }
+        "RandomNormal" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: RandomNormal requiere RandomNormal[mu, sigma]".into()
+                ));
+            }
+            let mu = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomNormal: en mu: {e}"))),
+            };
+            let sigma = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomNormal: en sigma: {e}"))),
+            };
+            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
+                document.version,
+                "RandomNormal",
+                &arg_refs,
+            );
+            match grafito_geometry::stats_extra::random_normal(&mut rng, mu, sigma) {
+                Ok(v) => Some(Ok(format!("RandomNormal[{mu}, {sigma}] = {v:.6}"))),
+                Err(e) => Some(Err(format!("RandomNormal: {e}"))),
+            }
+        }
+        "RandomBinomial" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: RandomBinomial requiere RandomBinomial[n, p]".into()
+                ));
+            }
+            let n_raw = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomBinomial: en n: {e}"))),
+            };
+            if n_raw.fract() != 0.0 || !(0.0..=100_000.0).contains(&n_raw) {
+                return Some(Err("RandomBinomial: n debe ser un entero 0..=100000".into()));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = n_raw as u32;
+            let p = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomBinomial: en p: {e}"))),
+            };
+            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
+                document.version,
+                "RandomBinomial",
+                &arg_refs,
+            );
+            match grafito_geometry::stats_extra::random_binomial(&mut rng, n, p) {
+                Ok(v) => Some(Ok(format!("RandomBinomial[{n}, {p}] = {v}"))),
+                Err(e) => Some(Err(format!("RandomBinomial: {e}"))),
+            }
+        }
+        "RandomPoisson" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: RandomPoisson requiere RandomPoisson[lambda]".into()
+                ));
+            }
+            let lambda = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables))
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("RandomPoisson: en lambda: {e}"))),
+            };
+            let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+            let mut rng = grafito_geometry::list_ops::DeterministicRng::seed_from_parts(
+                document.version,
+                "RandomPoisson",
+                &arg_refs,
+            );
+            match grafito_geometry::stats_extra::random_poisson(&mut rng, lambda) {
+                Ok(v) => Some(Ok(format!("RandomPoisson[{lambda}] = {v}"))),
+                Err(e) => Some(Err(format!("RandomPoisson: {e}"))),
+            }
+        }
+        // Frente P4-E: scripting/display (helpers en ggbscript.rs + DisplayFlags en core).
+        "RunClickScript" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: RunClickScript requiere RunClickScript[etiqueta]".into(),
+                ));
+            }
+            let label = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            match crate::ggbscript::run_click_script(document, label) {
+                Ok(n) => Some(Ok(format!("RunClickScript[{label}]: {n} paso(s)"))),
+                Err(e) => Some(Err(format!("RunClickScript: {e}"))),
+            }
+        }
+        "RunUpdateScript" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: RunUpdateScript requiere RunUpdateScript[etiqueta] (disparo explícito; NO hay hooks automáticos)".into(),
+                ));
+            }
+            let label = cmd.args[0].trim().trim_matches('"').trim_matches('\'');
+            match crate::ggbscript::run_update_script(document, label) {
+                Ok(n) => Some(Ok(format!(
+                    "RunUpdateScript[{label}]: {n} paso(s) (sin hooks automáticos)"
+                ))),
+                Err(e) => Some(Err(format!("RunUpdateScript: {e}"))),
+            }
+        }
+        "SelectObjects" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: SelectObjects requiere SelectObjects[{et1, et2, ...}]".into(),
+                ));
+            }
+            let labels = parse_w1_brace_list(&cmd.args[0]);
+            match crate::ggbscript::resolve_selection_labels(document, &labels) {
+                Ok((found, missing)) => {
+                    if !missing.is_empty() {
+                        return Some(Err(format!(
+                            "SelectObjects: no existen: {}",
+                            missing.join(", ")
+                        )));
+                    }
+                    document.clear_selection();
+                    for id in &found {
+                        document.select(*id);
+                    }
+                    Some(Ok(format!(
+                        "SelectObjects: {} objeto(s) seleccionados",
+                        found.len()
+                    )))
+                }
+                Err(e) => Some(Err(format!("SelectObjects: {e}"))),
+            }
+        }
+        "SetActiveView" | "SetPerspective" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(format!(
+                    "Error: {} requiere {}[perspectiva] (10 canónicas)",
+                    cmd.command, cmd.command
+                )));
+            }
+            match crate::ggbscript::parse_perspective(&cmd.args[0]) {
+                Ok(t) => Some(Ok(format!(
+                    "{}: '{}' validada ({}; se aplica desde la UI: una sola ventana, la perspectiva es layout)",
+                    cmd.command, t.title, t.ident
+                ))),
+                Err(e) => Some(Err(format!("{}: {e}", cmd.command))),
+            }
+        }
+        "SetViewDirection" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: SetViewDirection requiere SetViewDirection[dirección] (front, back, left, right, top, bottom, isometric)".into(),
+                ));
+            }
+            match crate::ggbscript::parse_view_direction(&cmd.args[0]) {
+                Ok(d) => Some(Ok(format!(
+                    "SetViewDirection: '{}' validada (la cámara vive en la app; se aplica desde la UI)",
+                    d.canonical_name()
+                ))),
+                Err(e) => Some(Err(format!("SetViewDirection: {e}"))),
+            }
+        }
+        "SetAxesRatio" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetAxesRatio requiere SetAxesRatio[x, y] (ViewTransform es escala uniforme; se guarda para P3c)".into(),
+                ));
+            }
+            match crate::ggbscript::parse_axes_ratio(
+                &cmd.args[0],
+                &cmd.args[1],
+                &document.variables,
+            ) {
+                Ok((rx, ry)) => {
+                    if let Err(e) = document.try_set_variable("__view_axes_rx".to_string(), rx) {
+                        return Some(Err(format!("SetAxesRatio: {e}")));
+                    }
+                    if let Err(e) = document.try_set_variable("__view_axes_ry".to_string(), ry) {
+                        return Some(Err(format!("SetAxesRatio: {e}")));
+                    }
+                    Some(Ok(format!(
+                        "SetAxesRatio = {rx}:{ry} (guardado en __view_axes_rx/ry; escala uniforme hoy, P3c)"
+                    )))
+                }
+                Err(e) => Some(Err(format!("SetAxesRatio: {e}"))),
+            }
+        }
+        "AxisStepX" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: AxisStepX requiere AxisStepX[paso] (se guarda en __view_axis_step_x para P3c)".into(),
+                ));
+            }
+            match crate::ggbscript::parse_axis_step(&cmd.args[0], &document.variables) {
+                Ok(v) => match document.try_set_variable("__view_axis_step_x".to_string(), v) {
+                    Ok(()) => Some(Ok(format!(
+                        "AxisStepX = {v} (guardado; sin pasos por eje en ViewTransform, P3c)"
+                    ))),
+                    Err(e) => Some(Err(format!("AxisStepX: {e}"))),
+                },
+                Err(e) => Some(Err(format!("AxisStepX: {e}"))),
+            }
+        }
+        "AxisStepY" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: AxisStepY requiere AxisStepY[paso] (se guarda en __view_axis_step_y para P3c)".into(),
+                ));
+            }
+            match crate::ggbscript::parse_axis_step(&cmd.args[0], &document.variables) {
+                Ok(v) => match document.try_set_variable("__view_axis_step_y".to_string(), v) {
+                    Ok(()) => Some(Ok(format!(
+                        "AxisStepY = {v} (guardado; sin pasos por eje en ViewTransform, P3c)"
+                    ))),
+                    Err(e) => Some(Err(format!("AxisStepY: {e}"))),
+                },
+                Err(e) => Some(Err(format!("AxisStepY: {e}"))),
+            }
+        }
+        "ShowAxes" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: ShowAxes requiere ShowAxes[bool] (se guarda en __view_show_axes para P3c)".into(),
+                ));
+            }
+            match crate::ggbscript::parse_toggle_bool(&cmd.args[0]) {
+                Ok(b) => {
+                    let v = if b { 1.0 } else { 0.0 };
+                    match document.try_set_variable("__view_show_axes".to_string(), v) {
+                        Ok(()) => Some(Ok(format!(
+                            "ShowAxes = {b} (guardado; el render usa show_grid/number_plane_labels hoy, P3c)"
+                        ))),
+                        Err(e) => Some(Err(format!("ShowAxes: {e}"))),
+                    }
+                }
+                Err(e) => Some(Err(format!("ShowAxes: {e}"))),
+            }
+        }
+        "ShowGrid" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: ShowGrid requiere ShowGrid[bool] (se guarda en __view_show_grid para P3c)".into(),
+                ));
+            }
+            match crate::ggbscript::parse_toggle_bool(&cmd.args[0]) {
+                Ok(b) => {
+                    let v = if b { 1.0 } else { 0.0 };
+                    match document.try_set_variable("__view_show_grid".to_string(), v) {
+                        Ok(()) => Some(Ok(format!(
+                            "ShowGrid = {b} (guardado; el render usa GrafitoApp.show_grid hoy, P3c)"
+                        ))),
+                        Err(e) => Some(Err(format!("ShowGrid: {e}"))),
+                    }
+                }
+                Err(e) => Some(Err(format!("ShowGrid: {e}"))),
+            }
+        }
+        "SetConditionToShowObject" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetConditionToShowObject requiere SetConditionToShowObject[etiqueta, condición]".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let cond = cmd.args[1].trim();
+            let mut store = document.display_flags.clone();
+            match crate::ggbscript::set_condition_to_show(&mut store, document, label, cond) {
+                Ok(()) => {
+                    document.display_flags = store;
+                    Some(Ok(format!(
+                        "SetConditionToShowObject[{label}] guardada (se evalúa en el render; error de sintaxis no oculta)"
+                    )))
+                }
+                Err(e) => Some(Err(format!("SetConditionToShowObject: {e}"))),
+            }
+        }
+        "SetDynamicColor" => {
+            if cmd.args.len() != 4 {
+                return Some(Err(
+                    "Error: SetDynamicColor requiere SetDynamicColor[etiqueta, r, g, b] (0..=1, se evalúa por frame)".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let mut store = document.display_flags.clone();
+            match crate::ggbscript::set_dynamic_color(
+                &mut store,
+                document,
+                label,
+                cmd.args[1].trim(),
+                cmd.args[2].trim(),
+                cmd.args[3].trim(),
+            ) {
+                Ok(()) => {
+                    document.display_flags = store;
+                    Some(Ok(format!(
+                        "SetDynamicColor[{label}] guardado (vía StyleOverride.color en el render)"
+                    )))
+                }
+                Err(e) => Some(Err(format!("SetDynamicColor: {e}"))),
+            }
+        }
+        "SetTooltipMode" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetTooltipMode requiere SetTooltipMode[etiqueta, modo] (0=auto, 1=on, 2=off; flag-guardado)".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let mut store = document.display_flags.clone();
+            match crate::ggbscript::set_tooltip_mode(
+                &mut store,
+                document,
+                label,
+                cmd.args[1].trim(),
+            ) {
+                Ok(m) => {
+                    document.display_flags = store;
+                    Some(Ok(format!(
+                        "SetTooltipMode[{label}] = {} (flag-guardado; el hover al objeto llega en P3c)",
+                        m.canonical_name()
+                    )))
+                }
+                Err(e) => Some(Err(format!("SetTooltipMode: {e}"))),
+            }
+        }
+        "SetLabelMode" | "ShowLabel" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(format!(
+                    "Error: {} requiere {}[etiqueta, bool] (simplificado honesto: true/false)",
+                    cmd.command, cmd.command
+                )));
+            }
+            let label = cmd.args[0].trim();
+            let mut store = document.display_flags.clone();
+            match crate::ggbscript::set_show_label(&mut store, document, label, cmd.args[1].trim())
+            {
+                Ok(show) => {
+                    document.display_flags = store;
+                    Some(Ok(format!(
+                        "{}[{label}] = {show} (vía hide_label en el render)",
+                        cmd.command
+                    )))
+                }
+                Err(e) => Some(Err(format!("{}: {e}", cmd.command))),
+            }
+        }
+        "SetFixed" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetFixed requiere SetFixed[etiqueta, bool] (bloquea el arrastre en input)".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let mut store = document.display_flags.clone();
+            match crate::ggbscript::set_locked(&mut store, document, label, cmd.args[1].trim()) {
+                Ok(locked) => {
+                    document.display_flags = store;
+                    Some(Ok(format!(
+                        "SetFixed[{label}] = {locked} (gate !is_locked en el arrastre)"
+                    )))
+                }
+                Err(e) => Some(Err(format!("SetFixed: {e}"))),
+            }
+        }
+        "SetDecoration" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetDecoration requiere SetDecoration[etiqueta, n] (0=ninguna, 1-3=tildes, 4=flecha; flag-guardado)".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let mut store = document.display_flags.clone();
+            match crate::ggbscript::set_decoration(&mut store, document, label, cmd.args[1].trim())
+            {
+                Ok(d) => {
+                    document.display_flags = store;
+                    Some(Ok(format!(
+                        "SetDecoration[{label}] = {} (flag-guardado; el render 2D no tiene punto limpio para tildes)",
+                        d.canonical_name()
+                    )))
+                }
+                Err(e) => Some(Err(format!("SetDecoration: {e}"))),
+            }
+        }
+        "SetLevelOfDetail" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetLevelOfDetail requiere SetLevelOfDetail[etiqueta, 0..=2] (flag-guardado)".into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            let mut store = document.display_flags.clone();
+            match crate::ggbscript::set_level_of_detail(
+                &mut store,
+                document,
+                label,
+                cmd.args[1].trim(),
+            ) {
+                Ok(lod) => {
+                    document.display_flags = store;
+                    Some(Ok(format!(
+                        "SetLevelOfDetail[{label}] = {lod} (flag-guardado; respeto mínimo en render denso vía lod_allows_dense en P3c)"
+                    )))
+                }
+                Err(e) => Some(Err(format!("SetLevelOfDetail: {e}"))),
+            }
+        }
+        "SetVisibleInView" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetVisibleInView requiere SetVisibleInView[etiqueta, vista]".into(),
+                ));
+            }
+            match crate::ggbscript::validate_visible_in_view(
+                document,
+                cmd.args[0].trim(),
+                cmd.args[1].trim(),
+            ) {
+                Ok(()) => Some(Ok("SetVisibleInView: ok".to_string())),
+                Err(e) => Some(Err(e)),
+            }
+        }
+        "SetImage" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetImage requiere SetImage[etiqueta, ruta]".into()
+                ));
+            }
+            match crate::ggbscript::check_set_image(
+                document,
+                cmd.args[0].trim(),
+                cmd.args[1].trim(),
+            ) {
+                Ok(()) => Some(Ok("SetImage: ok".to_string())),
+                Err(e) => Some(Err(e)),
+            }
+        }
+        "ToolImage" => {
+            if cmd.args.len() != 1 && cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: ToolImage requiere ToolImage[etiqueta] o ToolImage[etiqueta, ruta]"
+                        .into(),
+                ));
+            }
+            let label = cmd.args[0].trim();
+            if find_object_by_label(document, label).is_none() {
+                return Some(Err(format!("ToolImage: no existe el objeto '{label}'")));
+            }
+            Some(Err(crate::ggbscript::TOOL_IMAGE_UNAVAILABLE.to_string()))
+        }
+        "PlaySound" => {
+            if cmd.args.is_empty() || cmd.args.len() > 1 {
+                return Some(Err("Error: PlaySound requiere PlaySound[ruta]".into()));
+            }
+            Some(Err(crate::ggbscript::PLAY_SOUND_UNAVAILABLE.to_string()))
+        }
+        "StartRecord" => {
+            if !cmd.args.is_empty() {
+                return Some(Err("Error: StartRecord no lleva argumentos".into()));
+            }
+            Some(Err(crate::ggbscript::START_RECORD_UNAVAILABLE.to_string()))
+        }
+        "SlowPlot" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: SlowPlot requiere SlowPlot[objeto]".into()));
+            }
+            Some(Err(crate::ggbscript::SLOW_PLOT_UNAVAILABLE.to_string()))
+        }
+        "SetLineOpacity" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetLineOpacity requiere SetLineOpacity[etiqueta, 0..=1]".into(),
+                ));
+            }
+            match crate::ggbscript::apply_line_opacity(
+                document,
+                cmd.args[0].trim(),
+                cmd.args[1].trim(),
+            ) {
+                Ok(v) => Some(Ok(format!("SetLineOpacity[{}] = {v}", cmd.args[0].trim()))),
+                Err(e) => Some(Err(format!("SetLineOpacity: {e}"))),
+            }
+        }
+        "SetPointSize" => {
+            if cmd.args.len() != 2 {
+                return Some(Err(
+                    "Error: SetPointSize requiere SetPointSize[etiqueta, 0.5..=64]".into(),
+                ));
+            }
+            match crate::ggbscript::apply_point_size(
+                document,
+                cmd.args[0].trim(),
+                cmd.args[1].trim(),
+            ) {
+                Ok(v) => Some(Ok(format!("SetPointSize[{}] = {v}", cmd.args[0].trim()))),
+                Err(e) => Some(Err(format!("SetPointSize: {e}"))),
+            }
+        }
+        "ExportImage" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: ExportImage requiere ExportImage[ruta.png|.svg]".into(),
+                ));
+            }
+            match crate::ggbscript::resolve_export_image(&cmd.args[0]) {
+                Ok(t) => Some(Err(format!(
+                    "ExportImage: '{}' validada ({}); la escritura la hace la UI (comandos sin I/O con workers)",
+                    t.path.display(),
+                    t.format.canonical_name()
+                ))),
+                Err(e) => Some(Err(format!("ExportImage: {e}"))),
+            }
+        }
+        "GetTime" => {
+            if !cmd.args.is_empty() {
+                return Some(Err("Error: GetTime no lleva argumentos".into()));
+            }
+            let p = crate::ggbscript::time_parts_now();
+            Some(Ok(format!(
+                "GetTime = {{{}, {}, {}, {}, {}, {}}}",
+                p.year, p.month, p.day, p.hour, p.minute, p.second
+            )))
+        }
+        "Name" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Name requiere Name[etiqueta]".into()));
+            }
+            match crate::ggbscript::object_label_of(document, cmd.args[0].trim()) {
+                Ok(l) => Some(Ok(format!("Name = {l}"))),
+                Err(e) => Some(Err(format!("Name: {e}"))),
+            }
+        }
+        "DynamicCoordinates" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: DynamicCoordinates requiere DynamicCoordinates[punto]".into(),
+                ));
+            }
+            match crate::ggbscript::point_coords_of(document, cmd.args[0].trim()) {
+                Ok((x, y)) => Some(Ok(format!(
+                    "DynamicCoordinates[{}] = ({x}, {y})",
+                    cmd.args[0].trim()
+                ))),
+                Err(e) => Some(Err(format!("DynamicCoordinates: {e}"))),
+            }
+        }
+        "Corner" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(
+                    "Error: Corner requiere Corner[1..=4] (1=sup-izq, 2=sup-der, 3=inf-der, 4=inf-izq)".into(),
+                ));
+            }
+            let n_raw = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("Corner: en n: {e}"))),
+            };
+            if n_raw.fract() != 0.0 || !(1.0..=4.0).contains(&n_raw) {
+                return Some(Err("Corner: n debe ser un entero 1..=4".into()));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = n_raw as u8;
+            match crate::ggbscript::view_corner(document.view(), n) {
+                Ok(pt) => Some(Ok(format!("Corner[{n}] = ({}, {})", pt.x, pt.y))),
+                Err(e) => Some(Err(format!("Corner: {e}"))),
+            }
+        }
+        "ConstructionStep" | "SetConstructionStep" => {
+            if cmd.args.len() != 1 {
+                return Some(Err(format!(
+                    "Error: {} requiere {}[n] (el log vive en la app; requiere cableado UI P3c)",
+                    cmd.command, cmd.command
+                )));
+            }
+            let n_raw = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(format!("{}: en n: {e}", cmd.command))),
+            };
+            if n_raw.fract() != 0.0 || !(1.0..=500.0).contains(&n_raw) {
+                return Some(Err(format!(
+                    "{}: n debe ser un entero 1..=500",
+                    cmd.command
+                )));
+            }
+            Some(Err(format!(
+                "{}: requiere cableado UI (P3c): el protocolo de construcción vive en la app (MAX 500), no accesible desde command sin tocar app.rs",
+                cmd.command
+            )))
+        }
         _ => None,
     }
 }
@@ -21452,6 +23923,26 @@ fn resolve_list_arg(arg: &str, document: &Document) -> Result<Vec<ListElem>, Str
 ///
 /// Solo escalares finitos y anidamiento dentro de `MAX_LIST_DEPTH`;
 /// el texto no tiene literal (llega por API, no por sintaxis).
+fn p4_list_elems_to_flat(elems: &[ListElem], cmd: &str) -> Result<Vec<f64>, String> {
+    let mut out = Vec::with_capacity(elems.len());
+    for elem in elems {
+        match elem {
+            ListElem::Scalar(v) => {
+                if !v.is_finite() {
+                    return Err(format!("{cmd}: la lista contiene un valor no finito"));
+                }
+                out.push(*v);
+            }
+            ListElem::List(_) => {
+                return Err(format!(
+                    "{cmd}: se esperaba una lista plana numérica (sin anidar)"
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn list_elems_to_items(elems: &[ListElem]) -> Result<Vec<ListItem>, String> {
     fn convert(elem: &ListElem, depth: usize) -> Result<ListItem, String> {
         if depth > grafito_core::validation::MAX_LIST_DEPTH {

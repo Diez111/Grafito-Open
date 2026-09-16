@@ -145,7 +145,8 @@ fn oleada1_todos_visibles_en_paleta() {
     // Frente P1b (constructor List: +1 visible S): 434 → 435.
     // Frente P2 (medidas/geometría: +25 visibles S): 435 → 460.
     // Frente P3b (scripting: +11 visibles S + Execute real): 460 → 472.
-    assert_eq!(command_registry::palette_commands().count(), 472);
+    // Frente P4 (CAS+listas/geometría/stats/display: +105 visibles S): 472 → 577.
+    assert_eq!(command_registry::palette_commands().count(), 577);
 }
 
 #[test]

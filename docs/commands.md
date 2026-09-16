@@ -658,6 +658,155 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 
 - `PlaneBisector[A, B]`: Plano mediatriz de dos puntos 3D: PlaneBisector[A, B]. Mutacion: crea objetos. Riesgo: bajo. Alias: `plano_mediatriz`, `bisector`.
 - `PerpendicularPlane[A, B, P]`: Plano por P con normal AB: PerpendicularPlane[A, B, P]. Mutacion: crea objetos. Riesgo: bajo. Alias: `plano_perpendicular`.
+## CAS
+
+- `ImplicitDerivative[f, x]`: Derivada implícita dy/dx de F(x,y)=0 o evaluada en un punto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ImplicitDerivative[f, x, y]`, `ImplicitDerivative[f, x, y, x0, y0]`.
+- `Iteration[f, x, x0, n]`: Itera x_{k+1} = f(x_k) desde x0: Iteration[f, x, x0, n]. Mutacion: solo consulta. Riesgo: bajo.
+- `Numeric[expr]`: Evalúa a decimal: Numeric[expr] o Numeric[expr, var, valor]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Numeric[expr, var, valor]`.
+- `ToExponential[a, b]`: Complejo (a, b) a forma r·e^(iθ): ToExponential[a, b]. Mutacion: solo consulta. Riesgo: bajo.
+- `LeftSide[ecuación]`: Lado izquierdo de una ecuación izq = der. Mutacion: solo consulta. Riesgo: bajo.
+- `RightSide[ecuación]`: Lado derecho de una ecuación izq = der. Mutacion: solo consulta. Riesgo: bajo.
+- `Factors[n]`: Factores primos con multiplicidad: Factors[n]. Mutacion: solo consulta. Riesgo: bajo.
+- `AreEqual[a, b]`: Igualdad demostrable: verdadero, falso o indefinido honesto. Mutacion: solo consulta. Riesgo: bajo.
+- `RemovableDiscontinuity[f, punto]`: Discontinuidad evitable de f en un punto: límite existe pero f difiere. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `RemovableDiscontinuity[f, x, punto]`.
+- `InflectionPoint[f]`: Puntos de inflexión en [-10, 10] o en [a, b] dado. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InflectionPoint[f, var, a, b]`.
+- `Dimension[matriz]`: Dimensión (filas, columnas) de una matriz. Mutacion: solo consulta. Riesgo: bajo.
+- `Identity[n]`: Matriz identidad n×n: Identity[n]. Mutacion: solo consulta. Riesgo: bajo.
+- `MatrixRank[matriz]`: Rango de una matriz (Bareiss exacto o SVD). Mutacion: solo consulta. Riesgo: bajo.
+- `RandomBetween[a, b]`: Entero uniforme en [a, b], determinista por versión del documento. Mutacion: solo consulta. Riesgo: bajo.
+- `RandomPolynomial[grado]`: Polinomio aleatorio de grado dado, determinista por versión del documento. Mutacion: solo consulta. Riesgo: bajo.
+- `LeftSum[f, var, a, b, n]`: Suma de Riemann por extremo izquierdo: LeftSum[f, var, a, b, n]. Mutacion: solo consulta. Riesgo: bajo.
+- `LowerSum[f, var, a, b, n]`: Suma inferior estimada con 8 muestras por subintervalo, sin precisión exacta. Mutacion: solo consulta. Riesgo: bajo.
+- `UpperSum[f, var, a, b, n]`: Suma superior estimada con 8 muestras por subintervalo, sin precisión exacta. Mutacion: solo consulta. Riesgo: bajo.
+- `TrapezoidalSum[f, var, a, b, n]`: Suma trapezoidal: TrapezoidalSum[f, var, a, b, n]. Mutacion: solo consulta. Riesgo: bajo.
+- `RectangleSum[f, var, a, b, n]`: Suma de rectángulos por punto medio: RectangleSum[f, var, a, b, n]. Mutacion: solo consulta. Riesgo: bajo.
+## Lista
+
+- `ColumnName[n]`: Nombre de columna 1-based (1→A, 27→AA): ColumnName[n]. Mutacion: solo consulta. Riesgo: bajo.
+- `DataFunction[expr, xs]`: Evalúa expr sobre cada fila (x, y opcional, n): DataFunction[expr, xs]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `DataFunction[expr, xs, ys]`.
+- `Frequency[lista]`: Conteo por valor único ordenado: Frequency[lista]. Mutacion: solo consulta. Riesgo: bajo.
+## Crear
+
+- `PointList[matriz]`: Crea puntos desde una matriz de 2 o 3 columnas uniformes. Mutacion: crea objetos. Riesgo: bajo.
+## Lista
+
+- `RemoveUndefined[lista]`: Filtra NaN e infinitos de una lista. Mutacion: solo consulta. Riesgo: bajo.
+- `SelectedElement[lista]`: Elemento de la lista cuyo rótulo está seleccionado; sin selección da error honesto. Mutacion: solo consulta. Riesgo: bajo.
+- `SelectedIndex[lista]`: Posición 1-based del primer rótulo seleccionado; sin selección da error honesto. Mutacion: solo consulta. Riesgo: bajo.
+## Texto
+
+- `ParseToFunction[texto, var]`: Valida texto como expresión en la variable dada. Mutacion: solo consulta. Riesgo: bajo.
+- `ParseToNumber[texto]`: Interpreta texto como número (coma o punto decimal). Mutacion: solo consulta. Riesgo: bajo.
+- `ReadText[etiqueta]`: Contenido de un objeto texto existente. Mutacion: solo consulta. Riesgo: bajo.
+- `ReplaceAll[texto, buscar, reemplazo]`: Reemplazo literal de subcadenas: ReplaceAll[texto, buscar, reemplazo]. Mutacion: solo consulta. Riesgo: bajo.
+## Crear
+
+- `RotateText[texto, grados]`: Crea un texto rotado (grados a radianes en el brazo). Mutacion: crea objetos. Riesgo: bajo.
+## Texto
+
+- `Split[texto, delim]`: Divide texto por un separador literal. Mutacion: solo consulta. Riesgo: bajo.
+## Crear
+
+- `Text[texto]`: Crea un objeto texto con el contenido dado. Mutacion: crea objetos. Riesgo: bajo.
+- `VerticalText[texto]`: Crea un texto apilado un carácter por línea. Mutacion: crea objetos. Riesgo: bajo.
+## Análisis
+
+- `AffineRatio[A, B, C]`: Razón afín de tres puntos colineales: AffineRatio[A, B, C]. Mutacion: solo consulta. Riesgo: bajo.
+- `CrossRatio[A, B, C, D]`: Razón doble de cuatro puntos: CrossRatio[A, B, C, D]. Mutacion: solo consulta. Riesgo: bajo.
+- `AreCongruent[obj1, obj2]`: Congruencia por longitud (segmentos) o SSS (polígonos); otros tipos dan error honesto. Mutacion: solo consulta. Riesgo: bajo.
+## Construir
+
+- `CircularArc[centro, r, a0, a1]`: Crea un arco por centro, radio y ángulos en radianes. Mutacion: crea objetos. Riesgo: bajo.
+- `CircularSector[centro, r, a0, a1]`: Crea un sector por centro, radio y ángulos en radianes. Mutacion: crea objetos. Riesgo: bajo.
+- `CircumcircularArc[A, B, C]`: Crea el arco circunscrito a tres puntos no colineales. Mutacion: crea objetos. Riesgo: bajo.
+- `CircumcircularSector[A, B, C]`: Crea el sector circunscrito a tres puntos no colineales. Mutacion: crea objetos. Riesgo: bajo.
+- `Cubic[P1, P2, P3, P4, P5, P6, P7, P8, P9]`: Crea la cúbica implícita por 9 puntos. Mutacion: crea objetos. Riesgo: bajo.
+## Análisis
+
+- `Direction[recta]`: Dirección de recta o normal de plano; mensaje con componentes, sin objeto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Direction[A, B]`.
+## Construir
+
+- `PerpendicularLine[P, recta]`: Crea la recta perpendicular por P a una recta dada. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `PerpendicularLine[P, A, B]`.
+- `RigidPolygon[P1, P2, P3]`: Crea un polígono con validación de rigidez Laman; sin ligas automáticas. Mutacion: crea objetos. Riesgo: bajo.
+## Cónicas
+
+- `Conic[P1, P2, P3, P4, P5]`: Crea la cónica implícita por 5 puntos (ConicByFivePoints existe como restricción paramétrica). Mutacion: crea objetos. Riesgo: bajo.
+- `Parameter[cónica]`: Parámetro focal de parábola, elipse o hipérbola. Mutacion: solo consulta. Riesgo: bajo.
+## Análisis
+
+- `PathParameter[P, camino]`: Parámetro de recorrido de un punto sobre polilínea o polígono. Mutacion: solo consulta. Riesgo: bajo.
+- `Type[objeto]`: Nombre del tipo del objeto (GeoObject::name). Mutacion: solo consulta. Riesgo: bajo.
+## Construir
+
+- `Vertex[objeto]`: Crea puntos en los vértices de polígono o cónica. Mutacion: crea objetos. Riesgo: bajo.
+## Análisis
+
+- `InteriorAngles[polígono]`: Ángulos interiores de un polígono en radianes. Mutacion: solo consulta. Riesgo: bajo.
+## 3D
+
+- `Bottom[sólido]`: Crea el plano horizontal en la cota mínima del sólido (solo tipos con cotas reales). Mutacion: crea objetos. Riesgo: bajo.
+- `Top[sólido]`: Crea el plano horizontal en la cota máxima del sólido (solo tipos con cotas reales). Mutacion: crea objetos. Riesgo: bajo.
+- `Ends[sólido]`: Crea los 2 planos de tapa de cilindro o prisma. Mutacion: crea objetos. Riesgo: bajo.
+## Análisis
+
+- `Side[sólido]`: Área lateral de cilindro, cono o prisma; mensaje con el valor. Mutacion: solo consulta. Riesgo: bajo.
+## 3D
+
+- `IntersectConic[esfera, plano]`: Círculo de esfera por plano como mensaje honesto; sin objeto círculo-3D en esta versión. Mutacion: solo consulta. Riesgo: bajo.
+## Estadística
+
+- `Variance[lista]`: Varianza poblacional (÷n) de una lista. Mutacion: solo consulta. Riesgo: bajo.
+- `HistogramRight[lista]`: Histograma con bins cerrados a derecha; solo mensaje, sin objeto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `HistogramRight[lista, bins]`.
+## Probabilidad
+
+- `RandomUniform[a, b]`: Sorteo uniforme en [a, b), determinista por versión del documento. Mutacion: solo consulta. Riesgo: bajo.
+- `RandomNormal[mu, sigma]`: Sorteo normal por Box-Muller, determinista por versión del documento. Mutacion: solo consulta. Riesgo: bajo.
+- `RandomBinomial[n, p]`: Conteo binomial exacto hasta la cota, determinista por versión del documento. Mutacion: solo consulta. Riesgo: bajo.
+- `RandomPoisson[lambda]`: Conteo Poisson exacto o aproximado según lambda, determinista. Mutacion: solo consulta. Riesgo: bajo.
+- `Beta[a, b]`: Función beta B(a, b) (brazo huérfano previo, ahora visible). Mutacion: solo consulta. Riesgo: bajo.
+- `GammaDist[alpha, beta]`: Distribución gamma: PDF y CDF (brazo huérfano previo, ahora visible). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GammaDist[alpha, beta, x]`.
+- `BetaDist[alpha, beta]`: Distribución beta: PDF por gamma incompleta (brazo huérfano previo, ahora visible). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `BetaDist[alpha, beta, x]`.
+- `Cauchy[x0, gamma]`: Distribución Cauchy: PDF y CDF (brazo huérfano previo, ahora visible). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Cauchy[x0, gamma, x]`.
+- `Pareto[xm, alpha]`: Distribución Pareto: PDF y CDF (brazo huérfano previo, ahora visible). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Pareto[xm, alpha, x]`.
+- `Laplace[mu, b]`: Distribución Laplace: PDF y CDF (brazo huérfano previo, ahora visible). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Laplace[mu, b, x]`.
+- `Rayleigh[sigma]`: Distribución Rayleigh: PDF y CDF (brazo huérfano previo, ahora visible). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Rayleigh[sigma, x]`.
+- `NegBinomial[r, p]`: Binomial negativa: PMF y CDF (brazo huérfano previo, ahora visible). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `NegBinomial[r, p, k]`.
+## Dinámica
+
+- `RunClickScript[etiqueta]`: Ejecuta el guion OnClick guardado de un objeto. Mutacion: transforma objetos. Riesgo: bajo.
+- `RunUpdateScript[etiqueta]`: Dispara el guion OnUpdate de un objeto; sin hooks automáticos. Mutacion: transforma objetos. Riesgo: bajo.
+- `SelectObjects[etiquetas]`: Selecciona objetos por etiquetas: SelectObjects[{A, B}]. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetActiveView[perspectiva]`: Valida una de las 10 perspectivas; se aplica desde la UI. Mutacion: solo consulta. Riesgo: bajo.
+- `SetPerspective[perspectiva]`: Valida una de las 10 perspectivas; se aplica desde la UI. Mutacion: solo consulta. Riesgo: bajo.
+- `SetViewDirection[dirección]`: Valida la dirección de vista 3D; la cámara vive en la app. Mutacion: solo consulta. Riesgo: bajo.
+- `SetAxesRatio[x, y]`: Guarda la razón de ejes en __view_axes_rx/ry; escala uniforme hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
+- `AxisStepX[paso]`: Guarda el paso del eje X en __view_axis_step_x; sin pasos por eje hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
+- `AxisStepY[paso]`: Guarda el paso del eje Y en __view_axis_step_y; sin pasos por eje hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
+- `ShowAxes[bool]`: Guarda mostrar ejes en __view_show_axes; el render usa sus flags hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
+- `ShowGrid[bool]`: Guarda mostrar grilla en __view_show_grid; el render usa su flag hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetConditionToShowObject[etiqueta, condición]`: Guarda la condición de visibilidad; se evalúa en el render. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetDynamicColor[etiqueta, r, g, b]`: Guarda el color dinámico r, g, b; se evalúa por frame en el render. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetTooltipMode[etiqueta, modo]`: Guarda el modo de tooltip; flag-guardado, el hover al objeto llega en P3c. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetLabelMode[etiqueta, bool]`: Muestra u oculta la etiqueta del canvas; simplificado honesto true/false. Mutacion: transforma objetos. Riesgo: bajo.
+- `ShowLabel[etiqueta, bool]`: Muestra u oculta la etiqueta del canvas vía hide_label en el render. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetFixed[etiqueta, bool]`: Fija un objeto y bloquea su arrastre en el canvas. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetDecoration[etiqueta, n]`: Guarda marcas de ángulo o segmento; flag-guardado sin punto limpio en el render. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetLevelOfDetail[etiqueta, n]`: Guarda el nivel de detalle 0..=2; flag-guardado con respeto mínimo en P3c. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetVisibleInView[etiqueta, vista]`: Error honesto: una sola vista por documento, sin vistas múltiples nombradas. Mutacion: solo consulta. Riesgo: bajo.
+- `SetImage[etiqueta, ruta]`: Error honesto: sin pipeline de imágenes para objetos en esta versión. Mutacion: solo consulta. Riesgo: bajo.
+- `ToolImage[etiqueta]`: Error honesto: Tool::Image no disponible en esta versión. Mutacion: solo consulta. Riesgo: bajo.
+- `PlaySound[ruta]`: Error honesto: sin pipeline de reproducción de audio en la app. Mutacion: solo consulta. Riesgo: bajo.
+- `StartRecord[]`: Error honesto: sin grabación de pantalla en la app. Mutacion: solo consulta. Riesgo: bajo.
+- `SlowPlot[objeto]`: Error honesto: sin plantilla de trazado progresivo en el motor. Mutacion: solo consulta. Riesgo: bajo.
+- `SetLineOpacity[etiqueta, opacidad]`: Cambia la opacidad de línea reescribiendo el alfa del color. Mutacion: transforma objetos. Riesgo: bajo.
+- `SetPointSize[etiqueta, tamaño]`: Cambia el tamaño de punto 2D, 3D o nube. Mutacion: transforma objetos. Riesgo: bajo.
+- `ExportImage[ruta]`: Valida la ruta PNG o SVG; la escritura la hace la UI sin I/O en comandos. Mutacion: solo consulta. Riesgo: bajo.
+- `GetTime[]`: Hora actual del sistema como lista año, mes, día, hora, min, seg. Mutacion: solo consulta. Riesgo: bajo.
+- `Name[etiqueta]`: Etiqueta existente verificada del objeto. Mutacion: solo consulta. Riesgo: bajo.
+- `DynamicCoordinates[punto]`: Coordenadas vivas de un punto 2D. Mutacion: solo consulta. Riesgo: bajo.
+- `Corner[n]`: Esquina visible de la vista en mundo: Corner[1..=4]. Mutacion: solo consulta. Riesgo: bajo.
+- `ConstructionStep[n]`: Error honesto: el protocolo vive en la app y requiere cableado UI P3c. Mutacion: solo consulta. Riesgo: bajo.
+- `SetConstructionStep[n]`: Error honesto: sin rebobinado del documento; requiere cableado UI P3c. Mutacion: solo consulta. Riesgo: bajo.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 

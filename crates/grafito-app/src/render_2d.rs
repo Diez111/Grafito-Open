@@ -2364,6 +2364,69 @@ fn get_label(base: &str, style: Option<StyleOverride>) -> &str {
     base
 }
 
+// ── Frente P4: respeto mínimo de DisplayFlags en el canvas ──
+//
+// Solo ganchos limpios existentes: `StyleOverride.color` (dynamic color por
+// frame), `hide_label` en `get_label` (ShowLabel) y condición de visibilidad
+// (skip). Decoración/LOD quedan flag-guardados (nota en el help, nunca error
+// falso). Todo fail-open: sin entrada → comportamiento histórico; condición
+// con error → se dibuja igual (no ocultar por un parse roto).
+fn p4_display_override(
+    document: &grafito_core::Document,
+    label: &str,
+) -> (Option<StyleOverride>, bool) {
+    if label.is_empty() {
+        return (None, true);
+    }
+    let Some(flags) = document.display_flags.get(label) else {
+        return (None, true);
+    };
+    // Condición: `false` → no dibujar; error → dibujar igual.
+    if let Some(cond) = &flags.condition {
+        if let Ok(visible) = grafito_command::ggbscript::eval_condition(document, cond) {
+            if !visible {
+                return (None, false);
+            }
+        }
+    }
+    let mut style = StyleOverride::default();
+    let mut touched = false;
+    if !flags.show_label {
+        style.hide_label = true;
+        touched = true;
+    }
+    if let Some(exprs) = &flags.dynamic_color {
+        if let Ok(color) = grafito_command::ggbscript::eval_dynamic_color(document, exprs) {
+            style.color = Some(color);
+            touched = true;
+        }
+    }
+    if touched {
+        (Some(style), true)
+    } else {
+        (None, true)
+    }
+}
+
+fn p4_merge_style(
+    base: Option<StyleOverride>,
+    extra: Option<StyleOverride>,
+) -> Option<StyleOverride> {
+    match (base, extra) {
+        (None, None) => None,
+        (Some(s), None) | (None, Some(s)) => Some(s),
+        (Some(mut a), Some(b)) => {
+            // El estilo del llamador (hover/preview) gana en color; el flag
+            // solo aporta lo que el llamador no fijó + hide_label.
+            if a.color.is_none() {
+                a.color = b.color;
+            }
+            a.hide_label = a.hide_label || b.hide_label;
+            Some(a)
+        }
+    }
+}
+
 // ── Etiquetas matemáticas TeX en canvas (W2) ──
 //
 // Donde el canvas mostraba ASCII (`f`), compone `"f = x^2"` y dibuja el
@@ -4157,6 +4220,12 @@ impl GrafitoApp {
         // casos que antes recortaban internamente (ComplexGrid/ComplexMapping)
         // ahora quedan cubiertos por este clip único.
         let painter = clipped_to_canvas(painter, canvas_rect);
+        // Frente P4: respeto mínimo de DisplayFlags (condición/dynamic/hide).
+        let (p4_style, p4_visible) = p4_display_override(&self.document, obj.label());
+        if !p4_visible {
+            return;
+        }
+        let style = p4_merge_style(style, p4_style);
         let overlay_only = match cpu_object_pass(&self.document, obj, overlay_only) {
             CpuObjectPass::Full => false,
             CpuObjectPass::Supplement => true,
@@ -4818,13 +4887,17 @@ impl GrafitoApp {
             }
             GeoObject::Text(txt) => {
                 let s = view.world_to_screen(txt.position);
-                painter.text(
-                    canvas_rect.min + Vec2::new(s.x, s.y),
-                    egui::Align2::LEFT_CENTER,
-                    &txt.content,
+                let color = to_color32(txt.color);
+                let galley = painter.layout_no_wrap(
+                    txt.content.clone(),
                     egui::FontId::proportional(txt.font_size.max(8.0)),
-                    to_color32(txt.color),
+                    color,
                 );
+                // Emula el anclaje LEFT_CENTER previo (TextShape pivota en la
+                // esquina superior izquierda): se sube media altura de galley.
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y - galley.size().y / 2.0);
+                painter
+                    .add(egui::epaint::TextShape::new(pos, galley, color).with_angle(txt.rotation));
             }
             GeoObject::Histogram(h) => {
                 let bins = grafito_geometry::statistics::histogram(&h.data, h.bins);

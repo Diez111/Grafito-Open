@@ -151,8 +151,8 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | tools seguras (`all_safe_tool_schemas`, assistant) | 21 (3 base + 8 pedag + 8 math + 2 harness1) | assistant/src/agent.rs:2250-2259,2721-2766 (math 8 verificado por conteo `ToolSchema::new`) |
 | Assistant | tools seguras (`all_safe_tool_schemas`, agent hoja) | 9 (3 base + 6 pedag, sin math/harness) | agent/src/tools.rs:3060-3081 |
 | Tex | TEX_INPUT_MAX_BYTES | 8 KiB | tex/src/lib.rs:37 |
-| Comandos | COMMANDS registrados | 516 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
-| Comandos | palette-visible | 472 (45 ocultos) + 15 acciones UI = 487 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real) |
+| Comandos | COMMANDS registrados | 621 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`) |
+| Comandos | palette-visible | 577 (44 ocultos) + 15 acciones UI = 592 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real; P4: +105 CAS/listas/geometría/stats/display) |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
 | Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
@@ -249,7 +249,7 @@ Notas:
 |---|---|
 | RequestBudget 8192 / 2048 / 8 / 60s | `crates/grafito-assistant-types/src/lib.rs:198-209` |
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
-| 516 comandos (`command!(`), 472 visibles + 15 UI = 487 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real) |
+| 621 comandos (`command!(`), 577 visibles + 15 UI = 592 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real; P4: +105 CAS/listas/geometría/stats/display) |
 | 15 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs` |
 | 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
 | 87 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (contado F5: 87 variantes) |
@@ -287,10 +287,10 @@ Notas:
 
 ## 14. Paridad GeoGebra 2026 — frente F10-C (BUILD 2026-09-05, rama f10-plan-total)
 
-> Plan de cierre ejecutado 2026-09-16 (P0–P3, ver ADR-0003): 338 → **516 comandos**
-> (472 visibles + 15 UI = 487 en paleta), i18n ES/EN/PT/IT/FR/DE (187 claves),
-> export `.ggb` + PDF multipágina + P2P iroh tras flag. GeoGebra lista ~590:
-> cobertura nominal ≈87% con el resto declarado abajo como stub honesto.
+> Plan de cierre ejecutado 2026-09-16 (P0–P4, ver ADR-0003): 338 → **621 comandos**
+> (577 visibles + 15 UI = 592 en paleta), i18n ES/EN/PT/IT/FR/DE (187 claves),
+> export `.ggb` + PDF multipágina + P2P iroh tras flag. GeoGebra lista ~502:
+> cobertura nominal ≈100% con el resto declarado abajo como stub honesto.
 
 Cerebro puro en `crates/grafito-core/src/symbolic/` (`csv.rs`, `solids.rs`,
 `exchange.rs`, `mod.rs` con `groebner_gate`); piel fina en

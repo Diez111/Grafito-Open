@@ -1340,6 +1340,10 @@ pub struct TextObj {
     pub color: Color,
     pub visible: bool,
     pub font_size: f32,
+    /// Rotación en radianes, horario (igual que `egui::epaint::TextShape::angle`).
+    /// `#[serde(default)]` (= 0.0): la persistencia vieja sin ángulo sigue válida.
+    #[serde(default)]
+    pub rotation: f32,
 }
 
 impl TextObj {
@@ -1352,6 +1356,7 @@ impl TextObj {
             color: Color::DEFAULT_STROKE,
             visible: true,
             font_size: 14.0,
+            rotation: 0.0,
         }
     }
 }
@@ -5278,6 +5283,169 @@ impl GeoObject {
     }
 }
 
+// ── Frente P3 SCRIPTING: flags de display por objeto ──────────────────────
+// Solo agregados: ningún struct existente se modifica (el store vive en
+// `grafito-command/src/ggbscript.rs::DisplayStore`, keyed por etiqueta; la
+// persistencia y el cableado a render/input van en la fase de cableado).
+// Los defaults preservan el comportamiento histórico: sin condición, color
+// estático, tooltip automático, etiqueta visible, arrastrable, sin marcas,
+// detalle completo.
+
+/// De dónde sale el texto de ayuda al hover de un objeto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TooltipMode {
+    /// El que ya muestra el inspector dinámico (`hovered_analysis`).
+    #[default]
+    Auto,
+    /// Siempre visible (cableado UI).
+    On,
+    /// Nunca (ni siquiera el análisis al hover).
+    Off,
+}
+
+impl TooltipMode {
+    /// 0 = auto, 1 = on, 2 = off (GeoGebra `SetTooltipMode[etiqueta, n]`).
+    /// Acepta además `auto`/`on`/`off` (insensible a mayúsculas, con comillas).
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_lowercase()
+            .as_str()
+        {
+            "0" | "auto" | "automatico" | "automático" => Some(Self::Auto),
+            "1" | "on" | "siempre" | "visible" => Some(Self::On),
+            "2" | "off" | "nunca" | "oculto" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Nombre canónico en inglés para mensajes y serialización legible.
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Marcas de ángulo/segmento (GeoGebra `SetDecoration[etiqueta, n]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Decoration {
+    /// Sin marcas (comportamiento histórico).
+    #[default]
+    None,
+    /// Una tilde.
+    Tick1,
+    /// Dos tildes.
+    Tick2,
+    /// Tres tildes.
+    Tick3,
+    /// Flecha.
+    Arrow,
+}
+
+impl Decoration {
+    /// 0 = ninguna, 1-3 = tildes, 4 = flecha. Acepta además los nombres
+    /// canónicos en inglés (`none`, `tick1`…​) insensible a mayúsculas.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_lowercase()
+            .as_str()
+        {
+            "0" | "none" | "ninguna" => Some(Self::None),
+            "1" | "tick1" => Some(Self::Tick1),
+            "2" | "tick2" => Some(Self::Tick2),
+            "3" | "tick3" => Some(Self::Tick3),
+            "4" | "arrow" | "flecha" => Some(Self::Arrow),
+            _ => None,
+        }
+    }
+
+    /// Nombre canónico en inglés.
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Tick1 => "tick1",
+            Self::Tick2 => "tick2",
+            Self::Tick3 => "tick3",
+            Self::Arrow => "arrow",
+        }
+    }
+}
+
+/// `true` por defecto: las etiquetas del canvas se dibujan como siempre.
+fn default_show_label_true() -> bool {
+    true
+}
+
+/// Nivel de detalle máximo del store (0 = completo, 2 = mínimo).
+pub const MAX_LEVEL_OF_DETAIL: u8 = 2;
+
+/// Flags de display por objeto (comandos `Set*[etiqueta, …​]`).
+///
+/// Todo con `#[serde(default)]`: JSON viejo o parcial migra a comportamiento
+/// histórico. `PartialEq/Eq` para tests y dedup del store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayFlags {
+    /// Condición de visibilidad (`SetConditionToShowObject`): sintaxis validada
+    /// al guardar; se evalúa con `ggbscript::eval_condition` en el cableado.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// Color dinámico (`SetDynamicColor`): tres componentes r,g,b en 0..=1
+    /// como strings, validados sintácticamente; se evalúan por frame con las
+    /// variables del documento en el cableado.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_color: Option<[String; 3]>,
+    /// Modo de tooltip (`SetTooltipMode`).
+    #[serde(default)]
+    pub tooltip_mode: TooltipMode,
+    /// Etiqueta del canvas (`SetLabelMode`/`ShowLabel`): `false` la oculta.
+    #[serde(default = "default_show_label_true")]
+    pub show_label: bool,
+    /// Fijo (`SetFixed`): `true` bloquea el arrastre en el cableado.
+    #[serde(default)]
+    pub locked: bool,
+    /// Marcas de ángulo/segmento (`SetDecoration`).
+    #[serde(default)]
+    pub decoration: Decoration,
+    /// Nivel de detalle (`SetLevelOfDetail`): 0..=`MAX_LEVEL_OF_DETAIL`.
+    #[serde(default)]
+    pub lod: u8,
+}
+
+impl Default for DisplayFlags {
+    fn default() -> Self {
+        Self {
+            condition: None,
+            dynamic_color: None,
+            tooltip_mode: TooltipMode::default(),
+            show_label: true,
+            locked: false,
+            decoration: Decoration::default(),
+            lod: 0,
+        }
+    }
+}
+
+impl DisplayFlags {
+    /// Valida un nivel de detalle (0..=`MAX_LEVEL_OF_DETAIL`).
+    pub fn check_lod(raw: &str) -> Result<u8, String> {
+        let clean = raw.trim().trim_matches('"').trim_matches('\'');
+        match clean.parse::<u8>() {
+            Ok(lod) if lod <= MAX_LEVEL_OF_DETAIL => Ok(lod),
+            _ => Err(format!(
+                "el nivel de detalle debe ser un entero 0..={MAX_LEVEL_OF_DETAIL}"
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5734,5 +5902,41 @@ mod coverage_sweep_objeto {
         assert!(wrapped.point_style().is_some() || wrapped.point_style().is_none());
         let arc = GeoObject::Arc(ArcObj::new(Point2::new(0.0, 0.0), 1.0, 0.0, 1.0));
         assert_eq!(arc.line_style(), None);
+    }
+}
+
+#[cfg(test)]
+mod text_rotation_tests {
+    use super::*;
+
+    #[test]
+    fn texto_nuevo_arranca_sin_rotacion() {
+        let t = TextObj::new("hola", Point2::new(1.0, 2.0));
+        assert_eq!(t.rotation, 0.0);
+    }
+
+    #[test]
+    fn persistencia_vieja_sin_angulo_carga_como_cero() {
+        // JSON legacy sin `rotation` → `#[serde(default)]` = 0.0.
+        let legacy = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000",
+            "label": "T1",
+            "content": "hola",
+            "position": {"x": 1.0, "y": 2.0},
+            "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+            "visible": true,
+            "font_size": 14.0
+        });
+        let t: TextObj = serde_json::from_value(legacy).unwrap();
+        assert_eq!(t.rotation, 0.0);
+    }
+
+    #[test]
+    fn rotacion_sobrevive_ida_y_vuelta() {
+        let mut t = TextObj::new("hola", Point2::new(0.0, 0.0));
+        t.rotation = 0.5;
+        let v = serde_json::to_value(&t).unwrap();
+        let de_vuelta: TextObj = serde_json::from_value(v).unwrap();
+        assert_eq!(de_vuelta.rotation, 0.5);
     }
 }

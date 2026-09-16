@@ -636,12 +636,18 @@ fn risch_expr(
                 return Ok(xln);
             }
             // F3c: racionales `P(x)/Q(x)` por fracciones parciales (grado ≤ 4);
+            // grado 5-6 con lineales racionales → Hermite-Ostrogradsky local;
             // resto → `Err` honesto con la factorización parcial lograda.
             match risch_rational(num, den, var, depth, terms) {
                 Ok(prim) => Ok(prim),
-                Err(RischError::Unsupported { hint }) => Err(risch_unsupported(format!(
-                    "cociente no trivial ({hint}); racional propio general → Hermite/Rothstein en symbolic::integrate, resto Risch completo pendiente"
-                ))),
+                Err(RischError::Unsupported { hint }) => {
+                    match hermite_rational_ast(num, den, var, terms) {
+                        Ok(hermite_prim) => Ok(hermite_prim),
+                        Err(_) => Err(risch_unsupported(format!(
+                            "cociente no trivial ({hint}); racional propio general → Hermite/Rothstein en symbolic::integrate, resto Risch completo pendiente"
+                        ))),
+                    }
+                }
                 Err(other) => Err(other),
             }
         }
@@ -2667,6 +2673,803 @@ fn risch_parts_x_exp(
     Ok(None)
 }
 
+// ---------------------------------------------------------------------------
+// Frente Hermite-Ostrogradsky (grado 5-6) + Rothstein-Trager básico.
+//
+// La vía F3c (`risch_rational`) cubre denominador grado ≤ 4 con lineales
+// reales o una cuadrática irreducible. Esta vía extiende a grado ≤ 6 cuando
+// el denominador se parte en lineales racionales (con multiplicidad, vía
+// Hermite) más como mucho una cuadrática irreducible (vía
+// `primitive_irreducible_quadratic`: `ln + atan`, es decir Rothstein-Trager
+// para el caso real-cuadrático).
+//
+// Método (Ostrogradsky): para `P/Q` propio, `G = mcd(Q, Q')`, `V = G`,
+// `B = Q/V` (exacta), `S = V'B/V`; se resuelve `P = U'B - U S + A V` con
+// `grado(U) < grado(V)`, `grado(A) < grado(B)` (sistema lineal `d×d`,
+// `d = grado(Q) ≤ 6`). Entonces `∫P/Q = U/V + ∫A/B` con `B` libre de
+// cuadrados. El resto `A/B` se integra por fracciones parciales sobre sus
+// raíces racionales (colocación entera, sistema `≤ 6`) más la cuadrática
+// irreducible si la hay.
+//
+// Honesto: si `B` conserva un factor irreducible de grado ≥ 3 o dos
+// cuadráticas sin lineales racionales (p. ej. `1/(x⁴+1)`), no hay
+// factorización sobre algebraicos en este crate y se devuelve
+// `RischError::Unsupported` que lo dice. Presupuestos:
+// `MAX_HERMITE_DEN_DEGREE` 6, `MAX_HERMITE_NUM_DEGREE` 12 (impropios se
+// dividen primero), sistema `≤ 6`, héritage `MAX_RISCH_TERMS` 64.
+// ---------------------------------------------------------------------------
+
+/// Grado máximo del denominador en la vía Hermite.
+pub const MAX_HERMITE_DEN_DEGREE: usize = 6;
+/// Grado máximo del numerador (impropios se dividen primero).
+pub const MAX_HERMITE_NUM_DEGREE: usize = 12;
+/// Tamaño máximo del sistema lineal de Hermite/parciales.
+pub const MAX_HERMITE_SYSTEM: usize = 6;
+
+/// Reducción de Ostrogradsky `P/Q → U/V + A/B` (coeficientes ascendentes).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HermiteReduction {
+    /// Numerador de la parte racional `U`.
+    pub rational_num: Vec<f64>,
+    /// Denominador de la parte racional `V` (`mcd(Q, Q')`).
+    pub rational_den: Vec<f64>,
+    /// Numerador del resto logarítmico `A`.
+    pub remainder_num: Vec<f64>,
+    /// Denominador libre de cuadrados `B`.
+    pub remainder_den: Vec<f64>,
+}
+
+fn hermite_degree(coeffs: &[f64]) -> Option<usize> {
+    let mut degree: Option<usize> = None;
+    for (index, value) in coeffs.iter().enumerate() {
+        if value.abs() > POLY_EPS {
+            degree = Some(index);
+        }
+    }
+    degree
+}
+
+fn hermite_is_zero(coeffs: &[f64]) -> bool {
+    hermite_degree(coeffs).is_none()
+}
+
+fn hermite_trim(mut coeffs: Vec<f64>) -> Vec<f64> {
+    while coeffs.len() > 1 && coeffs.last().is_some_and(|v| v.abs() < POLY_EPS) {
+        coeffs.pop();
+    }
+    if coeffs.is_empty() {
+        coeffs.push(0.0);
+    }
+    coeffs
+}
+
+fn hermite_derivative(coeffs: &[f64]) -> Vec<f64> {
+    if coeffs.len() <= 1 {
+        return vec![0.0];
+    }
+    let mut out = Vec::new();
+    for (index, value) in coeffs.iter().enumerate().skip(1) {
+        let derived = *value * (index as f64);
+        out.push(if derived.is_finite() { derived } else { 0.0 });
+    }
+    hermite_trim(out)
+}
+
+fn hermite_mul(a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
+    if a.is_empty() || b.is_empty() {
+        return Some(vec![0.0]);
+    }
+    if a.len() + b.len() < 2 || a.len() - 1 + (b.len() - 1) > MAX_HERMITE_NUM_DEGREE {
+        return None;
+    }
+    let mut out = vec![0.0; a.len() + b.len() - 1];
+    for (i, x) in a.iter().enumerate() {
+        for (j, y) in b.iter().enumerate() {
+            let value = x * y;
+            if !value.is_finite() {
+                return None;
+            }
+            out[i + j] += value;
+        }
+    }
+    if !out.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    Some(hermite_trim(out))
+}
+
+fn hermite_sub(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let len = a.len().max(b.len());
+    let mut out = vec![0.0; len];
+    for (index, slot) in out.iter_mut().enumerate() {
+        let left = a.get(index).copied().unwrap_or(0.0);
+        let right = b.get(index).copied().unwrap_or(0.0);
+        *slot = left - right;
+    }
+    hermite_trim(out)
+}
+
+fn hermite_gcd(mut a: Vec<f64>, mut b: Vec<f64>) -> Vec<f64> {
+    a = hermite_trim(a);
+    b = hermite_trim(b);
+    for _ in 0..32 {
+        if hermite_is_zero(&b) {
+            break;
+        }
+        let (_, rem) = poly_div_asc(&a, &b);
+        a = hermite_trim(b);
+        b = hermite_trim(rem);
+        if a.len() > MAX_HERMITE_DEN_DEGREE + 1 {
+            break;
+        }
+    }
+    // Normaliza a mónico para que `Q/V` sea exacta y estable.
+    if let Some(lead) = a.last().copied() {
+        if lead.abs() > POLY_EPS {
+            for value in &mut a {
+                *value /= lead;
+            }
+        }
+    }
+    hermite_trim(a)
+}
+
+fn hermite_exact_div(num: &[f64], den: &[f64]) -> Option<Vec<f64>> {
+    if hermite_is_zero(den) {
+        return None;
+    }
+    let (quot, rem) = poly_div_asc(num, den);
+    if hermite_is_zero(&rem) || rem.iter().all(|v| v.abs() < 1e-9) {
+        Some(hermite_trim(quot))
+    } else {
+        None
+    }
+}
+
+fn hermite_solve_system(mat: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
+    let n = rhs.len();
+    if n == 0 || n > MAX_HERMITE_SYSTEM || mat.len() != n {
+        return None;
+    }
+    for row in mat {
+        if row.len() != n {
+            return None;
+        }
+    }
+    let mut aug: Vec<Vec<f64>> = mat
+        .iter()
+        .zip(rhs.iter())
+        .map(|(row, rhs_value)| {
+            let mut full = row.clone();
+            full.push(*rhs_value);
+            full
+        })
+        .collect();
+    for col in 0..n {
+        let mut pivot = col;
+        for row in col..n {
+            let candidate = aug.get(row)?.get(col).copied().unwrap_or(0.0).abs();
+            let best = aug.get(pivot)?.get(col).copied().unwrap_or(0.0).abs();
+            if candidate > best {
+                pivot = row;
+            }
+        }
+        let pivot_value = aug.get(pivot)?.get(col).copied().unwrap_or(0.0);
+        if !pivot_value.is_finite() || pivot_value.abs() < 1e-12 {
+            return None;
+        }
+        aug.swap(col, pivot);
+        let diag = aug.get(col)?.get(col).copied().unwrap_or(0.0);
+        let pivot_row: Vec<f64> = aug.get(col)?.get(col..=n)?.to_vec();
+        for (row_index, row) in aug.iter_mut().enumerate().take(n) {
+            if row_index == col {
+                continue;
+            }
+            let cell = row.get(col).copied().unwrap_or(0.0);
+            let factor = cell / diag;
+            if !factor.is_finite() {
+                return None;
+            }
+            for (slot, pivot_cell) in row.iter_mut().skip(col).zip(pivot_row.iter()) {
+                *slot -= factor * pivot_cell;
+            }
+        }
+    }
+    let mut out = vec![0.0; n];
+    for (index, row) in aug.iter().enumerate() {
+        let diag = row.get(index).copied().unwrap_or(0.0);
+        let rhs_value = row.get(n).copied().unwrap_or(0.0);
+        if diag.abs() < 1e-12 || !rhs_value.is_finite() {
+            return None;
+        }
+        let value = rhs_value / diag;
+        if !value.is_finite() {
+            return None;
+        }
+        out[index] = value;
+    }
+    Some(out)
+}
+
+fn hermite_poly_to_expr(coeffs: &[f64], var: &str) -> crate::ast::Expr {
+    use crate::ast::Expr;
+    let trimmed = hermite_trim(coeffs.to_vec());
+    if hermite_is_zero(&trimmed) {
+        return Expr::Const(0.0);
+    }
+    let mut acc: Option<Expr> = None;
+    for (degree, coeff) in trimmed.iter().enumerate() {
+        if coeff.abs() < POLY_EPS {
+            continue;
+        }
+        let term = if degree == 0 {
+            Expr::Const(*coeff)
+        } else if degree == 1 {
+            Expr::Mul(
+                Box::new(Expr::Const(*coeff)),
+                Box::new(Expr::Var(var.to_string())),
+            )
+        } else {
+            Expr::Mul(
+                Box::new(Expr::Const(*coeff)),
+                Box::new(Expr::Pow(
+                    Box::new(Expr::Var(var.to_string())),
+                    Box::new(Expr::Const(degree as f64)),
+                )),
+            )
+        };
+        acc = Some(match acc {
+            None => term,
+            Some(prev) => Expr::Add(Box::new(prev), Box::new(term)),
+        });
+    }
+    acc.unwrap_or(Expr::Const(0.0))
+}
+
+/// Reducción de Ostrogradsky sobre coeficientes ascendentes.
+///
+/// `den` no nulo de grado `1..=6`, `num` de grado menor (propio). Devuelve
+/// `(U, V, A, B)` con `∫P/Q = U/V + ∫A/B`.
+pub fn hermite_reduce(num: &[f64], den: &[f64]) -> Result<HermiteReduction, String> {
+    let denominator = hermite_trim(den.to_vec());
+    let numerator = hermite_trim(num.to_vec());
+    let Some(den_degree) = hermite_degree(&denominator) else {
+        return Err("denominador idénticamente nulo".to_string());
+    };
+    if den_degree == 0 || den_degree > MAX_HERMITE_DEN_DEGREE {
+        return Err(format!(
+            "denominador de grado {den_degree} fuera de 1..={MAX_HERMITE_DEN_DEGREE}"
+        ));
+    }
+    if numerator.len() - 1 > MAX_HERMITE_NUM_DEGREE {
+        return Err("numerador excede el grado máximo".to_string());
+    }
+    if let Some(num_degree) = hermite_degree(&numerator) {
+        if num_degree >= den_degree && !hermite_is_zero(&numerator) {
+            return Err("cociente impropio: dividir primero".to_string());
+        }
+    }
+    let derivative = hermite_derivative(&denominator);
+    let square_part = hermite_gcd(denominator.clone(), derivative);
+    let Some(squarefree) = hermite_exact_div(&denominator, &square_part) else {
+        return Err("mcd no divide al denominador (ruido numérico)".to_string());
+    };
+    let squarefree = hermite_trim(squarefree);
+    let repeated = hermite_trim(square_part);
+    if repeated.len() == 1 {
+        return Ok(HermiteReduction {
+            rational_num: vec![0.0],
+            rational_den: vec![1.0],
+            remainder_num: numerator,
+            remainder_den: denominator,
+        });
+    }
+    let repeated_derivative = hermite_derivative(&repeated);
+    let Some(product) = hermite_mul(&repeated_derivative, &squarefree) else {
+        return Err("producto V'B excede el grado".to_string());
+    };
+    let Some(spoly) = hermite_exact_div(&product, &repeated) else {
+        return Err("S = V'B/V no es polinómica".to_string());
+    };
+    let spoly = hermite_trim(spoly);
+    let Some(n) = hermite_degree(&repeated) else {
+        return Err("parte repetida degenerada".to_string());
+    };
+    let m = hermite_degree(&squarefree).unwrap_or(0);
+    // `grado(U) < grado(V) = n` aporta `n` incógnitas; `grado(A) < m` aporta `m`.
+    let unknowns = n + m;
+    if unknowns == 0 || unknowns > MAX_HERMITE_SYSTEM || unknowns != den_degree {
+        return Err("grados inconsistentes para Ostrogradsky".to_string());
+    }
+    let mut mat = vec![vec![0.0; unknowns]; den_degree];
+    let mut rhs = vec![0.0; den_degree];
+    for (index, coeff) in numerator.iter().enumerate() {
+        if index < den_degree {
+            rhs[index] = *coeff;
+        }
+    }
+    for col in 0..n {
+        let mut basis = vec![0.0; col + 1];
+        if let Some(slot) = basis.get_mut(col) {
+            *slot = 1.0;
+        }
+        let basis_derivative = hermite_derivative(&basis);
+        let term_a = hermite_mul(&basis_derivative, &squarefree).unwrap_or(vec![0.0]);
+        let term_b = hermite_mul(&basis, &spoly).unwrap_or(vec![0.0]);
+        let contribution = hermite_sub(&term_a, &term_b);
+        for (row, coeff) in contribution.iter().enumerate() {
+            if row < den_degree {
+                if let Some(cell) = mat.get_mut(row).and_then(|r| r.get_mut(col)) {
+                    *cell += *coeff;
+                }
+            }
+        }
+    }
+    for col in 0..m {
+        let target = n + col;
+        let mut basis = vec![0.0; col + 1];
+        if let Some(slot) = basis.get_mut(col) {
+            *slot = 1.0;
+        }
+        let contribution = hermite_mul(&basis, &repeated).unwrap_or(vec![0.0]);
+        for (row, coeff) in contribution.iter().enumerate() {
+            if row < den_degree {
+                if let Some(cell) = mat.get_mut(row).and_then(|r| r.get_mut(target)) {
+                    *cell += *coeff;
+                }
+            }
+        }
+    }
+    let Some(solution) = hermite_solve_system(&mat, &rhs) else {
+        return Err("sistema de Ostrogradsky singular".to_string());
+    };
+    Ok(HermiteReduction {
+        rational_num: hermite_trim(solution[0..n].to_vec()),
+        rational_den: repeated,
+        remainder_num: hermite_trim(solution[n..n + m].to_vec()),
+        remainder_den: squarefree,
+    })
+}
+
+fn hermite_peel_all(mut coeffs: Vec<f64>) -> (Vec<f64>, Vec<f64>) {
+    let mut roots: Vec<f64> = Vec::new();
+    for _ in 0..3 {
+        let (mut found, rest) = peel_rational_roots(&coeffs);
+        if found.is_empty() {
+            coeffs = rest;
+            break;
+        }
+        roots.append(&mut found);
+        coeffs = rest;
+        if roots.len() > MAX_HERMITE_DEN_DEGREE {
+            break;
+        }
+        if coeffs.len() <= 1 {
+            break;
+        }
+    }
+    (roots, hermite_trim(coeffs))
+}
+
+fn hermite_partial_linears(
+    rem: &[f64],
+    full_q: &[f64],
+    run: &[(f64, usize)],
+    var: &str,
+    terms: &mut usize,
+) -> Result<crate::ast::Expr, RischError> {
+    use crate::ast::Expr;
+    let x = Expr::Var(var.to_string());
+    let total: usize = run.iter().map(|(_, k)| k).sum();
+    if total == 0 || total > MAX_HERMITE_SYSTEM {
+        return Err(risch_unsupported(
+            "parcial lineal fuera de 1..=6".to_string(),
+        ));
+    }
+    let lead = full_q.last().copied().unwrap_or(1.0);
+    let mut xs: Vec<f64> = Vec::new();
+    let mut candidate: i64 = 0;
+    while xs.len() < total && candidate < 128 {
+        for value in [candidate as f64, -(candidate as f64)] {
+            if xs.len() >= total {
+                break;
+            }
+            if run.iter().all(|(root, _)| (value - root).abs() > 1e-9) && !xs.contains(&value) {
+                xs.push(value);
+            }
+        }
+        candidate += 1;
+    }
+    xs.truncate(total);
+    if xs.len() < total {
+        return Err(risch_unsupported(
+            "sin puntos de colocación para parciales de Hermite".to_string(),
+        ));
+    }
+    let mut mat: Vec<Vec<f64>> = Vec::new();
+    let mut rhs: Vec<f64> = Vec::new();
+    for sample in &xs {
+        let mut row = Vec::with_capacity(total);
+        for (index, (_, mult)) in run.iter().enumerate() {
+            for order in 1..=*mult {
+                let mut basis = lead;
+                for (other, (other_root, other_mult)) in run.iter().enumerate() {
+                    let exponent = if index == other {
+                        mult - order
+                    } else {
+                        *other_mult
+                    };
+                    basis *= (sample - other_root).powi(exponent as i32);
+                }
+                row.push(basis);
+            }
+        }
+        mat.push(row);
+        rhs.push(eval_poly_asc(rem, *sample));
+    }
+    let coeffs = hermite_solve_system(&mat, &rhs)
+        .ok_or_else(|| risch_unsupported("parcial lineal singular en Hermite".to_string()))?;
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut position = 0_usize;
+    for (root, mult) in run {
+        for order in 1..=*mult {
+            let Some(coeff) = coeffs.get(position).copied() else {
+                return Err(risch_unsupported(
+                    "coeficiente parcial faltante".to_string(),
+                ));
+            };
+            position += 1;
+            if coeff.abs() < POLY_EPS {
+                continue;
+            }
+            *terms += 1;
+            if *terms > MAX_RISCH_TERMS {
+                return Err(RischError::ResourceLimit {
+                    detail: format!("más de {MAX_RISCH_TERMS} términos"),
+                });
+            }
+            let base = Expr::Sub(Box::new(x.clone()), Box::new(Expr::Const(*root)));
+            if order == 1 {
+                parts.push(Expr::Mul(
+                    Box::new(Expr::Const(coeff)),
+                    Box::new(Expr::Ln(Box::new(Expr::Abs(Box::new(base))))),
+                ));
+            } else {
+                parts.push(Expr::Div(
+                    Box::new(Expr::Const(coeff / (1.0 - order as f64))),
+                    Box::new(Expr::Pow(
+                        Box::new(base),
+                        Box::new(Expr::Const(order as f64 - 1.0)),
+                    )),
+                ));
+            }
+        }
+    }
+    parts
+        .into_iter()
+        .reduce(|a, b| Expr::Add(Box::new(a), Box::new(b)))
+        .ok_or_else(|| risch_unsupported("parcial lineal vacía en Hermite".to_string()))
+}
+
+fn hermite_remainder_partial(
+    rem: &[f64],
+    full_q: &[f64],
+    roots: &[f64],
+    rest: &[f64],
+    var: &str,
+    terms: &mut usize,
+) -> Result<Option<crate::ast::Expr>, RischError> {
+    use crate::ast::Expr;
+    if rest.len() != 3 {
+        return Ok(None);
+    }
+    let (r0, r1, r2) = (rest[0], rest[1], rest[2]);
+    if r2.abs() < POLY_EPS || r1 * r1 - 4.0 * r2 * r0 >= -POLY_EPS {
+        return Ok(None);
+    }
+    let mut run: Vec<(f64, usize)> = Vec::new();
+    let mut sorted = roots.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    for root in sorted {
+        match run.last_mut() {
+            Some(last) if (last.0 - root).abs() < 1e-9 => last.1 += 1,
+            _ => run.push((root, 1)),
+        }
+    }
+    let linears: usize = run.iter().map(|(_, k)| k).sum();
+    if linears + 2 > MAX_HERMITE_SYSTEM {
+        return Ok(None);
+    }
+    let lead = full_q.last().copied().unwrap_or(1.0);
+    let mut xs: Vec<f64> = Vec::new();
+    let mut candidate: i64 = 0;
+    while xs.len() < linears + 2 && candidate < 128 {
+        for value in [candidate as f64, -(candidate as f64)] {
+            if xs.len() >= linears + 2 {
+                break;
+            }
+            if run.iter().any(|(root, _)| (value - root).abs() < 1e-9) || xs.contains(&value) {
+                continue;
+            }
+            if (r2 * value * value + r1 * value + r0).abs() < 1e-9 {
+                continue;
+            }
+            xs.push(value);
+        }
+        candidate += 1;
+    }
+    xs.truncate(linears + 2);
+    if xs.len() < linears + 2 {
+        return Ok(None);
+    }
+    let mut mat: Vec<Vec<f64>> = Vec::new();
+    let mut rhs: Vec<f64> = Vec::new();
+    for sample in &xs {
+        let mut row = Vec::with_capacity(linears + 2);
+        for (index, (_, mult)) in run.iter().enumerate() {
+            for order in 1..=*mult {
+                let mut basis = lead * (r2 * sample * sample + r1 * sample + r0);
+                for (other, (other_root, other_mult)) in run.iter().enumerate() {
+                    let exponent = if index == other {
+                        mult - order
+                    } else {
+                        *other_mult
+                    };
+                    basis *= (sample - other_root).powi(exponent as i32);
+                }
+                row.push(basis);
+            }
+        }
+        let mut lin_basis = lead;
+        for (other_root, other_mult) in &run {
+            lin_basis *= (sample - other_root).powi(*other_mult as i32);
+        }
+        row.push(lin_basis);
+        row.push(lin_basis * sample);
+        mat.push(row);
+        rhs.push(eval_poly_asc(rem, *sample));
+    }
+    let Some(coeffs) = hermite_solve_system(&mat, &rhs) else {
+        return Ok(None);
+    };
+    let x = Expr::Var(var.to_string());
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut position = 0_usize;
+    for (root, mult) in &run {
+        for order in 1..=*mult {
+            let Some(coeff) = coeffs.get(position).copied() else {
+                return Ok(None);
+            };
+            position += 1;
+            if coeff.abs() < POLY_EPS {
+                continue;
+            }
+            *terms += 1;
+            if *terms > MAX_RISCH_TERMS {
+                return Err(RischError::ResourceLimit {
+                    detail: format!("más de {MAX_RISCH_TERMS} términos"),
+                });
+            }
+            let base = Expr::Sub(Box::new(x.clone()), Box::new(Expr::Const(*root)));
+            if order == 1 {
+                parts.push(Expr::Mul(
+                    Box::new(Expr::Const(coeff)),
+                    Box::new(Expr::Ln(Box::new(Expr::Abs(Box::new(base))))),
+                ));
+            } else {
+                parts.push(Expr::Div(
+                    Box::new(Expr::Const(coeff / (1.0 - order as f64))),
+                    Box::new(Expr::Pow(
+                        Box::new(base),
+                        Box::new(Expr::Const(order as f64 - 1.0)),
+                    )),
+                ));
+            }
+        }
+    }
+    let (const_c, linear_b) = (
+        coeffs.get(position).copied().unwrap_or(0.0),
+        coeffs.get(position + 1).copied().unwrap_or(0.0),
+    );
+    let mut worst = 0.0_f64;
+    for (row, target) in mat.iter().zip(rhs.iter()) {
+        let got: f64 = row.iter().zip(coeffs.iter()).map(|(a, b)| a * b).sum();
+        worst = worst.max((got - target).abs());
+    }
+    if worst > 1e-6 * rhs.iter().map(|v| v.abs()).fold(1.0_f64, f64::max) {
+        return Ok(None);
+    }
+    if linear_b.abs() > POLY_EPS || const_c.abs() > POLY_EPS {
+        let quad = vec![r0 / r2, r1 / r2, 1.0];
+        let linear = vec![const_c / r2, linear_b / r2];
+        match primitive_irreducible_quadratic(&linear, &quad, var) {
+            Some(quad_prim) => parts.push(quad_prim),
+            None => return Ok(None),
+        }
+    }
+    if parts.is_empty() {
+        return Ok(Some(Expr::Const(0.0)));
+    }
+    Ok(parts
+        .into_iter()
+        .reduce(|a, b| Expr::Add(Box::new(a), Box::new(b))))
+}
+
+fn hermite_integrate_proper(
+    num: &[f64],
+    den: &[f64],
+    var: &str,
+    terms: &mut usize,
+) -> Result<crate::ast::Expr, RischError> {
+    use crate::ast::Expr;
+    let reduction = hermite_reduce(num, den).map_err(risch_unsupported)?;
+    let x = Expr::Var(var.to_string());
+    let mut acc: Option<Expr> = None;
+    let mut push_part = |part: Expr| {
+        acc = Some(match acc.take() {
+            None => part,
+            Some(prev) => Expr::Add(Box::new(prev), Box::new(part)),
+        });
+    };
+    if !hermite_is_zero(&reduction.rational_num) {
+        let rational = Expr::Div(
+            Box::new(hermite_poly_to_expr(&reduction.rational_num, var)),
+            Box::new(hermite_poly_to_expr(&reduction.rational_den, var)),
+        );
+        *terms += 1;
+        if *terms > MAX_RISCH_TERMS {
+            return Err(RischError::ResourceLimit {
+                detail: format!("más de {MAX_RISCH_TERMS} términos"),
+            });
+        }
+        push_part(rational);
+    }
+    if hermite_is_zero(&reduction.remainder_num) {
+        return acc.ok_or_else(|| risch_unsupported("resto nulo en Hermite".to_string()));
+    }
+    let (roots, rest) = hermite_peel_all(reduction.remainder_den.clone());
+    if rest.len() > 1 {
+        if let Some(mixed) = hermite_remainder_partial(
+            &reduction.remainder_num,
+            &reduction.remainder_den,
+            &roots,
+            &rest,
+            var,
+            terms,
+        )? {
+            push_part(mixed);
+            return acc.ok_or_else(|| risch_unsupported("Hermite vacío".to_string()));
+        }
+        if rest.len() != 1 {
+            return Err(risch_unsupported(format!(
+                "resto irreducible de grado {} en Hermite; se exige factorización sobre algebraicos",
+                rest.len() - 1
+            )));
+        }
+    }
+    let mut run: Vec<(f64, usize)> = Vec::new();
+    let mut sorted = roots.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    for root in sorted {
+        match run.last_mut() {
+            Some(last) if (last.0 - root).abs() < 1e-9 => last.1 += 1,
+            _ => run.push((root, 1)),
+        }
+    }
+    if run.is_empty() {
+        return Err(risch_unsupported(
+            "sin raíces lineales reales en Hermite; se exige factorización sobre algebraicos"
+                .to_string(),
+        ));
+    }
+    let partial = hermite_partial_linears(
+        &reduction.remainder_num,
+        &reduction.remainder_den,
+        &run,
+        var,
+        terms,
+    )?;
+    let _ = x;
+    push_part(partial);
+    acc.ok_or_else(|| risch_unsupported("Hermite vacío".to_string()))
+}
+
+fn hermite_rational_ast(
+    num: &crate::ast::Expr,
+    den: &crate::ast::Expr,
+    var: &str,
+    terms: &mut usize,
+) -> Result<crate::ast::Expr, RischError> {
+    use crate::ast::Expr;
+    let num_coeffs = poly_coeffs_bounded(num, var, MAX_HERMITE_NUM_DEGREE)
+        .ok_or_else(|| risch_unsupported("numerador no polinómico en Hermite".to_string()))?;
+    let mut den_coeffs =
+        poly_coeffs_bounded(den, var, MAX_HERMITE_DEN_DEGREE).ok_or_else(|| {
+            risch_unsupported(format!(
+                "denominador no polinómico o de grado > {MAX_HERMITE_DEN_DEGREE}"
+            ))
+        })?;
+    while den_coeffs.len() > 1 && den_coeffs.last().is_some_and(|v| v.abs() < POLY_EPS) {
+        den_coeffs.pop();
+    }
+    if den_coeffs.iter().all(|v| v.abs() < POLY_EPS) {
+        return Err(risch_unsupported(
+            "denominador idénticamente nulo".to_string(),
+        ));
+    }
+    let den_degree = den_coeffs.len() - 1;
+    if den_degree == 0 {
+        return Err(risch_unsupported(
+            "denominador constante en Hermite".to_string(),
+        ));
+    }
+    let x = Expr::Var(var.to_string());
+    let mut prefix: Option<Expr> = None;
+    let (quotient, remainder) = poly_div_asc(&num_coeffs, &den_coeffs);
+    let mut proper_num = remainder;
+    while proper_num.len() > 1 && proper_num.last().is_some_and(|v| v.abs() < POLY_EPS) {
+        proper_num.pop();
+    }
+    for (power, coeff) in quotient.iter().enumerate() {
+        if coeff.abs() < POLY_EPS {
+            continue;
+        }
+        *terms += 1;
+        if *terms > MAX_RISCH_TERMS {
+            return Err(RischError::ResourceLimit {
+                detail: format!("más de {MAX_RISCH_TERMS} términos"),
+            });
+        }
+        let integrated = if power == 0 {
+            Expr::Mul(Box::new(Expr::Const(*coeff)), Box::new(x.clone()))
+        } else {
+            Expr::Mul(
+                Box::new(Expr::Const(coeff / (power as f64 + 1.0))),
+                Box::new(Expr::Pow(
+                    Box::new(x.clone()),
+                    Box::new(Expr::Const(power as f64 + 1.0)),
+                )),
+            )
+        };
+        prefix = Some(match prefix {
+            None => integrated,
+            Some(prev) => Expr::Add(Box::new(prev), Box::new(integrated)),
+        });
+    }
+    if proper_num.iter().all(|v| v.abs() < POLY_EPS) {
+        return prefix.ok_or_else(|| risch_unsupported("cociente vacío en Hermite".to_string()));
+    }
+    let proper = hermite_integrate_proper(&proper_num, &den_coeffs, var, terms)?;
+    Ok(match prefix {
+        None => proper,
+        Some(prev) => Expr::Add(Box::new(prev), Box::new(proper)),
+    })
+}
+
+/// Integra `P/Q` con denominador de grado `≤ 6` por Hermite-Ostrogradsky.
+///
+/// Acepta cocientes impropios (divide primero). El resto logarítmico usa
+/// Rothstein-Trager básico: lineales racionales por colocación más como mucho
+/// una cuadrática irreducible (`ln + atan`). Sin factorización sobre
+/// algebraicos: dos cuadráticas o irreducible grado `≥ 3` → `Unsupported`
+/// honesto que lo dice.
+pub fn integrate_rational_hermite(expr: &str, var: &str) -> Result<String, RischError> {
+    let (clean, variable) = validate_risch_input(expr, var)?;
+    let ast = crate::ast::parse_ast(&clean).map_err(|reason| RischError::Parse { reason })?;
+    let (num, den) = match &ast {
+        crate::ast::Expr::Div(numerator, denominator) => {
+            ((**numerator).clone(), (**denominator).clone())
+        }
+        _ => {
+            return Err(risch_unsupported(
+                "se esperaba un cociente P/Q para Hermite".to_string(),
+            ));
+        }
+    };
+    let mut terms = 0_usize;
+    Ok(hermite_rational_ast(&num, &den, &variable, &mut terms)?.to_expr_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3007,19 +3810,63 @@ mod tests {
             &mixed,
             &[0.37, -0.53, 1.5, 3.71],
         );
-        // Grado 5 > cota 4: `Err` sin explosión.
-        let err5 = risch_norman_integrate("1/(x^5+2*x+1)", "x").expect_err("grado 5");
-        assert!(matches!(err5, RischError::Unsupported { .. }), "got {err5}");
-        // Cuadrática irreducible repetida `(x²+1)²`: Hermite completo
-        // pendiente → `Err` honesto que deriva a `symbolic::integrate`.
-        let rep = risch_norman_integrate("1/(x^4+2*x^2+1)", "x").expect_err("repetida compleja");
-        assert!(matches!(rep, RischError::Unsupported { .. }), "got {rep}");
-        // `x⁴+1` (dos cuadráticas sin lineales racionales): también honesto.
+        // Grado 5 con lineales racionales: Hermite local lo resuelve.
+        let split5 = risch_norman_integrate("1/((x-1)*(x+1)*(x-2)*(x+2)*(x-3))", "x")
+            .expect("grado 5 lineal");
+        assert!(split5.contains("ln"), "got {split5}");
+        check_prim_by_derivative(
+            "1/((x-1)*(x+1)*(x-2)*(x+2)*(x-3))",
+            "x",
+            &split5,
+            &[0.37, -0.53, 1.5, 3.71],
+        );
+        // Grado 7 > cota Hermite 6: `Err` honesto sin explosión.
+        let err7 = risch_norman_integrate("1/(x^7+2*x+1)", "x").expect_err("grado 7");
+        assert!(matches!(err7, RischError::Unsupported { .. }), "got {err7}");
+        // Cuadrática irreducible repetida `(x²+1)²`: Hermite la resuelve.
+        let rep = risch_norman_integrate("1/(x^4+2*x^2+1)", "x").expect("repetida compleja");
+        assert!(rep.contains("atan"), "got {rep}");
+        check_prim_by_derivative("1/(x^4+2*x^2+1)", "x", &rep, &[0.37, -0.53, 1.5, 3.71]);
+        // `x⁴+1` (dos cuadráticas sin lineales racionales): honesto, exige
+        // factorización sobre algebraicos.
         let two_quad = risch_norman_integrate("1/(x^4+1)", "x").expect_err("sin lineales");
         assert!(
             matches!(two_quad, RischError::Unsupported { .. }),
             "got {two_quad}"
         );
+    }
+
+    #[test]
+    fn hermite_reduce_splits_repeated_roots() {
+        // `1/(x-1)²(x+1)` → parte racional + log.
+        let reduction = hermite_reduce(&[1.0], &[-1.0, -1.0, 1.0, 1.0]).expect("reduce");
+        assert_eq!(
+            reduction.rational_den.len(),
+            2,
+            "got {:?}",
+            reduction.rational_den
+        );
+        assert!(!hermite_is_zero(&reduction.rational_num));
+    }
+
+    #[test]
+    fn hermite_reduce_rejects_honest_errors_and_bounds() {
+        assert!(hermite_reduce(&[1.0], &[0.0]).is_err());
+        assert!(hermite_reduce(&[1.0], &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]).is_err());
+        assert!(hermite_reduce(&[1.0, 1.0, 1.0], &[1.0, 1.0]).is_err());
+    }
+
+    #[test]
+    fn hermite_integrates_degree_six_split_and_rejects_algebraic() {
+        let prim = integrate_rational_hermite("1/((x-1)*(x+1)*(x-2)*(x+2)*(x-3)*(x+3))", "x")
+            .expect("grado 6 lineal");
+        assert!(prim.contains("ln"), "got {prim}");
+        assert!(integrate_rational_hermite("x+1", "x").is_err());
+        assert!(integrate_rational_hermite(&"x".repeat(2001), "x").is_err());
+        assert!(matches!(
+            integrate_rational_hermite("1/(x^4+1)", "x"),
+            Err(RischError::Unsupported { .. })
+        ));
     }
 
     #[test]

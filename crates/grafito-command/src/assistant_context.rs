@@ -1266,9 +1266,13 @@ impl AssistantKnowledgeGraph {
                         .collect(),
                     registry_spec: Some(spec),
                     executable_policy,
-                    keywords: executable_policy
-                        .map(|capability| capability.keywords)
-                        .unwrap_or_default(),
+                    keywords: if executable_policy.is_some() {
+                        executable_policy
+                            .map(|capability| capability.keywords)
+                            .unwrap_or_default()
+                    } else {
+                        canonical_keywords_overlay(spec.canonical)
+                    },
                     reference_only: spec.mutation == MutationClass::LoadsExternalData,
                     expression_reference: false,
                 }
@@ -1374,13 +1378,144 @@ fn is_catalog_stopword(term: &str) -> bool {
     )
 }
 
+/// Pliega acentos y ñ al ASCII base para que el scoring del catálogo sea
+/// insensible a tildes ("resolvé" encuentra "Resuelve", "graficá"→"grafica").
+/// Asume minúsculas; simétrico con `command_palette::fold_spanish` (la UI no
+/// es dependencia de este crate: la copia es intencional y estable).
+fn fold_spanish(lower: &str) -> String {
+    lower
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            other => other,
+        })
+        .collect()
+}
+
+/// Sinónimos en español para comandos frecuentes del asistente.
+///
+/// El scoring de términos ya existe; esta tabla cubre imperativos y
+/// variantes ("resolvé", "deriva", "integrando") que no aparecen en el
+/// `help` canónico. Solo acelera el ranking; jamás cambia el contrato de
+/// ejecución (los campos de política siguen viniendo del registro).
+fn canonical_keywords_overlay(canonical: &str) -> &'static [&'static str] {
+    match canonical {
+        "Solve" | "Solutions" | "NSolve" => &[
+            "resolver",
+            "resolvé",
+            "resuelve",
+            "ecuacion",
+            "ecuación",
+            "raiz",
+            "raíz",
+        ],
+        "SolveCubic" | "SolveQuartic" | "CSolve" | "CSolutions" | "NSolutions" => &[
+            "resolver", "resolvé", "raices", "raíces", "cubica", "cuartica",
+        ],
+        "Simplify" => &["simplificar", "simplifica", "reducir"],
+        "Derivative" | "NDerivative" | "ImplicitDerivative" => {
+            &["derivar", "derivá", "deriva", "derivada", "diferenciar"]
+        }
+        "Integral" | "IntegralSymbolic" | "IntegralBetween" | "NIntegral" => &[
+            "integrar",
+            "integrá",
+            "integra",
+            "primitiva",
+            "área",
+            "area",
+        ],
+        "Limit" | "LimitAbove" | "LimitBelow" => &["límite", "limite", "lim"],
+        "Factor" | "IFactor" | "CFactor" | "CIFactor" | "Factors" => {
+            &["factorizar", "factorizá", "factoriza", "factores"]
+        }
+        "Expand" => &["expandir", "expandí", "desarrollar"],
+        "Prove" | "ProveDetails" | "Relation" => &[
+            "demostrar",
+            "demostrá",
+            "demostracion",
+            "demostración",
+            "probar",
+            "teorema",
+            "axioma",
+        ],
+        "Minimize" | "Maximize" => &[
+            "minimizar",
+            "maximizar",
+            "mínimo",
+            "minimo",
+            "máximo",
+            "maximo",
+            "optimizar",
+        ],
+        "NSolveODE" | "SolveODE2" | "EulerODE" | "ODESystem2" => &[
+            "edo",
+            "ecuacion diferencial",
+            "ecuación diferencial",
+            "diferencial",
+        ],
+        "Mean" | "MeanX" | "MeanY" => &["media", "promedio"],
+        "Median" => &["mediana"],
+        "Mode" => &["moda"],
+        "Variance" | "SampleVariance" | "SD" | "SampleSD" | "SDX" | "SDY" => &[
+            "varianza",
+            "desvio",
+            "desvío",
+            "desviacion",
+            "desviación",
+            "dispersion",
+        ],
+        "Turtle" => &["tortuga", "logo", "cuadrado", "espiral"],
+        "Text" | "VerticalText" | "RotateText" => &["texto", "text", "etiqueta"],
+        "ReplaceAll" | "Split" | "ParseToNumber" | "ParseToFunction" => &[
+            "texto",
+            "cadena",
+            "string",
+            "reemplazar",
+            "separar",
+            "parsear",
+        ],
+        "List" | "Element" | "Unique" | "Sort" | "Zip" | "Map" | "Sum" | "Product" => &[
+            "lista", "listas", "elemento", "ordenar", "sumar", "producto",
+        ],
+        "Rank" | "MatrixRank" | "Inverse" | "Identity" | "Transpose" | "ReducedRowEchelonForm" => {
+            &["matriz", "matrices", "rango", "inversa", "identidad"]
+        }
+        "Histogram" | "BarChart" | "PieChart" | "DotPlot" | "BoxPlot" => &[
+            "grafico",
+            "gráfico",
+            "barras",
+            "torta",
+            "histograma",
+            "dispersion",
+        ],
+        "GCD" | "LCM" | "Divisors" | "PrimeFactors" | "IsPrime" | "NextPrime" | "PreviousPrime" => {
+            &[
+                "divisor",
+                "divisores",
+                "primo",
+                "primos",
+                "mcd",
+                "mcm",
+                "factorizar",
+            ]
+        }
+        _ => &[],
+    }
+}
+
 fn score_named_terms(
     value: &str,
     terms: &[String],
     partial_weight: usize,
     exact_weight: usize,
 ) -> usize {
-    let value = value.to_lowercase();
+    let value = fold_spanish(&value.to_lowercase());
     terms
         .iter()
         .map(|term| {
@@ -1396,7 +1531,7 @@ fn score_named_terms(
 }
 
 fn score_text_terms(value: &str, terms: &[String], weight: usize) -> usize {
-    let value = value.to_lowercase();
+    let value = fold_spanish(&value.to_lowercase());
     terms
         .iter()
         .filter(|term| value.contains(term.as_str()))
@@ -1482,9 +1617,9 @@ pub fn assistant_tool_catalog(problem: &str, max_bytes: usize) -> String {
         normalized_problem.contains("complej") || normalized_problem.contains("complex");
     let terms = normalized_problem
         .split(|character: char| !character.is_alphanumeric())
-        .filter(|term| term.chars().count() >= 3 || matches!(*term, "3d" | "4d"))
+        .map(fold_spanish)
+        .filter(|term| term.chars().count() >= 3 || matches!(term.as_str(), "3d" | "4d"))
         .filter(|term| !is_catalog_stopword(term))
-        .map(str::to_owned)
         .collect::<Vec<_>>();
     let generic_graph_request = ["grafic", "graf", "mostr", "dibuj", "visualiz"]
         .iter()
@@ -1530,15 +1665,30 @@ pub fn assistant_tool_catalog(problem: &str, max_bytes: usize) -> String {
     .iter()
     .any(|term| normalized_problem.contains(term));
     let mut candidates = Vec::new();
+    // Comandos del plano complejo que deben dominar un pedido complejo
+    // (evita que las referencias de expresiones, que también matchean
+    // "función", consuman el presupuesto del catálogo). Solo la familia 2D
+    // canónica: DomainColoring y ComplexGrid son la respuesta correcta a
+    // "graficá 1/z"; las variantes 3D/integrales puntúan por su cuenta.
+    const COMPLEX_GRAPH_COMMANDS: &[&str] = &["DomainColoring", "ComplexGrid"];
     for node in &assistant_knowledge_graph().nodes {
+        // Los pedidos complejos nunca ofrecen Function: graficar `1/z` como
+        // real es incorrecto; el catálogo debe empujar DomainColoring/ComplexGrid.
+        if complex_request && node.canonical == "Function" {
+            continue;
+        }
         let default_function = generic_graph_request
             && !complex_request
             && !specialized_request
             && node.canonical == "Function";
         let calculus_boost = calculus_example_request && node.canonical == "Function";
+        let complex_boost = complex_request
+            && node.executable_policy.is_some()
+            && COMPLEX_GRAPH_COMMANDS.contains(&node.canonical);
         let score = node.relevance_score(&terms)
             + usize::from(default_function) * 250
             + usize::from(calculus_boost) * 200
+            + usize::from(complex_boost) * 300
             + usize::from(catalog_overview_request);
         if score == 0 {
             continue;

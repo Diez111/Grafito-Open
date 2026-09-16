@@ -4244,6 +4244,308 @@ fn laplace_inverse_cubic(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Frente Bernoulli + exactas de 1er orden.
+//
+// Bernoulli `y' + p(x)·y = q(x)·y^n` (`n` entero, `n ≠ 0,1`, `|n| ≤ 8`) por
+// sustitución `v = y^(1-n)` → lineal `v' + (1-n)·p·v = (1-n)·q`, reusando el
+// solver lineal (`μ = exp(∫p̃)`, `H = ∫μ·q̃`). Exactas `Mdx + Ndy = 0` por test
+// `∂M/∂y = ∂N/∂x` más potencial por cuadratura (`∫M dx + ∫(N − ∂P/∂y) dy`).
+// Presupuestos: entradas `≤ 2000` bytes (`MAX_ODE_SYMBOLIC_BYTES`), salida
+// `≤ 8000`, Bernoulli `|n| ≤ 8` (`MAX_BERNOULLI_ABS_N`), exactas con resto
+// `∫` via `risch_ast` (falla honesto si no hay primitiva).
+// ---------------------------------------------------------------------------
+
+/// Exponente absoluto máximo de Bernoulli (`|n| ≤ 8`, `n ≠ 0,1`).
+pub const MAX_BERNOULLI_ABS_N: i32 = 8;
+/// Grado polinómico máximo documentado para el sondeo de exactas.
+pub const MAX_EXACT_POLY_DEGREE: usize = 8;
+
+fn bernoulli_term_parts(
+    term: &crate::ast::Expr,
+    x: &str,
+    y: &str,
+) -> Option<(crate::ast::Expr, i32)> {
+    use crate::ast::Expr;
+    if !crate::cas::cas_contains_var(term, y) {
+        return Some((term.clone(), 0));
+    }
+    match term {
+        Expr::Var(name) if name == y => Some((Expr::Const(1.0), 1)),
+        Expr::Pow(base, exp) => {
+            if matches!(base.as_ref(), Expr::Var(name) if name == y) {
+                let number = crate::cas::cas_const_value(exp)?;
+                if !number.is_finite() || (number - number.round()).abs() > 1e-9 {
+                    return None;
+                }
+                let rounded = number.round();
+                if !(-64.0..=64.0).contains(&rounded) {
+                    return None;
+                }
+                Some((Expr::Const(1.0), rounded as i32))
+            } else {
+                None
+            }
+        }
+        Expr::Mul(a, b) => {
+            let a_has_y = crate::cas::cas_contains_var(a, y);
+            let b_has_y = crate::cas::cas_contains_var(b, y);
+            if a_has_y == b_has_y {
+                return None;
+            }
+            let (x_part, y_part) = if a_has_y { (b, a) } else { (a, b) };
+            if crate::cas::cas_contains_var(x_part, y) {
+                return None;
+            }
+            let _ = x;
+            match y_part.as_ref() {
+                Expr::Var(name) if name == y => Some(((**x_part).clone(), 1)),
+                Expr::Pow(base, exp) if matches!(base.as_ref(), Expr::Var(name) if name == y) => {
+                    let number = crate::cas::cas_const_value(exp)?;
+                    if !number.is_finite() || (number - number.round()).abs() > 1e-9 {
+                        return None;
+                    }
+                    let rounded = number.round();
+                    if !(-64.0..=64.0).contains(&rounded) {
+                        return None;
+                    }
+                    Some(((**x_part).clone(), rounded as i32))
+                }
+                _ => None,
+            }
+        }
+        Expr::Div(a, b) => {
+            if crate::cas::cas_contains_var(b, y) {
+                return None;
+            }
+            let (x_part, exponent) = bernoulli_term_parts(a, x, y)?;
+            if exponent == 0 {
+                return None;
+            }
+            Some((Expr::Div(Box::new(x_part), b.clone()), exponent))
+        }
+        _ => None,
+    }
+}
+
+fn bernoulli_summands(expr: &crate::ast::Expr) -> Vec<crate::ast::Expr> {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Add(a, b) => {
+            let mut out = bernoulli_summands(a);
+            out.extend(bernoulli_summands(b));
+            out
+        }
+        Expr::Sub(a, b) => {
+            let mut out = bernoulli_summands(a);
+            out.push(Expr::Neg(b.clone()));
+            out
+        }
+        _ => vec![expr.clone()],
+    }
+}
+
+/// Exponente `n` si `rhs` es Bernoulli `a(x)·y + b(x)·y^n` (`None` si no).
+pub fn bernoulli_exponent(rhs: &str, x: &str, y: &str) -> Result<Option<i32>, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let y = check_ode_identifier(y)?;
+    let clean = check_ode_bytes(rhs)?;
+    let ast = parse_ode(&clean)?;
+    let terms = bernoulli_summands(&ast);
+    if terms.len() > 2 {
+        return Ok(None);
+    }
+    let mut exponents: Vec<i32> = Vec::new();
+    let mut parts: Vec<crate::ast::Expr> = Vec::new();
+    for term in &terms {
+        let Some((x_part, exponent)) = bernoulli_term_parts(term, &x, &y) else {
+            return Ok(None);
+        };
+        let _ = x_part;
+        exponents.push(exponent);
+        parts.push(term.clone());
+    }
+    if exponents.len() == 1 {
+        let candidate = exponents[0];
+        if candidate != 0 && candidate != 1 && candidate.abs() <= MAX_BERNOULLI_ABS_N {
+            return Ok(Some(candidate));
+        }
+        return Ok(None);
+    }
+    if exponents.len() != 2 {
+        return Ok(None);
+    }
+    let (first, second) = (exponents[0], exponents[1]);
+    let candidate = if first == 1 {
+        second
+    } else if second == 1 {
+        first
+    } else {
+        return Ok(None);
+    };
+    if candidate == 0 || candidate == 1 || candidate.abs() > MAX_BERNOULLI_ABS_N {
+        return Ok(None);
+    }
+    let _ = parts;
+    Ok(Some(candidate))
+}
+
+/// Resuelve `y' + p(x)·y = q(x)·y^n` por `v = y^(1-n)` → lineal.
+pub fn solve_bernoulli(
+    p_expr: &str,
+    q_expr: &str,
+    n: i32,
+    x: &str,
+) -> Result<String, OdeSymbolicError> {
+    if n == 0 || n == 1 {
+        return Err(OdeSymbolicError::NotSupported {
+            hint: "Bernoulli exige n ≠ 0,1 (esos casos son lineales)".to_string(),
+        });
+    }
+    if n.abs() > MAX_BERNOULLI_ABS_N {
+        return Err(OdeSymbolicError::NotSupported {
+            hint: format!("Bernoulli con |n| > {MAX_BERNOULLI_ABS_N} fuera del subset"),
+        });
+    }
+    let x = check_ode_identifier(x)?;
+    let p_ast = parse_normalized(&check_ode_bytes(p_expr)?)?;
+    let q_ast = parse_normalized(&check_ode_bytes(q_expr)?)?;
+    let order = 1 - n;
+    let order_f = f64::from(order);
+    let p_tilde =
+        crate::ast::Expr::Mul(Box::new(crate::ast::Expr::Const(order_f)), Box::new(p_ast));
+    let q_tilde =
+        crate::ast::Expr::Mul(Box::new(crate::ast::Expr::Const(order_f)), Box::new(q_ast));
+    let p_tilde_str = fold_neg_const(&p_tilde).to_expr_string();
+    let p_int = integrate_or_fail(&p_tilde_str, &x)?;
+    let p_int_ast = parse_normalized(&p_int)?;
+    let mu_ast = crate::ast::Expr::Exp(Box::new(p_int_ast));
+    let mu = mu_ast.to_expr_string();
+    let q_is_zero = matches!(crate::cas::cas_const_value(&q_tilde), Some(v) if v == 0.0);
+    let primitive = if q_is_zero {
+        "0".to_string()
+    } else {
+        let mu_q = crate::ast::Expr::Mul(
+            Box::new(mu_ast),
+            Box::new(parse_normalized(
+                &fold_neg_const(&q_tilde).to_expr_string(),
+            )?),
+        );
+        ode_prim(&fold_neg_const(&mu_q), &x).map_err(|_| OdeSymbolicError::IntegrationFailed {
+            expr: mu_q.to_expr_string(),
+        })?
+    };
+    let out = format!("y = (({primitive} + C)/({mu}))^(1/{order})");
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "solución de Bernoulli excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// `true` si `Mdx + Ndy = 0` es exacta (`∂M/∂y = ∂N/∂x`).
+pub fn is_exact_ode(
+    m_expr: &str,
+    n_expr: &str,
+    x: &str,
+    y: &str,
+) -> Result<bool, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let y = check_ode_identifier(y)?;
+    let m_ast = parse_normalized(&check_ode_bytes(m_expr)?)?;
+    let n_ast = parse_normalized(&check_ode_bytes(n_expr)?)?;
+    let difference =
+        crate::ast::Expr::Sub(Box::new(m_ast.diff(&y)), Box::new(n_ast.diff(&x))).simplify();
+    if let crate::ast::Expr::Const(c) = difference {
+        if c.is_finite() {
+            return Ok(c.abs() < 1e-12);
+        }
+        return Ok(false);
+    }
+    for sample in [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0] {
+        let probe = difference.eval_2d(&x, sample, &y, sample);
+        if !probe.is_finite() {
+            continue;
+        }
+        if probe.abs() > 1e-9 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Resuelve la exacta `Mdx + Ndy = 0` por potencial `Ψ(x,y) = C`.
+pub fn solve_exact_ode(
+    m_expr: &str,
+    n_expr: &str,
+    x: &str,
+    y: &str,
+) -> Result<String, OdeSymbolicError> {
+    let x = check_ode_identifier(x)?;
+    let y = check_ode_identifier(y)?;
+    if !is_exact_ode(m_expr, n_expr, &x, &y)? {
+        return Err(OdeSymbolicError::NotSupported {
+            hint:
+                "no es exacta (∂M/∂y ≠ ∂N/∂x); usa factor integrante o lineal/separable/Bernoulli"
+                    .to_string(),
+        });
+    }
+    let m_ast = parse_normalized(&check_ode_bytes(m_expr)?)?;
+    let n_ast = parse_normalized(&check_ode_bytes(n_expr)?)?;
+    let potential_x = crate::integral::risch_ast(&m_ast, &x).map_err(|_| {
+        OdeSymbolicError::IntegrationFailed {
+            expr: "sin primitiva de M en x".to_string(),
+        }
+    })?;
+    let potential_y_derivative = potential_x.diff(&y).simplify();
+    let remainder =
+        crate::ast::Expr::Sub(Box::new(n_ast), Box::new(potential_y_derivative)).simplify();
+    let remainder_is_zero = matches!(crate::cas::cas_const_value(&remainder), Some(v) if v.abs() < 1e-12)
+        || [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0].iter().all(|sample| {
+            let probe = remainder.eval_2d(&x, *sample, &y, *sample);
+            probe.is_finite() && probe.abs() < 1e-9
+        });
+    if remainder_is_zero {
+        let potential = crate::ast::Expr::Add(
+            Box::new(potential_x),
+            Box::new(crate::ast::Expr::Const(0.0)),
+        )
+        .simplify()
+        .to_expr_string();
+        let out = format!("{potential} = C");
+        if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+            return Err(OdeSymbolicError::IntegrationFailed {
+                expr: "potencial excede el presupuesto".to_string(),
+            });
+        }
+        return Ok(out);
+    }
+    if crate::cas::cas_contains_var(&remainder, &x) {
+        return Err(OdeSymbolicError::NotSupported {
+            hint: "resto con x tras cuadratura parcial; no es exacta computable".to_string(),
+        });
+    }
+    let height = match crate::cas::cas_const_value(&remainder) {
+        Some(value) if value.abs() < 1e-12 => crate::ast::Expr::Const(0.0),
+        _ => crate::integral::risch_ast(&fold_neg_const(&remainder), &y).map_err(|_| {
+            OdeSymbolicError::IntegrationFailed {
+                expr: "sin primitiva del resto en y".to_string(),
+            }
+        })?,
+    };
+    let potential = crate::ast::Expr::Add(Box::new(potential_x), Box::new(height))
+        .simplify()
+        .to_expr_string();
+    let out = format!("{potential} = C");
+    if out.len() > MAX_ODE_SYMBOLIC_BYTES * 4 {
+        return Err(OdeSymbolicError::IntegrationFailed {
+            expr: "potencial excede el presupuesto".to_string(),
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod ode_symbolic_tests {
     use super::*;
@@ -4860,5 +5162,33 @@ mod ode_symbolic_tests {
             (numeric - expected).abs() < 1e-3,
             "Simpson={numeric} vs F(2)={expected} (f={out})"
         );
+    }
+
+    #[test]
+    fn bernoulli_detects_solves_and_bounds() {
+        assert_eq!(
+            bernoulli_exponent("x*y + x*y^2", "x", "y").expect("detecta"),
+            Some(2)
+        );
+        assert_eq!(
+            bernoulli_exponent("2*y + x", "x", "y").expect("lineal"),
+            None
+        );
+        assert!(bernoulli_exponent("", "x", "y").is_err());
+        let sol = solve_bernoulli("1", "x", 2, "x").expect("bernoulli n=2");
+        assert!(sol.starts_with("y = "), "got {sol}");
+        assert!(sol.contains('C'), "got {sol}");
+        assert!(solve_bernoulli("1", "x", 1, "x").is_err());
+        assert!(solve_bernoulli("1", "x", 9, "x").is_err());
+    }
+
+    #[test]
+    fn exact_detects_solves_and_rejects() {
+        assert!(is_exact_ode("2*x*y", "x^2", "x", "y").expect("exacta"));
+        assert!(!is_exact_ode("y", "x^2", "x", "y").expect("no exacta"));
+        let potential = solve_exact_ode("2*x*y", "x^2", "x", "y").expect("potencial");
+        assert!(potential.contains('C'), "got {potential}");
+        assert!(solve_exact_ode("y", "x^2", "x", "y").is_err());
+        assert!(is_exact_ode("", "x", "x", "y").is_err());
     }
 }

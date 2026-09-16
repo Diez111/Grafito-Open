@@ -501,8 +501,12 @@ fn w1_symbolic_gate_specs_resolve_and_match_handlers() {
     assert!(!command_registry::resolve("GroebnerBasis")
         .expect("GroebnerBasis registered")
         .accepts_argument_count(1));
-    // Colisiones evitadas: la distribución sigue legado sin spec registrada.
-    assert!(command_registry::resolve("Laplace").is_none());
+    // Frente P4: la distribución Laplace ya tiene spec registrada (brazo
+    // huérfano previo ahora visible); sigue sin colisionar con LaplaceT.
+    let laplace = command_registry::resolve("Laplace").expect("Laplace registrado (P4)");
+    assert_eq!(laplace.canonical, "Laplace");
+    assert!(laplace.accepts_argument_count(2));
+    assert!(laplace.accepts_argument_count(3));
     assert_eq!(
         command_registry::canonicalize("groebnerbasis"),
         Some("GroebnerBasis")
@@ -629,8 +633,9 @@ fn resolve_alias_escolares_resuelve() {
             .unwrap_or_else(|| panic!("alias {alias} debe parsear"));
         assert_eq!(parsed.command, canonical, "parse {alias}");
     }
-    // Laplace sigue siendo distribución (sin spec), no alias de LaplaceT.
-    assert!(command_registry::resolve("Laplace").is_none());
+    // Frente P4: Laplace ahora es distribución CON spec (no alias de LaplaceT).
+    let laplace = command_registry::resolve("Laplace").expect("Laplace registrado (P4)");
+    assert_eq!(laplace.canonical, "Laplace");
     let laplace_t = command_registry::resolve("LaplaceT").expect("LaplaceT registrado");
     assert!(
         laplace_t.help.contains("Laplace es distribución"),

@@ -941,6 +941,15 @@ pub struct Document {
     /// se poda en [`Self::remove_object`] y [`Self::prune_layers`].
     #[serde(default)]
     layers: BTreeMap<ObjectId, u32>,
+    /// Flags de display por etiqueta (`Set*[etiqueta, …]`, frente P4).
+    ///
+    /// `etiqueta → DisplayFlags` (ver `object.rs::DisplayFlags` + store
+    /// `ggbscript::DisplayStore`). `#[serde(default)]` migra JSON viejo a
+    /// vacío = comportamiento histórico. Se poda en `remove_object` por
+    /// etiqueta; el renombrado deja la entrada vieja huérfana (lookup por
+    /// etiqueta nueva da default, sin mentir).
+    #[serde(default)]
+    pub display_flags: BTreeMap<String, crate::DisplayFlags>,
 }
 
 /// Máximo de muestras por estela de rastro (512 pts × 16 B ≈ 8 KiB/objeto).
@@ -1027,6 +1036,7 @@ impl Default for Document {
             trails: BTreeMap::new(),
             number_plane_labels: true,
             layers: BTreeMap::new(),
+            display_flags: BTreeMap::new(),
         }
     }
 }
@@ -1521,6 +1531,14 @@ impl Document {
         self.trace_enabled.remove(&id);
         self.trails.remove(&id);
         self.layers.remove(&id);
+        // Frente P4: poda del store de display por etiqueta (lookup honesto:
+        // sin entrada → flags default, comportamiento histórico).
+        if let Some(obj) = self.objects.get(&id) {
+            let label = obj.label().to_string();
+            if !label.is_empty() {
+                self.display_flags.remove(&label);
+            }
+        }
         self.spreadsheet_coordinate_points
             .retain(|_, point_id| *point_id != id);
         self.live_sequences.remove(&id);

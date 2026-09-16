@@ -1016,7 +1016,16 @@ impl GrafitoApp {
             && response.dragged_by(PointerButton::Primary)
         {
             if let (Some(sel_id), Some(pos)) = (self.select_drag_object, current_pos) {
-                if self.document.is_free_object(&sel_id) {
+                // Frente P4: `SetFixed` bloquea el arrastre (una sola línea de gate, sin cambiar firmas).
+                if self.document.is_free_object(&sel_id)
+                    && !grafito_command::ggbscript::is_locked(
+                        &self.document.display_flags,
+                        self.document
+                            .get_object(sel_id)
+                            .map(|o| o.label())
+                            .unwrap_or_default(),
+                    )
+                {
                     let local = pos - canvas_rect.min;
                     let mut world = self
                         .document

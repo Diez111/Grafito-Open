@@ -804,6 +804,7 @@ fn validate_geo_object_legacy_match(doc: &Document, obj: &GeoObject) -> Result<(
             validate_string(&o.content, "Text.content")?;
             validate_point2(o.position, "Text.position")?;
             validate_positive_f32(o.font_size, "Text.font_size")?;
+            validate_finite_f32(o.rotation, "Text.rotation")?;
         }
         GeoObject::Ellipse(o) => {
             validate_point2(o.center, "Ellipse.center")?;
@@ -2022,5 +2023,21 @@ mod tests_transformed_jacobian {
             });
         }
         assert!(validate_object_candidate_typed(&doc, &ok_deep).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests_text_rotation {
+    use super::*;
+
+    #[test]
+    fn rotacion_finita_pasa_y_no_finita_falla() {
+        let doc = Document::new();
+        let mut ok = crate::TextObj::new("hola", grafito_geometry::Point2::new(0.0, 0.0));
+        ok.rotation = 1.0;
+        assert!(validate_object_candidate_typed(&doc, &crate::GeoObject::Text(ok)).is_ok());
+        let mut bad = crate::TextObj::new("hola", grafito_geometry::Point2::new(0.0, 0.0));
+        bad.rotation = f32::NAN;
+        assert!(validate_object_candidate_typed(&doc, &crate::GeoObject::Text(bad)).is_err());
     }
 }

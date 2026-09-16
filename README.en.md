@@ -181,8 +181,8 @@ All three pipelines compile a WGSL shader with the user's expression embedded at
 | Panel | Access | Purpose |
 |-------|--------|---------|
 | **Algebra** | Tab A | Object list, input bar, variables with sliders, animations, per-type filter |
-| **Toolbar** | Tab T | 17 groups (5/8/17 progressive), 73 tools with vector icons, contextual 2D/3D hiding, keyboard shortcuts |
-| **Command Palette** | Ctrl+K | 238 registered commands (199 palette-visible) across 26 categories + 14 UI actions, fuzzy bilingual search, arrow navigation, syntax template insertion |
+| **Toolbar** | Tab T | 18 groups (5/8/18 progressive), 87 tools with vector icons, contextual 2D/3D hiding, keyboard shortcuts |
+| **Command Palette** | Ctrl+K | 621 registered commands (577 palette-visible) across 25 categories + 15 UI actions, fuzzy bilingual search, arrow navigation, syntax template insertion |
 | **Math Keyboard** | Footer | 4 tabs: numeric, functions, letters, advanced |
 | **Properties** | Right panel | Type, editable label, visibility toggle, color picker, real-time measurements |
 | **Spreadsheet** | Tab S | Full grid editor, create points from cell coordinates |

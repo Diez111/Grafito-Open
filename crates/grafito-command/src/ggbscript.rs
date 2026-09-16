@@ -44,10 +44,11 @@ use crate::commands::{
     CommandOutcome, ScriptBudget,
 };
 use grafito_core::validation::MAX_EXPR_LENGTH;
-use grafito_core::{Document, GeoObject};
-use grafito_geometry::expr::evaluate;
-use grafito_geometry::Point2;
-use std::path::{Component, Path};
+use grafito_core::{Decoration, DisplayFlags, Document, GeoObject, ObjectId, TooltipMode};
+use grafito_geometry::expr::{evaluate, prepare_function_ast};
+use grafito_geometry::{Color, Point2, ViewTransform};
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
 // ── Presupuestos G-D ────────────────────────────────────────────────
 
@@ -399,22 +400,15 @@ pub(crate) fn run_ggb_steps(
     Ok(executed)
 }
 
-/// Evalúa una condición numérica (`expr` o `a <cmp> b`) con las variables del
-/// documento. Verdadero = comparación cierta o valor finito no nulo.
-pub fn eval_condition(document: &Document, cond: &str) -> Result<bool, String> {
-    let cond = cond.trim();
-    if cond.is_empty() {
-        return Err("la condición no debe estar vacía".into());
-    }
-    if cond.len() > MAX_EXPR_LENGTH {
-        return Err(format!("la condición excede {MAX_EXPR_LENGTH} caracteres"));
-    }
-    let vars: Vec<(String, f64)> = document
-        .variables
-        .iter()
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
-    // Operadores de dos caracteres primero, fuera de paréntesis.
+/// Parte una condición en `(izquierda, operador, derecha)` por el primer
+/// comparador fuera de paréntesis/corchetes/comillas (`<=`, `>=`, `==`,
+/// `!=`, `<`, `>`, `=` en ese orden de preferencia).
+///
+/// Extracción verbatim del escaneo que vivía inline en [`eval_condition`]:
+/// mismo recorrido por frontera de `char` (nunca trocea multibyte), misma
+/// profundidad, mismo orden. Devuelve los lados ya recortados (pueden venir
+/// vacíos: el llamador decide si eso es error).
+fn split_comparison(cond: &str) -> Option<(&str, &str, &str)> {
     let bytes = cond.as_bytes();
     let mut depth = 0usize;
     let mut in_str = false;
@@ -462,9 +456,27 @@ pub fn eval_condition(document: &Document, cond: &str) -> Result<bool, String> {
         }
         i += 1;
     }
-    if let Some((at, op)) = op_at {
-        let lhs = cond[..at].trim();
-        let rhs = cond[at + op.len()..].trim();
+    let (at, op) = op_at?;
+    Some((cond[..at].trim(), op, cond[at + op.len()..].trim()))
+}
+
+/// Evalúa una condición numérica (`expr` o `a <cmp> b`) con las variables del
+/// documento. Verdadero = comparación cierta o valor finito no nulo.
+pub fn eval_condition(document: &Document, cond: &str) -> Result<bool, String> {
+    let cond = cond.trim();
+    if cond.is_empty() {
+        return Err("la condición no debe estar vacía".into());
+    }
+    if cond.len() > MAX_EXPR_LENGTH {
+        return Err(format!("la condición excede {MAX_EXPR_LENGTH} caracteres"));
+    }
+    let vars: Vec<(String, f64)> = document
+        .variables
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    // Operadores de dos caracteres primero, fuera de paréntesis.
+    if let Some((lhs, op, rhs)) = split_comparison(cond) {
         if lhs.is_empty() || rhs.is_empty() {
             return Err(format!("condición mal formada: '{cond}'"));
         }
@@ -1708,6 +1720,918 @@ fn unsupported(command: &str, alternative: &str) -> CommandOutcome {
 
 // ── Dispatcher G-D ──────────────────────────────────────────────────
 
+// ── Frente P3 SCRIPTING: ejecución explícita, vistas, display, export ──
+//
+// Todo helper acá es puro sobre `&Document` / `&mut DisplayStore`: el
+// comando (fase de cableado, `commands.rs` + `command_registry.rs`) valida
+// args, llama al helper y traduce el `Result` a `CommandOutcome`. Nada se
+// ejecuta solo: sin hooks globales (riesgo de recursión OnUpdate).
+//
+// Mapa de scripts: `Document.object_scripts` (`BTreeMap<String,
+// ObjectScripts>`, `document.rs`, con `#[serde(default)]`) + `OnClick` /
+// `OnUpdate` ya guardados por `store_object_script`. Este frente NO crea
+// ningún mapa nuevo en `Document`.
+//
+// Estado de vista: `ViewTransform` (`grafito-geometry/src/types.rs:93-99`)
+// solo tiene `offset/scale/screen_size/x_log/y_log`: sin `show_axes`,
+// `show_grid` ni pasos por eje. La geometría queda fuera de alcance, así
+// que los helpers de esta sección validan y devuelven intento puro; el
+// render ya respeta lo que existe (`GrafitoApp.show_grid` en
+// `render_2d.rs:draw_grid`, `Document.number_plane_labels` en `draw_axes`).
+
+/// Ejecuta el guion `OnUpdate` guardado para `label`
+/// (comando `RunUpdateScript[etiqueta]`).
+///
+/// Disparo explícito, igual que `run_click_script`: presupuesto fresco por
+/// llamada y sin hooks automáticos en ningún commit (el tracking de cambios
+/// por objeto + presupuesto de recursión quedan para P3c; ver
+/// `ObjectScripts` en `document.rs`). Sin guion → error honesto.
+pub fn run_update_script(document: &mut Document, label: &str) -> Result<usize, String> {
+    let script = document
+        .object_scripts
+        .get(label.trim().trim_matches('"').trim_matches('\''))
+        .and_then(|scripts| scripts.on_update.clone())
+        .ok_or_else(|| format!("'{label}' no tiene guion OnUpdate"))?;
+    let steps = check_script_allowlist(&script)?;
+    let mut budget = crate::commands::ScriptBudget::default();
+    run_ggb_steps(document, &steps, &mut budget)
+}
+
+/// Etiquetas máximas aceptadas por `SelectObjects` en una invocación.
+pub const MAX_SELECTION_LABELS: usize = 512;
+
+/// Resuelve etiquetas a `ObjectId` existentes, sin tocar la selección.
+///
+/// Puro (`&Document`): el comando limpia con `Document::clear_selection` y
+/// selecciona con `Document::select` (`document.rs`; `select` ya dedup).
+/// Devuelve `(encontrados, faltantes)`; lista vacía o más de
+/// `MAX_SELECTION_LABELS` etiquetas → error honesto.
+pub fn resolve_selection_labels(
+    document: &Document,
+    labels: &[String],
+) -> Result<(Vec<ObjectId>, Vec<String>), String> {
+    if labels.is_empty() {
+        return Err("SelectObjects: pasá al menos una etiqueta".into());
+    }
+    if labels.len() > MAX_SELECTION_LABELS {
+        return Err(format!(
+            "SelectObjects: más de {MAX_SELECTION_LABELS} etiquetas"
+        ));
+    }
+    let mut found = Vec::new();
+    let mut missing = Vec::new();
+    for raw in labels {
+        let clean = raw.trim().trim_matches('"').trim_matches('\'').trim();
+        if clean.is_empty() {
+            return Err("SelectObjects: hay una etiqueta vacía".into());
+        }
+        match find_object_by_label(document, clean) {
+            Some(id) => {
+                if !found.contains(&id) {
+                    found.push(id);
+                }
+            }
+            None => missing.push(clean.to_string()),
+        }
+    }
+    Ok((found, missing))
+}
+
+// ── Vistas: perspectivas, dirección, ejes, grilla ─────────────────────
+
+/// Perspectiva canónica como destino de `SetActiveView`/`SetPerspective`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerspectiveTarget {
+    /// Identificador de variante (`Geometry2D`, …​).
+    pub ident: &'static str,
+    /// Título largo (`Geometría 2D`, …​).
+    pub title: &'static str,
+    /// Etiqueta corta del selector (`G2`, …​).
+    pub short: &'static str,
+    /// Atajo `Ctrl+Shift+N` (1..=9, 0 = Examen).
+    pub shortcut: u8,
+}
+
+/// Las 10 perspectivas, espejo de `Perspective::ALL` + `title` +
+/// `short_label` + `shortcut_number` (`grafito-app/src/lib.rs:106-191`).
+/// El test `perspective_mirror_covers_all_ten` pinnea cantidad y contenido:
+/// si la app agrega una perspectiva, este espejo debe actualizarse.
+pub const CANONICAL_PERSPECTIVES: [(&str, &str, &str, u8); 10] = [
+    ("Geometry2D", "Geometría 2D", "G2", 1),
+    ("Geometry3D", "Geometría 3D", "G3", 2),
+    ("AlgebraCas", "Álgebra y CAS", "AL", 3),
+    ("Calculus", "Cálculo", "Cλ", 4),
+    ("Probability", "Probabilidad", "P", 5),
+    ("Statistics", "Estadística", "S", 6),
+    ("Complex", "Complejos", "i", 7),
+    ("Dynamics", "Dinámica", "Dn", 8),
+    ("DataAnalysis", "Análisis de datos", "D", 9),
+    ("Exam", "Examen", "E", 0),
+];
+
+/// Valida el destino de `SetActiveView`/`SetPerspective` (sinónimos en
+/// Grafito: una sola ventana, la perspectiva es el layout).
+///
+/// Acepta identificador, título o etiqueta corta (insensible a mayúsculas,
+/// con o sin comillas) o número de atajo (`"1"`..`"9"`, `"0"`). El comando
+/// aplica con `set_perspective` en el cableado (respeta `exam_locked`).
+pub fn parse_perspective(raw: &str) -> Result<PerspectiveTarget, String> {
+    let clean = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if clean.is_empty() {
+        return Err("la perspectiva no debe estar vacía".into());
+    }
+    let lowered = clean.to_lowercase();
+    for (ident, title, short, shortcut) in CANONICAL_PERSPECTIVES {
+        if lowered == ident.to_lowercase()
+            || lowered == title.to_lowercase()
+            || lowered == short.to_lowercase()
+            || lowered == shortcut.to_string()
+        {
+            return Ok(PerspectiveTarget {
+                ident,
+                title,
+                short,
+                shortcut,
+            });
+        }
+    }
+    Err(format!(
+        "perspectiva desconocida '{clean}' (10 válidas: {})",
+        CANONICAL_PERSPECTIVES
+            .iter()
+            .map(|(_, title, _, _)| *title)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// Dirección de vista 3D (`SetViewDirection`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewDirection {
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Isometric,
+}
+
+impl ViewDirection {
+    /// Nombre canónico en inglés.
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Front => "front",
+            Self::Back => "back",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Isometric => "isometric",
+        }
+    }
+
+    /// Parsea alias en español/inglés (insensible a mayúsculas, con comillas).
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_lowercase()
+            .as_str()
+        {
+            "front" | "frontal" | "frente" | "alzado" => Some(Self::Front),
+            "back" | "trasera" | "posterior" => Some(Self::Back),
+            "left" | "izquierda" | "lateral-izq" => Some(Self::Left),
+            "right" | "derecha" | "lateral-der" => Some(Self::Right),
+            "top" | "superior" | "planta" | "arriba" => Some(Self::Top),
+            "bottom" | "inferior" | "abajo" => Some(Self::Bottom),
+            "isometric" | "isometrica" | "isométrica" | "3d" => Some(Self::Isometric),
+            _ => None,
+        }
+    }
+}
+
+/// Valida la dirección de `SetViewDirection`.
+///
+/// El `Document` no guarda cámara (la órbita 3D vive en estado de app), así
+/// que el comando la aplica a la cámara en el cableado; acá solo validación.
+pub fn parse_view_direction(raw: &str) -> Result<ViewDirection, String> {
+    ViewDirection::parse(raw).ok_or_else(|| {
+        "dirección desconocida (front, back, left, right, top, bottom, isometric)".to_string()
+    })
+}
+
+/// Parsea un booleano de `ShowAxes`/`ShowGrid`/`ShowLabel`/`SetFixed`.
+///
+/// Acepta `true/false`, `1/0`, `sí/si/no`, `on/off` y `verdadero/falso`
+/// (insensible a mayúsculas, con o sin comillas).
+pub fn parse_toggle_bool(raw: &str) -> Result<bool, String> {
+    match raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_lowercase()
+        .as_str()
+    {
+        "true" | "1" | "on" | "sí" | "si" | "verdadero" => Ok(true),
+        "false" | "0" | "off" | "no" | "falso" => Ok(false),
+        _ => Err("se esperaba true/false (1/0, sí/no, on/off)".into()),
+    }
+}
+
+/// Paso de eje máximo aceptado (`AxisStepX`/`AxisStepY`, unidades de mundo).
+pub const MAX_AXIS_STEP: f64 = 1e12;
+
+/// Valida el paso de `AxisStepX`/`AxisStepY`: finito, > 0, ≤ `MAX_AXIS_STEP`.
+///
+/// Sin hogar en `ViewTransform` (escala uniforme): el comando guarda el
+/// intento para el cableado (grilla/ejes por eje en P3c).
+pub fn parse_axis_step(raw: &str, variables: &BTreeMap<String, f64>) -> Result<f64, String> {
+    let value = parse_numeric_arg(raw, variables)
+        .map_err(|error| format!("paso de eje inválido: {error}"))?;
+    if !value.is_finite() || value <= 0.0 || value > MAX_AXIS_STEP {
+        return Err(format!(
+            "el paso de eje debe ser finito entre 0 (excluido) y {MAX_AXIS_STEP}"
+        ));
+    }
+    Ok(value)
+}
+
+/// Valida la razón de `SetAxesRatio[x, y]`: dos números finitos > 0.
+///
+/// `ViewTransform` es de escala uniforme (`world_to_screen` usa un solo
+/// `scale`): razón no-uniforme exige cambio geométrico, fuera de alcance.
+/// El comando guarda el intento validado para P3c.
+pub fn parse_axes_ratio(
+    x_raw: &str,
+    y_raw: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Result<(f64, f64), String> {
+    let error = |side: &str| format!("SetAxesRatio: el lado {side} debe ser finito mayor a 0");
+    let x = parse_numeric_arg(x_raw, variables).map_err(|_| error("x"))?;
+    let y = parse_numeric_arg(y_raw, variables).map_err(|_| error("y"))?;
+    if !x.is_finite() || x <= 0.0 {
+        return Err(error("x"));
+    }
+    if !y.is_finite() || y <= 0.0 {
+        return Err(error("y"));
+    }
+    Ok((x, y))
+}
+
+// ── Lecturas: etiqueta, coordenadas, esquina de vista, hora ────────────
+
+/// Etiqueta existente (`Name[etiqueta]`): verifica y devuelve el `label`.
+pub fn object_label_of(document: &Document, raw: &str) -> Result<String, String> {
+    require_existing_label(document, raw)
+}
+
+/// Coordenadas vivas de un punto (`DynamicCoordinates[punto]`).
+///
+/// Solo `Point` 2D; el resto (incluido `Point3D`) da error honesto que nombra
+/// el tipo real en vez de inventar una proyección.
+pub fn point_coords_of(document: &Document, raw: &str) -> Result<(f64, f64), String> {
+    let clean = require_existing_label(document, raw)?;
+    let id = find_object_by_label(document, &clean)
+        .ok_or_else(|| format!("no existe el objeto '{clean}'"))?;
+    match document.get_object(id) {
+        Some(GeoObject::Point(point)) => Ok((point.position.x, point.position.y)),
+        Some(other) => Err(format!(
+            "DynamicCoordinates: '{clean}' es {} (solo puntos 2D)",
+            other.name()
+        )),
+        None => Err(format!("no existe el objeto '{clean}'")),
+    }
+}
+
+/// Esquina visible de la vista (`Corner[n]`).
+///
+/// `n` 1..=4 en orden horario desde arriba-izquierda de pantalla
+/// (1 = sup-izq, 2 = sup-der, 3 = inf-der, 4 = inf-izq), proyectada a mundo
+/// con el `screen_size` actual. Tamaño de pantalla inválido → error honesto.
+pub fn view_corner(view: &ViewTransform, n: u8) -> Result<Point2, String> {
+    let (width, height) = (view.screen_size.x, view.screen_size.y);
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Err("Corner: la vista tiene un tamaño de pantalla inválido".into());
+    }
+    let screen = match n {
+        1 => glam::Vec2::new(0.0, 0.0),
+        2 => glam::Vec2::new(width, 0.0),
+        3 => glam::Vec2::new(width, height),
+        4 => glam::Vec2::new(0.0, height),
+        _ => {
+            return Err(
+                "Corner: n debe ser 1..=4 (1=sup-izq, 2=sup-der, 3=inf-der, 4=inf-izq)".into(),
+            )
+        }
+    };
+    Ok(view.screen_to_world(screen))
+}
+
+/// Parte de fecha-hora (`GetTime`: `[año, mes, día, hora, min, seg]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeParts {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+}
+
+impl TimeParts {
+    /// Lista `[año, mes, día, hora, min, seg]` como la devuelve `GetTime`.
+    pub const fn as_list(self) -> [i64; 6] {
+        [
+            self.year as i64,
+            self.month as i64,
+            self.day as i64,
+            self.hour as i64,
+            self.minute as i64,
+            self.second as i64,
+        ]
+    }
+}
+
+/// Convierte días desde la época Unix a `(año, mes, día)` (algoritmo civil
+/// de Howard Hinnant, división euclidiana: vale también pre-1970).
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m as u32, d as u32)
+}
+
+/// Convierte segundos Unix a partes locales UTC, sin dependencias.
+pub fn time_parts_from_unix(secs: i64) -> TimeParts {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    TimeParts {
+        year,
+        month,
+        day,
+        hour: (tod / 3_600) as u32,
+        minute: ((tod % 3_600) / 60) as u32,
+        second: (tod % 60) as u32,
+    }
+}
+
+/// Hora actual del sistema como partes (`GetTime`). Reloj previo a 1970 o
+/// ilegible → época Unix (nunca falla, nunca paniquea).
+pub fn time_parts_now() -> TimeParts {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|delta| i64::try_from(delta.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    time_parts_from_unix(secs)
+}
+
+// ── Protocolo de construcción (vista del log de app) ────────────────────
+
+/// Entrada del protocolo tal como la guarda `GrafitoApp.construction_log`
+/// (`app.rs`; cota `MAX_CONSTRUCTION_LOG = 500`, cronológico).
+///
+/// El `command` no puede importar la app (dependencia invertida), así que el
+/// cableado mapea `ConstructionStep → ConstructionLogEntry` y llama acá.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstructionLogEntry {
+    pub action: String,
+    pub inputs: Vec<String>,
+    pub output: String,
+}
+
+/// Valida el paso `n` (1-based) contra un log de largo `len` y devuelve el
+/// índice 0-based. Log vacío o fuera de rango → error honesto con el rango.
+pub fn check_construction_step(n: usize, len: usize) -> Result<usize, String> {
+    if len == 0 {
+        return Err("el protocolo de construcción está vacío".into());
+    }
+    if n == 0 || n > len {
+        return Err(format!("el paso debe estar entre 1 y {len}"));
+    }
+    Ok(n - 1)
+}
+
+/// Reporta el contenido del paso `n` (`ConstructionStep[n]`).
+///
+/// Solo lectura: `SetConstructionStep[n]` valida el mismo rango y reporta
+/// sin time-travel (no hay rebobinado del documento; honesto por diseño).
+pub fn construction_step_text(
+    entries: &[ConstructionLogEntry],
+    n: usize,
+) -> Result<String, String> {
+    let index = check_construction_step(n, entries.len())?;
+    let entry = entries
+        .get(index)
+        .ok_or_else(|| "paso fuera de rango".to_string())?;
+    Ok(format!(
+        "{n}. {}({}) -> {}",
+        entry.action,
+        entry.inputs.join(", "),
+        entry.output
+    ))
+}
+
+// ── ExportImage: solo resolución pura, el worker va en el cableado ──────
+
+/// Formato de `ExportImage[ruta]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportImageFormat {
+    Png,
+    Svg,
+}
+
+impl ExportImageFormat {
+    /// Extensión sin punto.
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Svg => "svg",
+        }
+    }
+
+    /// Nombre para mensajes.
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Svg => "SVG",
+        }
+    }
+
+    /// Parsea una extensión (insensible a mayúsculas, sin punto).
+    pub fn parse_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "png" => Some(Self::Png),
+            "svg" => Some(Self::Svg),
+            _ => None,
+        }
+    }
+}
+
+/// Destino resuelto de `ExportImage`: ruta saneada + formato.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportImageTarget {
+    pub path: PathBuf,
+    pub format: ExportImageFormat,
+}
+
+/// Caracteres máximos de la ruta (anti-DoS, espejo del espíritu de
+/// `validate_ggt_path`; acá se permite absoluta o relativa).
+pub const MAX_EXPORT_IMAGE_PATH_CHARS: usize = 1024;
+
+/// Resuelve ruta + formato sin tocar disco (puro, testeable).
+///
+/// Sin extensión → `.png`. Otra extensión (`.pdf`/`.tex`/…) → error honesto
+/// (PDF y TikZ tienen su propio flujo de export). `..` o NUL → error.
+/// Decisión de I/O documentada: el render (`build_export_scene` +
+/// `render_png`, `export.rs`) es pesado y la escritura va por worker
+/// (`PendingExportJob`, precedente en `app.rs`), así que el comando solo
+/// resuelve y el cableado encola el worker con `export_png`/`export_document`.
+pub fn resolve_export_image(raw: &str) -> Result<ExportImageTarget, String> {
+    let clean = unquote(raw).trim().to_string();
+    if clean.is_empty() {
+        return Err("ExportImage: la ruta no debe estar vacía".into());
+    }
+    if clean.chars().count() > MAX_EXPORT_IMAGE_PATH_CHARS {
+        return Err(format!(
+            "ExportImage: la ruta excede {MAX_EXPORT_IMAGE_PATH_CHARS} caracteres"
+        ));
+    }
+    if clean.contains('\0') {
+        return Err("ExportImage: la ruta contiene NUL".into());
+    }
+    let provisional = Path::new(&clean);
+    if provisional
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("ExportImage: la ruta no debe contener '..'".into());
+    }
+    let ext = provisional
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext.is_empty() {
+        return Ok(ExportImageTarget {
+            path: PathBuf::from(format!("{clean}.png")),
+            format: ExportImageFormat::Png,
+        });
+    }
+    match ExportImageFormat::parse_extension(&ext) {
+        Some(format) => Ok(ExportImageTarget {
+            path: PathBuf::from(&clean),
+            format,
+        }),
+        None => Err(format!(
+            "ExportImage: formato '.{ext}' no soportado (solo .png/.svg; PDF y TikZ van por su propio export)"
+        )),
+    }
+}
+
+// ── Display por objeto: store + setters puros ────────────────────────────
+//
+// El store (`etiqueta → DisplayFlags`) lo posee el llamador (fase de
+// cableado: estado de app + persistencia serde, ya que `DisplayFlags`
+// deriva `Serialize/Deserialize`). Sin hooks globales: cada setter valida
+// etiqueta existente + sintaxis y guarda; el respeto en render/input se
+// cablea por comando según su veredicto (ver reporte del frente).
+
+/// Store de flags de display por etiqueta (propiedad del llamador).
+pub type DisplayStore = BTreeMap<String, DisplayFlags>;
+
+/// Entrada del store para una etiqueta ya validada.
+fn display_entry<'a>(store: &'a mut DisplayStore, clean: &str) -> &'a mut DisplayFlags {
+    store.entry(clean.to_string()).or_default()
+}
+
+/// Limpia comillas/espacios y exige que la etiqueta exista en el documento.
+fn require_existing_label(document: &Document, raw: &str) -> Result<String, String> {
+    let clean = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    if clean.is_empty() {
+        return Err("la etiqueta no debe estar vacía".into());
+    }
+    if find_object_by_label(document, &clean).is_none() {
+        return Err(format!("no existe el objeto '{clean}'"));
+    }
+    Ok(clean)
+}
+
+/// Revisa paréntesis/corchetes balanceados fuera de comillas (sintaxis).
+fn check_balanced_delimiters(text: &str) -> Result<(), String> {
+    let mut paren = 0i32;
+    let mut bracket = 0i32;
+    let mut in_str = false;
+    for ch in text.chars() {
+        if ch == '"' {
+            in_str = !in_str;
+        } else if !in_str {
+            match ch {
+                '(' => paren += 1,
+                ')' => {
+                    paren -= 1;
+                    if paren < 0 {
+                        return Err("paréntesis de cierre sin apertura".into());
+                    }
+                }
+                '[' => bracket += 1,
+                ']' => {
+                    bracket -= 1;
+                    if bracket < 0 {
+                        return Err("corchete de cierre sin apertura".into());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if in_str {
+        return Err("comilla sin cerrar".into());
+    }
+    if paren != 0 {
+        return Err("paréntesis sin balancear".into());
+    }
+    if bracket != 0 {
+        return Err("corchetes sin balancear".into());
+    }
+    Ok(())
+}
+
+/// Valida sintaxis aritmética con el parser real (`prepare_function_ast`
+/// con variables vacías: parsea sin necesitar valores). `what` nombra el
+/// operando en el error (`lado izquierdo`, `componente rojo`, …​).
+fn check_arith_syntax(expr: &str, what: &str) -> Result<(), String> {
+    let clean = expr.trim();
+    if clean.is_empty() {
+        return Err(format!("{what}: expresión vacía"));
+    }
+    if clean.len() > MAX_EXPR_LENGTH {
+        return Err(format!("{what}: excede {MAX_EXPR_LENGTH} caracteres"));
+    }
+    check_balanced_delimiters(clean).map_err(|detail| format!("{what}: {detail}"))?;
+    prepare_function_ast(clean, &BTreeMap::new(), &[])
+        .map(|_| ())
+        .map_err(|error| format!("{what}: sintaxis inválida ({error})"))?;
+    Ok(())
+}
+
+/// Valida sintaxis de condición (comparación partida por
+/// [`split_comparison`] o expresión suelta). No evalúa: una condición puede
+/// referenciar variables que existen y valer `false` hoy sin ser inválida.
+pub fn check_condition_syntax(cond: &str) -> Result<(), String> {
+    let clean = cond.trim();
+    if clean.is_empty() {
+        return Err("la condición no debe estar vacía".into());
+    }
+    if clean.len() > MAX_EXPR_LENGTH {
+        return Err(format!("la condición excede {MAX_EXPR_LENGTH} caracteres"));
+    }
+    check_balanced_delimiters(clean).map_err(|detail| format!("la condición: {detail}"))?;
+    if let Some((lhs, _op, rhs)) = split_comparison(clean) {
+        if lhs.is_empty() || rhs.is_empty() {
+            return Err(format!("condición mal formada: '{clean}'"));
+        }
+        check_arith_syntax(lhs, "lado izquierdo de la condición")?;
+        check_arith_syntax(rhs, "lado derecho de la condición")?;
+    } else {
+        check_arith_syntax(clean, "la condición")?;
+    }
+    Ok(())
+}
+
+/// Guarda la condición (`SetConditionToShowObject[etiqueta, condición]`).
+///
+/// Flag-guardado: la evaluación vive en el cableado con [`eval_condition`]
+/// (P3c decide el punto exacto: filtro en visibles o skip en render).
+pub fn set_condition_to_show(
+    store: &mut DisplayStore,
+    document: &Document,
+    label: &str,
+    cond: &str,
+) -> Result<(), String> {
+    let clean = require_existing_label(document, label)?;
+    check_condition_syntax(cond)?;
+    display_entry(store, &clean).condition = Some(cond.trim().to_string());
+    Ok(())
+}
+
+/// Guarda la expresión de color (`SetDynamicColor[etiqueta, r, g, b]`).
+///
+/// Tres componentes en 0..=1 (se clamp al evaluar). Flag-guardado: el render
+/// la evalúa por frame con [`eval_dynamic_color`] en el cableado (vía
+/// `StyleOverride.color`, `render_2d.rs:2303-2326`).
+pub fn set_dynamic_color(
+    store: &mut DisplayStore,
+    document: &Document,
+    label: &str,
+    red: &str,
+    green: &str,
+    blue: &str,
+) -> Result<(), String> {
+    let clean = require_existing_label(document, label)?;
+    check_arith_syntax(red, "componente rojo")?;
+    check_arith_syntax(green, "componente verde")?;
+    check_arith_syntax(blue, "componente azul")?;
+    display_entry(store, &clean).dynamic_color = Some([
+        red.trim().to_string(),
+        green.trim().to_string(),
+        blue.trim().to_string(),
+    ]);
+    Ok(())
+}
+
+/// Evalúa un color dinámico guardado con las variables del documento.
+///
+/// Cada componente debe dar finito (si no, error honesto en vez de color
+/// inventado); se clamp a 0..=1. Alfa siempre 1.0 (la transparencia la
+/// maneja `SetLineOpacity`). Puro: el cableado lo llama por frame.
+pub fn eval_dynamic_color(document: &Document, exprs: &[String; 3]) -> Result<Color, String> {
+    let vars: Vec<(String, f64)> = document
+        .variables
+        .iter()
+        .map(|(name, value)| (name.clone(), *value))
+        .collect();
+    let names = ["rojo", "verde", "azul"];
+    let mut rgb = [0.0f32; 3];
+    for (index, expr) in exprs.iter().enumerate() {
+        let value = evaluate(expr, &vars)
+            .map_err(|error| format!("componente {} inválido: {error}", names[index]))?;
+        if !value.is_finite() {
+            return Err(format!("componente {} no finito", names[index]));
+        }
+        rgb[index] = (value as f32).clamp(0.0, 1.0);
+    }
+    Ok(Color::new(rgb[0], rgb[1], rgb[2], 1.0))
+}
+
+/// Guarda el modo de tooltip (`SetTooltipMode[etiqueta, modo]`).
+///
+/// Flag-guardado (0 = auto, 1 = on, 2 = off + alias): el hover real
+/// (`hovered_analysis`) se respeta en el cableado UI.
+pub fn set_tooltip_mode(
+    store: &mut DisplayStore,
+    document: &Document,
+    label: &str,
+    raw: &str,
+) -> Result<TooltipMode, String> {
+    let clean = require_existing_label(document, label)?;
+    let mode = TooltipMode::parse(raw)
+        .ok_or_else(|| "el modo debe ser 0 (auto), 1 (on) o 2 (off)".to_string())?;
+    display_entry(store, &clean).tooltip_mode = mode;
+    Ok(mode)
+}
+
+/// `SetVisibleInView[etiqueta, vista]`: error honesto documentado.
+///
+/// Grafito tiene una sola vista 2D/3D (`ViewTransform` único por documento;
+/// las 10 perspectivas son layouts de UI, no vistas nombradas por objeto),
+/// así que no hay destino válido que guardar. Primero valida la etiqueta
+/// para que un typo reporte `no existe` en vez del genérico.
+pub fn validate_visible_in_view(
+    document: &Document,
+    label: &str,
+    view: &str,
+) -> Result<(), String> {
+    let clean = require_existing_label(document, label)?;
+    Err(format!(
+        "SetVisibleInView: '{clean}' pide vista '{view}', pero Grafito tiene una sola vista por documento (sin vistas múltiples nombradas); las 10 perspectivas son layouts de UI, no destinos por objeto"
+    ))
+}
+
+/// Guarda la visibilidad de etiqueta (`SetLabelMode`/`ShowLabel[etiqueta, bool]`).
+///
+/// Flag-guardado: el canvas dibuja etiquetas vía `get_label` + `hide_label`
+/// de `StyleOverride` (`render_2d.rs:2358-2365`); el cableado alimenta el
+/// override desde el store.
+pub fn set_show_label(
+    store: &mut DisplayStore,
+    document: &Document,
+    label: &str,
+    raw: &str,
+) -> Result<bool, String> {
+    let clean = require_existing_label(document, label)?;
+    let show = parse_toggle_bool(raw)?;
+    display_entry(store, &clean).show_label = show;
+    Ok(show)
+}
+
+/// Fija un objeto (`SetFixed[etiqueta, bool]`).
+///
+/// Flag-guardado: el drag vive en `input.rs` (`is_free_object`, sin acceso
+/// al store que poseerá la app) así que el cableado suma `!is_locked` al
+/// gate de `try_move_point_and_re_evaluate` (una línea, sin cambiar firmas).
+pub fn set_locked(
+    store: &mut DisplayStore,
+    document: &Document,
+    label: &str,
+    raw: &str,
+) -> Result<bool, String> {
+    let clean = require_existing_label(document, label)?;
+    let locked = parse_toggle_bool(raw)?;
+    display_entry(store, &clean).locked = locked;
+    Ok(locked)
+}
+
+/// ¿Está fijo este rótulo? Etiqueta ausente o sin flag → `false`.
+pub fn is_locked(store: &DisplayStore, label: &str) -> bool {
+    let clean = label.trim().trim_matches('"').trim_matches('\'').trim();
+    store.get(clean).is_some_and(|flags| flags.locked)
+}
+
+/// `SetImage[etiqueta, ruta]`: error honesto documentado.
+///
+/// No hay pipeline de imágenes para objetos: ningún `GeoObject::Image`
+/// existe en `object.rs` y `Tool::Image` está deshabilitado
+/// (`tool_dispatcher.rs` → `unavailable_tool`, `ui.rs` avisa "no
+/// disponible"). Inventar un objeto rompería validación/render/export.
+pub fn check_set_image(document: &Document, label: &str, _path: &str) -> Result<(), String> {
+    let clean = require_existing_label(document, label)?;
+    Err(format!(
+        "SetImage: '{clean}' sin pipeline de imágenes para objetos (Tool::Image no disponible en esta versión)"
+    ))
+}
+
+/// Guarda marcas de ángulo/segmento (`SetDecoration[etiqueta, n]`, 0..=4).
+///
+/// Flag-guardado + nota: el render 2D no tiene punto de inserción limpio
+/// para tildes (cada familia dibuja su propio trazo), así que el cableado
+/// dibuja los ticks; acá solo validación y guarda.
+pub fn set_decoration(
+    store: &mut DisplayStore,
+    document: &Document,
+    label: &str,
+    raw: &str,
+) -> Result<Decoration, String> {
+    let clean = require_existing_label(document, label)?;
+    let decoration = Decoration::parse(raw).ok_or_else(|| {
+        "la decoración debe ser 0 (ninguna), 1-3 (tildes) o 4 (flecha)".to_string()
+    })?;
+    display_entry(store, &clean).decoration = decoration;
+    Ok(decoration)
+}
+
+/// Guarda el nivel de detalle (`SetLevelOfDetail[etiqueta, 0..=2]`).
+///
+/// Flag-guardado: el cableado usa [`lod_allows_dense`] como respeto mínimo
+/// en render denso.
+pub fn set_level_of_detail(
+    store: &mut DisplayStore,
+    document: &Document,
+    label: &str,
+    raw: &str,
+) -> Result<u8, String> {
+    let clean = require_existing_label(document, label)?;
+    let lod = DisplayFlags::check_lod(raw)?;
+    display_entry(store, &clean).lod = lod;
+    Ok(lod)
+}
+
+/// Puntos máximos que un `lod` deja dibujar en una pasada densa (heurística
+/// para el cableado: 0 = todo, 1 = hasta 65536, 2+ = hasta 4096).
+pub const fn lod_allows_dense(lod: u8, points: usize) -> bool {
+    match lod {
+        0 => true,
+        1 => points <= 65_536,
+        _ => points <= 4_096,
+    }
+}
+
+/// Opacidad de línea (`SetLineOpacity[etiqueta, 0..=1]`).
+///
+/// Implementado sin campos nuevos: reescribe el alfa del `color` del objeto
+/// (vía `set_color`, que delega al interior en `Transformed`).
+pub fn apply_line_opacity(document: &mut Document, label: &str, raw: &str) -> Result<f32, String> {
+    let clean = require_existing_label(document, label)?;
+    let value: f64 = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .parse()
+        .map_err(|_| "la opacidad debe ser un número entre 0 y 1".to_string())?;
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err("la opacidad debe ser finita entre 0 y 1".into());
+    }
+    let id = find_object_by_label(document, &clean)
+        .ok_or_else(|| format!("no existe el objeto '{clean}'"))?;
+    let object = document
+        .get_object_mut(id)
+        .ok_or_else(|| format!("objeto '{clean}' inválido"))?;
+    let mut color = object.color();
+    color.a = value as f32;
+    object.set_color(color);
+    Ok(value as f32)
+}
+
+/// Tamaño de punto (`SetPointSize[etiqueta, tamaño]`, 0.5..=64).
+///
+/// Implementado sobre los campos existentes (`Point.size`, `Point3D.size`,
+/// `ScatterPlot.point_size`); otro tipo → error honesto que nombra el tipo
+/// real (texto usa tamaño de fuente, sin comando aún).
+pub fn apply_point_size(document: &mut Document, label: &str, raw: &str) -> Result<f32, String> {
+    let clean = require_existing_label(document, label)?;
+    let value: f64 = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .parse()
+        .map_err(|_| "el tamaño debe ser un número entre 0.5 y 64".to_string())?;
+    if !value.is_finite() || !(0.5..=64.0).contains(&value) {
+        return Err("el tamaño debe ser finito entre 0.5 y 64".into());
+    }
+    let size = value as f32;
+    let id = find_object_by_label(document, &clean)
+        .ok_or_else(|| format!("no existe el objeto '{clean}'"))?;
+    match document.get_object_mut(id) {
+        Some(GeoObject::Point(point)) => point.size = size,
+        Some(GeoObject::Point3D(point)) => point.size = size,
+        Some(GeoObject::ScatterPlot(plot)) => plot.point_size = size,
+        Some(other) => {
+            return Err(format!(
+                "SetPointSize: '{clean}' es {} (solo puntos 2D/3D y nubes)",
+                other.name()
+            ))
+        }
+        None => return Err(format!("no existe el objeto '{clean}'")),
+    }
+    Ok(size)
+}
+
+// ── Sin camino limpio: errores honestos con motivo ───────────────────────
+
+/// `SlowPlot`: el trazado progresivo exigiría una plantilla de animación
+/// nueva en el motor (las 13 plantillas nativas son fijas y ninguna hace
+/// reveal progresivo de un objeto arbitrario); la animación a pedido vive en
+/// el chat del asistente.
+pub const SLOW_PLOT_UNAVAILABLE: &str = "SlowPlot: sin camino limpio (el motor de animación no tiene plantilla de trazado progresivo; pedí la animación en el chat del asistente)";
+
+/// `PlaySound`: la app no reproduce audio (piper renderiza wav para muxear
+/// en MP4, no reproduce; sin rodio/kira/cpal en el workspace).
+pub const PLAY_SOUND_UNAVAILABLE: &str = "PlaySound: sin pipeline de reproducción de audio en la app (la voz piper solo narra para export MP4)";
+
+/// `StartRecord`: la app no graba pantalla (el MP4 existe vía el motor de
+/// animación + ffmpeg-sidecar, que es otro flujo: escenas, no captura).
+pub const START_RECORD_UNAVAILABLE: &str = "StartRecord: sin grabación de pantalla en la app (el video se genera con el motor de animación, no por captura)";
+
+/// `ToolImage`: alias del veredicto de `check_set_image` para el cableado.
+pub const TOOL_IMAGE_UNAVAILABLE: &str =
+    "ToolImage: sin pipeline de imágenes para objetos (Tool::Image no disponible en esta versión)";
+
 /// Despacha los comandos del frente G-D. Devuelve `None` si no es un comando
 /// G-D (el dispatcher general sigue su curso).
 pub(crate) fn handle_ggb_command(
@@ -2340,5 +3264,353 @@ mod tests {
         let nul = std::ffi::OsString::from_vec(b"nu\0l.ggt".to_vec());
         assert!(validate_ggt_path(&base, std::path::Path::new(&nul)).is_err());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Frente P3 SCRIPTING ──────────────────────────────────────────
+
+    fn doc_with_button() -> (Document, String) {
+        let mut doc = doc_with_point("A");
+        let mut input = "Button[B, \"Show[A]\"]".to_string();
+        assert!(matches!(
+            process_input(&mut doc, &mut input),
+            CommandOutcome::Message(_)
+        ));
+        let label = last_text_label(&doc);
+        (doc, label)
+    }
+
+    fn empty_vars() -> BTreeMap<String, f64> {
+        BTreeMap::new()
+    }
+
+    #[test]
+    fn update_script_runs_explicitly_and_missing_is_honest() {
+        let mut doc = doc_with_point("A");
+        assert!(run_update_script(&mut doc, "A").is_err());
+        let mut input = "OnUpdate[A, \"Show[A]\"]".to_string();
+        assert!(matches!(
+            process_input(&mut doc, &mut input),
+            CommandOutcome::Message(_)
+        ));
+        assert_eq!(run_update_script(&mut doc, "A"), Ok(1));
+        assert_eq!(run_update_script(&mut doc, "\"A\""), Ok(1));
+        assert!(run_update_script(&mut doc, "Falta").is_err());
+    }
+
+    #[test]
+    fn click_script_pin_and_selection_resolver() {
+        let mut doc = doc_with_point("A");
+        let mut input = "OnClick[A, \"Show[A]\"]".to_string();
+        assert!(matches!(
+            process_input(&mut doc, &mut input),
+            CommandOutcome::Message(_)
+        ));
+        assert_eq!(run_click_script(&mut doc, "A"), Ok(1));
+
+        let (found, missing) =
+            resolve_selection_labels(&doc, &["A".to_string(), "A".to_string(), "Z".to_string()])
+                .expect("resuelve");
+        assert_eq!(found.len(), 1);
+        assert_eq!(missing, vec!["Z".to_string()]);
+        assert!(resolve_selection_labels(&doc, &[]).is_err());
+        assert!(resolve_selection_labels(&doc, &["  ".to_string()]).is_err());
+    }
+
+    #[test]
+    fn perspective_mirror_covers_all_ten() {
+        assert_eq!(CANONICAL_PERSPECTIVES.len(), 10);
+        let mut shortcuts = std::collections::BTreeSet::new();
+        for (_, _, _, shortcut) in CANONICAL_PERSPECTIVES {
+            assert!(shortcuts.insert(shortcut), "atajo duplicado");
+        }
+        assert_eq!(
+            parse_perspective("geometría 2d").expect("g2").ident,
+            "Geometry2D"
+        );
+        assert_eq!(parse_perspective("\"G3\"").expect("g3").shortcut, 2);
+        assert_eq!(parse_perspective("AL").expect("al").ident, "AlgebraCas");
+        assert_eq!(parse_perspective("cλ").expect("calc").ident, "Calculus");
+        assert_eq!(parse_perspective("0").expect("exam").ident, "Exam");
+        assert_eq!(
+            parse_perspective("Análisis de datos").expect("d").short,
+            "D"
+        );
+        assert!(parse_perspective("").is_err());
+        assert!(parse_perspective("Narnia").is_err());
+    }
+
+    #[test]
+    fn view_direction_aliases_and_toggle_bool() {
+        assert_eq!(ViewDirection::parse("frontal"), Some(ViewDirection::Front));
+        assert_eq!(ViewDirection::parse("\"TOP\""), Some(ViewDirection::Top));
+        assert_eq!(
+            ViewDirection::parse("isométrica"),
+            Some(ViewDirection::Isometric)
+        );
+        assert_eq!(
+            parse_view_direction("3d").expect("3d"),
+            ViewDirection::Isometric
+        );
+        assert!(parse_view_direction("nadir").is_err());
+        assert_eq!(parse_toggle_bool("true"), Ok(true));
+        assert_eq!(parse_toggle_bool("0"), Ok(false));
+        assert_eq!(parse_toggle_bool("SÍ"), Ok(true));
+        assert_eq!(parse_toggle_bool("\"no\""), Ok(false));
+        assert!(parse_toggle_bool("quizás").is_err());
+    }
+
+    #[test]
+    fn axis_step_and_ratio_validate_ranges() {
+        assert_eq!(parse_axis_step("2", &empty_vars()), Ok(2.0));
+        assert!(parse_axis_step("0", &empty_vars()).is_err());
+        assert!(parse_axis_step("-3", &empty_vars()).is_err());
+        assert!(parse_axis_step("abc", &empty_vars()).is_err());
+        assert_eq!(parse_axes_ratio("16", "9", &empty_vars()), Ok((16.0, 9.0)));
+        assert!(parse_axes_ratio("0", "9", &empty_vars()).is_err());
+        assert!(parse_axes_ratio("16", "-1", &empty_vars()).is_err());
+    }
+
+    #[test]
+    fn view_corners_map_screen_to_world() {
+        let doc = Document::new();
+        let view = doc.view();
+        let c1 = view_corner(view, 1).expect("c1");
+        let c3 = view_corner(view, 3).expect("c3");
+        assert!((c1.x + 8.0).abs() < 1e-9, "c1.x={}", c1.x);
+        assert!((c1.y - 6.0).abs() < 1e-9, "c1.y={}", c1.y);
+        assert!((c3.x - 8.0).abs() < 1e-9, "c3.x={}", c3.x);
+        assert!((c3.y + 6.0).abs() < 1e-9, "c3.y={}", c3.y);
+        assert!(view_corner(view, 0).is_err());
+        assert!(view_corner(view, 5).is_err());
+    }
+
+    #[test]
+    fn unix_time_vectors_cover_epoch_leap_and_negative() {
+        let epoch = time_parts_from_unix(0);
+        assert_eq!(epoch.as_list(), [1970, 1, 1, 0, 0, 0]);
+        assert_eq!(
+            time_parts_from_unix(946_684_800).as_list(),
+            [2000, 1, 1, 0, 0, 0]
+        );
+        assert_eq!(
+            time_parts_from_unix(1_582_934_400).as_list(),
+            [2020, 2, 29, 0, 0, 0]
+        );
+        assert_eq!(
+            time_parts_from_unix(-1).as_list(),
+            [1969, 12, 31, 23, 59, 59]
+        );
+        assert_eq!(
+            time_parts_from_unix(1_690_848_000).as_list(),
+            [2023, 8, 1, 0, 0, 0]
+        );
+        let now = time_parts_now();
+        assert!((1..=12).contains(&now.month));
+        assert!((1..=31).contains(&now.day));
+        assert!(now.hour < 24 && now.minute < 60 && now.second < 60);
+    }
+
+    #[test]
+    fn label_and_coords_readers_are_honest() {
+        let (doc, button) = doc_with_button();
+        assert_eq!(object_label_of(&doc, "A"), Ok("A".to_string()));
+        assert!(object_label_of(&doc, "Falta").is_err());
+        assert_eq!(point_coords_of(&doc, "A"), Ok((1.0, 2.0)));
+        let err = point_coords_of(&doc, &button).expect_err("texto no es punto");
+        assert!(err.contains("solo puntos"), "{err}");
+    }
+
+    #[test]
+    fn construction_log_reports_without_time_travel() {
+        let entries = vec![
+            ConstructionLogEntry {
+                action: "Point".to_string(),
+                inputs: vec![],
+                output: "A".to_string(),
+            },
+            ConstructionLogEntry {
+                action: "Circle".to_string(),
+                inputs: vec!["A".to_string(), "B".to_string()],
+                output: "C".to_string(),
+            },
+        ];
+        assert_eq!(
+            construction_step_text(&entries, 2).expect("paso 2"),
+            "2. Circle(A, B) -> C"
+        );
+        assert_eq!(check_construction_step(1, 2), Ok(0));
+        assert!(construction_step_text(&entries, 0).is_err());
+        assert!(construction_step_text(&entries, 3).is_err());
+        assert!(construction_step_text(&[], 1).is_err());
+    }
+
+    #[test]
+    fn export_image_resolves_purely_and_rejects() {
+        let target = resolve_export_image("foto.png").expect("png");
+        assert_eq!(target.format, ExportImageFormat::Png);
+        assert_eq!(target.path, PathBuf::from("foto.png"));
+        let svg = resolve_export_image("dir/graf.SVG").expect("svg");
+        assert_eq!(svg.format, ExportImageFormat::Svg);
+        let def = resolve_export_image("foto").expect("default png");
+        assert_eq!(def.format, ExportImageFormat::Png);
+        assert_eq!(def.path, PathBuf::from("foto.png"));
+        assert!(resolve_export_image("").is_err());
+        assert!(resolve_export_image("../afuera.png").is_err());
+        assert!(resolve_export_image("a\0b.png").is_err());
+        let pdf = resolve_export_image("doc.pdf").expect_err("pdf aparte");
+        assert!(pdf.contains(".pdf"), "{pdf}");
+    }
+
+    #[test]
+    fn condition_syntax_is_parse_level_not_eval_level() {
+        assert!(check_condition_syntax("a > 1").is_ok());
+        assert!(check_condition_syntax("x").is_ok());
+        assert!(check_condition_syntax("2*(a+b) <= 10").is_ok());
+        assert!(check_condition_syntax("").is_err());
+        assert!(check_condition_syntax(">").is_err());
+        assert!(check_condition_syntax("a >").is_err());
+        assert!(check_condition_syntax("(a > 1").is_err());
+        assert!(check_condition_syntax("\"abierta").is_err());
+        // La refactorización no cambió la evaluación real.
+        let doc = doc_with_point("A");
+        assert_eq!(eval_condition(&doc, "2 > 1"), Ok(true));
+        assert_eq!(eval_condition(&doc, "2 < 1"), Ok(false));
+    }
+
+    #[test]
+    fn condition_and_color_store_validated_flags() {
+        let doc = doc_with_point("A");
+        let mut store: DisplayStore = DisplayStore::new();
+        assert!(set_condition_to_show(&mut store, &doc, "A", "a > 1").is_ok());
+        assert_eq!(
+            store.get("A").and_then(|flags| flags.condition.clone()),
+            Some("a > 1".to_string())
+        );
+        assert!(set_condition_to_show(&mut store, &doc, "A", ">").is_err());
+        assert!(set_condition_to_show(&mut store, &doc, "Falta", "a > 1").is_err());
+
+        assert!(set_dynamic_color(&mut store, &doc, "A", "a", "0.5", "1").is_ok());
+        assert!(set_dynamic_color(&mut store, &doc, "A", "((", "0.5", "1").is_err());
+        let triple = store
+            .get("A")
+            .and_then(|flags| flags.dynamic_color.clone())
+            .expect("triple");
+        let mut doc_vars = doc_with_point("A");
+        doc_vars
+            .try_set_variable("a".into(), 0.25)
+            .expect("variable a");
+        let color = eval_dynamic_color(&doc_vars, &triple).expect("color");
+        assert!((color.r - 0.25).abs() < 1e-6);
+        assert!((color.g - 0.5).abs() < 1e-6);
+        assert_eq!(color.b, 1.0);
+        // Clamp honesto + no-finito honesto.
+        let clamped = eval_dynamic_color(
+            &doc_vars,
+            &["2".to_string(), "0".to_string(), "0".to_string()],
+        )
+        .expect("clamp");
+        assert_eq!(clamped.r, 1.0);
+        assert!(eval_dynamic_color(
+            &doc_vars,
+            &["1/0".to_string(), "0".to_string(), "0".to_string()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tooltip_visible_in_view_and_image_verdicts() {
+        let doc = doc_with_point("A");
+        let mut store: DisplayStore = DisplayStore::new();
+        assert_eq!(
+            set_tooltip_mode(&mut store, &doc, "A", "1").expect("on"),
+            TooltipMode::On
+        );
+        assert_eq!(
+            set_tooltip_mode(&mut store, &doc, "A", "off").expect("off"),
+            TooltipMode::Off
+        );
+        assert!(set_tooltip_mode(&mut store, &doc, "A", "7").is_err());
+
+        let err = validate_visible_in_view(&doc, "A", "Vista2").expect_err("sin vistas múltiples");
+        assert!(err.contains("una sola vista"), "{err}");
+        let missing = validate_visible_in_view(&doc, "Falta", "Vista2").expect_err("typo");
+        assert!(missing.contains("no existe"), "{missing}");
+
+        let img = check_set_image(&doc, "A", "foto.png").expect_err("sin pipeline");
+        assert!(img.contains("sin pipeline"), "{img}");
+        assert!(check_set_image(&doc, "Falta", "foto.png").is_err());
+        assert!(TOOL_IMAGE_UNAVAILABLE.contains("sin pipeline"));
+    }
+
+    #[test]
+    fn label_lock_decoration_and_lod_flags() {
+        let doc = doc_with_point("A");
+        let mut store: DisplayStore = DisplayStore::new();
+        assert!(DisplayFlags::default().show_label);
+        let flags: DisplayFlags =
+            serde_json::from_str("{}").expect("serde default migra a histórico");
+        assert!(flags.show_label && !flags.locked && flags.lod == 0);
+
+        assert_eq!(set_show_label(&mut store, &doc, "A", "false"), Ok(false));
+        assert!(set_show_label(&mut store, &doc, "A", "quizás").is_err());
+        assert_eq!(set_locked(&mut store, &doc, "A", "true"), Ok(true));
+        assert!(is_locked(&store, "A"));
+        assert!(is_locked(&store, "\"A\""));
+        assert!(!is_locked(&store, "B"));
+
+        assert_eq!(
+            set_decoration(&mut store, &doc, "A", "2").expect("ticks"),
+            Decoration::Tick2
+        );
+        assert_eq!(
+            set_decoration(&mut store, &doc, "A", "flecha").expect("flecha"),
+            Decoration::Arrow
+        );
+        assert!(set_decoration(&mut store, &doc, "A", "9").is_err());
+
+        assert_eq!(set_level_of_detail(&mut store, &doc, "A", "2"), Ok(2));
+        assert!(set_level_of_detail(&mut store, &doc, "A", "3").is_err());
+        assert!(lod_allows_dense(0, usize::MAX));
+        assert!(lod_allows_dense(1, 65_536));
+        assert!(!lod_allows_dense(1, 65_537));
+        assert!(lod_allows_dense(2, 4_096));
+        assert!(!lod_allows_dense(2, 4_097));
+        assert_eq!(TooltipMode::parse("2"), Some(TooltipMode::Off));
+        assert_eq!(DisplayFlags::check_lod("1"), Ok(1));
+        assert!(DisplayFlags::check_lod("5").is_err());
+    }
+
+    #[test]
+    fn line_opacity_and_point_size_mutate_existing_fields() {
+        let mut doc = doc_with_point("A");
+        assert_eq!(apply_line_opacity(&mut doc, "A", "0.5"), Ok(0.5));
+        let id = find_object_by_label(&doc, "A").expect("A");
+        let alpha = doc.get_object(id).expect("obj").color().a;
+        assert!((alpha - 0.5).abs() < 1e-6);
+        assert!(apply_line_opacity(&mut doc, "A", "2").is_err());
+        assert!(apply_line_opacity(&mut doc, "A", "-0.1").is_err());
+        assert!(apply_line_opacity(&mut doc, "Falta", "0.5").is_err());
+
+        assert_eq!(apply_point_size(&mut doc, "A", "8"), Ok(8.0));
+        assert!(apply_point_size(&mut doc, "A", "0").is_err());
+        assert!(apply_point_size(&mut doc, "A", "100").is_err());
+        let (mut doc_btn, button) = doc_with_button();
+        let err = apply_point_size(&mut doc_btn, &button, "8").expect_err("texto no es punto");
+        assert!(err.contains("solo puntos"), "{err}");
+
+        let mut scatter = Document::new();
+        scatter
+            .try_add_object(GeoObject::ScatterPlot(
+                grafito_core::ScatterPlotObj::new(vec![1.0], vec![2.0]).with_label("Nube"),
+            ))
+            .expect("nube");
+        assert_eq!(apply_point_size(&mut scatter, "Nube", "7"), Ok(7.0));
+    }
+
+    #[test]
+    fn unavailable_features_name_themselves_honestly() {
+        assert!(SLOW_PLOT_UNAVAILABLE.contains("SlowPlot"));
+        assert!(PLAY_SOUND_UNAVAILABLE.contains("PlaySound"));
+        assert!(START_RECORD_UNAVAILABLE.contains("StartRecord"));
     }
 }
