@@ -188,8 +188,9 @@ fn p4_todos_visibles_en_paleta() {
         palette_visible(canonical);
     }
     // Frente P4: 516 → 621 totales, 472 → 577 visibles.
+    // Frente P4-fix: 4 comandos sin tool pasan a visibles: 577 → 581.
     assert_eq!(command_registry::all().len(), 621);
-    assert_eq!(command_registry::palette_commands().count(), 577);
+    assert_eq!(command_registry::palette_commands().count(), 581);
 }
 
 #[test]

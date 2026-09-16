@@ -5,7 +5,7 @@
 > Nunca append-only sin dedup/decay. Esta file la escribe la IA en `session.idle`.
 
 ## Proyecto (cross-sesión)
-- Stack: Rust 1.92, 16 crates, eframe 0.29 + egui rayon, wgpu 22.
+- Stack: Rust 1.92, 18 members de workspace (19 dirs en crates/), eframe 0.29 + egui rayon, wgpu 22.
 - Tokens nórdicos: Snow #F7F7F5 / Charcoal #2C2F38 / Fjord #4A6E8A, Inter, grid 8px.
 - Gates: `cargo fmt --check && cargo clippy -- -D warnings && cargo test --locked`.
 

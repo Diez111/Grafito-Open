@@ -794,7 +794,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Aplica cizallamiento afin: x' = x + k*y con k = tan(angulo).",
         TransformsObject,
         Medium,
-        false,
+        true,
         "Shear",
         [
             signature!("Shear[objeto, angulo, eje]"; "objeto": Object required, "angulo": Number required, "eje": Expression optional),
@@ -809,7 +809,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Aplica estiramiento afin: x' = factor*x (o y' = factor*y segun eje).",
         TransformsObject,
         Medium,
-        false,
+        true,
         "Stretch",
         [
             signature!("Stretch[objeto, factor, eje]"; "objeto": Object required, "factor": Number required, "eje": Expression optional),
@@ -824,7 +824,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Crea texto con valor fraccionario: FractionText[0.5] -> \"1/2\".",
         CreatesObject,
         Low,
-        false,
+        true,
         "FractionText",
         [
             signature!("FractionText[valor]"; "valor": Number required),
@@ -839,7 +839,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Crea texto con surd: SurdText[1.414] -> \"√2\".",
         CreatesObject,
         Low,
-        false,
+        true,
         "SurdText",
         [
             signature!("SurdText[valor]"; "valor": Number required),
@@ -9578,8 +9578,8 @@ mod registry_tests {
         assert_eq!(all().len(), 621, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            577,
-            "comandos visibles en paleta (docs §8: 577 + 15 UI = 592)"
+            581,
+            "comandos visibles en paleta (docs §8: 581 + 15 UI = 596)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }
