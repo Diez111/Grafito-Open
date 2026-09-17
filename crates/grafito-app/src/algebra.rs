@@ -971,7 +971,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 ));
                                 if style_resp
                                     .as_ref()
-                                    .is_some_and(|resp| resp.drag_started())
+                                    .is_some_and(|resp| resp.drag_started() || resp.dragged())
                                 {
                                     crate::app::panel_gesture_begin(
                                         ui.ctx(),

@@ -4553,7 +4553,7 @@ mod tests {
     fn agent_transport_stays_quiet_while_rate_limited() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
-        crate::clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // Stub que cuenta conexiones: si el freno falla, el POST llega y el
         // contador lo delata. Ventana de 400ms y cierre limpio.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds");
@@ -4605,7 +4605,7 @@ mod tests {
     #[test]
     fn agent_post_records_cooldown_on_429_with_retry_after() {
         use std::io::{Read, Write};
-        crate::clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds");
         let port = listener.local_addr().expect("stub addr").port();
         // Accept con deadline (no bloqueante): si una pausa ajena (otro test
@@ -4662,6 +4662,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn agent_http_error_keeps_capped_body_for_session_detection() {
+        let _serial = rate_limit_test_guard();
         // El 400 de sesión del gateway Go debe sobrevivir en el mensaje para
         // que la app detecte `MissingSessionID` y dispare el fallback.
         // Cliente plano (sin rate-limiter global): el test no depende del
@@ -6638,7 +6639,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_runs_function_call_output_then_final_text() {
-        crate::clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (port, stub) = spawn_responses_stub(
             vec![
@@ -6709,7 +6710,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_cancels_mid_loop_after_first_dispatch() {
-        crate::clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         struct CancellingDispatcher {
             cancellation: Cancellation,
         }
@@ -6763,7 +6764,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_reports_per_turn_timeout() {
-        crate::clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds loopback");
         let port = listener.local_addr().expect("stub has addr").port();
@@ -7170,5 +7171,19 @@ mod tests {
         // `responses_loop_reports_per_turn_timeout`) y la app liga su
         // Cancellation al token del turno (forwarder en
         // `pedir_spec_ia_de_verdad`).
+    }
+
+    /// Candado de serialización para tests que comparten el `static` de pausa
+    /// por cuota (`RATE_LIMIT_NOT_BEFORE`): un stub 429 deja una pausa real y
+    /// otro test en paralelo puede fallar rápido por ella ANTES de conectar a
+    /// su server stub → `server.join()` espera un `accept()` que nunca llega
+    /// (hang de suite). Un lock por proceso + clear al entrar elimina la
+    /// carrera; el guard vive hasta el final del test (no usar `let _ =`).
+    #[cfg(feature = "assistant-net")]
+    fn rate_limit_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::clear_rate_limit_for_tests();
+        guard
     }
 }

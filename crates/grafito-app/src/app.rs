@@ -1158,15 +1158,33 @@ impl DeferredPanelSnapshot {
 /// segundo componente identifica el slider: `"live-p"`, `("style", oid)`…).
 pub(crate) const PANEL_GESTURE_UNDO_KEY: &str = "panel_gesture_undo";
 
+thread_local! {
+    /// Gestos de slider de panel en curso: `clave → (before, frame)`.
+    ///
+    /// El `before` vive acá (y no en temp-data de egui) para poder
+    /// **barrer huérfanos**: si el widget desaparece a mitad del arrastre
+    /// (undo que borra la variable, cambio de modo), `drag_stopped` nunca
+    /// llega y el `before` quedaría colgado para siempre; `panel_gesture_sweep`
+    /// lo commitea (si hubo cambio) a los 3 frames sin toque.
+    static PANEL_GESTURES: std::cell::RefCell<
+        std::collections::HashMap<egui::Id, (Document, u64)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// Guarda el `before` una sola vez al iniciar un arrastre de slider de
-/// panel. Sin esto, cada frame con cambio pushea un `Document` entero e
-/// inunda el undo a mitad del gesto (los sliders del canvas ya usan este
-/// patrón con `CANVAS_SLIDER_UNDO_KEY`; punto-arrastre usa
-/// `point_drag_has_mutated`). Idempotente por clave.
+/// panel (idempotente por clave; refresca el frame en cada toque). Sin
+/// esto, cada frame con cambio pushea un `Document` entero e inunda el
+/// undo a mitad del gesto (los sliders del canvas ya usan este patrón con
+/// `CANVAS_SLIDER_UNDO_KEY`; punto-arrastre usa `point_drag_has_mutated`).
 pub(crate) fn panel_gesture_begin(ctx: &egui::Context, key: egui::Id, document: &Document) {
-    ctx.memory_mut(|mem| {
-        if mem.data.get_temp::<Document>(key).is_none() {
-            mem.data.insert_temp(key, document.clone());
+    let now = ctx.cumulative_pass_nr();
+    PANEL_GESTURES.with(|gestos| {
+        let mut gestos = gestos.borrow_mut();
+        match gestos.get_mut(&key) {
+            Some(entry) => entry.1 = now,
+            None => {
+                gestos.insert(key, (document.clone(), now));
+            }
         }
     });
 }
@@ -1182,15 +1200,49 @@ pub(crate) fn panel_gesture_commit(
     undo_stack: &mut VecDeque<Document>,
     redo_stack: &mut VecDeque<ChangeSet>,
 ) -> bool {
-    let before: Option<Document> = ctx.memory_mut(|mem| mem.data.remove_temp(key));
+    let _ = ctx;
+    let before = PANEL_GESTURES.with(|gestos| gestos.borrow_mut().remove(&key));
     match before {
-        Some(before) if before.version != current_version => {
+        Some((before, _)) if before.version != current_version => {
             push_history_snapshot(undo_stack, redo_stack, before);
             true
         }
         _ => false,
     }
 }
+
+/// Commitea gestos huérfanos (widget desaparecido a mitad de arrastre) tras
+/// `PANEL_GESTURE_STALE_FRAMES` frames sin toque. Se llama una vez por frame
+/// desde `draw_objects`. Devuelve cuántos gestos cerró (tests).
+pub(crate) fn panel_gesture_sweep_at(
+    now: u64,
+    current_version: u64,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
+) -> usize {
+    let huerfanos: Vec<(egui::Id, Document)> = PANEL_GESTURES.with(|gestos| {
+        let mut gestos = gestos.borrow_mut();
+        let claves: Vec<egui::Id> = gestos
+            .iter()
+            .filter(|(_, (_, frame))| now.saturating_sub(*frame) > PANEL_GESTURE_STALE_FRAMES)
+            .map(|(clave, _)| *clave)
+            .collect();
+        claves
+            .into_iter()
+            .filter_map(|clave| gestos.remove(&clave).map(|(before, _)| (clave, before)))
+            .collect()
+    });
+    let cerrados = huerfanos.len();
+    for (_clave, before) in huerfanos {
+        if before.version != current_version {
+            push_history_snapshot(undo_stack, redo_stack, before);
+        }
+    }
+    cerrados
+}
+
+/// Frames sin toque tras los cuales un gesto se considera huérfano.
+pub(crate) const PANEL_GESTURE_STALE_FRAMES: u64 = 2;
 
 /// Inserts a complete object batch on detached state and records one undo
 /// snapshot only after every object has passed validation.

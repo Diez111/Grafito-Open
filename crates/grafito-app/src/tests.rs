@@ -5859,3 +5859,63 @@ fn gesto_slider_undo_coalescea_un_drag_en_una_sola_entrada() {
     ));
     assert_eq!(undo_stack.len(), 2);
 }
+
+#[test]
+fn gesto_huerfano_se_commitea_al_desaparecer_el_widget() {
+    let ctx = egui::Context::default();
+    let key = egui::Id::new((crate::app::PANEL_GESTURE_UNDO_KEY, "huerfano-test"));
+    let mut document = grafito_core::Document::new();
+    let mut undo_stack: VecDeque<grafito_core::Document> = VecDeque::new();
+    let mut redo_stack: VecDeque<grafito_core::ChangeSet> = VecDeque::new();
+
+    // Gesto en curso, con cambio ya aplicado (el frame lo pone `begin`).
+    crate::app::panel_gesture_begin(&ctx, key, &document);
+    let frame_gesto = ctx.cumulative_pass_nr();
+    document.bump_version();
+    // Recién iniciado: no es huérfano aunque no se toque 1-2 frames.
+    let mut cerrados = crate::app::panel_gesture_sweep_at(
+        frame_gesto + crate::app::PANEL_GESTURE_STALE_FRAMES,
+        document.version,
+        &mut undo_stack,
+        &mut redo_stack,
+    );
+    assert_eq!(cerrados, 0);
+    assert!(undo_stack.is_empty(), "el gesto sigue vivo");
+    // Sin toques pasada la ventana: se commitea una sola vez.
+    cerrados = crate::app::panel_gesture_sweep_at(
+        frame_gesto + crate::app::PANEL_GESTURE_STALE_FRAMES + 1,
+        document.version,
+        &mut undo_stack,
+        &mut redo_stack,
+    );
+    assert_eq!(cerrados, 1);
+    assert_eq!(undo_stack.len(), 1, "el before no se pierde");
+    // Barrido repetido: nada colgado ni duplicado.
+    cerrados = crate::app::panel_gesture_sweep_at(
+        frame_gesto + crate::app::PANEL_GESTURE_STALE_FRAMES + 2,
+        document.version,
+        &mut undo_stack,
+        &mut redo_stack,
+    );
+    assert_eq!(cerrados, 0);
+    assert_eq!(undo_stack.len(), 1);
+}
+
+#[test]
+fn gesto_huerfano_sin_cambio_neto_no_deja_entrada() {
+    let ctx = egui::Context::default();
+    let key = egui::Id::new((crate::app::PANEL_GESTURE_UNDO_KEY, "huerfano-sin-cambio"));
+    let document = grafito_core::Document::new();
+    let mut undo_stack: VecDeque<grafito_core::Document> = VecDeque::new();
+    let mut redo_stack: VecDeque<grafito_core::ChangeSet> = VecDeque::new();
+    crate::app::panel_gesture_begin(&ctx, key, &document);
+    let frame_gesto = ctx.cumulative_pass_nr();
+    let cerrados = crate::app::panel_gesture_sweep_at(
+        frame_gesto + crate::app::PANEL_GESTURE_STALE_FRAMES + 1,
+        document.version,
+        &mut undo_stack,
+        &mut redo_stack,
+    );
+    assert_eq!(cerrados, 1, "el gesto se cierra");
+    assert!(undo_stack.is_empty(), "sin cambio no hay entrada");
+}

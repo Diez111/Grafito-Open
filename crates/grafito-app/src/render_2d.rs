@@ -952,7 +952,9 @@ fn estimate_object_vertices(
             let d = vf.density.clamp(5, 128);
             d.saturating_mul(d).saturating_mul(8)
         }
-        GO::VectorField3D(_) => 8192,
+        // 3D: el plan filtra `is_3d()` y el builder de `Transformed` no lo
+        // dibuja; estimar >0 truncaría escenas 2D por objetos invisibles.
+        GO::VectorField3D(_) => 0,
         GO::ImplicitCurve(_) => {
             let g = grafito_core::implicit_curve::recommended_grid_size_for_quality(
                 w,
@@ -4198,6 +4200,14 @@ impl GrafitoApp {
         TEX_LABEL_TEXTURES.with(|c| c.borrow_mut().tick());
         FRACTAL_TEXTURES.with(|c| c.borrow_mut().tick());
         COMPLEX_GRID_TEXTURES.with(|c| c.borrow_mut().tick());
+        // Gestos de slider huérfanos (widget desaparecido a mitad de
+        // arrastre): commit a los 3 frames sin toque, sin fugas de `before`.
+        crate::app::panel_gesture_sweep_at(
+            painter.ctx().cumulative_pass_nr(),
+            self.document.version,
+            &mut self.undo_stack,
+            &mut self.redo_stack,
+        );
 
         // Cache misses and fill rasterization are admitted in ObjectId order
         // under one frame budget. Deferred curves keep their old cache untouched.

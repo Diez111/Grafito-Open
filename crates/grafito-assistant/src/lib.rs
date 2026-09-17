@@ -5227,7 +5227,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn minimax_wire_uses_anthropic_headers_and_response_shape() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/messages",
@@ -5270,7 +5270,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_wire_uses_bearer_and_response_shape() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -5347,7 +5347,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn go_headers_viajan_en_responses_y_chat_con_ua_propio() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let session = "123e4567-e89b-42d3-a456-426614174000";
         // Responses.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5472,7 +5472,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn fusion_returns_only_the_deepseek_audited_answer() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -5538,7 +5538,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn fusion_discards_the_draft_when_deepseek_audit_fails() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -5689,7 +5689,7 @@ mod tests {
     #[test]
     fn rate_limit_cooldown_blocks_without_touching_network() {
         // Sin red ni sleeps: la pausa se arma y se consulta en memoria.
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         assert!(check_rate_limit_cooldown().is_ok());
         record_rate_limited(Some(60));
         assert!(check_rate_limit_cooldown().is_err(), "en pausa bloquea");
@@ -5706,7 +5706,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn rate_limit_cooldown_honors_retry_after_and_expires() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // Con Retry-After: la pausa respeta el header (acotado al venir).
         record_rate_limited(Some(7));
         let remaining = rate_limit_cooldown_remaining_secs().expect("pausa armada");
@@ -5727,7 +5727,7 @@ mod tests {
         // El segundo lookup sale del cache: ningún GET extra (single-flight
         // por TTL). Sin red en este test: sólo el registro compartido.
         clear_models_cache_for_tests();
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         assert!(cached_model_list().is_none());
         store_model_list(vec!["deepseek-v4-flash".to_string()]);
         assert_eq!(
@@ -5748,7 +5748,7 @@ mod tests {
         // total). Si un bug refetchea, el contador lo delata sin colgar: el
         // servidor acepta hasta 2 y cierra con ventana de 500ms.
         clear_models_cache_for_tests();
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -5888,7 +5888,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_reports_429_with_retry_after_without_sleeping() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -5930,7 +5930,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_truncates_long_500_body_without_secrets() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -5977,7 +5977,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_marks_incomplete_as_truncated_with_partial_text() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Url::parse(&format!(
             "http://{}/responses",
@@ -6202,7 +6202,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_responses_reassembles_fragmented_deltas_with_progress() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let body = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" mundo\"}\n\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
             .to_vec();
         let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", true)]);
@@ -6243,7 +6243,7 @@ mod tests {
     fn streaming_sse_sends_go_session_header_and_user_agent() {
         // El header `x-opencode-session` y el UA propio viajan también en el
         // POST de streaming (Responses y Chat), no solo en no-streaming.
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let body = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
             .to_vec();
         let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
@@ -6276,7 +6276,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_falls_back_to_non_streaming_when_server_never_speaks_sse() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let json_body =
             br#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"listo"}]}]}"#
                 .to_vec();
@@ -6312,7 +6312,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_anthropic_reassembles_text_thinking_and_usage() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // Wire real de Anthropic Messages: usage partido (input en
         // `message_start`, output en `message_delta`), thinking + texto en
         // `content_block_delta` y cierre en `message_stop`.
@@ -6392,7 +6392,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_anthropic_falls_back_when_server_never_speaks_sse() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // Respuesta JSON plana (la que espera `anthropic_completion_text`):
         // sin eventos SSE hay UN reintento no-streaming con el payload base.
         let json_body =
@@ -6577,7 +6577,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_over_cap_with_prior_deltas_returns_truncated_partial() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // Bug del screenshot: el stream cortaba con Err duro aunque ya había
         // deltas válidos en pantalla. Ahora devuelve el parcial con
         // `truncated:true` (la UI lo avisa y ofrece continuar).
@@ -6611,7 +6611,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_over_cap_without_events_keeps_honest_error() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // Sin ningún evento válido no hay parcial que rescatar: se mantiene
         // el Err, pero honesto (nombra el tope, no manda a Configuración).
         let mut body = Vec::new();
@@ -6641,7 +6641,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn non_streaming_body_over_cap_fails_honest_without_config_pointer() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // El path no-streaming comparte el tope de 256 KiB: cuerpo mayor →
         // Err honesto con el mismo texto (límite OOM, no error de modelo).
         let big_text = "y".repeat(RESPONSES_MAX_BODY_BYTES + 1024);
@@ -6671,7 +6671,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_over_cap_with_multibyte_markdown_partial_no_done() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // Repro del reporte AS2: stream que supera el tope con deltas previos
         // (parcial con markdown a medio cerrar + multibyte UTF-8 que parte
         // los chunks de 4 KiB, `data: [DONE]` ausente). No debe paniquear:
@@ -6728,7 +6728,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_huge_line_without_newline_stays_bounded() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // Línea de 300 KiB sin `\n`: `pending.extend` queda acotado por el
         // tope (el chequeo es por `total_bytes` ANTES de extender de más y
         // `take(maximum)` limita el reader). Con un delta previo válido se
@@ -6837,7 +6837,7 @@ mod tests {
     fn streaming_paints_partial_before_done() {
         // El parcial debe pintar desde el primer delta, sin esperar al
         // `[DONE]`: el `progress` se invoca por delta con el acumulado.
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         let body = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola\"}\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" mundo\"}\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
             .to_vec();
         let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
@@ -6872,7 +6872,7 @@ mod tests {
         // de tiempo, sin socket ni sleeps: antes un stub TCP dormía 800ms).
         // Con cero deltas la etapa honesta es `waiting for first token`.
         use std::io::Read;
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         struct ImmediateTimeout;
         impl Read for ImmediateTimeout {
             fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
@@ -6903,7 +6903,7 @@ mod tests {
         // error de timeout (sin socket ni sleeps). El mensaje debe ser
         // `while receiving` + KiB, aunque el deadline local no haya vencido.
         use std::io::Read;
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         struct DeltaThenTimeout {
             payload: Vec<u8>,
             offset: usize,
@@ -7240,7 +7240,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_completion_flows_into_telling_guard() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // El worker aplica `guard_remote_completion` sobre el resultado del
         // transporte streaming; acá se verifica la misma composición
         // (transporte SSE stub → guard) que ejecuta el brazo Responses del
@@ -7308,7 +7308,7 @@ mod tests {
     #[cfg(feature = "assistant-net")]
     #[test]
     fn guarded_chat_worker_blocks_telling_on_the_streaming_path() {
-        clear_rate_limit_for_tests();
+        let _serial = rate_limit_test_guard();
         // F14: el chat ahora streamea; el stub responde SSE de Chat Completions.
         let chat_body = b"data: {\"choices\":[{\"delta\":{\"content\":\"La respuesta es x = 2\"}}]}\n\ndata: [DONE]\n\n"
             .to_vec();
@@ -7453,5 +7453,19 @@ mod tests {
             matches!(direct, Err(ref error) if error.contains(disabled)),
             "{direct:?}"
         );
+    }
+
+    /// Candado de serialización para tests que comparten el `static` de pausa
+    /// por cuota (`RATE_LIMIT_NOT_BEFORE`): un stub 429 deja una pausa real y
+    /// otro test en paralelo puede fallar rápido por ella ANTES de conectar a
+    /// su server stub → `server.join()` espera un `accept()` que nunca llega
+    /// (hang de suite). Un lock por proceso + clear al entrar elimina la
+    /// carrera; el guard vive hasta el final del test (no usar `let _ =`).
+    #[cfg(feature = "assistant-net")]
+    fn rate_limit_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear_rate_limit_for_tests();
+        guard
     }
 }

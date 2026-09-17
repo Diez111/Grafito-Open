@@ -15,7 +15,7 @@ grafito-ui        ─────────────> grafito-app (Piel)
 
 - **Cerebro puro** (sin egui/wgpu): `grafito-core`, `grafito-geometry`, `grafito-command`, `grafito-whiteboard`, `grafito-profile`, `grafito-pedagogy`, `grafito-plugins`
 - **Puente**: `grafito-anim` nativo (11 plantillas, MP4 vía ffmpeg-sidecar, `FfmpegMissing` honesto; `engines/python` eliminado) + voz Piper sidecar / captions
-- **Piel**: `grafito-ui` (tokens, theme) + `grafito-app` (app.rs 9275L, assistant.rs 14429L, panels.rs 9442L, medido 2026-09-17 con `wc -l`)
+- **Piel**: `grafito-ui` (tokens, theme) + `grafito-app` (app.rs 9371L, assistant.rs 14429L, panels.rs 9479L, medido 2026-09-17 con `wc -l`)
 
 ## Principios
 

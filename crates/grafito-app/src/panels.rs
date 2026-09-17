@@ -2423,7 +2423,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             crate::app::PANEL_GESTURE_UNDO_KEY,
                                             "live-p",
                                         ));
-                                        if response.drag_started() {
+                                        if response.drag_started() || response.dragged() {
                                             crate::app::panel_gesture_begin(
                                                 ui.ctx(),
                                                 gesture_key,
